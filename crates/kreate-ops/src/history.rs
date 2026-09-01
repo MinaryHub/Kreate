@@ -1,0 +1,852 @@
+//! The undo stack and operator history.
+//!
+//! # Restore and re-run, not invert
+//!
+//! Undo restores the recorded pre-state. Redo *re-runs the operator* with the
+//! same parameters rather than replaying a stored post-state. That is possible
+//! only because [`Operator::execute`] reads nothing but its parameters, and it
+//! buys three things:
+//!
+//! - no operator has to implement a provably correct inverse,
+//! - the adjust-last-operation panel is the same code path with edited
+//!   parameters, so it needs no separate mechanism,
+//! - a redo cannot drift out of step with the operator's current behaviour.
+//!
+//! The cost is that an operator must be fast enough to re-run. That is a much
+//! weaker requirement than being incrementally updatable, and it removes an
+//! entire class of incremental-update bugs.
+//!
+//! # A history entry is a script line
+//!
+//! Each entry holds `(op_id, params)`, which is exactly what a script call needs.
+//! "Copy as script" from the history is therefore free rather than a feature, and
+//! so is macro recording.
+
+use kreate_scene::{DocMut, Document, UndoPayload};
+
+use crate::operator::{Context, OpError, OpResult, OperatorRegistry};
+use crate::property::PropertyMap;
+
+/// One recorded operation.
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    pub op_id: String,
+    pub params: PropertyMap,
+    /// Human-readable label for the history panel.
+    pub label: String,
+    /// What to restore in order to undo this.
+    payload: UndoPayload,
+}
+
+impl HistoryEntry {
+    /// The script line that reproduces this operation.
+    pub fn to_script_call(&self) -> String {
+        self.params.to_script_call(&self.op_id)
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.payload.bytes() + self.op_id.len() + self.label.len()
+    }
+}
+
+/// The undo stack.
+///
+/// Entries above `cursor` are undone-but-redoable. Dispatching a new operation
+/// discards them, which is the conventional and expected behaviour.
+pub struct History {
+    entries: Vec<HistoryEntry>,
+    /// Number of entries currently applied to the document.
+    cursor: usize,
+    budget_bytes: usize,
+    /// Entries dropped by the budget, for reporting rather than silence.
+    evicted: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl History {
+    /// Default memory budget.
+    ///
+    /// A budget exists at all because "millions of elements" plus snapshot undo
+    /// is how a process quietly reaches 16 GB and starts swapping. Eviction from
+    /// the *oldest* end keeps recent undo depth, which is what users actually
+    /// reach for.
+    pub const DEFAULT_BUDGET: usize = 2 << 30;
+
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            cursor: 0,
+            budget_bytes: Self::DEFAULT_BUDGET,
+            evicted: 0,
+        }
+    }
+
+    pub fn with_budget(budget_bytes: usize) -> Self {
+        Self {
+            budget_bytes,
+            ..Self::new()
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.cursor > 0
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.cursor < self.entries.len()
+    }
+
+    /// Entries in chronological order. Those at or past [`History::cursor`] are
+    /// undone.
+    pub fn entries(&self) -> &[HistoryEntry] {
+        &self.entries
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// How many entries the memory budget has discarded.
+    pub fn evicted(&self) -> usize {
+        self.evicted
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.entries.iter().map(HistoryEntry::bytes).sum()
+    }
+
+    /// The most recent applied entry, for the adjust-last-operation panel.
+    pub fn last(&self) -> Option<&HistoryEntry> {
+        self.cursor.checked_sub(1).and_then(|i| self.entries.get(i))
+    }
+
+    /// Dispatches an operator and records it if it finished.
+    ///
+    /// The single entry point for anything that changes the document. `Running`,
+    /// `Cancelled` and `PassThrough` record nothing: a modal operator owns an
+    /// uncommitted transaction until it confirms, and a cancelled one must leave
+    /// no trace in the history.
+    pub fn dispatch(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        ctx: &Context,
+        op_id: &str,
+        params: &PropertyMap,
+    ) -> Result<OpResult, OpError> {
+        let info = registry
+            .get(op_id)
+            .ok_or_else(|| OpError::UnknownOperator(op_id.to_string()))?;
+        let label = info.label.to_string();
+        // Start from the defaults so a partial map still yields a complete,
+        // reproducible record — the history must not depend on today's defaults
+        // to be replayable tomorrow.
+        let mut full = info.defaults();
+        full.overlay(params);
+
+        let mut edit = DocMut::new(doc);
+        let result = registry.execute(op_id, &full, &mut edit, ctx);
+        let payload = edit.finish();
+
+        match result {
+            Ok(OpResult::Finished) => {
+                // A redo branch that is no longer reachable.
+                self.entries.truncate(self.cursor);
+                self.entries.push(HistoryEntry {
+                    op_id: op_id.to_string(),
+                    params: full,
+                    label,
+                    payload,
+                });
+                self.cursor = self.entries.len();
+                self.enforce_budget();
+                Ok(OpResult::Finished)
+            }
+            other => other,
+        }
+    }
+
+    /// Undoes the most recent applied entry.
+    pub fn undo(&mut self, doc: &mut Document) -> bool {
+        let Some(index) = self.cursor.checked_sub(1) else {
+            return false;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return false;
+        };
+        entry.payload.restore(doc);
+        self.cursor = index;
+        true
+    }
+
+    /// Redoes the next entry by re-running its operator.
+    ///
+    /// Correct because the document has been restored to exactly the state the
+    /// operator originally saw, and the operator reads nothing but its
+    /// parameters.
+    pub fn redo(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        ctx: &Context,
+    ) -> Result<bool, OpError> {
+        let Some(entry) = self.entries.get(self.cursor) else {
+            return Ok(false);
+        };
+        let (op_id, params) = (entry.op_id.clone(), entry.params.clone());
+
+        let mut edit = DocMut::new(doc);
+        let result = registry.execute(&op_id, &params, &mut edit, ctx);
+        let payload = edit.finish();
+        result?;
+
+        // The re-run may record a different payload than the first run did — for
+        // instance if the mesh has since been compacted — so the stored one is
+        // replaced rather than trusted.
+        self.entries[self.cursor].payload = payload;
+        self.cursor += 1;
+        Ok(true)
+    }
+
+    /// Re-runs the last operation with new parameters.
+    ///
+    /// The adjust-last-operation panel. Restore, then run again: the same path
+    /// redo takes, which is why editing a parameter after the fact needs no
+    /// operator-specific support.
+    pub fn adjust_last(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        ctx: &Context,
+        params: &PropertyMap,
+    ) -> Result<bool, OpError> {
+        let Some(index) = self.cursor.checked_sub(1) else {
+            return Ok(false);
+        };
+        let op_id = self.entries[index].op_id.clone();
+
+        self.entries[index].payload.restore(doc);
+
+        let mut full = registry
+            .get(&op_id)
+            .ok_or_else(|| OpError::UnknownOperator(op_id.clone()))?
+            .defaults();
+        full.overlay(params);
+
+        let mut edit = DocMut::new(doc);
+        let result = registry.execute(&op_id, &full, &mut edit, ctx);
+        let payload = edit.finish();
+
+        match result {
+            Ok(_) => {
+                self.entries[index].params = full;
+                self.entries[index].payload = payload;
+                Ok(true)
+            }
+            Err(e) => {
+                // The document is back at the pre-operation state and the entry
+                // no longer describes anything applied, so the cursor must move
+                // with it rather than claiming an applied entry that is not.
+                self.cursor = index;
+                Err(e)
+            }
+        }
+    }
+
+    /// A script that reproduces the applied history, one call per line.
+    ///
+    /// Macro recording, with no separate machinery.
+    pub fn to_script(&self) -> String {
+        self.entries[..self.cursor]
+            .iter()
+            .map(HistoryEntry::to_script_call)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+    }
+
+    /// Drops the oldest entries until the budget is met.
+    ///
+    /// The most recent entry is always kept, however large: a budget that could
+    /// discard the operation the user just performed would make undo
+    /// untrustworthy, which is worse than exceeding a soft limit.
+    fn enforce_budget(&mut self) {
+        while self.bytes() > self.budget_bytes && self.entries.len() > 1 {
+            self.entries.remove(0);
+            self.cursor = self.cursor.saturating_sub(1);
+            self.evicted += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operator::Operator;
+    use crate::{OpParams as OpParamsDerive, PropertyValue};
+    use kreate_scene::document::{MeshId, Object, ObjectData};
+
+    #[derive(Clone, Debug, Default, PartialEq, OpParamsDerive)]
+    struct MoveParams {
+        /// Distance to move the selected vertices along Z.
+        #[param(unit = "length")]
+        offset: f64,
+    }
+
+    /// Moves selected vertices, through the declared write-set path.
+    struct MoveSelected;
+
+    impl Operator for MoveSelected {
+        type Params = MoveParams;
+        fn id() -> &'static str {
+            "mesh.move_selected"
+        }
+        fn label() -> &'static str {
+            "Move Selected"
+        }
+        fn execute(
+            params: &Self::Params,
+            doc: &mut DocMut<'_>,
+            _ctx: &Context,
+        ) -> Result<OpResult, OpError> {
+            let mesh =
+                first_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh".into()))?;
+            let indices = doc.selected_vertices(mesh);
+            if indices.is_empty() {
+                return Ok(OpResult::Cancelled);
+            }
+            let offset = params.offset as f32;
+            doc.edit_positions(mesh, &indices, |_, p| p.z += offset)
+                .map_err(|e| OpError::Failed(e.to_string()))?;
+            Ok(OpResult::Finished)
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, OpParamsDerive)]
+    struct AddCubeParams {
+        /// Edge length of the new cube.
+        #[param(min = 0.001, unit = "length")]
+        size: f64,
+    }
+
+    /// Adds an object, through the coarse snapshot path.
+    struct AddCube;
+
+    impl Operator for AddCube {
+        type Params = AddCubeParams;
+        fn id() -> &'static str {
+            "object.add_cube"
+        }
+        fn label() -> &'static str {
+            "Add Cube"
+        }
+        fn execute(
+            params: &Self::Params,
+            doc: &mut DocMut<'_>,
+            _ctx: &Context,
+        ) -> Result<OpResult, OpError> {
+            let size = if params.size > 0.0 { params.size } else { 1.0 };
+            doc.document_mut()
+                .add_mesh_object("Cube", kreate_mesh::primitives::cube(size as f32));
+            Ok(OpResult::Finished)
+        }
+    }
+
+    struct AlwaysFails;
+
+    impl Operator for AlwaysFails {
+        type Params = AddCubeParams;
+        fn id() -> &'static str {
+            "test.fail"
+        }
+        fn label() -> &'static str {
+            "Always Fails"
+        }
+        fn execute(
+            _params: &Self::Params,
+            _doc: &mut DocMut<'_>,
+            _ctx: &Context,
+        ) -> Result<OpResult, OpError> {
+            Err(OpError::Failed("nope".into()))
+        }
+    }
+
+    fn first_mesh(doc: &Document) -> Option<MeshId> {
+        doc.objects().find_map(|(_, o)| o.mesh())
+    }
+
+    fn registry() -> OperatorRegistry {
+        let mut r = OperatorRegistry::new();
+        r.register::<MoveSelected>();
+        r.register::<AddCube>();
+        r.register::<AlwaysFails>();
+        r
+    }
+
+    /// A grid with vertices 0 and 1 selected.
+    fn doc_with_selection() -> Document {
+        let mut d = Document::new();
+        let mesh = d.add_mesh(kreate_mesh::primitives::grid(4.0, 3, 3));
+        d.add_object(Object::new("Grid", ObjectData::Mesh(mesh)));
+        let n = d.mesh(mesh).unwrap().num_verts() as usize;
+        let mut sel = vec![false; n];
+        sel[0] = true;
+        sel[1] = true;
+        d.mesh_mut(mesh).unwrap().attributes_mut().insert(
+            kreate_mesh::attribute::names::SELECT_VERT,
+            kreate_mesh::attribute::Domain::Point,
+            kreate_mesh::attribute::AttrData::Bool(std::sync::Arc::new(sel)),
+        );
+        d
+    }
+
+    fn params(offset: f64) -> PropertyMap {
+        let mut m = PropertyMap::new();
+        m.set("offset", PropertyValue::Float(offset));
+        m
+    }
+
+    fn z_of(doc: &Document, index: usize) -> f32 {
+        let mesh = first_mesh(doc).unwrap();
+        doc.mesh(mesh).unwrap().positions()[index].z
+    }
+
+    // --- the property the whole architecture rests on ----------------------
+
+    #[test]
+    fn apply_then_undo_restores_the_document_exactly() {
+        let mut doc = doc_with_selection();
+        let before: Vec<_> = doc
+            .mesh(first_mesh(&doc).unwrap())
+            .unwrap()
+            .positions()
+            .to_vec();
+
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(2.0),
+        )
+        .unwrap();
+        assert_ne!(z_of(&doc, 0), before[0].z);
+
+        assert!(h.undo(&mut doc));
+        assert_eq!(
+            doc.mesh(first_mesh(&doc).unwrap()).unwrap().positions(),
+            before.as_slice(),
+            "undo must restore the document exactly"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_are_symmetric_over_many_steps() {
+        let mut doc = doc_with_selection();
+        let original: Vec<_> = doc
+            .mesh(first_mesh(&doc).unwrap())
+            .unwrap()
+            .positions()
+            .to_vec();
+        let r = registry();
+        let mut h = History::new();
+
+        for i in 1..=5 {
+            h.dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "mesh.move_selected",
+                &params(i as f64),
+            )
+            .unwrap();
+        }
+        let after_all = z_of(&doc, 0);
+
+        for _ in 0..5 {
+            assert!(h.undo(&mut doc));
+        }
+        assert_eq!(
+            doc.mesh(first_mesh(&doc).unwrap()).unwrap().positions(),
+            original.as_slice()
+        );
+        assert!(!h.can_undo());
+
+        for _ in 0..5 {
+            assert!(h.redo(&r, &mut doc, &Context::default()).unwrap());
+        }
+        assert!(
+            (z_of(&doc, 0) - after_all).abs() < 1e-6,
+            "redo must reach the same state"
+        );
+        assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn a_new_operation_discards_the_redo_branch() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        h.undo(&mut doc);
+        assert!(h.can_redo());
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(5.0),
+        )
+        .unwrap();
+        assert!(!h.can_redo(), "the unreachable branch must be discarded");
+        assert_eq!(h.entries().len(), 2);
+    }
+
+    #[test]
+    fn undoing_a_topology_change_restores_the_object_graph() {
+        let mut doc = Document::new();
+        let r = registry();
+        let mut h = History::new();
+        let mut p = PropertyMap::new();
+        p.set("size", PropertyValue::Float(2.0));
+
+        h.dispatch(&r, &mut doc, &Context::default(), "object.add_cube", &p)
+            .unwrap();
+        assert_eq!(doc.object_count(), 1);
+
+        h.undo(&mut doc);
+        assert_eq!(doc.object_count(), 0, "the object must be gone");
+
+        h.redo(&r, &mut doc, &Context::default()).unwrap();
+        assert_eq!(doc.object_count(), 1);
+    }
+
+    // --- adjust last operation --------------------------------------------
+
+    #[test]
+    fn adjusting_the_last_operation_replaces_its_effect() {
+        // The F9 panel. Restore, then re-run with edited values — the same path
+        // redo takes, which is why this needs no operator-specific support.
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        assert!((z_of(&doc, 0) - 1.0).abs() < 1e-6);
+
+        h.adjust_last(&r, &mut doc, &Context::default(), &params(7.0))
+            .unwrap();
+        assert!(
+            (z_of(&doc, 0) - 7.0).abs() < 1e-6,
+            "the effect must be replaced, not compounded"
+        );
+        assert_eq!(
+            h.entries().len(),
+            1,
+            "adjusting must not add a history entry"
+        );
+    }
+
+    #[test]
+    fn adjusting_repeatedly_does_not_accumulate() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        for v in [2.0, 3.0, 0.5] {
+            h.adjust_last(&r, &mut doc, &Context::default(), &params(v))
+                .unwrap();
+        }
+        assert!((z_of(&doc, 0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn undo_after_adjusting_restores_the_original_state() {
+        let mut doc = doc_with_selection();
+        let original = z_of(&doc, 0);
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        h.adjust_last(&r, &mut doc, &Context::default(), &params(9.0))
+            .unwrap();
+        h.undo(&mut doc);
+        assert!((z_of(&doc, 0) - original).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjusting_with_nothing_in_the_history_is_a_no_op() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        assert!(!h
+            .adjust_last(&r, &mut doc, &Context::default(), &params(1.0))
+            .unwrap());
+    }
+
+    // --- what must not be recorded ----------------------------------------
+
+    #[test]
+    fn a_cancelled_operator_leaves_no_trace() {
+        // A modal operator owns an uncommitted transaction until it confirms.
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::grid(1.0, 1, 1));
+        doc.add_object(Object::new("Grid", ObjectData::Mesh(mesh)));
+
+        let r = registry();
+        let mut h = History::new();
+        // Nothing is selected, so the operator cancels.
+        let result = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "mesh.move_selected",
+                &params(1.0),
+            )
+            .unwrap();
+        assert_eq!(result, OpResult::Cancelled);
+        assert!(h.entries().is_empty());
+        assert!(!h.can_undo());
+    }
+
+    #[test]
+    fn a_failing_operator_is_not_recorded() {
+        let mut doc = Document::new();
+        let r = registry();
+        let mut h = History::new();
+        assert!(h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "test.fail",
+                &PropertyMap::new()
+            )
+            .is_err());
+        assert!(h.entries().is_empty());
+    }
+
+    #[test]
+    fn dispatching_an_unknown_operator_is_an_error_and_records_nothing() {
+        let mut doc = Document::new();
+        let r = registry();
+        let mut h = History::new();
+        assert!(h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "nope.nope",
+                &PropertyMap::new()
+            )
+            .is_err());
+        assert!(h.entries().is_empty());
+    }
+
+    // --- the history as a script ------------------------------------------
+
+    #[test]
+    fn the_history_reads_as_a_script() {
+        // Macro recording and "copy as script", with no separate machinery: an
+        // entry already holds exactly what a script call needs.
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.5),
+        )
+        .unwrap();
+        let mut p = PropertyMap::new();
+        p.set("size", PropertyValue::Float(2.0));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.add_cube", &p)
+            .unwrap();
+
+        assert_eq!(
+            h.to_script(),
+            "kreate.ops.mesh.move_selected(offset=1.5)\n\
+             kreate.ops.object.add_cube(size=2.0)"
+        );
+    }
+
+    #[test]
+    fn an_undone_operation_is_not_in_the_script() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(2.0),
+        )
+        .unwrap();
+        h.undo(&mut doc);
+        assert_eq!(h.to_script().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_recorded_entry_is_complete_even_from_a_partial_call() {
+        // The record must not depend on today's defaults to be replayable
+        // tomorrow, so a partial dispatch is expanded before it is stored.
+        let mut doc = Document::new();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.add_cube",
+            &PropertyMap::new(),
+        )
+        .unwrap();
+        assert_eq!(h.last().unwrap().params.len(), 1);
+        assert!(h.last().unwrap().params.get("size").is_some());
+    }
+
+    // --- memory budget ----------------------------------------------------
+
+    #[test]
+    fn the_budget_evicts_the_oldest_entries() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::with_budget(200);
+
+        for i in 1..=20 {
+            h.dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "mesh.move_selected",
+                &params(i as f64),
+            )
+            .unwrap();
+        }
+        assert!(
+            h.evicted() > 0,
+            "the budget should have discarded something"
+        );
+        assert!(h.bytes() <= 200 || h.entries().len() == 1);
+        // Recent undo depth is what users reach for, so it is what survives.
+        assert!(h.can_undo());
+    }
+
+    #[test]
+    fn the_most_recent_entry_is_never_evicted() {
+        // A budget that could discard the operation just performed would make
+        // undo untrustworthy, which is worse than exceeding a soft limit.
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::with_budget(0);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        assert_eq!(h.entries().len(), 1);
+        assert!(h.can_undo());
+    }
+
+    #[test]
+    fn undo_and_redo_report_availability_correctly() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        assert!(!h.can_undo() && !h.can_redo());
+        assert!(!h.undo(&mut doc));
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        assert!(h.can_undo() && !h.can_redo());
+
+        h.undo(&mut doc);
+        assert!(!h.can_undo() && h.can_redo());
+        assert!(!h.redo(&r, &mut doc, &Context::default()).is_err());
+        assert!(h.can_undo() && !h.can_redo());
+    }
+
+    #[test]
+    fn a_history_entry_carries_a_label_for_the_panel() {
+        let mut doc = doc_with_selection();
+        let r = registry();
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "mesh.move_selected",
+            &params(1.0),
+        )
+        .unwrap();
+        assert_eq!(h.last().unwrap().label, "Move Selected");
+    }
+}

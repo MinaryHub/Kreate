@@ -1,0 +1,429 @@
+//! Named, typed attribute layers over the four mesh domains.
+//!
+//! Everything that is not topology lives here: positions, UVs, creases, material
+//! indices, vertex groups, selection state, and any custom layer a plugin adds.
+//! There are deliberately no hardcoded attribute fields on `MeshData` other than
+//! topology — retrofitting a generic attribute system onto hardcoded fields is
+//! the single most painful refactor in this domain, and every importer's
+//! semantics depend on the domain model existing first.
+//!
+//! Each layer's array sits behind its own [`Arc`], which is what makes
+//! structural-sharing undo cheap: moving vertices copies the position array and
+//! shares everything else. Mutation therefore goes through `make_mut_*`, which
+//! performs the copy-on-write.
+
+use std::sync::Arc;
+
+use glam::{Vec2, Vec3, Vec4};
+
+/// Which mesh element a layer's values are indexed by.
+///
+/// These map 1:1 onto USD's `vertex` / `faceVarying` / `uniform` primvar
+/// interpolations, which is why glTF split vertices, FBX `ByPolygonVertex`
+/// layers, and OBJ's separate `v`/`vt`/`vn` index streams all reduce to the same
+/// problem: put it in the Corner domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Domain {
+    /// One value per vertex.
+    Point,
+    /// One value per edge.
+    Edge,
+    /// One value per face-corner (a face's use of a vertex). USD `faceVarying`.
+    Corner,
+    /// One value per face. USD `uniform`.
+    Face,
+}
+
+impl Domain {
+    pub const ALL: [Domain; 4] = [Domain::Point, Domain::Edge, Domain::Corner, Domain::Face];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Domain::Point => "point",
+            Domain::Edge => "edge",
+            Domain::Corner => "corner",
+            Domain::Face => "face",
+        }
+    }
+}
+
+/// The value type of a layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AttrType {
+    F32,
+    F32x2,
+    F32x3,
+    F32x4,
+    I32,
+    Bool,
+    /// Packed 8-bit RGBA, for vertex colours that do not need float precision.
+    U8x4,
+}
+
+/// A layer's values. One `Arc` per array — see the module docs.
+#[derive(Clone, Debug)]
+pub enum AttrData {
+    F32(Arc<Vec<f32>>),
+    F32x2(Arc<Vec<Vec2>>),
+    F32x3(Arc<Vec<Vec3>>),
+    F32x4(Arc<Vec<Vec4>>),
+    I32(Arc<Vec<i32>>),
+    Bool(Arc<Vec<bool>>),
+    U8x4(Arc<Vec<[u8; 4]>>),
+}
+
+impl AttrData {
+    pub fn ty(&self) -> AttrType {
+        match self {
+            AttrData::F32(_) => AttrType::F32,
+            AttrData::F32x2(_) => AttrType::F32x2,
+            AttrData::F32x3(_) => AttrType::F32x3,
+            AttrData::F32x4(_) => AttrType::F32x4,
+            AttrData::I32(_) => AttrType::I32,
+            AttrData::Bool(_) => AttrType::Bool,
+            AttrData::U8x4(_) => AttrType::U8x4,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            AttrData::F32(v) => v.len(),
+            AttrData::F32x2(v) => v.len(),
+            AttrData::F32x3(v) => v.len(),
+            AttrData::F32x4(v) => v.len(),
+            AttrData::I32(v) => v.len(),
+            AttrData::Bool(v) => v.len(),
+            AttrData::U8x4(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Allocates `len` default values of the given type.
+    pub fn zeroed(ty: AttrType, len: usize) -> Self {
+        match ty {
+            AttrType::F32 => AttrData::F32(Arc::new(vec![0.0; len])),
+            AttrType::F32x2 => AttrData::F32x2(Arc::new(vec![Vec2::ZERO; len])),
+            AttrType::F32x3 => AttrData::F32x3(Arc::new(vec![Vec3::ZERO; len])),
+            AttrType::F32x4 => AttrData::F32x4(Arc::new(vec![Vec4::ZERO; len])),
+            AttrType::I32 => AttrData::I32(Arc::new(vec![0; len])),
+            AttrType::Bool => AttrData::Bool(Arc::new(vec![false; len])),
+            AttrType::U8x4 => AttrData::U8x4(Arc::new(vec![[0; 4]; len])),
+        }
+    }
+
+    /// Grows or shrinks to `len`, filling new entries with the type's default.
+    /// Copies only if the `Arc` is shared, so a no-op resize is free.
+    fn resize(&mut self, len: usize) {
+        if self.len() == len {
+            return;
+        }
+        match self {
+            AttrData::F32(v) => Arc::make_mut(v).resize(len, 0.0),
+            AttrData::F32x2(v) => Arc::make_mut(v).resize(len, Vec2::ZERO),
+            AttrData::F32x3(v) => Arc::make_mut(v).resize(len, Vec3::ZERO),
+            AttrData::F32x4(v) => Arc::make_mut(v).resize(len, Vec4::ZERO),
+            AttrData::I32(v) => Arc::make_mut(v).resize(len, 0),
+            AttrData::Bool(v) => Arc::make_mut(v).resize(len, false),
+            AttrData::U8x4(v) => Arc::make_mut(v).resize(len, [0; 4]),
+        }
+    }
+
+    /// Whether two layers share the same allocation.
+    ///
+    /// This is the free, exact "did this change?" test that the evaluation cache
+    /// and the undo system rely on — no manual invalidation discipline needed.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AttrData::F32(a), AttrData::F32(b)) => Arc::ptr_eq(a, b),
+            (AttrData::F32x2(a), AttrData::F32x2(b)) => Arc::ptr_eq(a, b),
+            (AttrData::F32x3(a), AttrData::F32x3(b)) => Arc::ptr_eq(a, b),
+            (AttrData::F32x4(a), AttrData::F32x4(b)) => Arc::ptr_eq(a, b),
+            (AttrData::I32(a), AttrData::I32(b)) => Arc::ptr_eq(a, b),
+            (AttrData::Bool(a), AttrData::Bool(b)) => Arc::ptr_eq(a, b),
+            (AttrData::U8x4(a), AttrData::U8x4(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// One named layer.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub name: Box<str>,
+    pub domain: Domain,
+    pub data: AttrData,
+}
+
+/// Well-known layer names.
+///
+/// Layers whose name starts with `.` are internal: they round-trip through edit
+/// mode and undo like any other layer, but are not shown to the user and are not
+/// written to interchange formats.
+pub mod names {
+    /// Point / `F32x3`. Every mesh has this.
+    pub const POSITION: &str = "position";
+    /// Face / `I32`.
+    pub const MATERIAL_INDEX: &str = "material_index";
+    /// Face / `Bool`.
+    pub const SHADE_SMOOTH: &str = "shade_smooth";
+    /// Edge / `F32`, in `0..=1`.
+    pub const CREASE: &str = "crease";
+    /// Edge / `Bool`.
+    pub const SHARP_EDGE: &str = "sharp_edge";
+    /// Edge / `Bool`. UV seam.
+    pub const SEAM: &str = "seam";
+    /// Corner / `F32x3`. Present only when custom split normals are authored;
+    /// its presence overrides computed normals.
+    pub const CUSTOM_NORMAL: &str = "custom_normal";
+
+    /// Selection lives in attribute layers rather than a side table, so it
+    /// survives `MeshData` <-> `BMesh` round trips and shares structurally under
+    /// undo without any extra machinery.
+    pub const SELECT_VERT: &str = ".select_vert";
+    pub const SELECT_EDGE: &str = ".select_edge";
+    pub const SELECT_FACE: &str = ".select_face";
+
+    /// `true` for layers that are internal bookkeeping rather than user data.
+    pub fn is_internal(name: &str) -> bool {
+        name.starts_with('.')
+    }
+}
+
+/// A set of named layers, kept sorted by name.
+///
+/// A sorted `Vec` rather than a hash map, because iteration order is part of the
+/// contract: operator output must never depend on hash iteration order, or
+/// golden tests go flaky and file writes stop being reproducible. Layer counts
+/// are small (tens), so binary search beats hashing anyway.
+#[derive(Clone, Debug, Default)]
+pub struct AttributeStore {
+    layers: Vec<Layer>,
+}
+
+impl AttributeStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.layers.binary_search_by(|l| (*l.name).cmp(name)).ok()
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.index_of(name).is_some()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Layer> {
+        self.index_of(name).map(|i| &self.layers[i])
+    }
+
+    /// Iterates layers in name order.
+    pub fn iter(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.iter()
+    }
+
+    pub fn iter_domain(&self, domain: Domain) -> impl Iterator<Item = &Layer> {
+        self.layers.iter().filter(move |l| l.domain == domain)
+    }
+
+    /// Inserts or replaces a layer, returning the previous one if any.
+    pub fn insert(&mut self, name: &str, domain: Domain, data: AttrData) -> Option<Layer> {
+        let layer = Layer {
+            name: name.into(),
+            domain,
+            data,
+        };
+        match self.layers.binary_search_by(|l| (*l.name).cmp(name)) {
+            Ok(i) => Some(std::mem::replace(&mut self.layers[i], layer)),
+            Err(i) => {
+                self.layers.insert(i, layer);
+                None
+            }
+        }
+    }
+
+    /// Adds a zero-filled layer if absent. Returns whether it was added.
+    pub fn ensure(&mut self, name: &str, domain: Domain, ty: AttrType, len: usize) -> bool {
+        if self.contains(name) {
+            return false;
+        }
+        self.insert(name, domain, AttrData::zeroed(ty, len));
+        true
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<Layer> {
+        self.index_of(name).map(|i| self.layers.remove(i))
+    }
+
+    /// Resizes every layer in `domain` to `len`.
+    ///
+    /// Called when topology changes. Layers in other domains keep their `Arc`
+    /// untouched and so stay structurally shared.
+    pub fn resize_domain(&mut self, domain: Domain, len: usize) {
+        for l in self.layers.iter_mut().filter(|l| l.domain == domain) {
+            l.data.resize(len);
+        }
+    }
+}
+
+/// Generates the typed accessor pairs: a read accessor, and a copy-on-write
+/// `make_mut_*` which is the only way to mutate a layer.
+macro_rules! typed_accessors {
+    ($( $variant:ident, $elem:ty, $get:ident, $make_mut:ident );* $(;)?) => {
+        impl AttributeStore {
+            $(
+                /// Reads the named layer if it exists and has this type.
+                pub fn $get(&self, name: &str) -> Option<&[$elem]> {
+                    match &self.get(name)?.data {
+                        AttrData::$variant(v) => Some(v.as_slice()),
+                        _ => None,
+                    }
+                }
+
+                /// Mutable access, cloning the array only if it is shared with a
+                /// snapshot (copy-on-write).
+                pub fn $make_mut(&mut self, name: &str) -> Option<&mut Vec<$elem>> {
+                    let i = self.index_of(name)?;
+                    match &mut self.layers[i].data {
+                        AttrData::$variant(v) => Some(Arc::make_mut(v)),
+                        _ => None,
+                    }
+                }
+            )*
+        }
+    };
+}
+
+typed_accessors! {
+    F32,   f32,     get_f32,   make_mut_f32;
+    F32x2, Vec2,    get_f32x2, make_mut_f32x2;
+    F32x3, Vec3,    get_f32x3, make_mut_f32x3;
+    F32x4, Vec4,    get_f32x4, make_mut_f32x4;
+    I32,   i32,     get_i32,   make_mut_i32;
+    Bool,  bool,    get_bool,  make_mut_bool;
+    U8x4,  [u8; 4], get_u8x4,  make_mut_u8x4;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with_positions(n: usize) -> AttributeStore {
+        let mut s = AttributeStore::new();
+        s.insert(
+            names::POSITION,
+            Domain::Point,
+            AttrData::F32x3(Arc::new(vec![Vec3::ZERO; n])),
+        );
+        s
+    }
+
+    #[test]
+    fn iteration_is_deterministic_regardless_of_insertion_order() {
+        let collect = |order: [&str; 3]| {
+            let mut s = AttributeStore::new();
+            for n in order {
+                s.insert(n, Domain::Point, AttrData::zeroed(AttrType::F32, 1));
+            }
+            s.iter().map(|l| l.name.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            collect(["zeta", "alpha", "mid"]),
+            collect(["mid", "zeta", "alpha"])
+        );
+        assert_eq!(collect(["zeta", "alpha", "mid"]), ["alpha", "mid", "zeta"]);
+    }
+
+    #[test]
+    fn typed_read_rejects_wrong_type() {
+        let s = store_with_positions(3);
+        assert!(s.get_f32x3(names::POSITION).is_some());
+        assert!(s.get_f32(names::POSITION).is_none());
+        assert!(s.get_f32x3("nope").is_none());
+    }
+
+    #[test]
+    fn make_mut_is_copy_on_write() {
+        let mut a = store_with_positions(2);
+        // A snapshot is a clone of the store: Arcs are shared, nothing is copied.
+        let snapshot = a.clone();
+        let before = snapshot.get_f32x3(names::POSITION).unwrap().to_vec();
+
+        a.make_mut_f32x3(names::POSITION).unwrap()[0] = Vec3::X;
+
+        assert_eq!(a.get_f32x3(names::POSITION).unwrap()[0], Vec3::X);
+        assert_eq!(
+            snapshot.get_f32x3(names::POSITION).unwrap(),
+            before.as_slice(),
+            "mutating the live store must not disturb the snapshot"
+        );
+    }
+
+    #[test]
+    fn untouched_layers_stay_shared_after_a_write() {
+        let mut a = store_with_positions(2);
+        a.insert(
+            names::CREASE,
+            Domain::Edge,
+            AttrData::zeroed(AttrType::F32, 4),
+        );
+        let snapshot = a.clone();
+
+        a.make_mut_f32x3(names::POSITION).unwrap()[0] = Vec3::X;
+
+        // The property the whole undo design rests on: a position edit must not
+        // deep-copy unrelated layers.
+        assert!(
+            a.get(names::CREASE)
+                .unwrap()
+                .data
+                .ptr_eq(&snapshot.get(names::CREASE).unwrap().data),
+            "crease layer should still be shared"
+        );
+        assert!(
+            !a.get(names::POSITION)
+                .unwrap()
+                .data
+                .ptr_eq(&snapshot.get(names::POSITION).unwrap().data),
+            "position layer should have diverged"
+        );
+    }
+
+    #[test]
+    fn resize_domain_only_touches_that_domain() {
+        let mut s = store_with_positions(2);
+        s.insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::zeroed(AttrType::I32, 1),
+        );
+        s.resize_domain(Domain::Point, 5);
+        assert_eq!(s.get_f32x3(names::POSITION).unwrap().len(), 5);
+        assert_eq!(s.get_i32(names::MATERIAL_INDEX).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ensure_does_not_clobber_existing_data() {
+        let mut s = store_with_positions(2);
+        s.make_mut_f32x3(names::POSITION).unwrap()[1] = Vec3::Y;
+        assert!(!s.ensure(names::POSITION, Domain::Point, AttrType::F32x3, 2));
+        assert_eq!(s.get_f32x3(names::POSITION).unwrap()[1], Vec3::Y);
+    }
+
+    #[test]
+    fn selection_layers_are_internal() {
+        assert!(names::is_internal(names::SELECT_VERT));
+        assert!(!names::is_internal(names::POSITION));
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "kreate-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fluent-bundle = "0.15"
+# The AST, for enumerating a resource's message ids: fluent-bundle offers no
+# way to list what a bundle contains, and an unauditable translation rots.
+fluent-syntax = "0.11"
+unic-langid = "0.9"
+unicode-normalization = "0.1"
+unicode-linebreak = "0.1"
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,430 @@
+//! Widgets generated from an operator's reflected schema.
+//!
+//! This is the payoff of `#[derive(OpParams)]`. Nothing here knows what
+//! `mesh.bevel` is: it reads a `&[PropertyDesc]`, draws the right widget for each
+//! entry with the right range, step, unit and tooltip, and hands back an edited
+//! `PropertyMap`. Adding an operator adds its panel.
+//!
+//! Two behaviours are worth stating because they are frequent complaints about
+//! modelling tools:
+//!
+//! - **A drag stops at the soft limit; a typed value is only bound by the hard
+//!   one.** A slider that cannot be exceeded is infuriating when the useful range
+//!   turns out to be wider than the designer guessed.
+//! - **Angles are edited in degrees and stored in radians.** Nobody types
+//!   `0.2617993877`.
+
+use egui::Ui;
+use kreate_i18n::{Catalog, TextKind};
+use kreate_reflect::{PropertyDesc, PropertyKind, PropertyMap, PropertyValue, Unit};
+
+/// How a value is shown and parsed, derived from its unit.
+pub struct UnitDisplay {
+    /// Multiplier from stored value to displayed value.
+    pub to_display: f64,
+    pub suffix: &'static str,
+    /// Drag increment in *display* units.
+    pub default_step: f64,
+    pub decimals: usize,
+}
+
+impl UnitDisplay {
+    pub fn of(unit: Unit) -> Self {
+        match unit {
+            Unit::None => Self {
+                to_display: 1.0,
+                suffix: "",
+                default_step: 0.01,
+                decimals: 3,
+            },
+            Unit::Length => Self {
+                to_display: 1.0,
+                suffix: " m",
+                default_step: 0.01,
+                decimals: 4,
+            },
+            // Stored in radians, edited in degrees.
+            Unit::Angle => Self {
+                to_display: 180.0 / std::f64::consts::PI,
+                suffix: "\u{00B0}",
+                default_step: 1.0,
+                decimals: 2,
+            },
+            Unit::Factor => Self {
+                to_display: 100.0,
+                suffix: " %",
+                default_step: 1.0,
+                decimals: 1,
+            },
+            Unit::Count => Self {
+                to_display: 1.0,
+                suffix: "",
+                default_step: 1.0,
+                decimals: 0,
+            },
+        }
+    }
+
+    pub fn from_display(&self, shown: f64) -> f64 {
+        shown / self.to_display
+    }
+}
+
+/// Labels for one parameter, translated where a translation exists.
+fn labels(catalog: &Catalog, op_id: &str, desc: &PropertyDesc) -> (String, String) {
+    let name = catalog.format(&desc.name_key(op_id), TextKind::Ui, &[]);
+    // The key coming back means there is no translation; fall back to the field
+    // name rather than showing `op-mesh-bevel-param-width-name` in the panel.
+    let name = if name == desc.name_key(op_id) {
+        prettify(desc.name)
+    } else {
+        name
+    };
+
+    let tip = catalog.format(&desc.desc_key(op_id), TextKind::Tooltip, &[]);
+    // The doc comment on the field is the fallback tooltip, which is why
+    // documentation and UI text cannot drift apart.
+    let tip = if tip == desc.desc_key(op_id) {
+        desc.doc.to_string()
+    } else {
+        tip
+    };
+    (name, tip)
+}
+
+/// `soft_max` -> `Soft Max`, for a field with no translation yet.
+fn prettify(field: &str) -> String {
+    field
+        .split('_')
+        .map(|word| {
+            let mut c = word.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Draws every parameter in `schema`, editing `values` in place.
+///
+/// Returns `true` if anything changed, which the caller turns into an
+/// `AdjustLast` command — the adjust-last-operation panel needs no more than
+/// that, because re-running with edited parameters is the same path redo takes.
+pub fn property_editor(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    op_id: &str,
+    schema: &[PropertyDesc],
+    values: &mut PropertyMap,
+) -> bool {
+    let mut changed = false;
+    egui::Grid::new(("props", op_id))
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            for desc in schema {
+                let (name, tip) = labels(catalog, op_id, desc);
+                let label = ui.label(name);
+                if !tip.is_empty() {
+                    label.on_hover_text(tip);
+                }
+                changed |= property_widget(ui, desc, values);
+                ui.end_row();
+            }
+        });
+    changed
+}
+
+/// Draws the widget for one parameter.
+pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMap) -> bool {
+    let current = values.get(desc.name).cloned();
+    let mut changed = false;
+
+    match (&desc.kind, current) {
+        (PropertyKind::Bool, Some(PropertyValue::Bool(mut v))) => {
+            if ui.checkbox(&mut v, "").changed() {
+                values.set(desc.name, PropertyValue::Bool(v));
+                changed = true;
+            }
+        }
+
+        (PropertyKind::Int, Some(PropertyValue::Int(v))) => {
+            let mut n = v;
+            if drag_int(ui, desc, &mut n) {
+                values.set(desc.name, desc.clamp(PropertyValue::Int(n)));
+                changed = true;
+            }
+        }
+
+        (PropertyKind::Float, Some(PropertyValue::Float(v))) => {
+            let mut f = v;
+            if drag_float(ui, desc, &mut f) {
+                values.set(desc.name, desc.clamp(PropertyValue::Float(f)));
+                changed = true;
+            }
+        }
+
+        (PropertyKind::Vec3, Some(PropertyValue::Vec3(v))) => {
+            let mut out = v;
+            ui.horizontal(|ui| {
+                // X/Y/Z rather than three unlabelled boxes: in a modeller the
+                // axis is the first thing you need to know.
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    // i18n-exempt: axis letters are conventionally untranslated
+                    ui.label(*axis);
+                    let mut component = out[i];
+                    if drag_float(ui, desc, &mut component) {
+                        out[i] = component;
+                        changed = true;
+                    }
+                }
+            });
+            if changed {
+                values.set(desc.name, desc.clamp(PropertyValue::Vec3(out)));
+            }
+        }
+
+        (PropertyKind::Text, Some(PropertyValue::Text(v))) => {
+            let mut text = v;
+            if ui.text_edit_singleline(&mut text).changed() {
+                // Normalise on the way in: Hangul arriving as decomposed jamo
+                // from a paste or an IME renders as separate marks and compares
+                // unequal to the same word typed normally.
+                values.set(
+                    desc.name,
+                    PropertyValue::Text(kreate_i18n::korean::normalize(&text)),
+                );
+                changed = true;
+            }
+        }
+
+        (PropertyKind::Enum { variants }, Some(PropertyValue::Enum(v))) => {
+            let selected = variants.get(v as usize).copied().unwrap_or("?");
+            let mut choice = v;
+            egui::ComboBox::from_id_salt((desc.name, "enum"))
+                .selected_text(prettify(selected))
+                .show_ui(ui, |ui| {
+                    for (i, variant) in variants.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut choice, i as u32, prettify(variant))
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            if changed {
+                values.set(desc.name, desc.clamp(PropertyValue::Enum(choice)));
+            }
+        }
+
+        // The value is missing or has the wrong type — from an older file, or a
+        // schema that changed. Show it as unavailable rather than guessing, and
+        // never panic on a document the application can otherwise open.
+        (_, other) => {
+            let what = other
+                .map(|v| v.kind_name().to_string())
+                .unwrap_or_else(|| "missing".into());
+            ui.weak(format!("<{what}>"));
+        }
+    }
+    changed
+}
+
+/// A drag-scrub float field, in display units.
+fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
+    let display = UnitDisplay::of(desc.unit);
+    let mut shown = *value * display.to_display;
+
+    let step = desc.step.unwrap_or(display.default_step) * display.to_display;
+    let mut drag = egui::DragValue::new(&mut shown)
+        .speed(step)
+        .suffix(display.suffix)
+        .max_decimals(display.decimals);
+
+    // The soft range bounds the *drag*; typing is bound only by the hard range.
+    // A slider that cannot be exceeded is a standing complaint about modelling
+    // tools, and the schema distinguishes the two for exactly this reason.
+    let soft_lo = desc.soft_min.or(desc.min);
+    let soft_hi = desc.soft_max.or(desc.max);
+    if let (Some(lo), Some(hi)) = (soft_lo, soft_hi) {
+        drag = drag.range((lo * display.to_display)..=(hi * display.to_display));
+    }
+
+    if ui.add(drag).changed() {
+        *value = display.from_display(shown);
+        true
+    } else {
+        false
+    }
+}
+
+fn drag_int(ui: &mut Ui, desc: &PropertyDesc, value: &mut i64) -> bool {
+    let mut n = *value;
+    let mut drag = egui::DragValue::new(&mut n).speed(desc.step.unwrap_or(1.0));
+    if let (Some(lo), Some(hi)) = (desc.min.or(desc.soft_min), desc.max.or(desc.soft_max)) {
+        drag = drag.range((lo as i64)..=(hi as i64));
+    }
+    if ui.add(drag).changed() {
+        *value = n;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desc(name: &'static str, kind: PropertyKind, unit: Unit) -> PropertyDesc {
+        PropertyDesc {
+            name,
+            kind,
+            min: None,
+            max: None,
+            soft_min: None,
+            soft_max: None,
+            step: None,
+            unit,
+            doc: "",
+        }
+    }
+
+    #[test]
+    fn angles_are_edited_in_degrees_and_stored_in_radians() {
+        // Nobody types 0.2617993877.
+        let d = UnitDisplay::of(Unit::Angle);
+        let radians = 15f64.to_radians();
+        assert!((radians * d.to_display - 15.0).abs() < 1e-9);
+        assert!((d.from_display(15.0) - radians).abs() < 1e-12);
+        assert_eq!(d.suffix, "\u{00B0}");
+    }
+
+    #[test]
+    fn factors_are_edited_as_percentages() {
+        let d = UnitDisplay::of(Unit::Factor);
+        assert!((0.25 * d.to_display - 25.0).abs() < 1e-9);
+        assert!((d.from_display(25.0) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lengths_are_shown_in_metres_without_conversion() {
+        let d = UnitDisplay::of(Unit::Length);
+        assert_eq!(d.to_display, 1.0);
+        assert_eq!(d.suffix, " m");
+        // Four decimals, so a millimetre is editable.
+        assert!(d.decimals >= 4);
+    }
+
+    #[test]
+    fn counts_drag_in_whole_steps() {
+        let d = UnitDisplay::of(Unit::Count);
+        assert_eq!(d.default_step, 1.0);
+        assert_eq!(d.decimals, 0);
+    }
+
+    #[test]
+    fn unit_conversions_round_trip() {
+        for unit in [
+            Unit::None,
+            Unit::Length,
+            Unit::Angle,
+            Unit::Factor,
+            Unit::Count,
+        ] {
+            let d = UnitDisplay::of(unit);
+            let stored = 0.375;
+            assert!(
+                (d.from_display(stored * d.to_display) - stored).abs() < 1e-12,
+                "{unit:?} does not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn field_names_become_readable_labels_without_a_translation() {
+        // A new parameter must not show `soft_max` or a raw i18n key in the panel.
+        assert_eq!(prettify("soft_max"), "Soft Max");
+        assert_eq!(prettify("width"), "Width");
+        assert_eq!(prettify("clamp_overlap"), "Clamp Overlap");
+        assert_eq!(prettify(""), "");
+    }
+
+    #[test]
+    fn labels_prefer_a_translation_and_fall_back_to_the_field() {
+        let mut catalog = Catalog::new();
+        catalog
+            .add(
+                "ko-KR",
+                "op-mesh-bevel-param-width-name = 폭\nop-mesh-bevel-param-width-desc = 베벨의 폭입니다.\n",
+            )
+            .unwrap();
+
+        let mut d = desc("width", PropertyKind::Float, Unit::Length);
+        d.doc = "Width of the bevel.";
+        let (name, tip) = labels(&catalog, "mesh.bevel", &d);
+        assert_eq!(name, "폭");
+        assert_eq!(tip, "베벨의 폭입니다.");
+
+        // An untranslated parameter falls back to the field name and its doc
+        // comment, so documentation and UI text cannot drift apart.
+        let mut other = desc("clamp_overlap", PropertyKind::Bool, Unit::None);
+        other.doc = "Clamp the width.";
+        let (name, tip) = labels(&catalog, "mesh.bevel", &other);
+        assert_eq!(name, "Clamp Overlap");
+        assert_eq!(tip, "Clamp the width.");
+    }
+
+    #[test]
+    fn the_tooltip_toggle_suppresses_translated_tooltips_only() {
+        // English menus with Korean tooltips, and the reverse, are both things
+        // Korean professionals ask for.
+        let mut catalog = Catalog::new();
+        catalog
+            .add(
+                "ko-KR",
+                "op-x-param-w-name = 폭\nop-x-param-w-desc = 설명\n",
+            )
+            .unwrap();
+        catalog.options.tooltips = false;
+
+        let mut d = desc("w", PropertyKind::Float, Unit::None);
+        d.doc = "fallback doc";
+        let (name, tip) = labels(&catalog, "x", &d);
+        assert_eq!(name, "폭", "the label is still translated");
+        assert_eq!(
+            tip, "fallback doc",
+            "the tooltip falls back to the doc comment"
+        );
+    }
+
+    #[test]
+    fn a_soft_range_is_narrower_than_the_hard_one_the_widget_enforces() {
+        // The distinction the drag widget relies on: it clamps to the soft range,
+        // while a typed value is bound only by the hard range.
+        let d = PropertyDesc {
+            name: "width",
+            kind: PropertyKind::Float,
+            min: Some(0.0),
+            max: Some(100.0),
+            soft_min: Some(0.0),
+            soft_max: Some(1.0),
+            step: Some(0.01),
+            unit: Unit::Length,
+            doc: "",
+        };
+        assert!(d.soft_max.unwrap() < d.max.unwrap());
+        // And the hard range is what actually constrains a stored value.
+        assert_eq!(
+            d.clamp(PropertyValue::Float(50.0)),
+            PropertyValue::Float(50.0)
+        );
+        assert_eq!(
+            d.clamp(PropertyValue::Float(500.0)),
+            PropertyValue::Float(100.0)
+        );
+    }
+}

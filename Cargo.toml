@@ -1,0 +1,94 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kreate-math",
+    "crates/kreate-mesh",
+    "crates/kreate-scene",
+    "crates/kreate-ops",
+    "crates/kreate-ops-derive",
+    "crates/kreate-input",
+    "crates/kreate-render",
+    "crates/kreate-io",
+    "crates/kreate-ui",
+    "crates/kreate-testkit",
+    "crates/kreate-i18n",
+    "crates/kreate-reflect",
+    "apps/kreate",
+    "apps/kreatec",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kreate3d/kreate"
+
+# Versions are PINNED. The winit <-> egui <-> egui-wgpu <-> wgpu <-> naga_oil cluster is
+# tightly coupled; upgrade the whole cluster in one dedicated PR, verified by the
+# renderer smoke test (headless render + image hash).
+[workspace.dependencies]
+kreate-math       = { path = "crates/kreate-math" }
+kreate-mesh       = { path = "crates/kreate-mesh" }
+kreate-scene      = { path = "crates/kreate-scene" }
+kreate-ops        = { path = "crates/kreate-ops" }
+kreate-ops-derive = { path = "crates/kreate-ops-derive" }
+kreate-input      = { path = "crates/kreate-input" }
+kreate-render     = { path = "crates/kreate-render" }
+kreate-io         = { path = "crates/kreate-io" }
+kreate-ui         = { path = "crates/kreate-ui" }
+kreate-testkit    = { path = "crates/kreate-testkit" }
+kreate-i18n       = { path = "crates/kreate-i18n" }
+kreate-reflect    = { path = "crates/kreate-reflect" }
+
+# --- graphics cluster (pinned exactly) ---
+wgpu       = "=29.0.4"
+winit      = "=0.30.13"
+egui       = "=0.35.0"
+egui-wgpu  = "=0.35.0"
+egui-winit = "=0.35.0"
+
+# --- math ---
+glam     = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "=1.25.0", features = ["derive"] }
+
+# --- concurrency ---
+rayon             = "1.10"
+crossbeam-channel = "0.5"
+parking_lot       = "0.12"
+arc-swap          = "1.7"
+
+# --- data structures ---
+slotmap  = "1.0"
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
+arrayvec = "0.7"
+indexmap = "2.5"
+# default-features off drops `runtime-rng` (and with it `getrandom`). Two reasons,
+# and the first is the important one: a runtime-random hash seed makes iteration
+# order vary between runs, which violates the workspace-wide rule that operator
+# output must never depend on hash order. Fixed keys also let the mesh kernel
+# compile to wasm32-unknown-unknown, which CI checks.
+ahash    = { version = "0.8", default-features = false, features = ["std"] }
+
+# --- errors / logging ---
+thiserror = "2.0"
+anyhow    = "1.0"
+tracing   = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+pollster  = "0.4"
+
+# --- dev / test ---
+proptest = "1.5"
+criterion = "0.5"
+
+# Debug-mode mesh math is ~50x too slow to be usable. Optimize dependencies fully and
+# our own code lightly; this keeps debug builds interactive without wrecking step-debugging.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = 1          # keep line tables for profiling (tracy/puffin) and crash minidumps

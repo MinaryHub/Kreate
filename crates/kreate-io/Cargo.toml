@@ -1,0 +1,14 @@
+[package]
+name = "kreate-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kreate-math.workspace = true
+kreate-mesh.workspace = true
+glam.workspace = true
+ahash.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "kreate-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kreate-math.workspace = true
+kreate-mesh.workspace = true
+kreate-scene.workspace = true
+kreate-ops-derive.workspace = true
+kreate-reflect.workspace = true
+glam.workspace = true
+thiserror.workspace = true
