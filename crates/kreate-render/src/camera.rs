@@ -39,6 +39,68 @@ pub enum Projection {
     Orthographic,
 }
 
+/// One of the six axis views the navigation gizmo snaps to.
+///
+/// Named for the side the camera moves *to*: `PosX` puts the eye on the `+X`
+/// side looking back at the pivot, which is what a user means when they click
+/// the `+X` ball.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ViewAxis {
+    PosX,
+    NegX,
+    PosY,
+    NegY,
+    PosZ,
+    NegZ,
+}
+
+impl ViewAxis {
+    /// All six, in a stable order: `+X, -X, +Y, -Y, +Z, -Z`.
+    pub const ALL: [ViewAxis; 6] = [
+        ViewAxis::PosX,
+        ViewAxis::NegX,
+        ViewAxis::PosY,
+        ViewAxis::NegY,
+        ViewAxis::PosZ,
+        ViewAxis::NegZ,
+    ];
+
+    /// The direction from the pivot toward the eye.
+    pub fn direction(self) -> DVec3 {
+        match self {
+            ViewAxis::PosX => DVec3::X,
+            ViewAxis::NegX => DVec3::NEG_X,
+            ViewAxis::PosY => DVec3::Y,
+            ViewAxis::NegY => DVec3::NEG_Y,
+            ViewAxis::PosZ => DVec3::Z,
+            ViewAxis::NegZ => DVec3::NEG_Z,
+        }
+    }
+
+    /// Whether this is the positive end of its axis, which is what decides
+    /// whether the gizmo draws it filled and labelled.
+    pub fn is_positive(self) -> bool {
+        matches!(self, ViewAxis::PosX | ViewAxis::PosY | ViewAxis::PosZ)
+    }
+
+    /// `0` for X, `1` for Y, `2` for Z — the index a colour table is keyed on.
+    pub fn axis_index(self) -> usize {
+        match self {
+            ViewAxis::PosX | ViewAxis::NegX => 0,
+            ViewAxis::PosY | ViewAxis::NegY => 1,
+            ViewAxis::PosZ | ViewAxis::NegZ => 2,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewAxis::PosX | ViewAxis::NegX => "X",
+            ViewAxis::PosY | ViewAxis::NegY => "Y",
+            ViewAxis::PosZ | ViewAxis::NegZ => "Z",
+        }
+    }
+}
+
 /// An orbit camera.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -146,6 +208,87 @@ impl Camera {
         self.distance = (self.distance * 1.1f64.powf(-amount)).max(Self::MIN_DISTANCE);
     }
 
+    /// A framing that looks along one of the six world axes.
+    ///
+    /// `axis` names the side the **eye** moves to, not the direction of view:
+    /// `PosZ` is the top view, looking down. Read the other way round it silently
+    /// reverses which of two stacked objects is in front, and every symmetric
+    /// test still passes.
+    ///
+    /// The pivot and the distance are kept, so an axis snap changes where the
+    /// camera is looking *from* and nothing else — the subject stays the same
+    /// size and in the same place, which is what makes the six views usable as
+    /// a set rather than as six separate jumps.
+    ///
+    /// The up direction is chosen per axis rather than fixed: world `+Z` is up
+    /// for the four side views, but a top view has no meaningful "up" along `Z`
+    /// and needs `+Y` instead. Using one vector for all six leaves the top and
+    /// bottom views degenerate — the classic gimbal collapse, which shows up as
+    /// a top view rolled to an arbitrary angle.
+    pub fn looking_along(&self, axis: ViewAxis) -> Camera {
+        let toward_eye = axis.direction();
+        // A top or bottom view: `Z` cannot also be up.
+        let up_reference = if toward_eye.dot(DVec3::Z).abs() > 0.99 {
+            DVec3::Y
+        } else {
+            DVec3::Z
+        };
+        let right = up_reference.cross(toward_eye).normalize();
+        let up = toward_eye.cross(right);
+        let basis = glam::DMat3::from_cols(right, up, toward_eye);
+        Camera {
+            rotation: DQuat::from_mat3(&basis).normalize(),
+            ..*self
+        }
+    }
+
+    /// Moves the pivot to a depth along the view axis without moving the eye.
+    ///
+    /// **Auto-depth**, the single most valuable navigation feature there is.
+    /// Orbiting about a fixed origin while working close to a surface swings the
+    /// model wildly for a small mouse movement — the drunk feeling every
+    /// hand-rolled 3D viewport has. Orbiting about what is under the cursor
+    /// removes it entirely.
+    ///
+    /// The pivot goes to the given depth **along the view direction**, not to the
+    /// hit point itself. Moving it sideways to the exact hit would drag the eye
+    /// with it and the view would jump the instant the drag began, which reads as
+    /// a bug rather than as a feature.
+    pub fn set_pivot_depth(&mut self, depth: f64) {
+        let eye = self.eye();
+        let d = depth.max(Self::MIN_DISTANCE);
+        self.distance = d;
+        self.pivot = eye + self.forward() * d;
+    }
+
+    /// The depth of a world point along the view axis, or `None` if it is behind
+    /// the eye.
+    pub fn depth_of(&self, point: DVec3) -> Option<f64> {
+        let d = (point - self.eye()).dot(self.forward());
+        (d > Self::MIN_DISTANCE).then_some(d)
+    }
+
+    /// Dollies toward a direction rather than toward the pivot.
+    ///
+    /// Zoom-to-cursor: the point under the pointer stays under it as the view
+    /// closes in, so a user zooms into a detail by pointing at it instead of
+    /// alternating zoom and pan. `direction` is a unit vector from the eye,
+    /// normally the ray through the cursor.
+    pub fn dolly_towards(&mut self, amount: f64, direction: DVec3) {
+        let before = self.distance;
+        self.dolly(amount);
+        let travelled = before - self.distance;
+        if travelled.abs() < f64::EPSILON {
+            return;
+        }
+        // Slide the pivot sideways by as much as the eye advanced *off* the view
+        // axis. With `direction` equal to the view direction this is exactly
+        // zero, so plain dolly stays plain.
+        let along = direction.dot(self.forward());
+        let sideways = direction - self.forward() * along;
+        self.pivot += sideways * travelled;
+    }
+
     /// Height of the orthographic view volume, chosen so switching projections
     /// keeps the framing at the pivot unchanged.
     #[inline]
@@ -154,10 +297,24 @@ impl Camera {
     }
 
     /// Frames a bounding sphere, leaving a small margin.
-    pub fn frame_sphere(&mut self, center: DVec3, radius: f64) {
+    ///
+    /// `aspect` is width divided by height. It is required rather than optional
+    /// because framing on the vertical field of view alone clips the subject
+    /// horizontally the moment a viewport is taller than it is wide — which is
+    /// exactly what happens when side panels take most of the width. The
+    /// constraint is whichever axis is *tighter*.
+    pub fn frame_sphere(&mut self, center: DVec3, radius: f64, aspect: f64) {
         self.pivot = center;
         let r = radius.max(1e-6);
-        self.distance = (r / (self.fov_y * 0.5).sin()) * 1.15;
+        let aspect = if aspect.is_finite() && aspect > 1e-6 {
+            aspect
+        } else {
+            1.0
+        };
+        let half_v = self.fov_y * 0.5;
+        let half_h = (half_v.tan() * aspect).atan();
+        let half = half_v.min(half_h);
+        self.distance = (r / half.sin()) * 1.15;
     }
 
     /// View matrix with the translation removed.
@@ -468,7 +625,7 @@ mod tests {
     #[test]
     fn frame_sphere_fits_the_sphere_in_view() {
         let mut c = Camera::default();
-        c.frame_sphere(DVec3::new(1.0, 2.0, 3.0), 5.0);
+        c.frame_sphere(DVec3::new(1.0, 2.0, 3.0), 5.0, 16.0 / 9.0);
         assert_eq!(c.pivot, DVec3::new(1.0, 2.0, 3.0));
         // The half-angle to the sphere's silhouette must be inside the fov.
         let half_angle = (5.0f64 / c.distance).asin();
@@ -476,10 +633,55 @@ mod tests {
     }
 
     #[test]
-    fn frame_sphere_handles_a_degenerate_radius() {
+    fn framing_fits_the_sphere_on_both_axes_at_any_aspect() {
+        // The bug this guards: framing on the vertical field of view alone clips
+        // the subject horizontally as soon as a viewport is taller than it is
+        // wide, which is what side panels do to it.
+        for aspect in [0.25, 0.45, 1.0, 1.13, 2.7, 8.0] {
+            let mut c = Camera::default();
+            let r = 5.0;
+            c.frame_sphere(DVec3::ZERO, r, aspect);
+
+            let half_v = c.fov_y * 0.5;
+            let half_h = (half_v.tan() * aspect).atan();
+            let subtended = (r / c.distance).asin();
+            assert!(
+                subtended < half_v && subtended < half_h,
+                "at aspect {aspect} the sphere subtends {subtended} but the half                  angles are v={half_v} h={half_h}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_viewport_pulls_the_camera_further_back() {
+        // The concrete consequence: a tall, narrow viewport needs more distance
+        // for the same subject.
+        let mut wide = Camera::default();
+        wide.frame_sphere(DVec3::ZERO, 1.0, 2.0);
+        let mut narrow = Camera::default();
+        narrow.frame_sphere(DVec3::ZERO, 1.0, 0.4);
+        assert!(
+            narrow.distance > wide.distance * 1.5,
+            "narrow {} should be much further than wide {}",
+            narrow.distance,
+            wide.distance
+        );
+    }
+
+    #[test]
+    fn frame_sphere_handles_degenerate_input() {
         let mut c = Camera::default();
-        c.frame_sphere(DVec3::ZERO, 0.0);
+        c.frame_sphere(DVec3::ZERO, 0.0, 1.0);
         assert!(c.distance.is_finite() && c.distance > 0.0);
+        // A zero-width viewport happens during a resize or with a collapsed panel.
+        for aspect in [0.0, -1.0, f64::NAN] {
+            let mut c = Camera::default();
+            c.frame_sphere(DVec3::ZERO, 1.0, aspect);
+            assert!(
+                c.distance.is_finite() && c.distance > 0.0,
+                "aspect {aspect}"
+            );
+        }
     }
 
     #[test]
@@ -512,5 +714,99 @@ mod tests {
                 "aspect {aspect}"
             );
         }
+    }
+
+    #[test]
+    fn auto_depth_moves_the_pivot_without_moving_the_eye() {
+        // The whole point: the orbit centre changes, the picture does not. A
+        // pivot change that shifted the view would announce itself as a jump the
+        // instant the user pressed the button.
+        let mut c = Camera::default();
+        let eye = c.eye();
+        let forward = c.forward();
+
+        c.set_pivot_depth(2.5);
+        assert!((c.eye() - eye).length() < 1e-9, "the eye moved");
+        assert!((c.forward() - forward).length() < 1e-9, "the view turned");
+        assert!((c.distance - 2.5).abs() < 1e-9);
+        assert!((c.pivot - (eye + forward * 2.5)).length() < 1e-9);
+    }
+
+    #[test]
+    fn orbiting_after_auto_depth_turns_about_the_new_centre() {
+        let mut c = Camera::default();
+        c.set_pivot_depth(2.0);
+        let centre = c.pivot;
+        c.orbit(0.5, 0.2);
+        assert!(
+            (c.pivot - centre).length() < 1e-9,
+            "orbit must leave the pivot alone"
+        );
+        assert!(
+            ((c.eye() - centre).length() - 2.0).abs() < 1e-9,
+            "and keep the eye at the same radius from it"
+        );
+    }
+
+    #[test]
+    fn auto_depth_refuses_to_collapse_onto_the_eye() {
+        // A ray that hits something touching the near plane would otherwise set
+        // the distance to zero, which makes orbit undefined and the near plane
+        // collapse.
+        let mut c = Camera::default();
+        c.set_pivot_depth(0.0);
+        assert!(c.distance > 0.0);
+        c.set_pivot_depth(-5.0);
+        assert!(c.distance > 0.0);
+        assert!(c.near() > 0.0);
+    }
+
+    #[test]
+    fn a_point_behind_the_eye_has_no_depth() {
+        let c = Camera::default();
+        let behind = c.eye() - c.forward() * 3.0;
+        assert_eq!(c.depth_of(behind), None);
+        let ahead = c.eye() + c.forward() * 3.0;
+        assert!((c.depth_of(ahead).unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zooming_along_the_view_axis_is_a_plain_dolly() {
+        // The property that keeps wheel-zoom at the centre of the screen exactly
+        // as it was: pointing straight ahead must not slide the pivot at all.
+        let mut cursor = Camera::default();
+        let mut plain = cursor;
+        let forward = cursor.forward();
+
+        cursor.dolly_towards(1.0, forward);
+        plain.dolly(1.0);
+        assert!((cursor.pivot - plain.pivot).length() < 1e-9);
+        assert!((cursor.distance - plain.distance).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zooming_toward_the_cursor_brings_that_point_closer_to_the_centre() {
+        // Zoom-to-cursor, stated as what the user sees: the thing they are
+        // pointing at ends up nearer the middle of the screen than it was.
+        let mut c = Camera::default();
+        let eye = c.eye();
+        // A direction off to one side of the view.
+        let direction = (c.forward() + c.right() * 0.3).normalize();
+        let target = eye + direction * c.distance;
+
+        let offset_before = {
+            let to = target - c.pivot;
+            (to - c.forward() * to.dot(c.forward())).length()
+        };
+        c.dolly_towards(3.0, direction);
+        let offset_after = {
+            let to = target - c.pivot;
+            (to - c.forward() * to.dot(c.forward())).length()
+        };
+        assert!(
+            offset_after < offset_before,
+            "the target went from {offset_before} to {offset_after} off-axis"
+        );
+        assert!(c.distance < 8.0, "and the view did close in");
     }
 }

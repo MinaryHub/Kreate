@@ -11,4 +11,9 @@ repository.workspace = true
 # schema and emits `(op_id, params)`. See `command`.
 kreate-reflect.workspace = true
 kreate-i18n.workspace = true
+# Camera types and vector maths for the navigation gizmo. Still no operators
+# and no scene: this crate reads state and emits commands.
+kreate-input.workspace = true
+kreate-math.workspace = true
+kreate-render.workspace = true
 egui.workspace = true

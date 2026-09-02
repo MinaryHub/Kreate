@@ -91,15 +91,22 @@ fn studio(n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Front-facing normal. Interpolated normals on a backface point away, and
-    // without this a mesh with inconsistent winding shows black patches that
-    // look like a shading bug rather than a topology one.
+fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    // Flip the normal on backfaces, so a mesh with inconsistent winding is lit
+    // rather than showing black patches that read as a shading bug instead of a
+    // topology one.
+    //
+    // The test is the rasteriser's own facing flag, which is constant across a
+    // triangle. Comparing the normal against the view vector instead — the
+    // obvious-looking `dot(n, to_eye) < 0.0` — is wrong: the view vector varies
+    // per fragment under perspective, so on a face seen at a grazing angle the
+    // sign flips partway across it and the shading breaks along a curve through
+    // the middle of a flat surface.
     var n = normalize(in.normal);
-    let to_eye = normalize(-in.view_pos);
-    if (dot(n, to_eye) < 0.0) {
+    if (!front_facing) {
         n = -n;
     }
+    let to_eye = normalize(-in.view_pos);
 
     let base = object.base_color.rgb;
     var color: vec3<f32>;

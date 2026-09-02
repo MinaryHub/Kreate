@@ -5,9 +5,13 @@
 //! same trait, so a third-party operator is indistinguishable from a built-in one
 //! — which is the point of the design rather than a nice side effect.
 
+pub mod mesh;
+pub mod modifier;
 pub mod object;
 
 /// Registers every built-in operator.
 pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
+    mesh::register(registry);
+    modifier::register(registry);
     object::register(registry);
 }

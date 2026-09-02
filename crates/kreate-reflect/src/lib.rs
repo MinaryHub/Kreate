@@ -36,6 +36,15 @@ pub enum PropertyValue {
     Text(String),
     /// Index into the corresponding [`PropertyKind::Enum`] variant list.
     Enum(u32),
+    /// A list of element indices.
+    ///
+    /// The parameter a resolved selection is: box select, lasso select, a script
+    /// picking elements by name, a restored selection from a file. All of those
+    /// are "these specific elements", and the alternative — passing the *screen
+    /// rectangle* and re-resolving it — is worse in every direction. It makes the
+    /// operator depend on a camera, it cannot be replayed headlessly, and
+    /// adjusting it after the view has moved silently selects something else.
+    Ints(Vec<u32>),
 }
 
 impl PropertyValue {
@@ -47,6 +56,7 @@ impl PropertyValue {
             PropertyValue::Vec3(_) => "vec3",
             PropertyValue::Text(_) => "text",
             PropertyValue::Enum(_) => "enum",
+            PropertyValue::Ints(_) => "ints",
         }
     }
 
@@ -88,6 +98,13 @@ impl PropertyValue {
             _ => None,
         }
     }
+
+    pub fn as_ints(&self) -> Option<&[u32]> {
+        match self {
+            PropertyValue::Ints(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// What kind of value a parameter holds, and what the UI should offer.
@@ -98,7 +115,15 @@ pub enum PropertyKind {
     Float,
     Vec3,
     Text,
-    Enum { variants: &'static [&'static str] },
+    Enum {
+        variants: &'static [&'static str],
+    },
+    /// A list of element indices, with no widget of its own.
+    ///
+    /// The property editor shows a count rather than the values. A thousand
+    /// spinners is not a way to edit a selection, and the thing that *does* edit
+    /// one is the viewport.
+    Ints,
 }
 
 /// The physical quantity a numeric parameter represents.
@@ -316,6 +341,21 @@ fn format_value(v: &PropertyValue) -> String {
         ),
         PropertyValue::Text(t) => format!("{t:?}"),
         PropertyValue::Enum(e) => e.to_string(),
+        // A Python list, so a generated line pastes back and runs. Written out
+        // in full however long it is: a truncated selection would produce a
+        // script that runs and does something different, which is worse than a
+        // long line.
+        PropertyValue::Ints(v) => {
+            let mut out = String::from("[");
+            for (i, n) in v.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "{n}");
+            }
+            out.push(']');
+            out
+        }
     }
 }
 

@@ -220,6 +220,16 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
             }
         }
 
+        // A resolved element set: shown as a count, not as values. A thousand
+        // spinners is not a way to edit a selection, and the thing that does
+        // edit one is the viewport.
+        //
+        // A bare number rather than a phrase, so there is no prose here to need
+        // translating — the row's own label already says what is being counted.
+        (PropertyKind::Ints, Some(PropertyValue::Ints(v))) => {
+            ui.weak(v.len().to_string());
+        }
+
         // The value is missing or has the wrong type — from an older file, or a
         // schema that changed. Show it as unavailable rather than guessing, and
         // never panic on a document the application can otherwise open.

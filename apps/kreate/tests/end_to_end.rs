@@ -6,9 +6,9 @@
 //! catch things that each layer's own tests cannot: that an operator's effect
 //! reaches the framebuffer, and that undoing it puts the *pixels* back.
 
-use glam::{DAffine3, Vec4};
+use glam::Vec4;
 use kreate_ops::{Context, History, OpResult, OperatorRegistry, PropertyMap, PropertyValue};
-use kreate_render::{Camera, GpuMesh, GpuOptions, RenderMeshCpu, Viewport};
+use kreate_render::{Camera, Draw, GpuMesh, GpuOptions, RenderMeshCpu, Viewport};
 use kreate_scene::Document;
 
 const SIZE: u32 = 192;
@@ -76,14 +76,14 @@ fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
             mesh_id,
             GpuMesh::upload(
                 &gpu.device,
-                &viewport.object_layout,
+                &viewport.layouts,
                 &cpu,
                 Vec4::new(0.75, 0.72, 0.68, 1.0),
             ),
         ));
     }
 
-    let mut draws: Vec<(&GpuMesh, DAffine3)> = Vec::new();
+    let mut draws: Vec<Draw> = Vec::new();
     for (id, object) in doc.objects() {
         if !object.visible {
             continue;
@@ -92,11 +92,11 @@ fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
             continue;
         };
         if let Some((_, m)) = uploaded.iter().find(|(mid, _)| *mid == mesh_id) {
-            draws.push((m, doc.world_transform(id)));
+            draws.push(Draw::new(m, doc.world_transform(id)).selected(doc.selection.contains(id)));
         }
     }
 
-    viewport.prepare(&gpu.queue, camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, camera, &draws);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -165,6 +165,25 @@ macro_rules! gpu_or_skip {
             }
         }
     };
+}
+
+/// Writes a frame to `target/e2e-<label>.png`.
+///
+/// Always, not behind a flag. Twice now a rendering defect has been diagnosed
+/// wrongly by reading the code and correctly by looking at the picture, so the
+/// picture is written every run.
+fn dump(pixels: &[[u8; 4]], label: &str) {
+    let mut bytes = Vec::with_capacity(pixels.len() * 4);
+    for p in pixels {
+        bytes.extend_from_slice(p);
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("e2e-{label}.png"));
+    if let Some(img) = image::RgbaImage::from_raw(SIZE, SIZE, bytes) {
+        let _ = img.save(&path);
+        eprintln!("wrote {}", path.display());
+    }
 }
 
 /// A fixed camera, so two renders of the same document are comparable.
@@ -444,6 +463,150 @@ fn linked_duplicates_draw_twice_from_one_upload() {
 }
 
 #[test]
+fn two_linked_duplicates_appear_at_two_different_places() {
+    // Sharing one mesh datablock between two objects must still draw two
+    // objects. The weaker check — "the frame changed" — passes even if both
+    // draws land on top of each other, so this counts the separated regions.
+    let r = registry();
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let ctx = Context::default();
+
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &params(&[
+            ("shape", PropertyValue::Enum(1)),
+            ("size", PropertyValue::Float(1.5)),
+            ("location", PropertyValue::Vec3([-3.0, 0.0, 0.0])),
+        ]),
+    )
+    .unwrap();
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.duplicate",
+        &params(&[("linked", PropertyValue::Bool(true))]),
+    )
+    .unwrap();
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.translate",
+        &params(&[("translation", PropertyValue::Vec3([6.0, 0.0, 0.0]))]),
+    )
+    .unwrap();
+    assert_eq!(doc.mesh_count(), 1, "one datablock");
+    assert_eq!(doc.object_count(), 2, "two objects");
+
+    let pixels = gpu_or_skip!(render(&doc, &camera()));
+    dump(&pixels, "two-linked-duplicates");
+
+    // Count columns that contain geometry. Two cubes six metres apart, viewed
+    // from the default three-quarter angle, occupy two separated bands with a
+    // gap between them; one cube drawn twice occupies a single band.
+    //
+    // "Contains geometry" is measured against the corner pixel rather than an
+    // absolute threshold: the clear colour is dark in linear space but lands
+    // around 66 once the sRGB target has encoded it, so a plausible-looking
+    // constant marks the whole background as occupied and every frame as one
+    // band — including the ones that are correct.
+    let background = pixels[0];
+    let occupied: Vec<bool> = (0..SIZE)
+        .map(|x| {
+            (0..SIZE).any(|y| {
+                let p = pixels[(y * SIZE + x) as usize];
+                (0..3).any(|c| p[c].abs_diff(background[c]) > 30)
+            })
+        })
+        .collect();
+    let bands = occupied.windows(2).filter(|w| !w[0] && w[1]).count() + usize::from(occupied[0]);
+    assert_eq!(
+        bands, 2,
+        "expected two separated objects, found {bands} band(s); the second \n         draw is probably overwriting the first one's transform"
+    );
+}
+
+#[test]
+fn selecting_one_of_two_linked_duplicates_highlights_only_that_one() {
+    // Object-mode selection is per *draw*. Both objects share one mesh
+    // datablock, so the highlight cannot travel in the mesh's own flags buffer
+    // without lighting up both — which is the mistake this pins down.
+    let r = registry();
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let ctx = Context::default();
+
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &params(&[
+            ("shape", PropertyValue::Enum(1)),
+            ("size", PropertyValue::Float(1.5)),
+            ("location", PropertyValue::Vec3([-3.0, 0.0, 0.0])),
+        ]),
+    )
+    .unwrap();
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.duplicate",
+        &params(&[("linked", PropertyValue::Bool(true))]),
+    )
+    .unwrap();
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.translate",
+        &params(&[("translation", PropertyValue::Vec3([6.0, 0.0, 0.0]))]),
+    )
+    .unwrap();
+    // Duplicating selects the copy and deselects the original, which is what
+    // makes this a one-of-two test rather than a none-or-both one.
+    assert_eq!(doc.selection.objects.len(), 1, "the copy alone is selected");
+
+    let pixels = gpu_or_skip!(render(&doc, &camera()));
+    dump(&pixels, "selection-highlight");
+
+    // The selection colour is a saturated orange; every other colour in the
+    // frame — background, surface shading, ordinary wireframe — is neutral, so
+    // "red much greater than blue" isolates it without a golden image.
+    let mut left = 0usize;
+    let mut right = 0usize;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let p = pixels[(y * SIZE + x) as usize];
+            if i32::from(p[0]) - i32::from(p[2]) > 60 {
+                if x < SIZE / 2 {
+                    left += 1;
+                } else {
+                    right += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        right > 40,
+        "the selected copy is on the right and should be outlined in orange, \
+         found {right} orange pixels there"
+    );
+    assert_eq!(
+        left, 0,
+        "the unselected original must stay neutral; {left} orange pixels leaked \
+         onto it, so the highlight is travelling with the shared datablock"
+    );
+}
+
+#[test]
 fn a_parented_child_follows_its_parent_on_screen() {
     // The hierarchy reaching the renderer through world_transform.
     let r = registry();
@@ -499,6 +662,106 @@ fn a_parented_child_follows_its_parent_on_screen() {
     assert!(
         differing(&before, &after) > 0.02,
         "the move should be visible"
+    );
+}
+
+#[test]
+fn a_gpu_cache_keyed_on_the_document_version_sees_every_change() {
+    // The defect a user found by dragging a value in the properties panel and
+    // watching nothing happen.
+    //
+    // Adjusting restores a snapshot and re-runs the operator. If the snapshot
+    // carries its old version number back with it, the counter lands on exactly
+    // the value it had before, and a cache comparing versions concludes nothing
+    // changed — so the document is different and the screen is not.
+    let r = registry();
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let ctx = Context::default();
+
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &params(&[
+            ("shape", PropertyValue::Enum(1)),
+            ("size", PropertyValue::Float(2.0)),
+        ]),
+    )
+    .unwrap();
+
+    let mut versions = std::collections::HashSet::new();
+    versions.insert(doc.version());
+
+    for size in [4.0, 1.0, 6.0, 2.5] {
+        h.adjust_last(
+            &r,
+            &mut doc,
+            &ctx,
+            &params(&[
+                ("shape", PropertyValue::Enum(1)),
+                ("size", PropertyValue::Float(size)),
+            ]),
+        )
+        .unwrap();
+        assert!(
+            versions.insert(doc.version()),
+            "version {} was seen before; a cache would skip this change",
+            doc.version()
+        );
+    }
+
+    // And the document really did change each time.
+    let mesh = doc
+        .objects()
+        .find_map(|(_, o)| o.mesh())
+        .expect("an object");
+    let extent = doc.mesh(mesh).unwrap().bounds().size().x;
+    assert!(
+        (extent - 2.5).abs() < 1e-4,
+        "final size is {extent}, expected 2.5"
+    );
+}
+
+#[test]
+fn adjusting_a_size_is_visible_on_screen() {
+    // The same defect, checked where the user sees it. Two renders that differ
+    // only by an adjusted parameter must not produce the same picture.
+    let r = registry();
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let ctx = Context::default();
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &params(&[
+            ("shape", PropertyValue::Enum(1)),
+            ("size", PropertyValue::Float(1.0)),
+        ]),
+    )
+    .unwrap();
+    let small = gpu_or_skip!(render(&doc, &camera()));
+
+    h.adjust_last(
+        &r,
+        &mut doc,
+        &ctx,
+        &params(&[
+            ("shape", PropertyValue::Enum(1)),
+            ("size", PropertyValue::Float(4.0)),
+        ]),
+    )
+    .unwrap();
+    let large = gpu_or_skip!(render(&doc, &camera()));
+
+    let changed = differing(&small, &large);
+    assert!(
+        changed > 0.05,
+        "adjusting the size changed only {:.2}% of the frame",
+        changed * 100.0
     );
 }
 

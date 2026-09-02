@@ -348,13 +348,22 @@ pub fn surface_config(
 }
 
 /// Creates the depth texture for a viewport.
+///
+/// Sizes are clamped to the device's limits rather than passed through. A
+/// viewport size is ultimately derived from a window rectangle and a DPI factor,
+/// so a value that is zero, negative-turned-huge by a cast, or simply larger than
+/// the hardware allows is reachable from ordinary interaction. Unclamped, that
+/// surfaces as `Texture with 'depth' label is invalid` at the *view*, several
+/// steps from the cause, and takes the device down with it.
 pub fn create_depth_texture(device: &Device, width: u32, height: u32) -> wgpu::TextureView {
+    let max = device.limits().max_texture_dimension_2d;
+    let (width, height) = (width.clamp(1, max), height.clamp(1, max));
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
             size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -385,6 +394,21 @@ pub fn depth_read_state() -> wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(false),
         depth_compare: Some(DEPTH_COMPARE),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// The depth-stencil state for a pass that ignores depth entirely.
+///
+/// What makes x-ray picking two lines rather than a second code path: with
+/// `Always` an occluded element still writes its id, so a see-through mode
+/// selects what it shows. The same shader, a different pipeline.
+pub fn depth_ignore_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
     }

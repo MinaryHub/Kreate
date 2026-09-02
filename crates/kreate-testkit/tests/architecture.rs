@@ -242,6 +242,8 @@ const TEXT_CALLS: &[&str] = &[
     "ui.heading(\"",
     "ui.button(\"",
     "ui.small_button(\"",
+    "Button::new(\"",
+    "RichText::new(\"",
     "ui.weak(\"",
     "ui.monospace(\"",
     "ui.hyperlink_to(\"",
@@ -253,6 +255,38 @@ const TEXT_CALLS: &[&str] = &[
 /// Marker allowing a specific literal, for text that is genuinely not
 /// translatable: axis letters, format names, script identifiers, node type ids.
 const EXEMPT: &str = "i18n-exempt";
+
+/// Whether the literal on line `i` carries an exemption marker.
+///
+/// The marker may be on the line itself or in the comment introducing the
+/// *statement* the line belongs to. rustfmt splits a builder chain across
+/// lines, so the comment above `if ui` can sit several lines above the literal
+/// it is about, and a one-line lookback made the gate impossible to satisfy
+/// without contorting the code — which is how a gate ends up switched off.
+///
+/// The walk stops at the end of the previous statement, so an exemption cannot
+/// leak forward onto an unrelated literal further down. A blind lookback does
+/// exactly that, and it is worse than no gate: it reports success while quietly
+/// excusing text nobody decided to excuse.
+fn exempt_for(lines: &[&str], i: usize) -> bool {
+    if lines[i].contains(EXEMPT) {
+        return true;
+    }
+    let mut p = i;
+    while p > 0 {
+        p -= 1;
+        if lines[p].contains(EXEMPT) {
+            return true;
+        }
+        let prev = lines[p].trim();
+        // The previous statement, block boundary or blank line. Anything above
+        // this belongs to something else.
+        if prev.is_empty() || prev.ends_with(';') || prev.ends_with('{') || prev.ends_with('}') {
+            return false;
+        }
+    }
+    false
+}
 
 /// Finds bare-literal label calls in one source file, as `(line number, text)`.
 ///
@@ -288,11 +322,7 @@ fn find_untranslated(source: &str) -> Vec<(usize, String)> {
         if line.contains(&format!("{call}\")")) {
             continue;
         }
-        let exempt = line.contains(EXEMPT)
-            || i.checked_sub(1)
-                .map(|p| lines[p].contains(EXEMPT))
-                .unwrap_or(false);
-        if !exempt {
+        if !exempt_for(&lines, i) {
             out.push((i + 1, trimmed.to_string()));
         }
     }
@@ -347,6 +377,15 @@ fn panel(ui: &mut Ui) {
     ui.label("X");
     ui.button("");
     ui.heading("Bevel");
+    // i18n-exempt: a glyph standing in for an icon
+    if ui
+        .add_enabled(true, egui::Button::new("+"))
+        .clicked()
+    {}
+    if ui
+        .add_enabled(true, egui::Button::new("Apply"))
+        .clicked()
+    {}
 }
 "#;
     let found = find_untranslated(sample);
@@ -372,7 +411,22 @@ fn panel(ui: &mut Ui) {
         !lines.iter().any(|l| l.contains("button(\"\")")),
         "an empty literal is a deliberate no-text"
     );
-    assert_eq!(found.len(), 2, "exactly the two real violations: {lines:?}");
+    // A builder chain broken across lines: the marker is three lines above the
+    // literal it applies to, and the pattern is not one of the `ui.x("` calls.
+    assert!(
+        !lines.iter().any(|l| l.contains("\"+\"")),
+        "a marker a few lines up must still exempt: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("\"Apply\"")),
+        "a Button::new literal must be caught, got {lines:?}"
+    );
+
+    assert_eq!(
+        found.len(),
+        3,
+        "exactly the three real violations: {lines:?}"
+    );
 }
 
 #[test]

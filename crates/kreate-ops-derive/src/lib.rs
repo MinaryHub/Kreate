@@ -308,13 +308,18 @@ fn type_info(field: &Field) -> Result<TypeInfo, String> {
             to_value: "PropertyValue::Vec3([self.FIELD[0] as f64, self.FIELD[1] as f64, self.FIELD[2] as f64])",
             from_value: "v.as_vec3().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32])",
         },
+        "Vec<u32>" => TypeInfo {
+            kind: "PropertyKind::Ints".into(),
+            to_value: "PropertyValue::Ints(self.FIELD.clone())",
+            from_value: "v.as_ints().map(|s| s.to_vec())",
+        },
         other => {
             return Err(format!(
                 "`{}: {other}` is not a supported parameter type. Parameters must be \
                  serialisable so that scripting, keymaps and undo all see the same \
                  values; supported types are bool, the integer types, f32/f64, \
-                 String, [f32; 3] and [f64; 3], or any integer field annotated \
-                 with #[param(variants(...))].",
+                 String, [f32; 3], [f64; 3], Vec<u32>, or any integer field \
+                 annotated with #[param(variants(...))].",
                 field.name
             ))
         }

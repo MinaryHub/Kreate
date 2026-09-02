@@ -171,6 +171,66 @@ impl MeshData {
         self.num_verts == 0 && self.num_faces() == 0
     }
 
+    /// Whether `other` differs from this mesh in nothing but its selection.
+    ///
+    /// The question a renderer has to be able to answer cheaply. Selection is
+    /// stored as ordinary attribute layers — which is what makes it survive the
+    /// round trip through edit mode and share structurally under undo — but it
+    /// also means a click produces a whole new `MeshData`, and a cache that can
+    /// only ask "is this the same mesh" will re-upload the geometry of a million
+    /// vertices because one face was clicked.
+    ///
+    /// Answered by pointer identity per array, so it costs a handful of
+    /// comparisons regardless of how large the mesh is. Copy-on-write is what
+    /// makes that valid: an array nobody wrote to keeps its pointer.
+    ///
+    /// A selection layer *appearing* counts, which is not a nicety: the layers
+    /// are created when the user enters edit mode, so without it the first click
+    /// on every mesh is a full upload — the one moment when the mesh is largest
+    /// and the user is most attentive.
+    ///
+    /// Conservative in every other direction. Any non-selection layer that
+    /// changed, appeared or vanished means a full upload, which is correct but
+    /// slower, rather than risking a buffer that quietly stays stale.
+    pub fn only_selection_differs(&self, other: &MeshData) -> bool {
+        if self.num_verts != other.num_verts
+            || !Arc::ptr_eq(&self.face_offsets, &other.face_offsets)
+            || !Arc::ptr_eq(&self.corner_verts, &other.corner_verts)
+            || !Arc::ptr_eq(&self.edges, &other.edges)
+        {
+            return false;
+        }
+
+        // Both directions, so a layer that vanished is caught as well as one
+        // that changed. The stores are kept sorted by name, so this is a walk
+        // over two short sorted lists either way round.
+        let unmatched = |a: &AttributeStore, b: &AttributeStore| {
+            a.iter().any(|layer| match b.get(&layer.name) {
+                None => !names::is_selection(&layer.name),
+                Some(theirs) => {
+                    theirs.domain != layer.domain
+                        || (!layer.data.ptr_eq(&theirs.data) && !names::is_selection(&layer.name))
+                }
+            })
+        };
+        !unmatched(&self.attributes, &other.attributes)
+            && !unmatched(&other.attributes, &self.attributes)
+    }
+
+    /// Roughly how many heap bytes this mesh occupies.
+    ///
+    /// The topology arrays plus every attribute layer. Shared arrays are counted
+    /// in full by each holder, so summing this over several meshes that share
+    /// arrays overstates the total — which is the safe direction for a budget,
+    /// and the honest one for asking "what would this cost if it were not
+    /// shared".
+    pub fn memory_bytes(&self) -> usize {
+        self.face_offsets.len() * 4
+            + self.corner_verts.len() * 4
+            + self.edges.len() * 8
+            + self.attributes.memory_bytes()
+    }
+
     // --- topology -----------------------------------------------------------
 
     #[inline]
@@ -325,6 +385,177 @@ impl MeshData {
         normals
     }
 
+    /// Area-weighted face normals, one per face.
+    ///
+    /// Newell's method, so a non-planar n-gon gets a normal that does not depend
+    /// on which corner happened to be sampled. Left unnormalised: the magnitude
+    /// is twice the area, which is exactly the weight wanted when averaging.
+    pub fn compute_face_normals(&self) -> Vec<Vec3> {
+        let pos = self.positions();
+        (0..self.num_faces())
+            .map(|f| {
+                let verts = self.face_verts(f);
+                let mut n = Vec3::ZERO;
+                for i in 0..verts.len() {
+                    let a = pos[verts[i] as usize];
+                    let b = pos[verts[(i + 1) % verts.len()] as usize];
+                    n += (a - b).cross(a + b);
+                }
+                n
+            })
+            .collect()
+    }
+
+    /// Per-corner normals, splitting shading across sharp edges.
+    ///
+    /// Averaging every face that meets at a vertex — which is what a plain
+    /// per-vertex normal does — shades a cube as a rounded lump: each of its
+    /// eight vertices ends up with a diagonal normal, and interpolating those
+    /// across a flat face makes it curve. On hard-surface geometry that is not a
+    /// subtle inaccuracy, it is the wrong picture.
+    ///
+    /// So a corner averages only the neighbouring faces whose own normal is
+    /// within `angle_threshold` radians of this face's. A cube's faces meet at
+    /// 90 degrees and stay flat; a sphere's meet at a few degrees and stay smooth.
+    /// A face marked `shade_smooth = false` never averages with anything.
+    ///
+    /// Returned per *corner*, not per vertex, because that is the domain the
+    /// distinction lives in — the same reason UVs and split normals live there.
+    /// Per-corner normals, honouring smoothing groups.
+    ///
+    /// A corner's normal averages the faces in its **smooth group**: the faces
+    /// reachable from its own, walking the fan around that vertex, without
+    /// crossing a sharp edge or a crease sharper than `angle_threshold`.
+    ///
+    /// Reachability rather than a pairwise comparison is the whole point. A
+    /// pairwise test — "average every face at this vertex that is within the
+    /// angle" — cannot see a sharp edge standing between two faces that do not
+    /// touch each other, so smoothing leaks straight across it. The symptom is a
+    /// shading seam that ignores the sharp edge the user just marked, which
+    /// reads as the mark not working rather than as an averaging bug.
+    pub fn compute_corner_normals(&self, angle_threshold: f32) -> Vec<Vec3> {
+        let face_normals = self.compute_face_normals();
+        let unit: Vec<Vec3> = face_normals.iter().map(|n| n.normalize_or_zero()).collect();
+        let cos_threshold = angle_threshold.cos();
+        let smooth = self.attributes.get_bool(names::SHADE_SMOOTH);
+
+        // Sharp edges, as sorted vertex pairs for binary search. Sorted rather
+        // than hashed because this decides the output geometry's shading and a
+        // per-run hash seed would make it depend on which run it was.
+        let mut sharp: Vec<[u32; 2]> = Vec::new();
+        if let Some(flags) = self.attributes.get_bool(names::SHARP_EDGE) {
+            for (edge, &is_sharp) in self.edges.iter().zip(flags) {
+                if is_sharp {
+                    let mut key = *edge;
+                    key.sort_unstable();
+                    sharp.push(key);
+                }
+            }
+            sharp.sort_unstable();
+        }
+        let is_sharp = |a: u32, b: u32| -> bool {
+            if sharp.is_empty() {
+                return false;
+            }
+            let mut key = [a, b];
+            key.sort_unstable();
+            sharp.binary_search(&key).is_ok()
+        };
+
+        // Which faces touch each vertex, as CSR so the inner loop is a slice.
+        let mut counts = vec![0u32; self.num_verts() as usize + 1];
+        for &v in self.corner_verts.iter() {
+            counts[v as usize + 1] += 1;
+        }
+        for i in 1..counts.len() {
+            counts[i] += counts[i - 1];
+        }
+        let offsets = counts.clone();
+        let mut cursor = counts;
+        let mut adjacent = vec![0u32; self.corner_verts.len()];
+        for f in 0..self.num_faces() {
+            for &v in self.face_verts(f) {
+                adjacent[cursor[v as usize] as usize] = f;
+                cursor[v as usize] += 1;
+            }
+        }
+
+        /// The two vertices a face's ring reaches from `v`, i.e. the far ends of
+        /// its two edges at that corner.
+        fn neighbours_at(ring: &[u32], v: u32) -> Option<[u32; 2]> {
+            let n = ring.len();
+            let i = ring.iter().position(|&x| x == v)?;
+            Some([ring[(i + n - 1) % n], ring[(i + 1) % n]])
+        }
+
+        let mut out = Vec::with_capacity(self.corner_verts.len());
+        // Reused across corners so the walk allocates once rather than per
+        // corner; a vertex fan is small but there is one per corner.
+        let mut group: Vec<u32> = Vec::new();
+        let mut queue: Vec<u32> = Vec::new();
+
+        for f in 0..self.num_faces() {
+            let face_is_smooth = smooth.map(|s| s[f as usize]).unwrap_or(true);
+            for &v in self.face_verts(f) {
+                if !face_is_smooth {
+                    out.push(unit[f as usize]);
+                    continue;
+                }
+                let fan = &adjacent[offsets[v as usize] as usize..offsets[v as usize + 1] as usize];
+
+                group.clear();
+                queue.clear();
+                group.push(f);
+                queue.push(f);
+                while let Some(current) = queue.pop() {
+                    let Some(from) = neighbours_at(self.face_verts(current), v) else {
+                        continue;
+                    };
+                    for &g in fan {
+                        if group.contains(&g) {
+                            continue;
+                        }
+                        if !smooth.map(|s| s[g as usize]).unwrap_or(true) {
+                            continue;
+                        }
+                        // A crease as steep as the threshold breaks the group
+                        // just as a sharp edge does, so an auto-smooth angle
+                        // needs no marks on the mesh to take effect.
+                        if unit[current as usize].dot(unit[g as usize]) < cos_threshold {
+                            continue;
+                        }
+                        let Some(to) = neighbours_at(self.face_verts(g), v) else {
+                            continue;
+                        };
+                        // Fan-adjacent: they share one of the edges at `v`.
+                        let shared = to.iter().find(|w| from.contains(w));
+                        if let Some(&w) = shared {
+                            if !is_sharp(v, w) {
+                                group.push(g);
+                                queue.push(g);
+                            }
+                        }
+                    }
+                }
+
+                let mut n = Vec3::ZERO;
+                for &g in &group {
+                    // Unnormalised, so the average is area-weighted: a strip of
+                    // slivers beside one large quad should not outvote the quad.
+                    n += face_normals[g as usize];
+                }
+                // Falling back to the face's own normal keeps a degenerate
+                // neighbourhood from producing a zero normal and a black face.
+                out.push(if n == Vec3::ZERO {
+                    unit[f as usize]
+                } else {
+                    n.normalize_or_zero()
+                });
+            }
+        }
+        out
+    }
+
     pub fn bounds(&self) -> kreate_math::Aabb {
         kreate_math::Aabb::from_points(self.positions().iter().copied())
     }
@@ -466,6 +697,154 @@ impl Default for MeshData {
 
 #[cfg(test)]
 mod tests {
+    // --- selection-only change detection ------------------------------------
+
+    /// A copy of `mesh` with the three selection layers present and empty.
+    ///
+    /// Derived from the given mesh rather than built fresh, because the whole
+    /// comparison is pointer identity: two independently generated cubes have
+    /// equal contents in different allocations and are correctly *not* the same
+    /// mesh.
+    fn with_selection_layers(mesh: &MeshData) -> MeshData {
+        let mut mesh = mesh.clone();
+        let counts = [
+            (names::SELECT_VERT, Domain::Point),
+            (names::SELECT_EDGE, Domain::Edge),
+            (names::SELECT_FACE, Domain::Face),
+        ];
+        for (name, domain) in counts {
+            let len = mesh.domain_len(domain);
+            mesh.attributes_mut().insert(
+                name,
+                domain,
+                AttrData::Bool(std::sync::Arc::new(vec![false; len])),
+            );
+        }
+        mesh
+    }
+
+    fn selectable_cube() -> MeshData {
+        with_selection_layers(&crate::primitives::cube(2.0))
+    }
+
+    #[test]
+    fn a_mesh_only_differs_from_itself_by_nothing() {
+        let mesh = selectable_cube();
+        let copy = mesh.clone();
+        assert!(mesh.only_selection_differs(&copy));
+    }
+
+    #[test]
+    fn a_selection_change_is_recognised_as_one() {
+        // The whole point: a click on one face must not make the renderer
+        // re-upload the geometry of a million vertices.
+        let mesh = selectable_cube();
+        let mut clicked = mesh.clone();
+        clicked
+            .attributes_mut()
+            .make_mut_bool(names::SELECT_FACE)
+            .expect("the layer is there")[2] = true;
+        assert!(
+            mesh.only_selection_differs(&clicked),
+            "a selection change was mistaken for a geometry change"
+        );
+    }
+
+    #[test]
+    fn moving_a_vertex_is_not_a_selection_change() {
+        let mesh = selectable_cube();
+        let mut moved = mesh.clone();
+        moved.positions_mut()[0].y += 1.0;
+        assert!(!mesh.only_selection_differs(&moved));
+    }
+
+    #[test]
+    fn changing_a_uv_is_not_a_selection_change() {
+        // Any layer that is not a selection layer means a full upload. A
+        // renderer applying a UV edit as a flags write would show the old
+        // texture coordinates until something else forced a rebuild.
+        let mut mesh = selectable_cube();
+        let corners = mesh.num_corners() as usize;
+        mesh.attributes_mut().insert(
+            "uv",
+            Domain::Corner,
+            AttrData::F32x2(std::sync::Arc::new(vec![kreate_math::Vec2::ZERO; corners])),
+        );
+        let mut edited = mesh.clone();
+        edited
+            .attributes_mut()
+            .make_mut_f32x2("uv")
+            .expect("the layer is there")[0] = kreate_math::Vec2::ONE;
+        assert!(!mesh.only_selection_differs(&edited));
+    }
+
+    #[test]
+    fn a_topology_change_is_not_a_selection_change() {
+        let mesh = selectable_cube();
+        let other = crate::primitives::uv_sphere(1.0, 8, 4);
+        assert!(!mesh.only_selection_differs(&other));
+    }
+
+    #[test]
+    fn a_selection_layer_appearing_counts_as_a_selection_change() {
+        // The layers are created when the user enters edit mode, so without this
+        // the first click on every mesh is a full upload — at the one moment the
+        // mesh is largest and the user is watching most closely.
+        let bare = crate::primitives::cube(2.0);
+        let selectable = with_selection_layers(&bare);
+        assert!(bare.only_selection_differs(&selectable));
+        assert!(
+            selectable.only_selection_differs(&bare),
+            "and the other way"
+        );
+    }
+
+    #[test]
+    fn a_non_selection_layer_appearing_forces_a_full_upload() {
+        // Conservative in the safe direction: a mesh that gained a UV set needs a
+        // real upload, not a flags write that leaves the coordinates stale.
+        let mesh = selectable_cube();
+        let mut textured = mesh.clone();
+        let corners = textured.num_corners() as usize;
+        textured.attributes_mut().insert(
+            "uv",
+            Domain::Corner,
+            AttrData::F32x2(std::sync::Arc::new(vec![kreate_math::Vec2::ZERO; corners])),
+        );
+        assert!(!mesh.only_selection_differs(&textured));
+        assert!(!textured.only_selection_differs(&mesh), "and the other way");
+    }
+
+    #[test]
+    fn a_layer_that_changed_domain_forces_a_full_upload() {
+        // Same name, different domain: a different array with a different length,
+        // and writing it into a buffer sized for the old one is a corruption
+        // rather than a stale value.
+        let mesh = selectable_cube();
+        let mut moved = mesh.clone();
+        moved.attributes_mut().remove(names::SELECT_FACE);
+        let verts = moved.num_verts() as usize;
+        moved.attributes_mut().insert(
+            names::SELECT_FACE,
+            Domain::Point,
+            AttrData::Bool(std::sync::Arc::new(vec![false; verts])),
+        );
+        assert!(!mesh.only_selection_differs(&moved));
+    }
+
+    #[test]
+    fn the_comparison_does_not_scan_the_arrays() {
+        // Two meshes with equal *contents* but separate allocations must still
+        // come back as different, because the test is pointer identity — which is
+        // what makes it cost the same on a million vertices as on eight.
+        let mesh = selectable_cube();
+        let rebuilt = MeshData::from_faces(
+            mesh.positions().to_vec(),
+            &mesh.faces().map(|f| f.to_vec()).collect::<Vec<_>>(),
+        );
+        assert!(!mesh.only_selection_differs(&rebuilt));
+    }
+
     use super::*;
 
     /// A unit quad plus a triangle sharing one edge.
@@ -561,6 +940,105 @@ mod tests {
             2
         );
         m.assert_valid();
+    }
+
+    #[test]
+    fn a_cube_stays_flat_shaded() {
+        // The defect this exists to prevent: averaging every face at a vertex
+        // gives a cube's corners diagonal normals, and interpolating those across
+        // a flat face shades it as if it were rounded.
+        let cube = crate::primitives::cube(2.0);
+        let corners = cube.compute_corner_normals(30f32.to_radians());
+        assert_eq!(corners.len(), cube.num_corners() as usize);
+
+        for f in 0..cube.num_faces() {
+            let range = cube.face_corner_range(f);
+            let first = corners[range.start];
+            for c in range {
+                assert!(
+                    (corners[c] - first).length() < 1e-5,
+                    "face {f} has varying normals; it will shade as curved"
+                );
+            }
+            // And it must be an axis direction, not a diagonal.
+            let biggest = first.abs().max_element();
+            assert!(
+                biggest > 0.99,
+                "face {f} normal {first} is not axis-aligned"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sphere_stays_smooth_shaded() {
+        // The other half: a threshold that flattened everything would make a
+        // sphere faceted, which is just as wrong in the other direction.
+        let sphere = crate::primitives::uv_sphere(1.0, 48, 24);
+        let corners = sphere.compute_corner_normals(30f32.to_radians());
+        let pos = sphere.positions();
+
+        // On a unit sphere the correct normal at a vertex is its position.
+        let mut worst: f32 = 0.0;
+        for f in 0..sphere.num_faces() {
+            for (i, &v) in sphere.face_verts(f).iter().enumerate() {
+                let n = corners[sphere.face_corner_range(f).start + i];
+                let expected = pos[v as usize].normalize();
+                worst = worst.max(n.dot(expected).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+        }
+        assert!(
+            worst < 5.0,
+            "worst deviation {worst} degrees; the sphere is faceted"
+        );
+    }
+
+    #[test]
+    fn a_face_marked_flat_never_averages_with_its_neighbours() {
+        let mut m = crate::primitives::uv_sphere(1.0, 16, 8);
+        let n = m.num_faces() as usize;
+        let mut smooth = vec![true; n];
+        smooth[0] = false;
+        m.attributes_mut().insert(
+            names::SHADE_SMOOTH,
+            Domain::Face,
+            AttrData::Bool(Arc::new(smooth)),
+        );
+
+        let corners = m.compute_corner_normals(30f32.to_radians());
+        let range = m.face_corner_range(0);
+        let first = corners[range.start];
+        for c in range {
+            assert!(
+                (corners[c] - first).length() < 1e-5,
+                "face 0 should be flat"
+            );
+        }
+    }
+
+    #[test]
+    fn the_threshold_controls_where_shading_splits() {
+        let cube = crate::primitives::cube(2.0);
+        // A threshold above 90 degrees smooths even a cube's corners.
+        let smoothed = cube.compute_corner_normals(120f32.to_radians());
+        let range = cube.face_corner_range(0);
+        let first = smoothed[range.start];
+        assert!(
+            first.abs().max_element() < 0.99,
+            "at a 120 degree threshold a cube corner should be diagonal, got {first}"
+        );
+    }
+
+    #[test]
+    fn corner_normals_are_finite_for_degenerate_geometry() {
+        // A zero-area face has no direction to contribute; the result must still
+        // be a usable normal rather than a black surface.
+        let m = MeshData::from_faces(
+            vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0, Vec3::Y],
+            &[vec![0, 1, 2], vec![0, 2, 3]],
+        );
+        for n in m.compute_corner_normals(30f32.to_radians()) {
+            assert!(n.is_finite(), "got {n}");
+        }
     }
 
     #[test]

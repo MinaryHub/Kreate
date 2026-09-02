@@ -95,6 +95,12 @@ pub struct Object {
     pub visible: bool,
     pub selectable: bool,
     pub linkage: Linkage,
+    /// Applied in order to produce the geometry that is drawn.
+    ///
+    /// The document holds the cage the user edits; what appears on screen is the
+    /// result of running this stack over it. See [`crate::modifier`] for why the
+    /// evaluated result is cached outside the document rather than here.
+    pub modifiers: Vec<crate::modifier::ModifierInstance>,
 }
 
 impl Object {
@@ -108,6 +114,7 @@ impl Object {
             visible: true,
             selectable: true,
             linkage: Linkage::Local,
+            modifiers: Vec::new(),
         }
     }
 
@@ -226,9 +233,29 @@ impl Document {
         Self::default()
     }
 
+    /// A counter that increases on every mutation.
+    ///
+    /// **Monotonic, including across undo.** A caching consumer — the GPU mesh
+    /// cache, an evaluation cache, an autosave timer — compares it against the
+    /// version it last saw, so a version that can go *backwards* is worse than no
+    /// version at all: restoring a snapshot and re-running an operator lands on
+    /// the same number the cache already holds, and the cache concludes nothing
+    /// changed while the document underneath it is different.
     #[inline]
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Replaces this document's contents with `other`, keeping the version
+    /// moving forward.
+    ///
+    /// This is how undo puts a snapshot back. It is not `*self = other`, because
+    /// that would carry the snapshot's older version along with it — see
+    /// [`Document::version`].
+    pub fn adopt(&mut self, other: Document) {
+        let next = self.version.max(other.version) + 1;
+        *self = other;
+        self.version = next;
     }
 
     #[inline]
@@ -420,6 +447,25 @@ impl Document {
         self.meshes.get_mut(id).map(Arc::make_mut)
     }
 
+    /// The mesh datablock as a shared handle.
+    ///
+    /// A consumer that keeps a clone of this can tell whether the mesh changed
+    /// with `Arc::ptr_eq` — free, and exact, with no invalidation discipline to
+    /// forget. Holding the clone is what makes it work: `Arc::make_mut` only
+    /// copies when the handle is shared, so a cache that does *not* hold one
+    /// would watch the document mutate in place behind an unchanged pointer.
+    pub fn mesh_arc(&self, id: MeshId) -> Option<&Arc<MeshData>> {
+        self.meshes.get(id)
+    }
+
+    /// Every mesh datablock, in arena slot order.
+    ///
+    /// Deterministic, which is what lets the debug-build validation hook name
+    /// the same datablock on every run.
+    pub fn meshes(&self) -> impl Iterator<Item = (MeshId, &MeshData)> + '_ {
+        self.meshes.iter().map(|(id, m)| (id, m.as_ref()))
+    }
+
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
     }
@@ -519,6 +565,40 @@ mod tests {
         assert_eq!(d.object_count(), 1);
         assert_eq!(d.roots(), &[id]);
         assert_eq!(d.object(id).unwrap().name, "Cube");
+    }
+
+    #[test]
+    fn adopting_a_snapshot_moves_the_version_forward_not_back() {
+        // The defect this guards: a cache keyed on the version sees the same
+        // number after "restore, then re-run" as it saw before, concludes nothing
+        // changed, and keeps drawing the old geometry.
+        let (mut d, _) = doc_with_cube();
+        let snapshot = d.clone();
+        d.add_mesh_object("Second", kreate_mesh::primitives::cube(1.0));
+        let after_edit = d.version();
+        assert!(after_edit > snapshot.version());
+
+        d.adopt(snapshot);
+        assert_eq!(d.object_count(), 1, "the content really is the older one");
+        assert!(
+            d.version() > after_edit,
+            "the version went backwards: {} is not past {after_edit}",
+            d.version()
+        );
+    }
+
+    #[test]
+    fn repeated_adopt_and_edit_never_repeats_a_version() {
+        let (mut d, _) = doc_with_cube();
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(d.version());
+        for _ in 0..10 {
+            let snapshot = d.clone();
+            d.add_mesh_object("Temp", kreate_mesh::primitives::cube(1.0));
+            assert!(seen.insert(d.version()), "version {} repeated", d.version());
+            d.adopt(snapshot);
+            assert!(seen.insert(d.version()), "version {} repeated", d.version());
+        }
     }
 
     #[test]
@@ -672,6 +752,39 @@ mod tests {
         d.set_parent(c, Some(b)).unwrap();
 
         assert_eq!(d.hierarchy(), vec![(a, 0), (b, 1), (c, 2)]);
+    }
+
+    #[test]
+    fn a_held_handle_makes_a_change_detectable_by_pointer() {
+        // The mechanism a GPU cache uses instead of a version stamp. It works
+        // only because the cache holds a handle: with a unique handle,
+        // `Arc::make_mut` mutates in place and the pointer never changes.
+        let (mut d, id) = doc_with_cube();
+        let mesh_id = d.object(id).unwrap().mesh().unwrap();
+        let held = d.mesh_arc(mesh_id).unwrap().clone();
+
+        assert!(Arc::ptr_eq(&held, d.mesh_arc(mesh_id).unwrap()));
+        d.mesh_mut(mesh_id).unwrap().positions_mut()[0] = kreate_math::Vec3::splat(3.0);
+        assert!(
+            !Arc::ptr_eq(&held, d.mesh_arc(mesh_id).unwrap()),
+            "the edit must be visible as a different handle"
+        );
+    }
+
+    #[test]
+    fn without_a_held_handle_an_edit_is_invisible_to_a_pointer_check() {
+        // Stated as a test because it is the trap: a cache that stores only the
+        // id would compare unchanged pointers and never rebuild.
+        let (mut d, id) = doc_with_cube();
+        let mesh_id = d.object(id).unwrap().mesh().unwrap();
+        let before = Arc::as_ptr(d.mesh_arc(mesh_id).unwrap());
+
+        d.mesh_mut(mesh_id).unwrap().positions_mut()[0] = kreate_math::Vec3::splat(3.0);
+        assert_eq!(
+            before,
+            Arc::as_ptr(d.mesh_arc(mesh_id).unwrap()),
+            "a uniquely-owned handle is mutated in place, so the pointer is stable"
+        );
     }
 
     #[test]

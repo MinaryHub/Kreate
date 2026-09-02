@@ -95,7 +95,11 @@ impl UndoPayload {
     /// Puts the document back to the state this payload describes.
     pub fn restore(&self, doc: &mut Document) {
         match self {
-            UndoPayload::Snapshot(snapshot) => *doc = (**snapshot).clone(),
+            // `adopt` rather than assignment: the snapshot carries the version
+            // it had when it was taken, and letting that overwrite the live one
+            // makes the counter go backwards. A cache keyed on it then misses a
+            // real change — see `Document::version`.
+            UndoPayload::Snapshot(snapshot) => doc.adopt((**snapshot).clone()),
             UndoPayload::PositionDelta {
                 mesh,
                 indices,
@@ -423,6 +427,23 @@ mod tests {
         edit.document_mut()
             .add_object(Object::new("X", ObjectData::Empty));
         assert!(matches!(edit.finish(), UndoPayload::Snapshot(_)));
+    }
+
+    #[test]
+    fn restoring_a_snapshot_advances_the_version() {
+        let (mut doc, _) = doc_with_grid();
+        let mut edit = DocMut::new(&mut doc);
+        edit.document_mut()
+            .add_mesh_object("Cube", kreate_mesh::primitives::cube(1.0));
+        let payload = edit.finish();
+        let after_edit = doc.version();
+
+        payload.restore(&mut doc);
+        assert!(
+            doc.version() > after_edit,
+            "undo left the version at {}, which a cache would read as 'unchanged'",
+            doc.version()
+        );
     }
 
     #[test]

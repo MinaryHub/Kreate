@@ -23,12 +23,14 @@ pub use glam::{
 
 mod aabb;
 mod axis;
+mod bvh;
 mod plane;
 mod ray;
 mod transform;
 
 pub use aabb::Aabb;
 pub use axis::{Axis, AxisConvention, Handedness, UpAxis};
+pub use bvh::{Bvh, Hit};
 pub use plane::Plane;
 pub use ray::Ray;
 pub use transform::{DTransform, Transform};

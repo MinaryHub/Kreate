@@ -15,10 +15,16 @@
 //! # Generation checking
 //!
 //! Handles carry a generation counter **in debug builds only**. Debug builds pay
-//! 8 bytes per handle and catch use-after-free precisely, at the moment it
-//! happens; release builds pay 4 bytes and no check. Since the arenas are purely
-//! in-memory — nothing here is ever serialised — the size difference between
-//! profiles is invisible outside this module.
+//! 8 bytes per handle plus a parallel counter per slot, and catch use-after-free
+//! precisely, at the moment it happens; release builds pay 4 bytes, no counter
+//! array, and no check. Since the arenas are purely in-memory — nothing here is
+//! ever serialised — the size difference between profiles is invisible outside
+//! this module.
+//!
+//! The counter array is `cfg`-gated rather than merely unread in release: at the
+//! `BMesh` ratio of one vertex to two edges to four loops, four bytes per slot
+//! is 28 bytes per vertex, which is the difference between meeting the memory
+//! budget and missing it.
 
 use std::marker::PhantomData;
 
@@ -88,6 +94,9 @@ macro_rules! define_id {
 pub struct Arena<I: ArenaIndex, T> {
     slots: Vec<Option<T>>,
     /// Bumped every time a slot is freed, so a stale handle can be detected.
+    ///
+    /// Debug builds only — see the module docs.
+    #[cfg(debug_assertions)]
     generations: Vec<u32>,
     /// Free slots, most recently freed first.
     free: Vec<u32>,
@@ -105,6 +114,7 @@ impl<I: ArenaIndex, T> Arena<I, T> {
     pub fn new() -> Self {
         Self {
             slots: Vec::new(),
+            #[cfg(debug_assertions)]
             generations: Vec::new(),
             free: Vec::new(),
             len: 0,
@@ -115,11 +125,67 @@ impl<I: ArenaIndex, T> Arena<I, T> {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             slots: Vec::with_capacity(cap),
+            #[cfg(debug_assertions)]
             generations: Vec::with_capacity(cap),
             free: Vec::new(),
             len: 0,
             _marker: PhantomData,
         }
+    }
+
+    // --- generation bookkeeping ---------------------------------------------
+    //
+    // Four small shims so the `cfg` appears here and nowhere else. Scattering it
+    // through `insert`, `remove`, `clear`, `iter` and `compact` is how the two
+    // profiles drift apart until a debug-only assertion fires on release data.
+
+    #[inline]
+    fn generation_of(&self, index: usize) -> u32 {
+        #[cfg(debug_assertions)]
+        {
+            self.generations.get(index).copied().unwrap_or(0)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = index;
+            0
+        }
+    }
+
+    #[inline]
+    fn push_generation(&mut self) {
+        #[cfg(debug_assertions)]
+        self.generations.push(0);
+    }
+
+    #[inline]
+    fn bump_generation(&mut self, index: usize) {
+        #[cfg(debug_assertions)]
+        if let Some(g) = self.generations.get_mut(index) {
+            *g = g.wrapping_add(1);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = index;
+    }
+
+    #[inline]
+    fn truncate_generations(&mut self, len: usize) {
+        #[cfg(debug_assertions)]
+        self.generations.truncate(len);
+        #[cfg(not(debug_assertions))]
+        let _ = len;
+    }
+
+    /// Bytes held by the arena's own arrays, excluding anything the elements
+    /// point to.
+    ///
+    /// Reported so the per-vertex memory budget can be a test rather than an
+    /// intention. Measured against the slots actually in use, so it does not
+    /// swing with `Vec` growth policy.
+    pub fn memory_bytes(&self) -> usize {
+        let per_slot =
+            std::mem::size_of::<Option<T>>() + if cfg!(debug_assertions) { 4 } else { 0 };
+        self.slots.len() * per_slot + self.free.len() * 4
     }
 
     /// Number of live elements. Not the same as the slot count once anything has
@@ -155,12 +221,12 @@ impl<I: ArenaIndex, T> Arena<I, T> {
         match self.free.pop() {
             Some(i) => {
                 self.slots[i as usize] = Some(value);
-                I::from_parts(i, self.generations[i as usize])
+                I::from_parts(i, self.generation_of(i as usize))
             }
             None => {
                 let i = self.slots.len() as u32;
                 self.slots.push(Some(value));
-                self.generations.push(0);
+                self.push_generation();
                 I::from_parts(i, 0)
             }
         }
@@ -178,7 +244,7 @@ impl<I: ArenaIndex, T> Arena<I, T> {
             self.len -= 1;
             // Bump on free, not on reuse, so every outstanding handle to this
             // slot becomes detectably stale immediately.
-            self.generations[i] = self.generations[i].wrapping_add(1);
+            self.bump_generation(i);
             self.free.push(i as u32);
         }
         taken
@@ -186,11 +252,15 @@ impl<I: ArenaIndex, T> Arena<I, T> {
 
     #[inline]
     fn generation_matches(&self, id: I) -> bool {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             self.generations
                 .get(id.index() as usize)
                 .is_some_and(|&g| g == id.generation())
-        } else {
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = id;
             true
         }
     }
@@ -216,12 +286,27 @@ impl<I: ArenaIndex, T> Arena<I, T> {
         self.get(id).is_some()
     }
 
+    /// The live handle for a slot, if that slot is occupied.
+    ///
+    /// How an index that came from outside — a GPU id buffer, a script, a
+    /// serialised file — becomes a handle. Fabricating one with
+    /// [`ArenaIndex::from_parts`] and a guessed generation is the wrong move: in
+    /// a debug build it fails the generation check and the lookup silently finds
+    /// nothing, and in a release build it succeeds against whatever has since
+    /// taken the slot.
+    pub fn handle_at(&self, index: u32) -> Option<I> {
+        self.slots
+            .get(index as usize)?
+            .as_ref()
+            .map(|_| I::from_parts(index, self.generation_of(index as usize)))
+    }
+
     pub fn clear(&mut self) {
         // Generations are kept and bumped rather than reset, so handles taken
         // before the clear do not silently become valid again.
-        for (i, slot) in self.slots.iter_mut().enumerate() {
-            if slot.take().is_some() {
-                self.generations[i] = self.generations[i].wrapping_add(1);
+        for i in 0..self.slots.len() {
+            if self.slots[i].take().is_some() {
+                self.bump_generation(i);
             }
         }
         self.free = (0..self.slots.len() as u32).rev().collect();
@@ -232,15 +317,21 @@ impl<I: ArenaIndex, T> Arena<I, T> {
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> + '_ {
         self.slots.iter().enumerate().filter_map(move |(i, s)| {
             s.as_ref()
-                .map(|v| (I::from_parts(i as u32, self.generations[i]), v))
+                .map(|v| (I::from_parts(i as u32, self.generation_of(i)), v))
         })
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (I, &mut T)> + '_ {
+        // Borrowed, not taken: `iter_mut` reads the counters while handing out
+        // `&mut` to the slots, and the two are disjoint fields.
+        #[cfg(debug_assertions)]
         let generations = &self.generations;
         self.slots.iter_mut().enumerate().filter_map(move |(i, s)| {
-            s.as_mut()
-                .map(|v| (I::from_parts(i as u32, generations[i]), v))
+            #[cfg(debug_assertions)]
+            let g = generations[i];
+            #[cfg(not(debug_assertions))]
+            let g = 0u32;
+            s.as_mut().map(move |v| (I::from_parts(i as u32, g), v))
         })
     }
 
@@ -273,13 +364,13 @@ impl<I: ArenaIndex, T> Arena<I, T> {
                 // The element moved slots, so its old handle is dead. Bump the
                 // destination's generation to invalidate any handle that referred
                 // to whatever used to live there.
-                self.generations[write] = self.generations[write].wrapping_add(1);
+                self.bump_generation(write);
             }
-            *entry = Some(I::from_parts(write as u32, self.generations[write]));
+            *entry = Some(I::from_parts(write as u32, self.generation_of(write)));
             write += 1;
         }
         self.slots.truncate(write);
-        self.generations.truncate(write);
+        self.truncate_generations(write);
         self.free.clear();
         debug_assert_eq!(write, self.len as usize);
         remap

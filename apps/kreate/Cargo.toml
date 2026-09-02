@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 kreate-math.workspace = true
+kreate-input.workspace = true
 kreate-mesh.workspace = true
 kreate-render.workspace = true
 kreate-scene.workspace = true
@@ -25,3 +26,8 @@ winit.workspace = true
 pollster.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Dumps a composited frame to PNG so a layout defect can be looked at rather
+# than guessed at.
+image = { version = "0.25", default-features = false, features = ["png"] }

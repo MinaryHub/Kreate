@@ -153,6 +153,8 @@ impl History {
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 
+        debug_assert_meshes_valid(doc, op_id);
+
         match result {
             Ok(OpResult::Finished) => {
                 // A redo branch that is no longer reachable.
@@ -167,7 +169,22 @@ impl History {
                 self.enforce_budget();
                 Ok(OpResult::Finished)
             }
-            other => other,
+            // Anything else did not happen, so the document goes back to what it
+            // was — here, once, rather than in every operator.
+            //
+            // This is not tidiness. An operator that decides there is nothing to
+            // do has usually already run its conversion: an edit-mode operator
+            // round-trips the mesh through `BMesh` before it can tell, and that
+            // rebuilds every array. Left in place, a "nothing to do" outcome
+            // hands the renderer a mesh it has never seen — a full re-upload of
+            // geometry that did not change — and does it with no history entry
+            // to undo. Restoring puts the original arrays back, so the caches
+            // that key on array identity see nothing happened, because nothing
+            // did.
+            other => {
+                payload.restore(doc);
+                other
+            }
         }
     }
 
@@ -181,6 +198,7 @@ impl History {
         };
         entry.payload.restore(doc);
         self.cursor = index;
+        debug_assert_meshes_valid(doc, "<undo>");
         true
     }
 
@@ -288,6 +306,39 @@ impl History {
     }
 }
 
+/// Validates every mesh in the document, in debug builds only.
+///
+/// The single highest-return line in the project. A mesh kernel does not fail
+/// loudly: an operator leaves a subtly invalid mesh, three operators later
+/// something crashes or the file is silently wrong, and the trail back to the
+/// cause is gone. Checking at the dispatcher means the report names the
+/// operator that did it, at the moment it did it.
+///
+/// Compiled out of release builds: the check is O(V + E + F) with a duplicate
+/// scan, which is nothing beside an operator but is not free on a 10 M-vertex
+/// mesh at interactive rates.
+#[inline]
+fn debug_assert_meshes_valid(doc: &Document, op_id: &str) {
+    #[cfg(debug_assertions)]
+    for (id, mesh) in doc.meshes() {
+        let violations = mesh.validate();
+        assert!(
+            violations.is_empty(),
+            "`{op_id}` left {id:?} invalid ({} problem(s)):\n{}",
+            violations.len(),
+            violations
+                .iter()
+                .map(|v| format!("  - {v:?}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (doc, op_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +378,44 @@ mod tests {
             let offset = params.offset as f32;
             doc.edit_positions(mesh, &indices, |_, p| p.z += offset)
                 .map_err(|e| OpError::Failed(e.to_string()))?;
+            Ok(OpResult::Finished)
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, OpParamsDerive)]
+    struct CorruptParams {
+        /// Present only because every operator has a parameter block.
+        unused: f64,
+    }
+
+    /// Deliberately leaves the mesh structurally invalid.
+    ///
+    /// Exists so the safety net can be shown to be armed. A guard that is never
+    /// observed to fire is indistinguishable from one that was accidentally
+    /// compiled out, and this one is the project's single most important
+    /// defence.
+    struct CorruptMesh;
+
+    impl Operator for CorruptMesh {
+        type Params = CorruptParams;
+        fn id() -> &'static str {
+            "test.corrupt_mesh"
+        }
+        fn label() -> &'static str {
+            "Corrupt Mesh"
+        }
+        fn execute(
+            _params: &Self::Params,
+            doc: &mut DocMut<'_>,
+            _ctx: &Context,
+        ) -> Result<OpResult, OpError> {
+            let mesh =
+                first_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh".into()))?;
+            let indices = vec![0u32];
+            doc.edit_positions(mesh, &indices, |_, p| {
+                *p = kreate_math::Vec3::splat(f32::NAN)
+            })
+            .map_err(|e| OpError::Failed(e.to_string()))?;
             Ok(OpResult::Finished)
         }
     }
@@ -848,5 +937,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(h.last().unwrap().label, "Move Selected");
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "the validation hook is compiled out of release builds"
+    )]
+    #[should_panic(expected = "test.corrupt_mesh")]
+    fn the_dispatcher_catches_an_operator_that_corrupts_a_mesh() {
+        // The plan's first-listed risk, made observable: an operator leaves bad
+        // data, and the failure names *that* operator rather than surfacing three
+        // operations later as an unattributable crash.
+        let mut registry = OperatorRegistry::new();
+        registry.register::<AddCube>();
+        registry.register::<CorruptMesh>();
+        let mut history = History::new();
+        let mut doc = Document::new();
+        let ctx = Context::default();
+
+        let mut size = PropertyMap::new();
+        size.set("size", PropertyValue::Float(2.0));
+        history
+            .dispatch(&registry, &mut doc, &ctx, "object.add_cube", &size)
+            .unwrap();
+
+        let _ = history.dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "test.corrupt_mesh",
+            &PropertyMap::new(),
+        );
     }
 }

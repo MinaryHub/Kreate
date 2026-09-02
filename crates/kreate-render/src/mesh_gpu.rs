@@ -119,27 +119,110 @@ pub struct RenderMeshCpu {
     /// instanced screen-space quads, never from the triangulation — a quad must
     /// not show its diagonal.
     pub edge_verts: Vec<[u32; 2]>,
+    /// One render vertex per *mesh* vertex, for anything drawn per mesh vertex.
+    ///
+    /// Splitting for normals means a cube corner is three render vertices, so
+    /// "draw a dot per vertex" would draw three dots on top of each other and,
+    /// worse, report three different ids for one thing the user thinks of as one
+    /// vertex. Indexing through this keeps the vertex point overlay and the id
+    /// pass talking about mesh vertices, which is what selection is expressed
+    /// in. Which of the split copies is named is irrelevant: they differ only in
+    /// their normal.
+    pub vert_to_render: Vec<u32>,
     pub vert_flags: Vec<u32>,
     pub edge_flags: Vec<u32>,
     pub face_flags: Vec<u32>,
     pub counts: MeshCounts,
 }
 
+/// Angle beyond which shading splits across an edge.
+///
+/// 30 degrees is the long-standing default across modelling tools: it keeps a
+/// moderately tessellated curve smooth while leaving anything that reads as a
+/// crease sharp.
+pub const DEFAULT_AUTO_SMOOTH: f32 = std::f32::consts::PI / 6.0;
+
 impl RenderMeshCpu {
     pub fn extract(mesh: &MeshData) -> Self {
+        Self::extract_with_auto_smooth(mesh, DEFAULT_AUTO_SMOOTH)
+    }
+
+    /// Builds the render mesh, splitting vertices where shading must break.
+    ///
+    /// Normals are per *corner*, so a cube's corner has three different normals —
+    /// one per face. A GPU vertex carries exactly one, which means the render
+    /// mesh has to split those into separate vertices. That is allowed and
+    /// expected: `MeshData` keeps the topology the user authored, and this is a
+    /// derived form built for the rasteriser. Splitting here rather than there is
+    /// what lets a cube stay eight vertices in the document while shading
+    /// correctly on screen.
+    pub fn extract_with_auto_smooth(mesh: &MeshData, angle_threshold: f32) -> Self {
         let tri = mesh.triangulate();
-        let normals = mesh.compute_vertex_normals();
+        let corner_normals = mesh.compute_corner_normals(angle_threshold);
+        let mesh_positions = mesh.positions();
+
+        // Deduplicate by (mesh vertex, encoded normal). A smooth mesh collapses
+        // back to one vertex each; a hard-surface one splits only where it must.
+        let mut lookup: ahash::AHashMap<(u32, u32), u32> = ahash::AHashMap::new();
+        let mut positions = Vec::with_capacity(mesh.num_verts() as usize);
+        let mut normals = Vec::with_capacity(mesh.num_verts() as usize);
+        let mut indices = Vec::with_capacity(tri.indices.len());
+        // One representative render vertex per mesh vertex, so the overlay
+        // buffers — which index mesh vertices — still resolve to a position.
+        let mut representative = vec![u32::MAX; mesh.num_verts() as usize];
+
+        for (t, corner) in tri.indices.as_chunks::<3>().0.iter().enumerate() {
+            let face = tri.tri_to_face[t];
+            let face_verts = mesh.face_verts(face);
+            let face_start = mesh.face_corner_range(face).start;
+            for &v in corner {
+                // Which corner of the source face this triangle vertex came
+                // from. A face never repeats a vertex — the validator enforces
+                // it — so the search is unambiguous.
+                let normal = face_verts
+                    .iter()
+                    .position(|fv| *fv == v)
+                    .map(|i| corner_normals[face_start + i])
+                    .unwrap_or(Vec3::Z);
+                let packed = oct_encode(normal);
+                let index = *lookup.entry((v, packed)).or_insert_with(|| {
+                    positions.push(GpuPosition(mesh_positions[v as usize].to_array()));
+                    normals.push(packed);
+                    (positions.len() - 1) as u32
+                });
+                if representative[v as usize] == u32::MAX {
+                    representative[v as usize] = index;
+                }
+                indices.push(index);
+            }
+        }
+
+        // Edges are authored against mesh vertices; point them at a render vertex
+        // that shares the position. Which of the split copies is irrelevant — they
+        // differ only in their normal.
+        let last = positions.len().saturating_sub(1) as u32;
+        let edge_verts: Vec<[u32; 2]> = mesh
+            .edges()
+            .iter()
+            .map(|[a, b]| {
+                [
+                    representative[*a as usize].min(last),
+                    representative[*b as usize].min(last),
+                ]
+            })
+            .collect();
+        // A vertex belonging to no face has no render vertex at all. Clamped
+        // rather than dropped: the buffer is indexed by mesh vertex, so a hole
+        // would shift every later vertex onto the wrong id.
+        let vert_to_render: Vec<u32> = representative.iter().map(|r| (*r).min(last)).collect();
 
         let mut out = Self {
-            positions: mesh
-                .positions()
-                .iter()
-                .map(|p| GpuPosition(p.to_array()))
-                .collect(),
-            normals: normals.iter().map(|n| oct_encode(*n)).collect(),
-            indices: tri.indices,
+            positions,
+            normals,
+            indices,
             tri_to_face: tri.tri_to_face,
-            edge_verts: mesh.edges().to_vec(),
+            edge_verts,
+            vert_to_render,
             vert_flags: vec![0; mesh.num_verts() as usize],
             edge_flags: vec![0; mesh.num_edges() as usize],
             face_flags: vec![0; mesh.num_faces() as usize],
@@ -153,6 +236,11 @@ impl RenderMeshCpu {
         out.counts.triangles = (out.indices.len() / 3) as u32;
         out.update_flags(mesh);
         out
+    }
+
+    /// Render vertices after splitting, which is what the GPU buffers hold.
+    pub fn render_verts(&self) -> u32 {
+        self.positions.len() as u32
     }
 
     /// Recomputes the flag buffers from the mesh's attribute layers.
@@ -237,11 +325,15 @@ impl RenderMeshCpu {
     }
 
     /// GPU bytes per vertex. The plan's budget is 100.
+    /// GPU bytes per *render* vertex, which is what is actually uploaded.
+    ///
+    /// Measured against the split count rather than the document's, because
+    /// splitting is what the buffers pay for.
     pub fn bytes_per_vertex(&self) -> f32 {
-        if self.counts.verts == 0 {
+        if self.positions.is_empty() {
             0.0
         } else {
-            self.gpu_bytes() as f32 / self.counts.verts as f32
+            self.gpu_bytes() as f32 / self.positions.len() as f32
         }
     }
 }
@@ -320,7 +412,10 @@ mod tests {
         assert_eq!(r.indices.len(), r.counts.triangles as usize * 3);
         assert_eq!(r.tri_to_face.len(), r.counts.triangles as usize);
         assert!(r.tri_to_face.iter().all(|&f| f < m.num_faces()));
-        assert!(r.indices.iter().all(|&v| v < m.num_verts()));
+        // Indices address *render* vertices, which are split where shading
+        // breaks, not the mesh vertices the document keeps.
+        assert!(r.indices.iter().all(|&v| v < r.render_verts()));
+        assert!(r.edge_verts.iter().flatten().all(|&v| v < r.render_verts()));
     }
 
     #[test]
@@ -332,6 +427,65 @@ mod tests {
         let r = RenderMeshCpu::extract(&m);
         assert_eq!(r.edge_verts.len(), 12);
         assert_eq!(r.counts.triangles, 12, "6 quads triangulate to 12 tris");
+    }
+
+    #[test]
+    fn a_cube_splits_into_one_vertex_per_face_corner() {
+        // Eight vertices in the document, twenty-four on the GPU: each corner
+        // needs a different normal for each of the three faces meeting there.
+        // Without the split a cube shades as a rounded lump.
+        let m = primitives::cube(2.0);
+        let r = RenderMeshCpu::extract(&m);
+        assert_eq!(m.num_verts(), 8, "the document keeps eight");
+        assert_eq!(r.render_verts(), 24, "the GPU needs twenty-four");
+        assert_eq!(r.counts.verts, 8, "the reported count is the document's");
+    }
+
+    #[test]
+    fn a_smooth_mesh_does_not_split_at_all() {
+        // The other direction: a sphere must not pay for a mechanism it does not
+        // need.
+        let m = primitives::uv_sphere(1.0, 32, 16);
+        let r = RenderMeshCpu::extract(&m);
+        assert_eq!(
+            r.render_verts(),
+            m.num_verts(),
+            "a smooth mesh should collapse back to one vertex each"
+        );
+    }
+
+    #[test]
+    fn split_vertices_share_a_position_and_differ_only_in_normal() {
+        let m = primitives::cube(2.0);
+        let r = RenderMeshCpu::extract(&m);
+        // Group render vertices by position; each group must hold three, with
+        // three distinct normals.
+        let mut groups: std::collections::HashMap<[u32; 3], Vec<u32>> = Default::default();
+        for (i, p) in r.positions.iter().enumerate() {
+            let key = [p.0[0].to_bits(), p.0[1].to_bits(), p.0[2].to_bits()];
+            groups.entry(key).or_default().push(r.normals[i]);
+        }
+        assert_eq!(groups.len(), 8, "eight distinct positions");
+        for (key, normals) in &groups {
+            assert_eq!(normals.len(), 3, "corner {key:?} should split three ways");
+            let unique: std::collections::HashSet<_> = normals.iter().collect();
+            assert_eq!(unique.len(), 3, "the three copies must differ");
+        }
+    }
+
+    #[test]
+    fn edges_still_resolve_to_a_position_after_splitting() {
+        // The overlay buffers index mesh vertices; after splitting they have to
+        // be pointed at a render vertex that shares the position.
+        let m = primitives::cube(2.0);
+        let r = RenderMeshCpu::extract(&m);
+        for (e, [a, b]) in r.edge_verts.iter().enumerate() {
+            let (pa, pb) = (r.positions[*a as usize].0, r.positions[*b as usize].0);
+            assert_ne!(pa, pb, "edge {e} collapsed to a point");
+            let [ma, mb] = m.edges()[e];
+            assert_eq!(pa, m.positions()[ma as usize].to_array());
+            assert_eq!(pb, m.positions()[mb as usize].to_array());
+        }
     }
 
     #[test]

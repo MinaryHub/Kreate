@@ -31,6 +31,25 @@ pub enum Command {
         objects: Vec<u32>,
         active: Option<u32>,
     },
+    /// Enters or leaves mesh edit mode.
+    ///
+    /// Not an operator: the mode lives in the application, not in the document,
+    /// so there is nothing for an undo step to restore. Making it one would put
+    /// a history entry between the user and the edit they actually want back.
+    ToggleEditMode,
+    /// Chooses which element type edit-mode selection acts on.
+    SetSelectMode(u32),
+    /// Snap the view to look along a world axis.
+    ///
+    /// Carries the axis rather than a camera, so the application decides how to
+    /// get there — which is what keeps the animation policy in one place instead
+    /// of every caller choosing a duration.
+    SnapToAxis(kreate_render::ViewAxis),
+    /// Orbit by a screen-space drag on the navigation gizmo.
+    OrbitBy {
+        dx: f32,
+        dy: f32,
+    },
     /// Focus the viewport on the current selection.
     FrameSelection,
 }

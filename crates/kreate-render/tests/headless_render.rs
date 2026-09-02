@@ -15,7 +15,7 @@
 //! without a GPU do not report a false negative.
 
 use glam::{DAffine3, DVec3, Vec4};
-use kreate_render::{Camera, GpuMesh, GpuOptions, RenderMeshCpu, ShadingMode, Viewport};
+use kreate_render::{Camera, Draw, GpuMesh, GpuOptions, RenderMeshCpu, ShadingMode, Viewport};
 
 const SIZE: u32 = 256;
 /// 256 px * 4 bytes is already a multiple of wgpu's 256-byte row alignment, so
@@ -62,6 +62,16 @@ fn render_scene_opts(
     show_grid: bool,
     configure_camera: impl FnOnce(&mut Camera),
 ) -> Option<(Rendered, [u8; 4])> {
+    render_scene_full(meshes, shading, show_grid, false, configure_camera)
+}
+
+fn render_scene_full(
+    meshes: &[(kreate_mesh::MeshData, DAffine3)],
+    shading: ShadingMode,
+    show_grid: bool,
+    show_wireframe: bool,
+    configure_camera: impl FnOnce(&mut Camera),
+) -> Option<(Rendered, [u8; 4])> {
     let opts = GpuOptions::default();
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
@@ -86,6 +96,7 @@ fn render_scene_opts(
     let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
     viewport.shading = shading;
     viewport.show_grid = show_grid;
+    viewport.show_wireframe = show_wireframe;
 
     let uploaded: Vec<(GpuMesh, DAffine3)> = meshes
         .iter()
@@ -93,19 +104,19 @@ fn render_scene_opts(
             let cpu = RenderMeshCpu::extract(mesh);
             let gpu_mesh = GpuMesh::upload(
                 &gpu.device,
-                &viewport.object_layout,
+                &viewport.layouts,
                 &cpu,
                 Vec4::new(0.75, 0.72, 0.68, 1.0),
             );
             (gpu_mesh, *xform)
         })
         .collect();
-    let refs: Vec<(&GpuMesh, DAffine3)> = uploaded.iter().map(|(m, t)| (m, *t)).collect();
+    let refs: Vec<Draw> = uploaded.iter().map(|(m, t)| Draw::new(m, *t)).collect();
 
     let mut camera = Camera::default();
     configure_camera(&mut camera);
 
-    viewport.prepare(&gpu.queue, &camera, &refs);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &refs);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -194,7 +205,7 @@ fn cube_scene() -> Vec<(kreate_mesh::MeshData, DAffine3)> {
 #[test]
 fn a_cube_actually_reaches_the_framebuffer() {
     let (img, bg) = gpu_or_skip!(render_scene(&cube_scene(), ShadingMode::Studio, |c| {
-        c.frame_sphere(DVec3::ZERO, 1.8);
+        c.frame_sphere(DVec3::ZERO, 1.8, 1.0);
     }));
 
     let covered = img.covered_fraction(bg);
@@ -216,7 +227,7 @@ fn studio_shading_produces_a_range_of_tones() {
     // brightnesses. A single flat tone means the normals never arrived — the
     // exact symptom of a broken octahedral decode or a garbled normal matrix.
     let (img, _) = gpu_or_skip!(render_scene(&cube_scene(), ShadingMode::Studio, |c| {
-        c.frame_sphere(DVec3::ZERO, 1.8);
+        c.frame_sphere(DVec3::ZERO, 1.8, 1.0);
     }));
     assert!(
         img.distinct_luminances() > 6,
@@ -225,10 +236,142 @@ fn studio_shading_produces_a_range_of_tones() {
     );
 }
 
+/// Distinct brightness levels found on the object, quantised coarsely.
+///
+/// A flat-shaded cube shows three visible faces and therefore about three
+/// levels. Shading that varies across a face — which is what averaging every
+/// face normal at a vertex produces — spreads those into a gradient.
+fn tones_on_object(img: &Rendered, background: [u8; 4]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for p in &img.pixels {
+        if (0..3).any(|i| (p[i] as i32 - background[i] as i32).abs() > 8) {
+            let l = (p[0] as u32 * 30 + p[1] as u32 * 59 + p[2] as u32 * 11) / 100;
+            seen.insert(l / 6);
+        }
+    }
+    seen.len()
+}
+
+#[test]
+fn a_cube_shades_as_flat_faces_not_as_a_rounded_lump() {
+    // The defect a user reported as the cube "looking cut". Averaging every face
+    // that meets at a vertex gives a cube's eight corners diagonal normals, and
+    // interpolating those across a flat face shades it as if it were curved — so
+    // each face becomes a gradient and the lighting clamps along a curve through
+    // the middle of it.
+    //
+    // Splitting the shading at edges sharper than the auto-smooth threshold
+    // leaves each face a single tone.
+    let (img, bg) = gpu_or_skip!(render_scene_opts(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        |c| c.frame_sphere(DVec3::ZERO, 1.6, 1.0)
+    ));
+
+    let tones = tones_on_object(&img, bg);
+    assert!(
+        tones <= 8,
+        "{tones} distinct tones on a cube; the faces are shading as curved rather          than flat"
+    );
+    assert!(
+        tones >= 2,
+        "only {tones} tones; the faces are not being lit differently at all"
+    );
+}
+
+#[test]
+fn the_wireframe_draws_real_edges_and_not_triangulation_diagonals() {
+    // The reason the overlay is built from the mesh's own edge list rather than
+    // from the triangles. `PolygonMode::Line`, a `LineList` over the index
+    // buffer, and a barycentric derivative trick all draw *triangulation* edges,
+    // so every quad shows a diagonal — which is disqualifying for a polygon
+    // modeller, where the quad is the thing the user is working with.
+    //
+    // A single quad viewed face-on makes that unambiguous: its diagonal would run
+    // exactly through the centre of the frame.
+    let plane = vec![(kreate_mesh::primitives::plane(2.0), DAffine3::IDENTITY)];
+    let face_on = |c: &mut Camera| {
+        // Straight down the plane's normal, so the quad fills the frame square.
+        c.pivot = DVec3::ZERO;
+        c.rotation = glam::DQuat::IDENTITY;
+        c.distance = 3.0;
+    };
+
+    let (without, _) = gpu_or_skip!(render_scene_full(
+        &plane,
+        ShadingMode::Flat,
+        false,
+        false,
+        face_on
+    ));
+    let (with, _) = gpu_or_skip!(render_scene_full(
+        &plane,
+        ShadingMode::Flat,
+        false,
+        true,
+        face_on
+    ));
+
+    let centre = SIZE / 2;
+    assert_eq!(
+        with.at(centre, centre),
+        without.at(centre, centre),
+        "a line runs through the middle of the quad; the overlay is drawing the          triangulation rather than the mesh's edges"
+    );
+
+    // And the real edges must actually be drawn, or the test above passes for
+    // the wrong reason.
+    let differing = with
+        .pixels
+        .iter()
+        .zip(&without.pixels)
+        .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 20))
+        .count();
+    assert!(
+        differing > 200,
+        "only {differing} pixels changed with the wireframe on; it is not drawing"
+    );
+}
+
+#[test]
+fn a_cube_wireframe_is_visible_against_its_own_shading() {
+    // The overlay's default colour and width have to read against the surface it
+    // sits on. An earlier pair looked reasonable in the source and was invisible
+    // on screen.
+    let cube = cube_scene();
+    let camera = |c: &mut Camera| c.frame_sphere(DVec3::ZERO, 1.6, 1.0);
+    let (plain, _) = gpu_or_skip!(render_scene_full(
+        &cube,
+        ShadingMode::Studio,
+        false,
+        false,
+        camera
+    ));
+    let (wire, _) = gpu_or_skip!(render_scene_full(
+        &cube,
+        ShadingMode::Studio,
+        false,
+        true,
+        camera
+    ));
+
+    let changed = wire
+        .pixels
+        .iter()
+        .zip(&plain.pixels)
+        .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 40))
+        .count();
+    assert!(
+        changed > 400,
+        "only {changed} pixels differ strongly; the wireframe is too faint to see"
+    );
+}
+
 #[test]
 fn the_grid_is_drawn_when_the_scene_is_empty() {
     let (img, bg) = gpu_or_skip!(render_scene(&[], ShadingMode::Studio, |c| {
-        c.frame_sphere(DVec3::ZERO, 4.0);
+        c.frame_sphere(DVec3::ZERO, 4.0, 1.0);
     }));
     let covered = img.covered_fraction(bg);
     assert!(
@@ -280,7 +423,7 @@ fn a_far_away_scene_renders_identically_to_one_at_the_origin() {
         ShadingMode::Studio,
         false,
         |c| {
-            c.frame_sphere(DVec3::ZERO, 1.8);
+            c.frame_sphere(DVec3::ZERO, 1.8, 1.0);
         }
     ));
 
@@ -294,7 +437,7 @@ fn a_far_away_scene_renders_identically_to_one_at_the_origin() {
         ShadingMode::Studio,
         false,
         move |c| {
-            c.frame_sphere(far, 1.8);
+            c.frame_sphere(far, 1.8, 1.0);
         }
     ));
 

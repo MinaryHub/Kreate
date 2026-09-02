@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt as _;
 use crate::camera::{Camera, Projection};
 use crate::gpu::{self, DEPTH_CLEAR, DEPTH_FORMAT};
 use crate::mesh_gpu::{MeshCounts, RenderMeshCpu};
+use crate::picking::PickDomain;
 
 /// How the solid pass shades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,74 @@ struct ObjectData {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EdgeGlobals {
+    view_proj: [[f32; 4]; 4],
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EdgeObject {
+    model: [[f32; 4]; 4],
+    base_color: [f32; 4],
+    selected_color: [f32; 4],
+    flags_params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ElementGlobals {
+    view_proj: [[f32; 4]; 4],
+    params: [f32; 4],
+    layers: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ElementObject {
+    model: [[f32; 4]; 4],
+    selected_color: [f32; 4],
+    unselected_color: [f32; 4],
+    /// x: whether the rubber-band preview applies to this draw.
+    ///
+    /// Per draw rather than compared against an object id in the shader: the
+    /// preview belongs to the one object being edited, and a flag the caller
+    /// already knows is cheaper than an id round trip through two uniforms.
+    flags: [f32; 4],
+}
+
+/// What a rubber-band drag would select, for the overlays to draw.
+///
+/// The bitset the compute reduction just produced, read directly. That is the
+/// point of it being a bitset rather than a list: the highlight follows the drag
+/// with no readback and no upload, so what the user sees during the drag is
+/// literally what the commit will apply.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct PreviewParams {
+    /// x: preview active. y: domain — 0 vert, 1 edge, 2 face. z: whether the
+    /// drag removes rather than adds. w: how many elements the bitset covers.
+    mode: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct IdGlobals {
+    view_proj: [[f32; 4]; 4],
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct IdObject {
+    model: [[f32; 4]; 4],
+    /// x: object id plus one. Zero is reserved for "nothing here", which is what
+    /// lets an untouched id pixel mean a miss rather than object zero.
+    ids: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct GridGlobals {
     view_proj: [[f32; 4]; 4],
     inv_view_row0: [f32; 4],
@@ -57,16 +126,45 @@ pub struct GpuMesh {
     positions: wgpu::Buffer,
     normals: wgpu::Buffer,
     indices: wgpu::Buffer,
-    object: wgpu::Buffer,
-    object_bind: wgpu::BindGroup,
+    /// Positions as storage, plus the edge list and its flags.
+    ///
+    /// Per-*mesh*, unlike the transform: geometry is shared between linked
+    /// duplicates, and only the transform differs.
+    edge_bind: wgpu::BindGroup,
+    /// Everything the id pass, the face fill and the vertex points read:
+    /// positions, the index stream, the triangle-to-face map, the edge list, the
+    /// vertex map and the per-element flags.
+    id_bind: wgpu::BindGroup,
+    /// The three flag buffers, kept so that a selection change is a write to
+    /// *these* and nothing else.
+    ///
+    /// This is the load-bearing part of the buffer split: a renderer that
+    /// rebuilds geometry when a selection changes turns one click on a dense
+    /// mesh into a visible stall, and rubber-band selection into a slideshow.
+    vert_flags: wgpu::Buffer,
+    edge_flags: wgpu::Buffer,
+    face_flags: wgpu::Buffer,
     pub counts: MeshCounts,
+    /// Render vertices after the normal split, which is what the position buffer
+    /// holds. Distinct from `counts.verts`, which counts *mesh* vertices.
+    pub render_verts: u32,
     pub color: Vec4,
+}
+
+/// The per-mesh bind group layouts a `GpuMesh` needs.
+///
+/// Grouped rather than passed one by one: every pass that reads geometry from
+/// storage adds one, and a function taking four layouts in a row is a call site
+/// nobody can read.
+pub struct MeshLayouts {
+    pub edge: wgpu::BindGroupLayout,
+    pub id: wgpu::BindGroupLayout,
 }
 
 impl GpuMesh {
     pub fn upload(
         device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
+        layouts: &MeshLayouts,
         cpu: &RenderMeshCpu,
         color: Vec4,
     ) -> Self {
@@ -85,33 +183,115 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(&cpu.normals),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
+        // STORAGE as well as INDEX: the id pass draws faces *non-indexed* and
+        // reads this as an array, because `vertex_index` in an indexed draw is
+        // the vertex fetched from the index buffer and says nothing about which
+        // triangle is being drawn — and WebGPU has no portable primitive index.
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh indices"),
-            contents: bytemuck::cast_slice(&cpu.indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.indices)),
+            usage: wgpu::BufferUsages::INDEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
         });
-        let object = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("object uniform"),
-            size: std::mem::size_of::<ObjectData>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let tri_to_face = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh tri to face"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.tri_to_face)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let object_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object bind group"),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: object.as_entire_binding(),
-            }],
+        let vert_to_render = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vert to render"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.vert_to_render)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let vert_flags = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vert flags"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.vert_flags)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let face_flags = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh face flags"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.face_flags)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        // The edge list is authored against render vertices and changes only when
+        // topology does; the flags change on selection alone. Keeping them apart
+        // is what lets a selection update without touching geometry.
+        let edge_verts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh edge verts"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32x2(&cpu.edge_verts)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let edge_flags = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh edge flags"),
+            contents: bytemuck::cast_slice(&pad_if_empty_u32(&cpu.edge_flags)),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let edge_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("edge bind group"),
+            layout: &layouts.edge,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: edge_verts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edge_flags.as_entire_binding(),
+                },
+            ],
+        });
+
+        let id_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("id bind group"),
+            layout: &layouts.id,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tri_to_face.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: edge_verts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: vert_to_render.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: vert_flags.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: face_flags.as_entire_binding(),
+                },
+            ],
         });
 
         Self {
             positions,
             normals,
             indices,
-            object,
-            object_bind,
+            edge_bind,
+            id_bind,
+            vert_flags,
+            edge_flags,
+            face_flags,
             counts: cpu.counts,
+            render_verts: cpu.render_verts(),
             color,
         }
     }
@@ -126,10 +306,211 @@ impl GpuMesh {
         queue.write_buffer(&self.positions, 0, bytemuck::cast_slice(&cpu.positions));
         queue.write_buffer(&self.normals, 0, bytemuck::cast_slice(&cpu.normals));
     }
+
+    /// Rewrites only the three flag buffers.
+    ///
+    /// What a selection change costs: three small writes, no geometry touched,
+    /// and the highlight is correct in the same frame. The buffers are sized from
+    /// the mesh's element counts and a selection cannot change those, so a
+    /// caller reaching this with a differently shaped mesh has a topology change
+    /// on its hands and needs a full upload instead.
+    pub fn update_flags(&self, queue: &wgpu::Queue, cpu: &RenderMeshCpu) -> bool {
+        if cpu.counts != self.counts {
+            return false;
+        }
+        queue.write_buffer(
+            &self.vert_flags,
+            0,
+            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.vert_flags)),
+        );
+        queue.write_buffer(
+            &self.edge_flags,
+            0,
+            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.edge_flags)),
+        );
+        queue.write_buffer(
+            &self.face_flags,
+            0,
+            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.face_flags)),
+        );
+        true
+    }
+}
+
+/// One entry in the frame's draw list: a mesh, where to put it, and the state
+/// that belongs to the *object* rather than to the geometry.
+///
+/// A tuple would do for the first two, but everything object-level lands here —
+/// selection now, and later the outline group, the x-ray tier and the per-object
+/// display mode — and each of those is precisely what cannot live on the mesh,
+/// because two linked duplicates share one datablock and disagree about all of
+/// them.
+#[derive(Clone, Copy)]
+pub struct Draw<'a> {
+    pub mesh: &'a GpuMesh,
+    pub transform: DAffine3,
+    /// Highlights the object's wireframe. Object-mode selection; element
+    /// selection travels in the mesh's own flags buffer.
+    pub selected: bool,
+    /// What the id pass writes for this draw, so a pick names the object rather
+    /// than the geometry.
+    ///
+    /// Per draw and not per mesh, which is the whole reason it is here: two
+    /// linked duplicates share one datablock and are different objects.
+    pub object_id: u32,
+    /// Whether the rubber-band preview applies to this draw.
+    ///
+    /// A drag resolves elements of *one* object — the one being edited — and the
+    /// bitset is indexed by that mesh's element numbering. Applied to a
+    /// neighbour it would highlight whatever elements happened to share those
+    /// indices.
+    pub preview: bool,
+}
+
+impl<'a> Draw<'a> {
+    pub fn new(mesh: &'a GpuMesh, transform: DAffine3) -> Self {
+        Self {
+            mesh,
+            transform,
+            selected: false,
+            object_id: 0,
+            preview: false,
+        }
+    }
+
+    pub fn selected(mut self, yes: bool) -> Self {
+        self.selected = yes;
+        self
+    }
+
+    /// What the id pass reports when this draw is picked.
+    pub fn object_id(mut self, id: u32) -> Self {
+        self.object_id = id;
+        self
+    }
+
+    /// Marks this draw as the one a rubber-band drag is resolving against.
+    pub fn preview(mut self, yes: bool) -> Self {
+        self.preview = yes;
+        self
+    }
+}
+
+/// A growable per-frame uniform array addressed by dynamic offset.
+///
+/// Object data is per *draw*, not per mesh: two objects can share one mesh
+/// datablock — that is the whole point of referencing geometry by id — and each
+/// needs its own transform. Writing into a buffer owned by the mesh means the
+/// second draw overwrites the first, and both linked duplicates land on top of
+/// each other.
+struct UniformRing {
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// Distance between slots, rounded up to the device's alignment.
+    stride: u32,
+    capacity: u32,
+}
+
+impl UniformRing {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        element_size: u64,
+        capacity: u32,
+        label: &str,
+    ) -> Self {
+        // Dynamic offsets must be a multiple of the device's alignment, which is
+        // typically 256 bytes and never smaller than the struct.
+        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let stride = element_size.div_ceil(align) * align;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: stride * capacity.max(1) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(element_size),
+                }),
+            }],
+        });
+        Self {
+            buffer,
+            bind,
+            stride: stride as u32,
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn offset(&self, index: u32) -> u32 {
+        self.stride * index
+    }
+
+    /// Grows to hold `needed` slots, reallocating only when it must.
+    fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        element_size: u64,
+        needed: u32,
+        label: &str,
+    ) {
+        if needed <= self.capacity {
+            return;
+        }
+        // Geometric growth, so a scene that grows steadily does not reallocate
+        // on every object added.
+        let capacity = needed.next_power_of_two();
+        *self = Self::new(device, layout, element_size, capacity, label);
+    }
+}
+
+/// wgpu rejects a zero-sized buffer, and an empty mesh is a perfectly ordinary
+/// document state. One dummy element costs nothing and keeps the bind group
+/// valid; nothing is ever drawn from it because the instance count is zero.
+fn pad_if_empty_u32(values: &[u32]) -> Vec<u32> {
+    if values.is_empty() {
+        vec![0]
+    } else {
+        values.to_vec()
+    }
+}
+
+fn pad_if_empty_u32x2(values: &[[u32; 2]]) -> Vec<[u32; 2]> {
+    if values.is_empty() {
+        vec![[0, 0]]
+    } else {
+        values.to_vec()
+    }
 }
 
 /// A bind group layout holding one uniform buffer, visible to both stages.
 fn uniform_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    uniform_layout(device, label, false, None)
+}
+
+/// The same, addressed by a dynamic offset so one buffer can hold a slot per draw.
+fn dynamic_uniform_layout(
+    device: &wgpu::Device,
+    label: &str,
+    element_size: u64,
+) -> wgpu::BindGroupLayout {
+    uniform_layout(device, label, true, std::num::NonZeroU64::new(element_size))
+}
+
+fn uniform_layout(
+    device: &wgpu::Device,
+    label: &str,
+    dynamic: bool,
+    min_binding_size: Option<std::num::NonZeroU64>,
+) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -137,11 +518,244 @@ fn uniform_bind_group_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGr
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+                has_dynamic_offset: dynamic,
+                min_binding_size,
             },
             count: None,
         }],
+    })
+}
+
+/// Layout for the wireframe pass: the mesh's three read-only storage buffers.
+///
+/// Per-mesh, so it holds nothing that varies between two objects sharing one
+/// datablock — the transform lives in a separate, per-draw group.
+fn edge_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("edge"),
+        entries: &[storage(0), storage(1), storage(2)],
+    })
+}
+
+/// The size of one per-draw id uniform slot.
+const ID_OBJECT_SIZE: u64 = std::mem::size_of::<IdObject>() as u64;
+
+/// The size of one per-draw element-overlay uniform slot.
+const ELEMENT_OBJECT_SIZE: u64 = std::mem::size_of::<ElementObject>() as u64;
+
+/// What a rubber-band drag in progress would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewSelection {
+    /// Which element domain the bitset indexes.
+    pub domain: PickDomain,
+    /// Whether the drag removes from the selection rather than adding.
+    pub deselect: bool,
+    /// How many elements the bitset covers, so a stale bit past the end of a
+    /// shrunken mesh cannot light up an element that no longer exists.
+    pub elements: u32,
+}
+
+/// The colour every selected element is drawn in.
+///
+/// One constant for vertices, edges and faces: three shades of orange would
+/// read as three different states rather than as one selection.
+const SELECTED_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
+
+/// Opacity of the selected-face fill.
+///
+/// Translucent so the shading underneath still reads: an opaque fill hides the
+/// form of the thing being worked on.
+const FACE_FILL_ALPHA: f32 = 0.28;
+
+/// One id pipeline per element domain, in an occluded and an x-ray variant.
+///
+/// Six pipelines from one shader module. Built at startup rather than on first
+/// use: pipeline creation is expensive and unpredictable, and the one place it
+/// must never happen is partway through a drag — which is exactly when a user
+/// first switches to vertex mode and starts clicking.
+struct IdPipelines {
+    /// Indexed by [`PickDomain`] through [`IdPipelines::slot`], then by whether
+    /// occluded elements are selectable.
+    occluded: [wgpu::RenderPipeline; 3],
+    xray: [wgpu::RenderPipeline; 3],
+}
+
+impl IdPipelines {
+    fn new(
+        device: &wgpu::Device,
+        globals: &wgpu::BindGroupLayout,
+        mesh: &wgpu::BindGroupLayout,
+        object: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("id"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/id.wgsl").into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("id layout"),
+            bind_group_layouts: &[Some(globals), Some(mesh), Some(object)],
+            immediate_size: 0,
+        });
+
+        let build = |entry: &str, topology, xray: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("id"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    // No vertex buffers anywhere in this pass: every path reads
+                    // geometry from storage and builds its primitives from the
+                    // vertex and instance indices.
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_id"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: crate::picking::ID_FORMAT,
+                        // Ids are not colours. Blending two ids together would
+                        // produce a third that names nothing.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    // No culling, for the same reason the solid pass does none: a
+                    // modeller routinely has inconsistently wound geometry
+                    // mid-edit, and an element that is drawn has to be clickable.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(if xray {
+                    // See-through: occluded elements are selectable, which is the
+                    // whole point of the mode. Two pipeline variants of one
+                    // shader, and the semantics fall out of the depth state.
+                    gpu::depth_ignore_state()
+                } else {
+                    gpu::depth_read_state()
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let list = wgpu::PrimitiveTopology::TriangleList;
+        let strip = wgpu::PrimitiveTopology::TriangleStrip;
+        Self {
+            occluded: [
+                build("vs_face", list, false),
+                build("vs_edge", strip, false),
+                build("vs_vert", strip, false),
+            ],
+            xray: [
+                build("vs_face", list, true),
+                build("vs_edge", strip, true),
+                build("vs_vert", strip, true),
+            ],
+        }
+    }
+
+    /// Which of the three geometry paths a domain draws with.
+    ///
+    /// Object mode draws faces: an object is picked by the surface the user
+    /// clicked, and only the object id is read back.
+    fn slot(domain: PickDomain) -> usize {
+        match domain {
+            PickDomain::Object | PickDomain::Face => 0,
+            PickDomain::Edge => 1,
+            PickDomain::Vert => 2,
+        }
+    }
+
+    fn get(&self, domain: PickDomain, xray: bool) -> &wgpu::RenderPipeline {
+        let slot = Self::slot(domain);
+        if xray {
+            &self.xray[slot]
+        } else {
+            &self.occluded[slot]
+        }
+    }
+}
+
+/// Layout for the rubber-band preview: what a drag in progress would select.
+///
+/// Its own group rather than folded into the per-mesh or per-draw ones, because
+/// it is neither: the bitset belongs to the *drag*, and is the same for every
+/// draw in the frame.
+fn preview_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("preview"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Layout for the passes that read geometry out of storage: the id pass, the
+/// selected-face fill and the vertex points.
+///
+/// One layout for all three on purpose. They have to agree about what geometry
+/// *is* — what is highlighted must be what is pickable — and sharing the binding
+/// makes that structural rather than a convention someone maintains.
+///
+/// Per-mesh, so nothing here varies between two objects sharing a datablock. The
+/// object id and the transform do vary, so they live in the per-draw group.
+fn mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mesh"),
+        entries: &[
+            storage(0),
+            storage(1),
+            storage(2),
+            storage(3),
+            storage(4),
+            storage(5),
+            storage(6),
+        ],
     })
 }
 
@@ -153,14 +767,82 @@ pub struct Viewport {
     globals_bind: wgpu::BindGroup,
     grid_buf: wgpu::Buffer,
     grid_bind: wgpu::BindGroup,
-    pub object_layout: wgpu::BindGroupLayout,
+    edges: wgpu::RenderPipeline,
+    edge_globals_buf: wgpu::Buffer,
+    edge_globals_bind: wgpu::BindGroup,
+    object_layout: wgpu::BindGroupLayout,
+    edge_object_layout: wgpu::BindGroupLayout,
+    /// Per-draw object uniforms for the solid and wireframe passes.
+    objects: UniformRing,
+    edge_objects: UniformRing,
+    /// One pipeline per element domain, in two occlusion variants. Built up
+    /// front rather than on first use: a pipeline compiled during a drag is a
+    /// visible hitch, and there are six of them.
+    id_pipelines: IdPipelines,
+    id_globals_buf: wgpu::Buffer,
+    id_globals_bind: wgpu::BindGroup,
+    /// The selected-face fill and the vertex points: the other two thirds of
+    /// element selection.
+    faces: wgpu::RenderPipeline,
+    points: wgpu::RenderPipeline,
+    element_globals_buf: wgpu::Buffer,
+    element_globals_bind: wgpu::BindGroup,
+    element_object_layout: wgpu::BindGroupLayout,
+    element_objects: UniformRing,
+    preview_layout: wgpu::BindGroupLayout,
+    preview_buf: wgpu::Buffer,
+    /// Which generation of the bitset the current bind group points at, so it is
+    /// rebuilt when the reduction grows one and not on every frame of a drag.
+    ///
+    /// `None` means it is still pointing at the idle buffer.
+    preview_generation: Option<u64>,
+    /// Rebuilt whenever the bitset buffer changes, which is whenever the edited
+    /// mesh grows past the last drag's capacity.
+    preview_bind: wgpu::BindGroup,
+    /// A zeroed bitset, bound when no drag has ever run.
+    ///
+    /// Cheaper than a second set of pipelines without the group, and it means
+    /// the pass list has exactly one shape.
+    #[allow(dead_code)]
+    preview_idle_bits: wgpu::Buffer,
+    id_object_layout: wgpu::BindGroupLayout,
+    id_objects: UniformRing,
+    pub layouts: MeshLayouts,
     depth: wgpu::TextureView,
+    /// Allocated size of the render targets.
     size: (u32, u32),
+    /// The sub-rectangle actually drawn into.
+    ///
+    /// The offscreen target is allocated in coarse steps so a panel drag does not
+    /// reallocate it every frame, which means it is usually *larger* than the
+    /// area on screen. Rendering into the whole thing and then sampling all of it
+    /// into a smaller rectangle stretches the image — up to 7% at a 64-pixel
+    /// step, which on a cube reads as "it looks wrong" rather than as a bug with
+    /// an obvious cause. So the pass is restricted to the exact region and the
+    /// caller samples exactly that much.
+    render_size: (u32, u32),
     pub shading: ShadingMode,
     pub background: wgpu::Color,
+    /// Whether to draw the wireframe overlay.
+    pub show_wireframe: bool,
+    /// Whether to draw the element overlays: selected-face fill and vertex
+    /// points. On in edit mode and off outside it — a scene full of vertex dots
+    /// is unreadable when the user is arranging objects.
+    pub show_elements: bool,
+    /// Vertex dot diameter, in pixels.
+    pub point_size: f32,
+    /// Wireframe line width, in pixels.
+    pub wireframe_width: f32,
     /// Whether to draw the ground grid. A user-facing toggle, and what lets a
     /// test compare geometry without the world-anchored lattice in the way.
     pub show_grid: bool,
+    /// Display scaling, applied to the pick tolerance.
+    ///
+    /// A tolerance chosen in pixels is a tolerance chosen for a particular
+    /// screen density. Without this, picking on a high-density display is a
+    /// third as forgiving as it was designed to be — which reads as the
+    /// application being fussy about where you click.
+    pub pick_scale: f32,
 }
 
 impl Viewport {
@@ -171,7 +853,8 @@ impl Viewport {
         height: u32,
     ) -> Self {
         let globals_layout = uniform_bind_group_layout(device, "globals");
-        let object_layout = uniform_bind_group_layout(device, "object");
+        let object_layout = dynamic_uniform_layout(device, "object", OBJECT_SIZE);
+        let edge_object_layout = dynamic_uniform_layout(device, "edge object", EDGE_OBJECT_SIZE);
         let grid_layout = uniform_bind_group_layout(device, "grid globals");
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -196,8 +879,72 @@ impl Viewport {
                 }],
             })
         };
+        let edge_globals_layout = uniform_bind_group_layout(device, "edge globals");
+        let layouts = MeshLayouts {
+            edge: edge_bind_group_layout(device),
+            id: mesh_bind_group_layout(device),
+        };
+        let id_globals_layout = uniform_bind_group_layout(device, "id globals");
+        let id_object_layout = dynamic_uniform_layout(device, "id object", ID_OBJECT_SIZE);
+        let id_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("id globals"),
+            size: std::mem::size_of::<IdGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let element_globals_layout = uniform_bind_group_layout(device, "element globals");
+        let element_object_layout =
+            dynamic_uniform_layout(device, "element object", ELEMENT_OBJECT_SIZE);
+        let element_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("element globals"),
+            size: std::mem::size_of::<ElementGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let preview_layout = preview_bind_group_layout(device);
+        let preview_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview params"),
+            size: std::mem::size_of::<PreviewParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // A zeroed bitset to bind when no drag is in progress, so the pass list
+        // has exactly one shape and the preview group is never absent.
+        let preview_idle_bits = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview idle bits"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let preview_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("preview bind"),
+            layout: &preview_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: preview_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: preview_idle_bits.as_entire_binding(),
+                },
+            ],
+        });
+        let edge_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge globals"),
+            size: std::mem::size_of::<EdgeGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let id_globals_bind = bind(&id_globals_layout, &id_globals_buf, "id globals bind");
+        let element_globals_bind = bind(
+            &element_globals_layout,
+            &element_globals_buf,
+            "element globals bind",
+        );
         let globals_bind = bind(&globals_layout, &globals_buf, "globals bind");
         let grid_bind = bind(&grid_layout, &grid_buf, "grid bind");
+        let edge_globals_bind = bind(&edge_globals_layout, &edge_globals_buf, "edge globals bind");
 
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("solid"),
@@ -206,6 +953,10 @@ impl Viewport {
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grid"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/grid.wgsl").into()),
+        });
+        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("overlay_edge"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/overlay_edge.wgsl").into()),
         });
 
         let solid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -217,6 +968,115 @@ impl Viewport {
             label: Some("grid layout"),
             bind_group_layouts: &[Some(&grid_layout)],
             immediate_size: 0,
+        });
+
+        let edge_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("edge layout"),
+            bind_group_layouts: &[
+                Some(&edge_globals_layout),
+                Some(&layouts.edge),
+                Some(&edge_object_layout),
+                Some(&preview_layout),
+            ],
+            immediate_size: 0,
+        });
+        let id_pipelines =
+            IdPipelines::new(device, &id_globals_layout, &layouts.id, &id_object_layout);
+
+        let element_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("overlay_element"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/overlay_element.wgsl").into()),
+        });
+        let element_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("element layout"),
+            bind_group_layouts: &[
+                Some(&element_globals_layout),
+                Some(&layouts.id),
+                Some(&element_object_layout),
+                Some(&preview_layout),
+            ],
+            immediate_size: 0,
+        });
+        let element_pipeline = |label: &str, vs: &str, fs: &str, topology| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&element_pl),
+                vertex: wgpu::VertexState {
+                    module: &element_shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &element_shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                // Tests against the solid pass but does not write. Overlays layer
+                // by draw order and depth offset rather than fighting each other,
+                // which is what stops the shimmer while orbiting.
+                depth_stencil: Some(gpu::depth_read_state()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let faces = element_pipeline(
+            "selected faces",
+            "vs_face",
+            "fs_face",
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let points = element_pipeline(
+            "vertex points",
+            "vs_point",
+            "fs_point",
+            wgpu::PrimitiveTopology::TriangleStrip,
+        );
+        let edges = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("edges"),
+            layout: Some(&edge_pl),
+            vertex: wgpu::VertexState {
+                module: &edge_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                // No vertex buffers: the shader reads positions from storage and
+                // builds a quad from the vertex and instance indices, so a mesh's
+                // whole wireframe is one draw call.
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &edge_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            // Tests against the solid pass but does not write: overlays layer by
+            // draw order and depth offset rather than fighting each other, which
+            // is what stops the shimmer while orbiting.
+            depth_stencil: Some(gpu::depth_read_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
 
         let solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -310,9 +1170,51 @@ impl Viewport {
             globals_bind,
             grid_buf,
             grid_bind,
+            edges,
+            edge_globals_buf,
+            edge_globals_bind,
+            id_pipelines,
+            id_globals_buf,
+            id_globals_bind,
+            faces,
+            points,
+            element_globals_buf,
+            element_globals_bind,
+            element_objects: UniformRing::new(
+                device,
+                &element_object_layout,
+                ELEMENT_OBJECT_SIZE,
+                8,
+                "element objects",
+            ),
+            element_object_layout,
+            preview_layout,
+            preview_buf,
+            preview_generation: None,
+            preview_bind,
+            preview_idle_bits,
+            id_objects: UniformRing::new(
+                device,
+                &id_object_layout,
+                ID_OBJECT_SIZE,
+                8,
+                "id objects",
+            ),
+            id_object_layout,
+            objects: UniformRing::new(device, &object_layout, OBJECT_SIZE, 8, "objects"),
+            edge_objects: UniformRing::new(
+                device,
+                &edge_object_layout,
+                EDGE_OBJECT_SIZE,
+                8,
+                "edge objects",
+            ),
             object_layout,
+            edge_object_layout,
+            layouts,
             depth: gpu::create_depth_texture(device, width, height),
             size: (width.max(1), height.max(1)),
+            render_size: (width.max(1), height.max(1)),
             shading: ShadingMode::Studio,
             background: wgpu::Color {
                 r: 0.055,
@@ -321,23 +1223,71 @@ impl Viewport {
                 a: 1.0,
             },
             show_grid: true,
+            show_wireframe: true,
+            show_elements: false,
+            wireframe_width: 1.5,
+            point_size: 6.0,
+            pick_scale: 1.0,
         }
     }
 
+    /// Sets the allocated size of the depth target.
+    ///
+    /// Clamped to the device limits in the same way the depth texture is, so the
+    /// recorded size always describes what was actually allocated.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let size = (width.max(1), height.max(1));
+        let max = device.limits().max_texture_dimension_2d;
+        let size = (width.clamp(1, max), height.clamp(1, max));
         if size != self.size {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
         }
+        self.render_size = self.render_size.clamp_to(size);
     }
 
+    /// Sets the exact region of the target that is drawn into.
+    ///
+    /// Must be no larger than the allocated size. Everything else — the aspect
+    /// ratio, the pass viewport, and the UVs the caller should sample — follows
+    /// from this rather than from the allocation.
+    pub fn set_render_size(&mut self, width: u32, height: u32) {
+        self.render_size = (
+            width.max(1).min(self.size.0),
+            height.max(1).min(self.size.1),
+        );
+    }
+
+    #[inline]
+    pub fn render_size(&self) -> (u32, u32) {
+        self.render_size
+    }
+
+    /// The fraction of the target that holds the image, for the caller's UVs.
+    ///
+    /// Sampling the whole texture instead is the stretch this exists to avoid.
+    pub fn uv_extent(&self) -> (f32, f32) {
+        (
+            self.render_size.0 as f32 / self.size.0 as f32,
+            self.render_size.1 as f32 / self.size.1 as f32,
+        )
+    }
+
+    /// Aspect ratio of the drawn region, which is what the projection needs.
     pub fn aspect(&self) -> f64 {
-        self.size.0 as f64 / self.size.1 as f64
+        self.render_size.0 as f64 / self.render_size.1 as f64
     }
 
     /// Uploads per-frame uniforms.
-    pub fn prepare(&self, queue: &wgpu::Queue, camera: &Camera, meshes: &[(&GpuMesh, DAffine3)]) {
+    ///
+    /// Takes `&mut self` because the per-draw uniform rings are sized by the
+    /// number of *draws*, which the number of meshes does not bound.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        draws: &[Draw],
+    ) {
         let aspect = self.aspect();
         let view_proj = camera.view_projection(aspect);
 
@@ -391,20 +1341,309 @@ impl Viewport {
             }),
         );
 
-        for (mesh, model) in meshes {
-            let m = camera.model_matrix_relative(model);
+        queue.write_buffer(
+            &self.edge_globals_buf,
+            0,
+            bytemuck::bytes_of(&EdgeGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                params: [
+                    self.render_size.0 as f32,
+                    self.render_size.1 as f32,
+                    self.wireframe_width,
+                    // Overlay layer 2. A fraction of the fragment's own depth, so
+                    // it is scale-invariant: the same nudge works at a centimetre
+                    // and at a kilometre, which a constant bias cannot manage.
+                    EDGE_DEPTH_OFFSET,
+                ],
+            }),
+        );
+
+        queue.write_buffer(
+            &self.element_globals_buf,
+            0,
+            bytemuck::bytes_of(&ElementGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                params: [
+                    self.render_size.0 as f32,
+                    self.render_size.1 as f32,
+                    self.point_size,
+                    0.0,
+                ],
+                // The same layer offsets the id pass uses, taken from the same
+                // place: the z order of the overlays on screen has to be the z
+                // order in the id buffer, or the thing that looks clickable is
+                // not the thing that gets clicked.
+                layers: [
+                    PickDomain::Face.depth_offset(),
+                    PickDomain::Vert.depth_offset(),
+                    FACE_FILL_ALPHA,
+                    0.0,
+                ],
+            }),
+        );
+
+        let count = draws.len() as u32;
+        self.objects
+            .ensure(device, &self.object_layout, OBJECT_SIZE, count, "objects");
+        self.element_objects.ensure(
+            device,
+            &self.element_object_layout,
+            ELEMENT_OBJECT_SIZE,
+            count,
+            "element objects",
+        );
+        self.edge_objects.ensure(
+            device,
+            &self.edge_object_layout,
+            EDGE_OBJECT_SIZE,
+            count,
+            "edge objects",
+        );
+
+        // One slot per draw, not per mesh. Two linked duplicates share a single
+        // datablock and differ only here, so a buffer owned by the mesh would let
+        // the second draw overwrite the first and both would land in one place.
+        for (i, draw) in draws.iter().enumerate() {
+            let i = i as u32;
+            let m = camera.model_matrix_relative(&draw.transform);
             let normal = normal_matrix(&m);
             queue.write_buffer(
-                &mesh.object,
-                0,
+                &self.objects.buffer,
+                self.objects.offset(i) as u64,
                 bytemuck::bytes_of(&ObjectData {
                     model: m.to_cols_array_2d(),
                     normal_col0: normal.x_axis.extend(0.0).to_array(),
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
-                    base_color: mesh.color.to_array(),
+                    base_color: draw.mesh.color.to_array(),
                 }),
             );
+            queue.write_buffer(
+                &self.element_objects.buffer,
+                self.element_objects.offset(i) as u64,
+                bytemuck::bytes_of(&ElementObject {
+                    model: m.to_cols_array_2d(),
+                    selected_color: SELECTED_COLOR,
+                    // Unselected vertices are drawn too, and pale: they are the
+                    // handles, and a vertex you cannot see is a vertex you
+                    // cannot aim at.
+                    unselected_color: [0.62, 0.64, 0.68, 1.0],
+                    flags: [f32::from(u8::from(draw.preview)), 0.0, 0.0, 0.0],
+                }),
+            );
+            queue.write_buffer(
+                &self.edge_objects.buffer,
+                self.edge_objects.offset(i) as u64,
+                bytemuck::bytes_of(&EdgeObject {
+                    model: m.to_cols_array_2d(),
+                    // Darker than the surface so the wireframe reads as structure
+                    // rather than competing with the shading.
+                    base_color: [0.05, 0.05, 0.06, 1.0],
+                    selected_color: SELECTED_COLOR,
+                    flags_params: [
+                        0.55,
+                        1.0,
+                        f32::from(u8::from(draw.selected)),
+                        f32::from(u8::from(draw.preview)),
+                    ],
+                }),
+            );
+        }
+    }
+
+    /// Points the overlays at what a rubber-band drag would select.
+    ///
+    /// `bits` is the bitset the compute reduction produced this frame, read
+    /// directly rather than copied back: that is what lets the highlight follow
+    /// the drag with no readback and no upload, so what the user sees during the
+    /// drag is what the commit will apply.
+    ///
+    /// Must be called every frame the overlays are drawn, active or not. A
+    /// pipeline with a bind group in its layout needs one bound, and leaving a
+    /// stale one in place would keep highlighting the previous drag.
+    pub fn prepare_preview(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bits: &wgpu::Buffer,
+        generation: u64,
+        preview: Option<PreviewSelection>,
+    ) {
+        let mode = match &preview {
+            Some(p) => [
+                1,
+                match p.domain {
+                    PickDomain::Vert => 0,
+                    PickDomain::Edge => 1,
+                    _ => 2,
+                },
+                u32::from(p.deselect),
+                p.elements,
+            ],
+            None => [0; 4],
+        };
+        queue.write_buffer(
+            &self.preview_buf,
+            0,
+            bytemuck::bytes_of(&PreviewParams { mode }),
+        );
+
+        // Rebuilt only when the reduction has reallocated its bitset. Rebuilding
+        // every frame would put a bind group creation in the drag path, which is
+        // the one path that has to stay quiet.
+        if self.preview_generation != Some(generation) {
+            self.preview_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("preview bind"),
+                layout: &self.preview_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.preview_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: bits.as_entire_binding(),
+                    },
+                ],
+            });
+            self.preview_generation = Some(generation);
+        }
+    }
+
+    /// Writes the uniforms the id pass reads.
+    ///
+    /// Separate from [`Viewport::prepare`] because the id pass is not drawn every
+    /// frame — object mode has no element picking — and because the domain being
+    /// selected in changes the radius and the depth offset.
+    pub fn prepare_ids(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        draws: &[Draw],
+        domain: PickDomain,
+    ) {
+        let view_proj = camera.view_projection(self.aspect());
+        queue.write_buffer(
+            &self.id_globals_buf,
+            0,
+            bytemuck::bytes_of(&IdGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                params: [
+                    self.render_size.0 as f32,
+                    self.render_size.1 as f32,
+                    // The pick tolerance, in pixels. Scaled by the display
+                    // scaling so that a tolerance chosen as "about a vertex dot
+                    // and a half" stays that on a high-density screen instead of
+                    // shrinking to a third of it.
+                    domain.radius_px() * self.pick_scale,
+                    domain.depth_offset(),
+                ],
+            }),
+        );
+
+        let count = draws.len() as u32;
+        self.id_objects.ensure(
+            device,
+            &self.id_object_layout,
+            ID_OBJECT_SIZE,
+            count,
+            "id objects",
+        );
+        for (i, draw) in draws.iter().enumerate() {
+            let m = camera.model_matrix_relative(&draw.transform);
+            queue.write_buffer(
+                &self.id_objects.buffer,
+                self.id_objects.offset(i as u32) as u64,
+                bytemuck::bytes_of(&IdObject {
+                    model: m.to_cols_array_2d(),
+                    // Plus one, so that an untouched pixel reads as a miss rather
+                    // than as the first object in the scene.
+                    ids: [draw.object_id + 1, 0, 0, 0],
+                }),
+            );
+        }
+    }
+
+    /// Records the id pass into `target`.
+    ///
+    /// Must run after [`Viewport::render`] in the same encoder: it tests against
+    /// the depth buffer that pass produced, which is what makes occlusion in the
+    /// id buffer exactly the occlusion on screen.
+    pub fn render_ids(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[Draw],
+        domain: PickDomain,
+        xray: bool,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ids"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Cleared to zero every frame: zero is "nothing here", and a
+                    // stale id left behind would be clickable long after the
+                    // element stopped being visible.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth,
+                depth_ops: Some(wgpu::Operations {
+                    // Loaded, never cleared. The depth this tests against is the
+                    // one the visible frame was drawn with.
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_viewport(
+            0.0,
+            0.0,
+            self.render_size.0 as f32,
+            self.render_size.1 as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_pipeline(self.id_pipelines.get(domain, xray));
+        pass.set_bind_group(0, &self.id_globals_bind, &[]);
+
+        for (i, draw) in draws.iter().enumerate() {
+            let mesh = draw.mesh;
+            let count = match domain {
+                PickDomain::Object | PickDomain::Face => mesh.counts.triangles * 3,
+                PickDomain::Edge => mesh.counts.edges,
+                PickDomain::Vert => mesh.counts.verts,
+            };
+            if count == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, &mesh.id_bind, &[]);
+            pass.set_bind_group(
+                2,
+                &self.id_objects.bind,
+                &[self.id_objects.offset(i as u32)],
+            );
+            match domain {
+                // Non-indexed: the shader reads the index buffer as storage so
+                // that `vertex_index` counts triangle corners and the face id is
+                // a lookup. See the shader for why the obvious alternatives do
+                // not work.
+                PickDomain::Object | PickDomain::Face => pass.draw(0..count, 0..1),
+                // Four vertices per element, one instance each: every edge or
+                // vertex of a mesh in a single draw.
+                PickDomain::Edge | PickDomain::Vert => pass.draw(0..4, 0..count),
+            }
         }
     }
 
@@ -413,7 +1652,7 @@ impl Viewport {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        meshes: &[(&GpuMesh, DAffine3)],
+        draws: &[Draw],
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("viewport"),
@@ -440,18 +1679,106 @@ impl Viewport {
             multiview_mask: None,
         });
 
+        // Every overlay pipeline has the preview group in its layout, so one is
+        // always bound — pointing at a zeroed bitset with the preview switched
+        // off when no drag is in progress. Built once in `new` rather than
+        // branched on here, because a second pass list for the no-preview case
+        // is a copy that drifts.
+        let preview = &self.preview_bind;
+
+        // Draw only into the region the caller will sample. Without this the
+        // image is stretched by however much the allocation was rounded up.
+        pass.set_viewport(
+            0.0,
+            0.0,
+            self.render_size.0 as f32,
+            self.render_size.1 as f32,
+            0.0,
+            1.0,
+        );
+
         // Opaque geometry first, so the grid can be depth-tested against it.
         pass.set_pipeline(&self.solid);
         pass.set_bind_group(0, &self.globals_bind, &[]);
-        for (mesh, _) in meshes {
+        for (i, draw) in draws.iter().enumerate() {
+            let mesh = draw.mesh;
             if mesh.counts.triangles == 0 {
                 continue;
             }
-            pass.set_bind_group(1, &mesh.object_bind, &[]);
+            pass.set_bind_group(1, &self.objects.bind, &[self.objects.offset(i as u32)]);
             pass.set_vertex_buffer(0, mesh.positions.slice(..));
             pass.set_vertex_buffer(1, mesh.normals.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+        }
+
+        // Selected faces first among the overlays, at the layer nearest the
+        // surface, so a selected face's own edges and vertices still read on top
+        // of its fill.
+        if self.show_elements {
+            pass.set_pipeline(&self.faces);
+            pass.set_bind_group(0, &self.element_globals_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.triangles == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &mesh.id_bind, &[]);
+                pass.set_bind_group(
+                    2,
+                    &self.element_objects.bind,
+                    &[self.element_objects.offset(i as u32)],
+                );
+                pass.set_bind_group(3, preview, &[]);
+                // Non-indexed, so the shader can name the face a triangle came
+                // from — see the shader.
+                pass.draw(0..mesh.counts.triangles * 3, 0..1);
+            }
+        }
+
+        // Wireframe over the solid pass, before the grid, so geometry occludes
+        // the grid but its own edges sit on top of it.
+        if self.show_wireframe {
+            pass.set_pipeline(&self.edges);
+            pass.set_bind_group(0, &self.edge_globals_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.edges == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &mesh.edge_bind, &[]);
+                pass.set_bind_group(
+                    2,
+                    &self.edge_objects.bind,
+                    &[self.edge_objects.offset(i as u32)],
+                );
+                pass.set_bind_group(3, preview, &[]);
+                // Four vertices per edge, one instance per edge: the whole
+                // wireframe of a mesh in a single draw.
+                pass.draw(0..4, 0..mesh.counts.edges);
+            }
+        }
+
+        // Vertex points last of the element overlays and at the nearest layer: a
+        // vertex sits on top of both the edges and the faces meeting at it, or
+        // the handle disappears exactly where the user needs to grab it.
+        if self.show_elements {
+            pass.set_pipeline(&self.points);
+            pass.set_bind_group(0, &self.element_globals_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.verts == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &mesh.id_bind, &[]);
+                pass.set_bind_group(
+                    2,
+                    &self.element_objects.bind,
+                    &[self.element_objects.offset(i as u32)],
+                );
+                pass.set_bind_group(3, preview, &[]);
+                pass.draw(0..4, 0..mesh.counts.verts);
+            }
         }
 
         if self.show_grid {
@@ -459,6 +1786,17 @@ impl Viewport {
             pass.set_bind_group(0, &self.grid_bind, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+}
+
+/// Clamps a size to fit inside another.
+trait ClampTo {
+    fn clamp_to(self, bounds: Self) -> Self;
+}
+
+impl ClampTo for (u32, u32) {
+    fn clamp_to(self, bounds: Self) -> Self {
+        (self.0.min(bounds.0).max(1), self.1.min(bounds.1).max(1))
     }
 }
 
@@ -470,6 +1808,15 @@ impl Viewport {
 fn normal_matrix(model: &Mat4) -> Mat3 {
     Mat3::from_mat4(*model).inverse().transpose()
 }
+
+/// Sizes of the per-draw uniform blocks, used both to allocate the rings and to
+/// declare `min_binding_size` on their layouts.
+const OBJECT_SIZE: u64 = std::mem::size_of::<ObjectData>() as u64;
+const EDGE_OBJECT_SIZE: u64 = std::mem::size_of::<EdgeObject>() as u64;
+
+/// Relative depth nudge for the wireframe, as a fraction of the fragment's own
+/// depth. Layer 2 in the overlay stack: above filled faces, below vertex points.
+const EDGE_DEPTH_OFFSET: f32 = 3.0e-4;
 
 /// Depth format, re-exported so callers configuring an offscreen viewport target
 /// do not have to reach into `gpu`.
@@ -517,6 +1864,31 @@ mod tests {
             (naive - correct).length() > 0.5,
             "the two must differ under non-uniform scale, or the test proves nothing"
         );
+    }
+
+    #[test]
+    fn the_drawn_region_drives_the_aspect_ratio_not_the_allocation() {
+        // The defect: an offscreen target allocated in coarse steps is larger
+        // than the area on screen, and projecting for the allocation while
+        // sampling it into a smaller rectangle stretches the image.
+        //
+        // Exercised through the size arithmetic rather than a device, because
+        // that is where the mistake is.
+        let alloc = (960u32, 384u32);
+        let exact = (960u32, 356u32);
+        let aspect_from_alloc = alloc.0 as f64 / alloc.1 as f64;
+        let aspect_from_exact = exact.0 as f64 / exact.1 as f64;
+        assert!(
+            (aspect_from_alloc - aspect_from_exact).abs() > 0.15,
+            "the two aspects must differ, or the test proves nothing"
+        );
+
+        let uv = (
+            exact.0 as f32 / alloc.0 as f32,
+            exact.1 as f32 / alloc.1 as f32,
+        );
+        assert!((uv.0 - 1.0).abs() < 1e-6, "width was not rounded");
+        assert!(uv.1 < 0.94, "height was rounded up, so the UV must be < 1");
     }
 
     #[test]

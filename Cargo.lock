@@ -1240,7 +1240,9 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glam",
+ "image",
  "kreate-i18n",
+ "kreate-input",
  "kreate-io",
  "kreate-math",
  "kreate-mesh",
@@ -1272,6 +1274,9 @@ dependencies = [
 [[package]]
 name = "kreate-input"
 version = "0.1.0"
+dependencies = [
+ "kreate-reflect",
+]
 
 [[package]]
 name = "kreate-io"
@@ -1361,7 +1366,10 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "kreate-i18n",
+ "kreate-input",
+ "kreate-math",
  "kreate-reflect",
+ "kreate-render",
 ]
 
 [[package]]

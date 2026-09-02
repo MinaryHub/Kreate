@@ -60,6 +60,21 @@ pub enum AttrType {
     U8x4,
 }
 
+impl AttrType {
+    /// Bytes per element. Used by the memory-budget tests; the numbers are the
+    /// point of choosing packed types (`U8x4` colours, `f16` UVs) in the first
+    /// place, so they are worth being able to add up.
+    pub fn size(self) -> usize {
+        match self {
+            AttrType::F32 | AttrType::I32 | AttrType::U8x4 => 4,
+            AttrType::Bool => 1,
+            AttrType::F32x2 => 8,
+            AttrType::F32x3 => 12,
+            AttrType::F32x4 => 16,
+        }
+    }
+}
+
 /// A layer's values. One `Arc` per array — see the module docs.
 #[derive(Clone, Debug)]
 pub enum AttrData {
@@ -101,6 +116,11 @@ impl AttrData {
         self.len() == 0
     }
 
+    /// Heap bytes this layer's array occupies.
+    pub fn memory_bytes(&self) -> usize {
+        self.len() * self.ty().size()
+    }
+
     /// Allocates `len` default values of the given type.
     pub fn zeroed(ty: AttrType, len: usize) -> Self {
         match ty {
@@ -131,6 +151,52 @@ impl AttrData {
         }
     }
 
+    /// Rewrites entry `i` with the type's default value.
+    ///
+    /// Needed because arenas reuse freed slots and attribute arrays are indexed
+    /// by slot: without this a new element silently inherits the UVs, crease and
+    /// selection state of whatever was deleted in its place, which only shows up
+    /// after a delete and reads as random corruption.
+    fn set_default_at(&mut self, i: usize) {
+        if i >= self.len() {
+            return;
+        }
+        match self {
+            AttrData::F32(v) => Arc::make_mut(v)[i] = 0.0,
+            AttrData::F32x2(v) => Arc::make_mut(v)[i] = Vec2::ZERO,
+            AttrData::F32x3(v) => Arc::make_mut(v)[i] = Vec3::ZERO,
+            AttrData::F32x4(v) => Arc::make_mut(v)[i] = Vec4::ZERO,
+            AttrData::I32(v) => Arc::make_mut(v)[i] = 0,
+            AttrData::Bool(v) => Arc::make_mut(v)[i] = false,
+            AttrData::U8x4(v) => Arc::make_mut(v)[i] = [0; 4],
+        }
+    }
+
+    /// Builds a new array by picking entries in the given order.
+    ///
+    /// The operation every renumbering needs: compaction, and converting between
+    /// a slot-indexed edit structure and a densely indexed storage one. Indices
+    /// past the end take the type's default rather than panicking, so a caller
+    /// with a partial map gets a defined result instead of a crash inside a
+    /// conversion.
+    pub fn gather(&self, indices: &[u32]) -> Self {
+        fn pick<T: Copy + Default>(src: &[T], indices: &[u32]) -> Vec<T> {
+            indices
+                .iter()
+                .map(|&i| src.get(i as usize).copied().unwrap_or_default())
+                .collect()
+        }
+        match self {
+            AttrData::F32(v) => AttrData::F32(Arc::new(pick(v, indices))),
+            AttrData::F32x2(v) => AttrData::F32x2(Arc::new(pick(v, indices))),
+            AttrData::F32x3(v) => AttrData::F32x3(Arc::new(pick(v, indices))),
+            AttrData::F32x4(v) => AttrData::F32x4(Arc::new(pick(v, indices))),
+            AttrData::I32(v) => AttrData::I32(Arc::new(pick(v, indices))),
+            AttrData::Bool(v) => AttrData::Bool(Arc::new(pick(v, indices))),
+            AttrData::U8x4(v) => AttrData::U8x4(Arc::new(pick(v, indices))),
+        }
+    }
+
     /// Whether two layers share the same allocation.
     ///
     /// This is the free, exact "did this change?" test that the evaluation cache
@@ -144,6 +210,7 @@ impl AttrData {
             (AttrData::I32(a), AttrData::I32(b)) => Arc::ptr_eq(a, b),
             (AttrData::Bool(a), AttrData::Bool(b)) => Arc::ptr_eq(a, b),
             (AttrData::U8x4(a), AttrData::U8x4(b)) => Arc::ptr_eq(a, b),
+            // Two different types are never the same array, whatever they hold.
             _ => false,
         }
     }
@@ -190,6 +257,16 @@ pub mod names {
     pub fn is_internal(name: &str) -> bool {
         name.starts_with('.')
     }
+
+    /// `true` for the three selection layers.
+    ///
+    /// Named rather than inferred from the leading dot: selection is the one
+    /// internal layer a renderer can apply without touching geometry, and a
+    /// future internal layer that happens to start with a dot must not be
+    /// swept into that category by accident.
+    pub fn is_selection(name: &str) -> bool {
+        matches!(name, SELECT_VERT | SELECT_EDGE | SELECT_FACE)
+    }
 }
 
 /// A set of named layers, kept sorted by name.
@@ -218,6 +295,15 @@ impl AttributeStore {
 
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
+    }
+
+    /// Heap bytes every layer's array occupies.
+    ///
+    /// Names are not counted: a layer name is a handful of bytes and this
+    /// number exists to be compared against a per-vertex budget, where the
+    /// arrays are the whole story.
+    pub fn memory_bytes(&self) -> usize {
+        self.layers.iter().map(|l| l.data.memory_bytes()).sum()
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -273,6 +359,30 @@ impl AttributeStore {
     pub fn resize_domain(&mut self, domain: Domain, len: usize) {
         for l in self.layers.iter_mut().filter(|l| l.domain == domain) {
             l.data.resize(len);
+        }
+    }
+
+    /// Resets entry `index` of every layer in a domain to its default.
+    ///
+    /// Called when an arena hands back a recycled slot.
+    pub fn reset_at(&mut self, domain: Domain, index: usize) {
+        for layer in self.layers.iter_mut() {
+            if layer.domain == domain {
+                layer.data.set_default_at(index);
+            }
+        }
+    }
+
+    /// Rebuilds every layer of a domain by picking entries in the given order.
+    ///
+    /// The bulk renumbering hook: one call reindexes every layer in lockstep, so
+    /// a caller cannot reindex three of four and leave the fourth silently
+    /// misaligned.
+    pub fn gather_domain(&mut self, domain: Domain, indices: &[u32]) {
+        for layer in self.layers.iter_mut() {
+            if layer.domain == domain {
+                layer.data = layer.data.gather(indices);
+            }
         }
     }
 }

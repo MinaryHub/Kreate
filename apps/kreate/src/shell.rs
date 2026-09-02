@@ -22,8 +22,9 @@
 
 use egui::{Panel, Ui};
 use kreate_i18n::{Catalog, TextKind};
-use kreate_ops::{History, OperatorRegistry, PropertyMap};
+use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
 use kreate_scene::document::{ObjectData, ObjectId};
+use kreate_scene::modifier::ModifierKind;
 use kreate_scene::Document;
 use kreate_ui::outliner::{OutlinerRow, RowKind};
 use kreate_ui::{Command, CommandQueue};
@@ -40,6 +41,34 @@ pub struct ShellState {
     pub egui_wants_keyboard: bool,
     /// Set while an IME is composing.
     pub ime_active: bool,
+    /// Whether the application is in mesh edit mode.
+    pub edit_mode: bool,
+    /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
+    pub select_mode: u32,
+    /// The camera's rotation, for drawing the navigation gizmo. Interface state
+    /// reads the camera; it never writes to it.
+    pub camera_rotation: kreate_math::DQuat,
+    /// Set while the pointer is over the navigation gizmo, so the viewport's own
+    /// navigation stands down and the two do not both act on one drag.
+    pub gizmo_active: bool,
+    /// The rubber-band rectangle to draw, in viewport-relative points.
+    ///
+    /// Set by the application while a selection drag is in progress. The
+    /// interface draws it and nothing else: the rectangle it *means* is resolved
+    /// on the GPU against the id buffer, and the two are the same numbers.
+    pub select_band: Option<(egui::Pos2, egui::Pos2)>,
+    /// Whether the drag is removing from the selection rather than adding.
+    pub select_band_deselect: bool,
+    /// Whether the remapping panel is open.
+    pub show_keymap: bool,
+    /// The binding waiting for a keystroke, if any.
+    ///
+    /// Lives here rather than in the panel because the application, not the
+    /// interface, is what sees the key event — the panel only says which binding
+    /// is listening.
+    pub capturing: Option<kreate_input::BindingId>,
+    /// What the panel asked for this frame.
+    pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
 }
 
 impl Default for ShellState {
@@ -52,18 +81,35 @@ impl Default for ShellState {
             show_properties: true,
             egui_wants_keyboard: false,
             ime_active: false,
+            edit_mode: false,
+            select_mode: 2,
+            camera_rotation: kreate_math::DQuat::IDENTITY,
+            gizmo_active: false,
+            select_band: None,
+            select_band_deselect: false,
+            show_keymap: false,
+            capturing: None,
+            keymap_edits: Vec::new(),
         }
     }
 }
 
 impl ShellState {
+    /// Whether the panel is listening for a keystroke to bind.
+    ///
+    /// While it is, the keymap must not act on keys — pressing `E` to bind it
+    /// would also extrude.
+    pub fn is_capturing(&self) -> bool {
+        self.capturing.is_some()
+    }
+
     /// Whether a viewport keyboard shortcut may run this frame.
     ///
     /// The gate that keeps a rename field from firing tool shortcuts. It is a
     /// single check in a single place on purpose: scattered `if !typing` tests
     /// are how the bug comes back.
     pub fn keymap_enabled(&self) -> bool {
-        !self.egui_wants_keyboard && !self.ime_active
+        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing()
     }
 }
 
@@ -102,6 +148,99 @@ pub fn outliner_rows(doc: &Document) -> Vec<OutlinerRow> {
         .collect()
 }
 
+/// Builds the modifier stack's view model for the active object.
+///
+/// Empty when nothing is active, which the panel draws differently from "this
+/// object has no modifiers" — the two are different states and must not look
+/// the same.
+///
+/// Each row carries the setter operator's id, its reflected schema and the
+/// entry's current parameters *in that operator's terms*, so the panel draws
+/// itself from reflection and knows nothing about what a mirror is.
+pub fn modifier_rows(
+    doc: &Document,
+    registry: &OperatorRegistry,
+    catalog: &Catalog,
+) -> Vec<kreate_ui::ModifierRow> {
+    let Some(id) = doc.selection.active else {
+        return Vec::new();
+    };
+    let Some(object) = doc.object(id) else {
+        return Vec::new();
+    };
+    object
+        .modifiers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let op_id = setter_for(&entry.kind);
+            let info = registry.get(op_id)?;
+            let name = catalog.format(entry.kind.name_key(), TextKind::Ui, &[]);
+            Some(kreate_ui::ModifierRow {
+                index: index as u32,
+                name,
+                enabled: entry.enabled,
+                op_id: op_id.to_string(),
+                schema: info.schema,
+                params: setter_params(index as u32, &entry.kind),
+            })
+        })
+        .collect()
+}
+
+/// Which operator writes a given kind's parameters.
+fn setter_for(kind: &ModifierKind) -> &'static str {
+    match kind {
+        ModifierKind::Mirror(_) => "object.modifier_set_mirror",
+        ModifierKind::Subdivide(_) => "object.modifier_set_subdivide",
+        ModifierKind::Array(_) => "object.modifier_set_array",
+    }
+}
+
+/// A modifier's parameters, in its setter operator's terms.
+///
+/// The panel edits this and hands it straight back to the operator, so the
+/// values shown are the values applied — there is no third representation to
+/// drift out of step.
+fn setter_params(index: u32, kind: &ModifierKind) -> PropertyMap {
+    let mut p = PropertyMap::new();
+    p.set("index", PropertyValue::Int(index as i64));
+    match kind {
+        ModifierKind::Mirror(m) => {
+            p.set("x", PropertyValue::Bool(m.x));
+            p.set("y", PropertyValue::Bool(m.y));
+            p.set("z", PropertyValue::Bool(m.z));
+            p.set(
+                "merge_threshold",
+                PropertyValue::Float(m.merge_threshold as f64),
+            );
+        }
+        ModifierKind::Subdivide(sub) => {
+            p.set("levels", PropertyValue::Int(sub.levels as i64));
+        }
+        ModifierKind::Array(a) => {
+            p.set("count", PropertyValue::Int(a.count as i64));
+            p.set(
+                "relative",
+                PropertyValue::Vec3([
+                    a.relative.x as f64,
+                    a.relative.y as f64,
+                    a.relative.z as f64,
+                ]),
+            );
+            p.set(
+                "constant",
+                PropertyValue::Vec3([
+                    a.constant.x as f64,
+                    a.constant.y as f64,
+                    a.constant.z as f64,
+                ]),
+            );
+        }
+    }
+    p
+}
+
 /// Opaque key for an object, so the UI can round-trip a handle it cannot read.
 pub fn object_key(id: ObjectId) -> u32 {
     use kreate_mesh::arena::ArenaIndex as _;
@@ -120,6 +259,14 @@ pub fn object_from_key(doc: &Document, key: u32) -> Option<ObjectId> {
         .find(|id| object_key(*id) == key)
 }
 
+/// The offscreen viewport, and how much of it holds the image.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewportImage {
+    pub texture: egui::TextureId,
+    /// Upper-right UV of the drawn region.
+    pub uv: (f32, f32),
+}
+
 /// Panel and menu labels, resolved once per frame.
 struct Labels {
     add_cube: String,
@@ -129,6 +276,29 @@ struct Labels {
     redo: String,
     outliner: String,
     properties: String,
+    modifiers: String,
+    keymap: String,
+    mode_object: String,
+    mode_edit: String,
+    extrude: String,
+    subdivide: String,
+    dissolve: String,
+    inset: String,
+    bridge: String,
+    loop_cut: String,
+    shade_smooth: String,
+    shade_flat: String,
+    mark_sharp: String,
+    recalc_normals: String,
+    fill: String,
+    spin: String,
+    bevel: String,
+    merge: String,
+    weld: String,
+    select_loop: String,
+    select_vert: String,
+    select_edge: String,
+    select_face: String,
 }
 
 impl Labels {
@@ -142,18 +312,45 @@ impl Labels {
             redo: t("menu-redo"),
             outliner: t("panel-outliner"),
             properties: t("panel-properties"),
+            modifiers: t("panel-modifiers"),
+            keymap: t("panel-keymap"),
+            mode_object: t("mode-object"),
+            mode_edit: t("mode-edit"),
+            extrude: t("menu-extrude"),
+            subdivide: t("menu-subdivide"),
+            dissolve: t("menu-dissolve"),
+            inset: t("menu-inset"),
+            bridge: t("menu-bridge"),
+            loop_cut: t("menu-loop-cut"),
+            shade_smooth: t("menu-shade-smooth"),
+            shade_flat: t("menu-shade-flat"),
+            mark_sharp: t("menu-mark-sharp"),
+            recalc_normals: t("menu-recalc-normals"),
+            fill: t("menu-fill"),
+            spin: t("menu-spin"),
+            bevel: t("menu-bevel"),
+            merge: t("menu-merge"),
+            weld: t("menu-weld"),
+            select_loop: t("menu-select-loop"),
+            select_vert: t("select-mode-vert"),
+            select_edge: t("select-mode-edge"),
+            select_face: t("select-mode-face"),
         }
     }
 }
 
 /// Draws the whole shell and returns the rectangle left for the viewport.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut Ui,
     state: &mut ShellState,
     doc: &Document,
     registry: &OperatorRegistry,
     history: &History,
-    viewport_texture: Option<egui::TextureId>,
+    keymap: &kreate_input::Keymap,
+    preset: kreate_input::Preset,
+    overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+    viewport_texture: Option<ViewportImage>,
 ) -> egui::Rect {
     // Resolved once per frame into owned strings. A closure over the catalog
     // would hold a borrow of `state` for the whole function, which conflicts with
@@ -169,9 +366,20 @@ pub fn draw(
         ],
     );
     let rows = outliner_rows(doc);
+    // Built here rather than inside the panel: the panel edits the parameters in
+    // place, and a closure over `doc` would hold a borrow across the mutable
+    // access the command queue needs.
+    let mut modifier_rows = modifier_rows(doc, registry, &state.catalog);
 
     Panel::top("menu").show(ui, |ui| {
-        ui.horizontal(|ui| {
+        // Wrapped, not clipped. The edit-mode toolbar is already wide enough to
+        // run off a narrow window, and a clipped row silently hides buttons —
+        // the user concludes the tool does not exist. Wrapping costs a little
+        // height and loses nothing.
+        //
+        // Grouped menus are the real answer and the plan budgets for them; this
+        // is what keeps the row honest until then.
+        ui.horizontal_wrapped(|ui| {
             if ui.button(&l.add_cube).clicked() {
                 let mut p = PropertyMap::new();
                 p.set("shape", kreate_reflect::PropertyValue::Enum(1));
@@ -197,13 +405,154 @@ pub fn draw(
                 }
             });
             ui.separator();
+
+            // The mode switch is a pair of exclusive buttons rather than a
+            // checkbox: which mode you are in governs what every other key does,
+            // so it has to be readable at a glance rather than inferred from a
+            // tick.
+            let label = if state.edit_mode {
+                &l.mode_edit
+            } else {
+                &l.mode_object
+            };
+            if ui
+                .add_enabled(
+                    state.edit_mode || doc.selection.active.is_some(),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                state.queue.push(Command::ToggleEditMode);
+            }
+
+            if state.edit_mode {
+                ui.separator();
+                for (index, text) in [
+                    (0u32, &l.select_vert),
+                    (1, &l.select_edge),
+                    (2, &l.select_face),
+                ] {
+                    if ui
+                        .selectable_label(state.select_mode == index, text)
+                        .clicked()
+                    {
+                        state.queue.push(Command::SetSelectMode(index));
+                    }
+                }
+                ui.separator();
+                if ui.button(&l.extrude).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
+                    state.queue.run("mesh.extrude_region", p);
+                }
+                if ui.button(&l.inset).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
+                    state.queue.run("mesh.inset", p);
+                }
+                if ui.button(&l.bridge).clicked() {
+                    state.queue.run("mesh.bridge", PropertyMap::new());
+                }
+                if ui.button(&l.loop_cut).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("cuts", kreate_reflect::PropertyValue::Int(1));
+                    p.set("position", kreate_reflect::PropertyValue::Float(0.5));
+                    state.queue.run("mesh.loop_cut", p);
+                }
+                if ui.button(&l.bevel).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("width", kreate_reflect::PropertyValue::Float(0.1));
+                    state.queue.run("mesh.bevel", p);
+                }
+                if ui.button(&l.subdivide).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("iterations", kreate_reflect::PropertyValue::Int(1));
+                    state.queue.run("mesh.subdivide", p);
+                }
+                // Delete and dissolve both act on whatever the current element
+                // mode is, so the button carries it rather than asking again.
+                if ui.button(&l.dissolve).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set(
+                        "mode",
+                        kreate_reflect::PropertyValue::Enum(state.select_mode),
+                    );
+                    state.queue.run("mesh.dissolve", p);
+                }
+                if ui.button(&l.delete).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set(
+                        "mode",
+                        kreate_reflect::PropertyValue::Enum(state.select_mode),
+                    );
+                    state.queue.run("mesh.delete", p);
+                }
+                ui.separator();
+                if ui.button(&l.merge).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("target", kreate_reflect::PropertyValue::Enum(0));
+                    state.queue.run("mesh.merge", p);
+                }
+                if ui.button(&l.weld).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
+                    state.queue.run("mesh.merge", p);
+                }
+                if ui.button(&l.select_loop).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("action", kreate_reflect::PropertyValue::Enum(3));
+                    state.queue.run("mesh.select", p);
+                }
+                ui.separator();
+                if ui.button(&l.shade_smooth).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
+                    state.queue.run("mesh.shade", p);
+                }
+                if ui.button(&l.shade_flat).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
+                    state.queue.run("mesh.shade", p);
+                }
+                if ui.button(&l.mark_sharp).clicked() {
+                    // By angle rather than by selection: a user reaching for
+                    // this on a freshly imported model has nothing selected, and
+                    // thirty degrees is the answer they want.
+                    let mut p = PropertyMap::new();
+                    p.set(
+                        "angle",
+                        kreate_reflect::PropertyValue::Float(30f64.to_radians()),
+                    );
+                    state.queue.run("mesh.mark_sharp", p);
+                }
+                if ui.button(&l.fill).clicked() {
+                    state.queue.run("mesh.fill", PropertyMap::new());
+                }
+                if ui.button(&l.spin).clicked() {
+                    state.queue.run("mesh.spin", PropertyMap::new());
+                }
+                if ui.button(&l.recalc_normals).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("action", kreate_reflect::PropertyValue::Enum(0));
+                    state.queue.run("mesh.normals", p);
+                }
+            }
+
+            ui.separator();
             ui.checkbox(&mut state.show_outliner, &l.outliner);
             ui.checkbox(&mut state.show_properties, &l.properties);
+            ui.checkbox(&mut state.show_keymap, &l.keymap);
         });
     });
 
     Panel::bottom("status").show(ui, |ui| {
         ui.horizontal(|ui| {
+            ui.label(if state.edit_mode {
+                &l.mode_edit
+            } else {
+                &l.mode_object
+            });
+            ui.separator();
             ui.label(&status);
             if let Some(entry) = history.last() {
                 ui.separator();
@@ -226,24 +575,171 @@ pub fn draw(
             .show(ui, |ui| {
                 ui.heading(&l.properties);
                 draw_adjust_panel(ui, state, registry, history);
+                ui.separator();
+                ui.heading(&l.modifiers);
+                draw_modifier_stack(ui, state, &mut modifier_rows);
             });
+    }
+
+    if state.show_keymap {
+        Panel::right("keymap").default_size(340.0).show(ui, |ui| {
+            ui.heading(&l.keymap);
+            let conflicts = keymap.conflicts();
+            let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
+            let mut edits = std::mem::take(&mut state.keymap_edits);
+            kreate_ui::keymap_editor(
+                ui,
+                keymap,
+                preset,
+                overrides,
+                &conflicts,
+                &text,
+                &mut state.capturing,
+                &mut edits,
+            );
+            state.keymap_edits = edits;
+        });
     }
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             let rect = ui.available_rect_before_wrap();
-            if let Some(texture) = viewport_texture {
+            if let Some(image) = viewport_texture {
+                // Only the part of the target that was drawn into. Sampling the
+                // whole texture would stretch the image by however much the
+                // allocation was rounded up.
                 ui.painter().image(
-                    texture,
+                    image.texture,
                     rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Rect::from_min_max(
+                        egui::pos2(0.0, 0.0),
+                        egui::pos2(image.uv.0, image.uv.1),
+                    ),
                     egui::Color32::WHITE,
                 );
             }
+            draw_select_band(ui, state, rect);
+            draw_nav_gizmo(ui, state, rect);
             rect
         })
         .inner
+}
+
+/// Everything the remapping panel says, resolved from the catalogue.
+///
+/// The counted lines are interpolated here rather than in the panel: Korean
+/// needs the number and the noun to agree in a way a format string cannot
+/// express, which is why the catalogue is Fluent.
+fn keymap_text(catalog: &Catalog, changed: usize, shadowed: usize) -> kreate_ui::KeymapText {
+    let t = |key: &str| catalog.format(key, TextKind::Ui, &[]);
+    kreate_ui::KeymapText {
+        preset: t("keymap-preset"),
+        changed: catalog.format(
+            "keymap-changed",
+            TextKind::Ui,
+            &[("count", &changed.to_string())],
+        ),
+        reset_all: t("keymap-reset-all"),
+        shadowed: if shadowed == 0 {
+            String::new()
+        } else {
+            catalog.format(
+                "keymap-shadowed",
+                TextKind::Ui,
+                &[("count", &shadowed.to_string())],
+            )
+        },
+        reset_hint: t("keymap-reset-hint"),
+        shadowed_hint: t("keymap-shadowed-hint"),
+        capture_hint: t("keymap-capture-hint"),
+        capturing: t("keymap-capturing"),
+        contexts: kreate_ui::keymap_editor::CONTEXT_ORDER
+            .into_iter()
+            .map(|c| t(kreate_ui::keymap_editor::context_key(c)))
+            .collect(),
+    }
+}
+
+/// The rubber band, over the viewport.
+///
+/// Drawn by the interface because it is a screen-space annotation with no
+/// geometry behind it, and egui already owns the layer above the viewport image.
+/// What it *selects* is decided by a compute pass over the id buffer from the
+/// same rectangle, so the outline and the result cannot disagree.
+fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
+    let Some((from, to)) = state.select_band else {
+        return;
+    };
+    let band = egui::Rect::from_two_pos(viewport.min + from.to_vec2(), viewport.min + to.to_vec2());
+    // Clipped to the viewport: a drag that leaves it should stop at the edge
+    // rather than draw over the panels.
+    let band = band.intersect(viewport);
+    if band.width() < 1.0 || band.height() < 1.0 {
+        return;
+    }
+
+    let painter = ui.painter().with_clip_rect(viewport);
+    // Warm for adding, cool for removing, so which one is happening is visible
+    // without reading the modifier keys off your own hand.
+    let colour = if state.select_band_deselect {
+        egui::Color32::from_rgb(120, 170, 230)
+    } else {
+        egui::Color32::from_rgb(255, 158, 41)
+    };
+    painter.rect_filled(band, 0.0, colour.gamma_multiply(0.12));
+    painter.rect_stroke(
+        band,
+        0.0,
+        egui::Stroke::new(1.0, colour),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The navigation gizmo, over the top-right of the viewport.
+///
+/// Drawn by the interface rather than by the renderer: it is a widget, it needs
+/// hover and click handling, and egui already owns the layer above the viewport
+/// image. Putting it in a wgpu pass would mean rebuilding pointer handling that
+/// exists three lines away.
+///
+/// Sets [`ShellState::gizmo_active`] while the pointer is over it, so the
+/// viewport's own navigation stands down — otherwise one drag would both orbit
+/// the gizmo and orbit the scene, at twice the rate.
+fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
+    use kreate_ui::nav_gizmo;
+
+    let radius = nav_gizmo::radius_for(viewport);
+    let centre = nav_gizmo::centre_for(viewport, radius);
+    let balls = nav_gizmo::layout(state.camera_rotation, centre, radius);
+
+    let area = egui::Rect::from_center_size(centre, egui::Vec2::splat(radius * 2.2));
+    let response = ui.interact(
+        area,
+        ui.id().with("nav-gizmo"),
+        egui::Sense::click_and_drag(),
+    );
+
+    let pointer = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos());
+    let over = pointer.is_some_and(|p| nav_gizmo::contains(centre, radius, p));
+    state.gizmo_active = over || response.dragged();
+
+    let hovered = pointer.and_then(|p| nav_gizmo::hit(&balls, p, nav_gizmo::ball_radius(radius)));
+
+    if response.drag_delta() != egui::Vec2::ZERO {
+        let d = response.drag_delta();
+        state.queue.push(Command::OrbitBy { dx: d.x, dy: d.y });
+    } else if response.clicked() {
+        // Only a click, never a drag that happened to end on a ball: snapping
+        // after an orbit would undo the orbit the user just performed.
+        if let Some(axis) = hovered {
+            state.queue.push(Command::SnapToAxis(axis));
+        }
+    }
+
+    nav_gizmo::draw(ui.painter(), centre, radius, &balls, hovered);
 }
 
 /// The adjust-last-operation panel.
@@ -303,6 +799,18 @@ fn draw_adjust_panel(
     }
 }
 
+/// Draws the modifier stack for the active object.
+fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_ui::ModifierRow]) {
+    let text = kreate_ui::modifier_stack::ModifierText::resolve(&state.catalog, KIND_KEYS);
+    kreate_ui::modifier_stack(ui, &text, &state.catalog, rows, &mut state.queue);
+}
+
+/// Translation keys for the addable modifier kinds, in the order the add
+/// operator's enum expects.
+///
+/// Two lists that have to agree; a test holds them to it.
+const KIND_KEYS: &[&str] = &["modifier-mirror", "modifier-subdivide", "modifier-array"];
+
 /// The built-in English catalog.
 ///
 /// Shipped as the fallback so an untranslated key resolves to readable text
@@ -313,6 +821,41 @@ menu-duplicate = Duplicate
 menu-delete = Delete
 menu-undo = Undo
 menu-redo = Redo
+menu-extrude = Extrude
+menu-subdivide = Subdivide
+menu-dissolve = Dissolve
+menu-inset = Inset
+menu-bridge = Bridge
+menu-loop-cut = Loop Cut
+menu-shade-smooth = Smooth
+menu-shade-flat = Flat
+menu-mark-sharp = Auto Sharp
+menu-recalc-normals = Recalc Normals
+menu-fill = Fill
+menu-spin = Spin
+menu-bevel = Bevel
+menu-merge = Merge
+menu-weld = Weld
+menu-select-loop = Loop
+mode-object = Object Mode
+mode-edit = Edit Mode
+select-mode-vert = Vertex
+select-mode-edge = Edge
+select-mode-face = Face
+panel-keymap = Keymap
+keymap-preset = Preset
+keymap-changed = { $count } changed
+keymap-reset-all = Reset all
+keymap-shadowed = { $count } shadowed
+keymap-reset-hint = Back to the preset
+keymap-shadowed-hint = Another binding takes this trigger first
+keymap-capture-hint = Click, then press the key you want
+keymap-capturing = press a key…
+keymap-context-global = Global
+keymap-context-viewport = Viewport
+keymap-context-object = Object Mode
+keymap-context-edit = Edit Mode
+keymap-context-modal = Modal Tools
 panel-outliner = Outliner
 panel-properties = Properties
 adjust-nothing = No operation to adjust
@@ -323,6 +866,16 @@ outliner-kind-camera = Camera
 outliner-kind-light = Light
 outliner-shared-mesh = Shared by { $count } objects
 outliner-mesh-summary = { $name }: { $verts } verts, { $faces } faces
+panel-modifiers = Modifiers
+modifier-none = No modifiers
+modifier-add = Add Modifier
+modifier-remove = Remove
+modifier-move-up = Move towards the input
+modifier-move-down = Move towards the result
+modifier-enabled = Apply this modifier
+modifier-mirror = Mirror
+modifier-subdivide = Subdivision
+modifier-array = Array
 "#;
 
 pub const KO_FTL: &str = r#"
@@ -331,6 +884,41 @@ menu-duplicate = 복제
 menu-delete = 삭제
 menu-undo = 되돌리기
 menu-redo = 다시 실행
+menu-extrude = 돌출
+menu-subdivide = 세분
+menu-dissolve = 녹이기
+menu-inset = 인셋
+menu-bridge = 브리지
+menu-loop-cut = 루프 컷
+menu-shade-smooth = 부드럽게
+menu-shade-flat = 평평하게
+menu-mark-sharp = 자동 샤프
+menu-recalc-normals = 노멀 재계산
+menu-fill = 채우기
+menu-spin = 회전
+menu-bevel = 베벨
+menu-merge = 병합
+menu-weld = 용접
+menu-select-loop = 루프
+mode-object = 오브젝트 모드
+mode-edit = 편집 모드
+select-mode-vert = 정점
+select-mode-edge = 모서리
+select-mode-face = 면
+panel-keymap = 키맵
+keymap-preset = 프리셋
+keymap-changed = { $count }개 변경됨
+keymap-reset-all = 전부 초기화
+keymap-shadowed = { $count }개가 가려짐
+keymap-reset-hint = 프리셋 값으로 되돌리기
+keymap-shadowed-hint = 다른 바인딩이 이 조합을 먼저 가져갑니다
+keymap-capture-hint = 클릭한 뒤 원하는 키를 누르세요
+keymap-capturing = 키를 누르세요…
+keymap-context-global = 전역
+keymap-context-viewport = 뷰포트
+keymap-context-object = 오브젝트 모드
+keymap-context-edit = 편집 모드
+keymap-context-modal = 모달 툴
 panel-outliner = 아웃라이너
 panel-properties = 속성
 adjust-nothing = 조정할 작업이 없습니다
@@ -341,6 +929,16 @@ outliner-kind-camera = 카메라
 outliner-kind-light = 조명
 outliner-shared-mesh = 오브젝트 { $count }개가 공유
 outliner-mesh-summary = { $name }: 정점 { $verts }, 면 { $faces }
+panel-modifiers = 모디파이어
+modifier-none = 모디파이어 없음
+modifier-add = 모디파이어 추가
+modifier-remove = 제거
+modifier-move-up = 입력 쪽으로 이동
+modifier-move-down = 결과 쪽으로 이동
+modifier-enabled = 이 모디파이어 적용
+modifier-mirror = 미러
+modifier-subdivide = 서브디비전
+modifier-array = 배열
 "#;
 
 /// Loads the catalog for a locale, with English as the fallback.
