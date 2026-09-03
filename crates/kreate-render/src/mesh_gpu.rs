@@ -26,6 +26,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use kreate_math::Aabb;
 use kreate_mesh::attribute::names;
 use kreate_mesh::MeshData;
 
@@ -133,6 +134,13 @@ pub struct RenderMeshCpu {
     pub edge_flags: Vec<u32>,
     pub face_flags: Vec<u32>,
     pub counts: MeshCounts,
+    /// The mesh's own bounding box, in object space.
+    ///
+    /// Computed here rather than on demand because this is the one place that
+    /// already walks every position, and because the screen-size decision runs
+    /// per draw per frame: a bound recomputed there would make the optimisation
+    /// cost more than it saves.
+    pub bounds: Aabb,
 }
 
 /// Angle beyond which shading splits across an edge.
@@ -232,6 +240,9 @@ impl RenderMeshCpu {
                 faces: mesh.num_faces(),
                 triangles: 0,
             },
+            // From the *mesh* positions, not the split render vertices. The two
+            // enclose the same points, and the mesh array is the shorter walk.
+            bounds: Aabb::from_points(mesh.positions().iter().copied()),
         };
         out.counts.triangles = (out.indices.len() / 3) as u32;
         out.update_flags(mesh);

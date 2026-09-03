@@ -29,6 +29,116 @@ struct ObjectData {
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var<uniform> object: ObjectData;
 
+// ---------------------------------------------------------------------------
+// The cluster path.
+//
+// A second vertex entry point in *this* file rather than a shader of its own,
+// and that is the whole point: it shares `fs_main` with the direct path
+// literally rather than by resemblance. Two copies of the lighting would drift,
+// and the drift would show up as one path shading differently from the other —
+// which is exactly what the pixel-identity test would then be unable to
+// distinguish from a real bug.
+//
+// Bindings a given pipeline's entry point does not touch are simply absent from
+// its layout; validation is per entry point, so the direct pipeline is
+// unaffected by everything below.
+
+struct Cluster {
+    sphere: vec4<f32>,
+    cone: vec4<f32>,
+    index_offset: u32,
+    triangle_count: u32,
+    lod: u32,
+    _pad: u32,
+};
+
+struct Instance {
+    model: mat4x4<f32>,
+    normal_col0: vec4<f32>,
+    normal_col1: vec4<f32>,
+    normal_col2: vec4<f32>,
+    // x: cluster count. y: base index into the visible list.
+    counts: vec4<u32>,
+    scale: vec4<f32>,
+    base_color: vec4<f32>,
+};
+
+@group(0) @binding(1) var<storage, read> visible: array<u32>;
+// Binding 1, not 0: `ObjectData` owns (1, 0) for the direct path, and one
+// module cannot declare two resources at the same binding. The cluster
+// pipeline's group 1 layout simply omits binding 0.
+@group(1) @binding(1) var<uniform> instance: Instance;
+// Declared flat and indexed by hand: a `vec3<f32>` in a storage array has a
+// 16-byte stride in WGSL, which would waste a third of the largest buffer in
+// the system. The same convention as the overlay and id shaders.
+@group(2) @binding(0) var<storage, read> cluster_positions: array<f32>;
+@group(2) @binding(1) var<storage, read> cluster_normals: array<u32>;
+@group(2) @binding(2) var<storage, read> cluster_records: array<Cluster>;
+@group(2) @binding(3) var<storage, read> cluster_indices: array<u32>;
+
+fn cluster_position(i: u32) -> vec3<f32> {
+    let b = 3u * i;
+    return vec3<f32>(
+        cluster_positions[b],
+        cluster_positions[b + 1u],
+        cluster_positions[b + 2u],
+    );
+}
+
+// One instance per surviving cluster, `VERTICES_PER_CLUSTER` vertices each.
+//
+// The vertex count is fixed because a single draw cannot vary it per instance,
+// so a cluster with fewer than the maximum triangles has its surplus vertices
+// collapsed onto one point — a zero-area triangle the rasteriser discards. That
+// is much cheaper than the alternative of a draw call per cluster, which is the
+// thing this whole design exists to avoid.
+//
+// Worth being precise about what the early-out buys, because a falsification
+// pass found that deleting it changes not one pixel. Clusters average about 95
+// of the 128 triangles, so without the check the surplus indices read on into
+// the *next* cluster's range and re-draw its triangles — exactly coincident with
+// the real ones, and rejected by the depth test, hence invisible. The last
+// cluster reads past the end of the buffer, and WebGPU clamps out-of-bounds
+// storage reads, so its three corners come out identical and the triangle is
+// degenerate anyway.
+//
+// So this is a performance measure, not a correctness one: it stops roughly a
+// quarter of the issued vertices from being shaded to no purpose. Stated here
+// rather than left implied, because a future reader who assumes it is load
+// bearing will not understand why removing it looks free.
+@vertex
+fn vs_cluster(
+    @builtin(vertex_index) vi: u32,
+    @builtin(instance_index) ii: u32,
+) -> VsOut {
+    var out: VsOut;
+    let cluster = cluster_records[visible[instance.counts.y + ii]];
+
+    if (vi / 3u >= cluster.triangle_count) {
+        // Degenerate: every surplus vertex goes to the same place, so the
+        // triangle has no area. Returned rather than discarded because a vertex
+        // shader cannot discard.
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.normal = vec3<f32>(0.0, 0.0, 1.0);
+        out.view_pos = vec3<f32>(0.0);
+        out.base_color = instance.base_color;
+        return out;
+    }
+
+    let index = cluster_indices[cluster.index_offset + vi];
+    let world = instance.model * vec4<f32>(cluster_position(index), 1.0);
+    out.clip = globals.view_proj * world;
+    let nm = mat3x3<f32>(
+        instance.normal_col0.xyz,
+        instance.normal_col1.xyz,
+        instance.normal_col2.xyz,
+    );
+    out.normal = nm * oct_decode(cluster_normals[index]);
+    out.view_pos = world.xyz;
+    out.base_color = instance.base_color;
+    return out;
+}
+
 fn unpack_snorm16(v: u32) -> f32 {
     // Shift up then arithmetic-shift down to sign-extend the low 16 bits.
     let s = i32(v << 16u) >> 16u;
@@ -54,6 +164,12 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) view_pos: vec3<f32>,
+    // Carried through the vertex stage rather than read from a uniform in the
+    // fragment stage, so that `fs_main` depends on no per-draw binding at all.
+    // That is what lets the direct path and the cluster path share it: they
+    // supply the colour from different uniforms in different vertex shaders and
+    // the fragment stage cannot tell which.
+    @location(2) @interpolate(flat) base_color: vec4<f32>,
 };
 
 @vertex
@@ -71,6 +187,7 @@ fn vs_main(
     );
     out.normal = nm * oct_decode(normal_packed);
     out.view_pos = world.xyz;
+    out.base_color = object.base_color;
     return out;
 }
 
@@ -108,7 +225,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     }
     let to_eye = normalize(-in.view_pos);
 
-    let base = object.base_color.rgb;
+    let base = in.base_color.rgb;
     var color: vec3<f32>;
     if (globals.params.x < 0.5) {
         color = studio(n, base);
@@ -120,5 +237,5 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
 
     // The surface is written to an sRGB target, so the hardware does the
     // encoding; shading stays in linear space.
-    return vec4<f32>(color, object.base_color.a);
+    return vec4<f32>(color, in.base_color.a);
 }

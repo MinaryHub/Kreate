@@ -68,6 +68,16 @@ fn navigation(preset: Preset) -> Vec<Binding> {
         Input::Wheel,
         Action::new("view.dolly"),
     );
+    // Shift with the wheel scrolls sideways nearly everywhere, and it is the
+    // only horizontal pan available on a mouse with no tilt wheel and no
+    // trackpad.
+    let shift_wheel = Binding::new(
+        "view.pan.shift_wheel",
+        Context::Viewport,
+        Input::Wheel,
+        Action::new("view.pan"),
+    )
+    .with_modifiers(Modifiers::shift());
 
     let dolly = |id: &str, button: MouseButton, modifiers: Modifiers| {
         Binding::new(
@@ -114,6 +124,7 @@ fn navigation(preset: Preset) -> Vec<Binding> {
                     Modifiers::ctrl(),
                 ),
                 wheel,
+                shift_wheel,
             ];
             bindings.extend(alt_fallback());
             bindings
@@ -123,6 +134,7 @@ fn navigation(preset: Preset) -> Vec<Binding> {
         Preset::Maya => {
             let mut bindings = alt_fallback();
             bindings.push(wheel);
+            bindings.push(shift_wheel);
             bindings
         }
         // 3ds Max: middle button pans, Alt-middle orbits — the two swapped
@@ -137,6 +149,7 @@ fn navigation(preset: Preset) -> Vec<Binding> {
             orbit("view.orbit.alt_lmb", MouseButton::Left, Modifiers::alt()),
             dolly("view.dolly.alt_rmb", MouseButton::Right, Modifiers::alt()),
             wheel,
+            shift_wheel,
         ],
     }
 }

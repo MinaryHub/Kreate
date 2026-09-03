@@ -15,6 +15,7 @@
 //! 144 fps and still feel terrible, and by the time that is noticed the causes
 //! are spread across a dozen places.
 
+use crate::capability::Capabilities;
 use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceConfiguration};
 
 /// Depth buffer format.
@@ -164,6 +165,11 @@ pub struct Gpu {
     pub device: Device,
     pub queue: Queue,
     pub info: AdapterSummary,
+    /// What this device can be relied on to do — see [`crate::capability`].
+    ///
+    /// Held on the device rather than re-queried, so a fast path can ask
+    /// cheaply and so the answer cannot drift between the check and the use.
+    pub caps: Capabilities,
 }
 
 impl Gpu {
@@ -210,6 +216,19 @@ impl Gpu {
             )));
         }
 
+        // Read the tier before the device exists, so a machine that cannot run
+        // the renderer says so in the first line of the log rather than by
+        // drawing nothing. The tier is a fact about the adapter, not about the
+        // device we are about to ask for.
+        let caps = crate::capability::Capabilities::of(&adapter);
+        tracing::info!(capability = %caps.summary(), "GPU capability");
+        if !caps.meets_target() {
+            tracing::warn!(
+                "{} is below the compute-driven tier the renderer targets;                  overlays and picking need storage buffers in the vertex stage",
+                info.describe()
+            );
+        }
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kreate device"),
@@ -236,6 +255,7 @@ impl Gpu {
             device,
             queue,
             info,
+            caps,
         })
     }
 

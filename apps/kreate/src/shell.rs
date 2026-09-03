@@ -48,9 +48,12 @@ pub struct ShellState {
     /// The camera's rotation, for drawing the navigation gizmo. Interface state
     /// reads the camera; it never writes to it.
     pub camera_rotation: kreate_math::DQuat,
-    /// Set while the pointer is over the navigation gizmo, so the viewport's own
-    /// navigation stands down and the two do not both act on one drag.
-    pub gizmo_active: bool,
+    /// Where the navigation gizmo is, in interface points.
+    ///
+    /// Geometry rather than a hover flag: it depends only on the viewport
+    /// rectangle, so it does not go stale between frames the way "the pointer is
+    /// over me" does. The application uses it to decide who owns a press.
+    pub gizmo_circle: Option<(egui::Pos2, f32)>,
     /// The outliner's cached row order.
     ///
     /// Lives here because it is view state: derived from the document, rebuilt
@@ -89,7 +92,7 @@ impl Default for ShellState {
             edit_mode: false,
             select_mode: 2,
             camera_rotation: kreate_math::DQuat::IDENTITY,
-            gizmo_active: false,
+            gizmo_circle: None,
             outliner: OutlinerOrder::default(),
             select_band: None,
             select_band_deselect: false,
@@ -804,8 +807,11 @@ fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
 /// image. Putting it in a wgpu pass would mean rebuilding pointer handling that
 /// exists three lines away.
 ///
-/// Sets [`ShellState::gizmo_active`] while the pointer is over it, so the
-/// viewport's own navigation stands down — otherwise one drag would both orbit
+/// One drag must not both turn the gizmo and turn the scene. That is settled by
+/// the interface claiming the press: `ui.interact` here makes egui report the
+/// press as consumed, and the viewport decides what a drag does once, when it
+/// begins. It used to be a flag the viewport consulted on every motion, which
+/// went stale between frames — the interface only runs when something redraws.
 /// the gizmo and orbit the scene, at twice the rate.
 fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
     use kreate_ui::nav_gizmo;
@@ -813,6 +819,8 @@ fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
     let radius = nav_gizmo::radius_for(viewport);
     let centre = nav_gizmo::centre_for(viewport, radius);
     let balls = nav_gizmo::layout(state.camera_rotation, centre, radius);
+
+    state.gizmo_circle = Some((centre, radius));
 
     let area = egui::Rect::from_center_size(centre, egui::Vec2::splat(radius * 2.2));
     let response = ui.interact(
@@ -824,8 +832,6 @@ fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
     let pointer = response
         .hover_pos()
         .or_else(|| response.interact_pointer_pos());
-    let over = pointer.is_some_and(|p| nav_gizmo::contains(centre, radius, p));
-    state.gizmo_active = over || response.dragged();
 
     let hovered = pointer.and_then(|p| nav_gizmo::hit(&balls, p, nav_gizmo::ball_radius(radius)));
 

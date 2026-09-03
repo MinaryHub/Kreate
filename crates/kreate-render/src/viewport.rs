@@ -11,9 +11,14 @@ use glam::{DAffine3, Mat3, Mat4, Vec4};
 use wgpu::util::DeviceExt as _;
 
 use crate::camera::{Camera, Projection};
+use crate::cluster::ClusterMesh;
+use crate::cluster_cull::{ClusterCull, CullDraws, CullView};
 use crate::gpu::{self, DEPTH_CLEAR, DEPTH_FORMAT};
+use crate::hiz::HiZ;
+use crate::lod::{Budget, Detail, ViewSize};
 use crate::mesh_gpu::{MeshCounts, RenderMeshCpu};
 use crate::picking::PickDomain;
+use kreate_math::Aabb;
 
 /// How the solid pass shades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +154,14 @@ pub struct GpuMesh {
     /// holds. Distinct from `counts.verts`, which counts *mesh* vertices.
     pub render_verts: u32,
     pub color: Vec4,
+    /// Object-space bounds, for the screen-size decision. See [`crate::lod`].
+    pub bounds: Aabb,
+    /// The cluster records, for the cull.
+    cluster_bind: wgpu::BindGroup,
+    /// Positions, normals, records and the cluster index stream, for the draw.
+    cluster_draw_bind: wgpu::BindGroup,
+    /// How many clusters this mesh has.
+    pub cluster_count: u32,
 }
 
 /// The per-mesh bind group layouts a `GpuMesh` needs.
@@ -159,6 +172,10 @@ pub struct GpuMesh {
 pub struct MeshLayouts {
     pub edge: wgpu::BindGroupLayout,
     pub id: wgpu::BindGroupLayout,
+    /// The cull's view of a mesh: its cluster records alone.
+    pub cluster: wgpu::BindGroupLayout,
+    /// The cluster draw's view: positions, normals, records and indices.
+    pub cluster_draw: wgpu::BindGroupLayout,
 }
 
 impl GpuMesh {
@@ -181,7 +198,13 @@ impl GpuMesh {
         let normals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh normals"),
             contents: bytemuck::cast_slice(&cpu.normals),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            // STORAGE as well as VERTEX: the direct solid pass fetches these as
+            // a vertex attribute, and the cluster pass reads the same bytes as
+            // an array because its vertex index comes from the cluster index
+            // stream rather than from an index buffer.
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
         });
         // STORAGE as well as INDEX: the id pass draws faces *non-indexed* and
         // reads this as an array, because `vertex_index` in an indexed draw is
@@ -281,18 +304,79 @@ impl GpuMesh {
             ],
         });
 
+        // Baked at upload, because the bake walks the whole index buffer and the
+        // result is only invalidated by a topology change — which is what an
+        // upload *is*. Doing it lazily on first draw would put a stall in the
+        // frame that first shows a mesh.
+        let baked = ClusterMesh::bake(cpu);
+        let cluster_count = baked.clusters.len() as u32;
+        let cluster_records = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh clusters"),
+            // An empty mesh still needs a buffer: a zero-sized binding is a
+            // validation error, and the draw is skipped on the count anyway.
+            contents: if baked.clusters.is_empty() {
+                &[0u8; 48]
+            } else {
+                bytemuck::cast_slice(&baked.clusters)
+            },
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let cluster_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh cluster indices"),
+            contents: if baked.indices.is_empty() {
+                &[0u8; 4]
+            } else {
+                bytemuck::cast_slice(&baked.indices)
+            },
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let cluster_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh clusters"),
+            layout: &layouts.cluster,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cluster_records.as_entire_binding(),
+            }],
+        });
+        let cluster_draw_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh cluster draw"),
+            layout: &layouts.cluster_draw,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: normals.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cluster_records.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cluster_indices.as_entire_binding(),
+                },
+            ],
+        });
+
         Self {
             positions,
             normals,
             indices,
             edge_bind,
             id_bind,
+            cluster_bind,
+            cluster_draw_bind,
+            cluster_count,
             vert_flags,
             edge_flags,
             face_flags,
             counts: cpu.counts,
             render_verts: cpu.render_verts(),
             color,
+            bounds: cpu.bounds,
         }
     }
 
@@ -365,6 +449,19 @@ pub struct Draw<'a> {
     /// neighbour it would highlight whatever elements happened to share those
     /// indices.
     pub preview: bool,
+    /// Whether this object is off limits to screen-size simplification.
+    ///
+    /// True for the mesh being edited. Selection is protected too, but that is
+    /// read from `selected` rather than duplicated here — see
+    /// [`Draw::protected`].
+    pub editing: bool,
+    /// How much of this object to draw, filled in by [`Viewport::prepare`].
+    ///
+    /// Carried on the draw rather than recomputed in each pass because four
+    /// passes consult it — solid, faces, wireframe, points — and the id pass
+    /// has to agree with all of them or the user can click something that was
+    /// never drawn.
+    pub detail: Detail,
 }
 
 impl<'a> Draw<'a> {
@@ -375,7 +472,30 @@ impl<'a> Draw<'a> {
             selected: false,
             object_id: 0,
             preview: false,
+            editing: false,
+            // Full until measured. A draw that is never passed through
+            // `prepare` renders completely, which is the safe default: the
+            // failure mode of forgetting to measure is a slow frame, not a
+            // missing object.
+            detail: Detail::FULL,
         }
+    }
+
+    /// Marks this draw as the one being edited, exempting it from every
+    /// screen-size simplification.
+    pub fn editing(mut self, yes: bool) -> Self {
+        self.editing = yes;
+        self
+    }
+
+    /// Whether simplification is forbidden for this draw.
+    ///
+    /// The plan's rule, in one place: never simplify the object being edited or
+    /// anything selected. Both are cases where the user is looking *for* the
+    /// thing, and an editor that hides what was selected has told a lie about
+    /// what exists.
+    pub fn protected(&self) -> bool {
+        self.editing || self.selected
     }
 
     pub fn selected(mut self, yes: bool) -> Self {
@@ -394,6 +514,83 @@ impl<'a> Draw<'a> {
         self.preview = yes;
         self
     }
+}
+
+/// The cluster draw's group 0: the shared globals and the visible list.
+///
+/// A free function rather than a method because it is called from inside
+/// `Viewport::new`, before a `Viewport` exists, as well as on every
+/// reallocation. One definition, so the two cannot disagree about binding order.
+fn cluster_globals_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals: &wgpu::Buffer,
+    visible: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cluster globals"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: visible.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// The cluster draw's group 1: one instance slot, reached by dynamic offset.
+fn cluster_instance_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    instances: &wgpu::Buffer,
+    size: u64,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cluster instance"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: instances,
+                offset: 0,
+                size: std::num::NonZeroU64::new(size),
+            }),
+        }],
+    })
+}
+
+/// A bind group layout of `count` read-only storage buffers.
+///
+/// The cluster draw reads four arrays that are all the same kind of thing, so
+/// spelling out four near-identical entries would be four chances to
+/// mistranscribe a binding index.
+fn storage_bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+    count: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayout {
+    let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..count)
+        .map(|binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect();
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &entries,
+    })
 }
 
 /// A growable per-frame uniform array addressed by dynamic offset.
@@ -808,6 +1005,25 @@ pub struct Viewport {
     id_object_layout: wgpu::BindGroupLayout,
     id_objects: UniformRing,
     pub layouts: MeshLayouts,
+    cull: ClusterCull,
+    /// The depth pyramid, for occlusion culling.
+    ///
+    /// Owned here because it is built from *this* viewport's depth buffer and
+    /// sized to its render target.
+    hiz: HiZ,
+    /// Whether the cull rejects occluded clusters.
+    ///
+    /// Off until the two-pass frame structure exists. Testing against a pyramid
+    /// built from a stale frame can reject clusters that have since become
+    /// visible, and a hole in a model is the one error this must not make.
+    pub occlusion_culling: bool,
+    cluster_solid: wgpu::RenderPipeline,
+    cluster_globals_layout: wgpu::BindGroupLayout,
+    cluster_instance_layout: wgpu::BindGroupLayout,
+    /// Rebuilt when the cull reallocates; see [`ClusterCull::generation`].
+    cluster_globals_bind: wgpu::BindGroup,
+    cluster_instance_bind: wgpu::BindGroup,
+    cluster_generation: u64,
     depth: wgpu::TextureView,
     /// Allocated size of the render targets.
     size: (u32, u32),
@@ -823,6 +1039,23 @@ pub struct Viewport {
     render_size: (u32, u32),
     pub shading: ShadingMode,
     pub background: wgpu::Color,
+    /// Whether the solid pass goes through cluster culling.
+    ///
+    /// Off by default, and that is a measurement rather than timidity: it is
+    /// currently 2.4x *slower* than the direct path on ten million triangles,
+    /// because a non-indexed cluster draw gives up the post-transform vertex
+    /// cache. See the module docs of [`crate::cluster_cull`] for the numbers and
+    /// for what would change them.
+    ///
+    /// Kept, and kept working, because occlusion culling needs exactly this
+    /// machinery and is where the win actually is.
+    pub cluster_path: bool,
+    /// Screen-size thresholds for culling and overlay density.
+    ///
+    /// Public so preferences can reach it: a user on a small laptop screen may
+    /// want the wireframe to thin out sooner, and one presenting to a room may
+    /// want it never to.
+    pub lod_budget: Budget,
     /// Whether to draw the wireframe overlay.
     pub show_wireframe: bool,
     /// Whether to draw the element overlays: selected-face fill and vertex
@@ -880,9 +1113,20 @@ impl Viewport {
             })
         };
         let edge_globals_layout = uniform_bind_group_layout(device, "edge globals");
+        let cluster_cull = ClusterCull::new(device);
         let layouts = MeshLayouts {
             edge: edge_bind_group_layout(device),
             id: mesh_bind_group_layout(device),
+            // Owned by the cull, because the cull's shader declares it and the
+            // two must agree. Copied out here so a mesh can build its bind group
+            // without reaching into the cull.
+            cluster: cluster_cull.cluster_layout().clone(),
+            cluster_draw: storage_bind_group_layout(
+                device,
+                "cluster draw",
+                4,
+                wgpu::ShaderStages::VERTEX,
+            ),
         };
         let id_globals_layout = uniform_bind_group_layout(device, "id globals");
         let id_object_layout = dynamic_uniform_layout(device, "id object", ID_OBJECT_SIZE);
@@ -1135,6 +1379,98 @@ impl Viewport {
             cache: None,
         });
 
+        // The cluster path: same shader module, same fragment entry point, no
+        // vertex buffers at all. Everything comes from storage, indexed through
+        // the visible list the cull produced.
+        let cluster_globals_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cluster globals"),
+                entries: &[
+                    // Fragment too: `fs_main` reads the shading mode out of the
+                    // same globals block, and it is deliberately the *same*
+                    // fragment entry point the direct path uses.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        // Binding 1, not 0: the direct path's `ObjectData` owns (1, 0) in this
+        // module, and one module cannot declare two resources at one binding.
+        let cluster_instance_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cluster instance"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let cluster_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cluster solid layout"),
+            bind_group_layouts: &[
+                Some(&cluster_globals_layout),
+                Some(&cluster_instance_layout),
+                Some(&layouts.cluster_draw),
+            ],
+            immediate_size: 0,
+        });
+        let cluster_solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cluster solid"),
+            layout: Some(&cluster_pl),
+            vertex: wgpu::VertexState {
+                module: &solid_shader,
+                entry_point: Some("vs_cluster"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &solid_shader,
+                // The *same* fragment entry point as the direct path, which is
+                // what makes the two provably shade alike rather than similarly.
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Off, as in the direct pass. The cone test has already removed
+                // whole clusters that face away; what is left may still contain
+                // inconsistently wound geometry, and a modeller needs to see it.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu::depth_write_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let grid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("grid"),
             layout: Some(&grid_pl),
@@ -1162,6 +1498,19 @@ impl Viewport {
             multiview_mask: None,
             cache: None,
         });
+
+        let cluster_globals_bind_0 = cluster_globals_bind(
+            device,
+            &cluster_globals_layout,
+            &globals_buf,
+            cluster_cull.visible_buffer(),
+        );
+        let cluster_instance_bind_0 = cluster_instance_bind(
+            device,
+            &cluster_instance_layout,
+            cluster_cull.instances_buffer(),
+            cluster_cull.instance_size(),
+        );
 
         Self {
             solid,
@@ -1212,6 +1561,15 @@ impl Viewport {
             object_layout,
             edge_object_layout,
             layouts,
+            cluster_globals_bind: cluster_globals_bind_0,
+            cluster_instance_bind: cluster_instance_bind_0,
+            cluster_generation: cluster_cull.generation(),
+            cull: cluster_cull,
+            hiz: HiZ::new(device, width.max(1), height.max(1)),
+            occlusion_culling: false,
+            cluster_solid,
+            cluster_globals_layout,
+            cluster_instance_layout,
             depth: gpu::create_depth_texture(device, width, height),
             size: (width.max(1), height.max(1)),
             render_size: (width.max(1), height.max(1)),
@@ -1223,6 +1581,8 @@ impl Viewport {
                 a: 1.0,
             },
             show_grid: true,
+            cluster_path: false,
+            lod_budget: Budget::default(),
             show_wireframe: true,
             show_elements: false,
             wireframe_width: 1.5,
@@ -1286,9 +1646,86 @@ impl Viewport {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
-        draws: &[Draw],
+        draws: &mut [Draw],
     ) {
+        // Measured first, because the uniforms written below carry the overlay
+        // alphas the measurement produces. One place decides, and every pass —
+        // including the id pass — reads that decision, so what is drawn and
+        // what is clickable cannot disagree.
+        for draw in draws.iter_mut() {
+            let size = ViewSize::measure(
+                draw.mesh.bounds,
+                &draw.transform,
+                camera,
+                // The render target's height, not the widget's: at 70% dynamic
+                // resolution there genuinely are fewer pixels per vertex, and
+                // the decision should follow.
+                self.render_size.1,
+            );
+            draw.detail = Detail::of(size, draw.mesh.counts, &self.lod_budget, draw.protected());
+        }
+        let draws: &[Draw] = draws;
+
         let aspect = self.aspect();
+
+        if self.cluster_path {
+            // Only the draws that survived the object-level cull are handed to
+            // the cluster cull, and in the same order the draw loop will use:
+            // the argument offset comes from the position in these slices, so a
+            // caller that reordered in between would draw another mesh's
+            // cluster list.
+            let transforms: Vec<DAffine3> = draws
+                .iter()
+                .filter(|d| d.detail.draw)
+                .map(|d| d.transform)
+                .collect();
+            let counts: Vec<u32> = draws
+                .iter()
+                .filter(|d| d.detail.draw)
+                .map(|d| d.mesh.cluster_count)
+                .collect();
+            let colors: Vec<[f32; 4]> = draws
+                .iter()
+                .filter(|d| d.detail.draw)
+                .map(|d| d.mesh.color.to_array())
+                .collect();
+            self.cull.prepare(
+                device,
+                queue,
+                &CullView {
+                    camera,
+                    aspect,
+                    hiz: &self.hiz,
+                    occlusion: self.occlusion_culling,
+                    render_height: self.render_size.1,
+                    budget: &self.lod_budget,
+                },
+                &CullDraws {
+                    transforms: &transforms,
+                    cluster_counts: &counts,
+                    colors: &colors,
+                },
+            );
+            if self.cull.generation() != self.cluster_generation {
+                // The shared buffers moved, so every bind group naming them is
+                // stale. Rebuilt here rather than checked at draw time, because
+                // a bind group that names a freed buffer fails validation at the
+                // draw and the message points at the draw, not at the cause.
+                self.cluster_globals_bind = cluster_globals_bind(
+                    device,
+                    &self.cluster_globals_layout,
+                    &self.globals_buf,
+                    self.cull.visible_buffer(),
+                );
+                self.cluster_instance_bind = cluster_instance_bind(
+                    device,
+                    &self.cluster_instance_layout,
+                    self.cull.instances_buffer(),
+                    self.cull.instance_size(),
+                );
+                self.cluster_generation = self.cull.generation();
+            }
+        }
         let view_proj = camera.view_projection(aspect);
 
         queue.write_buffer(
@@ -1428,7 +1865,16 @@ impl Viewport {
                     // handles, and a vertex you cannot see is a vertex you
                     // cannot aim at.
                     unselected_color: [0.62, 0.64, 0.68, 1.0],
-                    flags: [f32::from(u8::from(draw.preview)), 0.0, 0.0, 0.0],
+                    flags: [
+                        f32::from(u8::from(draw.preview)),
+                        // Fades the vertex dots as they grow too dense to read.
+                        // The face fill shares this uniform and ignores it: a
+                        // fill does not get less legible as the mesh gets
+                        // denser, it stays the same colour.
+                        draw.detail.point_alpha,
+                        0.0,
+                        0.0,
+                    ],
                 }),
             );
             queue.write_buffer(
@@ -1441,7 +1887,10 @@ impl Viewport {
                     base_color: [0.05, 0.05, 0.06, 1.0],
                     selected_color: SELECTED_COLOR,
                     flags_params: [
-                        0.55,
+                        // The wireframe's base alpha, scaled by the density
+                        // fade. Folded in here rather than in the shader so the
+                        // shader keeps one alpha and not two to multiply.
+                        0.55 * draw.detail.wire_alpha,
                         1.0,
                         f32::from(u8::from(draw.selected)),
                         f32::from(u8::from(draw.preview)),
@@ -1625,7 +2074,17 @@ impl Viewport {
                 PickDomain::Edge => mesh.counts.edges,
                 PickDomain::Vert => mesh.counts.verts,
             };
-            if count == 0 {
+            // Screen-size culling applies here too, and it has to: an object
+            // skipped by the visible pass but present in the id buffer would be
+            // clickable while invisible, and the user would select something
+            // they cannot see.
+            //
+            // The *density* fade deliberately does not apply. It is a statement
+            // about how readable an overlay is, not about what exists, and box
+            // selection on a dense mesh is exactly when the id buffer matters
+            // most. In practice the question rarely arises: the id pass runs on
+            // the object being edited, which is protected from fading anyway.
+            if count == 0 || !draw.detail.draw {
                 continue;
             }
             pass.set_bind_group(1, &mesh.id_bind, &[]);
@@ -1648,6 +2107,54 @@ impl Viewport {
     }
 
     /// Records the frame.
+    /// The depth pyramid, as last built.
+    pub fn depth_pyramid(&self) -> &HiZ {
+        &self.hiz
+    }
+
+    /// Builds the depth pyramid from this viewport's depth buffer.
+    ///
+    /// Encoded *after* the render pass that wrote the depth and before whatever
+    /// will read the pyramid. Separate from [`Self::render`] because it is a
+    /// chain of compute passes and a render pass cannot be interrupted, and
+    /// separate from [`Self::cull`] because the whole point of a two-pass scheme
+    /// is that a cull happens on each side of this.
+    pub fn build_depth_pyramid(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        // Sized to the *render* target rather than the allocation: the depth
+        // buffer is allocated at `size` but only `render_size` of it is drawn,
+        // and a pyramid covering the undrawn remainder would summarise stale
+        // depth from a larger frame.
+        self.hiz
+            .resize(device, self.render_size.0, self.render_size.1);
+        let depth = self.depth.clone();
+        self.hiz.build(device, queue, encoder, &depth);
+    }
+
+    /// Runs cluster culling, if the cluster path is on.
+    ///
+    /// A separate entry point because it is a *compute* pass and has to be
+    /// encoded before the render pass begins — a render pass cannot be
+    /// interrupted to dispatch. wgpu inserts the barrier between them, so the
+    /// draw sees the instance counts this wrote.
+    ///
+    /// Does nothing when the cluster path is off, so a caller can always call it.
+    pub fn cull(&self, encoder: &mut wgpu::CommandEncoder, draws: &[Draw]) {
+        if !self.cluster_path {
+            return;
+        }
+        let binds: Vec<&wgpu::BindGroup> = draws
+            .iter()
+            .filter(|d| d.detail.draw)
+            .map(|d| &d.mesh.cluster_bind)
+            .collect();
+        self.cull.dispatch(encoder, &binds);
+    }
+
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1698,18 +2205,43 @@ impl Viewport {
         );
 
         // Opaque geometry first, so the grid can be depth-tested against it.
-        pass.set_pipeline(&self.solid);
-        pass.set_bind_group(0, &self.globals_bind, &[]);
-        for (i, draw) in draws.iter().enumerate() {
-            let mesh = draw.mesh;
-            if mesh.counts.triangles == 0 {
-                continue;
+        if self.cluster_path {
+            pass.set_pipeline(&self.cluster_solid);
+            pass.set_bind_group(0, &self.cluster_globals_bind, &[]);
+            // Indexed by position among the *surviving* draws, because that is
+            // what `prepare` handed the cull. Enumerating all draws here would
+            // shift every argument offset by however many were culled.
+            for (slot, draw) in self
+                .cull
+                .slots()
+                .iter()
+                .zip(draws.iter().filter(|d| d.detail.draw))
+            {
+                if slot.cluster_count == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &self.cluster_instance_bind, &[slot.instance_offset]);
+                pass.set_bind_group(2, &draw.mesh.cluster_draw_bind, &[]);
+                // The whole mesh in one draw whose instance count the GPU chose.
+                // No index buffer: the vertex shader reads the cluster index
+                // stream from storage, which is what lets one draw cover
+                // clusters that are not contiguous in the original mesh.
+                pass.draw_indirect(self.cull.args_buffer(), slot.args_offset as u64);
             }
-            pass.set_bind_group(1, &self.objects.bind, &[self.objects.offset(i as u32)]);
-            pass.set_vertex_buffer(0, mesh.positions.slice(..));
-            pass.set_vertex_buffer(1, mesh.normals.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+        } else {
+            pass.set_pipeline(&self.solid);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                    continue;
+                }
+                pass.set_bind_group(1, &self.objects.bind, &[self.objects.offset(i as u32)]);
+                pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+            }
         }
 
         // Selected faces first among the overlays, at the layer nearest the
@@ -1720,7 +2252,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.element_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 {
+                if mesh.counts.triangles == 0 || !draw.detail.draw {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.id_bind, &[]);
@@ -1743,7 +2275,10 @@ impl Viewport {
             pass.set_bind_group(0, &self.edge_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.edges == 0 {
+                // A fully faded wireframe is skipped rather than drawn
+                // transparent: at that density the draw is millions of
+                // instances, and the point of the fade is not to pay for them.
+                if mesh.counts.edges == 0 || !draw.detail.draw || draw.detail.wire_alpha <= 0.0 {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.edge_bind, &[]);
@@ -1767,7 +2302,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.element_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.verts == 0 {
+                if mesh.counts.verts == 0 || !draw.detail.draw || draw.detail.point_alpha <= 0.0 {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.id_bind, &[]);

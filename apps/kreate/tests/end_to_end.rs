@@ -96,7 +96,7 @@ fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
         }
     }
 
-    viewport.prepare(&gpu.device, &gpu.queue, camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),

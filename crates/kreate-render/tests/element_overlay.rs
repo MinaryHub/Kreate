@@ -123,13 +123,13 @@ fn render(
     );
     after_upload(&gpu.queue, &uploaded);
 
-    let draws = vec![Draw::new(&uploaded, DAffine3::IDENTITY)];
+    let mut draws = vec![Draw::new(&uploaded, DAffine3::IDENTITY)];
     let mut camera = Camera::default();
     camera = camera.looking_along(kreate_render::ViewAxis::PosZ);
     camera.pivot = DVec3::ZERO;
     camera.distance = 5.0;
 
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -283,12 +283,12 @@ fn render_preview_full(
             }),
     );
 
-    let draws = vec![Draw::new(&uploaded, DAffine3::IDENTITY).preview(applies)];
+    let mut draws = vec![Draw::new(&uploaded, DAffine3::IDENTITY).preview(applies)];
     let mut camera = Camera::default();
     camera = camera.looking_along(kreate_render::ViewAxis::PosZ);
     camera.pivot = DVec3::ZERO;
     camera.distance = 5.0;
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),

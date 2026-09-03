@@ -43,8 +43,15 @@ use winit::window::{Window, WindowId};
 /// never sees them. `PowerPreference::HighPerformance` alone is not reliably
 /// enough, and quietly landing on the integrated GPU is a leading cause of
 /// "your application is slow" reports.
+///
+/// Windows only, and gated rather than left to be harmlessly ignored: these are
+/// NVIDIA Optimus and AMD PowerXpress conventions, they mean nothing on macOS or
+/// Linux, and an unexplained exported symbol invites someone to wonder whether
+/// the Mac build needs it.
+#[cfg(windows)]
 #[no_mangle]
 pub static NvOptimusEnablement: u32 = 1;
+#[cfg(windows)]
 #[no_mangle]
 pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
 
@@ -255,6 +262,20 @@ struct DragSelect {
     deselect: bool,
 }
 
+/// Viewport pixels one wheel notch pans.
+///
+/// A notch is a coarse unit and a pan is a fine one, so this is smaller than it
+/// looks: about a third of a line of text, which is what a sideways swipe on a
+/// trackpad feels like elsewhere.
+const WHEEL_PAN_PIXELS: f64 = 40.0;
+
+/// Notches one unit of pinch is worth.
+///
+/// A pinch reports a fraction of the distance between the fingers, so a full
+/// pinch is around one — several notches of zoom, which is what the gesture
+/// means on the platforms that send it.
+const PINCH_NOTCHES: f64 = 6.0;
+
 /// How far the pointer has to move for a press to become a box.
 ///
 /// Small enough that a deliberate drag is recognised immediately, large enough
@@ -356,6 +377,18 @@ struct App {
     key_overrides: std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
     /// Which mouse buttons are held, for resolving drag bindings.
     buttons: [bool; 3],
+    /// What each held button's drag is doing, decided when it was pressed.
+    ///
+    /// Latched rather than resolved per motion, for three reasons, and the first
+    /// two are bugs that were in the per-motion version:
+    ///
+    /// - the navigation gizmo's "the pointer is over me" flag is only recomputed
+    ///   when the interface runs, so between frames a drag consulted a stale one
+    ///   and navigation stopped working until something forced a redraw;
+    /// - releasing a modifier mid-drag turned an orbit into a pan halfway
+    ///   through;
+    /// - a drag is one gesture, and what it does is settled by how it began.
+    drag_ops: [Option<String>; 3],
     /// Where the camera is going. `camera` follows it.
     motion: kreate_render::CameraMotion,
     /// When the last frame was, for frame-rate-independent easing.
@@ -415,6 +448,7 @@ impl App {
             preset: Preset::default(),
             key_overrides: std::collections::BTreeMap::new(),
             buttons: [false; 3],
+            drag_ops: [const { None }; 3],
             viewport_px: None,
             ui: ShellState {
                 catalog: shell::load_catalog(locale),
@@ -928,6 +962,188 @@ impl App {
         ))
     }
 
+    /// Whether the cursor is inside the viewport rectangle.
+    ///
+    /// Window coordinates only — deliberately not [`App::cursor_viewport_px`],
+    /// which converts into the offscreen texture's pixels and so needs the
+    /// graphics state to exist. Whether a press belongs to the scene is a
+    /// question about the layout, not about the renderer, and tying the two
+    /// together makes it untestable and answers `false` before the first frame
+    /// for a reason that has nothing to do with the layout.
+    fn cursor_in_viewport(&self) -> bool {
+        let (Some((x, y)), Some((rx, ry, w, h))) = (self.input.cursor, self.viewport_px) else {
+            return false;
+        };
+        let (u, v) = ((x as f32 - rx) / w, (y as f32 - ry) / h);
+        (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)
+    }
+
+    /// Whether a press just now belongs to the viewport rather than the
+    /// interface.
+    ///
+    /// Decided by geometry — is the pointer in the viewport, and outside the
+    /// navigation gizmo — rather than by egui's `consumed`, which answers a
+    /// different question and answers it wrongly here.
+    ///
+    /// `egui_wants_pointer_input` is `is_pointer_over_egui() && !any_button_down`,
+    /// and the viewport lives inside a central panel, so "over egui" is true
+    /// everywhere in it. The result is that *every* press over the scene came
+    /// back consumed and every release did not — the exact inverse of what a
+    /// viewport needs, and why navigation appeared to work only sometimes.
+    ///
+    /// The gizmo is excluded by its own circle rather than by a hover flag,
+    /// because a flag is only recomputed when the interface runs and a press can
+    /// arrive between frames.
+    fn press_belongs_to_viewport(&self) -> bool {
+        if !self.cursor_in_viewport() {
+            return false;
+        }
+        let Some((centre, radius)) = self.ui.gizmo_circle else {
+            return true;
+        };
+        let Some((x, y)) = self.input.cursor else {
+            return false;
+        };
+        let scale = self.egui_ctx.pixels_per_point() as f64;
+        let dx = x / scale - centre.x as f64;
+        let dy = y / scale - centre.y as f64;
+        // The gizmo takes its own circle, and the viewport everything else. One
+        // drag must not both turn the gizmo and turn the scene.
+        dx * dx + dy * dy > (radius as f64) * (radius as f64)
+    }
+
+    /// Applies a scroll, in notches.
+    ///
+    /// Horizontal scroll pans. It used to be discarded, so a sideways two-finger
+    /// swipe on a trackpad — and a tilt wheel — did nothing at all.
+    ///
+    /// The vertical component asks the keymap, so the wheel is rebindable like
+    /// everything else. Unbound combinations fall back to zooming rather than
+    /// doing nothing: a wheel that is inert for no visible reason reads as the
+    /// application being broken, and a trackpad pinch arrives here as
+    /// Ctrl+wheel on Windows.
+    fn apply_wheel(&mut self, x: f64, y: f64) {
+        if x == 0.0 && y == 0.0 {
+            return;
+        }
+        self.input.note_event();
+        if x != 0.0 {
+            self.input.pan_delta.0 += x * WHEEL_PAN_PIXELS;
+        }
+        if y == 0.0 {
+            return;
+        }
+        let action = self.keymap.resolve(
+            KeyContext::Viewport,
+            &KeyInput::Wheel,
+            self.modifiers(),
+            EventKind::Press,
+        );
+        match action.as_ref().map(|a| a.op_id.as_str()) {
+            // Sideways, not up and down: this is the horizontal-scroll
+            // convention, and a vertical pan on the wheel would fight the zoom
+            // sharing it.
+            Some("view.pan") => self.input.pan_delta.0 += y * WHEEL_PAN_PIXELS,
+            Some("view.orbit") => self.input.orbit_delta.1 += y * WHEEL_PAN_PIXELS,
+            _ => self.input.scroll += y,
+        }
+    }
+
+    /// Ends every drag in progress, wherever its release went.
+    ///
+    /// Modifier state is cleared too: a drag that ended with Alt held leaves the
+    /// application believing Alt is still down, because the key-up went to
+    /// whatever took focus.
+    fn cancel_all_drags(&mut self) {
+        self.buttons = [false; 3];
+        self.drag_ops = [const { None }; 3];
+        // Dropped rather than committed. A rubber band whose release was never
+        // seen has no end point worth trusting, and committing a selection the
+        // user did not finish is worse than losing one they did.
+        self.drag_select = None;
+        self.input.shift_down = false;
+        self.input.ctrl_down = false;
+        self.input.alt_down = false;
+    }
+
+    /// Feeds a pointer movement to whatever drags are in progress.
+    ///
+    /// What each drag does was settled when it began — see [`App::drag_ops`] —
+    /// so this never consults the keymap. Which navigation a button performs
+    /// still comes from the keymap, just once: the Maya preset's Alt+LMB orbit
+    /// needs no code here at all.
+    ///
+    /// Separate from the event handler so it can be tested. A drag that quietly
+    /// changes what it is doing partway through is the kind of thing only a test
+    /// catches, because using it feels like the application being unreliable
+    /// rather than like a bug with a shape.
+    fn apply_drag_motion(&mut self, delta: (f64, f64)) {
+        for slot in 0..self.drag_ops.len() {
+            let Some(op) = self.drag_ops[slot].clone() else {
+                continue;
+            };
+            self.input.note_event();
+            match op.as_str() {
+                "view.orbit" => {
+                    self.input.orbit_delta.0 += delta.0;
+                    self.input.orbit_delta.1 += delta.1;
+                }
+                "view.pan" => {
+                    self.input.pan_delta.0 += delta.0;
+                    self.input.pan_delta.1 += delta.1;
+                }
+                // Vertical drag zooms, at a gentler rate than the wheel's
+                // notches.
+                "view.dolly" => self.input.scroll -= delta.1 * 0.02,
+                _ => {}
+            }
+        }
+    }
+
+    /// Decides what a mouse button's drag will do, at the moment it is pressed.
+    ///
+    /// Everything about the gesture is settled here: whether it navigates and
+    /// how, or whether it selects. Nothing downstream re-asks, so a modifier
+    /// released mid-drag cannot turn an orbit into a pan, and a pointer that
+    /// wanders over a panel cannot stop it.
+    fn begin_mouse_drag(&mut self, slot: usize, button: KeyMouse) {
+        let action = self.drag_action(button);
+        if let Some(action) = action {
+            // On the press, not on the first motion: by the time the pointer has
+            // moved the view has already turned once about the old pivot, and
+            // that first frame is exactly the jump auto-depth exists to remove.
+            if action.op_id == "view.orbit" {
+                self.set_auto_depth_pivot();
+            }
+            self.drag_ops[slot] = Some(action.op_id);
+            return;
+        }
+
+        // Unbound, so a left press is a selection gesture — a click or a box
+        // depending on whether the pointer moves, which cannot be told apart
+        // until it does. Nothing is committed here.
+        //
+        // Shift extends and Ctrl removes, read from the live modifier state
+        // rather than from the keymap: this is one gesture rather than several
+        // bindings, and a preset that rebinds selection has to move its variants
+        // with it.
+        if button == KeyMouse::Left {
+            self.begin_drag_select();
+        }
+    }
+
+    /// Ends whatever that button was doing.
+    ///
+    /// Runs even when the interface claimed the release — over a panel, a menu,
+    /// the navigation gizmo — because a button that went down has to come up. It
+    /// not doing so was what made navigation stick on and then appear broken.
+    fn end_mouse_drag(&mut self, slot: usize) {
+        let was_navigating = self.drag_ops[slot].take().is_some();
+        if !was_navigating && slot == 0 {
+            self.finish_drag_select();
+        }
+    }
+
     /// Begins a selection gesture at the cursor.
     fn begin_drag_select(&mut self) {
         let Some(origin) = self.cursor_viewport_px() else {
@@ -1407,7 +1623,16 @@ impl App {
                         // A drag resolves elements of the object being edited,
                         // and the bitset is indexed by that mesh's numbering —
                         // so only that draw may read it.
-                        .preview(Some(*id) == preview_target),
+                        .preview(Some(*id) == preview_target)
+                        // Exempt from screen-size simplification. In edit mode
+                        // the object-level `selected` flag above is deliberately
+                        // false, so without this the mesh actually being edited
+                        // would be the one thing eligible to have its overlays
+                        // faded — precisely backwards.
+                        .editing(
+                            self.op_ctx.mode == OpMode::EditMesh
+                                && self.doc.selection.contains(*id),
+                        ),
                 );
             }
         }
@@ -1444,7 +1669,7 @@ impl App {
 
         // 3D into the offscreen target...
         gfx.viewport
-            .prepare(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &draws);
+            .prepare(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &mut draws);
         gfx.viewport.render(&mut encoder, &gfx.target.view, &draws);
 
         // The id pass runs every frame, not on the click. The naive flow — click,
@@ -1879,18 +2104,26 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // egui gets first refusal. Anything it consumes must not also reach the
-        // viewport, or a click on a panel would orbit the camera behind it.
-        let consumed = match (self.egui_state.as_mut(), self.window.as_ref()) {
-            (Some(state), Some(window)) => {
-                let response = state.on_window_event(window, &event);
-                if response.repaint {
-                    self.redraw.set(RedrawReason::UI);
-                }
-                response.consumed
+        // The interface sees every event, and says whether it needs a repaint.
+        //
+        // Its `consumed` flag is deliberately ignored. It reports
+        // `is_pointer_over_egui() && !any_button_down`, and the viewport lives
+        // inside a central panel — so "over egui" is true across the whole scene
+        // and *every* press and every wheel notch over the model came back
+        // consumed while every release did not. Acting on it dropped exactly the
+        // input the viewport exists to receive.
+        //
+        // Pointer ownership is decided by geometry instead: the viewport takes
+        // what lands in it, the navigation gizmo takes its own circle, and the
+        // panels keep everything outside. Keyboard input is a different question
+        // with a different answer — see `ShellState::keymap_enabled`, which asks
+        // whether a text field has focus.
+        if let (Some(state), Some(window)) = (self.egui_state.as_mut(), self.window.as_ref()) {
+            let response = state.on_window_event(window, &event);
+            if response.repaint {
+                self.redraw.set(RedrawReason::UI);
             }
-            _ => false,
-        };
+        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -1911,7 +2144,12 @@ impl ApplicationHandler for App {
                 self.redraw.set(RedrawReason::RESIZE);
             }
 
-            WindowEvent::MouseInput { state, button, .. } if !consumed => {
+            // A button that went down has to come up, wherever it comes up.
+            // Guarding this arm on the interface's `consumed` flag was a real
+            // bug: a drag released over a panel had its release eaten, the button
+            // stayed held, and from then on the view turned whenever the pointer
+            // moved with nothing pressed.
+            WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 let slot = match button {
                     MouseButton::Left => Some(0),
@@ -1921,34 +2159,16 @@ impl ApplicationHandler for App {
                 };
                 if let Some(slot) = slot {
                     let mapped = [KeyMouse::Left, KeyMouse::Middle, KeyMouse::Right][slot];
-                    // On the press, not on the first motion: by the time the
-                    // pointer has moved the view has already turned once about
-                    // the old pivot, and that first frame is exactly the jump
-                    // auto-depth exists to remove.
-                    let starts_orbit = self
-                        .drag_action(mapped)
-                        .is_some_and(|a| a.op_id == "view.orbit");
-                    if pressed && !self.buttons[slot] && starts_orbit {
-                        self.set_auto_depth_pivot();
-                    }
-                    // A left press that is not bound to a drag begins a
-                    // selection gesture — which is a click or a box depending on
-                    // whether the pointer moves, and cannot be told apart until
-                    // it does. Nothing is committed here.
-                    //
-                    // Shift extends and Ctrl removes, read from the live modifier
-                    // state rather than from the keymap: this is one gesture
-                    // rather than several bindings, and a preset that rebinds
-                    // selection has to move its variants with it.
-                    let selecting = mapped == KeyMouse::Left
-                        && !starts_orbit
-                        && self.drag_action(mapped).is_none();
-                    if selecting {
-                        if pressed && !self.buttons[slot] {
-                            self.begin_drag_select();
-                        } else if !pressed && self.buttons[slot] {
-                            self.finish_drag_select();
+                    if pressed && !self.buttons[slot] {
+                        // Ownership is decided by where the press landed, not by
+                        // asking the interface whether it wants it. Asked once,
+                        // at the press, so the rest of the gesture never has to
+                        // ask again and cannot change its mind halfway through.
+                        if self.press_belongs_to_viewport() {
+                            self.begin_mouse_drag(slot, mapped);
                         }
+                    } else if !pressed && self.buttons[slot] {
+                        self.end_mouse_drag(slot);
                     }
                     self.buttons[slot] = pressed;
                 }
@@ -1958,51 +2178,44 @@ impl ApplicationHandler for App {
                 self.track_drag_select();
                 let p = (position.x, position.y);
                 if let Some(prev) = self.input.cursor {
-                    let delta = (p.0 - prev.0, p.1 - prev.1);
-                    // Which navigation this is comes from the keymap, so the
-                    // Maya preset's Alt+LMB orbit needs no code here at all.
-                    // One drag must not both turn the gizmo and turn the scene;
-                    // the gizmo took the pointer first.
-                    let blocked = self.ui.gizmo_active;
-                    for (slot, mapped) in [KeyMouse::Left, KeyMouse::Middle, KeyMouse::Right]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        if blocked || !self.buttons[slot] {
-                            continue;
-                        }
-                        let Some(action) = self.drag_action(mapped) else {
-                            continue;
-                        };
-                        self.input.note_event();
-                        match action.op_id.as_str() {
-                            "view.orbit" => {
-                                self.input.orbit_delta.0 += delta.0;
-                                self.input.orbit_delta.1 += delta.1;
-                            }
-                            "view.pan" => {
-                                self.input.pan_delta.0 += delta.0;
-                                self.input.pan_delta.1 += delta.1;
-                            }
-                            "view.dolly" => {
-                                // Vertical drag zooms, at a gentler rate than
-                                // the wheel's notches.
-                                self.input.scroll -= delta.1 * 0.02;
-                            }
-                            _ => {}
-                        }
-                    }
+                    self.apply_drag_motion((p.0 - prev.0, p.1 - prev.1));
                 }
                 self.input.cursor = Some(p);
             }
 
-            WindowEvent::MouseWheel { delta, .. } if !consumed => {
-                self.input.note_event();
-                self.input.scroll += match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as f64,
-                    MouseScrollDelta::PixelDelta(p) => p.y / 60.0,
+            // Owned by geometry, like a press. `consumed` is worse than useless
+            // here: with no button held it is *always* true over the viewport,
+            // so the wheel was being dropped exactly where zooming is wanted.
+            // Over a panel the cursor is outside the viewport and the interface
+            // keeps its own scrolling.
+            WindowEvent::MouseWheel { delta, .. } if self.cursor_in_viewport() => {
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
+                    // A precision trackpad reports pixels. Scaled to notches so
+                    // one unit means the same thing whichever device sent it.
+                    MouseScrollDelta::PixelDelta(p) => (p.x / 60.0, p.y / 60.0),
                 };
+                self.apply_wheel(x, y);
             }
+
+            // Pinch to zoom, which winit reports only on macOS and iOS. On
+            // Windows and Linux a trackpad pinch arrives as a wheel event
+            // instead, which the arm above already handles — there is no
+            // gesture to miss, only a different name for it.
+            WindowEvent::PinchGesture { delta, .. } if self.cursor_in_viewport() => {
+                self.apply_wheel(0.0, delta * PINCH_NOTCHES);
+            }
+
+            // The last way a held button can be left held: the release goes
+            // somewhere else. Alt+Tab mid-drag, a notification stealing focus, a
+            // screen locking — the window never sees the button come up, and
+            // without this the view would turn on every pointer movement until
+            // the user happened to press and release again.
+            //
+            // The same class of bug as a release the interface claimed, and worth
+            // fixing in the same place: whatever the reason, a gesture whose end
+            // was not observed has ended.
+            WindowEvent::Focused(false) => self.cancel_all_drags(),
 
             WindowEvent::ModifiersChanged(m) => {
                 self.input.shift_down = m.state().shift_key();
@@ -2105,4 +2318,300 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App::new(doc, &locale);
     event_loop.run_app(&mut app).expect("run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An application with no window, which is all the input state machine needs.
+    fn app() -> App {
+        let mut registry = OperatorRegistry::new();
+        kreate_ops::register_builtin(&mut registry);
+        let mut app = App::empty(Document::new(), "en-US", registry);
+        app.keymap = presets::load(Preset::Kreate);
+        app
+    }
+
+    /// The middle button, which the default preset orbits with.
+    const ORBIT: usize = 1;
+
+    #[test]
+    fn a_middle_drag_navigates() {
+        let mut app = app();
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        assert_eq!(
+            app.drag_ops[ORBIT].as_deref(),
+            Some("view.orbit"),
+            "the default preset orbits on the middle button"
+        );
+    }
+
+    #[test]
+    fn a_release_ends_the_drag() {
+        let mut app = app();
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        app.end_mouse_drag(ORBIT);
+        assert!(app.drag_ops[ORBIT].is_none());
+    }
+
+    #[test]
+    fn a_release_the_interface_claimed_still_ends_the_drag() {
+        // The bug this exists for, reported as "navigation works, then does not".
+        //
+        // A drag begun over the viewport and released over a panel had its
+        // release eaten by the interface, so the button stayed held. From then on
+        // the view turned whenever the pointer moved with nothing pressed, until
+        // some later press and release happened to clear it.
+        //
+        // The release path now runs whether or not the interface claimed the
+        // event: a button that went down has to come up.
+        let mut app = app();
+        app.buttons[ORBIT] = true;
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        assert!(app.drag_ops[ORBIT].is_some());
+
+        // What the event handler does for a release, consumed or not.
+        app.end_mouse_drag(ORBIT);
+        app.buttons[ORBIT] = false;
+
+        assert!(
+            app.drag_ops[ORBIT].is_none(),
+            "the drag outlived the button that started it"
+        );
+    }
+
+    #[test]
+    fn a_drag_keeps_doing_what_it_started_doing() {
+        // Releasing a modifier partway through used to turn a pan into an orbit,
+        // because the binding was resolved on every motion rather than once.
+        //
+        // Checked through the motion path rather than by reading the latch: the
+        // latch not changing proves nothing unless what consumes it agrees.
+        let mut app = app();
+        app.input.shift_down = true;
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        assert_eq!(app.drag_ops[ORBIT].as_deref(), Some("view.pan"));
+
+        app.apply_drag_motion((10.0, 0.0));
+        app.input.shift_down = false;
+        app.apply_drag_motion((10.0, 0.0));
+
+        assert_eq!(app.input.pan_delta.0, 20.0, "both movements should pan");
+        assert_eq!(
+            app.input.orbit_delta,
+            (0.0, 0.0),
+            "the gesture changed underneath the user"
+        );
+    }
+
+    #[test]
+    fn losing_focus_ends_every_drag() {
+        // Alt+Tab mid-drag: the release goes to whatever took focus, and the
+        // window never sees the button come up. The same class of bug as a
+        // release the interface claimed.
+        let mut app = app();
+        app.input.alt_down = true;
+        app.begin_mouse_drag(0, KeyMouse::Left);
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        app.buttons = [true, true, false];
+
+        app.cancel_all_drags();
+
+        app.apply_drag_motion((30.0, 30.0));
+        assert_eq!(app.input.orbit_delta, (0.0, 0.0));
+        assert_eq!(app.input.pan_delta, (0.0, 0.0));
+        assert_eq!(app.buttons, [false; 3]);
+        assert!(
+            !app.input.alt_down,
+            "a modifier held when focus was lost never gets its key-up"
+        );
+    }
+
+    #[test]
+    fn losing_focus_abandons_a_selection_drag_rather_than_committing_it() {
+        // A rubber band whose release was never seen has no end point worth
+        // trusting. Committing a selection the user did not finish is worse than
+        // losing one they did.
+        let mut app = app();
+        app.begin_mouse_drag(0, KeyMouse::Left);
+        app.drag_select = Some(DragSelect {
+            origin: (10.0, 10.0),
+            current: (90.0, 90.0),
+            moved: true,
+            extend: false,
+            deselect: false,
+        });
+
+        app.cancel_all_drags();
+        assert!(app.drag_select.is_none());
+    }
+
+    /// Puts a viewport on screen and the cursor in the middle of it.
+    ///
+    /// `viewport_px` is what the application knows about where the scene is
+    /// drawn; the render size comes from the graphics state, which a headless
+    /// test has none of, so ownership is tested through the parts that do not
+    /// need one.
+    fn with_viewport(app: &mut App) {
+        app.viewport_px = Some((100.0, 50.0, 800.0, 600.0));
+        app.input.cursor = Some((500.0, 350.0));
+    }
+
+    #[test]
+    fn a_press_outside_the_viewport_belongs_to_the_interface() {
+        // Over a panel: the interface keeps it, and the view must not move.
+        let mut app = app();
+        with_viewport(&mut app);
+        app.input.cursor = Some((10.0, 10.0));
+        assert!(!app.press_belongs_to_viewport());
+    }
+
+    #[test]
+    fn a_press_with_no_viewport_belongs_to_nobody() {
+        // Before the first frame there is no scene to click into.
+        let mut app = app();
+        app.input.cursor = Some((500.0, 350.0));
+        assert!(!app.press_belongs_to_viewport());
+    }
+
+    #[test]
+    fn a_press_over_the_navigation_gizmo_is_left_to_it() {
+        // One drag must not both turn the gizmo and turn the scene. Excluded by
+        // the gizmo's own circle rather than by a hover flag, because a flag is
+        // only recomputed when the interface runs and a press can arrive between
+        // frames.
+        let mut app = app();
+        with_viewport(&mut app);
+        app.ui.gizmo_circle = Some((egui::pos2(500.0, 350.0), 40.0));
+        assert!(
+            !app.press_belongs_to_viewport(),
+            "the press landed inside the gizmo"
+        );
+
+        app.input.cursor = Some((500.0, 600.0));
+        assert!(
+            app.press_belongs_to_viewport(),
+            "well clear of the gizmo, so the scene takes it"
+        );
+    }
+
+    #[test]
+    fn the_wheel_zooms() {
+        let mut app = app();
+        app.apply_wheel(0.0, 3.0);
+        assert_eq!(app.input.scroll, 3.0);
+        assert_eq!(app.input.pan_delta, (0.0, 0.0));
+    }
+
+    #[test]
+    fn horizontal_scroll_pans_rather_than_being_discarded() {
+        // A sideways two-finger swipe on a trackpad, and a tilt wheel, used to do
+        // nothing: only the vertical component was read.
+        let mut app = app();
+        app.apply_wheel(2.0, 0.0);
+        assert!(
+            app.input.pan_delta.0 != 0.0,
+            "the sideways swipe was dropped"
+        );
+        assert_eq!(app.input.scroll, 0.0, "it must not also zoom");
+    }
+
+    #[test]
+    fn shift_and_the_wheel_scroll_sideways() {
+        // The convention nearly everywhere, and the only horizontal pan available
+        // on a mouse with no tilt wheel and no trackpad.
+        let mut app = app();
+        app.input.shift_down = true;
+        app.apply_wheel(0.0, 2.0);
+        assert!(app.input.pan_delta.0 != 0.0);
+        assert_eq!(app.input.scroll, 0.0);
+    }
+
+    #[test]
+    fn an_unbound_modifier_still_zooms() {
+        // A trackpad pinch arrives as Ctrl+wheel on Windows, and a wheel that is
+        // inert for no visible reason reads as the application being broken.
+        let mut app = app();
+        app.input.ctrl_down = true;
+        app.apply_wheel(0.0, 2.0);
+        assert_eq!(app.input.scroll, 2.0);
+    }
+
+    #[test]
+    fn an_empty_scroll_does_nothing_at_all() {
+        // Trackpads emit these at the end of a gesture. Waking the frame loop for
+        // one is how an idle window stops being idle.
+        let mut app = app();
+        app.apply_wheel(0.0, 0.0);
+        assert!(!app.input.has_pending());
+        assert!(app.input.first_event_at.is_none());
+    }
+
+    #[test]
+    fn motion_without_a_button_moves_nothing() {
+        // The symptom of the release bug, stated directly: with no drag in
+        // progress, moving the pointer must not turn the view.
+        let mut app = app();
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        app.end_mouse_drag(ORBIT);
+        app.apply_drag_motion((25.0, 25.0));
+
+        assert_eq!(app.input.orbit_delta, (0.0, 0.0));
+        assert_eq!(app.input.pan_delta, (0.0, 0.0));
+        assert_eq!(app.input.scroll, 0.0);
+    }
+
+    #[test]
+    fn a_middle_drag_actually_turns_the_view() {
+        // The whole chain, from press to accumulated delta.
+        let mut app = app();
+        app.begin_mouse_drag(ORBIT, KeyMouse::Middle);
+        app.apply_drag_motion((12.0, -4.0));
+        assert_eq!(app.input.orbit_delta, (12.0, -4.0));
+    }
+
+    #[test]
+    fn an_unbound_left_press_starts_a_selection_rather_than_navigation() {
+        let mut app = app();
+        app.begin_mouse_drag(0, KeyMouse::Left);
+        assert!(
+            app.drag_ops[0].is_none(),
+            "a plain left drag is the selection rubber band"
+        );
+    }
+
+    #[test]
+    fn a_bound_left_press_navigates_instead_of_selecting() {
+        // Alt+LMB orbits in every preset, so that navigation works on a mouse
+        // without a usable middle button. It must not also begin a selection.
+        let mut app = app();
+        app.input.alt_down = true;
+        app.begin_mouse_drag(0, KeyMouse::Left);
+        assert_eq!(app.drag_ops[0].as_deref(), Some("view.orbit"));
+        assert!(
+            app.drag_select.is_none(),
+            "one press must not start two gestures"
+        );
+    }
+
+    #[test]
+    fn every_button_tracks_its_own_drag() {
+        // Holding one button while pressing another is ordinary, and the two must
+        // not share state.
+        let mut app = app();
+        app.input.alt_down = true;
+        app.begin_mouse_drag(0, KeyMouse::Left);
+        app.begin_mouse_drag(2, KeyMouse::Right);
+        assert_eq!(app.drag_ops[0].as_deref(), Some("view.orbit"));
+        assert_eq!(app.drag_ops[2].as_deref(), Some("view.dolly"));
+
+        app.end_mouse_drag(0);
+        assert!(app.drag_ops[0].is_none());
+        assert_eq!(
+            app.drag_ops[2].as_deref(),
+            Some("view.dolly"),
+            "releasing one button ended another's drag"
+        );
+    }
 }

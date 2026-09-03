@@ -76,7 +76,7 @@ fn select(
             (mesh, o.transform, o.id)
         })
         .collect();
-    let draws: Vec<Draw> = uploaded
+    let mut draws: Vec<Draw> = uploaded
         .iter()
         .map(|(m, t, id)| Draw::new(m, *t).object_id(*id))
         .collect();
@@ -86,7 +86,7 @@ fn select(
 
     let ids = PickTarget::new(&gpu.device, SIZE, SIZE);
     let mut region = RegionSelect::new(&gpu.device);
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.prepare_ids(&gpu.device, &gpu.queue, &camera, &draws, domain);
 
     let mut encoder = gpu
@@ -572,14 +572,14 @@ fn a_second_drag_does_not_inherit_the_first() {
         &cpu,
         Vec4::new(0.75, 0.72, 0.68, 1.0),
     );
-    let draws = vec![Draw::new(&mesh, DAffine3::IDENTITY).object_id(0)];
+    let mut draws = vec![Draw::new(&mesh, DAffine3::IDENTITY).object_id(0)];
     let mut camera = Camera::default();
     from_above(&mut camera);
     camera.distance = 4.0;
 
     let ids = PickTarget::new(&gpu.device, SIZE, SIZE);
     let mut region = RegionSelect::new(&gpu.device);
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.prepare_ids(&gpu.device, &gpu.queue, &camera, &draws, PickDomain::Vert);
 
     let run = |region: &mut RegionSelect, shape: &SelectShape| -> Vec<u32> {

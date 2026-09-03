@@ -111,12 +111,12 @@ fn render_scene_full(
             (gpu_mesh, *xform)
         })
         .collect();
-    let refs: Vec<Draw> = uploaded.iter().map(|(m, t)| Draw::new(m, *t)).collect();
+    let mut refs: Vec<Draw> = uploaded.iter().map(|(m, t)| Draw::new(m, *t)).collect();
 
     let mut camera = Camera::default();
     configure_camera(&mut camera);
 
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &refs);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut refs);
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),

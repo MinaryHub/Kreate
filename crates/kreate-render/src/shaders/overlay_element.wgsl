@@ -24,6 +24,8 @@ struct ElementObject {
     selected_color: vec4<f32>,
     unselected_color: vec4<f32>,
     // x: whether the rubber-band preview applies to this draw.
+    // y: overlay density fade for the vertex dots. The face fill ignores it —
+    //    a fill does not become less legible as a mesh gets denser.
     flags: vec4<f32>,
 };
 
@@ -211,5 +213,10 @@ fn fs_point(in: PointOut) -> @location(0) vec4<f32> {
         discard;
     }
     let color = select(object.unselected_color, object.selected_color, in.selected != 0u);
-    return vec4<f32>(color.rgb, color.a * coverage);
+    // `flags.y` is the density fade: below about a pixel of screen per vertex a
+    // field of dots is an unreadable grey smear that hides the shading it is
+    // supposed to annotate, so it fades out. The draw is skipped entirely once
+    // this reaches zero — see the draw loop — so what arrives here is always a
+    // partial fade.
+    return vec4<f32>(color.rgb, color.a * coverage * object.flags.y);
 }

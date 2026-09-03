@@ -79,7 +79,7 @@ fn pick(
             (mesh, o.transform, o.id)
         })
         .collect();
-    let draws: Vec<Draw> = uploaded
+    let mut draws: Vec<Draw> = uploaded
         .iter()
         .map(|(m, t, id)| Draw::new(m, *t).object_id(*id))
         .collect();
@@ -88,7 +88,7 @@ fn pick(
     configure_camera(&mut camera);
 
     let mut target = PickTarget::new(&gpu.device, SIZE, SIZE);
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.prepare_ids(&gpu.device, &gpu.queue, &camera, &draws, domain);
 
     let mut encoder = gpu

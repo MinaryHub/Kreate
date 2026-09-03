@@ -12,6 +12,7 @@ kreate-mesh.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 ahash.workspace = true
+meshopt.workspace = true
 wgpu.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
@@ -20,4 +21,7 @@ thiserror.workspace = true
 pollster.workspace = true
 # Shaders are parsed and validated in unit tests, so a syntax error is a test
 # failure rather than a blank window at run time.
-naga = { version = "29", features = ["wgsl-in"] }
+# `msl-out` as well as `wgsl-in`: a test translates every shader to Metal
+# Shading Language, which is the only way to find out whether the Metal path
+# works without owning a Mac.
+naga = { version = "29", features = ["wgsl-in", "msl-out", "hlsl-out", "spv-out"] }

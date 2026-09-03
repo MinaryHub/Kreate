@@ -60,6 +60,9 @@ arc-swap          = "1.7"
 
 # --- data structures ---
 slotmap  = "1.0"
+# Vertex-cache optimisation and meshlet clustering. Builds through `cc`, not
+# cmake — which is why it is usable here at all, since cmake is not installed.
+meshopt = "0.6.2"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 arrayvec = "0.7"
 indexmap = "2.5"

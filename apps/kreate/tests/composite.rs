@@ -224,7 +224,7 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
             ),
         ));
     }
-    let draws: Vec<kreate_render::Draw> = doc
+    let mut draws: Vec<kreate_render::Draw> = doc
         .objects()
         .filter_map(|(id, o)| {
             let mesh_id = o.mesh()?;
@@ -244,7 +244,7 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("composite"),
         });
-    viewport.prepare(&gpu.device, &gpu.queue, &camera, &draws);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.render(&mut encoder, &vp_view, &draws);
 
     let paint_jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
