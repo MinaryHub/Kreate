@@ -116,6 +116,115 @@ impl AttrData {
         self.len() == 0
     }
 
+    /// Builds a new array by blending several source values per output element.
+    ///
+    /// `offsets` is a CSR index: output element `i` blends the sources named by
+    /// `indices[offsets[i]..offsets[i + 1]]`. A flat pair rather than a list of
+    /// lists, because a refining modifier produces one of these per domain and
+    /// per level, and a `Vec` per element would allocate once per vertex of the
+    /// result.
+    ///
+    /// What "blend" means depends on the type, and the differences are not
+    /// arbitrary:
+    ///
+    /// - **Floats average.** A UV or a weight halfway between two corners is the
+    ///   mean of them.
+    /// - **Booleans require all sources.** These are selection and marker layers.
+    ///   A new vertex between one selected vertex and one unselected one is not
+    ///   selected — taking *any* source instead makes a selection bleed outward
+    ///   a ring on every subdivision.
+    /// - **Integers take the first source.** They are indices — a material, a
+    ///   group — and the mean of two indices is a third thing that means nothing.
+    /// - **Byte quadruples average**, as colours. This is the one type whose
+    ///   right answer depends on use: averaged as a colour, meaningless as a
+    ///   packed id. Colour is the only thing this codebase puts in one.
+    pub fn interpolate(&self, offsets: &[u32], indices: &[u32]) -> AttrData {
+        let count = offsets.len().saturating_sub(1);
+        // The sources of output element `i`, as a slice.
+        let sources = |i: usize| -> &[u32] {
+            let start = offsets[i] as usize;
+            let end = offsets[i + 1] as usize;
+            &indices[start.min(indices.len())..end.min(indices.len())]
+        };
+
+        macro_rules! mean {
+            ($values:expr, $zero:expr) => {{
+                let v = $values;
+                let mut out = Vec::with_capacity(count);
+                for i in 0..count {
+                    let src = sources(i);
+                    if src.is_empty() {
+                        out.push($zero);
+                        continue;
+                    }
+                    let mut sum = $zero;
+                    let mut n = 0.0f32;
+                    for index in src {
+                        if let Some(value) = v.get(*index as usize) {
+                            sum += *value;
+                            n += 1.0;
+                        }
+                    }
+                    out.push(if n > 0.0 { sum / n } else { $zero });
+                }
+                out
+            }};
+        }
+
+        match self {
+            AttrData::F32(v) => AttrData::F32(Arc::new(mean!(v, 0.0f32))),
+            AttrData::F32x2(v) => AttrData::F32x2(Arc::new(mean!(v, Vec2::ZERO))),
+            AttrData::F32x3(v) => AttrData::F32x3(Arc::new(mean!(v, Vec3::ZERO))),
+            AttrData::F32x4(v) => AttrData::F32x4(Arc::new(mean!(v, Vec4::ZERO))),
+            AttrData::Bool(v) => AttrData::Bool(Arc::new(
+                (0..count)
+                    .map(|i| {
+                        let src = sources(i);
+                        !src.is_empty()
+                            && src
+                                .iter()
+                                .all(|j| v.get(*j as usize).copied().unwrap_or(false))
+                    })
+                    .collect(),
+            )),
+            AttrData::I32(v) => AttrData::I32(Arc::new(
+                (0..count)
+                    .map(|i| {
+                        sources(i)
+                            .first()
+                            .and_then(|j| v.get(*j as usize).copied())
+                            .unwrap_or(0)
+                    })
+                    .collect(),
+            )),
+            AttrData::U8x4(v) => AttrData::U8x4(Arc::new(
+                (0..count)
+                    .map(|i| {
+                        let src = sources(i);
+                        let mut sum = [0u32; 4];
+                        let mut n = 0u32;
+                        for j in src {
+                            if let Some(value) = v.get(*j as usize) {
+                                for (s, c) in sum.iter_mut().zip(value) {
+                                    *s += u32::from(*c);
+                                }
+                                n += 1;
+                            }
+                        }
+                        if n == 0 {
+                            return [0; 4];
+                        }
+                        let mut out = [0u8; 4];
+                        for (o, s) in out.iter_mut().zip(sum) {
+                            *o = (s / n) as u8;
+                        }
+                        out
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
     /// Heap bytes this layer's array occupies.
     pub fn memory_bytes(&self) -> usize {
         self.len() * self.ty().size()

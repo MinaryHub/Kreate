@@ -30,3 +30,7 @@ pub use ops::register_builtin;
 pub use property::{
     OpParams as OpParamsTrait, PropertyDesc, PropertyKind, PropertyMap, PropertyValue, Unit,
 };
+
+/// Re-exported so a caller can hold an edit session without naming the scene
+/// crate: the operator layer is what hands one to `dispatch_in_session`.
+pub use kreate_scene::EditSession;

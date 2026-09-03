@@ -13,6 +13,7 @@ pub mod modifier_stack;
 pub mod nav_gizmo;
 pub mod outliner;
 pub mod property_editor;
+pub mod text;
 
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};
@@ -20,3 +21,4 @@ pub use keymap_editor::{keymap_editor, KeymapEdit, KeymapText};
 pub use modifier_stack::{modifier_stack, ModifierRow, ModifierText};
 pub use outliner::{outliner, ClickModifiers, OutlinerRow, RowKind};
 pub use property_editor::{property_editor, property_widget, UnitDisplay};
+pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};

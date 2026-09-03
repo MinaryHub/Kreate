@@ -201,7 +201,7 @@ fn row(
             // i18n-exempt: a reset arrow is a symbol, not prose
             if ui
                 .add_enabled(changed, egui::Button::new("↺"))
-                .on_hover_text(&text.reset_hint)
+                .on_hover_text(crate::text::wrap_tooltip(ui, &text.reset_hint))
                 .clicked()
             {
                 edits.push(KeymapEdit::Reset(binding.id.clone()));

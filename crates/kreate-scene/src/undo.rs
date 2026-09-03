@@ -40,6 +40,7 @@ use glam::Vec3;
 use kreate_mesh::attribute::names;
 
 use crate::document::{Document, MeshId};
+use crate::edit_session::EditSession;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EditError {
@@ -130,6 +131,12 @@ pub struct DocMut<'a> {
     /// Snapshot taken lazily, only if something asks for the coarse path.
     before: Option<Box<Document>>,
     deltas: Vec<UndoPayload>,
+    /// The edit-mode structure, when one is open.
+    ///
+    /// Carried here because this is the mutation gateway and the `BMesh` is a
+    /// staging area for mutations: an operator that reaches for one is about to
+    /// change the document, and both have to be reached through the same borrow.
+    session: Option<&'a mut EditSession>,
 }
 
 impl<'a> DocMut<'a> {
@@ -138,6 +145,74 @@ impl<'a> DocMut<'a> {
             doc,
             before: None,
             deltas: Vec::new(),
+            session: None,
+        }
+    }
+
+    /// The same, with an edit session an operator may use.
+    pub fn with_session(doc: &'a mut Document, session: Option<&'a mut EditSession>) -> Self {
+        Self {
+            doc,
+            before: None,
+            deltas: Vec::new(),
+            session,
+        }
+    }
+
+    /// The edit structure for `mesh`, ready to be worked on.
+    ///
+    /// `None` when there is no session, or when it is about another mesh, or
+    /// when the document has moved on since the session last agreed with it — a
+    /// selection click, an undo, a modifier. The caller then converts for
+    /// itself, which is correct but costs a pass over the whole mesh.
+    ///
+    /// Reopened rather than refused when it is merely stale: the alternative is
+    /// paying for a conversion *and* throwing the session away, which would make
+    /// every operator after a click slow instead of just the first.
+    pub fn edit_bmesh(&mut self, mesh: MeshId) -> Option<&mut kreate_mesh::BMesh> {
+        let doc = &*self.doc;
+        let session = self.session.as_mut()?;
+        if session.mesh() != mesh {
+            return None;
+        }
+        if !session.matches(doc, mesh) && !session.reopen(doc) {
+            return None;
+        }
+        Some(session.bmesh_for(doc))
+    }
+
+    /// The corner-to-edge map the session holds, if it is current.
+    ///
+    /// Returned by handle rather than by reference so the caller can hold it
+    /// while it borrows the mesh mutably — which is exactly what a selection
+    /// flush needs to do.
+    ///
+    /// `None` when there is no session or it is about another mesh. A stale one
+    /// is reopened, because the map has to describe the mesh that is actually
+    /// there.
+    pub fn edit_corner_edges(&mut self, mesh: MeshId) -> Option<std::sync::Arc<Vec<u32>>> {
+        let doc = &*self.doc;
+        let session = self.session.as_mut()?;
+        if session.mesh() != mesh {
+            return None;
+        }
+        if !session.matches(doc, mesh) && !session.reopen(doc) {
+            return None;
+        }
+        Some(session.corner_edges())
+    }
+
+    /// Writes the edit structure back to the document.
+    ///
+    /// Takes the coarse snapshot first, like [`DocMut::document_mut`]: a
+    /// topology change is exactly what the whole-document path is for.
+    pub fn bake_edit(&mut self) -> bool {
+        if self.before.is_none() {
+            self.before = Some(Box::new(self.doc.clone()));
+        }
+        match self.session.as_mut() {
+            Some(session) => session.bake(self.doc),
+            None => false,
         }
     }
 

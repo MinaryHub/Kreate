@@ -389,19 +389,81 @@ impl Document {
     ///
     /// `parent_world * parent_inverse * local`, so an object stays put when it is
     /// parented and follows the parent thereafter.
+    ///
+    /// Iterative, not recursive. The recursive form is shorter and overflows the
+    /// stack on a deep chain — and a deep chain is not exotic: a rig, a spine, a
+    /// length of chain links. A few thousand deep is enough, and the failure is a
+    /// hard crash rather than anything a user could act on.
+    ///
+    /// The walk up is bounded by the arena's slot count, so a document that
+    /// already contains a parent cycle returns a wrong answer rather than
+    /// hanging. `set_parent` refuses to create one; a corrupt file is the case
+    /// this covers.
     pub fn world_transform(&self, id: ObjectId) -> DAffine3 {
-        let Some(object) = self.objects.get(id) else {
-            return DAffine3::IDENTITY;
-        };
-        let local = object.transform.to_affine();
-        match object.parent {
-            None => local,
-            Some(parent) => self.world_transform(parent) * object.parent_inverse * local,
+        let mut chain: Vec<ObjectId> = Vec::new();
+        let mut current = Some(id);
+        for _ in 0..=self.objects.slot_count() {
+            let Some(next) = current else { break };
+            if self.objects.get(next).is_none() {
+                break;
+            }
+            chain.push(next);
+            current = self.objects[next].parent;
         }
+
+        // Multiplied from the root down, which is the order the recursive form
+        // effectively unwound in.
+        let mut world = DAffine3::IDENTITY;
+        for id in chain.iter().rev() {
+            let object = &self.objects[*id];
+            let local = object.transform.to_affine();
+            world = if object.parent.is_some() {
+                world * object.parent_inverse * local
+            } else {
+                local
+            };
+        }
+        world
     }
 
     /// Depth-first traversal from the roots, parents before children.
+    ///
+    /// The children are indexed in one pass first. Searching every object for
+    /// the children of each node instead is the obvious way to write this and is
+    /// quadratic: at a hundred thousand objects it is ten billion comparisons,
+    /// and the outliner asks for this whenever the scene changes. The cost is
+    /// invisible at twenty objects, which is why it needs saying rather than
+    /// measuring.
     pub fn hierarchy(&self) -> Vec<(ObjectId, usize)> {
+        use kreate_mesh::arena::ArenaIndex as _;
+
+        let slots = self.objects.slot_count();
+        // Flat CSR rather than a `Vec` per parent: one allocation instead of one
+        // per object, and the counting pass is the same walk either way.
+        let mut counts = vec![0u32; slots + 1];
+        for (_, object) in self.objects.iter() {
+            if let Some(parent) = object.parent {
+                counts[parent.index() as usize + 1] += 1;
+            }
+        }
+        for i in 1..counts.len() {
+            counts[i] += counts[i - 1];
+        }
+        let offsets = counts.clone();
+        let mut cursor = counts;
+        let mut children = vec![None; offsets[slots] as usize];
+        for (id, object) in self.objects.iter() {
+            if let Some(parent) = object.parent {
+                let slot = &mut cursor[parent.index() as usize];
+                children[*slot as usize] = Some(id);
+                *slot += 1;
+            }
+        }
+        let children_of = |parent: ObjectId| -> &[Option<ObjectId>] {
+            let i = parent.index() as usize;
+            &children[offsets[i] as usize..offsets[i + 1] as usize]
+        };
+
         let mut out = Vec::with_capacity(self.objects.len());
         let mut stack: Vec<(ObjectId, usize)> =
             self.roots.iter().rev().map(|id| (*id, 0)).collect();
@@ -410,16 +472,13 @@ impl Document {
                 continue;
             }
             out.push((id, depth));
-            let mut children: Vec<ObjectId> = self
-                .objects
-                .iter()
-                .filter(|(_, o)| o.parent == Some(id))
-                .map(|(cid, _)| cid)
-                .collect();
-            children.reverse();
-            stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+            // Reversed onto the stack so they come back off in arena order,
+            // which is what makes the outliner's row order reproducible.
+            for child in children_of(id).iter().rev().flatten() {
+                stack.push((*child, depth + 1));
+            }
             // A pre-existing cycle would otherwise loop forever here.
-            if out.len() > self.objects.slot_count() {
+            if out.len() > slots {
                 break;
             }
         }
@@ -479,6 +538,41 @@ impl Document {
             .values()
             .filter(|o| o.mesh() == Some(id))
             .count()
+    }
+
+    /// How many objects reference each mesh, by mesh slot.
+    ///
+    /// One pass for the whole scene. Asking [`Document::mesh_users`] per row is
+    /// quadratic, and the outliner is exactly the caller that wants it for every
+    /// object at once — which is how a scene of a hundred thousand objects turns
+    /// a panel into ten billion comparisons.
+    pub fn mesh_user_counts(&self) -> Vec<u32> {
+        use kreate_mesh::arena::ArenaIndex as _;
+
+        let mut counts = vec![0u32; self.meshes.slot_count()];
+        for object in self.objects.values() {
+            if let Some(mesh) = object.mesh() {
+                if let Some(slot) = counts.get_mut(mesh.index() as usize) {
+                    *slot += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// The live handle for an object slot, if that slot is occupied.
+    ///
+    /// How an index that came from outside — an outliner row, a GPU id buffer, a
+    /// script — becomes a handle, in constant time. Scanning for a matching
+    /// index is what the outliner used to do, once per key, which made resolving
+    /// a large selection quadratic.
+    ///
+    /// A slot that has been *reused* resolves to whatever occupies it now: the
+    /// index carries no generation, so that is the best available answer and the
+    /// window between a delete and a click is a frame. A slot that is simply
+    /// empty resolves to nothing.
+    pub fn object_at_slot(&self, index: u32) -> Option<ObjectId> {
+        self.objects.handle_at(index)
     }
 
     pub fn add_material(&mut self, material: Material) -> MaterialId {
@@ -552,6 +646,35 @@ impl Document {
 mod tests {
     use super::*;
     use kreate_math::DQuat;
+
+    #[test]
+    fn a_deep_parent_chain_does_not_overflow_the_stack() {
+        // A rig, a spine, a length of chain links. The recursive form of
+        // `world_transform` is shorter and dies here — and it dies as a hard
+        // crash on the first frame that asks for a transform, which is not
+        // something a user can act on or a report anyone can read.
+        //
+        // Depth rather than breadth: it is the chain length that costs stack
+        // frames, and a flat scene of the same size is fine either way.
+        // Parented at construction rather than with `set_parent`, which asks for
+        // the parent's world transform and so builds a chain in quadratic time.
+        // The hierarchy is the same; only the cost of making it differs.
+        let mut doc = Document::new();
+        let mut parent = None;
+        for i in 0..20_000 {
+            let mut object = Object::new(format!("Link{i}"), ObjectData::Empty);
+            object.parent = parent;
+            object.transform.translation = DVec3::Z;
+            parent = Some(doc.add_object(object));
+        }
+
+        let leaf = parent.expect("the chain was built");
+        let world = doc.world_transform(leaf);
+        assert!(
+            world.translation.is_finite(),
+            "the deepest link has a usable transform: {world:?}"
+        );
+    }
 
     fn doc_with_cube() -> (Document, ObjectId) {
         let mut d = Document::new();

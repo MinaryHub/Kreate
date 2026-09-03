@@ -171,6 +171,71 @@ impl MeshData {
         self.num_verts == 0 && self.num_faces() == 0
     }
 
+    /// The edge each corner walks along, to the next corner of its face.
+    ///
+    /// `u32::MAX` for a corner whose edge is missing, which a valid mesh does not
+    /// have — the validator forbids it — but a half-built one can.
+    ///
+    /// The bridge from CSR faces to the edge list, and what anything walking
+    /// "the edges of this face" needs. Built with a sorted pair table and binary
+    /// search rather than a hash map: several callers derive output geometry from
+    /// it, and a hasher with a per-run seed would make the answer depend on which
+    /// run it was.
+    pub fn corner_edges(&self) -> Vec<u32> {
+        let mut pairs: Vec<([u32; 2], u32)> = self
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(i, [a, b])| {
+                let mut key = [*a, *b];
+                key.sort_unstable();
+                (key, i as u32)
+            })
+            .collect();
+        pairs.sort_unstable();
+
+        let mut out = vec![u32::MAX; self.corner_verts.len()];
+        for face in 0..self.num_faces() {
+            let ring = self.face_verts(face);
+            let start = self.face_corner_range(face).start;
+            for (i, v) in ring.iter().enumerate() {
+                let next = ring[(i + 1) % ring.len()];
+                let mut key = [*v, next];
+                key.sort_unstable();
+                if let Ok(found) = pairs.binary_search_by_key(&key, |(k, _)| *k) {
+                    out[start + i] = pairs[found].1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `other` has the same *geometry* arrays as this mesh.
+    ///
+    /// Topology and positions, by pointer identity. Attribute layers are not
+    /// compared: a selection click rewrites one of those and leaves everything
+    /// else shared, and the thing asking this question — the edit session — holds
+    /// a decoded copy that a selection change does not invalidate.
+    ///
+    /// The distinction is load-bearing. Comparing whole meshes instead makes
+    /// every click invalidate the session, so the click *after* a click pays a
+    /// full decode: at a million vertices that is two seconds, which is worse
+    /// than having no session at all.
+    pub fn same_geometry(&self, other: &MeshData) -> bool {
+        self.num_verts == other.num_verts
+            && Arc::ptr_eq(&self.face_offsets, &other.face_offsets)
+            && Arc::ptr_eq(&self.corner_verts, &other.corner_verts)
+            && Arc::ptr_eq(&self.edges, &other.edges)
+            && match (
+                self.attributes.get(names::POSITION),
+                other.attributes.get(names::POSITION),
+            ) {
+                (Some(a), Some(b)) => a.data.ptr_eq(&b.data),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
     /// Whether `other` differs from this mesh in nothing but its selection.
     ///
     /// The question a renderer has to be able to answer cheaply. Selection is

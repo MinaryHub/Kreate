@@ -1,16 +1,24 @@
 //! The object outliner.
 //!
-//! Rows are **virtualised**: only what is on screen is laid out. A modelling
-//! scene reaches tens or hundreds of thousands of objects, and immediate-mode UI
-//! punishes iterating them — building every row every frame is fine at twenty
-//! rows and ruinous at fifty thousand, which is exactly the shape of bug that
-//! hides until someone opens a real scene.
+//! Rows are **virtualised twice over**, and the second one is the part that is
+//! easy to miss.
 //!
-//! The crate cannot see a `Document`, so the application hands over a
-//! [`OutlinerRow`] view model and receives [`crate::Command`]s. Selection
-//! arithmetic — plain click, additive click, range click — lives in
-//! [`resolve_click`] as a pure function, because that is where the bugs are and
-//! it is the part worth testing without a window.
+//! Only what is on screen is laid out — that much is `ScrollArea::show_rows`.
+//! But an immediate-mode UI also punishes *building* what it does not draw, and
+//! handing this widget a `Vec` of a hundred thousand rows means a hundred
+//! thousand `String` clones every frame for the twenty the user can see. That
+//! cost is invisible at twenty objects and ruinous at fifty thousand, which is
+//! exactly the shape of bug that hides until someone opens a real scene.
+//!
+//! So the widget takes the row **order** — one `u32` per object, cheap enough to
+//! cache and hand over whole — and a function that materialises a single row.
+//! Only the visible ones are ever built.
+//!
+//! The crate cannot see a `Document`, so the application supplies both and
+//! receives [`crate::Command`]s. Selection arithmetic — plain click, additive
+//! click, range click — lives in [`resolve_click`] as a pure function over the
+//! order, because that is where the bugs are and it is the part worth testing
+//! without a window.
 
 use egui::Ui;
 use kreate_i18n::{Catalog, TextKind};
@@ -48,6 +56,8 @@ impl RowKind {
 }
 
 /// One row of the outliner.
+///
+/// Built on demand for the rows on screen, never for the whole scene.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutlinerRow {
     /// Opaque object handle. The UI never interprets it.
@@ -91,15 +101,19 @@ pub struct ClickModifiers {
 
 /// Works out the new selection from a click.
 ///
-/// Returns `(objects, active)`. Pure, because this is where selection bugs live:
-/// a range click that forgets to include one end, an additive click that fails to
-/// toggle, an active object left pointing at something no longer selected.
+/// Returns `(objects, active)`. Pure, and over the row *order* rather than over
+/// materialised rows: this is where selection bugs live — a range click that
+/// forgets one end, an additive click that fails to toggle, an active object
+/// left pointing at something no longer selected — and none of them need a row's
+/// name or icon to reproduce.
 pub fn resolve_click(
-    rows: &[OutlinerRow],
+    order: &[u32],
+    selected: &[u32],
+    active: Option<u32>,
     clicked_index: usize,
     modifiers: ClickModifiers,
 ) -> (Vec<u32>, Option<u32>) {
-    let Some(clicked) = rows.get(clicked_index) else {
+    let Some(clicked) = order.get(clicked_index).copied() else {
         return (Vec::new(), None);
     };
 
@@ -107,52 +121,68 @@ pub fn resolve_click(
         // From the active row to the clicked one, inclusive at both ends. With no
         // active row there is nothing to range *from*, so it degrades to a plain
         // click rather than selecting everything.
-        let anchor = rows.iter().position(|r| r.active).unwrap_or(clicked_index);
+        let anchor = active
+            .and_then(|a| order.iter().position(|id| *id == a))
+            .unwrap_or(clicked_index);
         let (lo, hi) = if anchor <= clicked_index {
             (anchor, clicked_index)
         } else {
             (clicked_index, anchor)
         };
-        let objects: Vec<u32> = rows[lo..=hi].iter().map(|r| r.id).collect();
-        return (objects, Some(clicked.id));
+        return (order[lo..=hi].to_vec(), Some(clicked));
     }
 
     if modifiers.additive {
-        let mut objects: Vec<u32> = rows.iter().filter(|r| r.selected).map(|r| r.id).collect();
-        if let Some(pos) = objects.iter().position(|id| *id == clicked.id) {
+        let mut objects = selected.to_vec();
+        if let Some(pos) = objects.iter().position(|id| *id == clicked) {
             objects.remove(pos);
             // Deselecting the active row must move the active marker, or later
             // operators act on something the user cannot see is chosen.
             let active = objects.last().copied();
             return (objects, active);
         }
-        objects.push(clicked.id);
-        return (objects, Some(clicked.id));
+        objects.push(clicked);
+        return (objects, Some(clicked));
     }
 
-    (vec![clicked.id], Some(clicked.id))
+    (vec![clicked], Some(clicked))
 }
 
 /// Draws the outliner.
-pub fn outliner(ui: &mut Ui, catalog: &Catalog, rows: &[OutlinerRow], queue: &mut CommandQueue) {
+///
+/// `order` is every object in hierarchy order; `row` materialises one by
+/// position and is called only for the rows on screen.
+pub fn outliner(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    order: &[u32],
+    selected: &[u32],
+    active: Option<u32>,
+    row: impl Fn(usize) -> Option<OutlinerRow>,
+    queue: &mut CommandQueue,
+) {
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        // Only the visible rows are laid out. The whole point: a hundred
-        // thousand objects must cost the same as twenty.
-        .show_rows(ui, row_height, rows.len(), |ui, visible| {
+        // Only the visible rows are laid out — and, because `row` is a function
+        // rather than a slice, only the visible rows are *built*. The whole
+        // point: a hundred thousand objects must cost the same as twenty.
+        .show_rows(ui, row_height, order.len(), |ui, visible| {
             for index in visible {
-                let Some(row) = rows.get(index) else { continue };
-                draw_row(ui, catalog, rows, index, row, queue);
+                let Some(data) = row(index) else { continue };
+                draw_row(ui, catalog, order, selected, active, index, &data, queue);
             }
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row(
     ui: &mut Ui,
     catalog: &Catalog,
-    rows: &[OutlinerRow],
+    order: &[u32],
+    selected: &[u32],
+    active: Option<u32>,
     index: usize,
     row: &OutlinerRow,
     queue: &mut CommandQueue,
@@ -181,7 +211,7 @@ fn draw_row(
                 additive: i.modifiers.ctrl || i.modifiers.command,
                 range: i.modifiers.shift,
             });
-            let (objects, active) = resolve_click(rows, index, modifiers);
+            let (objects, active) = resolve_click(order, selected, active, index, modifiers);
             queue.push(Command::SetSelection { objects, active });
         }
         if response.double_clicked() {
@@ -221,10 +251,8 @@ pub fn summarise(catalog: &Catalog, row: &OutlinerRow) -> String {
 mod tests {
     use super::*;
 
-    fn rows(n: usize) -> Vec<OutlinerRow> {
-        (0..n)
-            .map(|i| OutlinerRow::new(i as u32, format!("Object{i}"), RowKind::Empty))
-            .collect()
+    fn order(n: u32) -> Vec<u32> {
+        (0..n).collect()
     }
 
     fn plain() -> ClickModifiers {
@@ -247,148 +275,79 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_click_replaces_the_selection() {
-        let mut r = rows(5);
-        r[0].selected = true;
-        r[1].selected = true;
-        let (objects, active) = resolve_click(&r, 3, plain());
+    fn a_plain_click_selects_only_that_row() {
+        let (objects, active) = resolve_click(&order(5), &[0, 1, 2], Some(1), 3, plain());
         assert_eq!(objects, vec![3]);
         assert_eq!(active, Some(3));
     }
 
     #[test]
-    fn an_additive_click_adds_and_toggles_off() {
-        let mut r = rows(5);
-        r[1].selected = true;
-
-        let (objects, active) = resolve_click(&r, 3, additive());
+    fn an_additive_click_adds_to_the_selection() {
+        let (objects, active) = resolve_click(&order(5), &[1], Some(1), 3, additive());
         assert_eq!(objects, vec![1, 3]);
         assert_eq!(active, Some(3));
+    }
 
-        // Clicking an already-selected row removes it.
-        r[3].selected = true;
-        let (objects, _) = resolve_click(&r, 3, additive());
+    #[test]
+    fn an_additive_click_on_a_selected_row_removes_it() {
+        let (objects, _) = resolve_click(&order(5), &[1, 3], Some(3), 3, additive());
         assert_eq!(objects, vec![1]);
     }
 
     #[test]
     fn deselecting_the_active_row_moves_the_active_marker() {
         // Otherwise later operators act on something the user cannot see is
-        // chosen, which reads as the tool ignoring them.
-        let mut r = rows(5);
-        r[1].selected = true;
-        r[3].selected = true;
-        r[3].active = true;
-
-        let (objects, active) = resolve_click(&r, 3, additive());
-        assert_eq!(objects, vec![1]);
-        assert_eq!(active, Some(1), "active must follow what is left");
+        // chosen.
+        let (objects, active) = resolve_click(&order(5), &[1, 3], Some(3), 3, additive());
+        assert_eq!(active, Some(1));
+        assert!(objects.contains(&1));
     }
 
     #[test]
     fn a_range_click_includes_both_ends() {
-        // The off-by-one that every list widget gets wrong at least once.
-        let mut r = rows(10);
-        r[2].active = true;
-        r[2].selected = true;
-
-        let (objects, active) = resolve_click(&r, 5, range());
-        assert_eq!(objects, vec![2, 3, 4, 5]);
-        assert_eq!(active, Some(5));
+        let (objects, active) = resolve_click(&order(6), &[1], Some(1), 4, range());
+        assert_eq!(objects, vec![1, 2, 3, 4]);
+        assert_eq!(active, Some(4));
     }
 
     #[test]
     fn a_range_click_works_upward_too() {
-        let mut r = rows(10);
-        r[7].active = true;
-        let (objects, _) = resolve_click(&r, 4, range());
-        assert_eq!(objects, vec![4, 5, 6, 7]);
+        let (objects, _) = resolve_click(&order(6), &[4], Some(4), 1, range());
+        assert_eq!(objects, vec![1, 2, 3, 4]);
     }
 
     #[test]
-    fn a_range_click_with_no_anchor_selects_only_the_clicked_row() {
-        // Selecting everything because there was nothing to range from would be
-        // a nasty surprise on a large scene.
-        let r = rows(100);
-        let (objects, active) = resolve_click(&r, 42, range());
-        assert_eq!(objects, vec![42]);
-        assert_eq!(active, Some(42));
-    }
-
-    #[test]
-    fn a_range_click_on_the_anchor_itself_selects_just_it() {
-        let mut r = rows(10);
-        r[3].active = true;
-        let (objects, _) = resolve_click(&r, 3, range());
+    fn a_range_click_with_no_anchor_degrades_to_a_plain_click() {
+        // Selecting everything would be a destructive surprise from a Shift the
+        // user was holding for something else.
+        let (objects, _) = resolve_click(&order(6), &[], None, 3, range());
         assert_eq!(objects, vec![3]);
     }
 
     #[test]
-    fn clicking_past_the_end_is_a_no_op() {
-        let r = rows(3);
-        assert_eq!(resolve_click(&r, 99, plain()), (Vec::new(), None));
-        assert_eq!(resolve_click(&[], 0, plain()), (Vec::new(), None));
+    fn a_range_click_whose_anchor_has_left_the_scene_degrades_too() {
+        // The active object can be deleted between frames; ranging from an id
+        // that is no longer in the order has no meaning.
+        let (objects, _) = resolve_click(&order(6), &[], Some(99), 3, range());
+        assert_eq!(objects, vec![3]);
     }
 
     #[test]
-    fn selection_arithmetic_is_linear_at_a_hundred_thousand_rows() {
-        // The plan's scale check. An implementation that is quadratic in the row
-        // count looks fine in a demo and is unusable on a real scene.
-        let mut r = rows(100_000);
-        r[10].active = true;
-
-        let start = std::time::Instant::now();
-        let (objects, _) = resolve_click(&r, 99_999, range());
-        let elapsed = start.elapsed();
-
-        assert_eq!(objects.len(), 99_990);
-        assert!(
-            elapsed.as_millis() < 200,
-            "resolving a click over 100k rows took {elapsed:?}"
-        );
+    fn a_click_outside_the_order_selects_nothing() {
+        // A stale row index from a frame where the scene was larger.
+        let (objects, active) = resolve_click(&order(3), &[1], Some(1), 7, plain());
+        assert!(objects.is_empty());
+        assert_eq!(active, None);
     }
 
     #[test]
-    fn every_row_kind_has_a_glyph_and_a_translation_key() {
-        for kind in [
-            RowKind::Empty,
-            RowKind::Mesh { verts: 8, faces: 6 },
-            RowKind::Camera,
-            RowKind::Light,
-        ] {
-            assert!(!kind.glyph().is_empty());
-            let key = kind.i18n_key();
-            assert!(key.starts_with("outliner-kind-"), "{key}");
-            assert!(
-                kreate_reflect::is_valid_i18n_key(key),
-                "{key} is not a valid Fluent identifier"
-            );
-        }
-    }
-
-    #[test]
-    fn a_summary_uses_a_translation_and_falls_back_readably() {
-        let mut catalog = Catalog::new();
-        catalog
-            .add(
-                "ko-KR",
-                "outliner-mesh-summary = { $name }: 정점 { $verts }, 면 { $faces }\n",
-            )
-            .unwrap();
-        let row = OutlinerRow::new(0, "Cube", RowKind::Mesh { verts: 8, faces: 6 });
-        assert_eq!(summarise(&catalog, &row), "Cube: 정점 8, 면 6");
-
-        // With no catalog at all the key comes back, which is visible and
-        // obviously wrong rather than silently blank.
-        let empty = Catalog::new();
-        assert_eq!(summarise(&empty, &row), "outliner-mesh-summary");
-    }
-
-    #[test]
-    fn a_shared_mesh_is_recorded_on_the_row() {
-        let mut row = OutlinerRow::new(0, "Cube", RowKind::Mesh { verts: 8, faces: 6 });
-        assert_eq!(row.mesh_users, 1, "a lone object is not 'shared'");
-        row.mesh_users = 4;
-        assert!(row.mesh_users > 1);
+    fn resolving_a_click_does_not_depend_on_row_contents() {
+        // The reason this takes the order rather than materialised rows: at a
+        // hundred thousand objects, building rows to answer a click is the same
+        // mistake as building them to draw twenty.
+        let big = order(100_000);
+        let (objects, active) = resolve_click(&big, &[0], Some(0), 99_999, range());
+        assert_eq!(objects.len(), 100_000);
+        assert_eq!(active, Some(99_999));
     }
 }

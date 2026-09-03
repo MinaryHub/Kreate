@@ -82,7 +82,9 @@ pub fn modifier_stack(
     queue: &mut CommandQueue,
 ) {
     if rows.is_empty() {
-        ui.weak(&text.empty);
+        // Prose in a panel the user can drag narrow, which is exactly where
+        // Korean overflows instead of wrapping.
+        ui.weak(crate::text::wrap(ui, &text.empty, ui.available_width()));
     }
 
     let last = rows.len().saturating_sub(1);
@@ -114,7 +116,7 @@ fn header(
         let mut enabled = row.enabled;
         if ui
             .checkbox(&mut enabled, "")
-            .on_hover_text(&text.enabled)
+            .on_hover_text(crate::text::wrap_tooltip(ui, &text.enabled))
             .changed()
         {
             queue.run("object.modifier_toggle", index_params(row.index));

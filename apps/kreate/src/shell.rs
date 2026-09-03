@@ -51,6 +51,11 @@ pub struct ShellState {
     /// Set while the pointer is over the navigation gizmo, so the viewport's own
     /// navigation stands down and the two do not both act on one drag.
     pub gizmo_active: bool,
+    /// The outliner's cached row order.
+    ///
+    /// Lives here because it is view state: derived from the document, rebuilt
+    /// when the document's version moves, and of no interest to anything else.
+    pub outliner: OutlinerOrder,
     /// The rubber-band rectangle to draw, in viewport-relative points.
     ///
     /// Set by the application while a selection drag is in progress. The
@@ -85,6 +90,7 @@ impl Default for ShellState {
             select_mode: 2,
             camera_rotation: kreate_math::DQuat::IDENTITY,
             gizmo_active: false,
+            outliner: OutlinerOrder::default(),
             select_band: None,
             select_band_deselect: false,
             show_keymap: false,
@@ -113,38 +119,112 @@ impl ShellState {
     }
 }
 
-/// Builds the outliner's view model from a document.
+/// The outliner's row order, and what it was built from.
 ///
-/// The UI cannot see a `Document`, so the shape crossing the boundary is a plain
-/// list. That also means the outliner is trivially testable without a scene.
-pub fn outliner_rows(doc: &Document) -> Vec<OutlinerRow> {
-    doc.hierarchy()
-        .into_iter()
-        .filter_map(|(id, depth)| {
-            let object = doc.object(id)?;
-            let kind = match object.data {
-                ObjectData::Empty => RowKind::Empty,
-                ObjectData::Camera => RowKind::Camera,
-                ObjectData::Light => RowKind::Light,
-                ObjectData::Mesh(mesh_id) => {
-                    let mesh = doc.mesh(mesh_id);
-                    RowKind::Mesh {
-                        verts: mesh.map(|m| m.num_verts()).unwrap_or(0),
-                        faces: mesh.map(|m| m.num_faces()).unwrap_or(0),
-                    }
+/// Cached rather than rebuilt every frame. The order is one `u32` per object —
+/// cheap to hold and cheap to hand to the widget whole — while the rows
+/// themselves are materialised only for what is on screen. Building a hundred
+/// thousand rows to draw twenty is the immediate-mode trap the outliner's own
+/// module docs warn about, and it costs a hundred thousand `String` clones a
+/// frame.
+#[derive(Default)]
+pub struct OutlinerOrder {
+    /// Object keys in hierarchy order.
+    ids: Vec<u32>,
+    /// Indentation per row, parallel to `ids`.
+    depths: Vec<u16>,
+    /// How many objects use each mesh, by mesh slot. Counted once for the whole
+    /// scene rather than asked per row, which would be quadratic.
+    mesh_users: Vec<u32>,
+    /// The document version this was built from.
+    version: Option<u64>,
+}
+
+impl OutlinerOrder {
+    /// Rebuilds the order if the document has changed since it was built.
+    pub fn sync(&mut self, doc: &Document) {
+        if self.version == Some(doc.version()) {
+            return;
+        }
+        let hierarchy = doc.hierarchy();
+        self.ids.clear();
+        self.depths.clear();
+        self.ids.reserve(hierarchy.len());
+        self.depths.reserve(hierarchy.len());
+        for (id, depth) in hierarchy {
+            self.ids.push(object_key(id));
+            self.depths.push(depth.min(u16::MAX as usize) as u16);
+        }
+        self.mesh_users = doc.mesh_user_counts();
+        self.version = Some(doc.version());
+    }
+
+    pub fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Builds one row, for a position the widget is about to draw.
+    ///
+    /// By index rather than by key, so the depth is a lookup rather than a
+    /// search: searching the order for each visible row would be a couple of
+    /// million comparisons a frame at a hundred thousand objects, which is the
+    /// same mistake one level down.
+    ///
+    /// `None` when the row names no live object, which happens for a frame after
+    /// a delete.
+    pub fn row(&self, doc: &Document, index: usize) -> Option<OutlinerRow> {
+        use kreate_mesh::arena::ArenaIndex as _;
+
+        let key = self.ids.get(index).copied()?;
+        let id = doc.object_at_slot(key)?;
+        let object = doc.object(id)?;
+        let kind = match object.data {
+            ObjectData::Empty => RowKind::Empty,
+            ObjectData::Camera => RowKind::Camera,
+            ObjectData::Light => RowKind::Light,
+            ObjectData::Mesh(mesh_id) => {
+                let mesh = doc.mesh(mesh_id);
+                RowKind::Mesh {
+                    verts: mesh.map(|m| m.num_verts()).unwrap_or(0),
+                    faces: mesh.map(|m| m.num_faces()).unwrap_or(0),
                 }
-            };
-            Some(OutlinerRow {
-                id: object_key(id),
-                name: object.name.clone(),
-                depth,
-                selected: doc.selection.contains(id),
-                active: doc.selection.active == Some(id),
-                visible: object.visible,
-                kind,
-                mesh_users: object.mesh().map(|m| doc.mesh_users(m)).unwrap_or(1),
-            })
+            }
+        };
+        let depth = self.depths.get(index).copied().unwrap_or(0);
+        Some(OutlinerRow {
+            id: key,
+            name: object.name.clone(),
+            depth: depth as usize,
+            selected: doc.selection.contains(id),
+            active: doc.selection.active == Some(id),
+            visible: object.visible,
+            kind,
+            mesh_users: object
+                .mesh()
+                .and_then(|m| self.mesh_users.get(m.index() as usize))
+                .copied()
+                .unwrap_or(1) as usize,
         })
+    }
+}
+
+/// Builds every row, for a caller that genuinely wants them all.
+///
+/// Only tests and the status bar want this; the panel does not — see
+/// [`OutlinerOrder`].
+pub fn outliner_rows(doc: &Document) -> Vec<OutlinerRow> {
+    let mut order = OutlinerOrder::default();
+    order.sync(doc);
+    (0..order.len())
+        .filter_map(|index| order.row(doc, index))
         .collect()
 }
 
@@ -217,6 +297,7 @@ fn setter_params(index: u32, kind: &ModifierKind) -> PropertyMap {
         }
         ModifierKind::Subdivide(sub) => {
             p.set("levels", PropertyValue::Int(sub.levels as i64));
+            p.set("smooth", PropertyValue::Bool(sub.smooth));
         }
         ModifierKind::Array(a) => {
             p.set("count", PropertyValue::Int(a.count as i64));
@@ -249,14 +330,15 @@ pub fn object_key(id: ObjectId) -> u32 {
 
 /// Finds the object an outliner row refers to.
 ///
-/// A lookup rather than reconstructing a handle from the index: the arena's
-/// generation counter is deliberately not exposed, and a stale row from a frame
-/// where the object was deleted must resolve to nothing instead of to whatever
-/// took its slot.
+/// The key *is* the arena slot, so this is a lookup rather than a search — which
+/// matters because resolving a selection resolves one key per object, and a
+/// scan per key made a large selection quadratic.
+///
+/// A row from a frame where the object was deleted resolves to nothing. A slot
+/// that has since been *reused* resolves to its new occupant: the key carries no
+/// generation, and the window between a delete and a click is one frame.
 pub fn object_from_key(doc: &Document, key: u32) -> Option<ObjectId> {
-    doc.objects()
-        .map(|(id, _)| id)
-        .find(|id| object_key(*id) == key)
+    doc.object_at_slot(key)
 }
 
 /// The offscreen viewport, and how much of it holds the image.
@@ -365,7 +447,16 @@ pub fn draw(
             ("selected", &doc.selection.objects.len().to_string()),
         ],
     );
-    let rows = outliner_rows(doc);
+    // Rebuilt only when the document changes, and the rows themselves only for
+    // what is on screen — see `OutlinerOrder`.
+    state.outliner.sync(doc);
+    let selected: Vec<u32> = doc
+        .selection
+        .objects
+        .iter()
+        .map(|id| object_key(*id))
+        .collect();
+    let active = doc.selection.active.map(object_key);
     // Built here rather than inside the panel: the panel edits the parameters in
     // place, and a closure over `doc` would hold a borrow across the mutable
     // access the command queue needs.
@@ -565,7 +656,17 @@ pub fn draw(
     if state.show_outliner {
         Panel::left("outliner").default_size(220.0).show(ui, |ui| {
             ui.heading(&l.outliner);
-            kreate_ui::outliner(ui, &state.catalog, &rows, &mut state.queue);
+            let order = std::mem::take(&mut state.outliner);
+            kreate_ui::outliner(
+                ui,
+                &state.catalog,
+                order.ids(),
+                &selected,
+                active,
+                |index| order.row(doc, index),
+                &mut state.queue,
+            );
+            state.outliner = order;
         });
     }
 

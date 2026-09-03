@@ -69,46 +69,73 @@ fn navigation(preset: Preset) -> Vec<Binding> {
         Action::new("view.dolly"),
     );
 
-    match preset {
-        // Blender's, and ours: middle button orbits, shift-middle pans.
-        Preset::Kreate | Preset::Blender => vec![
-            orbit("view.orbit.mmb", MouseButton::Middle, Modifiers::NONE),
-            pan(
-                "view.pan.shift_mmb",
-                MouseButton::Middle,
-                Modifiers::shift(),
-            ),
-            Binding::new(
-                "view.dolly.ctrl_mmb",
-                Context::Viewport,
-                Input::Mouse(MouseButton::Middle),
-                Action::new("view.dolly"),
-            )
-            .with_modifiers(Modifiers::ctrl())
-            .on(EventKind::Drag),
-            wheel,
-        ],
-        // Maya: Alt with the three buttons. The reason navigation is bindable
-        // at all — this cannot be expressed by a branch in an event handler.
-        Preset::Maya => vec![
+    let dolly = |id: &str, button: MouseButton, modifiers: Modifiers| {
+        Binding::new(
+            id,
+            Context::Viewport,
+            Input::Mouse(button),
+            Action::new("view.dolly"),
+        )
+        .with_modifiers(modifiers)
+        .on(EventKind::Drag)
+    };
+
+    // Navigation that needs no middle button.
+    //
+    // Not every mouse has a usable one — a scroll wheel that only clicks with a
+    // deliberate push, a trackpad, a tablet stylus — and a modeller whose view
+    // cannot be turned is not usable at all. These are Maya's combinations, so
+    // they cost nothing to learn and are already in a lot of people's hands, and
+    // they sit alongside the middle-button ones rather than replacing them.
+    //
+    // No conflict with selection: a plain left drag stays a rubber band, and
+    // `Alt` is a strictly heavier match, so the keymap resolves it first.
+    let alt_fallback = || {
+        vec![
             orbit("view.orbit.alt_lmb", MouseButton::Left, Modifiers::alt()),
             pan("view.pan.alt_mmb", MouseButton::Middle, Modifiers::alt()),
-            Binding::new(
-                "view.dolly.alt_rmb",
-                Context::Viewport,
-                Input::Mouse(MouseButton::Right),
-                Action::new("view.dolly"),
-            )
-            .with_modifiers(Modifiers::alt())
-            .on(EventKind::Drag),
-            wheel,
-        ],
+            dolly("view.dolly.alt_rmb", MouseButton::Right, Modifiers::alt()),
+        ]
+    };
+
+    match preset {
+        // Blender's, and ours: middle button orbits, shift-middle pans.
+        Preset::Kreate | Preset::Blender => {
+            let mut bindings = vec![
+                orbit("view.orbit.mmb", MouseButton::Middle, Modifiers::NONE),
+                pan(
+                    "view.pan.shift_mmb",
+                    MouseButton::Middle,
+                    Modifiers::shift(),
+                ),
+                dolly(
+                    "view.dolly.ctrl_mmb",
+                    MouseButton::Middle,
+                    Modifiers::ctrl(),
+                ),
+                wheel,
+            ];
+            bindings.extend(alt_fallback());
+            bindings
+        }
+        // Maya: Alt with the three buttons. The reason navigation is bindable
+        // at all — this cannot be expressed by a branch in an event handler.
+        Preset::Maya => {
+            let mut bindings = alt_fallback();
+            bindings.push(wheel);
+            bindings
+        }
         // 3ds Max: middle button pans, Alt-middle orbits — the two swapped
         // relative to Blender, which is precisely the sort of difference that
         // makes a user reach for a preset.
         Preset::Max => vec![
             pan("view.pan.mmb", MouseButton::Middle, Modifiers::NONE),
             orbit("view.orbit.alt_mmb", MouseButton::Middle, Modifiers::alt()),
+            // Alt+LMB orbits here too, for the same reason it does in the
+            // default preset: a mouse without a middle button must still be able
+            // to turn the view.
+            orbit("view.orbit.alt_lmb", MouseButton::Left, Modifiers::alt()),
+            dolly("view.dolly.alt_rmb", MouseButton::Right, Modifiers::alt()),
             wheel,
         ],
     }

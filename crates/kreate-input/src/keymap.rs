@@ -636,16 +636,25 @@ mod tests {
             .expect("Alt+LMB must orbit in the Maya preset");
         assert_eq!(action.op_id, "view.orbit");
 
-        // And the Kreate preset leaves Alt+LMB alone, so the two really differ.
+        // And the two presets really differ — shown on the middle button rather
+        // than on Alt+LMB, which every preset now binds so that navigation works
+        // on a mouse without a usable middle button.
         let kreate = presets::load(presets::Preset::Kreate);
-        assert!(kreate
-            .resolve(
+        let plain_middle = |k: &Keymap| {
+            k.resolve(
                 Context::Viewport,
-                &Input::Mouse(MouseButton::Left),
-                Modifiers::alt(),
+                &Input::Mouse(MouseButton::Middle),
+                Modifiers::NONE,
                 EventKind::Drag,
             )
-            .is_none());
+            .map(|a| a.op_id)
+        };
+        assert_eq!(plain_middle(&kreate).as_deref(), Some("view.orbit"));
+        assert_eq!(
+            plain_middle(&k),
+            None,
+            "Maya navigates only with Alt held, which is the difference"
+        );
     }
 
     #[test]

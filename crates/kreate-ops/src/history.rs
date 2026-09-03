@@ -139,6 +139,23 @@ impl History {
         op_id: &str,
         params: &PropertyMap,
     ) -> Result<OpResult, OpError> {
+        self.dispatch_in_session(registry, doc, None, ctx, op_id, params)
+    }
+
+    /// The same, with an edit session the operator may work in.
+    ///
+    /// Separate rather than a parameter on `dispatch`, because most callers —
+    /// scripts, tests, anything outside edit mode — have no session and should
+    /// not have to say so.
+    pub fn dispatch_in_session(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        session: Option<&mut crate::EditSession>,
+        ctx: &Context,
+        op_id: &str,
+        params: &PropertyMap,
+    ) -> Result<OpResult, OpError> {
         let info = registry
             .get(op_id)
             .ok_or_else(|| OpError::UnknownOperator(op_id.to_string()))?;
@@ -149,7 +166,7 @@ impl History {
         let mut full = info.defaults();
         full.overlay(params);
 
-        let mut edit = DocMut::new(doc);
+        let mut edit = DocMut::with_session(doc, session);
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 

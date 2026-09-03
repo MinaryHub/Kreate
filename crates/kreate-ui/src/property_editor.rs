@@ -128,7 +128,10 @@ pub fn property_editor(
                 let (name, tip) = labels(catalog, op_id, desc);
                 let label = ui.label(name);
                 if !tip.is_empty() {
-                    label.on_hover_text(tip);
+                    // Wrapped here rather than by the layout engine: a tooltip
+                    // is prose, and `epaint` finds no break opportunity in a
+                    // Korean sentence — see `crate::text`.
+                    label.on_hover_text(crate::text::wrap_tooltip(ui, &tip));
                 }
                 changed |= property_widget(ui, desc, values);
                 ui.end_row();

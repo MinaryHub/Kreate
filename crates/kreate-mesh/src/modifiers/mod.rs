@@ -24,6 +24,7 @@
 //! [`gather_edges_by_pair`] does the pairing instead.
 
 pub mod array;
+pub mod catmull_clark;
 pub mod mirror;
 pub mod subdivide;
 

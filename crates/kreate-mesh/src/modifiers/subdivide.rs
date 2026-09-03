@@ -1,35 +1,39 @@
 //! The subdivision modifier.
 //!
-//! Splits every face into quads, `levels` times over.
+//! Splits every face into quads, `levels` times over — smoothly by default.
 //!
-//! # This is simple subdivision, not Catmull-Clark
+//! # Two kinds, and the default is the smooth one
 //!
-//! The surface is refined but not *smoothed*: new vertices land on the edges and
-//! face centres of the cage rather than being pulled toward a limit surface. That
-//! is a real difference and it is stated rather than implied — a user reaching
-//! for "subdivision surface" wants the smooth one, and finding out by looking is
-//! worse than being told.
+//! **Catmull-Clark** pulls the surface toward a limit surface: this is what
+//! "subdivision surface" means and what a user reaching for this modifier
+//! expects. See [`crate::modifiers::catmull_clark`] for the rules.
 //!
-//! Catmull-Clark is the plan's target for this slot and is a separate piece of
-//! work: face, edge and vertex point rules, boundary rules and crease handling,
-//! each of which has to be right or the surface pulls away from the cage in a way
-//! that only shows on curved geometry. Simple subdivision is here now because the
-//! *stack* is what this phase is for, and a modifier that refines topology
-//! exercises every part of it.
+//! **Simple** subdivision refines the topology and leaves the shape exactly
+//! where it was. That is not a lesser version of the same thing — it is a
+//! different tool, for adding topology to a shape that is already right, and a
+//! modeller wants both.
+//!
+//! The default is smooth because being handed refined-but-unchanged geometry
+//! when you asked for a subdivision surface is the more surprising of the two.
 
 use crate::bmesh::BMesh;
 use crate::MeshData;
 
-/// How many times to subdivide.
+/// How many times to subdivide, and how.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SubdivideParams {
     /// Each level splits every edge in half.
     pub levels: u32,
+    /// Smooth the surface toward its limit rather than only refining topology.
+    pub smooth: bool,
 }
 
 impl Default for SubdivideParams {
     fn default() -> Self {
-        Self { levels: 1 }
+        Self {
+            levels: 1,
+            smooth: true,
+        }
     }
 }
 
@@ -45,6 +49,17 @@ pub fn subdivide(input: &MeshData, params: &SubdivideParams) -> MeshData {
     if levels == 0 || input.is_empty() {
         return input.clone();
     }
+    if params.smooth {
+        let mut mesh = input.clone();
+        for _ in 0..levels {
+            mesh = crate::modifiers::catmull_clark::subdivide_once(&mesh);
+        }
+        return mesh;
+    }
+
+    // Simple subdivision goes through the edit operator, which already knows how
+    // to split an n-gon and keeps the operator and the modifier producing the
+    // same topology from the same input.
     let mut mesh = BMesh::from_mesh_data(input);
     for _ in 0..levels {
         let faces: Vec<_> = mesh.face_ids().collect();
@@ -60,59 +75,104 @@ mod tests {
     use super::*;
     use crate::primitives;
 
+    fn simple(levels: u32) -> SubdivideParams {
+        SubdivideParams {
+            levels,
+            smooth: false,
+        }
+    }
+
+    fn smooth(levels: u32) -> SubdivideParams {
+        SubdivideParams {
+            levels,
+            smooth: true,
+        }
+    }
+
     #[test]
     fn one_level_turns_each_face_into_quads() {
-        let input = primitives::cube(2.0);
-        let out = subdivide(&input, &SubdivideParams::default());
-        out.assert_valid();
-        assert_eq!(out.num_faces(), 24, "four per original face");
-        for face in out.faces() {
-            assert_eq!(face.len(), 4);
+        for params in [simple(1), smooth(1)] {
+            let out = subdivide(&primitives::cube(2.0), &params);
+            out.assert_valid();
+            assert_eq!(out.num_faces(), 24, "four per original face: {params:?}");
+            for face in out.faces() {
+                assert_eq!(face.len(), 4);
+            }
         }
     }
 
     #[test]
     fn levels_compound() {
-        let input = primitives::cube(2.0);
-        let out = subdivide(&input, &SubdivideParams { levels: 2 });
-        out.assert_valid();
-        assert_eq!(out.num_faces(), 96);
+        for params in [simple(2), smooth(2)] {
+            let out = subdivide(&primitives::cube(2.0), &params);
+            out.assert_valid();
+            assert_eq!(out.num_faces(), 96, "{params:?}");
+        }
     }
 
     #[test]
     fn zero_levels_is_the_identity() {
         let input = primitives::cube(2.0);
-        let out = subdivide(&input, &SubdivideParams { levels: 0 });
-        assert_eq!(out.positions(), input.positions());
-        assert_eq!(out.corner_verts(), input.corner_verts());
+        for params in [simple(0), smooth(0)] {
+            let out = subdivide(&input, &params);
+            assert_eq!(out.positions(), input.positions(), "{params:?}");
+            assert_eq!(out.corner_verts(), input.corner_verts());
+        }
     }
 
     #[test]
     fn an_absurd_level_is_clamped() {
         // A viewport modifier is re-evaluated whenever its input changes, so an
         // unreasonable level is slow on every edit rather than once.
-        let input = primitives::cube(2.0);
-        let out = subdivide(&input, &SubdivideParams { levels: 100 });
-        out.assert_valid();
-        assert!(out.num_faces() <= 6 * 4u32.pow(MAX_LEVELS));
+        for params in [simple(100), smooth(100)] {
+            let out = subdivide(&primitives::cube(2.0), &params);
+            out.assert_valid();
+            assert!(out.num_faces() <= 6 * 4u32.pow(MAX_LEVELS), "{params:?}");
+        }
     }
 
     #[test]
-    fn the_cage_is_not_smoothed() {
-        // Stated rather than implied: this refines topology and leaves the shape
-        // alone.
+    fn the_default_smooths() {
+        // What a user reaching for "subdivision surface" gets. Being handed
+        // refined-but-unchanged geometry is the more surprising default of the
+        // two, so it is not the one on offer.
+        assert!(SubdivideParams::default().smooth);
+
         let input = primitives::cube(2.0);
-        let out = subdivide(&input, &SubdivideParams { levels: 2 });
+        let out = subdivide(&input, &SubdivideParams::default());
+        let moved = input
+            .positions()
+            .iter()
+            .zip(out.positions())
+            .filter(|(a, b)| (**a - **b).length() > 0.1)
+            .count();
         assert_eq!(
-            out.bounds().max,
-            input.bounds().max,
-            "simple subdivision must not pull the surface inward"
+            moved,
+            input.num_verts() as usize,
+            "every original vertex should have been pulled inward"
         );
     }
 
     #[test]
+    fn simple_subdivision_leaves_the_shape_alone() {
+        // The other tool, and why it is kept: adding topology to a shape that is
+        // already right.
+        let input = primitives::cube(2.0);
+        let out = subdivide(&input, &simple(2));
+        for (v, before) in input.positions().iter().enumerate() {
+            assert_eq!(
+                out.positions()[v],
+                *before,
+                "simple subdivision moved vertex {v}"
+            );
+        }
+    }
+
+    #[test]
     fn an_empty_mesh_subdivides_to_nothing() {
-        let out = subdivide(&MeshData::empty(), &SubdivideParams::default());
-        assert!(out.is_empty());
+        for params in [simple(1), smooth(1)] {
+            let out = subdivide(&MeshData::empty(), &params);
+            assert!(out.is_empty(), "{params:?}");
+        }
     }
 }

@@ -336,6 +336,51 @@ mod tests {
     }
 
     #[test]
+    fn a_click_in_edit_mode_reaches_the_flags_only_path() {
+        // The end-to-end version of the claim, through the operator the viewport
+        // actually dispatches. The pieces were each correct in isolation and the
+        // composition was not: selection went through `BMesh`, which rebuilt
+        // every array, so the flags-only path never fired for the one operation
+        // a user performs constantly.
+        use kreate_ops::operator::{Context, Mode};
+        use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+
+        let mut doc = doc_with(1);
+        let object = doc.objects().next().unwrap().0;
+        doc.selection.add(object);
+
+        let mut cache = ModifierCache::new();
+        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+
+        let mut registry = OperatorRegistry::new();
+        kreate_ops::register_builtin(&mut registry);
+        let mut history = History::new();
+        let mut params = PropertyMap::new();
+        params.set("element", PropertyValue::Int(2));
+        params.set("mode", PropertyValue::Enum(2));
+        params.set("extend", PropertyValue::Bool(false));
+        history
+            .dispatch(
+                &registry,
+                &mut doc,
+                &Context {
+                    mode: Mode::EditMesh,
+                },
+                "mesh.select_pick",
+                &params,
+            )
+            .expect("mesh.select_pick");
+
+        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        assert!(
+            plan.uploads.is_empty(),
+            "a click re-uploaded the geometry: {} uploads",
+            plan.uploads.len()
+        );
+        assert_eq!(plan.reflags.len(), 1, "the flags should be rewritten");
+    }
+
+    #[test]
     fn a_geometry_change_still_uploads() {
         // The companion: the shortcut must not swallow a real edit, or the screen
         // shows the old shape until something else forces a rebuild.

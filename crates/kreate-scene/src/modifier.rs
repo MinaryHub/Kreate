@@ -306,7 +306,10 @@ mod tests {
             .unwrap()
             .modifiers
             .push(ModifierInstance::new(ModifierKind::Subdivide(
-                SubdivideParams { levels: 1 },
+                SubdivideParams {
+                    levels: 1,
+                    ..Default::default()
+                },
             )));
 
         let mut cache = ModifierCache::new();
@@ -502,14 +505,20 @@ mod tests {
             .unwrap()
             .modifiers
             .push(ModifierInstance::new(ModifierKind::Subdivide(
-                SubdivideParams { levels: 1 },
+                SubdivideParams {
+                    levels: 1,
+                    ..Default::default()
+                },
             )));
         let other = doc.add_mesh_object("Other", primitives::cube(2.0));
         doc.object_mut(other)
             .unwrap()
             .modifiers
             .push(ModifierInstance::new(ModifierKind::Subdivide(
-                SubdivideParams { levels: 1 },
+                SubdivideParams {
+                    levels: 1,
+                    ..Default::default()
+                },
             )));
 
         let mut cache = ModifierCache::new();

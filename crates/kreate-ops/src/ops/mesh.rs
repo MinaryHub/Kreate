@@ -14,8 +14,9 @@
 //! acting on it directly. The operator signatures do not change when that lands
 //! — only what sits behind [`with_bmesh`].
 
-use kreate_mesh::bmesh::{BMesh, ElementId, SelectMode};
+use kreate_mesh::bmesh::{BMesh, SelectMode};
 use kreate_mesh::edit;
+use kreate_mesh::selection;
 use kreate_scene::document::MeshId;
 use kreate_scene::{DocMut, Document};
 
@@ -45,6 +46,25 @@ fn with_bmesh<T>(
 ) -> Result<T, OpError> {
     let mesh_id =
         target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+
+    // The edit-mode structure, when edit mode is open and still agrees with the
+    // document. Held across operators, so the decode happens once on entering
+    // edit mode rather than once per extrude.
+    if doc.edit_bmesh(mesh_id).is_some() {
+        let out = {
+            let bm = doc
+                .edit_bmesh(mesh_id)
+                .expect("checked on the line above, and nothing has borrowed since");
+            f(bm)?
+        };
+        if !doc.bake_edit() {
+            return Err(OpError::Failed("mesh vanished mid-edit".into()));
+        }
+        return Ok(out);
+    }
+
+    // No session: convert for this call. The path a script, a test, or an
+    // operator run outside edit mode takes.
     let mut bm = doc
         .document()
         .mesh(mesh_id)
@@ -60,6 +80,54 @@ fn with_bmesh<T>(
         .ok_or_else(|| OpError::Failed("mesh vanished mid-edit".into()))?;
     *slot = baked;
     Ok(out)
+}
+
+/// Runs a change against the document mesh, without building a [`BMesh`].
+///
+/// The path selection takes. A `BMesh` round trip rebuilds every array, which
+/// costs a decode and an encode of the whole mesh — and, worse, leaves the
+/// renderer nothing to compare: it decides what to re-upload by pointer identity
+/// per array, so a rebuilt mesh means a click on a million-vertex model
+/// re-uploads all of it. Writing the selection layers in place leaves the
+/// geometry arrays untouched and shared, which is what makes a click three small
+/// buffer writes.
+///
+/// The closure reports whether anything changed, so an operator that decides
+/// there was nothing to do returns `Cancelled` without a history step.
+fn with_mesh<T>(
+    doc: &mut DocMut<'_>,
+    f: impl FnOnce(&mut kreate_mesh::MeshData) -> T,
+) -> Result<T, OpError> {
+    let mesh_id =
+        target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    let mesh = doc
+        .document_mut()
+        .mesh_mut(mesh_id)
+        .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    Ok(f(mesh))
+}
+
+/// The corner-to-edge map for the mesh being edited, from the session.
+///
+/// `None` outside edit mode, or in a script, or in a test: those recompute it
+/// and pay a pass over the mesh, which is correct and rare. Inside edit mode it
+/// is what keeps a click from rebuilding a sorted table of every edge — four
+/// hundred milliseconds on a million faces, for a flush that takes two.
+fn edit_adjacency(doc: &mut DocMut<'_>) -> Option<std::sync::Arc<Vec<u32>>> {
+    let mesh = target_mesh(doc.document())?;
+    doc.edit_corner_edges(mesh)
+}
+
+/// Flushes a selection, using the session's map when there is one.
+fn flush(
+    mesh: &mut kreate_mesh::MeshData,
+    mode: SelectMode,
+    adjacency: &Option<std::sync::Arc<Vec<u32>>>,
+) {
+    match adjacency {
+        Some(map) => selection::flush_with(mesh, mode, map),
+        None => selection::flush(mesh, mode),
+    }
 }
 
 /// True when there is a mesh to edit at all.
@@ -953,27 +1021,46 @@ impl Operator for SelectElements {
             2 => SelectMode::Face,
             _ => SelectMode::Vert,
         };
-        let grew = with_bmesh(doc, |bm| {
-            match params.action {
-                1 => bm.select_none(),
-                2 => bm.select_invert(mode),
-                // Loop, ring and face-loop grow from what is already selected.
-                // Without a click to start from they have no seed, so an empty
-                // selection means there is nothing to do rather than an error.
-                3..=5 => {
-                    let seeds = bm.selected_edges();
-                    if seeds.is_empty() {
-                        return Ok(false);
-                    }
-                    for e in seeds {
-                        match params.action {
-                            3 => bm.select_edge_loop(e),
-                            4 => bm.select_edge_ring(e),
-                            _ => bm.select_face_loop(e),
-                        };
-                    }
+        // All, none and invert are layer writes and go straight to the mesh —
+        // no decode, no encode, and the geometry arrays stay shared so the
+        // renderer rewrites three flag buffers rather than the model.
+        //
+        // Loop, ring and face-loop walk radial and disk cycles, which is what
+        // the edit structure is for, and pay for it.
+        if params.action <= 2 {
+            let adjacency = edit_adjacency(doc);
+            let grew = with_mesh(doc, |mesh| {
+                match params.action {
+                    1 => selection::select_none(mesh),
+                    2 => match &adjacency {
+                        Some(map) => selection::select_invert_with(mesh, mode, map),
+                        None => selection::select_invert(mesh, mode),
+                    },
+                    _ => selection::select_all(mesh),
                 }
-                _ => bm.select_all(),
+                true
+            })?;
+            return Ok(if grew {
+                OpResult::Finished
+            } else {
+                OpResult::Cancelled
+            });
+        }
+
+        let grew = with_bmesh(doc, |bm| {
+            // Loop, ring and face-loop grow from what is already selected.
+            // Without a click to start from they have no seed, so an empty
+            // selection means there is nothing to do rather than an error.
+            let seeds = bm.selected_edges();
+            if seeds.is_empty() {
+                return Ok(false);
+            }
+            for e in seeds {
+                match params.action {
+                    3 => bm.select_edge_loop(e),
+                    4 => bm.select_edge_ring(e),
+                    _ => bm.select_face_loop(e),
+                };
             }
             Ok(true)
         })?;
@@ -1034,37 +1121,28 @@ impl Operator for SelectPick {
             2 => SelectMode::Face,
             _ => SelectMode::Vert,
         };
-        let changed = with_bmesh(doc, |bm| {
-            // An index that names no live element is not an error worth failing
-            // on: it means the id buffer described a frame the document has
-            // since moved on from, which is normal a frame or two after an edit.
-            // `handle_at` is also the only safe way to turn an outside index
-            // into a handle — a fabricated one carries a guessed generation.
-            let Some(handle) = bm.handle_at(mode.domain(), params.element) else {
-                return Ok(false);
-            };
-
-            let already = match handle {
-                ElementId::Vert(v) => bm.is_vert_selected(v),
-                ElementId::Edge(e) => bm.is_edge_selected(e),
-                ElementId::Face(f) => bm.is_face_selected(f),
-            };
+        let domain = mode.domain();
+        let adjacency = edit_adjacency(doc);
+        let changed = with_mesh(doc, |mesh| {
+            // An index the mesh does not have is not an error worth failing on:
+            // the id buffer describes a frame the document may have moved on
+            // from, which is normal a frame or two after an edit.
+            if params.element as usize >= mesh.domain_len(domain) {
+                return false;
+            }
+            let already = selection::is_selected(mesh, domain, params.element);
             // A plain click replaces the selection; Shift+Click toggles this one
             // element and leaves the rest.
             let on = if params.extend { !already } else { true };
             if !params.extend {
-                bm.select_none();
+                selection::select_none(mesh);
             }
-            match handle {
-                ElementId::Vert(v) => bm.set_vert_selected(v, on),
-                ElementId::Edge(e) => bm.set_edge_selected(e, on),
-                ElementId::Face(f) => bm.set_face_selected(f, on),
-            }
+            selection::set_selected(mesh, domain, params.element, on);
             // Flushed so the other domains agree: selecting a face has to mark
             // its edges and vertices, or the next operator acts on a selection
             // the user cannot see.
-            bm.flush_selection(mode);
-            Ok(true)
+            flush(mesh, mode, &adjacency);
+            true
         })?;
         Ok(if changed {
             OpResult::Finished
@@ -1098,12 +1176,10 @@ impl Operator for SelectNothing {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let had = with_bmesh(doc, |bm| {
-            let had = !bm.selected_verts().is_empty()
-                || !bm.selected_edges().is_empty()
-                || !bm.selected_faces().is_empty();
-            bm.select_none();
-            Ok(had)
+        let had = with_mesh(doc, |mesh| {
+            let had = selection::any_selected(mesh);
+            selection::select_none(mesh);
+            had
         })?;
         // Nothing was selected, so nothing changed: clicking empty space twice
         // should not fill the history with steps that undo to the same state.
@@ -1183,33 +1259,31 @@ impl Operator for SelectSet {
             return Ok(OpResult::Cancelled);
         }
 
-        let changed = with_bmesh(doc, |bm| {
+        let domain = mode.domain();
+        let adjacency = edit_adjacency(doc);
+        let changed = with_mesh(doc, |mesh| {
             if !params.extend {
-                bm.select_none();
+                selection::select_none(mesh);
             }
             let on = !params.deselect;
+            let count = mesh.domain_len(domain);
             let mut touched = false;
             for index in &params.elements {
-                // Indices that name no live element are skipped rather than
-                // failing the whole operation: the id buffer is a frame or two
-                // old, so a drag that ends just after an edit can name elements
-                // that have gone.
-                let Some(handle) = bm.handle_at(mode.domain(), *index) else {
-                    continue;
-                };
-                match handle {
-                    ElementId::Vert(v) => bm.set_vert_selected(v, on),
-                    ElementId::Edge(e) => bm.set_edge_selected(e, on),
-                    ElementId::Face(f) => bm.set_face_selected(f, on),
+                // Indices the mesh does not have are skipped rather than failing
+                // the whole operation: the id buffer is a frame or two old, so a
+                // drag that ends just after an edit can name elements that have
+                // gone.
+                if (*index as usize) < count {
+                    selection::set_selected(mesh, domain, *index, on);
+                    touched = true;
                 }
-                touched = true;
             }
             // Flushed once at the end rather than per element: selecting a
             // thousand faces has to mark their edges and vertices, and doing
             // that a thousand times over is the difference between a box select
             // that lands instantly and one that hitches.
-            bm.flush_selection(mode);
-            Ok(touched || !params.extend)
+            flush(mesh, mode, &adjacency);
+            touched || !params.extend
         })?;
         Ok(if changed {
             OpResult::Finished
@@ -2640,6 +2714,102 @@ mod tests {
         );
         assert_eq!(selected_faces(&d), vec![0, 1]);
         assert_eq!(h.entries().len(), steps, "a refused operator left a step");
+    }
+
+    /// Dispatches an operator by id with the given parameters.
+    fn run(
+        r: &OperatorRegistry,
+        h: &mut History,
+        d: &mut Document,
+        c: &Context,
+        id: &str,
+        pairs: &[(&'static str, PropertyValue)],
+    ) -> OpResult {
+        h.dispatch(r, d, c, id, &params(pairs)).expect(id)
+    }
+
+    /// The mesh an edit-mode document is holding.
+    fn mesh_arc(d: &Document) -> std::sync::Arc<kreate_mesh::MeshData> {
+        let id = d
+            .object(d.selection.active.unwrap())
+            .unwrap()
+            .mesh()
+            .unwrap();
+        d.mesh_arc(id).unwrap().clone()
+    }
+
+    #[test]
+    fn a_click_changes_nothing_but_the_selection() {
+        // The claim the whole selection path was rewritten for. The renderer
+        // decides what to re-upload by comparing attribute arrays for pointer
+        // identity, so a click that rebuilds the mesh — which is what a round
+        // trip through `BMesh` does — re-uploads a million vertices to change
+        // three bits.
+        //
+        // Tested by array identity rather than by contents: a `BMesh` round trip
+        // is the identity on contents, so a value comparison passes while every
+        // cache in the system sees a brand-new mesh.
+        let (r, mut h, mut d, c) = edit_mode_cube();
+        let before = mesh_arc(&d);
+        click(&r, &mut h, &mut d, &c, 2, 2, false);
+        let after = mesh_arc(&d);
+
+        assert!(
+            before.only_selection_differs(&after),
+            "a click changed something other than the selection"
+        );
+        assert_eq!(selected_faces(&d), vec![2], "and it did select something");
+    }
+
+    #[test]
+    fn a_box_select_changes_nothing_but_the_selection() {
+        // The same claim for the drag, which is the one that happens every frame
+        // rather than once.
+        let (r, mut h, mut d, c) = edit_mode_cube();
+        let before = mesh_arc(&d);
+        select_set(&r, &mut h, &mut d, &c, &[0, 1, 2], false, false);
+        assert!(before.only_selection_differs(&mesh_arc(&d)));
+    }
+
+    #[test]
+    fn select_all_and_invert_change_nothing_but_the_selection() {
+        let (r, mut h, mut d, c) = edit_mode_cube();
+        let before = mesh_arc(&d);
+        run(&r, &mut h, &mut d, &c, "mesh.select", &[]);
+        let all = mesh_arc(&d);
+        assert!(before.only_selection_differs(&all), "select all");
+
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "mesh.select",
+            &[("action", PropertyValue::Enum(2))],
+        );
+        assert!(all.only_selection_differs(&mesh_arc(&d)), "invert");
+    }
+
+    #[test]
+    fn a_geometry_edit_still_replaces_the_mesh() {
+        // The companion: the shortcut must not swallow a real edit. An operator
+        // that changes topology has to hand the renderer something it will
+        // actually rebuild.
+        let (r, mut h, mut d, c) = edit_mode_cube();
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "mesh.select",
+            &[("action", PropertyValue::Enum(0))],
+        );
+        let before = mesh_arc(&d);
+        run(&r, &mut h, &mut d, &c, "mesh.subdivide", &[]);
+        assert!(
+            !before.only_selection_differs(&mesh_arc(&d)),
+            "a subdivision was mistaken for a selection change"
+        );
     }
 
     #[test]

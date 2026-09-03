@@ -327,13 +327,21 @@ pub struct SetSubdivideParams {
     /// Each level splits every edge in half.
     #[param(min = 0, max = 6, unit = "count")]
     pub levels: u32,
+    /// Smooth the surface toward its limit rather than only refining topology.
+    ///
+    /// On is the subdivision *surface* a user is usually after; off adds
+    /// topology and leaves the shape exactly where it was, which is a different
+    /// tool rather than a lesser one.
+    pub smooth: bool,
 }
 
 impl Default for SetSubdivideParams {
     fn default() -> Self {
+        let d = SubdivideParams::default();
         Self {
             index: 0,
-            levels: SubdivideParams::default().levels,
+            levels: d.levels,
+            smooth: d.smooth,
         }
     }
 }
@@ -364,6 +372,7 @@ impl Operator for SetSubdivide {
             params.index,
             ModifierKind::Subdivide(SubdivideParams {
                 levels: params.levels,
+                smooth: params.smooth,
             }),
         )
     }

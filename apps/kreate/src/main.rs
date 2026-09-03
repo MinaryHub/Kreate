@@ -316,6 +316,13 @@ struct App {
     op_ctx: OpContext,
     /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
     select_mode: u32,
+    /// The edit structure, held while edit mode is open.
+    ///
+    /// Opened on entering edit mode and dropped on leaving, so the decode
+    /// happens once rather than once per operator. Lives in the application
+    /// rather than the document: it is a staging area for edits, and a document
+    /// carrying one would snapshot it into every undo step.
+    edit: Option<kreate_ops::EditSession>,
     /// Lazily built BVHs, for auto-depth and — later — snapping and knife.
     pick: kreate::pick::PickCache,
     /// Evaluated geometry, kept between frames.
@@ -394,6 +401,7 @@ impl App {
             history: History::new(),
             op_ctx: OpContext::default(),
             select_mode: 2,
+            edit: None,
             pick: kreate::pick::PickCache::new(),
             modifiers: kreate_scene::ModifierCache::new(),
             evaluated: Vec::new(),
@@ -419,10 +427,17 @@ impl App {
 
     /// Dispatches an operator. The only way this application changes the document.
     fn run_op(&mut self, op_id: &str, params: PropertyMap) {
-        match self
-            .history
-            .dispatch(&self.registry, &mut self.doc, &self.op_ctx, op_id, &params)
-        {
+        // Through the edit session when edit mode is open. An operator that can
+        // use it works in place; one that cannot — or that runs outside edit
+        // mode — converts for itself, which is the same code path as before.
+        match self.history.dispatch_in_session(
+            &self.registry,
+            &mut self.doc,
+            self.edit.as_mut(),
+            &self.op_ctx,
+            op_id,
+            &params,
+        ) {
             Ok(kreate_ops::OpResult::Finished) => {
                 if let Some(entry) = self.history.last() {
                     println!("{}", entry.to_script_call());
@@ -542,6 +557,17 @@ impl App {
             "mesh.select",
             &[("action", PropertyValue::Enum(if entering { 0 } else { 1 }))],
         );
+
+        // Opened after the selection change rather than before it, so the
+        // session starts current with the document instead of immediately stale.
+        self.edit = match (entering, kreate_ops::ops::mesh::target_mesh(&self.doc)) {
+            (true, Some(mesh)) => kreate_ops::EditSession::open(&self.doc, mesh),
+            // Dropped on the way out. Holding a `BMesh` for a mesh nobody is
+            // editing costs about four times what the document form does, and
+            // the plan is explicit that it lives only as long as edit mode.
+            _ => None,
+        };
+
         self.ui.edit_mode = self.op_ctx.mode == OpMode::EditMesh;
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }

@@ -61,6 +61,34 @@ impl BMesh {
         }
     }
 
+    /// Copies the selection layers from a `MeshData` that shares this topology.
+    ///
+    /// Selection lives authoritatively in the document mesh — a click writes it
+    /// there directly, without decoding anything — so an edit structure held
+    /// across operations has to be told before an operator reads from it. Three
+    /// arrays of bools; at a million vertices it is a megabyte of memcpy against
+    /// the two seconds a re-decode would cost.
+    ///
+    /// Only valid while the topology matches, which is exactly when the session
+    /// keeps its structure rather than rebuilding: element `i` of the mesh is
+    /// slot `i` of the arena for as long as nothing has been added or removed.
+    pub fn adopt_selection(&mut self, mesh: &crate::MeshData) {
+        self.ensure_selection_layers();
+        for mode in [SelectMode::Vert, SelectMode::Edge, SelectMode::Face] {
+            let Some(source) = mesh.attributes().get_bool(mode.layer()) else {
+                continue;
+            };
+            let source = source.to_vec();
+            let Some(target) = self.attributes.make_mut_bool(mode.layer()) else {
+                continue;
+            };
+            // Slot count and element count differ once anything has been
+            // removed, so the copy is bounded by both rather than assumed equal.
+            let n = target.len().min(source.len());
+            target[..n].copy_from_slice(&source[..n]);
+        }
+    }
+
     fn selected_at(&self, layer: &str, slot: u32) -> bool {
         self.attributes
             .get_bool(layer)
