@@ -66,6 +66,8 @@ pub enum LossyNote {
     AssumedUnitScale { assumed: String },
     /// A feature was recognised but is not represented in the IR.
     Unsupported { what: String },
+    /// Coincident vertices were merged. The count is how many disappeared.
+    Welded { mesh: String, merged: usize },
 }
 
 /// Where the data came from, and what had to be assumed to read it.
@@ -156,6 +158,148 @@ impl ImportMesh {
         self.faces.iter().map(|f| f.len()).sum()
     }
 
+    /// Merges vertices that share a position, and remaps the faces onto them.
+    ///
+    /// The highest-leverage step in any importer, and the one that separates a
+    /// toy from a usable one. Formats that store triangle soup — STL above all,
+    /// but also glTF after a vertex split — give every triangle its own copies
+    /// of its corners. Such a mesh looks perfect and survives no edit at all: it
+    /// has no shared edges, so extruding a face moves one triangle, subdividing
+    /// leaves cracks, and the whole thing comes apart on the first operation.
+    ///
+    /// # Corner attributes are not touched, and that is the point
+    ///
+    /// Welding changes which *vertex* a corner refers to; it does not change the
+    /// corners. UVs and split normals live in the corner domain precisely so
+    /// that a vertex shared by two faces can still carry a different UV in each,
+    /// which is what makes a seam possible. So they stay exactly as authored —
+    /// this is the pay-off for the domain model, and the reason a position-only
+    /// weld is safe here where in a vertex-attribute model it would destroy every
+    /// seam in the mesh.
+    ///
+    /// # Determinism
+    ///
+    /// Welding with a tolerance is not transitive: `a` may be within `epsilon`
+    /// of `b`, and `b` of `c`, without `a` being within `epsilon` of `c`. Any
+    /// greedy merge therefore depends on the order vertices are visited, and a
+    /// hash grid visited in map order would give different geometry on different
+    /// runs of the same import.
+    ///
+    /// So vertices are visited in index order and each one joins the
+    /// **lowest-indexed** representative it is close enough to, or becomes a new
+    /// one. That is a definite rule that produces the same mesh every time, and
+    /// the file's own vertex order is the tie-breaker.
+    pub fn weld(&mut self, epsilon: f32, notes: &mut Vec<LossyNote>) {
+        if self.positions.is_empty() || epsilon <= 0.0 {
+            return;
+        }
+        let before = self.positions.len();
+
+        // A grid whose cell is the tolerance, so anything within `epsilon` of a
+        // point lies in its cell or one of the twenty-six around it.
+        let cell = |p: Vec3| -> [i64; 3] {
+            [
+                (p.x as f64 / epsilon as f64).floor() as i64,
+                (p.y as f64 / epsilon as f64).floor() as i64,
+                (p.z as f64 / epsilon as f64).floor() as i64,
+            ]
+        };
+        let mut grid: ahash::AHashMap<[i64; 3], Vec<u32>> = ahash::AHashMap::new();
+
+        // Original index -> index of the representative it merged into.
+        let mut representative: Vec<u32> = Vec::with_capacity(before);
+        // Representative original index -> its index in the welded positions.
+        let mut welded: Vec<Vec3> = Vec::new();
+        let mut slot_of: ahash::AHashMap<u32, u32> = ahash::AHashMap::new();
+
+        let epsilon_sq = epsilon * epsilon;
+        for (i, position) in self.positions.iter().enumerate() {
+            let c = cell(*position);
+            let mut found: Option<u32> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let key = [c[0] + dx, c[1] + dy, c[2] + dz];
+                        let Some(bucket) = grid.get(&key) else {
+                            continue;
+                        };
+                        // Buckets hold representatives in index order, so the
+                        // first hit in a bucket is that cell's lowest — but the
+                        // search does not stop there. Taking the minimum across
+                        // all twenty-seven cells is what makes the result
+                        // independent of the order the neighbours are visited,
+                        // rather than merely repeatable for this loop nesting.
+                        for candidate in bucket {
+                            if self.positions[*candidate as usize].distance_squared(*position)
+                                <= epsilon_sq
+                            {
+                                found = Some(match found {
+                                    Some(best) => best.min(*candidate),
+                                    None => *candidate,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            match found {
+                Some(rep) => representative.push(slot_of[&rep]),
+                None => {
+                    let slot = welded.len() as u32;
+                    welded.push(*position);
+                    slot_of.insert(i as u32, slot);
+                    grid.entry(c).or_default().push(i as u32);
+                    representative.push(slot);
+                }
+            }
+        }
+
+        if welded.len() == before {
+            return;
+        }
+        notes.push(LossyNote::Welded {
+            mesh: self.name.clone(),
+            merged: before - welded.len(),
+        });
+
+        // Remap the faces, collapsing corners that have become the same vertex.
+        //
+        // A quad with two coincident corners is a triangle, not a quad with a
+        // zero-length edge — and a triangle whose corners all merged is nothing
+        // at all. Both have to be handled here rather than left for `sanitize`,
+        // because the corner arrays have to lose exactly the corners the faces
+        // lose.
+        let mut kept_corner: Vec<bool> = Vec::with_capacity(self.num_corners());
+        let mut faces: Vec<Vec<u32>> = Vec::with_capacity(self.faces.len());
+        for face in &self.faces {
+            let mut out: Vec<u32> = Vec::with_capacity(face.len());
+            for (position_in_face, corner) in face.iter().enumerate() {
+                let v = representative[*corner as usize];
+                // Compared against the previous kept corner, and against the
+                // first when this is the last: a face is a cycle, so its ends are
+                // adjacent too.
+                let duplicate = out.last() == Some(&v)
+                    || (position_in_face + 1 == face.len() && out.first() == Some(&v));
+                kept_corner.push(!duplicate);
+                if !duplicate {
+                    out.push(v);
+                }
+            }
+            faces.push(out);
+        }
+
+        self.positions = welded;
+        self.faces = faces;
+        retain_corners(&mut self.corner_uvs, &kept_corner);
+        retain_corners(&mut self.corner_normals, &kept_corner);
+
+        // Faces that collapsed below three corners are dropped by `sanitize`,
+        // which also keeps the corner arrays in step — one place that decides
+        // what an unrepresentable face is.
+        self.sanitize(notes);
+    }
+
     /// Drops faces that cannot be represented, recording why.
     ///
     /// Never silently: a mesh that loses faces without saying so is worse than
@@ -223,6 +367,23 @@ impl ImportMesh {
         let mut it = keep.iter();
         self.faces.retain(|_| *it.next().unwrap_or(&false));
     }
+}
+
+/// Keeps only the corners a weld did not collapse.
+///
+/// Generic over the element so UVs and normals cannot drift apart: they are the
+/// same operation on the same mask, and writing it twice is how one of them ends
+/// up a corner short.
+fn retain_corners<T: Copy>(corners: &mut Option<Vec<T>>, keep: &[bool]) {
+    let Some(values) = corners else { return };
+    if values.len() != keep.len() {
+        // The array does not describe these corners, so filtering it would
+        // silently misalign it. Leaving it is wrong too, but it is wrong
+        // visibly — and `sanitize` will not have produced this state.
+        return;
+    }
+    let mut it = keep.iter();
+    values.retain(|_| *it.next().unwrap_or(&false));
 }
 
 /// A scene as read from a file, before it becomes a document.
@@ -388,6 +549,366 @@ fn apply_smoothing_groups(mesh: &mut MeshData, groups: &[u32]) {
         Domain::Face,
         AttrData::Bool(Arc::new(smooth)),
     );
+}
+
+#[cfg(test)]
+mod weld_tests {
+    use super::*;
+
+    /// Two triangles sharing an edge, stored as soup: six vertices where four
+    /// would do. This is what STL gives, every time.
+    fn soup() -> ImportMesh {
+        ImportMesh {
+            name: "soup".to_string(),
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                // The second triangle repeats two of them, bit for bit.
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            faces: vec![vec![0, 1, 2], vec![3, 4, 5]],
+            corner_uvs: Some(vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, 1.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(0.0, 1.0),
+            ]),
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        }
+    }
+
+    #[test]
+    fn triangle_soup_becomes_a_shared_surface() {
+        // The whole point. Before welding these two triangles share no vertex, so
+        // they share no edge — extruding one would tear the mesh in half.
+        let mut mesh = soup();
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+
+        assert_eq!(mesh.positions.len(), 4, "the duplicates were not merged");
+        assert_eq!(mesh.faces.len(), 2, "a face was lost");
+        // The two faces now name two vertices in common, which is what an edge is.
+        let shared: Vec<u32> = mesh.faces[0]
+            .iter()
+            .filter(|v| mesh.faces[1].contains(v))
+            .copied()
+            .collect();
+        assert_eq!(shared.len(), 2, "the triangles still share no edge");
+        assert!(matches!(
+            notes.as_slice(),
+            [LossyNote::Welded { merged: 2, .. }]
+        ));
+    }
+
+    #[test]
+    fn corner_attributes_are_left_exactly_as_authored() {
+        // The pay-off for putting UVs in the corner domain. A vertex shared by
+        // two faces can still carry a different UV in each — that is what a seam
+        // is — so a position-only weld must not touch them.
+        //
+        // In a vertex-attribute model this same weld would have to pick one UV
+        // per merged vertex and would destroy every seam in the mesh.
+        let mut mesh = soup();
+        let before = mesh.corner_uvs.clone();
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+        assert_eq!(mesh.corner_uvs, before, "the UVs were disturbed");
+    }
+
+    #[test]
+    fn vertices_further_apart_than_the_tolerance_are_left_alone() {
+        let mut mesh = soup();
+        mesh.positions[3] = Vec3::new(1.5, 0.0, 0.0);
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+        assert_eq!(
+            mesh.positions.len(),
+            5,
+            "a vertex was merged that should not be"
+        );
+    }
+
+    #[test]
+    fn a_weld_that_changes_nothing_records_nothing() {
+        // A mesh that is already shared must come through untouched and unnoted:
+        // a note on every import would train the reader to ignore them.
+        let mut mesh = ImportMesh {
+            name: "clean".to_string(),
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            faces: vec![vec![0, 1, 2]],
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+        assert_eq!(mesh.positions.len(), 3);
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_quad_with_two_coincident_corners_becomes_a_triangle() {
+        // Not a quad with a zero-length edge. The corner arrays have to lose
+        // exactly the corner the face loses, or every UV after it shifts by one —
+        // which shows up as texturing that is subtly wrong from that face onward
+        // and is very hard to trace back here.
+        let mut mesh = ImportMesh {
+            name: "pinched".to_string(),
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                // Coincident with the previous one.
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            faces: vec![vec![0, 1, 2, 3]],
+            corner_uvs: Some(vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(9.0, 9.0),
+                Vec2::new(0.0, 1.0),
+            ]),
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+
+        assert_eq!(mesh.faces, vec![vec![0, 1, 2]]);
+        assert_eq!(
+            mesh.corner_uvs.as_ref().unwrap().len(),
+            3,
+            "the corner arrays did not follow the face"
+        );
+        assert_eq!(
+            mesh.corner_uvs.as_ref().unwrap()[2],
+            Vec2::new(0.0, 1.0),
+            "the wrong corner was dropped"
+        );
+    }
+
+    #[test]
+    fn a_face_whose_corners_all_merge_is_dropped() {
+        let mut mesh = ImportMesh {
+            name: "collapsed".to_string(),
+            positions: vec![
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            faces: vec![vec![0, 1, 2], vec![0, 3, 4]],
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+        assert_eq!(mesh.faces.len(), 1, "the collapsed face survived");
+        assert!(
+            notes
+                .iter()
+                .any(|n| matches!(n, LossyNote::DroppedDegenerateFace { .. })),
+            "a face vanished without a note"
+        );
+    }
+
+    #[test]
+    fn the_first_and_last_corner_of_a_face_are_adjacent() {
+        // A face is a cycle. If only consecutive pairs were compared, a triangle
+        // whose first and last corners merged would come out as a two-corner
+        // face rather than being dropped.
+        let mut mesh = ImportMesh {
+            name: "wrapped".to_string(),
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.0),
+            ],
+            faces: vec![vec![0, 1, 2]],
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(1e-5, &mut notes);
+        assert!(
+            mesh.faces.is_empty(),
+            "a two-corner face survived: {:?}",
+            mesh.faces
+        );
+    }
+
+    #[test]
+    fn welding_is_deterministic_regardless_of_how_the_points_are_spread() {
+        // Welding with a tolerance is not transitive — `a` may be within epsilon
+        // of `b`, and `b` of `c`, without `a` being within epsilon of `c` — so a
+        // greedy merge depends on the order vertices are visited. Visiting in
+        // index order and joining the lowest-indexed representative is what makes
+        // it a definite rule.
+        //
+        // Run repeatedly because the grid is a hash map: an implementation that
+        // depended on its iteration order would be stable within one run and
+        // differ between them.
+        let make = || ImportMesh {
+            name: "chain".to_string(),
+            positions: (0..64)
+                .map(|i| Vec3::new(i as f32 * 0.4, (i % 7) as f32 * 0.4, 0.0))
+                .collect(),
+            faces: (0..20).map(|i| vec![i, i + 1, i + 2]).collect(),
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let reference = {
+            let mut m = make();
+            m.weld(0.5, &mut Vec::new());
+            (m.positions.clone(), m.faces.clone())
+        };
+        for _ in 0..8 {
+            let mut m = make();
+            m.weld(0.5, &mut Vec::new());
+            assert_eq!(
+                (m.positions, m.faces),
+                reference,
+                "the weld gave a different mesh on a repeat run"
+            );
+        }
+    }
+
+    #[test]
+    fn points_within_the_tolerance_but_in_different_cells_still_merge() {
+        // The reason the search covers twenty-seven cells and not one.
+        //
+        // The grid's cell is the tolerance, so two points closer than the
+        // tolerance can still straddle a cell boundary — and a search that only
+        // looked in the point's own cell would leave them unmerged. The mesh
+        // would come out looking welded almost everywhere, with a scattering of
+        // seams wherever a shared vertex happened to fall near a multiple of the
+        // tolerance. That is far worse than not welding at all: it is a bug that
+        // depends on the model's absolute coordinates.
+        //
+        // A falsification pass that narrowed the search to one cell passed every
+        // other test in this file, because they all use points that are either
+        // bit-identical or far apart.
+        let epsilon = 0.1f32;
+        let mut mesh = ImportMesh {
+            name: "straddle".to_string(),
+            positions: vec![
+                // Either side of the boundary at x = 10 * epsilon, and a
+                // hundredth of the tolerance apart.
+                Vec3::new(epsilon * 10.0 - 0.0005, 0.0, 0.0),
+                Vec3::new(epsilon * 10.0 + 0.0005, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 2.0, 0.0),
+            ],
+            faces: vec![vec![0, 2, 3], vec![1, 3, 2]],
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(epsilon, &mut notes);
+        assert_eq!(
+            mesh.positions.len(),
+            3,
+            "two points a hundredth of the tolerance apart were not merged, so \
+             the search is not covering neighbouring cells"
+        );
+    }
+
+    #[test]
+    fn a_point_near_two_representatives_joins_the_lower_indexed_one() {
+        // Welding with a tolerance is not transitive, so a point can be close
+        // enough to two separate representatives at once. Which one it joins has
+        // to be decided by a rule, not by whichever cell the search happened to
+        // look in first — otherwise the geometry depends on the loop nesting in
+        // the search, and changing that nesting for speed would silently change
+        // people's meshes.
+        //
+        // The rule is the lowest index, and this is the case that can see it: a
+        // falsification pass that took the last match instead passed everything
+        // else here, including the determinism test — because taking the last
+        // match is perfectly deterministic too.
+        let mut mesh = ImportMesh {
+            name: "between".to_string(),
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                // Too far from the first to merge, so it becomes a second
+                // representative.
+                Vec3::new(1.0, 0.0, 0.0),
+                // Within tolerance of both.
+                Vec3::new(0.5, 0.0, 0.0),
+                Vec3::new(0.0, 5.0, 0.0),
+            ],
+            faces: vec![vec![2, 3, 0]],
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        let mut notes = Vec::new();
+        mesh.weld(0.7, &mut notes);
+
+        // Vertex 2 joined vertex 0, which is slot 0 — not vertex 1, which is
+        // slot 1. The face names slot 0 twice, so the wrap-around collapse
+        // reduces it to two corners and it is dropped.
+        assert_eq!(
+            mesh.positions.len(),
+            3,
+            "the merge did not happen as expected: {:?}",
+            mesh.positions
+        );
+        assert!(
+            mesh.faces.is_empty(),
+            "vertex 2 joined the wrong representative: the face is {:?}",
+            mesh.faces
+        );
+    }
+
+    #[test]
+    fn a_zero_tolerance_does_nothing() {
+        // Guards the division by the tolerance in the grid, and states the
+        // policy: no tolerance means no welding, not welding by exact equality.
+        let mut mesh = soup();
+        let mut notes = Vec::new();
+        mesh.weld(0.0, &mut notes);
+        assert_eq!(mesh.positions.len(), 6);
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn an_empty_mesh_welds_without_panicking() {
+        let mut mesh = ImportMesh {
+            name: "empty".to_string(),
+            positions: Vec::new(),
+            faces: Vec::new(),
+            corner_uvs: None,
+            corner_normals: None,
+            face_materials: None,
+            smoothing_groups: None,
+        };
+        mesh.weld(1e-5, &mut Vec::new());
+        assert!(mesh.positions.is_empty());
+    }
 }
 
 #[cfg(test)]

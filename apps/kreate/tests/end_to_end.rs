@@ -34,6 +34,18 @@ fn params(pairs: &[(&'static str, PropertyValue)]) -> PropertyMap {
 /// Returns `None` when there is no GPU, so a runner without one skips rather
 /// than reporting a failure it cannot act on.
 fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
+    render_as(doc, camera, false)
+}
+
+/// Renders the way the application does *in edit mode* when `editing` is set:
+/// element overlays on, and the object-level selection highlight deliberately
+/// off, because a whole orange wireframe would drown out the element selection
+/// the user is actually looking at.
+fn render_in_edit_mode(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
+    render_as(doc, camera, true)
+}
+
+fn render_as(doc: &Document, camera: &Camera, edit_mode: bool) -> Option<Vec<[u8; 4]>> {
     let opts = GpuOptions::default();
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
@@ -59,6 +71,7 @@ fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
     // The grid is anchored to the world, which would let it mask a change in the
     // geometry; these tests are about the objects.
     viewport.show_grid = false;
+    viewport.show_elements = edit_mode;
 
     let mut uploaded: Vec<(kreate_scene::document::MeshId, GpuMesh)> = Vec::new();
     for (_, object) in doc.objects() {
@@ -92,7 +105,11 @@ fn render(doc: &Document, camera: &Camera) -> Option<Vec<[u8; 4]>> {
             continue;
         };
         if let Some((_, m)) = uploaded.iter().find(|(mid, _)| *mid == mesh_id) {
-            draws.push(Draw::new(m, doc.world_transform(id)).selected(doc.selection.contains(id)));
+            draws.push(
+                Draw::new(m, doc.world_transform(id))
+                    .selected(!edit_mode && doc.selection.contains(id))
+                    .editing(edit_mode && doc.selection.contains(id)),
+            );
         }
     }
 
@@ -770,4 +787,192 @@ fn an_empty_document_renders_without_panicking() {
     let doc = Document::new();
     let pixels = gpu_or_skip!(render(&doc, &camera()));
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+}
+
+/// Pixels that are not the viewport background.
+fn lit_pixels(pixels: &[[u8; 4]]) -> usize {
+    pixels
+        .iter()
+        .filter(|p| p[0] > 90 || p[1] > 90 || p[2] > 90)
+        .count()
+}
+
+/// The GPU mesh cache, driven the way the application drives it.
+///
+/// The distinction that matters: the cache is keyed on the *identity* of the
+/// evaluated mesh handle, and slots persist across frames. A test that re-uploads
+/// everything each frame — which is what the plain `render` helper above does —
+/// cannot see a cache that fails to adopt a new handle, because it has no cache.
+struct MeshCache {
+    slots: Vec<(std::sync::Arc<kreate_mesh::MeshData>, GpuMesh)>,
+}
+
+impl MeshCache {
+    fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
+
+    /// Mirrors `App::sync_gpu`, including the re-flagging path.
+    fn sync(
+        &mut self,
+        gpu: &kreate_render::Gpu,
+        layouts: &kreate_render::MeshLayouts,
+        scene: &[(
+            kreate_scene::ObjectId,
+            std::sync::Arc<kreate_mesh::MeshData>,
+        )],
+    ) {
+        let held: Vec<_> = self.slots.iter().map(|(a, _)| a.clone()).collect();
+        let plan = kreate::gpu_sync::plan_sync(&held, scene);
+        if !plan.needs_work(held.len()) {
+            return;
+        }
+        let mut old: Vec<Option<(std::sync::Arc<kreate_mesh::MeshData>, GpuMesh)>> =
+            self.slots.drain(..).map(Some).collect();
+        for (slot, mesh) in &plan.reflags {
+            let Some(Some((handle, gpu_mesh))) = old.get_mut(*slot) else {
+                continue;
+            };
+            let cpu = RenderMeshCpu::extract(mesh);
+            if gpu_mesh.update_flags(&gpu.queue, &cpu) {
+                *handle = mesh.clone();
+            } else {
+                old[*slot] = None;
+            }
+        }
+        let mut next = Vec::with_capacity(plan.total());
+        for slot in &plan.keep {
+            if let Some(entry) = old.get_mut(*slot).and_then(Option::take) {
+                next.push(entry);
+            }
+        }
+        for arc in &plan.uploads {
+            let cpu = RenderMeshCpu::extract(arc);
+            let uploaded =
+                GpuMesh::upload(&gpu.device, layouts, &cpu, Vec4::new(0.75, 0.72, 0.68, 1.0));
+            next.push((arc.clone(), uploaded));
+        }
+        self.slots = next;
+    }
+
+    /// How the draw loop finds a slot: by handle identity, and by nothing else.
+    fn find(&self, mesh: &std::sync::Arc<kreate_mesh::MeshData>) -> Option<&GpuMesh> {
+        self.slots
+            .iter()
+            .find(|(a, _)| std::sync::Arc::ptr_eq(a, mesh))
+            .map(|(_, m)| m)
+    }
+}
+
+#[test]
+fn a_selection_only_change_leaves_the_object_findable_in_the_cache() {
+    // The reported bug, reduced to the line that caused it: select a cube, press
+    // Tab, and the cube disappears.
+    //
+    // Tab selects every element, which changes the mesh handle without changing
+    // any geometry, so the sync plan says to keep the slot and rewrite its flag
+    // buffers. The application produced that plan and then ignored the
+    // re-flagging half of it — so the slot kept the *previous* handle, the draw
+    // loop's `Arc::ptr_eq` matched nothing, and the object was quietly left out
+    // of the frame.
+    //
+    // Asserted against the cache rather than against pixels, because that is
+    // where the defect is: a pixel test that re-uploaded every frame passed
+    // while the application was broken.
+    let mut doc = Document::new();
+    let object = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+    doc.selection.add(object);
+
+    let opts = GpuOptions::default();
+    let instance = kreate_render::Gpu::create_instance(&opts);
+    let Ok(gpu) = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)) else {
+        eprintln!("no adapter; skipping");
+        return;
+    };
+    let viewport = Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+
+    let mut cache = MeshCache::new();
+    let mut modifiers = kreate_scene::ModifierCache::new();
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    assert!(
+        cache.find(&scene[0].1).is_some(),
+        "the object was not in the cache before edit mode"
+    );
+
+    // What Tab does first: select every element.
+    let r = registry();
+    let mut h = History::new();
+    let ctx = Context {
+        mode: kreate_ops::Mode::EditMesh,
+    };
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &params(&[("action", PropertyValue::Enum(0))]),
+    )
+    .expect("select all elements");
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    assert!(
+        cache.find(&scene[0].1).is_some(),
+        "after a selection-only change the cache no longer matches the evaluated \
+         mesh, so the object would not be drawn"
+    );
+    assert_eq!(
+        cache.slots.len(),
+        1,
+        "the mesh was re-uploaded rather than re-flagged"
+    );
+}
+
+#[test]
+fn entering_edit_mode_does_not_make_the_object_disappear() {
+    // Reported from the running application: select the cube, press Tab, and the
+    // cube vanishes. Tab does two things — it turns on the element overlays and
+    // it selects every element — so this reproduces both and checks the frame
+    // still has geometry in it.
+    //
+    // Written against the pixels rather than against the draw list, because
+    // "the object is in the draw list" is exactly what would still be true if
+    // the overlays were painting over it or the cull were rejecting it.
+    let mut doc = Document::new();
+    let object = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+    doc.selection.add(object);
+
+    let camera = camera();
+    let Some(before) = render(&doc, &camera) else {
+        eprintln!("no adapter; skipping");
+        return;
+    };
+    let lit_before = lit_pixels(&before);
+    assert!(lit_before > 500, "the object was not visible to begin with");
+
+    // What Tab does to the document: select every element of the target mesh.
+    let r = registry();
+    let mut h = History::new();
+    // Edit mode, because that is the mode Tab puts the application into and
+    // `mesh.select` polls false outside it.
+    let ctx = Context {
+        mode: kreate_ops::Mode::EditMesh,
+    };
+    h.dispatch(
+        &r,
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &params(&[("action", PropertyValue::Enum(0))]),
+    )
+    .expect("select all elements");
+
+    let after = render_in_edit_mode(&doc, &camera).expect("adapter worked a moment ago");
+    let lit_after = lit_pixels(&after);
+    assert!(
+        lit_after > 500,
+        "entering edit mode left {lit_after} lit pixels against {lit_before} before it"
+    );
 }

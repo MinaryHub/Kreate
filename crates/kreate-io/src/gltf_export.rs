@@ -1,0 +1,761 @@
+//! glTF 2.0 export.
+//!
+//! Written by hand on `gltf-json` rather than through a convenience writer,
+//! because the parts that matter here are exactly the parts a convenience
+//! writer decides for you: how n-gons are triangulated, where vertices are
+//! split, which UV origin is used, and what happens to the face-to-material
+//! partition.
+//!
+//! # The three lossy conversions, and what is done about each
+//!
+//! glTF is a runtime delivery format. It stores triangles, one attribute value
+//! per vertex, and one material per primitive. Kreate stores n-gons, attribute
+//! values per *corner*, and one material per face. Every export therefore has
+//! to perform three conversions, and each one loses something unless it is
+//! handled deliberately:
+//!
+//! | Kreate | glTF | What this module does |
+//! |---|---|---|
+//! | n-gon faces | triangles only | Triangulate, and record the original faces in [`NGON_EXTENSION`] |
+//! | corner attributes | per-vertex attributes | Split a vertex wherever its corners disagree |
+//! | material per face | material per primitive | One primitive per material actually used |
+//!
+//! The vertex split is the inverse of what [`crate::ir::ImportMesh::weld`] does
+//! on the way in, and it is not optional: a cube with per-face normals has to
+//! come out with 24 vertices or it shades as a sphere, and a UV seam that is
+//! not split puts a smear of texture across it.
+//!
+//! # `KREATE_ngons`
+//!
+//! Triangulation is the one conversion that cannot be undone by inspection —
+//! given a triangulated quad there is no way to know whether the author drew a
+//! quad or two triangles, and guessing (merging coplanar neighbours) is wrong
+//! about as often as it is right. So the original face list travels alongside
+//! the triangles in a vendor extension, and [`crate::gltf_import`] reads it
+//! back.
+//!
+//! It is listed in `extensionsUsed` but deliberately **not** in
+//! `extensionsRequired`: every other reader ignores it and still gets correct,
+//! complete triangles. An extension that makes a file unreadable to everyone
+//! else in exchange for a round trip with ourselves would be a bad trade.
+//!
+//! The extension stores the faces explicitly — a size per face and a vertex per
+//! corner — rather than something cleverer derived from the triangle order. The
+//! clever version costs a third less space and depends on the triangulator never
+//! changing its output order; recovering an ordered polygon ring from an
+//! unordered set of triangles is a boundary walk that has its own failure cases
+//! on degenerate input. Explicit is worth the third.
+
+use crate::ir::{ImportMaterial, LossyNote, UvOrigin};
+use glam::{Vec2, Vec3};
+use gltf::json;
+use json::validation::{Checked, USize64};
+use kreate_math::AxisConvention;
+use kreate_mesh::attribute::names;
+use kreate_mesh::MeshData;
+use std::collections::HashMap;
+
+/// The vendor extension carrying the pre-triangulation face list.
+pub const NGON_EXTENSION: &str = "KREATE_ngons";
+
+/// Kreate's default auto-smooth angle, 30 degrees.
+///
+/// Duplicated from `kreate-render` rather than shared, because `kreate-io` must
+/// not depend on the renderer. The value matters for agreement, not for
+/// correctness: an export whose normals were averaged over a different angle
+/// than the viewport used would shade differently in the file than on screen.
+const DEFAULT_AUTO_SMOOTH: f32 = std::f32::consts::PI / 6.0;
+
+#[derive(Clone, Copy, Debug)]
+pub struct GltfExportOptions {
+    /// Write a binary `.glb` rather than a `.gltf` with a base64 data URI.
+    ///
+    /// On by default. The JSON form is roughly a third larger and exists for
+    /// looking at the file, not for shipping it.
+    pub binary: bool,
+    /// Record the original faces in [`NGON_EXTENSION`].
+    pub record_ngons: bool,
+    /// Write a `NORMAL` attribute.
+    ///
+    /// On by default. Without it a reader computes its own, which loses every
+    /// sharp edge and smoothing decision the mesh carries.
+    pub normals: bool,
+    /// The angle beyond which adjacent faces stop sharing a normal.
+    pub auto_smooth_angle: f32,
+}
+
+impl Default for GltfExportOptions {
+    fn default() -> Self {
+        Self {
+            binary: true,
+            record_ngons: true,
+            normals: true,
+            auto_smooth_angle: DEFAULT_AUTO_SMOOTH,
+        }
+    }
+}
+
+/// One vertex of the exported, split vertex array.
+///
+/// Bit patterns rather than floats so the key is hashable and the comparison is
+/// exact. Exact is what is wanted: two corners either carry the same value and
+/// share a vertex, or they do not. An epsilon here would silently merge a seam
+/// that the author placed one texel apart.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct VertexKey {
+    vertex: u32,
+    uv: [u32; 2],
+    normal: [u32; 3],
+}
+
+/// Writes a glTF 2.0 file.
+///
+/// `materials` may be empty: a mesh whose faces carry material indices with no
+/// table behind them still needs somewhere for those indices to point, so a
+/// placeholder is emitted for each one in use. That keeps the face-to-material
+/// partition — which is real authored data — intact through the round trip even
+/// when the material parameters are not available.
+pub fn write_gltf(
+    meshes: &[(String, &MeshData)],
+    materials: &[ImportMaterial],
+    options: &GltfExportOptions,
+) -> (Vec<u8>, Vec<LossyNote>) {
+    let mut notes = Vec::new();
+    let mut root = json::Root {
+        asset: json::Asset {
+            version: "2.0".to_string(),
+            generator: Some("Kreate".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bin: Vec<u8> = Vec::new();
+    // Source material index to glTF material index. Only ever looked up and
+    // inserted into, never iterated: the emitted table's order comes from the
+    // order materials are first referenced, which is the face grouping's order
+    // below, which is sorted. That is where the determinism lives.
+    let mut material_map: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+    let mut used_ngons = false;
+
+    // Kreate is Z-up; glTF is Y-up. Applied here and nowhere else. Both are
+    // right-handed, so this rotation does not flip winding — asserted in the
+    // tests rather than assumed, because a silent winding flip is the classic
+    // way for an exporter to turn a model inside out.
+    let to_gltf = AxisConvention::GLTF.from_kreate();
+
+    for (name, mesh) in meshes {
+        let mesh_index = root.meshes.len() as u32;
+        let primitives = write_mesh(
+            name,
+            mesh,
+            materials,
+            options,
+            to_gltf,
+            &mut root,
+            &mut bin,
+            &mut material_map,
+            &mut notes,
+            &mut used_ngons,
+        );
+        if primitives.is_empty() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{name}: no faces, so nothing was written"),
+            });
+            continue;
+        }
+        root.meshes.push(json::Mesh {
+            name: Some(name.clone()),
+            primitives,
+            extensions: None,
+            extras: Default::default(),
+            weights: None,
+        });
+        let node = root.nodes.len() as u32;
+        root.nodes.push(json::Node {
+            mesh: Some(json::Index::new(mesh_index)),
+            name: Some(name.clone()),
+            ..Default::default()
+        });
+        if root.scenes.is_empty() {
+            root.scenes.push(json::Scene {
+                nodes: Vec::new(),
+                name: None,
+                extensions: None,
+                extras: Default::default(),
+            });
+            root.scene = Some(json::Index::new(0));
+        }
+        root.scenes[0].nodes.push(json::Index::new(node));
+    }
+
+    if used_ngons {
+        root.extensions_used.push(NGON_EXTENSION.to_string());
+    }
+    note_dropped_attributes(meshes, options, &mut notes);
+
+    // The buffer is declared even when empty so that a file with no geometry is
+    // still a structurally valid glTF rather than one with dangling views.
+    if !bin.is_empty() {
+        root.buffers.push(json::Buffer {
+            byte_length: USize64(bin.len() as u64),
+            name: None,
+            uri: if options.binary {
+                None
+            } else {
+                Some(format!(
+                    "data:application/octet-stream;base64,{}",
+                    base64(&bin)
+                ))
+            },
+            extensions: None,
+            extras: Default::default(),
+        });
+    }
+
+    let bytes = if options.binary {
+        pack_glb(&root, &bin)
+    } else {
+        // Not `to_vec_pretty`: this is a delivery format, and the pretty form of
+        // a mesh's worth of accessors is noise. The JSON path exists to be read
+        // structurally, which a formatter can do on demand.
+        serde_json::to_vec(&root).expect("the json tree is built from owned data")
+    };
+    (bytes, notes)
+}
+
+/// Builds every primitive of one mesh, appending its buffers to `bin`.
+#[allow(clippy::too_many_arguments)]
+fn write_mesh(
+    name: &str,
+    mesh: &MeshData,
+    materials: &[ImportMaterial],
+    options: &GltfExportOptions,
+    to_gltf: glam::Mat3,
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    material_map: &mut std::collections::BTreeMap<i32, u32>,
+    notes: &mut Vec<LossyNote>,
+    used_ngons: &mut bool,
+) -> Vec<json::mesh::Primitive> {
+    let positions = mesh.positions();
+    let uvs = mesh.attributes().get_f32x2("uv_map");
+    // Authored split normals win over computed ones, which is the whole point of
+    // storing them: a mesh that carries them has had its shading decided by hand
+    // and recomputing would overrule the author.
+    let authored = mesh.attributes().get_f32x3(names::CUSTOM_NORMAL);
+    let computed;
+    let normals: Option<&[Vec3]> = if !options.normals {
+        None
+    } else if let Some(n) = authored {
+        Some(n)
+    } else {
+        computed = mesh.compute_corner_normals(options.auto_smooth_angle);
+        Some(&computed)
+    };
+
+    let face_materials = mesh.attributes().get_i32(names::MATERIAL_INDEX);
+    let tri = mesh.triangulate();
+
+    // Which faces go in which primitive. Sorted by material index so the output
+    // is the same whichever order the faces happen to be in.
+    let mut groups: std::collections::BTreeMap<i32, Vec<u32>> = std::collections::BTreeMap::new();
+    for f in 0..mesh.num_faces() {
+        if mesh.face_len(f) < 3 {
+            notes.push(LossyNote::DroppedDegenerateFace {
+                mesh: name.to_string(),
+                face: f as usize,
+            });
+            continue;
+        }
+        let m = face_materials.map(|m| m[f as usize]).unwrap_or(-1);
+        groups.entry(m).or_default().push(f);
+    }
+
+    let mut primitives = Vec::new();
+    for (source_material, faces) in groups {
+        // The split vertex array for this primitive, and the corner-to-vertex
+        // map that both the triangles and the n-gon record are written through.
+        let mut seen: HashMap<VertexKey, u32> = HashMap::new();
+        let mut out_positions: Vec<Vec3> = Vec::new();
+        let mut out_uvs: Vec<Vec2> = Vec::new();
+        let mut out_normals: Vec<Vec3> = Vec::new();
+        let mut corner_vertex: HashMap<u32, u32> = HashMap::new();
+
+        let mut face_sizes: Vec<u32> = Vec::new();
+        let mut face_vertices: Vec<u32> = Vec::new();
+
+        for &f in &faces {
+            let range = mesh.face_corner_range(f);
+            face_sizes.push(range.len() as u32);
+            for c in range {
+                let vertex = mesh.corner_verts()[c];
+                let uv = uvs
+                    .map(|u| UvOrigin::TopLeft.from_kreate(u[c]))
+                    .unwrap_or(Vec2::ZERO);
+                let normal = normals.map(|n| to_gltf * n[c]).unwrap_or(Vec3::Y);
+                let key = VertexKey {
+                    vertex,
+                    uv: [uv.x.to_bits(), uv.y.to_bits()],
+                    normal: [normal.x.to_bits(), normal.y.to_bits(), normal.z.to_bits()],
+                };
+                let index = *seen.entry(key).or_insert_with(|| {
+                    out_positions.push(to_gltf * positions[vertex as usize]);
+                    out_uvs.push(uv);
+                    out_normals.push(normal);
+                    (out_positions.len() - 1) as u32
+                });
+                corner_vertex.insert(c as u32, index);
+                face_vertices.push(index);
+            }
+        }
+
+        // Triangles, mapped back through the corners they came from so they
+        // reference the split vertices rather than the mesh's own.
+        let in_group: std::collections::HashSet<u32> = faces.iter().copied().collect();
+        let mut indices: Vec<u32> = Vec::new();
+        for t in 0..tri.num_triangles() {
+            let f = tri.tri_to_face[t];
+            if !in_group.contains(&f) {
+                continue;
+            }
+            for k in 0..3 {
+                let v = tri.indices[t * 3 + k];
+                match corner_of(mesh, f, v).and_then(|c| corner_vertex.get(&c).copied()) {
+                    Some(index) => indices.push(index),
+                    None => {
+                        // Only reachable if the triangulator emitted a vertex the
+                        // face does not contain, which would be a bug there.
+                        // Reported rather than papered over with a zero.
+                        notes.push(LossyNote::Unsupported {
+                            what: format!(
+                                "{name}: face {f} was triangulated to a vertex it does not contain"
+                            ),
+                        });
+                        indices.push(0);
+                    }
+                }
+            }
+        }
+        if indices.is_empty() {
+            continue;
+        }
+
+        let mut attributes = std::collections::BTreeMap::new();
+        let view = push_view(
+            root,
+            bin,
+            bytemuck::cast_slice(&out_positions),
+            ARRAY_BUFFER,
+        );
+        let (min, max) = bounds(&out_positions);
+        attributes.insert(
+            Checked::Valid(json::mesh::Semantic::Positions),
+            push_accessor(
+                root,
+                view,
+                out_positions.len(),
+                json::accessor::ComponentType::F32,
+                json::accessor::Type::Vec3,
+                // Required by the specification for POSITION, and actually used:
+                // viewers frame the model from it without decoding the buffer.
+                Some(serde_json::json!([min.x, min.y, min.z])),
+                Some(serde_json::json!([max.x, max.y, max.z])),
+            ),
+        );
+        if normals.is_some() {
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_normals), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::Normals),
+                push_accessor(
+                    root,
+                    view,
+                    out_normals.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec3,
+                    None,
+                    None,
+                ),
+            );
+        }
+        if uvs.is_some() {
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_uvs), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::TexCoords(0)),
+                push_accessor(
+                    root,
+                    view,
+                    out_uvs.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec2,
+                    None,
+                    None,
+                ),
+            );
+        }
+
+        let view = push_view(
+            root,
+            bin,
+            bytemuck::cast_slice(&indices),
+            ELEMENT_ARRAY_BUFFER,
+        );
+        let index_accessor = push_accessor(
+            root,
+            view,
+            indices.len(),
+            json::accessor::ComponentType::U32,
+            json::accessor::Type::Scalar,
+            None,
+            None,
+        );
+
+        let extensions = if options.record_ngons && face_sizes.iter().any(|&n| n > 3) {
+            *used_ngons = true;
+            Some(ngon_extension(root, bin, &face_sizes, &face_vertices))
+        } else {
+            None
+        };
+        if !options.record_ngons && face_sizes.iter().any(|&n| n > 3) {
+            notes.push(LossyNote::Unsupported {
+                what: format!(
+                    "{name}: n-gons were triangulated and not recorded; the faces cannot be recovered"
+                ),
+            });
+        }
+
+        primitives.push(json::mesh::Primitive {
+            attributes,
+            extensions,
+            extras: Default::default(),
+            indices: Some(index_accessor),
+            material: if source_material < 0 {
+                None
+            } else {
+                Some(json::Index::new(emit_material(
+                    root,
+                    materials,
+                    material_map,
+                    source_material,
+                )))
+            },
+            mode: Checked::Valid(json::mesh::Mode::Triangles),
+            targets: None,
+        });
+    }
+    primitives
+}
+
+/// Which corner of `face` sits on `vertex`.
+///
+/// Linear, because a face is small and building an index for it would cost more
+/// than the scan. The first match wins: a face that names the same vertex twice
+/// is already invalid, and picking either corner is as good an answer as exists.
+fn corner_of(mesh: &MeshData, face: u32, vertex: u32) -> Option<u32> {
+    let range = mesh.face_corner_range(face);
+    let verts = mesh.corner_verts();
+    range
+        .clone()
+        .find(|&c| verts[c] == vertex)
+        .map(|c| c as u32)
+}
+
+/// Builds the `KREATE_ngons` payload for one primitive.
+fn ngon_extension(
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    face_sizes: &[u32],
+    face_vertices: &[u32],
+) -> json::extensions::mesh::Primitive {
+    let sizes_view = push_view(root, bin, bytemuck::cast_slice(face_sizes), None);
+    let sizes = push_accessor(
+        root,
+        sizes_view,
+        face_sizes.len(),
+        json::accessor::ComponentType::U32,
+        json::accessor::Type::Scalar,
+        None,
+        None,
+    );
+    let verts_view = push_view(root, bin, bytemuck::cast_slice(face_vertices), None);
+    let verts = push_accessor(
+        root,
+        verts_view,
+        face_vertices.len(),
+        json::accessor::ComponentType::U32,
+        json::accessor::Type::Scalar,
+        None,
+        None,
+    );
+    let mut others = serde_json::Map::new();
+    others.insert(
+        NGON_EXTENSION.to_string(),
+        serde_json::json!({
+            "faceSizes": sizes.value(),
+            "faceVertices": verts.value(),
+        }),
+    );
+    json::extensions::mesh::Primitive { others }
+}
+
+/// Emits a material for a source index the first time it is referenced.
+fn emit_material(
+    root: &mut json::Root,
+    materials: &[ImportMaterial],
+    map: &mut std::collections::BTreeMap<i32, u32>,
+    source: i32,
+) -> u32 {
+    if let Some(&existing) = map.get(&source) {
+        return existing;
+    }
+    let index = root.materials.len() as u32;
+    let described = materials.get(source as usize);
+    root.materials.push(json::Material {
+        name: Some(
+            described
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| format!("material{source}")),
+        ),
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_factor: json::material::PbrBaseColorFactor(
+                described
+                    .map(|m| m.base_color)
+                    .unwrap_or([0.8, 0.8, 0.8, 1.0]),
+            ),
+            metallic_factor: json::material::StrengthFactor(
+                described.map(|m| m.metallic).unwrap_or(0.0),
+            ),
+            roughness_factor: json::material::StrengthFactor(
+                described.map(|m| m.roughness).unwrap_or(0.5),
+            ),
+            ..Default::default()
+        },
+        emissive_factor: json::material::EmissiveFactor(
+            described.map(|m| m.emissive.to_array()).unwrap_or_default(),
+        ),
+        ..Default::default()
+    });
+    map.insert(source, index);
+    index
+}
+
+const ARRAY_BUFFER: Option<json::buffer::Target> = Some(json::buffer::Target::ArrayBuffer);
+const ELEMENT_ARRAY_BUFFER: Option<json::buffer::Target> =
+    Some(json::buffer::Target::ElementArrayBuffer);
+
+/// Appends `data` to the binary blob and declares a view over it.
+///
+/// Every view starts on a four-byte boundary. The specification requires it for
+/// accessor offsets, and a reader that maps the buffer instead of copying it
+/// will fault on a misaligned view rather than merely reading slowly.
+fn push_view(
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    data: &[u8],
+    target: Option<json::buffer::Target>,
+) -> json::Index<json::buffer::View> {
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let offset = bin.len();
+    bin.extend_from_slice(data);
+    let index = root.buffer_views.len() as u32;
+    root.buffer_views.push(json::buffer::View {
+        buffer: json::Index::new(0),
+        byte_length: USize64(data.len() as u64),
+        byte_offset: Some(USize64(offset as u64)),
+        byte_stride: None,
+        name: None,
+        target: target.map(Checked::Valid),
+        extensions: None,
+        extras: Default::default(),
+    });
+    json::Index::new(index)
+}
+
+fn push_accessor(
+    root: &mut json::Root,
+    view: json::Index<json::buffer::View>,
+    count: usize,
+    component: json::accessor::ComponentType,
+    ty: json::accessor::Type,
+    min: Option<serde_json::Value>,
+    max: Option<serde_json::Value>,
+) -> json::Index<json::accessor::Accessor> {
+    let index = root.accessors.len() as u32;
+    root.accessors.push(json::Accessor {
+        buffer_view: Some(view),
+        byte_offset: Some(USize64(0)),
+        count: USize64(count as u64),
+        component_type: Checked::Valid(json::accessor::GenericComponentType(component)),
+        extensions: None,
+        extras: Default::default(),
+        type_: Checked::Valid(ty),
+        min,
+        max,
+        name: None,
+        normalized: false,
+        sparse: None,
+    });
+    json::Index::new(index)
+}
+
+fn bounds(positions: &[Vec3]) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for p in positions {
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    if positions.is_empty() {
+        (Vec3::ZERO, Vec3::ZERO)
+    } else {
+        (min, max)
+    }
+}
+
+/// Reports what the mesh carries that glTF has no place for.
+///
+/// Said rather than dropped silently: a user whose creases and seams do not come
+/// back finds out from the file, not from the next time they open it.
+fn note_dropped_attributes(
+    meshes: &[(String, &MeshData)],
+    options: &GltfExportOptions,
+    notes: &mut Vec<LossyNote>,
+) {
+    for (name, mesh) in meshes {
+        let attrs = mesh.attributes();
+        for (layer, what) in [
+            (names::CREASE, "edge creases"),
+            (names::SHARP_EDGE, "sharp edges"),
+            (names::SEAM, "UV seams"),
+        ] {
+            if attrs.get(layer).is_some() {
+                notes.push(LossyNote::Unsupported {
+                    what: format!("{name}: {what} were dropped; glTF stores none"),
+                });
+            }
+        }
+        // A second UV set is data the author made on purpose, and glTF can carry
+        // it as TEXCOORD_1 — this exporter simply does not yet, which is worth
+        // saying plainly rather than leaving to be discovered.
+        let extra_uvs = attrs
+            .iter()
+            .filter(|l| l.name.starts_with("uv") && &*l.name != "uv_map")
+            .count();
+        if extra_uvs > 0 {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{name}: {extra_uvs} additional UV sets were dropped"),
+            });
+        }
+        if !options.normals && attrs.get(names::SHADE_SMOOTH).is_some() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{name}: smoothing was dropped along with the normals"),
+            });
+        }
+    }
+}
+
+/// Packs the JSON tree and binary blob into a `.glb`.
+fn pack_glb(root: &json::Root, bin: &[u8]) -> Vec<u8> {
+    const GLB_MAGIC: u32 = 0x46546C67;
+    const CHUNK_JSON: u32 = 0x4E4F534A;
+    const CHUNK_BIN: u32 = 0x004E4942;
+
+    let mut js = serde_json::to_vec(root).expect("the json tree is built from owned data");
+    // Chunks are padded to four bytes, JSON with spaces and binary with zeros —
+    // the specification names the filler for each, and a reader that trims the
+    // JSON chunk by length will choke on a trailing NUL.
+    while !js.len().is_multiple_of(4) {
+        js.push(b' ');
+    }
+    let mut blob = bin.to_vec();
+    while !blob.len().is_multiple_of(4) {
+        blob.push(0);
+    }
+
+    let mut out = Vec::with_capacity(28 + js.len() + blob.len());
+    let total = 12 + 8 + js.len() + if blob.is_empty() { 0 } else { 8 + blob.len() };
+    out.extend_from_slice(&GLB_MAGIC.to_le_bytes());
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(js.len() as u32).to_le_bytes());
+    out.extend_from_slice(&CHUNK_JSON.to_le_bytes());
+    out.extend_from_slice(&js);
+    if !blob.is_empty() {
+        out.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+        out.extend_from_slice(&CHUNK_BIN.to_le_bytes());
+        out.extend_from_slice(&blob);
+    }
+    out
+}
+
+/// Standard base64, for the `.gltf` data URI.
+///
+/// Hand-rolled rather than pulling a crate in for twenty lines that are used on
+/// one code path, in a format that has not changed since 1987.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_view_starts_on_a_four_byte_boundary_after_an_odd_one() {
+        // Tested here rather than through a written file, because every buffer
+        // this exporter currently emits is already a multiple of four bytes —
+        // positions and normals are twelve, UVs eight, every index four. A test
+        // that reads the alignment off a real file therefore passes whether the
+        // padding exists or not, which makes it a test of nothing.
+        //
+        // The padding is a guard for the attribute that is not here yet: a byte
+        // colour, a half-float UV, a u16 index. This calls it directly so the
+        // guard has a test that can actually fail.
+        let mut root = json::Root::default();
+        let mut bin = Vec::new();
+        push_view(&mut root, &mut bin, &[1, 2, 3], None);
+        let second = push_view(&mut root, &mut bin, &[4, 5, 6, 7], None);
+        let offset = root.buffer_views[second.value()].byte_offset.unwrap().0;
+        assert_eq!(offset, 4, "the second view landed at {offset}");
+        assert_eq!(bin.len(), 8);
+    }
+
+    #[test]
+    fn base64_matches_the_known_answers() {
+        // The padding cases are the ones that go wrong, so all three lengths are
+        // here. Values from RFC 4648's own test vectors.
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // The high bits, which is where a wrong alphabet index or a sign
+        // extension shows up and lowercase ASCII never would.
+        assert_eq!(base64(&[0xff, 0xef, 0xbf]), "/++/");
+    }
+}

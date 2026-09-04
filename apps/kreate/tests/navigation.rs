@@ -288,6 +288,12 @@ fn the_pick_cache_survives_an_edit_between_queries() {
 
 /// Ids the application handles itself rather than sending to the registry.
 const APP_ACTIONS: &[&str] = &[
+    // File commands are the application's, not the document's: there is no
+    // undo step for "the document you had open is gone".
+    "file.new",
+    "file.open",
+    "file.save",
+    "file.save_as",
     "view.orbit",
     "view.pan",
     "view.dolly",

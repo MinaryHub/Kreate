@@ -67,6 +67,19 @@ pub struct ShellState {
     pub select_band: Option<(egui::Pos2, egui::Pos2)>,
     /// Whether the drag is removing from the selection rather than adding.
     pub select_band_deselect: bool,
+    /// The last thing that happened, for the status bar.
+    ///
+    /// A single slot rather than a log: the status bar answers "did that work",
+    /// and the answer to that question is always the most recent one.
+    pub status: Option<String>,
+    /// Autosaves from sessions that did not exit cleanly, as (path, name).
+    ///
+    /// Held here so the recovery offer is drawn by the interface and answered
+    /// through the command queue, like everything else — rather than by a modal
+    /// dialog at startup that the user has to dismiss before seeing the
+    /// application at all. A crash is already a bad moment; being unable to look
+    /// at the program while deciding makes it worse.
+    pub recoverable: Vec<(std::path::PathBuf, String)>,
     /// Whether the remapping panel is open.
     pub show_keymap: bool,
     /// The binding waiting for a keystroke, if any.
@@ -96,6 +109,8 @@ impl Default for ShellState {
             outliner: OutlinerOrder::default(),
             select_band: None,
             select_band_deselect: false,
+            status: None,
+            recoverable: Vec::new(),
             show_keymap: false,
             capturing: None,
             keymap_edits: Vec::new(),
@@ -354,6 +369,13 @@ pub struct ViewportImage {
 
 /// Panel and menu labels, resolved once per frame.
 struct Labels {
+    file_new: String,
+    file_open: String,
+    file_save: String,
+    file_save_as: String,
+    recover_title: String,
+    recover_open: String,
+    recover_discard: String,
     add_cube: String,
     duplicate: String,
     delete: String,
@@ -390,6 +412,13 @@ impl Labels {
     fn new(catalog: &Catalog) -> Self {
         let t = |key: &str| catalog.format(key, TextKind::Ui, &[]);
         Self {
+            file_new: t("menu-file-new"),
+            file_open: t("menu-file-open"),
+            file_save: t("menu-file-save"),
+            file_save_as: t("menu-file-save-as"),
+            recover_title: t("recover-title"),
+            recover_open: t("recover-open"),
+            recover_discard: t("recover-discard"),
             add_cube: t("menu-add-cube"),
             duplicate: t("menu-duplicate"),
             delete: t("menu-delete"),
@@ -465,6 +494,36 @@ pub fn draw(
     // access the command queue needs.
     let mut modifier_rows = modifier_rows(doc, registry, &state.catalog);
 
+    // Drawn before the menu so it is the first thing in the window, and as a
+    // panel rather than a modal dialog: a user who has just lost a session wants
+    // to see their application, not a box in front of it. It also means the
+    // choice goes through the command queue like every other action instead of
+    // blocking the event loop at startup.
+    if !state.recoverable.is_empty() {
+        Panel::top("recover").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(&l.recover_title);
+                // A clone, because the buttons queue commands that will mutate
+                // this list and the loop would otherwise hold a borrow across it.
+                let offers = state.recoverable.clone();
+                for (path, name) in offers {
+                    ui.separator();
+                    ui.label(&name);
+                    if ui.button(&l.recover_open).clicked() {
+                        state
+                            .queue
+                            .push(Command::RecoverDocument { path: path.clone() });
+                    }
+                    if ui.button(&l.recover_discard).clicked() {
+                        state
+                            .queue
+                            .push(Command::DiscardRecovery { path: path.clone() });
+                    }
+                }
+            });
+        });
+    }
+
     Panel::top("menu").show(ui, |ui| {
         // Wrapped, not clipped. The edit-mode toolbar is already wide enough to
         // run off a narrow window, and a clipped row silently hides buttons —
@@ -474,6 +533,21 @@ pub fn draw(
         // Grouped menus are the real answer and the plan budgets for them; this
         // is what keeps the row honest until then.
         ui.horizontal_wrapped(|ui| {
+            // First in the row, because that is where every application in this
+            // category puts it and where a user's eye goes for it.
+            if ui.button(&l.file_new).clicked() {
+                state.queue.push(Command::NewDocument);
+            }
+            if ui.button(&l.file_open).clicked() {
+                state.queue.push(Command::OpenDocument);
+            }
+            if ui.button(&l.file_save).clicked() {
+                state.queue.push(Command::SaveDocument);
+            }
+            if ui.button(&l.file_save_as).clicked() {
+                state.queue.push(Command::SaveDocumentAs);
+            }
+            ui.separator();
             if ui.button(&l.add_cube).clicked() {
                 let mut p = PropertyMap::new();
                 p.set("shape", kreate_reflect::PropertyValue::Enum(1));
@@ -648,6 +722,14 @@ pub fn draw(
             });
             ui.separator();
             ui.label(&status);
+            // The last thing that happened, to the right of the standing counts.
+            // A save that reports nothing is a save the user cannot distinguish
+            // from one that silently failed.
+            if let Some(message) = &state.status {
+                ui.separator();
+                // i18n-exempt: composed from a translated template and a path
+                ui.label(message);
+            }
             if let Some(entry) = history.last() {
                 ui.separator();
                 // i18n-exempt: a generated script line is API text, not prose
@@ -923,6 +1005,15 @@ const KIND_KEYS: &[&str] = &["modifier-mirror", "modifier-subdivide", "modifier-
 /// Shipped as the fallback so an untranslated key resolves to readable text
 /// rather than to itself. The Korean resource sits beside it.
 pub const EN_FTL: &str = r#"
+menu-file-new = New
+menu-file-open = Open...
+menu-file-save = Save
+menu-file-save-as = Save As...
+recover-title = Recovered work
+recover-open = Open
+recover-discard = Discard
+status-saved = Saved { $path }
+status-opened = Opened { $path }
 menu-add-cube = Add Cube
 menu-duplicate = Duplicate
 menu-delete = Delete
@@ -986,6 +1077,15 @@ modifier-array = Array
 "#;
 
 pub const KO_FTL: &str = r#"
+menu-file-new = 새로
+menu-file-open = 열기...
+menu-file-save = 저장
+menu-file-save-as = 다른 이름으로 저장...
+recover-title = 복구된 작업
+recover-open = 열기
+recover-discard = 버리기
+status-saved = { $path } 저장함
+status-opened = { $path } 열었음
 menu-add-cube = 큐브 추가
 menu-duplicate = 복제
 menu-delete = 삭제
@@ -1200,6 +1300,13 @@ mod tests {
         // key would otherwise show up on screen as the key itself.
         let catalog = load_catalog("ko-KR");
         for key in [
+            "menu-file-new",
+            "menu-file-open",
+            "menu-file-save",
+            "menu-file-save-as",
+            "recover-title",
+            "recover-open",
+            "recover-discard",
             "menu-add-cube",
             "menu-duplicate",
             "menu-delete",

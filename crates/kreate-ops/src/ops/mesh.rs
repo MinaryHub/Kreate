@@ -14,9 +14,11 @@
 //! acting on it directly. The operator signatures do not change when that lands
 //! — only what sits behind [`with_bmesh`].
 
+use kreate_mesh::arena::VertId;
 use kreate_mesh::bmesh::{BMesh, SelectMode};
 use kreate_mesh::edit;
 use kreate_mesh::selection;
+use kreate_mesh::ArenaIndex;
 use kreate_scene::document::MeshId;
 use kreate_scene::{DocMut, Document};
 
@@ -133,6 +135,305 @@ fn flush(
 /// True when there is a mesh to edit at all.
 fn can_edit(ctx: &Context, doc: &Document) -> bool {
     ctx.mode == Mode::EditMesh && target_mesh(doc).is_some()
+}
+
+// --- transforming a selection -----------------------------------------------
+
+/// Every vertex a selection touches, whichever element type it was made in.
+///
+/// The union of the three domains: selected vertices, both ends of every
+/// selected edge, and every corner of every selected face. One rule for all
+/// three, rather than a branch on the current select mode, and that is
+/// deliberate — an edge is its two vertices and a face is its ring, so moving a
+/// face *is* moving its vertices. Writing it once means a transform cannot
+/// behave differently in one mode by accident, and it keeps working when a
+/// selection spans modes.
+///
+/// De-duplicated, which matters more than it looks: two adjacent selected faces
+/// share vertices, and applying a translation twice to a shared vertex would
+/// pull it twice as far as the rest of the face.
+pub fn selected_vertices(bm: &BMesh) -> Vec<VertId> {
+    let mut verts: Vec<VertId> = bm.selected_verts();
+    for e in bm.selected_edges() {
+        if let Some([a, b]) = bm.edge_verts(e) {
+            verts.push(a);
+            verts.push(b);
+        }
+    }
+    for f in bm.selected_faces() {
+        verts.extend(bm.face_verts(f));
+    }
+    verts.sort_unstable_by_key(|v| v.index());
+    verts.dedup_by_key(|v| v.index());
+    verts
+}
+
+/// The mean position of the affected vertices: what a rotation or a scale
+/// happens about by default.
+///
+/// The mean rather than the bounding-box centre. For a symmetric selection they
+/// agree; for a lopsided one the mean follows where the geometry actually is,
+/// and the bounding-box centre can sit in empty space away from every vertex —
+/// which makes a rotation swing rather than turn.
+fn median(bm: &BMesh, verts: &[VertId]) -> Option<glam::Vec3> {
+    if verts.is_empty() {
+        return None;
+    }
+    let mut total = glam::Vec3::ZERO;
+    let mut count = 0.0;
+    for v in verts {
+        if let Some(p) = bm.position(*v) {
+            total += p;
+            count += 1.0;
+        }
+    }
+    (count > 0.0).then(|| total / count)
+}
+
+/// How many distinct positions a selection occupies.
+///
+/// Used by rotate and scale to refuse a selection that has nothing to turn or
+/// stretch: every affected vertex sitting on the pivot means both operations are
+/// exactly the identity, and reporting success for a no-op puts an entry in the
+/// history that undoes to the same thing.
+fn distinct_positions(bm: &BMesh, verts: &[VertId]) -> usize {
+    let mut keys: Vec<[i64; 3]> = verts
+        .iter()
+        .filter_map(|v| bm.position(*v))
+        .map(|p| {
+            // Quantised at a micrometre, so two vertices a float's breadth apart
+            // count as one place. Without this a "single vertex" that happens to
+            // be two welded ones would pass for something scalable.
+            let q = |x: f32| (x as f64 * 1e6).round() as i64;
+            [q(p.x), q(p.y), q(p.z)]
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.len()
+}
+
+/// Every vertex a `MeshData` selection touches, as plain indices.
+///
+/// The same union rule as [`selected_vertices`], against the stored mesh rather
+/// than its edit form. Exposed because the application needs the selection's
+/// median to place a transform's pivot, and converting to a `BMesh` to ask would
+/// be an O(V + E + F) rebuild per pointer event.
+pub fn selection_vertices(mesh: &kreate_mesh::MeshData) -> Vec<u32> {
+    use kreate_mesh::attribute::names;
+    let attrs = mesh.attributes();
+    let mut verts: Vec<u32> = Vec::new();
+    if let Some(flags) = attrs.get_bool(names::SELECT_VERT) {
+        verts.extend(
+            flags
+                .iter()
+                .enumerate()
+                .filter(|(_, on)| **on)
+                .map(|(i, _)| i as u32),
+        );
+    }
+    if let Some(flags) = attrs.get_bool(names::SELECT_EDGE) {
+        for (edge, on) in mesh.edges().iter().zip(flags) {
+            if *on {
+                verts.push(edge[0]);
+                verts.push(edge[1]);
+            }
+        }
+    }
+    if let Some(flags) = attrs.get_bool(names::SELECT_FACE) {
+        for (face, on) in (0..mesh.num_faces()).zip(flags) {
+            if *on {
+                verts.extend_from_slice(mesh.face_verts(face));
+            }
+        }
+    }
+    verts.sort_unstable();
+    verts.dedup();
+    verts
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MeshTranslateParams {
+    /// How far to move the selection, in object space.
+    #[param(unit = "length")]
+    pub translation: [f64; 3],
+}
+
+/// Moves the selected vertices, edges or faces.
+pub struct TranslateSelection;
+
+impl Operator for TranslateSelection {
+    type Params = MeshTranslateParams;
+
+    fn id() -> &'static str {
+        "mesh.translate"
+    }
+    fn label() -> &'static str {
+        "Move Selection"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let offset = glam::Vec3::new(
+            params.translation[0] as f32,
+            params.translation[1] as f32,
+            params.translation[2] as f32,
+        );
+        let moved = with_bmesh(doc, |bm| {
+            let verts = selected_vertices(bm);
+            if verts.is_empty() {
+                return Ok(false);
+            }
+            for v in verts {
+                if let Some(p) = bm.position(v) {
+                    bm.set_position(v, p + offset);
+                }
+            }
+            Ok(true)
+        })?;
+        Ok(if moved {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MeshRotateParams {
+    #[param(unit = "angle")]
+    pub angle: f64,
+    /// Which axis to turn about, through the selection's median.
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+}
+
+/// Rotates the selected vertices, edges or faces about their median.
+pub struct RotateSelection;
+
+impl Operator for RotateSelection {
+    type Params = MeshRotateParams;
+
+    fn id() -> &'static str {
+        "mesh.rotate"
+    }
+    fn label() -> &'static str {
+        "Rotate Selection"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let axis = match params.axis {
+            0 => glam::Vec3::X,
+            1 => glam::Vec3::Y,
+            _ => glam::Vec3::Z,
+        };
+        let rotation = glam::Quat::from_axis_angle(axis, params.angle as f32);
+        let turned = with_bmesh(doc, |bm| {
+            let verts = selected_vertices(bm);
+            // A single point has nothing to turn: every vertex is the pivot, so
+            // the rotation is the identity.
+            if distinct_positions(bm, &verts) < 2 {
+                return Ok(false);
+            }
+            let Some(about) = median(bm, &verts) else {
+                return Ok(false);
+            };
+            for v in verts {
+                if let Some(p) = bm.position(v) {
+                    bm.set_position(v, about + rotation * (p - about));
+                }
+            }
+            Ok(true)
+        })?;
+        Ok(if turned {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct MeshScaleParams {
+    /// Scale factor per axis, about the selection's median.
+    pub scale: [f64; 3],
+}
+
+impl Default for MeshScaleParams {
+    fn default() -> Self {
+        Self { scale: [1.0; 3] }
+    }
+}
+
+/// Scales the selected edges or faces about their median.
+///
+/// # Why a single vertex is refused
+///
+/// Scaling happens about the selection's median, and a lone vertex *is* its own
+/// median — so the operation is exactly the identity. Refusing it is not a
+/// restriction on vertex mode: a selected loop or patch of vertices scales
+/// normally, and tapering a ring of vertices that way is a core modelling move.
+/// What is refused is the case that could not do anything, which otherwise puts
+/// an entry in the history that undoes to the same mesh.
+pub struct ScaleSelection;
+
+impl Operator for ScaleSelection {
+    type Params = MeshScaleParams;
+
+    fn id() -> &'static str {
+        "mesh.scale"
+    }
+    fn label() -> &'static str {
+        "Scale Selection"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let factor = glam::Vec3::new(
+            params.scale[0] as f32,
+            params.scale[1] as f32,
+            params.scale[2] as f32,
+        );
+        let scaled = with_bmesh(doc, |bm| {
+            let verts = selected_vertices(bm);
+            if distinct_positions(bm, &verts) < 2 {
+                return Ok(false);
+            }
+            let Some(about) = median(bm, &verts) else {
+                return Ok(false);
+            };
+            for v in verts {
+                if let Some(p) = bm.position(v) {
+                    bm.set_position(v, about + (p - about) * factor);
+                }
+            }
+            Ok(true)
+        })?;
+        Ok(if scaled {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
 }
 
 // --- extrude ----------------------------------------------------------------
@@ -1313,6 +1614,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SpinFaces>();
     registry.register::<SplitGeometry>();
     registry.register::<Subdivide>();
+    registry.register::<TranslateSelection>();
+    registry.register::<RotateSelection>();
+    registry.register::<ScaleSelection>();
 }
 
 #[cfg(test)]

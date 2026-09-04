@@ -100,6 +100,7 @@ pub struct Cluster {
 }
 
 /// A mesh reorganised into clusters.
+#[derive(Clone, Debug, Default)]
 pub struct ClusterMesh {
     pub clusters: Vec<Cluster>,
     /// Triangle indices grouped by cluster, into the mesh's own vertex buffer.

@@ -69,6 +69,28 @@ pub enum Violation {
     NonFinitePosition { vert: u32, value: Vec3 },
 }
 
+/// What can be wrong with a set of CSR topology arrays.
+///
+/// Named cases rather than one opaque error, because these arrive from files and
+/// a user whose file will not open deserves to know which part of it is wrong.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TopologyError {
+    #[error("face offsets must start at zero")]
+    FaceOffsetsMustStartAtZero,
+    #[error("face offsets decrease at face {face}")]
+    FaceOffsetsNotAscending { face: usize },
+    #[error("face offsets describe {declared} corners but {actual} were supplied")]
+    CornerCountMismatch { declared: usize, actual: usize },
+    #[error("corner {corner} refers to vertex {vertex}, but there are only {num_verts}")]
+    CornerOutOfRange {
+        corner: usize,
+        vertex: u32,
+        num_verts: u32,
+    },
+    #[error("edge {edge:?} refers past the {num_verts} vertices")]
+    EdgeOutOfRange { edge: [u32; 2], num_verts: u32 },
+}
+
 /// A polygon mesh in storage form.
 #[derive(Clone, Debug)]
 pub struct MeshData {
@@ -133,6 +155,82 @@ impl MeshData {
         };
         mesh.rebuild_edges();
         mesh
+    }
+
+    /// Builds a mesh straight from its CSR arrays, validating them first.
+    ///
+    /// What a deserialiser needs. The alternative, going through
+    /// [`Self::from_faces`], means materialising a `Vec` per face — which for a
+    /// million-face mesh is a million allocations to rebuild arrays the file
+    /// already holds in exactly the right form.
+    ///
+    /// Validation lives here rather than in each caller because these are the
+    /// invariants every later operation assumes without checking: a corner index
+    /// past the vertex count is not a wrong picture, it is an out-of-bounds read
+    /// somewhere three layers away, and the file that caused it will be long out
+    /// of scope by then.
+    ///
+    /// `edges` is trusted as a *hint* and rebuilt if it does not describe the
+    /// faces, so a file cannot introduce an edge list inconsistent with its own
+    /// topology.
+    pub fn from_csr(
+        num_verts: u32,
+        face_offsets: Vec<u32>,
+        corner_verts: Vec<u32>,
+        edges: Vec<[u32; 2]>,
+    ) -> Result<Self, TopologyError> {
+        if face_offsets.first() != Some(&0) {
+            return Err(TopologyError::FaceOffsetsMustStartAtZero);
+        }
+        for (i, w) in face_offsets.windows(2).enumerate() {
+            if w[1] < w[0] {
+                return Err(TopologyError::FaceOffsetsNotAscending { face: i });
+            }
+        }
+        let last = face_offsets.last().copied().unwrap_or(0) as usize;
+        if last != corner_verts.len() {
+            return Err(TopologyError::CornerCountMismatch {
+                declared: last,
+                actual: corner_verts.len(),
+            });
+        }
+        for (corner, vertex) in corner_verts.iter().enumerate() {
+            if *vertex >= num_verts {
+                return Err(TopologyError::CornerOutOfRange {
+                    corner,
+                    vertex: *vertex,
+                    num_verts,
+                });
+            }
+        }
+        for [a, b] in &edges {
+            if *a >= num_verts || *b >= num_verts {
+                return Err(TopologyError::EdgeOutOfRange {
+                    edge: [*a, *b],
+                    num_verts,
+                });
+            }
+        }
+
+        let mut attributes = AttributeStore::new();
+        attributes.insert(
+            names::POSITION,
+            Domain::Point,
+            AttrData::zeroed(AttrType::F32x3, num_verts as usize),
+        );
+        let mut mesh = Self {
+            num_verts,
+            face_offsets: Arc::new(face_offsets),
+            corner_verts: Arc::new(corner_verts),
+            edges: Arc::new(edges),
+            attributes,
+        };
+        // Rebuilt when the supplied list does not match what the faces imply.
+        // Trusting it would let a file declare edge attributes against edges
+        // that do not exist, and every edge-domain layer would then be the wrong
+        // length or, worse, the right length against the wrong edges.
+        mesh.rebuild_edges();
+        Ok(mesh)
     }
 
     // --- counts -------------------------------------------------------------

@@ -7,4 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kreate-mesh.workspace = true
+kreate-math.workspace = true
+glam.workspace = true
 

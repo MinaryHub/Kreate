@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::camera::{Camera, Projection};
 use crate::cluster::ClusterMesh;
-use crate::cluster_cull::{ClusterCull, CullDraws, CullView};
+use crate::cluster_cull::{ClusterCull, CullDraws, CullView, Pass};
 use crate::gpu::{self, DEPTH_CLEAR, DEPTH_FORMAT};
 use crate::hiz::HiZ;
 use crate::lod::{Budget, Detail, ViewSize};
@@ -304,11 +304,16 @@ impl GpuMesh {
             ],
         });
 
-        // Baked at upload, because the bake walks the whole index buffer and the
-        // result is only invalidated by a topology change — which is what an
-        // upload *is*. Doing it lazily on first draw would put a stall in the
-        // frame that first shows a mesh.
-        let baked = ClusterMesh::bake(cpu);
+        // Whatever the caller decided with `RenderMeshCpu::with_clusters`. Not
+        // baked here, because the bake costs a second copy of the whole index
+        // stream and the path that reads it is off by default — every mesh in
+        // every scene was paying for it.
+        //
+        // Empty buffers still get allocated when there are no clusters: a
+        // zero-sized binding is a validation error, and one 48-byte allocation
+        // per mesh is cheaper than making the bind group optional everywhere.
+        let empty = ClusterMesh::default();
+        let baked = cpu.clusters.as_ref().unwrap_or(&empty);
         let cluster_count = baked.clusters.len() as u32;
         let cluster_records = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh clusters"),
@@ -1005,6 +1010,12 @@ pub struct Viewport {
     id_object_layout: wgpu::BindGroupLayout,
     id_objects: UniformRing,
     pub layouts: MeshLayouts,
+    /// The colour format this viewport's pipelines were built for.
+    ///
+    /// Kept so the warm-up can allocate a scratch target the pipelines will
+    /// accept; a render pass whose attachment format differs from the pipeline
+    /// is a validation error, not a silent mismatch.
+    color_format: wgpu::TextureFormat,
     cull: ClusterCull,
     /// The depth pyramid, for occlusion culling.
     ///
@@ -1013,13 +1024,23 @@ pub struct Viewport {
     hiz: HiZ,
     /// Whether the cull rejects occluded clusters.
     ///
-    /// Off until the two-pass frame structure exists. Testing against a pyramid
-    /// built from a stale frame can reject clusters that have since become
-    /// visible, and a hole in a model is the one error this must not make.
+    /// The two-pass structure that makes this sound is implemented — see
+    /// [`Self::render_frame`] — so this is now safe to turn on. It stays off by
+    /// default for the same reason [`Self::cluster_path`] does: the cluster path
+    /// it depends on measures slower than the direct draw.
+    ///
+    /// Honest about the evidence: the second pass provably does work, but no
+    /// scene has been found in which removing it changes a pixel. See the module
+    /// docs of `tests/two_pass.rs`.
     pub occlusion_culling: bool,
     cluster_solid: wgpu::RenderPipeline,
     cluster_globals_layout: wgpu::BindGroupLayout,
     cluster_instance_layout: wgpu::BindGroupLayout,
+    /// Whether the missing-clusters warning has already been said.
+    ///
+    /// Once per viewport, not once per frame: a warning repeated sixty times a
+    /// second is a warning nobody reads.
+    cluster_warning: std::sync::atomic::AtomicBool,
     /// Rebuilt when the cull reallocates; see [`ClusterCull::generation`].
     cluster_globals_bind: wgpu::BindGroup,
     cluster_instance_bind: wgpu::BindGroup,
@@ -1563,7 +1584,9 @@ impl Viewport {
             layouts,
             cluster_globals_bind: cluster_globals_bind_0,
             cluster_instance_bind: cluster_instance_bind_0,
+            cluster_warning: std::sync::atomic::AtomicBool::new(false),
             cluster_generation: cluster_cull.generation(),
+            color_format,
             cull: cluster_cull,
             hiz: HiZ::new(device, width.max(1), height.max(1)),
             occlusion_culling: false,
@@ -1696,7 +1719,7 @@ impl Viewport {
                     camera,
                     aspect,
                     hiz: &self.hiz,
-                    occlusion: self.occlusion_culling,
+                    occlusion: self.occlusion_culling && self.cluster_path,
                     render_height: self.render_size.1,
                     budget: &self.lod_budget,
                 },
@@ -2107,6 +2130,140 @@ impl Viewport {
     }
 
     /// Records the frame.
+    /// Draws one throwaway frame that exercises every pipeline.
+    ///
+    /// Creating a pipeline object and *compiling* it are not the same thing.
+    /// Measured on this machine: building the viewport takes 586 ms, and the
+    /// first frame that uses the pipelines then costs 8.5 ms more than the
+    /// steady state. That second number is the driver finishing work it deferred
+    /// until a draw actually arrived.
+    ///
+    /// Left alone, that 8.5 ms does not land at startup. The solid pass and the
+    /// grid are used on the first frame, but the overlay pipelines are not
+    /// touched until the user presses Tab, and the id pass not until they hover
+    /// — so the cost lands in the middle of an interaction, which is exactly the
+    /// shape of hitch the plan's latency risk is about. A stall the first time
+    /// you click is far worse than the same milliseconds spent before the window
+    /// appears.
+    ///
+    /// So this runs every pipeline once, into a scratch target, against a
+    /// scratch cube.
+    ///
+    /// The scratch target is the viewport's own allocated size rather than
+    /// something tiny: a render pass requires its colour and depth attachments
+    /// to have the same extent, and the depth buffer belongs to the viewport.
+    /// Sizing the colour target down needs the depth resized too, which is more
+    /// state to restore than a single extra frame of fill is worth.
+    ///
+    /// Cheap to call and safe to call twice. Callers should call it once, after
+    /// construction, before the first real frame.
+    pub fn warm_up(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let warm = self.size;
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport warm-up"),
+            size: wgpu::Extent3d {
+                width: warm.0,
+                height: warm.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mesh = GpuMesh::upload(
+            device,
+            &self.layouts,
+            // With clusters, or the cluster pipelines are never exercised and
+            // the warm-up quietly skips the very draws it exists to compile.
+            &RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0)).with_clusters(),
+            Vec4::ONE,
+        );
+
+        // Every overlay on, and both cluster passes, so nothing is left for a
+        // later frame to compile. Restored afterwards: warming up must not
+        // change what the viewport draws.
+        let saved = (
+            self.show_grid,
+            self.show_wireframe,
+            self.show_elements,
+            self.cluster_path,
+            self.occlusion_culling,
+        );
+        self.show_grid = true;
+        self.show_wireframe = true;
+        self.show_elements = true;
+        self.cluster_path = true;
+        self.occlusion_culling = true;
+
+        let camera = Camera::default();
+        let mut draws = vec![Draw::new(&mesh, DAffine3::IDENTITY)];
+        self.prepare(device, queue, &camera, &mut draws);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("warm-up"),
+        });
+        self.render_frame(device, queue, &mut encoder, &view, &draws);
+        // The id pass too: it is the one the user provokes by moving the mouse,
+        // and it has a pipeline per element domain and per x-ray setting.
+        for domain in [
+            PickDomain::Object,
+            PickDomain::Face,
+            PickDomain::Edge,
+            PickDomain::Vert,
+        ] {
+            for xray in [false, true] {
+                self.prepare_ids(device, queue, &camera, &draws, domain);
+                let ids = self.warm_id_target(device, warm);
+                self.render_ids(&mut encoder, &ids, &draws, domain, xray);
+            }
+        }
+        queue.submit([encoder.finish()]);
+
+        (
+            self.show_grid,
+            self.show_wireframe,
+            self.show_elements,
+            self.cluster_path,
+            self.occlusion_culling,
+        ) = saved;
+    }
+
+    /// A scratch id target for the warm-up, matching the id pass format.
+    fn warm_id_target(&self, device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("warm-up ids"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::picking::ID_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// The cluster cull, for tests that need to see what it decided.
+    ///
+    /// Exposed because the two-pass scheme is otherwise unfalsifiable from
+    /// outside: its whole purpose is that the image comes out *unchanged*, so a
+    /// pixel comparison cannot distinguish "both passes working" from "occlusion
+    /// rejecting nothing at all". The instance counts can.
+    pub fn cluster_cull(&self) -> &ClusterCull {
+        &self.cull
+    }
+
     /// The depth pyramid, as last built.
     pub fn depth_pyramid(&self) -> &HiZ {
         &self.hiz
@@ -2144,6 +2301,18 @@ impl Viewport {
     ///
     /// Does nothing when the cluster path is off, so a caller can always call it.
     pub fn cull(&self, encoder: &mut wgpu::CommandEncoder, draws: &[Draw]) {
+        self.cull_pass(encoder, Pass::First, draws);
+    }
+
+    /// Runs one pass of the cluster cull.
+    ///
+    /// [`Pass::First`] is the whole cull when occlusion testing is off. With it
+    /// on, the first pass tests against the pyramid as it stands from the
+    /// previous frame and records what it drew, and the second re-tests only
+    /// what the first rejected — against a pyramid rebuilt from the depth the
+    /// first pass just wrote. See [`Pass`] for why that is sound and a single
+    /// stale-pyramid test is not.
+    pub fn cull_pass(&self, encoder: &mut wgpu::CommandEncoder, which: Pass, draws: &[Draw]) {
         if !self.cluster_path {
             return;
         }
@@ -2152,60 +2321,95 @@ impl Viewport {
             .filter(|d| d.detail.draw)
             .map(|d| &d.mesh.cluster_bind)
             .collect();
-        self.cull.dispatch(encoder, &binds);
+        self.cull.dispatch(encoder, which, &binds);
     }
 
-    pub fn render(
-        &self,
+    /// Encodes a whole frame, including occlusion culling if it is on.
+    ///
+    /// The two-pass sequence, in order, and every step is load bearing:
+    ///
+    /// 1. cull against the pyramid as it stands, from the previous frame;
+    /// 2. draw those survivors, clearing colour and depth;
+    /// 3. rebuild the pyramid from the depth just written;
+    /// 4. cull again, considering only what step 1 rejected;
+    /// 5. draw those survivors and every overlay, loading the same depth;
+    /// 6. rebuild the pyramid once more, so the next frame starts from complete
+    ///    depth rather than from step 2 alone.
+    ///
+    /// Step 4 is what makes the scheme sound. A single pass against a pyramid
+    /// built before the camera moved can reject a cluster that has since come
+    /// into view, and the result is a hole in the model — which a user reads as
+    /// corrupt geometry, not as a renderer bug. Step 4 re-tests exactly those
+    /// clusters against depth from *this* frame, and because that depth contains
+    /// strictly less than the full scene, its verdict can only be more
+    /// permissive than the truth.
+    ///
+    /// Falls back to a single pass when occlusion culling is off, which is the
+    /// path every existing caller takes.
+    pub fn render_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("viewport"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(self.background),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth,
-                depth_ops: Some(wgpu::Operations {
-                    // Reversed-Z clears to 0, not 1: nothing has been drawn yet.
-                    load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        if !self.cluster_path || !self.occlusion_culling {
+            self.cull(encoder, draws);
+            self.render(encoder, target, draws);
+            return;
+        }
 
-        // Every overlay pipeline has the preview group in its layout, so one is
-        // always bound — pointing at a zeroed bitset with the preview switched
-        // off when no drag is in progress. Built once in `new` rather than
-        // branched on here, because a second pass list for the no-preview case
-        // is a copy that drifts.
-        let preview = &self.preview_bind;
+        self.cull_pass(encoder, Pass::First, draws);
+        {
+            let mut pass = self.begin_pass(encoder, target, true);
+            self.encode_solid(&mut pass, draws, Pass::First);
+        }
+        self.build_depth_pyramid(device, queue, encoder);
 
-        // Draw only into the region the caller will sample. Without this the
-        // image is stretched by however much the allocation was rounded up.
-        pass.set_viewport(
-            0.0,
-            0.0,
-            self.render_size.0 as f32,
-            self.render_size.1 as f32,
-            0.0,
-            1.0,
-        );
+        self.cull_pass(encoder, Pass::Second, draws);
+        {
+            let mut pass = self.begin_pass(encoder, target, false);
+            self.encode_solid(&mut pass, draws, Pass::Second);
+            self.encode_overlays(&mut pass, draws);
+        }
+        // For the next frame first pass. Skipping it would leave the pyramid
+        // missing everything the second pass drew, which is safe — the second
+        // pass would simply have more to re-test — but wasteful, and this is
+        // eleven small dispatches.
+        self.build_depth_pyramid(device, queue, encoder);
+    }
 
-        // Opaque geometry first, so the grid can be depth-tested against it.
+    /// Draws the opaque geometry, through whichever path is configured.
+    ///
+    /// Extracted so the two-pass occlusion scheme can call it twice with a
+    /// pyramid build in between. `which` selects the cull results to draw and is
+    /// ignored by the direct path, which has none.
+    fn encode_solid(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw], which: Pass) {
         if self.cluster_path {
+            // A mesh uploaded without `RenderMeshCpu::with_clusters` has no
+            // clusters to draw, and the loop below skips it on the count — so
+            // the symptom is an object that silently does not appear. Said out
+            // loud once, because "the cluster path renders nothing" is otherwise
+            // a long afternoon.
+            if !self
+                .cluster_warning
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let missing = draws
+                    .iter()
+                    .filter(|d| d.detail.draw && d.mesh.counts.triangles > 0)
+                    .filter(|d| d.mesh.cluster_count == 0)
+                    .count();
+                if missing > 0 {
+                    tracing::warn!(
+                        missing,
+                        "the cluster path is on but these meshes were uploaded \
+                         without clusters, so they will not be drawn; use \
+                         RenderMeshCpu::with_clusters"
+                    );
+                }
+            }
             pass.set_pipeline(&self.cluster_solid);
             pass.set_bind_group(0, &self.cluster_globals_bind, &[]);
             // Indexed by position among the *surviving* draws, because that is
@@ -2213,7 +2417,7 @@ impl Viewport {
             // shift every argument offset by however many were culled.
             for (slot, draw) in self
                 .cull
-                .slots()
+                .slots(which)
                 .iter()
                 .zip(draws.iter().filter(|d| d.detail.draw))
             {
@@ -2243,6 +2447,76 @@ impl Viewport {
                 pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
             }
         }
+    }
+
+    /// Begins the viewport render pass.
+    ///
+    /// `clear` distinguishes the first pass of a frame from a later one: the
+    /// two-pass occlusion scheme draws into the same colour and depth twice, and
+    /// the second must load what the first wrote rather than clear it.
+    fn begin_pass<'a>(
+        &'a self,
+        encoder: &'a mut wgpu::CommandEncoder,
+        target: &'a wgpu::TextureView,
+        clear: bool,
+    ) -> wgpu::RenderPass<'a> {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewport"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: if clear {
+                        wgpu::LoadOp::Clear(self.background)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: if clear {
+                        // Reversed-Z clears to 0, not 1: nothing has been drawn.
+                        wgpu::LoadOp::Clear(DEPTH_CLEAR as f32)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        // Draw only into the region the caller will sample. Without this the
+        // image is stretched by however much the allocation was rounded up.
+        pass.set_viewport(
+            0.0,
+            0.0,
+            self.render_size.0 as f32,
+            self.render_size.1 as f32,
+            0.0,
+            1.0,
+        );
+        pass
+    }
+
+    /// Draws every overlay: selected faces, the wireframe, vertex points, grid.
+    ///
+    /// Split out of [`Self::render`] so the two-pass scheme can draw them once,
+    /// after both halves of the solid geometry. Drawing them after the first
+    /// half would put them under the second half.
+    fn encode_overlays(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw]) {
+        // Every overlay pipeline has the preview group in its layout, so one is
+        // always bound — pointing at a zeroed bitset with the preview switched
+        // off when no drag is in progress. Built once in `new` rather than
+        // branched on here, because a second pass list for the no-preview case
+        // is a copy that drifts.
+        let preview = &self.preview_bind;
 
         // Selected faces first among the overlays, at the layer nearest the
         // surface, so a selected face's own edges and vertices still read on top
@@ -2321,6 +2595,18 @@ impl Viewport {
             pass.set_bind_group(0, &self.grid_bind, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    pub fn render(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[Draw],
+    ) {
+        let mut pass = self.begin_pass(encoder, target, true);
+        // Opaque geometry first, so the grid can be depth-tested against it.
+        self.encode_solid(&mut pass, draws, Pass::First);
+        self.encode_overlays(&mut pass, draws);
     }
 }
 

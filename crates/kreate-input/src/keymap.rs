@@ -100,6 +100,16 @@ impl Modifiers {
             ..Self::NONE
         }
     }
+    /// Ctrl and Shift together. The "and the other one" half of a pair of
+    /// commands — Save and Save As, Undo and Redo on platforms that spell Redo
+    /// that way.
+    pub fn ctrl_shift() -> Self {
+        Self {
+            ctrl: true,
+            shift: true,
+            ..Self::NONE
+        }
+    }
 
     /// How specific this combination is, for ranking two matches.
     fn weight(self) -> u32 {

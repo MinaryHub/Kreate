@@ -134,6 +134,15 @@ pub struct RenderMeshCpu {
     pub edge_flags: Vec<u32>,
     pub face_flags: Vec<u32>,
     pub counts: MeshCounts,
+    /// The cluster decomposition, when one was asked for.
+    ///
+    /// Optional, and that is a memory decision rather than a stylistic one. The
+    /// cluster index stream is a second copy of every index — the direct path
+    /// needs `indices`, the cluster path needs its own order — so baking
+    /// unconditionally roughly doubles the largest buffer in the system for a
+    /// path that is off by default and currently measures slower. See
+    /// [`Self::with_clusters`].
+    pub clusters: Option<crate::cluster::ClusterMesh>,
     /// The mesh's own bounding box, in object space.
     ///
     /// Computed here rather than on demand because this is the one place that
@@ -243,6 +252,7 @@ impl RenderMeshCpu {
             // From the *mesh* positions, not the split render vertices. The two
             // enclose the same points, and the mesh array is the shorter walk.
             bounds: Aabb::from_points(mesh.positions().iter().copied()),
+            clusters: None,
         };
         out.counts.triangles = (out.indices.len() / 3) as u32;
         out.update_flags(mesh);
@@ -333,6 +343,18 @@ impl RenderMeshCpu {
             + self.vert_flags.len() * 4
             + self.edge_flags.len() * 4
             + self.face_flags.len() * 4
+            + self.clusters.as_ref().map_or(0, |c| c.memory_bytes())
+    }
+
+    /// Bakes the cluster decomposition, for the GPU-driven path.
+    ///
+    /// Opt-in because it costs a second copy of the index stream. A mesh
+    /// uploaded without it draws nothing through the cluster path — the draw is
+    /// skipped on a zero cluster count — so the viewport warns rather than
+    /// leaving a blank viewport unexplained.
+    pub fn with_clusters(mut self) -> Self {
+        self.clusters = Some(crate::cluster::ClusterMesh::bake(&self));
+        self
     }
 
     /// GPU bytes per vertex. The plan's budget is 100.

@@ -52,6 +52,27 @@ pub enum Command {
     },
     /// Focus the viewport on the current selection.
     FrameSelection,
+    /// Discard the document and start an empty one.
+    ///
+    /// Not an operator, for the same reason edit mode is not: there is no
+    /// sensible undo step for "the document you were editing is gone", and
+    /// putting one in the history would place a trap between the user and the
+    /// work they wanted back.
+    NewDocument,
+    /// Ask for a file and open it.
+    OpenDocument,
+    /// Save to the document's own path, asking for one if it has none.
+    SaveDocument,
+    /// Always ask for a path.
+    SaveDocumentAs,
+    /// Open a recovered autosave, and forget it either way.
+    RecoverDocument {
+        path: std::path::PathBuf,
+    },
+    /// Discard a recovered autosave without opening it.
+    DiscardRecovery {
+        path: std::path::PathBuf,
+    },
 }
 
 /// A queue the UI appends to and the application drains.

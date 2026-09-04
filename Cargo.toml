@@ -60,6 +60,51 @@ arc-swap          = "1.7"
 
 # --- data structures ---
 slotmap  = "1.0"
+# glTF import. Mature and complete: glb, external buffers, sparse accessors —
+# the parts that are tedious and easy to get subtly wrong. The *semantics* still
+# live in this project's IR, which is where they belong.
+#
+# `import` is what resolves buffers — glb binary chunks and base64 data URIs —
+# and it is the whole reason to take the dependency. It pulls in `image` with
+# only png and jpeg, which are the two formats glTF actually embeds and which a
+# texture pipeline will want regardless.
+gltf = { version = "1", default-features = false, features = ["import", "utils", "names", "extensions"] }
+
+# The document container. `zip` because the format is a zip: universal tooling,
+# streaming, random access to one mesh, and recoverable with `unzip` at 2am.
+zip = { version = "6", default-features = false, features = ["deflate"] }
+# Native file dialogs. The alternative is drawing one inside egui, which means
+# reimplementing a file browser — and getting a worse one that does not know
+# about the user's shortcuts, network locations, or shell extensions. `rfd` calls
+# the platform's own dialog on all three targets.
+#
+# `xdg-portal` rather than gtk3 on Linux: it talks to the desktop portal over
+# D-Bus, so there is no GTK build dependency and it works from inside a flatpak.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
+# Tier two crash reporting: a GPU fault, a stack overflow or an abort does not
+# run a Rust panic hook at all, so the only way to record one is to have a
+# *separate process* write the dump. That process is this same executable
+# re-invoked with a flag, so there is no second binary to ship or keep in step.
+#
+# `crash-handler` installs the platform handler (a vectored exception handler on
+# Windows, signal handlers elsewhere); `minidumper` is the client/server pair
+# that carries the request across. Both are Embark's, both are what everything
+# else in this space uses.
+crash-handler = "0.8"
+minidumper = "0.11"
+
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` deliberately left off: without it the map is a BTreeMap, so
+# JSON keys come out sorted and the file is byte-identical between saves.
+#
+# `float_roundtrip` deliberately on. Without it serde_json parses floats through
+# a fast path that is not exactly round-trip correct, and a document saved and
+# reloaded came back with every rotation off by one unit in the last place —
+# which then accumulates over repeated saves. Found by a load-and-save test that
+# demanded the file reproduce itself byte for byte.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
 # Vertex-cache optimisation and meshlet clustering. Builds through `cc`, not
 # cmake — which is why it is usable here at all, since cmake is not installed.
 meshopt = "0.6.2"

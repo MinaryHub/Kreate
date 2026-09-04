@@ -81,7 +81,7 @@ fn render(
     let uploaded: Vec<GpuMesh> = items
         .iter()
         .map(|(mesh, _)| {
-            let cpu = RenderMeshCpu::extract(mesh);
+            let cpu = RenderMeshCpu::extract(mesh).with_clusters();
             GpuMesh::upload(
                 &gpu.device,
                 &viewport.layouts,

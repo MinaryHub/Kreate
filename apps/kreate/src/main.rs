@@ -11,6 +11,7 @@
 //! any cooperation from the UI layer.
 
 // The shell lives in this package's library target so tests can drive it.
+use kreate::docfile::{self, DocumentFile};
 use kreate::{gpu_sync, shell};
 
 use std::sync::Arc;
@@ -64,16 +65,28 @@ Kreate
   Add        A cube  Shift+A next primitive shape
   Edit       D duplicate (linked)  X delete  Ctrl+A select all
   Edit mode  Tab enter/leave  E extrude  X delete  Ctrl+X dissolve
-             S subdivide  I inset  B bridge borders  Ctrl+R loop cut
+             Shift+S subdivide  I inset  B bridge borders  Ctrl+R loop cut
              [ / ] after a loop cut slides it
-             M merge selection  Shift+M weld by distance
+             Ctrl+M merge selection  Ctrl+Shift+M weld by distance
              N shade smooth  Ctrl+N recalculate  Shift+N flip
              K mark sharp  Alt+K clear  Shift+K auto-smooth 30 deg
              F fill hole  Shift+F grid fill
              Y split off faces  V rip along edges  Ctrl+B bevel
              1/2/3 vert/edge/face select  L loop  Shift+L ring
              Ctrl+A all elements  Alt+A none  Ctrl+I invert
-  Transform  T move +Z  R rotate 15 deg  S scale 1.2
+  Transform  M move  R rotate  S scale
+             The key starts the tool; the mouse does the work. Move follows the
+             pointer across the view, rotate follows it around the selection,
+             scale is how much further from the selection it has got.
+               LMB or Enter   confirm, as one undo step
+               RMB or Esc     cancel, leaving no trace
+               X / Y / Z      constrain to that axis; again to release
+               Shift (hold)   ten times finer, from where you pressed it
+               digits, . , -  type an exact value; Backspace to correct
+             In object mode they act on the selected objects; in edit mode on
+             the selected vertices, edges or faces. Rotate and scale work about
+             the selection's median, so a single vertex has nothing for them to
+             do and they say so.
   Adjust     [ / ]  re-run the last operation with a smaller/larger value
   History    Ctrl+Z undo  Ctrl+Y redo  P print history as a script
   Keymap     F1 prints the resolved keymap, preset and all
@@ -407,6 +420,26 @@ struct App {
     wanted_viewport: (u32, u32),
     /// Which primitive Shift+A adds next.
     next_shape: u32,
+    /// Where the document lives, and everything about saving it.
+    file: DocumentFile,
+    /// Autosaves from sessions that did not exit cleanly, offered once.
+    ///
+    /// Collected at startup rather than polled: a directory becoming stale while
+    /// this instance runs means another instance crashed, and interrupting the
+    /// user's work to say so is not this application's business.
+    recoverable: Vec<docfile::Recoverable>,
+    /// The interactive transform in progress, if any.
+    ///
+    /// While this is `Some`, the gesture owns the keyboard and the pointer:
+    /// §2.1's pipeline puts the modal stack above the keymap for exactly this
+    /// reason, so that `X` means "constrain to X" rather than "delete" for as
+    /// long as a transform is running.
+    gesture: Option<(kreate::modal::Gesture, kreate_ops::ModalSession)>,
+    /// The last title pushed to the window, so it is only set when it changes.
+    ///
+    /// Setting a window title is a system call that can repaint the frame, and
+    /// doing it every frame is a visible flicker on some window managers.
+    shown_title: String,
 }
 
 impl App {
@@ -456,11 +489,28 @@ impl App {
             },
             wanted_viewport: (0, 0),
             next_shape: 1,
+            gesture: None,
+            file: DocumentFile::new(),
+            // Collected once, at startup. This is the only moment a recovery
+            // offer is not an interruption.
+            recoverable: docfile::find_recoverable(),
+            shown_title: String::new(),
         }
     }
 
     /// Dispatches an operator. The only way this application changes the document.
     fn run_op(&mut self, op_id: &str, params: PropertyMap) {
+        // Recorded before it runs, not after. The operator that panics is the one
+        // most worth having in the report, and an entry written on success would
+        // be missing exactly that one.
+        //
+        // The registry's id rather than the caller's `&str`, because the ring
+        // buffer holds `&'static str` and the registry owns those for the life
+        // of the program. An id that names no operator is not recorded — the
+        // dispatch below will refuse it anyway.
+        if let Some(info) = self.registry.get(op_id) {
+            kreate::breadcrumbs::record(info.id);
+        }
         // Through the edit session when edit mode is open. An operator that can
         // use it works in place; one that cannot — or that runs outside edit
         // mode — converts for itself, which is the same code path as before.
@@ -606,10 +656,272 @@ impl App {
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
+    /// Hands the recovery list to the interface.
+    ///
+    /// Copied across rather than shared, because the interface layer reads a view
+    /// model and never reaches into application state — the same rule that keeps
+    /// the renderer off the document.
+    fn sync_recoverable(&mut self) {
+        if self.ui.recoverable.len() != self.recoverable.len() {
+            self.ui.recoverable = self
+                .recoverable
+                .iter()
+                .map(|r| (r.path.clone(), r.name.clone()))
+                .collect();
+        }
+    }
+
     fn set_select_mode(&mut self, mode: u32) {
         self.select_mode = mode;
         self.ui.select_mode = mode;
         self.redraw.set(RedrawReason::UI);
+    }
+
+    // --- the interactive transform -------------------------------------------
+
+    /// Where the selection is, in world space.
+    ///
+    /// The median of what is selected: the objects' origins in object mode, the
+    /// affected vertices in edit mode. This is what a rotation turns about and
+    /// what a scale grows from, and it is computed here rather than inside the
+    /// gesture because what counts as "the selection" is a question about the
+    /// document.
+    fn selection_pivot(&self) -> Option<DVec3> {
+        if self.op_ctx.mode == OpMode::EditMesh {
+            let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc)?;
+            let mesh = self.doc.mesh(mesh_id)?;
+            let object = self
+                .doc
+                .selection
+                .active
+                .or_else(|| self.doc.selection.objects.first().copied())?;
+            let world = self.doc.world_transform(object);
+            let verts = kreate_ops::ops::mesh::selection_vertices(mesh);
+            if verts.is_empty() {
+                return None;
+            }
+            let mut total = DVec3::ZERO;
+            for v in &verts {
+                let p = mesh.positions()[*v as usize];
+                total += DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            }
+            return Some(world.transform_point3(total / verts.len() as f64));
+        }
+        let objects = &self.doc.selection.objects;
+        if objects.is_empty() {
+            return None;
+        }
+        let mut total = DVec3::ZERO;
+        for id in objects {
+            total += self.doc.world_transform(*id).translation;
+        }
+        Some(total / objects.len() as f64)
+    }
+
+    /// The cursor in viewport pixels, **without** the bounds check.
+    ///
+    /// A gesture keeps tracking when the pointer leaves the viewport, which is
+    /// why this exists beside `cursor_viewport_px`. Someone dragging a long way
+    /// runs off the edge of a docked viewport routinely, and a transform that
+    /// froze there — or worse, snapped back — would be unusable. What is outside
+    /// the viewport is still a real pointer position; only *picking* needs it to
+    /// be inside.
+    fn cursor_viewport_unclamped(&self) -> Option<(f32, f32)> {
+        let (x, y, _, _) = self.viewport_px?;
+        let (cx, cy) = self.input.cursor?;
+        Some((cx as f32 - x, cy as f32 - y))
+    }
+
+    /// Starts an interactive transform.
+    fn begin_gesture(&mut self, kind: kreate::modal::Kind) {
+        // One at a time. Starting a second would abandon the first's transaction
+        // and leave the document part-transformed with nothing recording it.
+        if self.gesture.is_some() {
+            return;
+        }
+        // Bounds-checked at the start: a transform begun with the pointer over
+        // a panel has no sensible reference position, and the reference is what
+        // every later frame is measured against.
+        if self.cursor_viewport_px().is_none() {
+            self.status("point at the viewport to transform");
+            return;
+        }
+        let Some(cursor) = self.cursor_viewport_unclamped() else {
+            return;
+        };
+        let Some((_, _, w, h)) = self.viewport_px else {
+            return;
+        };
+        let Some(pivot) = self.selection_pivot() else {
+            self.status("nothing selected");
+            return;
+        };
+
+        let edit_mode = self.op_ctx.mode == OpMode::EditMesh;
+        let gesture = kreate::modal::Gesture::begin(kind, cursor, pivot, &self.camera, (w, h));
+        let op_id = kind.op_id(edit_mode);
+        // Started with the identity parameters, so pressing the key alone moves
+        // nothing. The first pointer motion is what does anything.
+        match self.history.begin_modal(
+            &self.registry,
+            &mut self.doc,
+            self.edit.as_mut(),
+            &self.op_ctx,
+            op_id,
+            &gesture.params(),
+        ) {
+            Ok(Some(session)) => {
+                let status = gesture.status();
+                self.gesture = Some((gesture, session));
+                self.status(&status);
+            }
+            // The operator declined. Nothing was started, and nothing must be:
+            // driving a gesture whose `begin_modal` returned `None` would retune
+            // whatever entry happened to be on top of the history.
+            Ok(None) => self.status(&format!("{} is not possible here", kind.label())),
+            Err(e) => self.status(&format!("{}: {e}", kind.label())),
+        }
+    }
+
+    /// Feeds the pointer to the gesture and re-applies the operator.
+    fn drive_gesture(&mut self) {
+        let Some(cursor) = self.cursor_viewport_unclamped() else {
+            return;
+        };
+        let Some((gesture, session)) = &mut self.gesture else {
+            return;
+        };
+        gesture.track(cursor);
+        let params = gesture.params();
+        let status = gesture.status();
+        // Restore and re-apply from the original — §2.2's rule. `update_modal`
+        // owns that; nothing here is incremental.
+        if let Err(e) = self.history.update_modal(
+            &self.registry,
+            &mut self.doc,
+            self.edit.as_mut(),
+            &self.op_ctx,
+            session,
+            &params,
+        ) {
+            tracing::warn!(error = %e, "transform failed");
+        }
+        self.status(&status);
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Confirms the gesture: one history entry, carrying the final parameters.
+    fn confirm_gesture(&mut self) {
+        let Some((gesture, session)) = self.gesture.take() else {
+            return;
+        };
+        let call = session.params().to_script_call(session.op_id());
+        self.history.commit_modal(session);
+        // Printed like any other operator, because it *is* like any other
+        // operator: the line reproduces the drag exactly.
+        println!("{call}");
+        self.status(&format!("{} done", gesture.kind.label()));
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Abandons the gesture. The document goes back and nothing is recorded.
+    fn cancel_gesture(&mut self) {
+        let Some((gesture, session)) = self.gesture.take() else {
+            return;
+        };
+        History::cancel_modal(session, &mut self.doc);
+        self.status(&format!("{} cancelled", gesture.kind.label()));
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Engages or releases precision on a running gesture.
+    ///
+    /// Measured from where the pointer is *now*, which is what stops the
+    /// selection jumping when the modifier goes down or comes up. §2.2 is
+    /// explicit about that, and it is the difference between a precision mode
+    /// that is usable and one that surprises the user twice per drag.
+    fn set_gesture_precision(&mut self, on: bool) {
+        let Some(cursor) = self.cursor_viewport_unclamped() else {
+            return;
+        };
+        let Some((gesture, _)) = &mut self.gesture else {
+            return;
+        };
+        gesture.set_precise(on, cursor);
+        self.drive_gesture();
+    }
+
+    /// A keystroke while a gesture runs. `true` when the gesture consumed it.
+    ///
+    /// The modal stack sits above the keymap in §2.1's pipeline, so this is
+    /// checked first and the keymap never sees these keys during a transform.
+    /// Without that, `X` would delete the selection halfway through moving it.
+    fn gesture_key(&mut self, code: KeyCode) -> bool {
+        use kreate::modal::Axis;
+        if self.gesture.is_none() {
+            return false;
+        }
+        let axis = match code {
+            KeyCode::KeyX => Some(Axis::X),
+            KeyCode::KeyY => Some(Axis::Y),
+            KeyCode::KeyZ => Some(Axis::Z),
+            _ => None,
+        };
+        if let Some(axis) = axis {
+            if let Some((gesture, _)) = &mut self.gesture {
+                gesture.toggle_axis(axis);
+            }
+            self.drive_gesture();
+            return true;
+        }
+        match code {
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.confirm_gesture();
+                true
+            }
+            KeyCode::Escape => {
+                self.cancel_gesture();
+                true
+            }
+            KeyCode::Backspace => {
+                if let Some((gesture, _)) = &mut self.gesture {
+                    gesture.backspace();
+                }
+                self.drive_gesture();
+                true
+            }
+            _ => {
+                let typed = match code {
+                    KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+                    KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+                    KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+                    KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+                    KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+                    KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+                    KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+                    KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+                    KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+                    KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+                    KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+                    KeyCode::Minus | KeyCode::NumpadSubtract => Some('-'),
+                    _ => None,
+                };
+                match typed {
+                    Some(c) => {
+                        if let Some((gesture, _)) = &mut self.gesture {
+                            gesture.type_character(c);
+                        }
+                        self.drive_gesture();
+                        true
+                    }
+                    // Everything else is swallowed rather than passed on. A
+                    // gesture is a mode: while one is running, a stray key must
+                    // not run an unrelated operator on a half-transformed
+                    // selection.
+                    None => true,
+                }
+            }
+        }
     }
 
     /// Applies the commands the panels queued this frame.
@@ -676,7 +988,170 @@ impl App {
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
                 Command::FrameSelection => self.frame_all(),
+                Command::NewDocument => self.new_document(),
+                Command::OpenDocument => self.open_document(),
+                Command::SaveDocument => self.save_document(false),
+                Command::SaveDocumentAs => self.save_document(true),
+                Command::RecoverDocument { path } => {
+                    self.load_from(&path);
+                    // The recovered document deliberately keeps *no* path: it
+                    // came from an autosave, and inheriting that path would make
+                    // the next Ctrl+S write back into the autosave directory
+                    // instead of asking where the document belongs.
+                    self.file = DocumentFile::new();
+                    docfile::forget_recoverable(&path);
+                    self.recoverable.retain(|r| r.path != path);
+                }
+                Command::DiscardRecovery { path } => {
+                    docfile::forget_recoverable(&path);
+                    self.recoverable.retain(|r| r.path != path);
+                    self.redraw.set(RedrawReason::UI);
+                }
             }
+        }
+    }
+
+    /// Replaces the document with an empty one.
+    fn new_document(&mut self) {
+        if !self.confirm_discarding_changes("start a new document") {
+            return;
+        }
+        self.adopt(load_document(None));
+        self.file = DocumentFile::new();
+        self.status("new document");
+    }
+
+    fn open_document(&mut self) {
+        if !self.confirm_discarding_changes("open another document") {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Kreate document", &["kreate"])
+            .set_title("Open")
+            .pick_file()
+        else {
+            return;
+        };
+        self.load_from(&path);
+    }
+
+    fn load_from(&mut self, path: &std::path::Path) {
+        match DocumentFile::open(path) {
+            Ok((document, file)) => {
+                self.adopt(document);
+                self.file = file;
+                self.status(&format!("opened {}", path.display()));
+            }
+            // Reported, never fatal. A file that will not open is the most
+            // ordinary thing a user can hand an application, and losing the
+            // session they already have over it would be indefensible.
+            Err(e) => self.status(&format!("cannot open {}: {e}", path.display())),
+        }
+    }
+
+    fn save_document(&mut self, ask: bool) {
+        let existing = self.file.path().map(|p| p.to_path_buf());
+        let path = match (&existing, ask) {
+            (Some(path), false) => path.clone(),
+            _ => {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("Kreate document", &["kreate"])
+                    .set_title(if ask { "Save As" } else { "Save" });
+                if let Some(current) = &existing {
+                    if let Some(parent) = current.parent() {
+                        dialog = dialog.set_directory(parent);
+                    }
+                    if let Some(name) = current.file_name() {
+                        dialog = dialog.set_file_name(name.to_string_lossy().to_string());
+                    }
+                } else {
+                    dialog = dialog.set_file_name("untitled.kreate");
+                }
+                match dialog.save_file() {
+                    Some(path) => path,
+                    None => return,
+                }
+            }
+        };
+        // The dialog may hand back a name with no extension, and a document
+        // called `model` is one the shell will not associate with anything.
+        let path = if path.extension().is_none() {
+            path.with_extension("kreate")
+        } else {
+            path
+        };
+        match self.file.save(&path, &self.doc) {
+            Ok(()) => self.status(&format!("saved {}", path.display())),
+            Err(e) => self.status(&format!("cannot save {}: {e}", path.display())),
+        }
+    }
+
+    /// Asks before throwing away unsaved work. `true` to proceed.
+    ///
+    /// A modal dialog, and deliberately: this is the one moment where carrying
+    /// on regardless destroys something the user cannot get back, and a
+    /// non-blocking notification they can miss is not consent.
+    fn confirm_discarding_changes(&self, what: &str) -> bool {
+        if !self.file.is_modified(&self.doc) {
+            return true;
+        }
+        let name = self
+            .file
+            .path()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "This document".to_string());
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Unsaved changes")
+            .set_description(format!(
+                "{name} has changes that have not been saved.\n\nDiscard them and {what}?"
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    }
+
+    /// Replaces the document and everything derived from it.
+    ///
+    /// The caches are not optional to clear. `pick`, `modifiers` and `evaluated`
+    /// are all keyed on the document that produced them, and a new document with
+    /// the old caches shows the previous file's geometry — which reads as the
+    /// open having silently failed.
+    fn adopt(&mut self, document: Document) {
+        self.doc = document;
+        self.history = History::new();
+        self.edit = None;
+        self.op_ctx.mode = OpMode::Object;
+        self.ui.edit_mode = false;
+        self.pick = kreate::pick::PickCache::default();
+        self.modifiers = kreate_scene::ModifierCache::new();
+        self.evaluated.clear();
+        self.hover = None;
+        self.drag_select = None;
+        self.ui.adjust_params = None;
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Puts a line in the log and on the status bar.
+    fn status(&mut self, message: &str) {
+        tracing::info!("{message}");
+        self.ui.status = Some(message.to_string());
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// Writes an autosave if one is due, and keeps the window title current.
+    ///
+    /// Called once a frame. Both halves are almost always two comparisons and
+    /// nothing else, which is why they can live on the frame path at all.
+    fn tick_document(&mut self) {
+        self.file.maybe_autosave(&self.doc);
+        let title = self.file.title(&self.doc);
+        if title != self.shown_title {
+            if let Some(window) = &self.window {
+                window.set_title(&title);
+            }
+            self.shown_title = title;
         }
     }
 
@@ -837,6 +1312,33 @@ impl App {
         // falling out of `old` here.
         let mut old: Vec<Option<(Arc<MeshData>, GpuMesh)>> =
             gfx.meshes.drain(..).map(Some).collect();
+
+        // A slot the plan wants re-flagged keeps its geometry and adopts the new
+        // handle: three small buffer writes instead of re-uploading a mesh
+        // because one face was clicked.
+        //
+        // Adopting the handle is not bookkeeping — it is the whole thing. The
+        // draw loop finds a slot with `Arc::ptr_eq` against the evaluated mesh,
+        // so a slot left holding the *previous* handle is a slot nothing
+        // matches, and the object silently stops being drawn. That was the bug:
+        // pressing Tab selects every element, which is a selection-only change,
+        // which took this path — and the object vanished.
+        for (slot, mesh) in &plan.reflags {
+            let Some(Some((held, gpu_mesh))) = old.get_mut(*slot) else {
+                continue;
+            };
+            let cpu = RenderMeshCpu::extract(mesh);
+            if gpu_mesh.update_flags(&gfx.gpu.queue, &cpu) {
+                *held = mesh.clone();
+            } else {
+                // The element counts moved, so this was not a selection change
+                // after all and the flag buffers are the wrong size. Dropping the
+                // slot makes the plan fall through to a full upload rather than
+                // leaving a mesh drawn with someone else's flags.
+                old[*slot] = None;
+            }
+        }
+
         let mut next: Vec<(Arc<MeshData>, GpuMesh)> = Vec::with_capacity(plan.total());
         for slot in &plan.keep {
             if let Some(entry) = old.get_mut(*slot).and_then(Option::take) {
@@ -1517,6 +2019,12 @@ impl App {
 
         self.apply_keymap_edits();
         self.drain_ui_commands();
+        // After the commands, so a save or an open is reflected in the title on
+        // the same frame it happened rather than the next one, and so the
+        // autosave timer sees this frame's edits.
+        self.file.touch(&self.doc);
+        self.tick_document();
+        self.sync_recoverable();
         // The panels may have changed the scene — a modifier added, a parameter
         // dragged — so it is re-evaluated before the frame is encoded rather
         // than showing the change one frame late.
@@ -1806,6 +2314,14 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        // The modal stack, first. §2.1 puts it at the top of the pipeline and
+        // this is why: while a transform runs, `X` means "constrain to X" and
+        // `Escape` means "cancel the transform" — not "delete" and not "quit".
+        // Checked before the escape hatches below, because a gesture is exactly
+        // the state a user most needs `Escape` to get them out of.
+        if self.gesture_key(code) {
+            return;
+        }
         // Escape and F1 are deliberately outside the keymap: there must always
         // be a way out and a way to ask, even from a keymap the user has broken.
         match code {
@@ -1866,6 +2382,18 @@ impl App {
     /// from the same table as an extrude.
     fn dispatch(&mut self, action: &Action) {
         match action.op_id.as_str() {
+            // The three transforms start a gesture rather than running an
+            // operator. The keymap still names the fixed-step operator ids, so a
+            // script or a rebound key can invoke them directly with parameters —
+            // the interactive path is a *way of arriving at* those parameters,
+            // not a different operation.
+            "object.translate" | "mesh.translate" => self.begin_gesture(kreate::modal::Kind::Move),
+            "object.rotate" | "mesh.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
+            "object.scale" | "mesh.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            "file.new" => self.new_document(),
+            "file.open" => self.open_document(),
+            "file.save" => self.save_document(false),
+            "file.save_as" => self.save_document(true),
             "edit.undo" => self.undo(),
             "edit.redo" => self.redo(),
             "edit.adjust_last" => {
@@ -2039,6 +2567,34 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
     })
 }
 
+/// Writes an emergency save if the process is unwinding from a panic.
+///
+/// Here rather than in the panic hook, and that is not a detail. The hook runs
+/// from a static closure that cannot be handed the document, and reaching it
+/// through a global lock would risk the hook deadlocking against a panic that
+/// happened while that lock was held — the one case a crash reporter has to
+/// survive. `Drop` runs during the same unwind with `&mut self` in hand and the
+/// document intact, so the save is both possible and safe.
+///
+/// It goes beside the autosave, never over the user's file: a process that has
+/// just panicked may hold exactly the state that caused the panic.
+impl Drop for App {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        if !self.file.is_modified(&self.doc) {
+            // Nothing to rescue, and writing anyway would leave a recovery offer
+            // for work that is already on disk.
+            return;
+        }
+        match self.file.emergency_save(&self.doc) {
+            Some(path) => eprintln!("unsaved work written to {}", path.display()),
+            None => eprintln!("unsaved work could not be written"),
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -2079,12 +2635,20 @@ impl ApplicationHandler for App {
             egui_wgpu::RendererOptions::default(),
         );
         let target = ViewportTarget::new(&gpu.device, &mut egui_renderer, size.width, size.height);
-        let viewport = Viewport::new(
+        let mut viewport = Viewport::new(
             &gpu.device,
             ViewportTarget::FORMAT,
             target.size.0,
             target.size.1,
         );
+        // Pay for shader compilation now, while the window is still coming up,
+        // rather than on the frame where the user first presses Tab or moves the
+        // mouse over the scene. Creating a pipeline and compiling it are not the
+        // same thing: the driver defers the second until a draw arrives, and the
+        // overlay and picking pipelines are not touched by an ordinary first
+        // frame. Measured cold, that first touch costs around ten milliseconds —
+        // a dropped frame, landing exactly when the user starts interacting.
+        viewport.warm_up(&gpu.device, &gpu.queue);
 
         let pick_target = kreate_render::PickTarget::new(&gpu.device, target.size.0, target.size.1);
         let region = kreate_render::RegionSelect::new(&gpu.device);
@@ -2157,6 +2721,26 @@ impl ApplicationHandler for App {
                     MouseButton::Right => Some(2),
                     _ => None,
                 };
+                // A running transform owns the buttons: left confirms, right
+                // cancels, and neither may also start a selection or an orbit.
+                // Handled before the drag machinery for the same reason the
+                // modal stack sits above the keymap.
+                if self.gesture.is_some() && pressed {
+                    match button {
+                        MouseButton::Left => {
+                            self.confirm_gesture();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.cancel_gesture();
+                            return;
+                        }
+                        // The middle button is navigation, which is allowed to
+                        // run during a transform: orbiting to see what you are
+                        // doing is not a conflict.
+                        _ => {}
+                    }
+                }
                 if let Some(slot) = slot {
                     let mapped = [KeyMouse::Left, KeyMouse::Middle, KeyMouse::Right][slot];
                     if pressed && !self.buttons[slot] {
@@ -2181,6 +2765,12 @@ impl ApplicationHandler for App {
                     self.apply_drag_motion((p.0 - prev.0, p.1 - prev.1));
                 }
                 self.input.cursor = Some(p);
+                // After the cursor is recorded, because the gesture reads it
+                // from there rather than from the event — one source of truth
+                // for where the pointer is.
+                if self.gesture.is_some() {
+                    self.drive_gesture();
+                }
             }
 
             // Owned by geometry, like a press. `consumed` is worse than useless
@@ -2221,6 +2811,12 @@ impl ApplicationHandler for App {
                 self.input.shift_down = m.state().shift_key();
                 self.input.ctrl_down = m.state().control_key();
                 self.input.alt_down = m.state().alt_key();
+                // Shift is precision while a transform runs. Handled from the
+                // modifier event rather than from a key press, because it is a
+                // *hold*: it has to engage and release, and a press-only path
+                // would leave a gesture stuck in precision after the key came
+                // back up.
+                self.set_gesture_precision(self.input.shift_down);
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
@@ -2261,6 +2857,35 @@ impl ApplicationHandler for App {
 }
 
 /// Builds the starting document, from a file if one was named.
+/// Loads the document named on the command line, or a starter scene.
+///
+/// Returns the file state alongside it, so a `.kreate` opened from the command
+/// line knows where it came from and Ctrl+S writes back to it. Without that, the
+/// most natural way to open a document — dragging it onto the executable — would
+/// produce a document that cannot be saved without a dialog.
+fn load_document_and_file(path: Option<&str>) -> (Document, DocumentFile) {
+    if let Some(path) = path {
+        let path = std::path::Path::new(path);
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
+        {
+            match DocumentFile::open(path) {
+                Ok(pair) => return pair,
+                // Reported and then carried on with an empty document, rather
+                // than refusing to start. An application that will not open
+                // because of the file it was asked to open leaves the user with
+                // no way to open a different one.
+                Err(e) => {
+                    tracing::error!("cannot open {}: {e}", path.display());
+                    return (load_document(None), DocumentFile::new());
+                }
+            }
+        }
+    }
+    (load_document(path), DocumentFile::new())
+}
+
 fn load_document(path: Option<&str>) -> Document {
     let mut doc = Document::new();
     match path {
@@ -2313,11 +2938,72 @@ fn main() {
         i += 1;
     }
 
+    // Before anything else, and before the window: this process may be the dump
+    // writer for another one, in which case it must not open a window, load a
+    // document, or claim a session.
+    if let Some(socket) = kreate::crashreport::reporter_socket(&args) {
+        kreate::crashreport::run_reporter(&socket);
+    }
+
+    install_panic_hook();
+    // Held for the life of `main`. Dropping it detaches the handler and lets the
+    // reporter exit, which is what should happen on a clean shutdown.
+    let _crash_reporter = kreate::crashreport::install();
+
+    // After the reporter is attached, so the crash it causes is one the reporter
+    // can see. Debug builds only.
+    #[cfg(debug_assertions)]
+    if args.iter().any(|a| a == "--crash-now") {
+        kreate::crashreport::crash_on_purpose();
+    }
+
     println!("{HELP}\n");
-    let doc = load_document(path.as_deref());
+    let (doc, file) = load_document_and_file(path.as_deref());
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App::new(doc, &locale);
+    app.file = file;
     event_loop.run_app(&mut app).expect("run");
+}
+
+/// Writes a crash report before the process unwinds.
+///
+/// Tier one of the two §3.4 describes. This catches a Rust panic, which is the
+/// common case and the one where the process is still healthy enough to write a
+/// file. The other tier — a GPU fault, a stack overflow, an abort — needs a
+/// separate process to survive it, because this hook does not run at all for
+/// those.
+///
+/// The report exists because the useful facts about a crash are the ones nobody
+/// thinks to ask for. A backtrace alone rarely identifies a mesh bug; the
+/// sequence of operators that led to it usually does, which is why the ring
+/// buffer of recent operator ids is the most valuable field in the file.
+fn install_panic_hook() {
+    let Some(dir) = docfile::autosave_root() else {
+        return;
+    };
+    // Chained rather than replaced: the default hook is what prints the panic to
+    // the terminal, and a developer running from a shell should still see it.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Written first and separately from anything that could itself panic, so
+        // a failure while assembling the report does not lose the report.
+        let report = dir.join("crash.txt");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut text = String::new();
+        text.push_str(&format!("kreate {}\n", env!("CARGO_PKG_VERSION")));
+        text.push_str(&format!("panic: {info}\n"));
+        text.push_str(&format!(
+            "backtrace:\n{}\n",
+            std::backtrace::Backtrace::force_capture()
+        ));
+        text.push_str("recent operators (oldest first):\n");
+        for id in kreate::recent_operators() {
+            text.push_str(&format!("  {id}\n"));
+        }
+        let _ = std::fs::write(&report, text);
+        eprintln!("crash report written to {}", report.display());
+        previous(info);
+    }));
 }
 
 #[cfg(test)]

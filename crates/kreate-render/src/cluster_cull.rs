@@ -94,7 +94,7 @@ struct Globals {
     params: [f32; 4],
     /// x: orthographic view height.
     ortho: [f32; 4],
-    /// x, y: pyramid level-0 size. z: level count. w: 1 to test occlusion.
+    /// x, y: pyramid level-0 size. z: level count. w: the pass mode.
     hiz: [f32; 4],
 }
 
@@ -134,17 +134,65 @@ struct DrawArgs {
     first_instance: u32,
 }
 
+/// Which cull is being run.
+///
+/// The two-pass scheme exists because testing occlusion against a pyramid built
+/// from an earlier frame is not sound on its own: the camera has moved, and a
+/// cluster rejected as hidden may have come into view. Splitting it fixes that
+/// without any cross-frame bookkeeping.
+///
+/// - [`Pass::Single`] skips occlusion entirely. Frustum, cone and size only.
+/// - [`Pass::First`] rejects against the pyramid as it stands, draws the
+///   survivors, and records which clusters it drew.
+/// - [`Pass::Second`] runs after the pyramid has been rebuilt from the depth the
+///   first pass just wrote, and considers only the clusters the first pass did
+///   *not* draw.
+///
+/// Why that is sound: a cluster the second pass tests is compared against depth
+/// containing strictly less than the full scene, so the test can only be more
+/// permissive than the truth. Anything genuinely visible survives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    Single,
+    First,
+    Second,
+}
+
+impl Pass {
+    fn mode(self) -> f32 {
+        match self {
+            Pass::Single => 0.0,
+            Pass::First => 1.0,
+            Pass::Second => 2.0,
+        }
+    }
+}
+
 /// Where one draw's slice of the shared buffers lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CullSlot {
     pub cluster_count: u32,
     /// Where this draw's survivors are written in the shared visible list.
+    ///
+    /// The second pass writes into a disjoint range further along the same
+    /// buffer, so the two passes' survivor lists never overlap and both stay
+    /// readable when the draws are issued.
     pub visible_base: u32,
-    /// Byte offset of this draw's `DrawArgs`, for both the dynamic binding and
-    /// `draw_indirect`.
+    /// Byte offset of this draw's `DrawArgs`.
     pub args_offset: u32,
     /// Byte offset of this draw's instance uniform.
     pub instance_offset: u32,
+    /// Where this draw's per-cluster "drawn by the first pass" flags start.
+    ///
+    /// Deliberately *not* [`Self::visible_base`], which differs between the two
+    /// passes because they append to disjoint halves of the visible list. The
+    /// flags are the one thing the passes must agree on, so they are indexed by
+    /// a base that is the same for both.
+    ///
+    /// Getting this wrong is invisible in a rendered image: the second pass
+    /// simply redraws what the first already drew, at identical depth, and the
+    /// depth test discards it. The picture is correct and the work is doubled.
+    pub flag_base: u32,
 }
 
 impl CullSlot {
@@ -160,18 +208,40 @@ impl CullSlot {
 /// without a device. It is arithmetic worth testing: an overlapping visible
 /// range means two meshes writing survivors into each other's slice, and the
 /// symptom is one mesh drawing fragments of another.
-pub fn plan(cluster_counts: &[u32], instance_stride: u32, args_stride: u32) -> Vec<CullSlot> {
+pub fn plan(
+    cluster_counts: &[u32],
+    instance_stride: u32,
+    args_stride: u32,
+    pass: Pass,
+) -> Vec<CullSlot> {
+    // The second pass lives in the upper half of both shared buffers. Disjoint
+    // rather than reused, because the first pass's survivor list is still needed
+    // when the second pass's draw is issued — both draws happen after both
+    // culls.
+    let total: u32 = cluster_counts.iter().sum();
+    let draws = cluster_counts.len() as u32;
+    let (base_offset, args_base, instance_base) = match pass {
+        Pass::Single | Pass::First => (0, 0, 0),
+        // The second pass needs its own instance slot as well as its own
+        // argument slot: the only field that differs is the visible-list base,
+        // but that one field is what tells the shader where to append.
+        Pass::Second => (total, draws * args_stride, draws * instance_stride),
+    };
+
     let mut slots = Vec::with_capacity(cluster_counts.len());
-    let mut base = 0u32;
+    let mut base = base_offset;
+    let mut flag_base = 0u32;
     for (i, count) in cluster_counts.iter().enumerate() {
         let i = i as u32;
         slots.push(CullSlot {
             cluster_count: *count,
             visible_base: base,
-            args_offset: i * args_stride,
-            instance_offset: i * instance_stride,
+            args_offset: args_base + i * args_stride,
+            instance_offset: instance_base + i * instance_stride,
+            flag_base,
         });
         base += *count;
+        flag_base += *count;
     }
     slots
 }
@@ -194,13 +264,11 @@ pub struct CullView<'a> {
     /// Always supplied, even with `occlusion` off, because a bind group cannot
     /// have a hole. An unused pyramid costs one texture binding.
     pub hiz: &'a HiZ,
-    /// Whether to reject occluded clusters.
+    /// Whether to set up the second, occlusion-testing pass.
     ///
-    /// A switch and not a constant because the pyramid has to come from
-    /// somewhere: testing against a pyramid built from a *stale* frame can
-    /// reject clusters that became visible since, which is the one error this
-    /// module must not make. The two-pass scheme is what makes it sound, and
-    /// until a caller implements that, this stays off.
+    /// One flag rather than a pass selector, because `prepare` configures both
+    /// passes at once — see the comment on the globals writes for why they
+    /// cannot be configured one at a time.
     pub occlusion: bool,
     /// The render target's height in device pixels, not the widget's — at 70%
     /// dynamic resolution there genuinely are fewer pixels per cluster.
@@ -227,15 +295,26 @@ pub struct ClusterCull {
     globals: wgpu::Buffer,
     instances: wgpu::Buffer,
     visible: wgpu::Buffer,
+    /// One flag per cluster per draw: did the first pass draw it.
+    drawn: wgpu::Buffer,
     args: wgpu::Buffer,
     bind: wgpu::BindGroup,
     instance_stride: u32,
     args_stride: u32,
+    globals_stride: u32,
     draw_capacity: u32,
     visible_capacity: u32,
     /// The pyramid size group 0 was last built against.
     hiz_size: (u32, u32),
-    slots: Vec<CullSlot>,
+    /// Both passes' slot tables, prepared together.
+    ///
+    /// Together rather than one per `prepare` call, because the two passes run
+    /// in the same frame and their globals live in two slots of one buffer —
+    /// writing them at different times would merge into whichever came last.
+    slots_first: Vec<CullSlot>,
+    slots_second: Vec<CullSlot>,
+    /// Whether the last `prepare` set up a second pass at all.
+    occlusion: bool,
     /// Bumped whenever the shared buffers are reallocated.
     ///
     /// The cluster draw binds the same instance and visible buffers, so its bind
@@ -255,12 +334,16 @@ impl ClusterCull {
         let shared_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cluster cull shared"),
             entries: &[
+                // Dynamic, because the two passes need *different* globals in
+                // the same frame and `queue.write_buffer` cannot deliver two
+                // values to one address: its writes are merged before the
+                // command buffer runs, so both dispatches would see the second.
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -311,6 +394,16 @@ impl ClusterCull {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -349,9 +442,12 @@ impl ClusterCull {
         let args_stride =
             (std::mem::size_of::<DrawArgs>() as u64).div_ceil(storage_align) * storage_align;
 
+        let globals_stride =
+            (std::mem::size_of::<Globals>() as u64).div_ceil(uniform_align) * uniform_align;
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cull globals"),
-            size: std::mem::size_of::<Globals>() as u64,
+            // Two slots: one per pass.
+            size: globals_stride * 2,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -389,7 +485,11 @@ impl ClusterCull {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: placeholder.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &placeholder,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(16),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -415,6 +515,10 @@ impl ClusterCull {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&placeholder_pyramid),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: placeholder.as_entire_binding(),
+                },
             ],
         });
 
@@ -438,6 +542,12 @@ impl ClusterCull {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }),
+            drawn: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cull drawn"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             args: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("cull args"),
                 size: args_stride,
@@ -450,10 +560,13 @@ impl ClusterCull {
             bind: placeholder_bind,
             instance_stride: instance_stride as u32,
             args_stride: args_stride as u32,
+            globals_stride: globals_stride as u32,
             draw_capacity: 0,
             visible_capacity: 0,
             hiz_size: (0, 0),
-            slots: Vec::new(),
+            slots_first: Vec::new(),
+            slots_second: Vec::new(),
+            occlusion: false,
             generation: 0,
         }
     }
@@ -463,9 +576,17 @@ impl ClusterCull {
         &self.cluster_layout
     }
 
-    /// Where each draw's slice lives, after the last [`Self::prepare`].
-    pub fn slots(&self) -> &[CullSlot] {
-        &self.slots
+    /// Whether the last [`Self::prepare`] set up a second pass.
+    pub fn occlusion(&self) -> bool {
+        self.occlusion
+    }
+
+    /// Where each draw's slice lives for one pass, after [`Self::prepare`].
+    pub fn slots(&self, pass: Pass) -> &[CullSlot] {
+        match pass {
+            Pass::Single | Pass::First => &self.slots_first,
+            Pass::Second => &self.slots_second,
+        }
     }
 
     /// Changes whenever the shared buffers are reallocated.
@@ -517,23 +638,31 @@ impl ClusterCull {
 
         self.instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cull instances"),
-            size: self.instance_stride as u64 * draws as u64,
+            size: self.instance_stride as u64 * draws as u64 * 2,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         self.args = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cull args"),
-            size: self.args_stride as u64 * draws as u64,
+            size: self.args_stride as u64 * draws as u64 * 2,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        // Twice the cluster count: the second pass writes into a disjoint upper
+        // half so both passes' survivor lists survive until their draws issue.
         self.visible = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cull visible"),
-            size: 4 * clusters as u64,
+            size: 8 * clusters as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        self.drawn = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cull drawn"),
+            size: 4 * clusters as u64,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         self.draw_capacity = draws;
@@ -551,7 +680,11 @@ impl ClusterCull {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.globals.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.globals,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<Globals>() as u64),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -576,6 +709,10 @@ impl ClusterCull {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(hiz.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.drawn.as_entire_binding(),
                 },
             ],
         });
@@ -611,86 +748,133 @@ impl ClusterCull {
             (cluster_counts.len() as u32).max(1),
             visible_capacity(cluster_counts).max(1),
         );
-        self.slots = plan(cluster_counts, self.instance_stride, self.args_stride);
+        self.occlusion = *occlusion;
+        self.slots_first = plan(
+            cluster_counts,
+            self.instance_stride,
+            self.args_stride,
+            if *occlusion {
+                Pass::First
+            } else {
+                Pass::Single
+            },
+        );
+        self.slots_second = plan(
+            cluster_counts,
+            self.instance_stride,
+            self.args_stride,
+            Pass::Second,
+        );
 
         let frustum = Frustum::from_view_projection(&camera.view_projection(*aspect));
         let planes = frustum.to_padded_planes();
+        let globals = |mode: f32| Globals {
+            view_proj: camera.view_projection(*aspect).to_cols_array_2d(),
+            planes: planes.map(|p| p.to_array()),
+            params: [
+                *render_height as f32,
+                budget.cull_px,
+                (camera.fov_y * 0.5).tan() as f32,
+                match camera.projection {
+                    Projection::Perspective => 1.0,
+                    Projection::Orthographic => 0.0,
+                },
+            ],
+            ortho: [camera.ortho_height() as f32, 0.0, 0.0, 0.0],
+            hiz: [
+                hiz.size().0 as f32,
+                hiz.size().1 as f32,
+                hiz.mip_count() as f32,
+                mode,
+            ],
+        };
+        // Both slots written now, before anything is encoded. They cannot be
+        // written between the two dispatches: queue writes are applied before
+        // the command buffer runs, so a later write to one address is what
+        // *both* dispatches would see.
+        let first_mode = if *occlusion {
+            Pass::First.mode()
+        } else {
+            Pass::Single.mode()
+        };
+        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals(first_mode)));
         queue.write_buffer(
             &self.globals,
-            0,
-            bytemuck::bytes_of(&Globals {
-                view_proj: camera.view_projection(*aspect).to_cols_array_2d(),
-                planes: planes.map(|p| p.to_array()),
-                params: [
-                    *render_height as f32,
-                    budget.cull_px,
-                    (camera.fov_y * 0.5).tan() as f32,
-                    match camera.projection {
-                        Projection::Perspective => 1.0,
-                        Projection::Orthographic => 0.0,
-                    },
-                ],
-                ortho: [camera.ortho_height() as f32, 0.0, 0.0, 0.0],
-                hiz: [
-                    hiz.size().0 as f32,
-                    hiz.size().1 as f32,
-                    hiz.mip_count() as f32,
-                    f32::from(u8::from(*occlusion)),
-                ],
-            }),
+            self.globals_stride as u64,
+            bytemuck::bytes_of(&globals(Pass::Second.mode())),
         );
 
-        for ((slot, transform), color) in self.slots.iter().zip(*transforms).zip(*colors) {
-            let model = camera.model_matrix_relative(transform);
-            let normal = normal_matrix(transform);
-            let m = transform.matrix3;
-            let scale = m
-                .x_axis
-                .length()
-                .max(m.y_axis.length())
-                .max(m.z_axis.length()) as f32;
-            queue.write_buffer(
-                &self.instances,
-                slot.instance_offset as u64,
-                bytemuck::bytes_of(&InstanceData {
-                    model: model.to_cols_array_2d(),
-                    normal_col0: normal.x_axis.extend(0.0).to_array(),
-                    normal_col1: normal.y_axis.extend(0.0).to_array(),
-                    normal_col2: normal.z_axis.extend(0.0).to_array(),
-                    counts: [slot.cluster_count, slot.visible_base, 0, 0],
-                    scale: [scale, 0.0, 0.0, 0.0],
-                    base_color: *color,
-                }),
-            );
-            // Reset every frame. The cull increments this field, so a stale
-            // count would draw last frame's survivors on top of this frame's.
-            queue.write_buffer(
-                &self.args,
-                slot.args_offset as u64,
-                bytemuck::bytes_of(&DrawArgs {
-                    vertex_count: VERTICES_PER_CLUSTER,
-                    instance_count: 0,
-                    first_vertex: 0,
-                    first_instance: 0,
-                }),
-            );
+        for which in [Pass::First, Pass::Second] {
+            let slots = match which {
+                Pass::Single | Pass::First => &self.slots_first,
+                Pass::Second => &self.slots_second,
+            };
+            for ((slot, transform), color) in slots.iter().zip(*transforms).zip(*colors) {
+                let model = camera.model_matrix_relative(transform);
+                let normal = normal_matrix(transform);
+                let m = transform.matrix3;
+                let scale = m
+                    .x_axis
+                    .length()
+                    .max(m.y_axis.length())
+                    .max(m.z_axis.length()) as f32;
+                queue.write_buffer(
+                    &self.instances,
+                    slot.instance_offset as u64,
+                    bytemuck::bytes_of(&InstanceData {
+                        model: model.to_cols_array_2d(),
+                        normal_col0: normal.x_axis.extend(0.0).to_array(),
+                        normal_col1: normal.y_axis.extend(0.0).to_array(),
+                        normal_col2: normal.z_axis.extend(0.0).to_array(),
+                        counts: [slot.cluster_count, slot.visible_base, slot.flag_base, 0],
+                        scale: [scale, 0.0, 0.0, 0.0],
+                        base_color: *color,
+                    }),
+                );
+                // Reset every frame. The cull increments this field, so a stale
+                // count would draw the previous frame survivors on top of this
+                // frame ones.
+                queue.write_buffer(
+                    &self.args,
+                    slot.args_offset as u64,
+                    bytemuck::bytes_of(&DrawArgs {
+                        vertex_count: VERTICES_PER_CLUSTER,
+                        instance_count: 0,
+                        first_vertex: 0,
+                        first_instance: 0,
+                    }),
+                );
+            }
         }
     }
 
     /// Runs the cull for every draw in one compute pass.
     ///
     /// `cluster_binds` is parallel to the slices given to [`Self::prepare`].
-    pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, cluster_binds: &[&wgpu::BindGroup]) {
+    pub fn dispatch(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        which: Pass,
+        cluster_binds: &[&wgpu::BindGroup],
+    ) {
+        let globals_offset = match which {
+            Pass::Single | Pass::First => 0,
+            Pass::Second => self.globals_stride,
+        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("cluster cull"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
-        for (slot, clusters) in self.slots.iter().zip(cluster_binds) {
+        for (slot, clusters) in self.slots(which).iter().zip(cluster_binds) {
             if slot.cluster_count == 0 {
                 continue;
             }
-            pass.set_bind_group(0, &self.bind, &[slot.instance_offset, slot.args_offset]);
+            pass.set_bind_group(
+                0,
+                &self.bind,
+                &[globals_offset, slot.instance_offset, slot.args_offset],
+            );
             pass.set_bind_group(1, *clusters, &[]);
             pass.dispatch_workgroups(slot.workgroups(), 1, 1);
         }
@@ -732,7 +916,7 @@ mod tests {
         // of one mesh inside another, which reads as corrupt topology rather
         // than as a buffer layout bug.
         let counts = [10u32, 0, 250, 1, 64];
-        let slots = plan(&counts, 256, 256);
+        let slots = plan(&counts, 256, 256, Pass::Single);
         let mut end = 0u32;
         for slot in &slots {
             assert_eq!(slot.visible_base, end);
@@ -745,7 +929,7 @@ mod tests {
     fn each_draw_gets_its_own_argument_slot() {
         // The count is incremented in place, so two draws sharing a slot would
         // each draw the other's survivor count.
-        let slots = plan(&[4, 4, 4], 256, 256);
+        let slots = plan(&[4, 4, 4], 256, 256, Pass::Single);
         let offsets: Vec<u32> = slots.iter().map(|s| s.args_offset).collect();
         assert_eq!(offsets, vec![0, 256, 512]);
         let instances: Vec<u32> = slots.iter().map(|s| s.instance_offset).collect();
@@ -757,7 +941,7 @@ mod tests {
         // A cluster past the last workgroup is silently never tested, and since
         // untested means unlisted, it silently never draws.
         for count in [0u32, 1, 63, 64, 65, 128, 129, 4095] {
-            let slots = plan(&[count], 256, 256);
+            let slots = plan(&[count], 256, 256, Pass::Single);
             let covered = slots[0].workgroups() * WORKGROUP;
             assert!(
                 covered >= count,
@@ -768,7 +952,7 @@ mod tests {
 
     #[test]
     fn an_empty_frame_plans_nothing() {
-        assert!(plan(&[], 256, 256).is_empty());
+        assert!(plan(&[], 256, 256, Pass::Single).is_empty());
         assert_eq!(visible_capacity(&[]), 0);
     }
 

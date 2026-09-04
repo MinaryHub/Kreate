@@ -16,7 +16,7 @@
 //! Skips rather than fails when no adapter is available.
 
 use glam::{DAffine3, DVec3};
-use kreate_render::cluster_cull::{ClusterCull, CullDraws, CullView};
+use kreate_render::cluster_cull::{ClusterCull, CullDraws, CullView, Pass};
 use kreate_render::{Camera, ClusterMesh, Frustum, GpuOptions, RenderMeshCpu, ViewAxis};
 
 const HEIGHT: u32 = 512;
@@ -98,7 +98,8 @@ impl Harness {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        self.cull.dispatch(&mut encoder, &[&self.cluster_bind]);
+        self.cull
+            .dispatch(&mut encoder, Pass::Single, &[&self.cluster_bind]);
 
         // The arguments and the list are read back together: the count lives in
         // the arguments and the identities in the list, and a test that trusted
@@ -371,7 +372,7 @@ fn a_second_draw_gets_its_own_count_and_its_own_slice() {
             colors: &[[0.5, 0.5, 0.5, 1.0]; 2],
         },
     );
-    let slots: Vec<kreate_render::CullSlot> = harness.cull.slots().to_vec();
+    let slots: Vec<kreate_render::CullSlot> = harness.cull.slots(Pass::Single).to_vec();
     assert_eq!(slots[1].visible_base, count, "the slices overlap");
 
     let mut encoder = harness
@@ -380,6 +381,7 @@ fn a_second_draw_gets_its_own_count_and_its_own_slice() {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     harness.cull.dispatch(
         &mut encoder,
+        Pass::Single,
         &[&harness.cluster_bind, &harness.cluster_bind],
     );
 

@@ -411,11 +411,25 @@ pub fn write_obj(meshes: &[(String, &MeshData)], opts: ObjOptions) -> String {
 
         let smooth = mesh.attributes().get_bool(names::SHADE_SMOOTH);
         let mut last_smooth: Option<bool> = None;
+        // Written even with no `.mtl` beside it. The names dangle, and every OBJ
+        // reader copes with that; what would not be recoverable is the partition
+        // itself, which is authored data. `usemtl` is also how the reader here
+        // rebuilds `material_index`, so omitting it made export the one direction
+        // that dropped materials.
+        let materials = mesh.attributes().get_i32(names::MATERIAL_INDEX);
+        let mut last_material: Option<i32> = None;
         for f in 0..mesh.num_faces() {
             let is_smooth = smooth.map(|s| s[f as usize]).unwrap_or(false);
             if last_smooth != Some(is_smooth) {
                 let _ = writeln!(out, "s {}", if is_smooth { "1" } else { "off" });
                 last_smooth = Some(is_smooth);
+            }
+            if let Some(materials) = materials {
+                let m = materials[f as usize];
+                if last_material != Some(m) && m >= 0 {
+                    let _ = writeln!(out, "usemtl material{m}");
+                    last_material = Some(m);
+                }
             }
             out.push('f');
             let range = mesh.face_corner_range(f);

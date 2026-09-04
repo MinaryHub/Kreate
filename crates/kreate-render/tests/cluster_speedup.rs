@@ -58,7 +58,7 @@ fn measure(clusters: bool, instances: usize, distance: f64) -> Option<Result> {
     viewport.show_elements = false;
 
     let mesh = kreate_mesh::primitives::uv_sphere(1.0, 400, 200);
-    let cpu = RenderMeshCpu::extract(&mesh);
+    let cpu = RenderMeshCpu::extract(&mesh).with_clusters();
     let triangles = cpu.counts.triangles;
     let uploaded = GpuMesh::upload(
         &gpu.device,

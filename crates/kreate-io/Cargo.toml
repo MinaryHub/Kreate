@@ -10,5 +10,17 @@ repository.workspace = true
 kreate-math.workspace = true
 kreate-mesh.workspace = true
 glam.workspace = true
+bytemuck.workspace = true
+kreate-scene.workspace = true
+gltf.workspace = true
+zip.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 ahash.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+kreate-testkit.workspace = true
+zip.workspace = true
+serde_json.workspace = true
+kreate-scene.workspace = true

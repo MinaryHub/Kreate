@@ -40,7 +40,8 @@ struct Globals {
     // x: orthographic view height, unused under perspective.
     ortho: vec4<f32>,
     // x, y: the pyramid's level-0 size in texels. z: how many levels it has.
-    // w: 1 to test occlusion, 0 to skip it.
+    // w: which pass this is — 0 no occlusion at all, 1 the first pass of the
+    //    two-pass scheme, 2 the second.
     hiz: vec4<f32>,
 };
 
@@ -62,9 +63,9 @@ struct Instance {
     // wrong makes half a squashed model disappear.
     normal: mat3x3<f32>,
     // x: how many clusters this instance owns. y: where its slice of the
-    // visible list starts. z: the largest scale factor in `model`, so the
-    // bounding sphere's radius can be scaled without decomposing the matrix
-    // here. w: unused.
+    // visible list starts, which differs between the two passes. z: where its
+    // per-cluster drawn flags start, which does *not* — the two passes have to
+    // agree about those. w: unused.
     counts: vec4<u32>,
     scale: vec4<f32>,
 };
@@ -79,6 +80,14 @@ struct Instance {
 @group(0) @binding(3) var<storage, read_write> args: DrawArgs;
 
 @group(0) @binding(4) var pyramid: texture_2d<f32>;
+// One flag per cluster per draw, saying whether the first pass already drew it.
+//
+// The second pass exists to give a second chance to clusters the first pass
+// rejected against a stale pyramid; without this it would redraw everything the
+// first pass already did. Written by pass one and read by pass two, in the same
+// frame — not persistent state across frames, which is what keeps the scheme
+// free of "which object was this last frame" bookkeeping.
+@group(0) @binding(5) var<storage, read_write> drawn: array<u32>;
 
 @group(1) @binding(0) var<storage, read> clusters: array<Cluster>;
 
@@ -165,9 +174,6 @@ fn diameter_px(centre: vec3<f32>, radius: f32) -> f32 {
 // what exists, and a hole in a model reads as corrupt data rather than as a
 // renderer bug. A cluster wrongly kept costs a fraction of a millisecond.
 fn is_occluded(centre: vec3<f32>, radius: f32) -> bool {
-    if (g.hiz.w < 0.5) {
-        return false;
-    }
 
     // The screen extent and nearest depth of the box enclosing the sphere.
     //
@@ -258,6 +264,21 @@ fn cull(@builtin(global_invocation_id) id: vec3<u32>) {
     if (index >= instance.counts.x) {
         return;
     }
+    let mode = u32(g.hiz.w + 0.5);
+    let flag = instance.counts.z + index;
+
+    if (mode == 1u) {
+        // Cleared here rather than by a separate clear pass. Every cluster the
+        // first pass examines writes its flag before any rejection can return
+        // early, so the second pass never reads a value left over from the last
+        // frame — which would make it skip a cluster it should draw, and that is
+        // a hole.
+        drawn[flag] = 0u;
+    } else if (mode == 2u && drawn[flag] != 0u) {
+        // The first pass already drew this one.
+        return;
+    }
+
     let cluster = clusters[index];
 
     let centre = (instance.model * vec4<f32>(cluster.sphere.xyz, 1.0)).xyz;
@@ -274,8 +295,17 @@ fn cull(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // Last, because it is the most expensive: eight matrix-vector products and
     // four texture loads, against three dot products for the tests above.
-    if (is_occluded(centre, radius)) {
+    //
+    // In pass one this is tested against the pyramid as it stands from the
+    // previous frame, which is not sound on its own — the camera has moved and
+    // something rejected here may have become visible. Pass two is what makes it
+    // sound: it re-tests exactly these against a pyramid rebuilt from this
+    // frame's own depth.
+    if (mode != 0u && is_occluded(centre, radius)) {
         return;
+    }
+    if (mode == 1u) {
+        drawn[flag] = 1u;
     }
 
     // The count *is* the indirect draw's instance field, incremented in place.

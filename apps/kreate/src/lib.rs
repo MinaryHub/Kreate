@@ -6,7 +6,19 @@
 //! interface and the viewport is precisely where a defect would otherwise be
 //! invisible to everything except a human looking at the screen.
 
+pub mod breadcrumbs;
+pub mod crashreport;
+pub mod docfile;
 pub mod gpu_sync;
+pub mod modal;
 pub mod pick;
 pub mod prefs;
 pub mod shell;
+
+/// The recently run operator ids, for the crash report.
+///
+/// Re-exported at the crate root because the panic hook is the only consumer and
+/// spelling out the module there adds nothing.
+pub fn recent_operators() -> Vec<&'static str> {
+    breadcrumbs::recent()
+}

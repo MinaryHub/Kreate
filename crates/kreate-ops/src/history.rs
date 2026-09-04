@@ -27,6 +27,36 @@ use kreate_scene::{DocMut, Document, UndoPayload};
 use crate::operator::{Context, OpError, OpResult, OperatorRegistry};
 use crate::property::PropertyMap;
 
+/// An interactive operator in progress: an uncommitted transaction.
+///
+/// Held by the application for as long as the user is dragging. Deliberately not
+/// inside [`History`]: the history is a record of what happened, and a gesture
+/// that has not been confirmed has not happened yet. Keeping it outside also
+/// makes the "no history entry until `Finished`" rule structural rather than
+/// something every path has to remember.
+pub struct ModalSession {
+    op_id: String,
+    label: String,
+    /// The document before the operator ran at all.
+    before: UndoPayload,
+    /// The last parameters that were applied successfully.
+    params: PropertyMap,
+    /// What the last successful apply recorded, which becomes the history
+    /// entry's payload on commit.
+    payload: UndoPayload,
+}
+
+impl ModalSession {
+    pub fn op_id(&self) -> &str {
+        &self.op_id
+    }
+
+    /// The parameters as last applied. What the header shows the user.
+    pub fn params(&self) -> &PropertyMap {
+        &self.params
+    }
+}
+
 /// One recorded operation.
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
@@ -203,6 +233,149 @@ impl History {
                 other
             }
         }
+    }
+
+    // --- interactive operators ----------------------------------------------
+
+    /// Starts an interactive operator, holding an **uncommitted** transaction.
+    ///
+    /// Nothing reaches the undo stack until [`History::commit_modal`], and
+    /// [`History::cancel_modal`] writes nothing at all. That is §1.7's rule and
+    /// it is what makes a cancelled drag leave no trace — including no entry
+    /// that a later undo would walk into.
+    ///
+    /// `None` when the operator declined to run: an empty selection, a
+    /// single-point scale. The caller must not start a drag in that case, and
+    /// getting this wrong is the specific bug where the interactive session
+    /// silently retunes whatever entry happened to be at the top of the history
+    /// instead of its own.
+    pub fn begin_modal(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        session: Option<&mut crate::EditSession>,
+        ctx: &Context,
+        op_id: &str,
+        params: &PropertyMap,
+    ) -> Result<Option<ModalSession>, OpError> {
+        let info = registry
+            .get(op_id)
+            .ok_or_else(|| OpError::UnknownOperator(op_id.to_string()))?;
+        let label = info.label.to_string();
+
+        // The state to come back to, taken before the operator runs. A whole
+        // document, which is microseconds and a handful of pointer bumps because
+        // every array is behind an `Arc` — the same property that makes snapshot
+        // undo affordable at all.
+        let before = UndoPayload::Snapshot(Box::new(doc.clone()));
+
+        let mut full = info.defaults();
+        full.overlay(params);
+        let mut edit = DocMut::with_session(doc, session);
+        let result = registry.execute(op_id, &full, &mut edit, ctx);
+        let payload = edit.finish();
+
+        match result {
+            Ok(OpResult::Finished) => Ok(Some(ModalSession {
+                op_id: op_id.to_string(),
+                label,
+                before,
+                params: full,
+                payload,
+            })),
+            Ok(_) => {
+                // Back to where it was, then say so. Same reasoning as
+                // `dispatch`: the operator may already have rebuilt every array
+                // deciding it had nothing to do.
+                payload.restore(doc);
+                Ok(None)
+            }
+            Err(e) => {
+                payload.restore(doc);
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-runs the interactive operator with new parameters.
+    ///
+    /// **Restore, then apply from the original.** Never incremental. §2.2 makes
+    /// this a rule rather than an implementation choice, and it buys three
+    /// things: a long drag accumulates no floating point drift, a cancel is a
+    /// single restore, and the operator needs no incremental update path — which
+    /// is an entire class of bug that then does not exist.
+    ///
+    /// It also means the mouse and the keyboard reach the same code. A drag that
+    /// ends with a final set of parameters is indistinguishable from someone
+    /// having typed those parameters, which is what makes the adjust panel,
+    /// scripting and macro replay work without any of them knowing a mouse was
+    /// involved.
+    pub fn update_modal(
+        &mut self,
+        registry: &OperatorRegistry,
+        doc: &mut Document,
+        session: Option<&mut crate::EditSession>,
+        ctx: &Context,
+        modal: &mut ModalSession,
+        params: &PropertyMap,
+    ) -> Result<(), OpError> {
+        modal.before.restore(doc);
+
+        let info = registry
+            .get(&modal.op_id)
+            .ok_or_else(|| OpError::UnknownOperator(modal.op_id.clone()))?;
+        let mut full = info.defaults();
+        full.overlay(params);
+
+        let mut edit = DocMut::with_session(doc, session);
+        let result = registry.execute(&modal.op_id, &full, &mut edit, ctx);
+        let payload = edit.finish();
+
+        match result {
+            Ok(OpResult::Finished) => {
+                modal.params = full;
+                modal.payload = payload;
+                Ok(())
+            }
+            Ok(_) => {
+                // The operator declined *this* value — a scale dragged back
+                // through 1.0, say. The document is left at the original, the
+                // session keeps the last value that worked, and the drag carries
+                // on. Ending it here would abort a gesture because the pointer
+                // passed through a degenerate position.
+                payload.restore(doc);
+                Ok(())
+            }
+            Err(e) => {
+                payload.restore(doc);
+                Err(e)
+            }
+        }
+    }
+
+    /// Commits the interactive operator as one history entry.
+    ///
+    /// One entry for the whole gesture, carrying the final parameters. A drag
+    /// across two hundred frames has to undo in one step, and has to read in the
+    /// history as the single thing the user did.
+    pub fn commit_modal(&mut self, modal: ModalSession) {
+        self.entries.truncate(self.cursor);
+        self.entries.push(HistoryEntry {
+            op_id: modal.op_id,
+            params: modal.params,
+            label: modal.label,
+            payload: modal.payload,
+        });
+        self.cursor = self.entries.len();
+        self.enforce_budget();
+    }
+
+    /// Abandons the interactive operator, restoring the document.
+    ///
+    /// Takes no `&mut self`: there is nothing in the history to unwind, because
+    /// nothing was ever put there. A cancelled drag is not an undo step.
+    pub fn cancel_modal(modal: ModalSession, doc: &mut Document) {
+        modal.before.restore(doc);
     }
 
     /// Undoes the most recent applied entry.

@@ -23,7 +23,7 @@ pub mod ops;
 /// dispatches. That separation is what the architecture test enforces.
 pub use kreate_reflect as property;
 
-pub use history::{History, HistoryEntry};
+pub use history::{History, HistoryEntry, ModalSession};
 pub use kreate_ops_derive::OpParams;
 pub use operator::{Context, Mode, OpError, OpResult, Operator, OperatorInfo, OperatorRegistry};
 pub use ops::register_builtin;

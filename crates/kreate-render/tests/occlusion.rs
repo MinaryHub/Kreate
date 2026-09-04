@@ -19,7 +19,7 @@
 //! Skips rather than fails when no adapter is available.
 
 use glam::{DAffine3, DVec3, Vec4};
-use kreate_render::cluster_cull::{ClusterCull, CullDraws, CullView};
+use kreate_render::cluster_cull::{ClusterCull, CullDraws, CullView, Pass};
 use kreate_render::hiz::{self, HiZ};
 use kreate_render::{
     Budget, Camera, ClusterMesh, Draw, GpuMesh, GpuOptions, RenderMeshCpu, ViewAxis, Viewport,
@@ -60,12 +60,12 @@ impl Scene {
 
         let occluder = kreate_mesh::primitives::uv_sphere(1.0, 48, 24);
         let hidden = kreate_mesh::primitives::uv_sphere(1.0, 48, 24);
-        let hidden_cpu = RenderMeshCpu::extract(&hidden);
+        let hidden_cpu = RenderMeshCpu::extract(&hidden).with_clusters();
         let meshes = vec![
             GpuMesh::upload(
                 &gpu.device,
                 &viewport.layouts,
-                &RenderMeshCpu::extract(&occluder),
+                &RenderMeshCpu::extract(&occluder).with_clusters(),
                 Vec4::new(0.45, 0.45, 0.47, 1.0),
             ),
             GpuMesh::upload(
@@ -217,7 +217,7 @@ impl Scene {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        cull.dispatch(&mut encoder, &[&cluster_bind]);
+        cull.dispatch(&mut encoder, Pass::Single, &[&cluster_bind]);
 
         let args = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("args"),
@@ -547,7 +547,7 @@ fn occlusion_off_keeps_everything_occlusion_on_rejects() {
         .gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    cull.dispatch(&mut encoder, &[&cluster_bind]);
+    cull.dispatch(&mut encoder, Pass::Single, &[&cluster_bind]);
     let args = scene.gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("args"),
         size: 16,

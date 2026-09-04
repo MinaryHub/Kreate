@@ -165,6 +165,23 @@ fn common() -> Vec<Binding> {
 
     vec![
         // --- global -------------------------------------------------------
+        // File commands live in the keymap rather than being hard-coded, for the
+        // same reason navigation does: a user coming from another application
+        // expects their own shortcuts, and one whose muscle memory is denied
+        // notices immediately.
+        key("file.new", "N", Context::Global, Action::new("file.new"))
+            .with_modifiers(Modifiers::ctrl()),
+        key("file.open", "O", Context::Global, Action::new("file.open"))
+            .with_modifiers(Modifiers::ctrl()),
+        key("file.save", "S", Context::Global, Action::new("file.save"))
+            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "file.save_as",
+            "S",
+            Context::Global,
+            Action::new("file.save_as"),
+        )
+        .with_modifiers(Modifiers::ctrl_shift()),
         key("edit.undo", "Z", Context::Global, Action::new("edit.undo"))
             .with_modifiers(Modifiers::ctrl()),
         key("edit.redo", "Y", Context::Global, Action::new("edit.redo"))
@@ -258,9 +275,19 @@ fn common() -> Vec<Binding> {
             Action::new("object.add_next_primitive"),
         )
         .with_modifiers(Modifiers::shift()),
+        // Move, Rotate, Scale on M, R, S — the same three keys in object mode
+        // and in edit mode, so the gesture does not change with the mode. The
+        // binding ids stay as they are: a released id is part of a saved keymap,
+        // and renaming one would silently drop a user's remapping of it.
+        //
+        // Still fixed-step operators rather than interactive modal tools. The
+        // full `TransformOp` — axis constraints, numeric entry, snapping,
+        // proportional editing — is Phase 2's, and these are what the keys do
+        // until it lands. The ids and the parameter names do not change when it
+        // does, so a keymap written today keeps working.
         key(
             "object.translate_up",
-            "T",
+            "M",
             Context::ObjectMode,
             Action::new("object.translate")
                 .with("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
@@ -281,6 +308,35 @@ fn common() -> Vec<Binding> {
             "S",
             Context::ObjectMode,
             Action::new("object.scale").with("scale", PropertyValue::Vec3([1.2, 1.2, 1.2])),
+        ),
+        // --- edit mode: the same three keys, acting on the selection --------
+        //
+        // One set of operators for vertices, edges and faces. An edge is its two
+        // vertices and a face is its ring, so there is nothing mode-specific to
+        // do: `mesh.translate` and friends move whatever the selection touches.
+        key(
+            "mesh.translate",
+            "M",
+            Context::EditMesh,
+            Action::new("mesh.translate")
+                .with("translation", PropertyValue::Vec3([0.0, 0.0, 0.25])),
+        ),
+        key(
+            "mesh.rotate",
+            "R",
+            Context::EditMesh,
+            Action::new("mesh.rotate")
+                .with(
+                    "angle",
+                    PropertyValue::Float(std::f64::consts::FRAC_PI_6 / 2.0),
+                )
+                .with("axis", PropertyValue::Enum(2)),
+        ),
+        key(
+            "mesh.scale",
+            "S",
+            Context::EditMesh,
+            Action::new("mesh.scale").with("scale", PropertyValue::Vec3([1.2, 1.2, 1.2])),
         ),
         // --- object mode ---------------------------------------------------
         key(
@@ -332,7 +388,12 @@ fn common() -> Vec<Binding> {
             "S",
             Context::EditMesh,
             Action::new("mesh.subdivide").with("iterations", PropertyValue::Int(1)),
-        ),
+        )
+        // Moved off the bare `S` when Scale took it. `Shift+S` rather than
+        // somewhere else entirely: the muscle memory for subdivide is already on
+        // this key, and a modifier is a smaller thing to relearn than a new
+        // letter.
+        .with_modifiers(Modifiers::shift()),
         key(
             "mesh.loop_cut",
             "R",
@@ -353,19 +414,24 @@ fn common() -> Vec<Binding> {
             Action::new("mesh.dissolve"),
         )
         .with_modifiers(Modifiers::ctrl()),
+        // Merge and weld moved off `M` and `Shift+M` when Move took the bare
+        // key. Both moved, rather than only the one that collided: they are one
+        // idea at two tolerances, and splitting them across `Ctrl+M` and
+        // `Shift+M` would leave the pair looking unrelated.
         key(
             "mesh.merge",
             "M",
             Context::EditMesh,
             Action::new("mesh.merge"),
-        ),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         key(
             "mesh.weld",
             "M",
             Context::EditMesh,
             Action::new("mesh.merge").with("distance", PropertyValue::Float(1e-4)),
         )
-        .with_modifiers(Modifiers::shift()),
+        .with_modifiers(Modifiers::ctrl_shift()),
         key(
             "mesh.bevel",
             "B",
@@ -542,14 +608,14 @@ mod tests {
     #[test]
     fn parameters_ride_along_with_the_binding() {
         // A keymap entry carries a parameter override, so two keys can reach the
-        // same operator with different arguments. Without it, `M` and `Shift+M`
-        // would need two operators for one idea.
+        // same operator with different arguments. Without it, `Ctrl+M` and
+        // `Ctrl+Shift+M` would need two operators for one idea.
         let k = load(Preset::Kreate);
         let merge = k
             .resolve(
                 Context::EditMesh,
                 &Input::key("M"),
-                Modifiers::NONE,
+                Modifiers::ctrl(),
                 EventKind::Press,
             )
             .unwrap();
@@ -557,7 +623,7 @@ mod tests {
             .resolve(
                 Context::EditMesh,
                 &Input::key("M"),
-                Modifiers::shift(),
+                Modifiers::ctrl_shift(),
                 EventKind::Press,
             )
             .unwrap();

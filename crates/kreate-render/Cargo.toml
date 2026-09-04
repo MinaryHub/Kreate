@@ -19,6 +19,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
+kreate-testkit.workspace = true
+# Golden images for the visual regression harness. PNG only: the goldens are
+# meant to be opened in a diff by a person, and no other codec is needed to do
+# that. Already in the tree via `gltf`, so this costs nothing to build.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Shaders are parsed and validated in unit tests, so a syntax error is a test
 # failure rather than a blank window at run time.
 # `msl-out` as well as `wgsl-in`: a test translates every shader to Metal

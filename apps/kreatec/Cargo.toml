@@ -9,4 +9,6 @@ repository.workspace = true
 [dependencies]
 kreate-math.workspace = true
 kreate-mesh.workspace = true
+kreate-scene.workspace = true
 kreate-io.workspace = true
+glam.workspace = true
