@@ -2,7 +2,7 @@
 //!
 //! # The shape §2.2 asks for
 //!
-//! `M`, `R` and `S` do not move anything by themselves. They *start* a gesture:
+//! `G`, `R` and `S` do not move anything by themselves. They *start* a gesture:
 //! from then until the user confirms, the pointer drives the operator's
 //! parameters and the viewport shows the result. Confirm commits one history
 //! entry; cancel restores and records nothing.
@@ -42,13 +42,32 @@
 //! angle flip from +175 degrees to −185. Half a turn is not an unreasonable
 //! rotation to ask for.
 //!
-//! # What is deliberately not here yet
+//! # The axis cycle
 //!
-//! The local-axis cycle (`X`, `XX`, `X` again), expression and unit entry
-//! (`2*3.5`, `30deg`), snapping, and proportional editing. Each is named in §2.2
-//! and each is additive: they change what `params` returns, not the structure
-//! around it. The axis constraint, precision hold and plain numeric entry are
-//! here, because they are what a transform is unusable without.
+//! Pressing an axis key walks `free -> global -> local -> free`. Two presses
+//! rather than one because both orientations are wanted often and neither is
+//! obviously the default: moving a wheel along the world's X is a different
+//! request from moving it along the axle it is mounted on, and a modeller wants
+//! whichever the object happens to be turned to.
+//!
+//! # Snapping
+//!
+//! Held [`Snap`] settings with `Ctrl` **inverting** them rather than enabling
+//! them. §2.2 is specific about the direction: a user who has turned snapping on
+//! wants `Ctrl` to let them off it for one drag, and a user who has it off wants
+//! `Ctrl` to turn it on. One modifier, and it always means "the other way".
+//!
+//! # Proportional editing
+//!
+//! The radius rides along as a parameter, so the operator does the falloff. That
+//! keeps this module free of the document — the gesture says "within this
+//! radius, this curve" and the mesh operator is what knows where the vertices
+//! are.
+//!
+//! Element snapping — to a vertex, an edge or a face — lands the selection *on*
+//! something rather than rounding how far it went, so it replaces the offset
+//! instead of adjusting it. The candidates come from [`crate::snap`], which
+//! excludes everything the drag is about to move.
 
 use glam::{DVec3, Vec3};
 use kreate_ops::{PropertyMap, PropertyValue};
@@ -83,6 +102,16 @@ impl Kind {
             Kind::Scale => "Scale",
         }
     }
+}
+
+/// Which set of axes a constraint is expressed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    /// The world's own axes.
+    Global,
+    /// The selection's: an object's own rotation, or in edit mode the object the
+    /// elements belong to.
+    Local,
 }
 
 /// A world axis the gesture is constrained to.
@@ -120,6 +149,53 @@ impl Axis {
     }
 }
 
+/// The degree sign, accepted in an angle field.
+const DEGREE_SIGN: char = '\u{b0}';
+
+/// What a gesture rounds its value to.
+///
+/// Increments rather than a grid in world space, because a transform is a
+/// *change*: snapping a move to a tenth of a metre means the object ends up a
+/// round distance from where it was, which is what someone laying out a panel
+/// asks for. Snapping to absolute world positions is a different feature and
+/// belongs with element snapping.
+#[derive(Clone, Copy, Debug)]
+pub struct Snap {
+    /// Whether snapping is on by default. `Ctrl` inverts it.
+    pub enabled: bool,
+    /// What it snaps to.
+    pub mode: crate::snap::Mode,
+    /// Metres per step for a move.
+    pub length: f64,
+    /// Radians per step for a rotation. A sixth of a right angle by default,
+    /// which is fifteen degrees — the increment a modeller reaches for.
+    pub angle: f64,
+    /// Steps per unit for a scale, so a tenth means 1.1, 1.2, and so on.
+    pub factor: f64,
+}
+
+impl Default for Snap {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: crate::snap::Mode::Increment,
+            length: 0.1,
+            angle: std::f64::consts::FRAC_PI_2 / 6.0,
+            factor: 0.1,
+        }
+    }
+}
+
+impl Snap {
+    /// Rounds `value` to the nearest multiple of `step`.
+    fn round(value: f64, step: f64) -> f64 {
+        if step <= 0.0 || !value.is_finite() {
+            return value;
+        }
+        (value / step).round() * step
+    }
+}
+
 /// How much finer a held precision modifier makes the gesture.
 ///
 /// A tenth, measured from the moment the modifier went down rather than from the
@@ -148,6 +224,32 @@ pub struct Gesture {
     right: Vec3,
     up: Vec3,
     pub axis: Option<Axis>,
+    /// Which axes the constraint is in. Only meaningful while `axis` is set.
+    pub orientation: Orientation,
+    /// The selection's own axes, for a local constraint.
+    ///
+    /// Captured at the start rather than read per frame: the transform may be
+    /// rotating the very thing this describes, and a constraint that followed
+    /// its own result would curve.
+    basis: [Vec3; 3],
+    /// Snapping, as configured. `snap_inverted` flips it for this drag.
+    pub snap: Snap,
+    pub snap_inverted: bool,
+    /// What may be snapped to: everything that is not moving.
+    ///
+    /// Built once, at the start. Nothing outside the selection moves during a
+    /// transform, so the set cannot change — rebuilding it per frame would be
+    /// the same answer at a hundred times the cost.
+    world: crate::snap::SnapWorld,
+    /// The camera and viewport, for resolving a snap in screen space.
+    ///
+    /// Held rather than passed, so that `params` stays a function of the
+    /// gesture's own state. The camera may orbit mid-drag; the copy here is
+    /// refreshed by [`Gesture::set_view`] when it does.
+    camera: Camera,
+    viewport: (f32, f32),
+    /// Proportional editing radius in world units, or `None` for off.
+    pub proportional: Option<f64>,
     /// Where precision mode was engaged, if it is engaged.
     precise_from: Option<(f32, f32)>,
     /// Motion accumulated before precision mode was engaged.
@@ -176,12 +278,22 @@ impl Gesture {
     /// mesh elements. The caller computes it, because what counts as the
     /// selection differs between object and edit mode and this module should not
     /// have an opinion about the document.
+    // Eight arguments, and each is a distinct fact the gesture cannot work out
+    // for itself: what it is, where the pointer is, where the selection is, how
+    // the scene is being looked at, how big the viewport is, which way the
+    // selection faces, how the user has snapping set, and what may be snapped
+    // to. Bundling them into a struct would move the same eight words to a
+    // different place and add a type whose only job is to be unpacked here.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin(
         kind: Kind,
         cursor: (f32, f32),
         pivot: DVec3,
         camera: &Camera,
         viewport: (f32, f32),
+        basis: [Vec3; 3],
+        snap: Snap,
+        world: crate::snap::SnapWorld,
     ) -> Self {
         // The world size of one pixel at the pivot's distance. This is what makes
         // a free move track the cursor: drag the mouse a hundred pixels and the
@@ -202,6 +314,14 @@ impl Gesture {
             right: camera.right().as_vec3(),
             up: camera.up().as_vec3(),
             axis: None,
+            orientation: Orientation::Global,
+            basis,
+            snap,
+            snap_inverted: false,
+            world,
+            camera: *camera,
+            viewport,
+            proportional: None,
             precise_from: None,
             coarse: (0.0, 0.0),
             numeric: String::new(),
@@ -252,13 +372,80 @@ impl Gesture {
         self.bearing = Some(bearing);
     }
 
-    /// Toggles an axis constraint, as pressing the same key twice releases it.
-    pub fn toggle_axis(&mut self, axis: Axis) {
-        self.axis = if self.axis == Some(axis) {
-            None
-        } else {
-            Some(axis)
-        };
+    /// Walks the axis cycle: free, then global, then local, then free again.
+    ///
+    /// Pressing a *different* axis key starts that axis's cycle from global
+    /// rather than inheriting the previous one's orientation — the second press
+    /// is a new request, not a continuation.
+    pub fn cycle_axis(&mut self, axis: Axis) {
+        match (self.axis, self.orientation) {
+            (Some(current), Orientation::Global) if current == axis => {
+                self.orientation = Orientation::Local;
+            }
+            (Some(current), Orientation::Local) if current == axis => {
+                self.axis = None;
+                self.orientation = Orientation::Global;
+            }
+            _ => {
+                self.axis = Some(axis);
+                self.orientation = Orientation::Global;
+            }
+        }
+    }
+
+    /// The constrained direction in world space.
+    fn axis_direction(&self, axis: Axis) -> Vec3 {
+        match self.orientation {
+            Orientation::Global => axis.direction(),
+            // Normalised, because the basis comes from an object transform and a
+            // scaled object's axes are not unit vectors. Without this a
+            // constrained move on a scaled object travels the wrong distance.
+            Orientation::Local => self.basis[axis.index() as usize].normalize_or(axis.direction()),
+        }
+    }
+
+    /// Updates the view the gesture resolves snaps against.
+    ///
+    /// Called when the camera moves mid-drag. Orbiting during a transform is
+    /// allowed — looking at what you are doing is not a conflict — and a snap
+    /// resolved against a stale camera would catch on whatever used to be under
+    /// the cursor.
+    pub fn set_view(&mut self, camera: &Camera, viewport: (f32, f32)) {
+        self.camera = *camera;
+        self.viewport = viewport;
+    }
+
+    /// Where the cursor is pointing, if a snap catches.
+    ///
+    /// `None` for increment snapping, which adjusts the value rather than
+    /// choosing a destination, and for a cursor that is not near anything.
+    fn snap_target(&self) -> Option<DVec3> {
+        if !self.snapping() || !self.snap.mode.needs_geometry() {
+            return None;
+        }
+        crate::snap::resolve(
+            &self.world,
+            self.snap.mode,
+            self.cursor,
+            &self.camera,
+            self.viewport,
+        )
+        .map(|hit| hit.point)
+    }
+
+    /// Inverts the snap setting for this drag, as a held `Ctrl` does.
+    pub fn set_snap_inverted(&mut self, inverted: bool) {
+        self.snap_inverted = inverted;
+    }
+
+    /// Whether snapping applies right now.
+    fn snapping(&self) -> bool {
+        self.snap.enabled != self.snap_inverted
+    }
+
+    /// Sets or clears the proportional editing radius.
+    pub fn set_proportional(&mut self, radius: Option<f64>) {
+        self.proportional = radius;
     }
 
     /// Engages or releases precision mode at the current cursor.
@@ -290,13 +477,21 @@ impl Gesture {
     }
 
     /// Accepts a typed character for the numeric buffer. `true` if it was taken.
+    ///
+    /// Permissive, because the buffer holds an expression rather than a number:
+    /// operators, brackets and unit letters all have to get in. Whether what has
+    /// been typed *means* anything is decided when it is evaluated, which is
+    /// also the only place that can decide — `2m` is fine and `2q` is not, and
+    /// neither is knowable one character at a time.
     pub fn type_character(&mut self, c: char) -> bool {
-        if c.is_ascii_digit() || c == '.' || (c == '-' && self.numeric.is_empty()) {
+        let usable = c.is_ascii_digit()
+            || c.is_ascii_alphabetic()
+            || matches!(c, '.' | '-' | '+' | '*' | '/' | '(' | ')' | ' ')
+            || c == DEGREE_SIGN;
+        if usable {
             self.numeric.push(c);
-            true
-        } else {
-            false
         }
+        usable
     }
 
     /// Removes the last typed character.
@@ -320,12 +515,23 @@ impl Gesture {
         }
     }
 
-    /// The typed value, if the buffer holds a usable number.
+    /// The typed value, if the buffer holds something that evaluates.
+    ///
+    /// Through the expression parser, so `2*3.5`, `1/8`, `2cm` and `30deg` are
+    /// all accepted where a number is. A buffer that does not evaluate yet — or
+    /// at all — hands control back to the pointer rather than reading as zero.
     fn typed(&self) -> Option<f64> {
-        if self.numeric.is_empty() || self.numeric == "-" || self.numeric == "." {
-            return None;
+        crate::expr::eval(&self.numeric, self.unit()).ok()
+    }
+
+    /// The unit the numeric field is in, which decides how a bare number and a
+    /// suffix are read.
+    fn unit(&self) -> crate::expr::Unit {
+        match self.kind {
+            Kind::Move => crate::expr::Unit::Length,
+            Kind::Rotate => crate::expr::Unit::Angle,
+            Kind::Scale => crate::expr::Unit::Factor,
         }
-        self.numeric.parse().ok()
     }
 
     /// The operator parameters this gesture currently means.
@@ -339,39 +545,36 @@ impl Gesture {
 
         match self.kind {
             Kind::Move => {
-                let offset = match (self.axis, self.typed()) {
-                    // A typed distance along a chosen axis is exact.
-                    (Some(axis), Some(value)) => axis.direction() * value as f32,
-                    // Typed with no axis: along the axis the drag most resembles,
-                    // so that typing a number after starting to drag does what
-                    // the drag was already doing.
-                    (None, Some(value)) => self.dominant_axis(dx, dy).direction() * value as f32,
-                    (Some(axis), None) => {
-                        // The pointer's motion projected onto the axis, so the
-                        // selection follows the cursor as closely as a
-                        // constrained move can.
-                        let free = self.screen_to_world(dx, dy);
-                        axis.direction() * free.dot(axis.direction())
-                    }
-                    // Free: straight across the view plane, one pixel to one
-                    // pixel's worth of world.
-                    (None, None) => self.screen_to_world(dx, dy),
-                };
+                let offset = self.offset(dx, dy);
                 params.set(
                     "translation",
-                    PropertyValue::Vec3([offset.x as f64, offset.y as f64, offset.z as f64]),
+                    PropertyValue::Vec3([offset.x, offset.y, offset.z]),
                 );
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
                 let angle = match self.typed() {
-                    Some(degrees) => degrees.to_radians(),
+                    // Already in radians: the expression parser converts, so a
+                    // bare `30` and `30deg` mean the same thing and `0.5rad`
+                    // means what it says.
+                    Some(radians) => radians,
                     // The angle the pointer has swept around the pivot on
                     // screen, whole turns included. Following the pointer around
                     // the pivot rather than reading horizontal motion: it is what
                     // the gesture looks like it should do, and it keeps working
                     // when the pivot is off to one side.
                     None => self.swept,
+                };
+                // Typed values are never snapped: someone who wrote a number
+                // meant that number, and rounding it would be the tool arguing.
+                // Angles snap to their increment whichever element mode is
+                // set: there is no sensible "rotate until this vertex is on
+                // that one" without a second reference point, and the increment
+                // is what a rotation wants anyway.
+                let angle = if self.snapping() && self.typed().is_none() {
+                    Snap::round(angle, self.snap.angle)
+                } else {
+                    angle
                 };
                 params.set("angle", PropertyValue::Float(angle));
                 params.set("axis", PropertyValue::Enum(axis.index()));
@@ -384,6 +587,11 @@ impl Gesture {
                     // through the pivot shrinks towards nothing.
                     None => self.distance_ratio() as f64,
                 };
+                let factor = if self.snapping() && self.typed().is_none() {
+                    Snap::round(factor, self.snap.factor)
+                } else {
+                    factor
+                };
                 let scale = match self.axis {
                     None => [factor, factor, factor],
                     Some(Axis::X) => [factor, 1.0, 1.0],
@@ -393,7 +601,81 @@ impl Gesture {
                 params.set("scale", PropertyValue::Vec3(scale));
             }
         }
+        // Carried on every transform, so an operator that supports it sees it and
+        // one that does not ignores it. The radius is in world units; absent
+        // means off, which is what an operator that has never heard of it
+        // defaults to anyway.
+        if let Some(radius) = self.proportional {
+            params.set("proportional_size", PropertyValue::Float(radius));
+        }
         params
+    }
+
+    /// The translation this gesture means, constrained and snapped.
+    ///
+    /// In `f64`, because that is what comes out the other end: the parameter is
+    /// `f64` and an object's transform is `f64` for the large-scene precision
+    /// §4.10 depends on. Computing in `f32` and widening at the last moment
+    /// looked harmless and was not — a typed `1.4/8` came out as
+    /// 0.17499999701976776, which is a rounding error the user can see in the
+    /// header and in the saved file.
+    fn offset(&self, dx: f32, dy: f32) -> DVec3 {
+        // Only in increment mode. The element modes have already had their say
+        // above, and rounding *their* answer would move the selection off the
+        // vertex it was just snapped to.
+        let increment = self.snapping() && self.snap.mode == crate::snap::Mode::Increment;
+        let snap = |v: f64| {
+            if increment {
+                Snap::round(v, self.snap.length)
+            } else {
+                v
+            }
+        };
+        // An element snap names a *destination*, so it replaces the offset rather
+        // than rounding it: the selection lands on the thing the cursor is over.
+        // Under an axis constraint only the component along that axis is taken,
+        // so a constrained move still travels only along its axis and stops
+        // level with what was snapped to.
+        //
+        // A typed value still wins. Someone who wrote a number is not asking to
+        // be moved somewhere else.
+        if self.typed().is_none() {
+            if let Some(target) = self.snap_target() {
+                let to_target = target - self.pivot;
+                return match self.axis {
+                    None => to_target,
+                    Some(axis) => {
+                        let direction = self.axis_direction(axis).as_dvec3();
+                        direction * to_target.dot(direction)
+                    }
+                };
+            }
+        }
+        match (self.axis, self.typed()) {
+            // A typed distance along a chosen axis is exact, and unsnapped.
+            (Some(axis), Some(value)) => self.axis_direction(axis).as_dvec3() * value,
+            // Typed with no axis: along the axis the drag most resembles, so
+            // that typing a number after starting to drag does what the drag was
+            // already doing.
+            (None, Some(value)) => {
+                let axis = self.dominant_axis(dx, dy);
+                self.axis_direction(axis).as_dvec3() * value
+            }
+            (Some(axis), None) => {
+                // The pointer's motion projected onto the axis, so the selection
+                // follows the cursor as closely as a constrained move can.
+                let direction = self.axis_direction(axis).as_dvec3();
+                let free = self.screen_to_world(dx, dy).as_dvec3();
+                direction * snap(free.dot(direction))
+            }
+            // Free: straight across the view plane, one pixel to one pixel's
+            // worth of world. Snapped per component, so a snapped free move lands
+            // on round numbers in every direction rather than only along one.
+            (None, None) => {
+                let free = self.screen_to_world(dx, dy).as_dvec3();
+                DVec3::new(snap(free.x), snap(free.y), snap(free.z))
+            }
+        }
     }
 
     /// A screen displacement as a world vector across the view plane.
@@ -447,10 +729,23 @@ impl Gesture {
     }
 
     /// What the status line says while the gesture runs.
+    /// Which axis the gesture is constrained to, if any.
+    ///
+    /// Exposed so the modal header can wear that axis's colour. The status
+    /// string already *says* the axis, but a colour is read without reading,
+    /// and during a drag the user's attention is on the model.
+    pub fn axis_index(&self) -> Option<usize> {
+        self.axis.map(|a| a.index() as usize)
+    }
+
     pub fn status(&self) -> String {
-        let axis = match self.axis {
-            Some(axis) => format!(" {}", axis.label()),
-            None => String::new(),
+        let axis = match (self.axis, self.orientation) {
+            (Some(axis), Orientation::Global) => format!(" {}", axis.label()),
+            // Doubled, the way it was typed, so the header says which of the two
+            // constraints is active rather than leaving it to be inferred from
+            // the result.
+            (Some(axis), Orientation::Local) => format!(" {0}{0}", axis.label()),
+            (None, _) => String::new(),
         };
         let precise = if self.precise_from.is_some() {
             "  precise"
@@ -465,18 +760,11 @@ impl Gesture {
         let value = match self.kind {
             Kind::Move => {
                 let (dx, dy) = self.effective_delta(self.cursor);
-                let v = match (self.axis, self.typed()) {
-                    (Some(a), Some(t)) => a.direction() * t as f32,
-                    (None, Some(t)) => self.dominant_axis(dx, dy).direction() * t as f32,
-                    (Some(a), None) => {
-                        a.direction() * self.screen_to_world(dx, dy).dot(a.direction())
-                    }
-                    (None, None) => self.screen_to_world(dx, dy),
-                };
+                let v = self.offset(dx, dy);
                 format!("{:.3} {:.3} {:.3}", v.x, v.y, v.z)
             }
             Kind::Rotate => {
-                let radians = self.typed().map(f64::to_radians).unwrap_or(self.swept);
+                let radians = self.typed().unwrap_or(self.swept);
                 format!("{:.1} deg", radians.to_degrees())
             }
             Kind::Scale => {
@@ -484,7 +772,24 @@ impl Gesture {
                 format!("{f:.3}")
             }
         };
-        format!("{}{axis}  {value}{typed}{precise}", self.kind.label())
+        let snap = if self.snapping() {
+            let caught = if self.snap_target().is_some() {
+                "*"
+            } else {
+                ""
+            };
+            format!("  snap {}{caught}", self.snap.mode.label())
+        } else {
+            String::new()
+        };
+        let proportional = match self.proportional {
+            Some(r) => format!("  falloff {r:.2}"),
+            None => String::new(),
+        };
+        format!(
+            "{}{axis}  {value}{typed}{precise}{snap}{proportional}",
+            self.kind.label()
+        )
     }
 
     /// The pivot, for a caller that wants to draw it.

@@ -112,7 +112,7 @@ impl Modifiers {
     }
 
     /// How specific this combination is, for ranking two matches.
-    fn weight(self) -> u32 {
+    pub(crate) fn weight(self) -> u32 {
         self.shift as u32 + self.ctrl as u32 + self.alt as u32
     }
 }
@@ -159,6 +159,34 @@ impl Context {
             // stray `S` would start a scale inside a running transform.
             Context::Modal => &[Context::Modal],
         }
+    }
+
+    /// Every context there is.
+    pub const ALL: &'static [Context] = &[
+        Context::Global,
+        Context::Viewport,
+        Context::ObjectMode,
+        Context::EditMesh,
+        Context::Modal,
+    ];
+
+    /// The contexts a keystroke is ever dispatched *in*.
+    ///
+    /// `Global` and `Viewport` are shared parents, never the active context —
+    /// the application is always in object mode, edit mode or a modal tool. So
+    /// a binding in a parent is only reachable through a leaf, which is what
+    /// makes [`Keymap::conflicts`] able to tell a shadowed binding from a dead
+    /// one.
+    ///
+    /// Derived from [`Self::chain`] rather than listed: a context that appears
+    /// in someone else's chain is an ancestor, and anything else is a leaf. A
+    /// new context therefore cannot be forgotten here.
+    pub fn leaves() -> impl Iterator<Item = Context> {
+        Self::ALL.iter().copied().filter(|c| {
+            !Self::ALL
+                .iter()
+                .any(|other| other != c && other.chain().contains(c))
+        })
     }
 }
 
@@ -233,6 +261,38 @@ impl Binding {
     pub fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
         self.modifiers = modifiers;
         self
+    }
+
+    /// How this binding reads to a user: `Ctrl+Shift+M`, `Tab`, `MMB`.
+    ///
+    /// The modifier order is fixed rather than following the struct's fields,
+    /// because a shortcut is read as a phrase: `Shift+Ctrl+S` looks like a
+    /// different shortcut from `Ctrl+Shift+S` even though it is the same one.
+    pub fn describe(&self) -> String {
+        let mut text = String::new();
+        for (held, name) in [
+            (self.modifiers.ctrl, "Ctrl"),
+            (self.modifiers.shift, "Shift"),
+            (self.modifiers.alt, "Alt"),
+        ] {
+            if held {
+                text.push_str(name);
+                text.push('+');
+            }
+        }
+        match &self.input {
+            Input::Key(name) => text.push_str(name),
+            Input::Mouse(button) => text.push_str(match button {
+                MouseButton::Left => "LMB",
+                MouseButton::Middle => "MMB",
+                MouseButton::Right => "RMB",
+            }),
+            Input::Wheel => text.push_str("Wheel"),
+        }
+        if self.event == EventKind::Drag {
+            text.push_str(" drag");
+        }
+        text
     }
 
     pub fn on(mut self, event: EventKind) -> Self {
@@ -352,24 +412,121 @@ impl Keymap {
         None
     }
 
-    /// Bindings that can never fire because an earlier one takes the same
-    /// trigger in the same context.
+    /// The shortcut that runs `op_id` in `context`, if there is one.
     ///
-    /// Reported rather than prevented: a shadowed binding is usually what the
-    /// user meant when they remapped something, and refusing the change would be
-    /// worse than telling them. The pair is `(shadowed, by)`.
+    /// Resolved through the same context chain as a keystroke, so what is
+    /// reported is what would actually fire: a tooltip that promised `X` while
+    /// an inner context had rebound it would be worse than saying nothing.
+    ///
+    /// Among several, the *simplest* wins — fewest modifiers, then alphabetical
+    /// for stability. An operator reachable by both `E` and `Ctrl+Shift+E` is
+    /// introduced by `E`, and a tie that resolved by hash order would make the
+    /// tooltip change between runs.
+    pub fn shortcut_for(&self, op_id: &str, context: Context) -> Option<String> {
+        self.shortcut_for_action(op_id, &PropertyMap::new(), context)
+    }
+
+    /// The shortcut that runs `op_id` **with these parameters**, if there is one.
+    ///
+    /// A binding qualifies when it agrees with `params` on every key `params`
+    /// names. It may carry more of its own — the menu entry for Extrude says
+    /// nothing about `offset`, and `E` is still its shortcut — but it may not
+    /// disagree.
+    ///
+    /// The distinction is not academic. `mesh.normals` is bound twice: `Ctrl+N`
+    /// recalculates and `Shift+N` flips. Looked up by operator alone, the
+    /// "Recalculate Normals" row would be labelled with whichever of the two
+    /// sorted first, and a menu that tells the user to press the key for a
+    /// *different* command is worse than one that says nothing.
+    pub fn shortcut_for_action(
+        &self,
+        op_id: &str,
+        params: &PropertyMap,
+        context: Context,
+    ) -> Option<String> {
+        let chain = context.chain();
+        let mut best: Option<(usize, u32, String)> = None;
+        for binding in self.bindings() {
+            if binding.disabled || binding.action.op_id != op_id {
+                continue;
+            }
+            let agrees = params
+                .iter()
+                .all(|(name, value)| binding.action.params.get(name) == Some(value));
+            if !agrees {
+                continue;
+            }
+            let Some(depth) = chain.iter().position(|c| *c == binding.context) else {
+                continue;
+            };
+            let text = binding.describe();
+            let weight = binding.modifiers.weight();
+            let candidate = (depth, weight, text);
+            if best.as_ref().is_none_or(|current| candidate < *current) {
+                best = Some(candidate);
+            }
+        }
+        best.map(|(_, _, text)| text)
+    }
+
+    /// Bindings that can never fire, each paired with what takes its trigger.
+    ///
+    /// Two ways a binding dies, and only one of them is obvious. The obvious
+    /// one is a duplicate in the same context: the loser is unreachable
+    /// everywhere.
+    ///
+    /// The other is invisible, and it cost this project its grid toggle. An
+    /// *outer* binding whose trigger is taken in every inner context that
+    /// leads to it is unreachable too: `Viewport` is never the active context,
+    /// so a `Viewport` binding that both `ObjectMode` and `EditMesh` rebind can
+    /// never fire — and a check that only compared like contexts said nothing
+    /// at all. That is precisely what happened when Move moved onto `G`.
+    ///
+    /// Cross-context shadowing is not itself a fault and is not reported: `X`
+    /// deletes an object in one mode and vertices in the other, and each is
+    /// reachable in its own mode. What is reported is a binding reachable in
+    /// **no** mode.
+    ///
+    /// `matches` demands exact modifiers, so only an identical trigger
+    /// competes: `Shift+M` neither shadows nor is shadowed by `M`.
+    ///
+    /// Reported rather than prevented: a shadowed binding is usually what
+    /// the user meant when they remapped something, and refusing the change
+    /// would be worse than telling them. The pair is `(shadowed, by)`.
     pub fn conflicts(&self) -> Vec<(BindingId, BindingId)> {
         let all: Vec<Binding> = self.bindings().filter(|b| !b.disabled).collect();
         let mut out = Vec::new();
         for (i, b) in all.iter().enumerate() {
-            for a in all.iter().take(i) {
-                if a.context == b.context
-                    && a.input == b.input
-                    && a.modifiers == b.modifiers
-                    && a.event == b.event
-                {
-                    out.push((b.id.clone(), a.id.clone()));
-                    break;
+            let mut in_play = false;
+            let mut reachable = false;
+            let mut beaten_by: Option<&BindingId> = None;
+            for leaf in Context::leaves() {
+                let chain = leaf.chain();
+                let Some(depth) = chain.iter().position(|c| *c == b.context) else {
+                    continue;
+                };
+                in_play = true;
+                // Who else answers this exact trigger, in a scope this leaf
+                // searches first? Within one scope `resolve` keeps the first it
+                // finds among equals, so an earlier position wins there.
+                let winner = all.iter().enumerate().find(|(j, a)| {
+                    *j != i
+                        && a.input == b.input
+                        && a.modifiers == b.modifiers
+                        && a.event == b.event
+                        && match chain.iter().position(|c| *c == a.context) {
+                            Some(d) => d < depth || (d == depth && *j < i),
+                            None => false,
+                        }
+                });
+                match winner {
+                    Some((_, a)) => beaten_by = beaten_by.or(Some(&a.id)),
+                    None => reachable = true,
+                }
+            }
+            if in_play && !reachable {
+                if let Some(other) = beaten_by {
+                    out.push((b.id.clone(), other.clone()));
                 }
             }
         }
@@ -600,6 +757,133 @@ mod tests {
     }
 
     #[test]
+    fn leaves_are_the_contexts_a_keystroke_arrives_in() {
+        let leaves: Vec<Context> = Context::leaves().collect();
+        assert!(leaves.contains(&Context::ObjectMode));
+        assert!(leaves.contains(&Context::EditMesh));
+        assert!(leaves.contains(&Context::Modal));
+        // Parents, never active on their own — which is the whole reason
+        // `conflicts` can tell a shadowed binding from a dead one.
+        assert!(!leaves.contains(&Context::Viewport));
+        assert!(!leaves.contains(&Context::Global));
+    }
+
+    #[test]
+    fn an_outer_binding_both_modes_rebind_is_reported_dead() {
+        // The case that cost the grid toggle. `Viewport` is never the active
+        // context, so a binding there that *both* inner modes take can never
+        // fire — and a same-context comparison sees nothing wrong, because no
+        // two of the three share a context.
+        let k = Keymap::new(vec![
+            Binding::new(
+                "view.grid",
+                Context::Viewport,
+                Input::key("G"),
+                Action::new("view.toggle_grid"),
+            ),
+            Binding::new(
+                "object.translate",
+                Context::ObjectMode,
+                Input::key("G"),
+                Action::new("object.translate"),
+            ),
+            Binding::new(
+                "mesh.translate",
+                Context::EditMesh,
+                Input::key("G"),
+                Action::new("mesh.translate"),
+            ),
+        ]);
+        let conflicts = k.conflicts();
+        assert_eq!(
+            conflicts
+                .iter()
+                .map(|(a, _)| a.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["view.grid"],
+            "the dead binding is the outer one, and only it"
+        );
+    }
+
+    #[test]
+    fn an_outer_binding_only_one_mode_rebinds_is_still_alive() {
+        // Half the previous case. The grid toggle would still be reachable in
+        // edit mode, so reporting it would be crying wolf — and a keymap panel
+        // that flags working bindings gets ignored, which is how the real one
+        // gets missed.
+        let k = Keymap::new(vec![
+            Binding::new(
+                "view.grid",
+                Context::Viewport,
+                Input::key("G"),
+                Action::new("view.toggle_grid"),
+            ),
+            Binding::new(
+                "object.translate",
+                Context::ObjectMode,
+                Input::key("G"),
+                Action::new("object.translate"),
+            ),
+        ]);
+        assert!(k.conflicts().is_empty(), "{:?}", k.conflicts());
+        // And it is genuinely reachable, in the mode that did not take the key.
+        assert_eq!(
+            k.resolve(
+                Context::EditMesh,
+                &Input::key("G"),
+                Modifiers::NONE,
+                EventKind::Press
+            )
+            .unwrap()
+            .op_id,
+            "view.toggle_grid"
+        );
+    }
+
+    #[test]
+    fn the_same_key_meaning_two_things_in_two_modes_is_not_a_conflict() {
+        // `X` deletes an object in one mode and vertices in the other. Both are
+        // reachable in their own mode, and neither is shadowed.
+        let k = Keymap::new(vec![
+            Binding::new(
+                "object.delete",
+                Context::ObjectMode,
+                Input::key("X"),
+                Action::new("object.delete"),
+            ),
+            Binding::new(
+                "mesh.delete",
+                Context::EditMesh,
+                Input::key("X"),
+                Action::new("mesh.delete"),
+            ),
+        ]);
+        assert!(k.conflicts().is_empty(), "{:?}", k.conflicts());
+    }
+
+    #[test]
+    fn a_modifier_neither_shadows_nor_is_shadowed() {
+        // `matches` demands exact modifiers, so `M` and `Shift+M` do not
+        // compete — which is what lets merge and weld share a letter.
+        let k = Keymap::new(vec![
+            Binding::new(
+                "mesh.merge",
+                Context::EditMesh,
+                Input::key("M"),
+                Action::new("mesh.merge"),
+            ),
+            Binding::new(
+                "mesh.weld",
+                Context::EditMesh,
+                Input::key("M"),
+                Action::new("mesh.merge"),
+            )
+            .with_modifiers(Modifiers::shift()),
+        ]);
+        assert!(k.conflicts().is_empty(), "{:?}", k.conflicts());
+    }
+
+    #[test]
     fn a_clean_preset_has_no_conflicts() {
         for preset in presets::ALL.iter().copied() {
             let k = presets::load(preset);
@@ -690,5 +974,128 @@ mod tests {
             )
             .unwrap();
         assert!(!extrude.is_view());
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use crate::presets::{load, Preset};
+
+    #[test]
+    fn a_shortcut_reads_as_a_phrase() {
+        let b = Binding::new(
+            "test",
+            Context::Global,
+            Input::key("S"),
+            Action::new("file.save"),
+        )
+        .with_modifiers(Modifiers::ctrl_shift());
+        // Ctrl before Shift before Alt, always. `Shift+Ctrl+S` looks like a
+        // different shortcut from `Ctrl+Shift+S` even though it is the same one.
+        assert_eq!(b.describe(), "Ctrl+Shift+S");
+    }
+
+    #[test]
+    fn a_mouse_binding_reads_as_a_button() {
+        let b = Binding::new(
+            "test",
+            Context::Viewport,
+            Input::Mouse(MouseButton::Middle),
+            Action::new("view.orbit"),
+        )
+        .on(EventKind::Drag);
+        assert_eq!(b.describe(), "MMB drag");
+    }
+
+    #[test]
+    fn the_shortcut_for_an_operator_is_found() {
+        let k = load(Preset::Kreate);
+        assert_eq!(
+            k.shortcut_for("edit.undo", Context::Viewport).as_deref(),
+            Some("Ctrl+Z")
+        );
+        assert_eq!(
+            k.shortcut_for("mesh.extrude_region", Context::EditMesh)
+                .as_deref(),
+            Some("E"),
+            "the binding is `mesh.extrude`; the *operator* it runs is              `mesh.extrude_region`, and the lookup is by operator"
+        );
+    }
+
+    #[test]
+    fn the_simplest_of_several_shortcuts_is_reported() {
+        // An operator reachable by both `E` and `Ctrl+Shift+E` is introduced by
+        // `E`. A tie broken by iteration order would also make a tooltip change
+        // between runs, which is why the rule is fewest modifiers then
+        // alphabetical rather than "whichever came first".
+        let mut k = load(Preset::Kreate);
+        k.add_addon(
+            Binding::new(
+                "test.awkward",
+                Context::EditMesh,
+                Input::key("E"),
+                Action::new("mesh.extrude_region"),
+            )
+            .with_modifiers(Modifiers::ctrl_shift()),
+        );
+        assert_eq!(
+            k.shortcut_for("mesh.extrude_region", Context::EditMesh)
+                .as_deref(),
+            Some("E")
+        );
+    }
+
+    #[test]
+    fn a_shortcut_from_an_unreachable_context_is_not_reported() {
+        // An edit-mode binding does not apply in object mode, and a tooltip that
+        // promised one would be telling the user to press a key that does
+        // nothing.
+        let k = load(Preset::Kreate);
+        assert!(k
+            .shortcut_for("mesh.extrude_region", Context::ObjectMode)
+            .is_none());
+    }
+
+    #[test]
+    fn an_operator_with_no_binding_reports_none() {
+        let k = load(Preset::Kreate);
+        assert!(k
+            .shortcut_for("nothing.bound.to.this", Context::Global)
+            .is_none());
+    }
+
+    #[test]
+    fn a_disabled_binding_is_not_reported() {
+        // A user who removed a shortcut should not be told it still works.
+        let mut k = load(Preset::Kreate);
+        k.set_override(
+            &BindingId::new("edit.undo"),
+            Override {
+                disabled: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(k.shortcut_for("edit.undo", Context::Viewport).is_none());
+    }
+
+    #[test]
+    fn a_remapped_binding_reports_its_new_key() {
+        // The whole point of resolving through the keymap rather than hardcoding
+        // a table: a user who rebound a key must see the key they chose.
+        let mut k = load(Preset::Kreate);
+        k.set_override(
+            &BindingId::new("mesh.extrude"),
+            Override {
+                input: Some(Input::key("J")),
+                modifiers: Some(Modifiers::alt()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            k.shortcut_for("mesh.extrude_region", Context::EditMesh)
+                .as_deref(),
+            Some("Alt+J")
+        );
     }
 }

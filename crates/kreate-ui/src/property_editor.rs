@@ -178,7 +178,9 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
                     // i18n-exempt: axis letters are conventionally untranslated
                     ui.label(*axis);
                     let mut component = out[i];
-                    if drag_float(ui, desc, &mut component) {
+                    let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
+                    axis_marker(ui, field.response.rect, i);
+                    if field.inner {
                         out[i] = component;
                         changed = true;
                     }
@@ -247,6 +249,33 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
 }
 
 /// A drag-scrub float field, in display units.
+/// A coloured strip down the left edge of an axis field.
+///
+/// The letter says which axis; the colour is what lets the eye find the right
+/// box without reading. It is the same three colours as the grid and the
+/// navigation gizmo — see [`crate::theme::Theme::axis`] — which is the point:
+/// after a week the user reaches for "the red one" without deciding to.
+///
+/// Drawn rather than styled because egui has no per-widget border, and drawn
+/// *after* the field so it is not painted over.
+fn axis_marker(ui: &Ui, rect: egui::Rect, axis: usize) {
+    const WIDTH: f32 = 2.0;
+    if rect.width() <= WIDTH {
+        return;
+    }
+    let strip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + WIDTH, rect.max.y));
+    ui.painter().rect_filled(
+        strip,
+        egui::CornerRadius {
+            nw: ui.visuals().widgets.inactive.corner_radius.nw,
+            sw: ui.visuals().widgets.inactive.corner_radius.sw,
+            ne: 0,
+            se: 0,
+        },
+        crate::theme::from_ui(ui).axis(axis),
+    );
+}
+
 fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
     let display = UnitDisplay::of(desc.unit);
     let mut shown = *value * display.to_display;

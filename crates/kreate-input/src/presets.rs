@@ -214,12 +214,18 @@ fn common() -> Vec<Binding> {
             Context::Viewport,
             Action::new("view.toggle_projection"),
         ),
+        // On `Shift+G` rather than bare `G`, which Move now takes in both
+        // modes. Not a stylistic move: `ObjectMode` and `EditMesh` are searched
+        // before `Viewport`, the application is always in one of the two, and a
+        // bare `G` here would therefore be unreachable rather than merely
+        // shadowed — see `Keymap::conflicts`, which now says so.
         key(
             "view.grid",
             "G",
             Context::Viewport,
             Action::new("view.toggle_grid"),
-        ),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "view.wireframe",
             "W",
@@ -232,6 +238,28 @@ fn common() -> Vec<Binding> {
             Context::Viewport,
             Action::new("view.toggle_auto_depth"),
         ),
+        // The two standing transform settings. Toggles rather than holds: they
+        // are how the user works, not something wanted for one drag — `Ctrl`
+        // covers the one-drag case by inverting the snap setting.
+        key(
+            "view.snap",
+            "Backquote",
+            Context::Viewport,
+            Action::new("view.toggle_snap"),
+        ),
+        key(
+            "view.proportional",
+            "O",
+            Context::EditMesh,
+            Action::new("view.toggle_proportional"),
+        ),
+        key(
+            "view.snap_mode",
+            "Backquote",
+            Context::Viewport,
+            Action::new("view.cycle_snap_mode"),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "edit.adjust_smaller",
             "BracketLeft",
@@ -275,10 +303,14 @@ fn common() -> Vec<Binding> {
             Action::new("object.add_next_primitive"),
         )
         .with_modifiers(Modifiers::shift()),
-        // Move, Rotate, Scale on M, R, S — the same three keys in object mode
-        // and in edit mode, so the gesture does not change with the mode. The
-        // binding ids stay as they are: a released id is part of a saved keymap,
-        // and renaming one would silently drop a user's remapping of it.
+        // Move, Rotate, Scale on G, R, S — the same three keys in object mode
+        // and in edit mode, so the gesture does not change with the mode. `G`
+        // for grab rather than `M` for move: it is what every modeller's hand
+        // already knows, and this preset is Blender's deliberately.
+        //
+        // The binding ids stay as they are — `object.translate_up` is still
+        // called that on `G`: a released id is part of a saved keymap, and
+        // renaming one would silently drop a user's remapping of it.
         //
         // Still fixed-step operators rather than interactive modal tools. The
         // full `TransformOp` — axis constraints, numeric entry, snapping,
@@ -287,7 +319,7 @@ fn common() -> Vec<Binding> {
         // does, so a keymap written today keeps working.
         key(
             "object.translate_up",
-            "M",
+            "G",
             Context::ObjectMode,
             Action::new("object.translate")
                 .with("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
@@ -316,7 +348,7 @@ fn common() -> Vec<Binding> {
         // do: `mesh.translate` and friends move whatever the selection touches.
         key(
             "mesh.translate",
-            "M",
+            "G",
             Context::EditMesh,
             Action::new("mesh.translate")
                 .with("translation", PropertyValue::Vec3([0.0, 0.0, 0.25])),
@@ -414,24 +446,22 @@ fn common() -> Vec<Binding> {
             Action::new("mesh.dissolve"),
         )
         .with_modifiers(Modifiers::ctrl()),
-        // Merge and weld moved off `M` and `Shift+M` when Move took the bare
-        // key. Both moved, rather than only the one that collided: they are one
-        // idea at two tolerances, and splitting them across `Ctrl+M` and
-        // `Shift+M` would leave the pair looking unrelated.
+        // Back on `M` and `Shift+M`, where they were before Move took the bare
+        // key — and where Blender has them. The `Ctrl` they wore in between
+        // existed only for that collision, and `G` has now ended it.
         key(
             "mesh.merge",
             "M",
             Context::EditMesh,
             Action::new("mesh.merge"),
-        )
-        .with_modifiers(Modifiers::ctrl()),
+        ),
         key(
             "mesh.weld",
             "M",
             Context::EditMesh,
             Action::new("mesh.merge").with("distance", PropertyValue::Float(1e-4)),
         )
-        .with_modifiers(Modifiers::ctrl_shift()),
+        .with_modifiers(Modifiers::shift()),
         key(
             "mesh.bevel",
             "B",
@@ -608,14 +638,14 @@ mod tests {
     #[test]
     fn parameters_ride_along_with_the_binding() {
         // A keymap entry carries a parameter override, so two keys can reach the
-        // same operator with different arguments. Without it, `Ctrl+M` and
-        // `Ctrl+Shift+M` would need two operators for one idea.
+        // same operator with different arguments. Without it, `M` and `Shift+M`
+        // would need two operators for one idea.
         let k = load(Preset::Kreate);
         let merge = k
             .resolve(
                 Context::EditMesh,
                 &Input::key("M"),
-                Modifiers::ctrl(),
+                Modifiers::default(),
                 EventKind::Press,
             )
             .unwrap();
@@ -623,13 +653,79 @@ mod tests {
             .resolve(
                 Context::EditMesh,
                 &Input::key("M"),
-                Modifiers::ctrl_shift(),
+                Modifiers::shift(),
                 EventKind::Press,
             )
             .unwrap();
         assert_eq!(merge.op_id, weld.op_id);
         assert!(merge.params.get("distance").is_none());
         assert!(weld.params.get("distance").is_some());
+    }
+
+    #[test]
+    fn g_moves_in_both_modes_and_the_grid_survived_it() {
+        // `G` for grab, in every preset, in both modes — the transform keys are
+        // in `common()`, so a preset that lost one would have lost it silently.
+        for preset in ALL.iter().copied() {
+            let k = load(preset);
+            for (context, op) in [
+                (Context::ObjectMode, "object.translate"),
+                (Context::EditMesh, "mesh.translate"),
+            ] {
+                assert_eq!(
+                    k.resolve(context, &Input::key("G"), Modifiers::NONE, EventKind::Press)
+                        .map(|a| a.op_id),
+                    Some(op.to_string()),
+                    "{preset:?}: G does not move in {context:?}"
+                );
+            }
+
+            // And the grid toggle is still reachable, from both modes. It used
+            // to be on bare `G`, where taking that key for Move would have
+            // killed it outright rather than merely moved it: the inner
+            // contexts are searched first and the application is always in one
+            // of them.
+            for context in [Context::ObjectMode, Context::EditMesh] {
+                assert_eq!(
+                    k.resolve(
+                        context,
+                        &Input::key("G"),
+                        Modifiers::shift(),
+                        EventKind::Press
+                    )
+                    .map(|a| a.op_id),
+                    Some("view.toggle_grid".to_string()),
+                    "{preset:?}: the grid toggle is unreachable from {context:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn merge_and_weld_hold_m_without_a_modifier_between_them() {
+        // They wore a `Ctrl` only while Move held the bare key. `M` is theirs
+        // again, and the pair still reads as one idea at two tolerances.
+        let k = load(Preset::Kreate);
+        let plain = k
+            .resolve(
+                Context::EditMesh,
+                &Input::key("M"),
+                Modifiers::NONE,
+                EventKind::Press,
+            )
+            .expect("M merges");
+        assert_eq!(plain.op_id, "mesh.merge");
+        assert!(plain.params.get("distance").is_none());
+        // And nothing answers `M` in object mode, where merge has no meaning —
+        // rather than object mode quietly inheriting edit mode's merge.
+        assert!(k
+            .resolve(
+                Context::ObjectMode,
+                &Input::key("M"),
+                Modifiers::NONE,
+                EventKind::Press
+            )
+            .is_none());
     }
 
     #[test]

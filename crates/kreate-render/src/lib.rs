@@ -12,6 +12,7 @@ pub mod hiz;
 pub mod lod;
 pub mod mesh_gpu;
 pub mod motion;
+pub mod palette;
 pub mod picking;
 pub mod region_select;
 pub mod viewport;

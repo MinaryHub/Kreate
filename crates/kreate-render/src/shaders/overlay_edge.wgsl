@@ -20,6 +20,10 @@ struct EdgeGlobals {
     // xy: viewport size in pixels. z: line width in pixels. w: relative depth
     // offset toward the viewer.
     params: vec4<f32>,
+    // The three edge diagnostics, linear RGBA, from the shared palette.
+    non_manifold_color: vec4<f32>,
+    seam_color: vec4<f32>,
+    sharp_color: vec4<f32>,
 };
 
 struct EdgeObject {
@@ -200,14 +204,14 @@ fn edge_color(flags: u32) -> vec4<f32> {
         // Loud on purpose: a non-manifold edge is nearly always a mistake, and
         // one the user cannot otherwise see until an operation fails on it much
         // later.
-        return vec4<f32>(0.95, 0.25, 0.85, 1.0) * object.flags_params.y
+        return g.non_manifold_color * object.flags_params.y
             + base * (1.0 - object.flags_params.y);
     }
     if ((flags & FLAG_SEAM) != 0u) {
-        return vec4<f32>(0.90, 0.45, 0.15, 1.0);
+        return g.seam_color;
     }
     if ((flags & FLAG_SHARP) != 0u) {
-        return vec4<f32>(0.20, 0.75, 0.95, 1.0);
+        return g.sharp_color;
     }
     if ((flags & FLAG_BOUNDARY) != 0u) {
         return base * (1.0 - object.flags_params.x)

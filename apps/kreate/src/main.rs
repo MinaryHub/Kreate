@@ -17,7 +17,7 @@ use kreate::{gpu_sync, shell};
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{DVec3, Vec4};
+use glam::{DVec3, Vec3, Vec4};
 use kreate::shell::ShellState;
 use kreate_input::{
     keymap::{Action, EventKind, Keymap, Modifiers as KeyMods, MouseButton as KeyMouse},
@@ -60,29 +60,37 @@ const HELP: &str = "\
 Kreate
 
   Navigate   MMB orbit  Shift+MMB pan  wheel zoom  F frame all
-  View       Z shading  O orthographic  G grid  W wireframe
+  View       Z shading  O orthographic  Shift+G grid  W wireframe
              Y auto-depth orbit (on by default)
   Add        A cube  Shift+A next primitive shape
   Edit       D duplicate (linked)  X delete  Ctrl+A select all
   Edit mode  Tab enter/leave  E extrude  X delete  Ctrl+X dissolve
              Shift+S subdivide  I inset  B bridge borders  Ctrl+R loop cut
              [ / ] after a loop cut slides it
-             Ctrl+M merge selection  Ctrl+Shift+M weld by distance
+             M merge selection  Shift+M weld by distance
              N shade smooth  Ctrl+N recalculate  Shift+N flip
              K mark sharp  Alt+K clear  Shift+K auto-smooth 30 deg
              F fill hole  Shift+F grid fill
              Y split off faces  V rip along edges  Ctrl+B bevel
              1/2/3 vert/edge/face select  L loop  Shift+L ring
              Ctrl+A all elements  Alt+A none  Ctrl+I invert
-  Transform  M move  R rotate  S scale
+  Transform  G move  R rotate  S scale
              The key starts the tool; the mouse does the work. Move follows the
              pointer across the view, rotate follows it around the selection,
              scale is how much further from the selection it has got.
                LMB or Enter   confirm, as one undo step
                RMB or Esc     cancel, leaving no trace
                X / Y / Z      constrain to that axis; again to release
+               X X            press again for the object's own axes (ZZ, YY)
                Shift (hold)   ten times finer, from where you pressed it
-               digits, . , -  type an exact value; Backspace to correct
+               Ctrl (hold)    the other way round on snapping
+               type a value   2*3.5, 1.4/8, 50cm, 30deg; Backspace to correct
+               wheel          proportional falloff radius, while it is on
+  Settings   ` snapping on/off (Ctrl inverts it for one drag)
+             Shift+` what it snaps to: increment, vertex, edge, midpoint, face
+                     Element modes land the selection *on* what the cursor is
+                     over; increment rounds how far it went.
+             O proportional editing on/off, in edit mode
              In object mode they act on the selected objects; in edit mode on
              the selected vertices, edges or faces. Rotate and scale work about
              the selection's median, so a single vertex has nothing for them to
@@ -205,6 +213,21 @@ struct ViewportTarget {
 impl ViewportTarget {
     const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+    /// The format egui samples this texture through.
+    ///
+    /// Not a detail. egui's fragment shader says of its input: "we expect
+    /// normal textures that are NOT sRGB-aware" — it treats what it samples as
+    /// already gamma-encoded, and for an sRGB framebuffer converts it *down* to
+    /// linear so the hardware can encode it back. Sampling through the sRGB
+    /// view decodes once more before egui ever sees it, so the image is
+    /// decoded twice and composited far too dark: the viewport background
+    /// arrived on screen at 4/255 instead of 28/255.
+    ///
+    /// The scene still renders *into* the sRGB view, so the shaders keep
+    /// writing linear and the hardware keeps encoding. Only the sampling side
+    /// changes.
+    const SAMPLED_AS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
     fn new(
         device: &wgpu::Device,
         renderer: &mut egui_wgpu::Renderer,
@@ -224,10 +247,14 @@ impl ViewportTarget {
             dimension: wgpu::TextureDimension::D2,
             format: Self::FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+            view_formats: &[Self::SAMPLED_AS],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
+        let sampled = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(Self::SAMPLED_AS),
+            ..Default::default()
+        });
+        let id = renderer.register_native_texture(device, &sampled, wgpu::FilterMode::Linear);
         Self { view, id, size }
     }
 
@@ -428,6 +455,18 @@ struct App {
     /// this instance runs means another instance crashed, and interrupting the
     /// user's work to say so is not this application's business.
     recoverable: Vec<docfile::Recoverable>,
+    /// Snapping, as the user has it set. `Ctrl` inverts it for one drag.
+    ///
+    /// Held on the application rather than inside a gesture because it is a
+    /// standing preference: it survives between transforms, and the next one
+    /// starts from it.
+    snap: kreate::modal::Snap,
+    /// The proportional editing radius, or `None` when it is off.
+    ///
+    /// §2.2 calls this unexpectedly central to how a modelling tool feels, and
+    /// it is: without it every vertex move is a spike, and shaping a surface
+    /// means moving each vertex individually.
+    proportional: Option<f64>,
     /// The interactive transform in progress, if any.
     ///
     /// While this is `Some`, the gesture owns the keyboard and the pointer:
@@ -489,6 +528,8 @@ impl App {
             },
             wanted_viewport: (0, 0),
             next_shape: 1,
+            snap: kreate::modal::Snap::default(),
+            proportional: None,
             gesture: None,
             file: DocumentFile::new(),
             // Collected once, at startup. This is the only moment a recovery
@@ -653,7 +694,224 @@ impl App {
         };
 
         self.ui.edit_mode = self.op_ctx.mode == OpMode::EditMesh;
+        // The mode decides which context a shortcut resolves in, so the
+        // tooltips change with it: `X` deletes an object in one mode and
+        // constrains an axis in the other.
+        self.refresh_command_info();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// What a command looks like to the user: name, sentence, and shortcut.
+    ///
+    /// The shortcut comes from the *keymap*, resolved in the context the command
+    /// would actually run in. A hardcoded table would be a second place the keys
+    /// are written down, and it would go stale the moment anyone rebound one —
+    /// which §2.5 makes a first-class thing to do.
+    fn command_info(
+        &self,
+        op_id: &str,
+        params: &PropertyMap,
+    ) -> kreate_ui::command_info::CommandInfo {
+        let label = self
+            .registry
+            .get(op_id)
+            .map(|info| info.label)
+            .unwrap_or(op_id);
+        let context = if self.op_ctx.mode == OpMode::EditMesh {
+            kreate_input::Context::EditMesh
+        } else {
+            kreate_input::Context::ObjectMode
+        };
+        kreate_ui::command_info::describe(
+            &self.ui.catalog,
+            &kreate_ui::command_info::variant_id(op_id, params),
+            label,
+            self.keymap.shortcut_for_action(op_id, params, context),
+        )
+    }
+
+    /// The commands the right-click menu offers, for the current mode.
+    ///
+    /// Filtered by each operator's own `poll`, so nothing unusable is offered.
+    /// Greyed-out rows are the alternative and are worse in a pop-up: a menu
+    /// opened *at* something, where most rows are dead, makes the user hunt for
+    /// the live ones. The menu bar can afford that; a menu under the cursor
+    /// cannot.
+    fn build_context_menu(&mut self) {
+        use kreate_ui::context_menu::{Entry, Group};
+
+        // `(operator, parameters)` rather than an operator alone, because a
+        // menu row is a *command* and several rows can reach one operator:
+        // `mesh.normals` recalculates or flips depending on `action`, and
+        // `mesh.shade` smooths or facets depending on `smooth`. Carrying the
+        // parameters is also what lets each row find its own shortcut instead of
+        // borrowing the other variant's.
+        fn group(
+            title: &str,
+            rows: &[(&str, &[(&'static str, PropertyValue)])],
+            app: &App,
+        ) -> Group {
+            let entries = rows
+                .iter()
+                .filter(|(id, _)| {
+                    app.registry
+                        .get(id)
+                        .is_some_and(|info| info.poll(&app.op_ctx, &app.doc))
+                })
+                .map(|(id, pairs)| {
+                    let mut params = PropertyMap::new();
+                    for (name, value) in *pairs {
+                        params.set(name, value.clone());
+                    }
+                    let info = app.command_info(id, &params);
+                    Entry::new(*id, info).with_params(params)
+                })
+                .collect();
+            Group {
+                title: title.to_string(),
+                entries,
+            }
+        }
+
+        let t = |key: &str| self.ui.catalog.get(key);
+        let groups = if self.op_ctx.mode == OpMode::EditMesh {
+            vec![
+                group(
+                    &t("menu-group-transform"),
+                    &[
+                        ("mesh.translate", &[]),
+                        ("mesh.rotate", &[]),
+                        ("mesh.scale", &[]),
+                    ],
+                    self,
+                ),
+                group(
+                    &t("menu-group-shape"),
+                    &[
+                        ("mesh.extrude_region", &[]),
+                        ("mesh.inset", &[]),
+                        ("mesh.bevel", &[]),
+                        ("mesh.subdivide", &[]),
+                        ("mesh.loop_cut", &[]),
+                        ("mesh.bridge", &[]),
+                        ("mesh.fill", &[]),
+                        ("mesh.spin", &[]),
+                    ],
+                    self,
+                ),
+                group(
+                    &t("menu-group-remove"),
+                    &[
+                        ("mesh.delete", &[]),
+                        ("mesh.dissolve", &[]),
+                        ("mesh.merge", &[]),
+                        ("mesh.split", &[]),
+                    ],
+                    self,
+                ),
+                group(
+                    &t("menu-group-shading"),
+                    &[
+                        ("mesh.shade", &[("smooth", PropertyValue::Bool(true))]),
+                        ("mesh.shade", &[("smooth", PropertyValue::Bool(false))]),
+                        ("mesh.mark_sharp", &[]),
+                        ("mesh.normals", &[("action", PropertyValue::Enum(0))]),
+                        ("mesh.normals", &[("action", PropertyValue::Enum(2))]),
+                    ],
+                    self,
+                ),
+            ]
+        } else {
+            vec![
+                group(
+                    &t("menu-group-transform"),
+                    &[
+                        ("object.translate", &[]),
+                        ("object.rotate", &[]),
+                        ("object.scale", &[]),
+                    ],
+                    self,
+                ),
+                group(
+                    &t("menu-group-object"),
+                    &[
+                        ("object.add_primitive", &[]),
+                        (
+                            "object.duplicate",
+                            &[("linked", PropertyValue::Bool(false))],
+                        ),
+                        ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
+                        ("object.delete", &[]),
+                    ],
+                    self,
+                ),
+            ]
+        };
+        self.ui.context_menu.groups = groups;
+    }
+
+    /// Opens the right-click menu at the cursor.
+    fn open_context_menu(&mut self) {
+        let Some((rx, ry, _, _)) = self.viewport_px else {
+            return;
+        };
+        let Some((x, y)) = self.input.cursor else {
+            return;
+        };
+        let scale = self.egui_ctx.pixels_per_point().max(0.01);
+        self.build_context_menu();
+        // Interface points, not physical pixels: everything egui places is in
+        // points, and passing pixels puts the menu at a fraction of the right
+        // position on any display that is not at 100%.
+        self.ui.context_menu.at = Some(egui::pos2(
+            (x as f32 - rx) / scale + rx / scale,
+            (y as f32 - ry) / scale + ry / scale,
+        ));
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// Refreshes the tooltips the top row shows.
+    ///
+    /// Rebuilt when the mode changes rather than every frame: it walks the
+    /// keymap once per command, and the answer only moves when the mode or the
+    /// bindings do.
+    fn refresh_command_info(&mut self) {
+        // `(operator, parameters)` for the same reason the menu uses it: two
+        // buttons can run one operator, and each needs its own shortcut.
+        const SHOWN: &[(&str, &[(&str, PropertyValue)])] = &[
+            ("object.add_primitive", &[]),
+            ("object.duplicate", &[]),
+            ("object.delete", &[]),
+            ("object.translate", &[]),
+            ("object.rotate", &[]),
+            ("object.scale", &[]),
+            ("mesh.translate", &[]),
+            ("mesh.rotate", &[]),
+            ("mesh.scale", &[]),
+            ("mesh.extrude_region", &[]),
+            ("mesh.subdivide", &[]),
+            ("mesh.dissolve", &[]),
+            ("mesh.delete", &[]),
+            ("mesh.inset", &[]),
+            ("mesh.bridge", &[]),
+            ("mesh.loop_cut", &[]),
+            ("mesh.mark_sharp", &[]),
+            ("mesh.fill", &[]),
+            ("mesh.spin", &[]),
+            ("mesh.bevel", &[]),
+            ("mesh.merge", &[]),
+            ("mesh.split", &[]),
+        ];
+        self.ui.command_info = SHOWN
+            .iter()
+            .map(|(id, pairs)| {
+                let mut params = PropertyMap::new();
+                for (name, value) in *pairs {
+                    params.set(name, value.clone());
+                }
+                (id.to_string(), self.command_info(id, &params))
+            })
+            .collect();
     }
 
     /// Hands the recovery list to the interface.
@@ -732,6 +990,85 @@ impl App {
         Some((cx as f32 - x, cy as f32 - y))
     }
 
+    /// The selection's own axes, for a local-orientation constraint.
+    ///
+    /// The active object's rotation. In edit mode that is the object the
+    /// elements belong to, which is the right answer: mesh elements have no
+    /// orientation of their own, and what a modeller means by "local" while
+    /// editing a mesh is the object it sits in.
+    ///
+    /// Falls back to the world axes when there is nothing to ask, so a local
+    /// constraint always has *some* meaning rather than collapsing to zero.
+    fn selection_basis(&self) -> [Vec3; 3] {
+        let world = self
+            .doc
+            .selection
+            .active
+            .or_else(|| self.doc.selection.objects.first().copied())
+            .map(|id| self.doc.world_transform(id));
+        let Some(world) = world else {
+            return [Vec3::X, Vec3::Y, Vec3::Z];
+        };
+        let m = world.matrix3;
+        [
+            Vec3::new(m.x_axis.x as f32, m.x_axis.y as f32, m.x_axis.z as f32),
+            Vec3::new(m.y_axis.x as f32, m.y_axis.y as f32, m.y_axis.z as f32),
+            Vec3::new(m.z_axis.x as f32, m.z_axis.y as f32, m.z_axis.z as f32),
+        ]
+    }
+
+    /// The geometry a drag may snap to: everything that is not about to move.
+    ///
+    /// The exclusion is the whole point, and it is why this cannot be a general
+    /// scene index reused between tools. A selection that can snap to itself
+    /// locks solid the moment the drag starts: the nearest vertex to a moving
+    /// vertex is itself, at zero distance, always.
+    ///
+    /// Built from the *evaluated* scene, so a drag snaps to what is on screen —
+    /// including geometry a modifier produced, which is what the user is
+    /// looking at and aiming for.
+    fn build_snap_world(&self) -> kreate::snap::SnapWorld {
+        let mut world = kreate::snap::SnapWorld::default();
+        if !self.snap.mode.needs_geometry() {
+            // Increment snapping needs no candidates, and gathering a scene's
+            // worth of them to ignore would be the whole cost for none of the
+            // benefit.
+            return world;
+        }
+
+        let edited = (self.op_ctx.mode == OpMode::EditMesh)
+            .then(|| kreate_ops::ops::mesh::target_mesh(&self.doc))
+            .flatten();
+
+        for (id, mesh) in &self.evaluated {
+            let object = self.doc.object(*id);
+            let Some(object) = object else { continue };
+            if !object.visible {
+                continue;
+            }
+            let to_world = self.doc.world_transform(*id);
+
+            let moving: Vec<u32> = if self.op_ctx.mode == OpMode::EditMesh {
+                // In edit mode only the selected elements move, and only within
+                // the mesh being edited. Every other object is a candidate whole.
+                if object.mesh() == edited {
+                    kreate_ops::ops::mesh::selection_vertices(mesh)
+                } else {
+                    Vec::new()
+                }
+            } else if self.doc.selection.objects.contains(id) {
+                // In object mode a selected object moves entirely, so none of it
+                // is a candidate.
+                continue;
+            } else {
+                Vec::new()
+            };
+
+            world.add_mesh(mesh, &to_world, &moving);
+        }
+        world
+    }
+
     /// Starts an interactive transform.
     fn begin_gesture(&mut self, kind: kreate::modal::Kind) {
         // One at a time. Starting a second would abandon the first's transaction
@@ -758,7 +1095,27 @@ impl App {
         };
 
         let edit_mode = self.op_ctx.mode == OpMode::EditMesh;
-        let gesture = kreate::modal::Gesture::begin(kind, cursor, pivot, &self.camera, (w, h));
+        let mut gesture = kreate::modal::Gesture::begin(
+            kind,
+            cursor,
+            pivot,
+            &self.camera,
+            (w, h),
+            self.selection_basis(),
+            self.snap,
+            self.build_snap_world(),
+        );
+        // Ctrl inverts snapping, and it may already be held when the gesture
+        // starts. Read once here rather than waiting for the next modifier
+        // event, which might never come.
+        gesture.set_snap_inverted(self.input.ctrl_down);
+        // Proportional editing is meaningless in object mode: there is no
+        // neighbouring geometry to fall off towards, only other objects, and
+        // dragging one object part-way because another is near it is not
+        // something anyone asks for.
+        if edit_mode {
+            gesture.set_proportional(self.proportional);
+        }
         let op_id = kind.op_id(edit_mode);
         // Started with the identity parameters, so pressing the key alone moves
         // nothing. The first pointer motion is what does anything.
@@ -788,9 +1145,17 @@ impl App {
         let Some(cursor) = self.cursor_viewport_unclamped() else {
             return;
         };
+        // Copied out before the mutable borrow of `self.gesture` below.
+        let camera = self.camera;
         let Some((gesture, session)) = &mut self.gesture else {
             return;
         };
+        // The camera first: orbiting during a transform is allowed, and a snap
+        // resolved against a stale view would catch on whatever used to be under
+        // the cursor.
+        if let Some((_, _, w, h)) = self.viewport_px {
+            gesture.set_view(&camera, (w, h));
+        }
         gesture.track(cursor);
         let params = gesture.params();
         let status = gesture.status();
@@ -834,6 +1199,26 @@ impl App {
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
+    /// Grows or shrinks the proportional radius during a gesture.
+    ///
+    /// The wheel, because that is the hand that is free: the pointer is driving
+    /// the transform and the other hand is on the modifiers. Multiplicative
+    /// rather than additive, so one notch feels the same whether the radius is a
+    /// centimetre or ten metres.
+    fn adjust_proportional(&mut self, notches: f32) -> bool {
+        if self.gesture.is_none() || self.proportional.is_none() {
+            return false;
+        }
+        let radius = self.proportional.unwrap_or(1.0) * 1.15f64.powf(notches as f64);
+        let radius = radius.clamp(1e-4, 1e4);
+        self.proportional = Some(radius);
+        if let Some((gesture, _)) = &mut self.gesture {
+            gesture.set_proportional(Some(radius));
+        }
+        self.drive_gesture();
+        true
+    }
+
     /// Engages or releases precision on a running gesture.
     ///
     /// Measured from where the pointer is *now*, which is what stops the
@@ -869,7 +1254,7 @@ impl App {
         };
         if let Some(axis) = axis {
             if let Some((gesture, _)) = &mut self.gesture {
-                gesture.toggle_axis(axis);
+                gesture.cycle_axis(axis);
             }
             self.drive_gesture();
             return true;
@@ -1988,6 +2373,13 @@ impl App {
             (to_points(d.origin), to_points(d.current))
         });
         self.ui.select_band_deselect = self.drag_select.as_ref().is_some_and(|d| d.deselect);
+        // Rebuilt every frame rather than pushed on change: a gesture's numbers
+        // move continuously, and a header a frame behind the drag would be
+        // worse than no header.
+        self.ui.modal = self.gesture.as_ref().map(|(g, _)| shell::ModalHeader {
+            text: g.status(),
+            axis: g.axis_index(),
+        });
 
         // --- run the interface, which tells us how big the viewport is -------
         let raw_input = state.take_egui_input(&window);
@@ -2390,6 +2782,31 @@ impl App {
             "object.translate" | "mesh.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "object.rotate" | "mesh.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "object.scale" | "mesh.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            "view.cycle_snap_mode" => {
+                self.snap.mode = self.snap.mode.next();
+                let label = self.snap.mode.label();
+                self.status(&format!("snap to {label}"));
+            }
+            "view.toggle_snap" => {
+                self.snap.enabled = !self.snap.enabled;
+                let on = self.snap.enabled;
+                self.status(if on { "snapping on" } else { "snapping off" });
+            }
+            "view.toggle_proportional" => {
+                self.proportional = match self.proportional {
+                    Some(_) => None,
+                    // A radius rather than a flag, so the first press has an
+                    // answer for "how far". One metre is a scene-scale default;
+                    // the wheel adjusts it during a drag.
+                    None => Some(1.0),
+                };
+                let on = self.proportional.is_some();
+                self.status(if on {
+                    "proportional editing on"
+                } else {
+                    "proportional editing off"
+                });
+            }
             "file.new" => self.new_document(),
             "file.open" => self.open_document(),
             "file.save" => self.save_document(false),
@@ -2620,6 +3037,10 @@ impl ApplicationHandler for App {
         surface.configure(&gpu.device, &config);
 
         kreate_ui::install_fonts(&self.egui_ctx);
+        // After the fonts, because the theme is built on whatever style the
+        // context already carries and installing it the other way round would
+        // be a silent ordering trap for the next person.
+        kreate_ui::install_theme(&self.egui_ctx);
         self.egui_state = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -2741,6 +3162,20 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // A plain right-click on the viewport opens the menu. Only a
+                // plain one: `Alt+RMB` is a navigation binding in the Maya
+                // preset, and taking every right-click would break it.
+                if button == MouseButton::Right
+                    && pressed
+                    && !self.input.alt_down
+                    && !self.input.ctrl_down
+                    && !self.input.shift_down
+                    && self.gesture.is_none()
+                    && self.press_belongs_to_viewport()
+                {
+                    self.open_context_menu();
+                    return;
+                }
                 if let Some(slot) = slot {
                     let mapped = [KeyMouse::Left, KeyMouse::Middle, KeyMouse::Right][slot];
                     if pressed && !self.buttons[slot] {
@@ -2785,7 +3220,13 @@ impl ApplicationHandler for App {
                     // one unit means the same thing whichever device sent it.
                     MouseScrollDelta::PixelDelta(p) => (p.x / 60.0, p.y / 60.0),
                 };
-                self.apply_wheel(x, y);
+                // A running gesture with proportional editing on takes the
+                // wheel for its radius. Zooming mid-transform would move the
+                // camera the selection is being dragged relative to, which is
+                // not what a hand reaching for the wheel means here.
+                if !self.adjust_proportional(y as f32) {
+                    self.apply_wheel(x, y);
+                }
             }
 
             // Pinch to zoom, which winit reports only on macOS and iOS. On
@@ -2817,6 +3258,16 @@ impl ApplicationHandler for App {
                 // would leave a gesture stuck in precision after the key came
                 // back up.
                 self.set_gesture_precision(self.input.shift_down);
+                // Ctrl inverts snapping rather than enabling it: someone who has
+                // snapping on wants Ctrl to let them off it, and someone who has
+                // it off wants Ctrl to turn it on. One modifier, always meaning
+                // "the other way".
+                if let Some((gesture, _)) = &mut self.gesture {
+                    gesture.set_snap_inverted(self.input.ctrl_down);
+                }
+                if self.gesture.is_some() {
+                    self.drive_gesture();
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {

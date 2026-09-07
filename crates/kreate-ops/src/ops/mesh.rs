@@ -252,11 +252,81 @@ pub fn selection_vertices(mesh: &kreate_mesh::MeshData) -> Vec<u32> {
     verts
 }
 
+/// How influence falls off with distance, for proportional editing.
+///
+/// Smooth by default. A modeller reaches for proportional editing to shape a
+/// surface, and a linear falloff leaves a visible cone with a crease at its rim
+/// — the very artefact the tool exists to avoid.
+fn falloff(distance: f64, radius: f64) -> f32 {
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    let t = (distance / radius).clamp(0.0, 1.0);
+    // Smoothstep, flipped: 1 at the centre, 0 at the rim, and flat at both ends
+    // so the moved region joins the rest of the mesh without a crease.
+    let s = 1.0 - t;
+    (s * s * (3.0 - 2.0 * s)) as f32
+}
+
+/// A weight per vertex: 1 for the selection, falling off for everything else.
+///
+/// The distance is to the *nearest selected vertex*, not to the selection's
+/// median. That matters as soon as the selection is more than a point: dragging
+/// a whole edge loop should pull the mesh evenly along its length, and a
+/// distance to the median would pull hardest in the middle and leave the ends
+/// behind.
+///
+/// O(V x S) as written, which is honest about what it is. A million-vertex mesh
+/// with a large selection wants a spatial index over the selected vertices, and
+/// that is the shape of the eventual fix; the operator's signature does not
+/// change when it lands.
+fn proportional_weights(bm: &BMesh, selected: &[VertId], radius: f64) -> Vec<(VertId, f32)> {
+    let anchors: Vec<glam::Vec3> = selected.iter().filter_map(|v| bm.position(*v)).collect();
+    // A fast path, not a rule: `falloff` already returns zero for a
+    // non-positive radius, so the loop below would reach the same answer. What
+    // it would also do is measure every vertex in the mesh against every
+    // selected one to conclude that nothing moves — and proportional editing
+    // being *off* is the common case, so that cost is paid on almost every
+    // transform.
+    //
+    // Being redundant for correctness is why removing it changes no test. It is
+    // kept for what it costs, not for what it decides.
+    if anchors.is_empty() || radius <= 0.0 {
+        return selected.iter().map(|v| (*v, 1.0)).collect();
+    }
+    let mut out: Vec<(VertId, f32)> = Vec::new();
+    for v in bm.vert_ids() {
+        if selected
+            .binary_search_by_key(&v.index(), |s| s.index())
+            .is_ok()
+        {
+            // Full weight, and not measured: a selected vertex is at distance
+            // zero from itself, but saying so explicitly means a rounding error
+            // can never give the selection less than 1.
+            out.push((v, 1.0));
+            continue;
+        }
+        let Some(p) = bm.position(v) else { continue };
+        let nearest = anchors
+            .iter()
+            .map(|a| a.distance(p) as f64)
+            .fold(f64::INFINITY, f64::min);
+        let weight = falloff(nearest, radius);
+        if weight > 0.0 {
+            out.push((v, weight));
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct MeshTranslateParams {
     /// How far to move the selection, in object space.
     #[param(unit = "length")]
     pub translation: [f64; 3],
+    /// Proportional editing radius. Zero is off.
+    #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
+    pub proportional_size: f64,
 }
 
 /// Moves the selected vertices, edges or faces.
@@ -285,14 +355,15 @@ impl Operator for TranslateSelection {
             params.translation[1] as f32,
             params.translation[2] as f32,
         );
+        let radius = params.proportional_size;
         let moved = with_bmesh(doc, |bm| {
             let verts = selected_vertices(bm);
             if verts.is_empty() {
                 return Ok(false);
             }
-            for v in verts {
+            for (v, weight) in proportional_weights(bm, &verts, radius) {
                 if let Some(p) = bm.position(v) {
-                    bm.set_position(v, p + offset);
+                    bm.set_position(v, p + offset * weight);
                 }
             }
             Ok(true)
@@ -312,6 +383,9 @@ pub struct MeshRotateParams {
     /// Which axis to turn about, through the selection's median.
     #[param(variants("x", "y", "z"))]
     pub axis: u32,
+    /// Proportional editing radius. Zero is off.
+    #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
+    pub proportional_size: f64,
 }
 
 /// Rotates the selected vertices, edges or faces about their median.
@@ -341,6 +415,7 @@ impl Operator for RotateSelection {
             _ => glam::Vec3::Z,
         };
         let rotation = glam::Quat::from_axis_angle(axis, params.angle as f32);
+        let radius = params.proportional_size;
         let turned = with_bmesh(doc, |bm| {
             let verts = selected_vertices(bm);
             // A single point has nothing to turn: every vertex is the pivot, so
@@ -351,9 +426,16 @@ impl Operator for RotateSelection {
             let Some(about) = median(bm, &verts) else {
                 return Ok(false);
             };
-            for v in verts {
+            for (v, weight) in proportional_weights(bm, &verts, radius) {
                 if let Some(p) = bm.position(v) {
-                    bm.set_position(v, about + rotation * (p - about));
+                    // The rotation is interpolated towards the identity rather
+                    // than the *result* being interpolated towards the original.
+                    // The two differ: blending positions drags a partly-weighted
+                    // vertex along the chord and shrinks the mesh towards the
+                    // pivot, while blending the rotation turns it through a
+                    // smaller angle, which is what the tool means.
+                    let partial = glam::Quat::IDENTITY.slerp(rotation, weight);
+                    bm.set_position(v, about + partial * (p - about));
                 }
             }
             Ok(true)
@@ -370,11 +452,17 @@ impl Operator for RotateSelection {
 pub struct MeshScaleParams {
     /// Scale factor per axis, about the selection's median.
     pub scale: [f64; 3],
+    /// Proportional editing radius. Zero is off.
+    #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
+    pub proportional_size: f64,
 }
 
 impl Default for MeshScaleParams {
     fn default() -> Self {
-        Self { scale: [1.0; 3] }
+        Self {
+            scale: [1.0; 3],
+            proportional_size: 0.0,
+        }
     }
 }
 
@@ -413,6 +501,7 @@ impl Operator for ScaleSelection {
             params.scale[1] as f32,
             params.scale[2] as f32,
         );
+        let radius = params.proportional_size;
         let scaled = with_bmesh(doc, |bm| {
             let verts = selected_vertices(bm);
             if distinct_positions(bm, &verts) < 2 {
@@ -421,9 +510,19 @@ impl Operator for ScaleSelection {
             let Some(about) = median(bm, &verts) else {
                 return Ok(false);
             };
-            for v in verts {
+            for (v, weight) in proportional_weights(bm, &verts, radius) {
                 if let Some(p) = bm.position(v) {
-                    bm.set_position(v, about + (p - about) * factor);
+                    // The factor is interpolated towards one.
+                    //
+                    // Unlike the rotation, this is *not* a correction: scaling is
+                    // linear in the position, so blending the factor and blending
+                    // the result are algebraically the same thing, and a test
+                    // cannot tell them apart. Written this way for symmetry with
+                    // the rotation above and because it says what is meant — a
+                    // vertex at half weight is scaled half as much, rather than
+                    // dragged half way to where a full scale would put it.
+                    let partial = glam::Vec3::ONE.lerp(factor, weight);
+                    bm.set_position(v, about + (p - about) * partial);
                 }
             }
             Ok(true)

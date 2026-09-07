@@ -22,6 +22,8 @@ use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 use kreate_math::{DQuat, DVec3};
 use kreate_render::ViewAxis;
 
+use crate::theme::Theme;
+
 /// One ball, positioned and depth-sorted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ball {
@@ -101,13 +103,11 @@ pub fn contains(centre: Pos2, radius: f32, pos: Pos2) -> bool {
     (centre - pos).length() <= radius + 4.0
 }
 
-/// Axis colours, matching the grid's.
-fn axis_colour(axis: ViewAxis, near: bool) -> Color32 {
-    let base = match axis.axis_index() {
-        0 => Color32::from_rgb(214, 74, 84),
-        1 => Color32::from_rgb(106, 186, 84),
-        _ => Color32::from_rgb(74, 128, 214),
-    };
+/// Axis colours, from the theme — which is where the grid and the transform
+/// panel get theirs too. Three widgets showing the same three axes in three
+/// different reds would teach the user nothing.
+fn axis_colour(theme: &Theme, axis: ViewAxis, near: bool) -> Color32 {
+    let base = theme.axis(axis.axis_index());
     if near {
         base
     } else {
@@ -126,16 +126,17 @@ pub fn draw(
     balls: &[Ball],
     hovered: Option<ViewAxis>,
 ) {
+    let theme = crate::theme::of(painter.ctx());
     let r = ball_radius(radius);
     for ball in balls {
         let positive = ball.axis.is_positive();
-        let colour = axis_colour(ball.axis, positive);
+        let colour = axis_colour(&theme, ball.axis, positive);
         // Only the positive end gets a spoke: two spokes per axis would draw a
         // line straight through the widget and make the near end hard to read.
         if positive {
             painter.line_segment(
                 [centre, ball.centre],
-                Stroke::new(2.0, axis_colour(ball.axis, true)),
+                Stroke::new(2.0, axis_colour(&theme, ball.axis, true)),
             );
         }
         let is_hovered = hovered == Some(ball.axis);
@@ -147,14 +148,16 @@ pub fn draw(
                 Align2::CENTER_CENTER,
                 ball.axis.label(),
                 FontId::proportional(r * 1.05),
-                Color32::from_rgb(20, 20, 22),
+                // The letter sits *on* the axis colour, so it takes the
+                // darkest surface rather than the text colour.
+                theme.sunken,
             );
         } else {
-            painter.circle_filled(ball.centre, size, Color32::from_rgb(38, 38, 42));
+            painter.circle_filled(ball.centre, size, theme.raised);
             painter.circle_stroke(ball.centre, size, Stroke::new(1.5, colour));
         }
         if is_hovered {
-            painter.circle_stroke(ball.centre, size + 2.0, Stroke::new(1.5, Color32::WHITE));
+            painter.circle_stroke(ball.centre, size + 2.0, Stroke::new(1.5, theme.text));
         }
     }
 }

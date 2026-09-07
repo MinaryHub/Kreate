@@ -9,11 +9,13 @@
 pub mod breadcrumbs;
 pub mod crashreport;
 pub mod docfile;
+pub mod expr;
 pub mod gpu_sync;
 pub mod modal;
 pub mod pick;
 pub mod prefs;
 pub mod shell;
+pub mod snap;
 
 /// The recently run operator ids, for the crash report.
 ///

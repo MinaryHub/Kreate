@@ -30,6 +30,19 @@ use kreate_ui::outliner::{OutlinerRow, RowKind};
 use kreate_ui::{Command, CommandQueue};
 
 /// What the panels need from the application, without being able to touch it.
+/// What the right-click menu offers, rebuilt when the mode changes.
+///
+/// Assembled by the application — only it has the registry, the keymap and the
+/// document needed to decide what can run and what key runs it — and handed to
+/// the interface, which draws it. The same rule as everywhere else here: the
+/// interface reads a view model and dispatches commands.
+#[derive(Default)]
+pub struct ContextMenu {
+    pub groups: Vec<kreate_ui::context_menu::Group>,
+    /// Where it was opened, in interface points. `None` when it is closed.
+    pub at: Option<egui::Pos2>,
+}
+
 pub struct ShellState {
     pub catalog: Catalog,
     pub queue: CommandQueue,
@@ -67,6 +80,15 @@ pub struct ShellState {
     pub select_band: Option<(egui::Pos2, egui::Pos2)>,
     /// Whether the drag is removing from the selection rather than adding.
     pub select_band_deselect: bool,
+    /// The right-click menu: what it offers and whether it is open.
+    pub context_menu: ContextMenu,
+    /// Every command in the top row, with its shortcut and description.
+    ///
+    /// Keyed by operator id. Built by the application because resolving a
+    /// shortcut needs the keymap, which the interface does not have and should
+    /// not: §2.5's whole point is that a binding is data, and a panel that knew
+    /// the keys would be a second place they are written down.
+    pub command_info: std::collections::BTreeMap<String, kreate_ui::command_info::CommandInfo>,
     /// The last thing that happened, for the status bar.
     ///
     /// A single slot rather than a log: the status bar answers "did that work",
@@ -90,6 +112,22 @@ pub struct ShellState {
     pub capturing: Option<kreate_input::BindingId>,
     /// What the panel asked for this frame.
     pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
+    /// The running modal transform, if one is running.
+    ///
+    /// Set by the application every frame a gesture is live and cleared the
+    /// moment it confirms or cancels. A drag is the one time the tool has to
+    /// talk continuously — what it is doing, along which axis, by how much —
+    /// and the status bar is the wrong place for it: the user is looking at
+    /// the model, not at the bottom of the window.
+    pub modal: Option<ModalHeader>,
+}
+
+/// What the modal header says while a transform is being dragged.
+pub struct ModalHeader {
+    /// The line the gesture composes: tool, constraint, precision, value.
+    pub text: String,
+    /// The constrained axis, if any, so the header can wear its colour.
+    pub axis: Option<usize>,
 }
 
 impl Default for ShellState {
@@ -109,11 +147,14 @@ impl Default for ShellState {
             outliner: OutlinerOrder::default(),
             select_band: None,
             select_band_deselect: false,
+            context_menu: ContextMenu::default(),
+            command_info: std::collections::BTreeMap::new(),
             status: None,
             recoverable: Vec::new(),
             show_keymap: false,
             capturing: None,
             keymap_edits: Vec::new(),
+            modal: None,
         }
     }
 }
@@ -548,17 +589,17 @@ pub fn draw(
                 state.queue.push(Command::SaveDocumentAs);
             }
             ui.separator();
-            if ui.button(&l.add_cube).clicked() {
+            if command_tool(ui, state, "object.add_primitive", &l.add_cube) {
                 let mut p = PropertyMap::new();
                 p.set("shape", kreate_reflect::PropertyValue::Enum(1));
                 state.queue.run("object.add_primitive", p);
             }
-            if ui.button(&l.duplicate).clicked() {
+            if command_tool(ui, state, "object.duplicate", &l.duplicate) {
                 let mut p = PropertyMap::new();
                 p.set("linked", kreate_reflect::PropertyValue::Bool(true));
                 state.queue.run("object.duplicate", p);
             }
-            if ui.button(&l.delete).clicked() {
+            if command_tool(ui, state, "object.delete", &l.delete) {
                 state.queue.run("object.delete", PropertyMap::new());
             }
             ui.separator();
@@ -608,38 +649,38 @@ pub fn draw(
                     }
                 }
                 ui.separator();
-                if ui.button(&l.extrude).clicked() {
+                if command_tool(ui, state, "mesh.extrude_region", &l.extrude) {
                     let mut p = PropertyMap::new();
                     p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
                     state.queue.run("mesh.extrude_region", p);
                 }
-                if ui.button(&l.inset).clicked() {
+                if command_tool(ui, state, "mesh.inset", &l.inset) {
                     let mut p = PropertyMap::new();
                     p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
                     state.queue.run("mesh.inset", p);
                 }
-                if ui.button(&l.bridge).clicked() {
+                if command_tool(ui, state, "mesh.bridge", &l.bridge) {
                     state.queue.run("mesh.bridge", PropertyMap::new());
                 }
-                if ui.button(&l.loop_cut).clicked() {
+                if command_tool(ui, state, "mesh.loop_cut", &l.loop_cut) {
                     let mut p = PropertyMap::new();
                     p.set("cuts", kreate_reflect::PropertyValue::Int(1));
                     p.set("position", kreate_reflect::PropertyValue::Float(0.5));
                     state.queue.run("mesh.loop_cut", p);
                 }
-                if ui.button(&l.bevel).clicked() {
+                if command_tool(ui, state, "mesh.bevel", &l.bevel) {
                     let mut p = PropertyMap::new();
                     p.set("width", kreate_reflect::PropertyValue::Float(0.1));
                     state.queue.run("mesh.bevel", p);
                 }
-                if ui.button(&l.subdivide).clicked() {
+                if command_tool(ui, state, "mesh.subdivide", &l.subdivide) {
                     let mut p = PropertyMap::new();
                     p.set("iterations", kreate_reflect::PropertyValue::Int(1));
                     state.queue.run("mesh.subdivide", p);
                 }
                 // Delete and dissolve both act on whatever the current element
                 // mode is, so the button carries it rather than asking again.
-                if ui.button(&l.dissolve).clicked() {
+                if command_tool(ui, state, "mesh.dissolve", &l.dissolve) {
                     let mut p = PropertyMap::new();
                     p.set(
                         "mode",
@@ -647,7 +688,7 @@ pub fn draw(
                     );
                     state.queue.run("mesh.dissolve", p);
                 }
-                if ui.button(&l.delete).clicked() {
+                if command_tool(ui, state, "mesh.delete", &l.delete) {
                     let mut p = PropertyMap::new();
                     p.set(
                         "mode",
@@ -656,28 +697,28 @@ pub fn draw(
                     state.queue.run("mesh.delete", p);
                 }
                 ui.separator();
-                if ui.button(&l.merge).clicked() {
+                if command_tool(ui, state, "mesh.merge", &l.merge) {
                     let mut p = PropertyMap::new();
                     p.set("target", kreate_reflect::PropertyValue::Enum(0));
                     state.queue.run("mesh.merge", p);
                 }
-                if ui.button(&l.weld).clicked() {
+                if command_tool(ui, state, "mesh.merge", &l.weld) {
                     let mut p = PropertyMap::new();
                     p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
                     state.queue.run("mesh.merge", p);
                 }
-                if ui.button(&l.select_loop).clicked() {
+                if command_tool(ui, state, "mesh.select", &l.select_loop) {
                     let mut p = PropertyMap::new();
                     p.set("action", kreate_reflect::PropertyValue::Enum(3));
                     state.queue.run("mesh.select", p);
                 }
                 ui.separator();
-                if ui.button(&l.shade_smooth).clicked() {
+                if command_tool(ui, state, "mesh.shade", &l.shade_smooth) {
                     let mut p = PropertyMap::new();
                     p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
                     state.queue.run("mesh.shade", p);
                 }
-                if ui.button(&l.shade_flat).clicked() {
+                if command_tool(ui, state, "mesh.shade", &l.shade_flat) {
                     let mut p = PropertyMap::new();
                     p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
                     state.queue.run("mesh.shade", p);
@@ -693,13 +734,13 @@ pub fn draw(
                     );
                     state.queue.run("mesh.mark_sharp", p);
                 }
-                if ui.button(&l.fill).clicked() {
+                if command_tool(ui, state, "mesh.fill", &l.fill) {
                     state.queue.run("mesh.fill", PropertyMap::new());
                 }
-                if ui.button(&l.spin).clicked() {
+                if command_tool(ui, state, "mesh.spin", &l.spin) {
                     state.queue.run("mesh.spin", PropertyMap::new());
                 }
-                if ui.button(&l.recalc_normals).clicked() {
+                if command_tool(ui, state, "mesh.normals", &l.recalc_normals) {
                     let mut p = PropertyMap::new();
                     p.set("action", kreate_reflect::PropertyValue::Enum(0));
                     state.queue.run("mesh.normals", p);
@@ -715,11 +756,15 @@ pub fn draw(
 
     Panel::bottom("status").show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(if state.edit_mode {
-                &l.mode_edit
+            // Edit mode wears the accent, which is the same thing the accent
+            // says everywhere else: this is what you are acting on. Object
+            // mode is the resting state and says it quietly.
+            let theme = kreate_ui::theme::from_ui(ui);
+            if state.edit_mode {
+                ui.colored_label(theme.accent, &l.mode_edit);
             } else {
-                &l.mode_object
-            });
+                ui.label(&l.mode_object);
+            }
             ui.separator();
             ui.label(&status);
             // The last thing that happened, to the right of the standing counts.
@@ -806,10 +851,83 @@ pub fn draw(
                 );
             }
             draw_select_band(ui, state, rect);
+            draw_modal_header(ui, state, rect);
             draw_nav_gizmo(ui, state, rect);
+            draw_context_menu(ui, state, rect);
             rect
         })
         .inner
+}
+
+/// A toolbar button carrying whatever is known about the command behind it.
+///
+/// The label stays as the top row already spells it — the buttons are laid out
+/// and translated there — and the *tooltip* is what the command information
+/// adds: the sentence and, above all, the shortcut. Teaching the key at the
+/// moment the user reaches for the button is the whole point; a toolbar that
+/// only ever runs commands keeps its users coming back to it forever.
+fn command_tool(ui: &mut egui::Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
+    let response = ui.button(label);
+    match state.command_info.get(op_id) {
+        Some(info) if info.has_tooltip() => response.on_hover_text(info.tooltip()).clicked(),
+        _ => response.clicked(),
+    }
+}
+
+/// How wide the right-click menu is, in interface points.
+///
+/// Fixed rather than fitted to the longest row: a menu that changes width with
+/// its contents moves its own shortcut column every time the mode changes, and
+/// the column is what the eye tracks.
+const MENU_WIDTH: f32 = 220.0;
+
+/// Draws the right-click menu, if one is open.
+///
+/// A window rather than egui's own `context_menu`, because the viewport is
+/// painted rather than being a widget with a response — and because the
+/// application decides when the menu opens: a right-click that cancels a
+/// transform must not also open a menu, and only the application knows a
+/// transform is running.
+fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::Rect) {
+    let Some(at) = state.context_menu.at else {
+        return;
+    };
+    let mut close = false;
+    egui::Area::new(egui::Id::new("viewport-context-menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at)
+        // Kept inside the viewport, so a right-click near the bottom edge does
+        // not put half the menu off screen where it cannot be read or reached.
+        .constrain_to(viewport)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // Bounded, or the popup takes every pixel to the right of where
+                // it opened: the rows lay out right-to-left to put each shortcut
+                // at the far edge, and "the far edge" of an unconstrained area is
+                // the edge of the window. The first picture of this menu had its
+                // shortcuts six hundred pixels from their labels.
+                ui.set_max_width(MENU_WIDTH);
+                ui.set_min_width(MENU_WIDTH);
+                if kreate_ui::context_menu::menu_body(
+                    ui,
+                    &state.context_menu.groups,
+                    &mut state.queue,
+                ) {
+                    close = true;
+                }
+            });
+        });
+
+    // Anywhere else dismisses it, which is what every menu everywhere does and
+    // what a user will try first.
+    if ui.ctx().input(|i| {
+        i.pointer.any_click() && !i.pointer.any_pressed() || i.key_pressed(egui::Key::Escape)
+    }) {
+        close = true;
+    }
+    if close {
+        state.context_menu.at = None;
+    }
 }
 
 /// Everything the remapping panel says, resolved from the catalogue.
@@ -868,10 +986,11 @@ fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
     let painter = ui.painter().with_clip_rect(viewport);
     // Warm for adding, cool for removing, so which one is happening is visible
     // without reading the modifier keys off your own hand.
+    let theme = kreate_ui::theme::from_ui(ui);
     let colour = if state.select_band_deselect {
-        egui::Color32::from_rgb(120, 170, 230)
+        theme.info
     } else {
-        egui::Color32::from_rgb(255, 158, 41)
+        theme.accent
     };
     painter.rect_filled(band, 0.0, colour.gamma_multiply(0.12));
     painter.rect_stroke(
@@ -880,6 +999,48 @@ fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
         egui::Stroke::new(1.0, colour),
         egui::StrokeKind::Inside,
     );
+}
+
+/// The running transform's header, over the top of the viewport.
+///
+/// Painted rather than laid out as a widget: it has to be centred over the
+/// viewport and must not take pointer input, since every pointer event during
+/// a drag belongs to the gesture.
+///
+/// The border carries the constrained axis's colour — the same three colours
+/// as the grid, the navigation gizmo and the transform fields. That is the
+/// whole reason those are one table: after a week the user stops reading the
+/// letter.
+fn draw_modal_header(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
+    let Some(header) = &state.modal else {
+        return;
+    };
+    let theme = kreate_ui::theme::from_ui(ui);
+    let edge = header.axis.map_or(theme.accent, |a| theme.axis(a));
+
+    let painter = ui.painter().with_clip_rect(viewport);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = painter.layout_no_wrap(header.text.clone(), font, theme.text);
+
+    let pad = egui::vec2(10.0, 5.0);
+    let size = galley.size() + pad * 2.0;
+    let centre = egui::pos2(viewport.center().x, viewport.top() + 12.0 + size.y * 0.5);
+    let rect = egui::Rect::from_center_size(centre, size);
+    if !viewport.contains_rect(rect) {
+        return;
+    }
+
+    let radius = egui::CornerRadius::same(theme.radius);
+    // Opaque enough to read over a light model, not so opaque it hides what is
+    // being dragged.
+    painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.94));
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, edge),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, theme.text);
 }
 
 /// The navigation gizmo, over the top-right of the viewport.
@@ -1074,6 +1235,80 @@ modifier-enabled = Apply this modifier
 modifier-mirror = Mirror
 modifier-subdivide = Subdivision
 modifier-array = Array
+
+# --- right-click menu groups ---
+menu-group-transform = Transform
+menu-group-shape = Shape
+menu-group-remove = Remove
+menu-group-shading = Shading
+menu-group-object = Object
+
+# --- operator names and descriptions ---
+#
+# The key is the operator id with dots and underscores turned to dashes, because
+# a Fluent identifier cannot contain either. A missing entry falls back to the
+# operator's built-in English label, so a partial translation stays usable.
+#
+# Descriptions are one sentence and say what the command *does to the model*,
+# not what it is called. "Extrude Region" is the name; "pulls the selected faces
+# out along their shared normal" is what someone who does not yet know the word
+# needs to read.
+op-mesh-translate = Move
+op-mesh-translate-desc = Moves the selected vertices, edges or faces.
+op-mesh-rotate = Rotate
+op-mesh-rotate-desc = Turns the selection about its own centre.
+op-mesh-scale = Scale
+op-mesh-scale-desc = Grows or shrinks the selection about its own centre.
+op-mesh-extrude-region = Extrude
+op-mesh-extrude-region-desc = Pulls the selected faces out along their shared normal, adding walls behind them.
+op-mesh-inset = Inset
+op-mesh-inset-desc = Adds a smaller copy of each selected face inside it.
+op-mesh-bevel = Bevel
+op-mesh-bevel-desc = Replaces each selected edge with a flat strip, rounding the corner.
+op-mesh-subdivide = Subdivide
+op-mesh-subdivide-desc = Cuts each selected face into smaller ones.
+op-mesh-loop-cut = Loop Cut
+op-mesh-loop-cut-desc = Adds a ring of edges around the mesh, following the quads.
+op-mesh-bridge = Bridge
+op-mesh-bridge-desc = Joins two open borders with a band of faces.
+op-mesh-fill = Fill
+op-mesh-fill-desc = Closes the selected border with a face.
+op-mesh-delete = Delete
+op-mesh-delete-desc = Removes the selection and everything built on it.
+op-mesh-dissolve = Dissolve
+op-mesh-dissolve-desc = Removes the selection but keeps the surface, merging what surrounded it.
+op-mesh-merge = Merge
+op-mesh-merge-desc = Collapses the selected vertices into one.
+op-mesh-split = Split
+op-mesh-split-desc = Detaches the selected faces from their neighbours.
+op-mesh-shade-smooth-true = Shade Smooth
+op-mesh-shade-smooth-true-desc = Blends the shading across the selected faces instead of faceting them.
+op-mesh-shade-smooth-false = Shade Flat
+op-mesh-shade-smooth-false-desc = Facets the selected faces, giving each its own flat shading.
+op-mesh-mark-sharp = Mark Sharp
+op-mesh-mark-sharp-desc = Keeps a crease across the selected edges however smooth the rest is.
+op-mesh-normals-action-0 = Recalculate Normals
+op-mesh-normals-action-0-desc = Turns every face to point outwards.
+op-mesh-normals-action-2 = Flip Normals
+op-mesh-normals-action-2-desc = Turns the selected faces to point the other way.
+op-mesh-spin = Spin
+op-mesh-spin-desc = Sweeps the selection around an axis, leaving a surface behind it.
+op-object-translate = Move
+op-object-translate-desc = Moves the selected objects.
+op-object-rotate = Rotate
+op-object-rotate-desc = Turns the selected objects.
+op-object-scale = Scale
+op-object-scale-desc = Grows or shrinks the selected objects.
+op-object-add-primitive = Add
+op-object-add-primitive-desc = Adds a new shape at the origin.
+op-object-duplicate = Duplicate
+op-object-duplicate-desc = Copies the selected objects. A linked copy shares its mesh, so editing one edits both.
+op-object-delete = Delete
+op-object-delete-desc = Removes the selected objects.
+op-object-duplicate-linked-false = Duplicate
+op-object-duplicate-linked-false-desc = Copies the selected objects, mesh and all, so the two can be edited apart.
+op-object-duplicate-linked-true = Duplicate Linked
+op-object-duplicate-linked-true-desc = Copies the selected objects but shares one mesh, so editing either edits both.
 "#;
 
 pub const KO_FTL: &str = r#"
@@ -1146,6 +1381,71 @@ modifier-enabled = 이 모디파이어 적용
 modifier-mirror = 미러
 modifier-subdivide = 서브디비전
 modifier-array = 배열
+
+# --- 오른클릭 메뉴 그룹 ---
+menu-group-transform = 변형
+menu-group-shape = 형상
+menu-group-remove = 제거
+menu-group-shading = 셰이딩
+menu-group-object = 오브젝트
+
+# --- 오퍼레이터 이름과 설명 ---
+op-mesh-translate = 이동
+op-mesh-translate-desc = 선택한 점, 선, 면을 옮깁니다.
+op-mesh-rotate = 회전
+op-mesh-rotate-desc = 선택 영역을 그 중심을 기준으로 돌립니다.
+op-mesh-scale = 크기
+op-mesh-scale-desc = 선택 영역을 그 중심을 기준으로 키우거나 줄입니다.
+op-mesh-extrude-region = 돌출
+op-mesh-extrude-region-desc = 선택한 면을 법선 방향으로 밀어내고 그 뒤에 벽을 만듭니다.
+op-mesh-inset = 인셋
+op-mesh-inset-desc = 선택한 각 면 안쪽에 더 작은 면을 만듭니다.
+op-mesh-bevel = 베벨
+op-mesh-bevel-desc = 선택한 엣지를 납작한 띠로 바꿔 모서리를 깎습니다.
+op-mesh-subdivide = 세분
+op-mesh-subdivide-desc = 선택한 면을 더 작은 면들로 나눕니다.
+op-mesh-loop-cut = 루프 컷
+op-mesh-loop-cut-desc = 쿼드를 따라 메시를 한 바퀴 도는 엣지 링을 넣습니다.
+op-mesh-bridge = 브리지
+op-mesh-bridge-desc = 열린 경계 둘을 면의 띠로 잇습니다.
+op-mesh-fill = 채우기
+op-mesh-fill-desc = 선택한 경계를 면으로 막습니다.
+op-mesh-delete = 삭제
+op-mesh-delete-desc = 선택 영역과 그 위에 세워진 것을 함께 지웁니다.
+op-mesh-dissolve = 녹이기
+op-mesh-dissolve-desc = 선택 영역을 지우되 표면은 남기고 주변을 합칩니다.
+op-mesh-merge = 병합
+op-mesh-merge-desc = 선택한 정점들을 하나로 모읍니다.
+op-mesh-split = 분리
+op-mesh-split-desc = 선택한 면을 이웃에서 떼어냅니다.
+op-mesh-shade-smooth-true = 부드럽게
+op-mesh-shade-smooth-true-desc = 선택한 면들의 셰이딩을 각지게 두지 않고 이어서 섞습니다.
+op-mesh-shade-smooth-false = 평평하게
+op-mesh-shade-smooth-false-desc = 선택한 면을 각지게 하여 면마다 자기 셰이딩을 갖게 합니다.
+op-mesh-mark-sharp = 샤프 표시
+op-mesh-mark-sharp-desc = 나머지가 아무리 부드러워도 선택한 엣지에는 각을 남깁니다.
+op-mesh-normals-action-0 = 노멀 재계산
+op-mesh-normals-action-0-desc = 모든 면이 바깥을 향하도록 돌립니다.
+op-mesh-normals-action-2 = 노멀 뒤집기
+op-mesh-normals-action-2-desc = 선택한 면이 반대쪽을 향하도록 돌립니다.
+op-mesh-spin = 스핀
+op-mesh-spin-desc = 선택 영역을 축 둘레로 쓸어 그 자취를 면으로 남깁니다.
+op-object-translate = 이동
+op-object-translate-desc = 선택한 오브젝트를 옮깁니다.
+op-object-rotate = 회전
+op-object-rotate-desc = 선택한 오브젝트를 돌립니다.
+op-object-scale = 크기
+op-object-scale-desc = 선택한 오브젝트를 키우거나 줄입니다.
+op-object-add-primitive = 추가
+op-object-add-primitive-desc = 원점에 새 도형을 만듭니다.
+op-object-duplicate = 복제
+op-object-duplicate-desc = 선택한 오브젝트를 복사합니다. 링크드 복제는 메시를 공유하므로 한쪽을 고치면 양쪽이 바뀝니다.
+op-object-delete = 삭제
+op-object-delete-desc = 선택한 오브젝트를 지웁니다.
+op-object-duplicate-linked-false = 복제
+op-object-duplicate-linked-false-desc = 선택한 오브젝트를 메시까지 복사해 서로 따로 편집할 수 있게 합니다.
+op-object-duplicate-linked-true = 링크드 복제
+op-object-duplicate-linked-true-desc = 선택한 오브젝트를 복사하되 메시는 공유하므로 한쪽을 고치면 양쪽이 바뀝니다.
 "#;
 
 /// Loads the catalog for a locale, with English as the fallback.

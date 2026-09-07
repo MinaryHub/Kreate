@@ -22,6 +22,8 @@ const H: u32 = 800;
 const BYTES_PER_ROW: u32 = W * 4;
 /// The surface format egui composites into.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// The format egui samples the viewport through. See the comment at the view.
+const SAMPLED_AS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 struct Composited {
     pixels: Vec<[u8; 4]>,
@@ -62,6 +64,19 @@ fn composite(doc: &Document, locale: &str) -> Option<Composited> {
 }
 
 fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composited> {
+    composite_with(doc, locale, edit_mode, |_| {})
+}
+
+/// The same, with a chance to arrange the interface state first.
+///
+/// For anything that is *opened* rather than always drawn — the right-click
+/// menu is the first — so a picture of it can be looked at rather than trusted.
+fn composite_with(
+    doc: &Document,
+    locale: &str,
+    edit_mode: bool,
+    arrange: impl FnOnce(&mut kreate::shell::ShellState),
+) -> Option<Composited> {
     // The filename distinguishes every variant, including how much is selected:
     // when several frames share one, only the last survives and the picture on
     // disk is not the one that failed.
@@ -79,12 +94,15 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
         (_, true) => format!("edit{selected}-{locale}"),
         _ => format!("scene-{locale}"),
     };
+    // Refined below once the arrangement has run, so an open menu does not
+    // overwrite the picture of a closed one.
+    let mut label = label;
     let opts = kreate_render::GpuOptions::default();
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
 
     // --- the surface stand-in, and the offscreen viewport target -------------
-    let make_target = |label, usage| {
+    let make_target = |label, usage, view_formats: &[wgpu::TextureFormat]| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -97,24 +115,35 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
             dimension: wgpu::TextureDimension::D2,
             format: FORMAT,
             usage,
-            view_formats: &[],
+            view_formats,
         })
     };
     let surface = make_target(
         "surface",
         wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        &[],
     );
     let surface_view = surface.create_view(&wgpu::TextureViewDescriptor::default());
     let vp = make_target(
         "viewport",
         wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        &[SAMPLED_AS],
     );
     let vp_view = vp.create_view(&wgpu::TextureViewDescriptor::default());
+    // The scene renders into the sRGB view and egui samples the plain one —
+    // the application does exactly this, and for the reason documented on
+    // `ViewportTarget::SAMPLED_AS`. Sampling through the sRGB view decodes a
+    // second time and composites the whole viewport far too dark, so a harness
+    // that did it differently would be picturing a frame nobody sees.
+    let vp_sampled = vp.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(SAMPLED_AS),
+        ..Default::default()
+    });
 
     let mut egui_renderer =
         egui_wgpu::Renderer::new(&gpu.device, FORMAT, egui_wgpu::RendererOptions::default());
     let vp_id =
-        egui_renderer.register_native_texture(&gpu.device, &vp_view, wgpu::FilterMode::Linear);
+        egui_renderer.register_native_texture(&gpu.device, &vp_sampled, wgpu::FilterMode::Linear);
 
     let mut viewport = kreate_render::Viewport::new(&gpu.device, FORMAT, W, H);
     viewport.show_grid = true;
@@ -122,6 +151,10 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
     // --- run the shell -------------------------------------------------------
     let ctx = egui::Context::default();
     kreate_ui::install_fonts(&ctx);
+    // The same order the application uses. Without this the harness would be
+    // picturing egui's defaults rather than the product, which is the one thing
+    // a compositing test must not do.
+    kreate_ui::install_theme(&ctx);
     // The surface is described to the renderer in *pixels* while egui lays out in
     // *points*. Pinning the ratio to 1 keeps the two consistent here; the
     // application takes the real value from the window instead.
@@ -140,6 +173,10 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
         edit_mode,
         ..Default::default()
     };
+    arrange(&mut state);
+    if state.context_menu.at.is_some() {
+        label = format!("menu-{label}");
+    }
 
     let raw_input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -163,8 +200,17 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
     // registered viewport image survives — which is exactly the misleading
     // picture this produced before.
     let mut texture_deltas: Vec<(egui::TextureId, egui::epaint::ImageDelta)> = Vec::new();
-    for _ in 0..2 {
-        let output = ctx.run_ui(raw_input.clone(), |ui| {
+    // Four passes with the clock advancing, not two at a standstill.
+    //
+    // Two was enough while everything on screen was a panel. It is not enough
+    // for anything that *appears*: egui fades a new `Area` in, and a fade driven
+    // by a clock that never moves is caught part way — the first picture of the
+    // right-click menu was a translucent ghost with two empty buttons in it, and
+    // a test counting changed pixels passed against it.
+    for pass in 0..4 {
+        let mut raw_input = raw_input.clone();
+        raw_input.time = Some(pass as f64 * 0.25);
+        let output = ctx.run_ui(raw_input, |ui| {
             root_rect = ui.max_rect();
             viewport_rect = kreate::shell::draw(
                 ui,
@@ -424,6 +470,108 @@ fn the_viewport_texture_is_visible_in_the_middle_of_the_frame() {
 }
 
 #[test]
+fn the_chrome_is_warm_and_the_viewport_is_not() {
+    // The whole premise of the theme, checked where it actually matters: on
+    // the composited frame, not on the token table. Warm chrome makes a
+    // neutral grey read cool, so the viewport must stay neutral or the tool is
+    // misreporting the one colour the user is judging.
+    //
+    // Two failures this catches that a unit test cannot: the theme never being
+    // installed on the context at all, and the viewport clear drifting warm to
+    // "match" the panels.
+    let c = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
+
+    // Several points well inside the side panels, away from text and borders.
+    let panel_samples = [(20, H / 2), (40, H / 2 + 60), (W - 30, H / 2)];
+    for (x, y) in panel_samples {
+        let p = c.at(x, y);
+        let (r, b) = (i32::from(p[0]), i32::from(p[2]));
+        assert!(
+            r > b,
+            "panel pixel at ({x},{y}) is not warm: {p:?} — is the theme installed?"
+        );
+    }
+
+    // And an empty corner of the viewport, away from the cube and the axis
+    // lines, which are deliberately coloured.
+    let vr = c.viewport_rect;
+    let x = (vr.min.x + vr.width() * 0.08) as u32;
+    let y = (vr.min.y + vr.height() * 0.08) as u32;
+    let p = c.at(x, y);
+    let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+    assert!(
+        (r - g).abs() <= 3 && (r - b).abs() <= 4,
+        "the viewport background has a colour cast at ({x},{y}): {p:?}"
+    );
+    // Neutral, not black: a clear that failed to happen would also pass the
+    // test above.
+    assert!(
+        (20..=48).contains(&r),
+        "the viewport background is not the expected dark neutral: {p:?}"
+    );
+}
+
+#[test]
+fn the_modal_header_draws_over_the_viewport_in_the_constrained_axis_colour() {
+    // A transform in progress is the one time the tool has to talk
+    // continuously, and the status bar is the wrong place for it: the user is
+    // looking at the model. Rendered rather than asserted on state, because
+    // "the header is set" and "the header is on screen where the eye is" are
+    // different claims.
+    let axis = 0; // X
+    let with = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.modal = Some(kreate::shell::ModalHeader {
+            text: "이동 X  1.400 0.000 0.000".into(),
+            axis: Some(axis),
+        });
+    }));
+    let without = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
+
+    let vr = with.viewport_rect;
+    // The band the header occupies: just under the top of the viewport, across
+    // the middle third where a centred pill lands.
+    let band = |c: &Composited| {
+        let mut changed = 0usize;
+        let mut axis_coloured = 0usize;
+        let want = kreate_render::palette::rgb8(kreate_render::palette::AXIS_X);
+        for y in (vr.min.y as u32 + 8)..(vr.min.y as u32 + 40) {
+            for x in (vr.center().x as u32 - 160)..(vr.center().x as u32 + 160) {
+                let p = c.at(x, y);
+                if p != without.at(x, y) {
+                    changed += 1;
+                }
+                let near = (0..3).all(|i| (i32::from(p[i]) - i32::from(want[i])).abs() < 40);
+                if near {
+                    axis_coloured += 1;
+                }
+            }
+        }
+        (changed, axis_coloured)
+    };
+
+    let (changed, axis_coloured) = band(&with);
+    assert!(
+        changed > 2000,
+        "only {changed} pixels changed where the header should be; it did not draw"
+    );
+    // And the border is the X colour, not the generic accent. This is what the
+    // one axis table buys: the same red as the grid and the transform field.
+    assert!(
+        axis_coloured > 40,
+        "found {axis_coloured} pixels near the X axis colour; the header is not          wearing the constrained axis"
+    );
+
+    // Nothing outside the viewport moved: the header is an overlay, not a panel.
+    let left_panel_changed = (0..H)
+        .filter(|y| with.at(20, *y) != without.at(20, *y))
+        .count();
+    assert_eq!(
+        left_panel_changed, 0,
+        "{left_panel_changed} pixels changed in the side panel"
+    );
+}
+
+#[test]
 fn panels_and_viewport_produce_many_distinct_colours() {
     // Text, panel chrome, the grid and the shaded cube together should span a
     // wide range. A handful of colours means one of those layers is missing.
@@ -541,5 +689,164 @@ fn edit_mode_shows_element_selection_instead_of_the_object_outline() {
     assert!(
         toolbar_width(&edit_all) > toolbar_width(&object_mode),
         "the edit-mode toolbar should be wider than the object-mode one"
+    );
+}
+
+#[test]
+fn the_right_click_menu_draws_over_the_viewport() {
+    // A menu that is built but never painted is the failure this catches: the
+    // data is right, every test about its contents passes, and nothing appears
+    // on screen. Checked by the picture, because that is the claim.
+    use kreate_ui::command_info::CommandInfo;
+    use kreate_ui::context_menu::{Entry, Group};
+
+    let doc = doc_with_cube();
+    let closed = composite(&doc, "ko-KR");
+    let Some(closed) = closed else {
+        eprintln!("no usable GPU adapter; skipping");
+        return;
+    };
+
+    let open = composite_with(&doc, "ko-KR", false, |state| {
+        state.context_menu.groups = vec![Group {
+            title: "변형".to_string(),
+            entries: vec![
+                Entry::new(
+                    "object.translate",
+                    CommandInfo {
+                        name: "이동".into(),
+                        description: "선택한 오브젝트를 옮깁니다.".into(),
+                        shortcut: "M".into(),
+                    },
+                ),
+                Entry::new(
+                    "object.rotate",
+                    CommandInfo {
+                        name: "회전".into(),
+                        description: "선택한 오브젝트를 돌립니다.".into(),
+                        shortcut: "R".into(),
+                    },
+                ),
+            ],
+        }];
+        // Well inside the viewport, so the menu is over the render rather than
+        // over a panel.
+        state.context_menu.at = Some(egui::pos2(420.0, 300.0));
+    })
+    .expect("the adapter was there a moment ago");
+    open.dump("menu");
+
+    // The menu is a light popup over a dark viewport, so it shows up as a
+    // change to a lot of pixels in that region — and only in that region.
+    let changed = |x0: u32, y0: u32, x1: u32, y1: u32| {
+        let mut n = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if closed.at(x, y) != open.at(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let under_menu = changed(420, 300, 620, 420);
+    assert!(
+        under_menu > 4_000,
+        "only {under_menu} pixels changed where the menu should be"
+    );
+
+    // And it has to be *readable*, not merely present. A first version of this
+    // test counted changed pixels alone and passed against a menu whose frame
+    // drew and whose text did not — a translucent ghost with two empty buttons
+    // in it. Text is high-contrast detail, so it shows up as many distinct
+    // luminances in a small region; a blank panel has two or three.
+    let mut shades = std::collections::HashSet::new();
+    for y in 300..420 {
+        for x in 420..620 {
+            let p = open.at(x, y);
+            let l = (p[0] as u32 * 30 + p[1] as u32 * 59 + p[2] as u32 * 11) / 100;
+            shades.insert(l / 4);
+        }
+    }
+    assert!(
+        shades.len() > 12,
+        "the menu region has only {} distinct shades, so nothing legible is in it",
+        shades.len()
+    );
+    // The interface elsewhere is untouched: a popup that repainted the panels
+    // would be drawing in the wrong place or at the wrong size.
+    let far_away = changed(0, 0, 200, 100);
+    assert_eq!(far_away, 0, "{far_away} pixels changed away from the menu");
+
+    // And it is a menu rather than a band across the window. The rows lay out
+    // right-to-left so each shortcut sits at the row's far edge, and the far
+    // edge of an unconstrained area is the edge of the window — the first
+    // picture of this menu ran to the viewport's right side with its shortcuts
+    // six hundred pixels from their labels.
+    let mut widest = 0;
+    for y in 300..420 {
+        let mut leftmost = None;
+        let mut rightmost = 0;
+        for x in 220..1020 {
+            if closed.at(x, y) != open.at(x, y) {
+                leftmost.get_or_insert(x);
+                rightmost = x;
+            }
+        }
+        if let Some(left) = leftmost {
+            widest = widest.max(rightmost - left);
+        }
+    }
+    assert!(
+        widest < 320,
+        "the menu is {widest} pixels wide, so it is stretching to fill the viewport"
+    );
+}
+
+#[test]
+fn a_menu_row_shows_its_shortcut() {
+    // The whole reason the menu carries them. Checked as pixels: the shortcut is
+    // drawn at the right-hand end of the row, so removing it leaves that column
+    // empty and the picture changes there.
+    use kreate_ui::command_info::CommandInfo;
+    use kreate_ui::context_menu::{Entry, Group};
+
+    let doc = doc_with_cube();
+    let entry = |shortcut: &str| Group {
+        title: String::new(),
+        entries: vec![Entry::new(
+            "object.translate",
+            CommandInfo {
+                name: "이동".into(),
+                description: String::new(),
+                shortcut: shortcut.to_string(),
+            },
+        )],
+    };
+
+    let Some(with) = composite_with(&doc, "ko-KR", false, |state| {
+        state.context_menu.groups = vec![entry("M")];
+        state.context_menu.at = Some(egui::pos2(420.0, 300.0));
+    }) else {
+        eprintln!("no usable GPU adapter; skipping");
+        return;
+    };
+    let without = composite_with(&doc, "ko-KR", false, |state| {
+        state.context_menu.groups = vec![entry("")];
+        state.context_menu.at = Some(egui::pos2(420.0, 300.0));
+    })
+    .expect("adapter");
+
+    let mut differing = 0;
+    for y in 300..340 {
+        for x in 420..640 {
+            if with.at(x, y) != without.at(x, y) {
+                differing += 1;
+            }
+        }
+    }
+    assert!(
+        differing > 10,
+        "the row looks the same with and without a shortcut ({differing} pixels)"
     );
 }

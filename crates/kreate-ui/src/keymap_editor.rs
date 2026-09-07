@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use kreate_input::keymap::{
     Binding, BindingId, Context, EventKind, Input, Keymap, Modifiers, MouseButton, Override,
 };
@@ -149,7 +149,7 @@ pub fn keymap_editor(
     });
 
     if !conflicts.is_empty() {
-        ui.colored_label(Color32::from_rgb(226, 170, 70), &text.shadowed);
+        ui.colored_label(crate::theme::from_ui(ui).accent, &text.shadowed);
     }
 
     ui.separator();
@@ -183,6 +183,7 @@ fn row(
     let changed = overrides.contains_key(&binding.id);
     let shadowed = conflicts.iter().any(|(a, _)| *a == binding.id);
     let waiting = capturing.as_ref() == Some(&binding.id);
+    let theme = crate::theme::from_ui(ui);
 
     ui.horizontal(|ui| {
         // The operator, not the binding id: the id is a compatibility handle,
@@ -193,7 +194,9 @@ fn row(
             label = label.weak().strikethrough();
         }
         if changed {
-            label = label.color(Color32::from_rgb(120, 180, 240));
+            // Informational, not a warning: an overridden binding is the user
+            // having done something deliberate.
+            label = label.color(theme.info);
         }
         ui.label(label);
 
@@ -222,7 +225,7 @@ fn row(
             };
             let mut button = egui::Button::new(trigger);
             if shadowed {
-                button = button.fill(Color32::from_rgb(80, 60, 30));
+                button = button.fill(theme.accent_wash);
             }
             if ui
                 .add(button)

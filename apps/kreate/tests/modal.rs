@@ -7,11 +7,16 @@
 //! be checked by numbers instead of by a person with a mouse.
 
 use glam::DVec3;
-use kreate::modal::{Axis, Gesture, Kind};
+use kreate::modal::{Axis, Gesture, Kind, Orientation, Snap};
+use kreate::snap::SnapWorld;
 use kreate_ops::PropertyValue;
 use kreate_render::Camera;
 
 const VIEWPORT: (f32, f32) = (800.0, 600.0);
+
+/// A local basis that is the world's, so a test that says nothing about
+/// orientation gets the same answer either way.
+const WORLD_AXES: [glam::Vec3; 3] = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z];
 
 /// A camera looking along −Y at the origin from eight units away, so world X is
 /// screen right and world Z is screen up. That makes every expectation below
@@ -72,20 +77,56 @@ fn a_gesture_that_has_not_moved_asks_for_nothing() {
     // key must not move anything. If the identity were not the identity, every
     // gesture would nudge the selection the instant it began.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(translation(&at(&mut g, (400.0, 300.0))), [0.0, 0.0, 0.0]);
 
-    let mut g = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(angle(&at(&mut g, (500.0, 300.0))), 0.0);
 
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(scale(&at(&mut g, (500.0, 300.0))), [1.0, 1.0, 1.0]);
 }
 
 #[test]
 fn dragging_right_moves_the_selection_right() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let t = translation(&at(&mut g, (500.0, 300.0)));
     assert!(t[0] > 0.5, "dragging right gave {t:?}");
     assert!(t[2].abs() < 1e-6, "and should not have moved it vertically");
@@ -97,7 +138,16 @@ fn dragging_up_moves_the_selection_up() {
     // wrong here is the classic "drag up, it goes down" bug, and it is invisible
     // in a screenshot of a symmetric object.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let t = translation(&at(&mut g, (400.0, 200.0)));
     assert!(t[2] > 0.5, "dragging up gave {t:?}");
 }
@@ -109,7 +159,16 @@ fn a_free_move_tracks_the_cursor_one_to_one() {
     // selection's depth, so the selection stays under the mouse.
     let camera = camera();
     let pivot = DVec3::ZERO;
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), pivot, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        pivot,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
 
     // The world height of the viewport at the pivot's distance.
     let distance = (pivot - camera.eye()).length();
@@ -131,13 +190,25 @@ fn a_move_is_bigger_when_the_selection_is_further_away() {
     // pixel, so a distant selection covers more ground for the same drag. A
     // fixed scale would make far objects crawl and near ones fly.
     let camera = camera();
-    let mut near = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut near = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let mut far = Gesture::begin(
         Kind::Move,
         (400.0, 300.0),
         DVec3::new(0.0, 40.0, 0.0),
         &camera,
         VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
     );
     let a = translation(&at(&mut near, (500.0, 300.0)))[0];
     let b = translation(&at(&mut far, (500.0, 300.0)))[0];
@@ -147,8 +218,17 @@ fn a_move_is_bigger_when_the_selection_is_further_away() {
 #[test]
 fn an_axis_constraint_confines_the_move_to_that_axis() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    g.toggle_axis(Axis::Z);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::Z);
     // A drag that is mostly sideways, so the unconstrained answer would be
     // mostly X — the constraint has to discard that part rather than rotate it.
     let t = translation(&at(&mut g, (520.0, 250.0)));
@@ -158,16 +238,114 @@ fn an_axis_constraint_confines_the_move_to_that_axis() {
 }
 
 #[test]
-fn pressing_the_same_axis_twice_releases_the_constraint() {
+fn an_axis_key_cycles_free_global_local_free() {
+    // Two orientations, because both are wanted often and neither is obviously
+    // the default: moving a wheel along the world's X is a different request
+    // from moving it along the axle it is mounted on.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    g.toggle_axis(Axis::X);
-    assert_eq!(g.axis, Some(Axis::X));
-    g.toggle_axis(Axis::X);
-    assert_eq!(g.axis, None, "a second press should free it again");
-    g.toggle_axis(Axis::X);
-    g.toggle_axis(Axis::Y);
-    assert_eq!(g.axis, Some(Axis::Y), "a different axis should replace it");
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    assert_eq!(g.axis, None);
+
+    g.cycle_axis(Axis::X);
+    assert_eq!(
+        (g.axis, g.orientation),
+        (Some(Axis::X), Orientation::Global)
+    );
+    g.cycle_axis(Axis::X);
+    assert_eq!((g.axis, g.orientation), (Some(Axis::X), Orientation::Local));
+    g.cycle_axis(Axis::X);
+    assert_eq!(g.axis, None, "a third press should free it again");
+}
+
+#[test]
+fn a_different_axis_key_starts_its_own_cycle() {
+    // Pressing Y after XX is a new request, not a continuation of X's. Carrying
+    // the local orientation across would mean the second key did something the
+    // user did not ask for and could not see.
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    g.cycle_axis(Axis::X);
+    assert_eq!(g.orientation, Orientation::Local);
+    g.cycle_axis(Axis::Y);
+    assert_eq!(
+        (g.axis, g.orientation),
+        (Some(Axis::Y), Orientation::Global),
+        "a new axis should start from global"
+    );
+}
+
+#[test]
+fn a_local_constraint_uses_the_selections_own_axes() {
+    // The whole point of the second press. With a basis turned a quarter turn
+    // about Z, local X is world Y.
+    let camera = camera();
+    let turned = [glam::Vec3::Y, -glam::Vec3::X, glam::Vec3::Z];
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        turned,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    for c in "2".chars() {
+        g.type_character(c);
+    }
+    let global = translation(&at(&mut g, (400.0, 300.0)));
+    assert_eq!(global, [2.0, 0.0, 0.0], "global X is world X");
+
+    g.cycle_axis(Axis::X);
+    let local = translation(&at(&mut g, (400.0, 300.0)));
+    assert_eq!(local, [0.0, 2.0, 0.0], "local X is this basis's X");
+}
+
+#[test]
+fn a_local_axis_is_normalised() {
+    // An object transform's axes are not unit vectors when the object is scaled.
+    // Left as they are, a constrained move on a doubled object would travel
+    // twice as far as the number said.
+    let camera = camera();
+    let doubled = [
+        glam::Vec3::X * 2.0,
+        glam::Vec3::Y * 2.0,
+        glam::Vec3::Z * 2.0,
+    ];
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        doubled,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    g.cycle_axis(Axis::X);
+    g.type_character('3');
+    assert_eq!(translation(&at(&mut g, (400.0, 300.0))), [3.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -176,7 +354,16 @@ fn precision_mode_slows_the_gesture_without_moving_it() {
     // modifier goes down: engaging it must not make the selection jump back
     // towards where the drag started.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let at_engage = translation(&at(&mut g, (500.0, 300.0)))[0];
 
     g.set_precise(true, (500.0, 300.0));
@@ -202,7 +389,16 @@ fn releasing_precision_mode_does_not_move_it_either() {
     // transitions, and only checking one of them is how the second one ships
     // broken.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     g.set_precise(true, (500.0, 300.0));
     let before = translation(&at(&mut g, (600.0, 300.0)))[0];
     g.set_precise(false, (600.0, 300.0));
@@ -215,7 +411,16 @@ fn releasing_precision_mode_does_not_move_it_either() {
     // And it is coarse again.
     let further = translation(&at(&mut g, (700.0, 300.0)))[0] - after;
     let coarse_hundred = {
-        let mut fresh = Gesture::begin(Kind::Move, (0.0, 0.0), DVec3::ZERO, &camera, VIEWPORT);
+        let mut fresh = Gesture::begin(
+            Kind::Move,
+            (0.0, 0.0),
+            DVec3::ZERO,
+            &camera,
+            VIEWPORT,
+            WORLD_AXES,
+            Snap::default(),
+            SnapWorld::default(),
+        );
         translation(&at(&mut fresh, (100.0, 0.0)))[0]
     };
     assert!(
@@ -230,8 +435,17 @@ fn a_typed_number_overrides_the_pointer_entirely() {
     // doing, a typed value is exact. Without this a modal tool cannot be used
     // for anything dimensioned.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    g.toggle_axis(Axis::X);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
     for c in "2.5".chars() {
         assert!(g.type_character(c));
     }
@@ -241,22 +455,130 @@ fn a_typed_number_overrides_the_pointer_entirely() {
 }
 
 #[test]
+fn the_numeric_buffer_takes_expressions() {
+    // The buffer holds an expression, so operators, brackets and unit letters
+    // all have to get in. Whether what has been typed *means* anything is
+    // decided when it is evaluated, which is the only place that can decide.
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    for c in "1.4/8".chars() {
+        assert!(g.type_character(c), "{c} was refused");
+    }
+    let t = translation(&at(&mut g, (400.0, 300.0)));
+    assert!((t[0] - 0.175).abs() < 1e-9, "got {t:?}");
+}
+
+#[test]
+fn a_unit_suffix_is_understood_in_the_field_it_belongs_to() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::Y);
+    for c in "50cm".chars() {
+        g.type_character(c);
+    }
+    let t = translation(&at(&mut g, (400.0, 300.0)));
+    assert!((t[1] - 0.5).abs() < 1e-9, "got {t:?}");
+}
+
+#[test]
+fn a_unit_the_field_cannot_use_leaves_the_pointer_in_charge() {
+    // `30deg` in a distance is a mistake. The expression refuses it, and a
+    // refused expression hands control back to the pointer rather than reading
+    // as zero — which would snap the selection back to where it started.
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    for c in "30deg".chars() {
+        g.type_character(c);
+    }
+    let t = translation(&at(&mut g, (500.0, 300.0)));
+    assert!(t[0] > 0.5, "the pointer should still be driving: {t:?}");
+}
+
+#[test]
+fn a_rotation_field_reads_degrees_and_accepts_radians() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    for c in "90".chars() {
+        g.type_character(c);
+    }
+    let a = angle(&at(&mut g, (500.0, 300.0)));
+    assert!((a - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "got {a}");
+
+    for _ in 0..2 {
+        g.backspace();
+    }
+    for c in "1rad".chars() {
+        g.type_character(c);
+    }
+    let a = angle(&at(&mut g, (500.0, 300.0)));
+    assert!((a - 1.0).abs() < 1e-9, "got {a}");
+}
+
+#[test]
 fn the_numeric_buffer_takes_only_what_it_can_use() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    assert!(g.type_character('-'), "a leading sign is a number");
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    assert!(g.type_character('-'), "a sign belongs in an expression");
     assert!(g.type_character('4'));
-    assert!(!g.type_character('-'), "but not a second one");
-    assert!(!g.type_character('q'), "and not a letter");
-    g.toggle_axis(Axis::Y);
-    assert_eq!(translation(&at(&mut g, (400.0, 300.0))), [0.0, -4.0, 0.0]);
-    g.backspace();
-    g.backspace();
+    // A letter is taken, because `4cm` is a real thing to type. It is the
+    // *evaluation* that rejects `4q`, not the keystroke.
+    assert!(g.type_character('q'));
+    g.cycle_axis(Axis::Y);
     assert_eq!(
         translation(&at(&mut g, (400.0, 300.0))),
         [0.0, 0.0, 0.0],
-        "an emptied buffer hands control back to the pointer"
+        "`-4q` does not evaluate, so nothing is typed and the pointer has not moved"
     );
+    g.backspace();
+    assert_eq!(translation(&at(&mut g, (400.0, 300.0))), [0.0, -4.0, 0.0]);
+    // A key that is not part of any expression is refused outright.
+    assert!(!g.type_character('%'));
 }
 
 #[test]
@@ -264,7 +586,16 @@ fn a_partial_number_is_not_treated_as_zero() {
     // Typing `-` then dragging must not snap the selection to the origin while
     // the buffer is unusable.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     g.type_character('-');
     let t = translation(&at(&mut g, (500.0, 300.0)));
     assert!(t[0] > 0.5, "the pointer should still be driving: {t:?}");
@@ -285,6 +616,9 @@ fn a_circular_drag_rotates_the_way_the_pointer_goes() {
         DVec3::ZERO,
         &camera,
         VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
     );
     let up = angle(&at(&mut g, (pivot_px.0, pivot_px.1 - 100.0)));
     assert!(
@@ -307,7 +641,16 @@ fn a_rotation_past_the_far_side_does_not_jump_a_full_turn() {
     // side of the pivot flips the sign and the selection snaps through a whole
     // revolution.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let mut previous = 0.0;
     // Three quarters of a turn, in small steps. Going *past* half a turn is the
     // whole point: a first version of this test stopped just short of it, so the
@@ -337,7 +680,16 @@ fn a_scale_measures_distance_from_the_pivot_not_sideways_travel() {
     // so replacing the ratio with `1 + dx/100` passed every scale test.
     let camera = camera();
     // Pivot projects to the centre of the viewport; start 100 px to its right.
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
 
     // Straight up by 100 px: the cursor is now sqrt(2) times as far from the
     // pivot, while its horizontal displacement is zero.
@@ -355,7 +707,16 @@ fn a_scale_dragged_around_the_pivot_does_not_change() {
     // pivot keeps the distance, so it keeps the scale. Any formula reading a
     // displacement rather than a radius fails this.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     for step in 0..8 {
         let theta = step as f32 * std::f32::consts::FRAC_PI_4;
         let cursor = (400.0 + 100.0 * theta.cos(), 300.0 - 100.0 * theta.sin());
@@ -372,7 +733,16 @@ fn a_rotation_started_on_the_pivot_does_nothing_rather_than_something_wild() {
     // Two nearly coincident points have no meaningful angle between them, and an
     // `atan2` of noise would spin the selection.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Rotate, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(angle(&at(&mut g, (400.5, 300.5))), 0.0);
 }
 
@@ -381,7 +751,16 @@ fn a_rotation_defaults_to_the_axis_facing_the_viewer() {
     // A circular drag looks like it turns the thing about the axis pointing out
     // of the screen. With this camera on −Y, that is Y.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(axis_index(&at(&mut g, (500.0, 200.0))), Axis::Y.index());
 }
 
@@ -389,7 +768,16 @@ fn a_rotation_defaults_to_the_axis_facing_the_viewer() {
 fn a_typed_rotation_is_in_degrees() {
     // Degrees at the keyboard, radians in the parameter. Nobody types radians.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     for c in "90".chars() {
         g.type_character(c);
     }
@@ -400,7 +788,16 @@ fn a_typed_rotation_is_in_degrees() {
 #[test]
 fn dragging_away_from_the_pivot_grows_the_selection() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     // Twice as far from the pivot as the start.
     let s = scale(&at(&mut g, (600.0, 300.0)));
     assert!((s[0] - 2.0).abs() < 1e-3, "got {s:?}");
@@ -411,7 +808,16 @@ fn dragging_away_from_the_pivot_grows_the_selection() {
 #[test]
 fn dragging_towards_the_pivot_shrinks_the_selection() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let s = scale(&at(&mut g, (450.0, 300.0)));
     assert!((s[0] - 0.5).abs() < 1e-3, "got {s:?}");
 }
@@ -419,8 +825,17 @@ fn dragging_towards_the_pivot_shrinks_the_selection() {
 #[test]
 fn a_constrained_scale_stretches_one_axis_only() {
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Scale, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    g.toggle_axis(Axis::X);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
     let s = scale(&at(&mut g, (600.0, 300.0)));
     assert!((s[0] - 2.0).abs() < 1e-3, "got {s:?}");
     assert_eq!(s[1], 1.0);
@@ -432,7 +847,16 @@ fn a_scale_started_on_the_pivot_holds_at_one() {
     // There is no reference length to take a ratio against. Held at 1 rather
     // than dividing by nothing.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Scale, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     assert_eq!(scale(&at(&mut g, (900.0, 300.0)))[0], 1.0);
 }
 
@@ -468,8 +892,17 @@ fn the_status_line_says_what_is_happening() {
     // duration of a gesture: without it, a constrained or precise drag looks
     // like the tool misbehaving.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Move, (400.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
-    g.toggle_axis(Axis::Z);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::Z);
     g.set_precise(true, (400.0, 300.0));
     for c in "1.5".chars() {
         g.type_character(c);
@@ -500,7 +933,16 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
         (Kind::Rotate, true),
         (Kind::Scale, true),
     ] {
-        let mut g = Gesture::begin(kind, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+        let mut g = Gesture::begin(
+            kind,
+            (500.0, 300.0),
+            DVec3::ZERO,
+            &camera,
+            VIEWPORT,
+            WORLD_AXES,
+            Snap::default(),
+            SnapWorld::default(),
+        );
         let params = at(&mut g, (560.0, 260.0));
         let info = registry.get(kind.op_id(edit_mode)).expect("registered");
         let names: Vec<&str> = info.schema.iter().map(|d| d.name).collect();
@@ -526,7 +968,16 @@ fn precision_mode_during_a_rotation_does_not_jump_the_angle() {
     // displacement, so they have nothing to carry across. The precision tests
     // for those two passed against a version that did not re-seed at all.
     let camera = camera();
-    let mut g = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     // A sixth of a turn, anticlockwise on screen.
     let quarter = (400.0 + 100.0 * 0.5, 300.0 - 100.0 * 0.866);
     let before = angle(&at(&mut g, quarter));
@@ -550,7 +1001,16 @@ fn precision_mode_during_a_rotation_does_not_jump_the_angle() {
         after + precise
     );
     // The same motion on a fresh, coarse gesture, for comparison.
-    let mut coarse = Gesture::begin(Kind::Rotate, quarter, DVec3::ZERO, &camera, VIEWPORT);
+    let mut coarse = Gesture::begin(
+        Kind::Rotate,
+        quarter,
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     let unscaled = angle(&at(&mut coarse, further));
 
     // Nonzero, or the transition swallowed the sweep entirely — which a version
@@ -590,12 +1050,30 @@ fn reporting_the_same_pointer_position_twice_changes_nothing() {
     let one = (450.0, 260.0);
     let two = (400.0, 200.0);
 
-    let mut direct = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut direct = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     direct.track(one);
     direct.set_precise(true, one);
     let straight = angle(&at(&mut direct, two));
 
-    let mut doubled = Gesture::begin(Kind::Rotate, (500.0, 300.0), DVec3::ZERO, &camera, VIEWPORT);
+    let mut doubled = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
     doubled.track(one);
     doubled.set_precise(true, one);
     doubled.track(one);
@@ -605,4 +1083,212 @@ fn reporting_the_same_pointer_position_twice_changes_nothing() {
         (straight - repeated).abs() < 1e-12,
         "a repeated position changed the angle: {straight} against {repeated}"
     );
+}
+
+// --- snapping ---------------------------------------------------------------
+
+fn snapping() -> Snap {
+    Snap {
+        enabled: true,
+        ..Snap::default()
+    }
+}
+
+#[test]
+fn a_snapped_move_lands_on_the_increment() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    // Whatever the pointer says, the answer is a multiple of the step.
+    for x in [420.0, 437.0, 455.0, 512.0] {
+        let t = translation(&at(&mut g, (x, 300.0)))[0];
+        let steps = t / 0.1;
+        assert!(
+            (steps - steps.round()).abs() < 1e-9,
+            "{t} is not a multiple of the snap step"
+        );
+    }
+}
+
+#[test]
+fn ctrl_inverts_snapping_rather_than_enabling_it() {
+    // §2.2's rule and the reason there is one modifier rather than two: someone
+    // with snapping on wants Ctrl to let them off it, and someone with it off
+    // wants Ctrl to turn it on.
+    let camera = camera();
+    let free_pointer = (473.0, 300.0);
+
+    let mut on = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    on.cycle_axis(Axis::X);
+    let snapped = translation(&at(&mut on, free_pointer))[0];
+    on.set_snap_inverted(true);
+    let released = translation(&at(&mut on, free_pointer))[0];
+    assert_ne!(snapped, released, "Ctrl did not let the user off snapping");
+    assert!(
+        (released / 0.1 - (released / 0.1).round()).abs() > 1e-6,
+        "the released value is still on the increment: {released}"
+    );
+
+    let mut off = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    off.cycle_axis(Axis::X);
+    off.set_snap_inverted(true);
+    let engaged = translation(&at(&mut off, free_pointer))[0];
+    assert!(
+        (engaged / 0.1 - (engaged / 0.1).round()).abs() < 1e-9,
+        "Ctrl did not turn snapping on: {engaged}"
+    );
+}
+
+#[test]
+fn a_typed_value_is_never_snapped() {
+    // Someone who wrote a number meant that number. Rounding it would be the
+    // tool arguing with an instruction.
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    for c in "0.137".chars() {
+        g.type_character(c);
+    }
+    assert_eq!(translation(&at(&mut g, (900.0, 300.0)))[0], 0.137);
+}
+
+#[test]
+fn a_snapped_rotation_lands_on_the_angle_increment() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    let step = std::f64::consts::FRAC_PI_2 / 6.0;
+    for theta in [0.3f32, 0.9, 1.7] {
+        let cursor = (400.0 + 100.0 * theta.cos(), 300.0 - 100.0 * theta.sin());
+        let a = angle(&at(&mut g, cursor));
+        let steps = a / step;
+        assert!(
+            (steps - steps.round()).abs() < 1e-9,
+            "{a} radians is not a multiple of {step}"
+        );
+    }
+}
+
+#[test]
+fn a_snapped_scale_lands_on_the_factor_increment() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Scale,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    for x in [530.0, 617.0, 683.0] {
+        let f = scale(&at(&mut g, (x, 300.0)))[0];
+        let steps = f / 0.1;
+        assert!(
+            (steps - steps.round()).abs() < 1e-9,
+            "{f} is not a multiple of the snap step"
+        );
+    }
+}
+
+// --- proportional editing ---------------------------------------------------
+
+#[test]
+fn a_proportional_radius_rides_along_as_a_parameter() {
+    // The gesture names the radius and the operator does the falloff, so this
+    // module never has to know where the vertices are.
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    assert!(
+        at(&mut g, (500.0, 300.0))
+            .get("proportional_size")
+            .is_none(),
+        "off should say nothing rather than say zero"
+    );
+
+    g.set_proportional(Some(1.5));
+    match at(&mut g, (500.0, 300.0)).get("proportional_size") {
+        Some(PropertyValue::Float(r)) => assert_eq!(*r, 1.5),
+        other => panic!("expected a radius, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_status_line_reports_the_new_modes() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        snapping(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::Z);
+    g.cycle_axis(Axis::Z);
+    g.set_proportional(Some(0.75));
+    g.track((450.0, 280.0));
+    let status = g.status();
+    assert!(
+        status.contains("ZZ"),
+        "a local constraint should show: {status}"
+    );
+    assert!(status.contains("snap"), "{status}");
+    assert!(status.contains("falloff"), "{status}");
 }

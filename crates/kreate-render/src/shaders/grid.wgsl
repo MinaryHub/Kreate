@@ -20,6 +20,12 @@ struct GridGlobals {
     eye_and_tan: vec4<f32>,
     // x: aspect ratio, y: 1 for perspective / 0 for orthographic, zw: unused.
     params: vec4<f32>,
+    // The lattice and the two visible axis lines, linear RGBA. Supplied by the
+    // CPU from the shared palette so the grid's X red is the same red the
+    // transform panel puts on its X field.
+    line_color: vec4<f32>,
+    axis_x_color: vec4<f32>,
+    axis_y_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: GridGlobals;
@@ -108,16 +114,16 @@ fn fs_main(in: VsOut) -> FsOut {
     let horizon = 1.0 - smoothstep(0.0, 1.0, abs(t) * 0.5e-3 / max(abs(dir.z), 1e-3));
     coverage = coverage * clamp(horizon, 0.0, 1.0);
 
-    var color = vec3<f32>(0.32);
+    var color = g.line_color.rgb;
     // Axis lines, which is what tells the user which way is which. Drawn from
     // the same lattice maths so they anti-alias identically.
     let axis_w = fwidth(world_xy) * 1.2;
     if (abs(world_xy.y) < axis_w.y) {
-        color = vec3<f32>(0.72, 0.22, 0.26); // +X, red
+        color = g.axis_x_color.rgb; // +X, red
         coverage = max(coverage, 1.0 - abs(world_xy.y) / max(axis_w.y, 1e-8));
         coverage = coverage * clamp(horizon, 0.0, 1.0);
     } else if (abs(world_xy.x) < axis_w.x) {
-        color = vec3<f32>(0.35, 0.62, 0.24); // +Y, green
+        color = g.axis_y_color.rgb; // +Y, green
         coverage = max(coverage, 1.0 - abs(world_xy.x) / max(axis_w.x, 1e-8));
         coverage = coverage * clamp(horizon, 0.0, 1.0);
     }

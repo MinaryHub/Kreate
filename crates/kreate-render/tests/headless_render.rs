@@ -456,3 +456,74 @@ fn a_far_away_scene_renders_identically_to_one_at_the_origin() {
         fraction * 100.0
     );
 }
+
+#[test]
+fn an_empty_viewport_clears_to_the_palette_colour() {
+    // The clear value is linear and the target is sRGB, so what reaches the
+    // texture is the encoded form. Asserting on the *encoded* byte is the
+    // point: it is the only way to catch a clear that was written in the wrong
+    // colour space, which is exactly the mistake that made the selection
+    // accent a pale yellow before the palette existed.
+    let (img, _) = gpu_or_skip!(render_scene_opts(&[], ShadingMode::Studio, false, |_| {}));
+    let expected = kreate_render::palette::rgb8(kreate_render::palette::VIEWPORT);
+    for (x, y) in [(2, 2), (SIZE - 3, 2), (SIZE / 2, SIZE - 3)] {
+        let p = img.at(x, y);
+        assert_eq!(
+            [p[0], p[1], p[2]],
+            expected,
+            "cleared pixel at ({x},{y}) is not the palette's viewport colour"
+        );
+    }
+}
+
+#[test]
+fn the_grid_axes_are_drawn_in_the_shared_axis_colours() {
+    // The grid is what tells the user which way is which, and it has to say it
+    // in the same three colours as the navigation gizmo and the transform
+    // fields — otherwise each widget teaches a different lesson.
+    //
+    // Not covered by the visual-regression goldens: two one-pixel lines across
+    // a 256-pixel frame are well under that harness's 1.5% budget, so the axis
+    // colours could be changed there without a single golden noticing. This
+    // asserts on them directly.
+    let (img, _) = gpu_or_skip!(render_scene_opts(&[], ShadingMode::Studio, true, |_| {}));
+
+    let count_near = |want: [u8; 3]| {
+        img.pixels
+            .iter()
+            .filter(|p| (0..3).all(|i| (i32::from(p[i]) - i32::from(want[i])).abs() <= 12))
+            .count()
+    };
+
+    for (name, hex) in [
+        ("X", kreate_render::palette::AXIS_X),
+        ("Y", kreate_render::palette::AXIS_Y),
+    ] {
+        let n = count_near(kreate_render::palette::rgb8(hex));
+        assert!(
+            n > 20,
+            "only {n} pixels near the {name} axis colour; the grid is not              drawing it from the palette"
+        );
+    }
+
+    // And the lattice itself. It is drawn at partial coverage over the
+    // background, so no pixel is the palette colour exactly; what is pinned is
+    // how bright the brightest lattice pixel gets. Left unchecked, the lattice
+    // colour is free to drift — the visual-regression goldens render without
+    // the grid, so nothing else looks at it at all.
+    let neutral_peak = img
+        .pixels
+        .iter()
+        .filter(|p| {
+            // Skip the axis lines, which are deliberately not neutral.
+            let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+            (r - g).abs() <= 6 && (g - b).abs() <= 8
+        })
+        .map(|p| i32::from(p[0]))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        (50..=90).contains(&neutral_peak),
+        "the brightest lattice pixel is {neutral_peak}; the grid line colour          has drifted from the palette"
+    );
+}

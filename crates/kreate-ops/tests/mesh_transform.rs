@@ -454,3 +454,233 @@ fn the_transforms_are_refused_outside_edit_mode() {
     }
     let _ = &mut doc;
 }
+
+// --- proportional editing ---------------------------------------------------
+
+/// A row of six vertex pairs a unit apart along X.
+///
+/// A strip rather than a patch, so distance from the selection is just the
+/// index and every expectation below reads as a number rather than a diagram.
+fn strip() -> MeshData {
+    let positions: Vec<glam::Vec3> = (0..6)
+        .flat_map(|i| {
+            [
+                glam::Vec3::new(i as f32, 0.0, 0.0),
+                glam::Vec3::new(i as f32, 1.0, 0.0),
+            ]
+        })
+        .collect();
+    let faces: Vec<Vec<u32>> = (0..5)
+        .map(|i| vec![i * 2, i * 2 + 2, i * 2 + 3, i * 2 + 1])
+        .collect();
+    MeshData::from_faces(positions, &faces)
+}
+
+#[test]
+fn proportional_editing_drags_the_neighbourhood_along() {
+    // The reason §2.2 calls this central rather than a nicety: without it every
+    // vertex move is a spike, and shaping a surface means moving each vertex by
+    // hand.
+    let (mut doc, ctx) = scene(strip());
+    // The pair at x = 0.
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1]);
+    let before = positions(&doc);
+
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[
+            ("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+            ("proportional_size", PropertyValue::Float(2.5)),
+        ],
+    )
+    .expect("translate");
+
+    let after = positions(&doc);
+    let lift = |i: usize| (after[i].z - before[i].z) as f64;
+
+    assert!((lift(0) - 1.0).abs() < 1e-6, "the selection moves fully");
+    assert!((lift(1) - 1.0).abs() < 1e-6);
+    // Inside the radius, falling off with distance.
+    assert!(lift(2) > 0.0 && lift(2) < 1.0, "x=1 lifted {}", lift(2));
+    assert!(lift(4) > 0.0 && lift(4) < lift(2), "x=2 lifted {}", lift(4));
+    // Outside it, untouched.
+    assert!(
+        lift(6).abs() < 1e-6,
+        "x=3 is beyond 2.5 and lifted {}",
+        lift(6)
+    );
+    assert!(lift(10).abs() < 1e-6, "x=5 lifted {}", lift(10));
+}
+
+#[test]
+fn the_falloff_is_flat_at_both_ends() {
+    // A linear falloff leaves a visible cone with a crease at its rim, which is
+    // the artefact proportional editing exists to avoid. Checked as the shape of
+    // the curve: the change per step is small near the selection and near the
+    // rim, and largest in between.
+    let (mut doc, ctx) = scene(strip());
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1]);
+    let before = positions(&doc);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[
+            ("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+            ("proportional_size", PropertyValue::Float(5.0)),
+        ],
+    )
+    .expect("translate");
+    let after = positions(&doc);
+    let lift = |i: usize| (after[i * 2].z - before[i * 2].z) as f64;
+
+    // x = 1..5, weights along a smoothstep from 1 down to 0.
+    let steps: Vec<f64> = (1..5).map(|i| lift(i) - lift(i + 1)).collect();
+    let middle = steps[1].max(steps[2]);
+    // With a margin, not a bare `<`. A linear falloff makes every step exactly
+    // equal, and `0.2 < 0.2` on `f32`-derived values comes out true about as
+    // often as not — so the strict comparison passed against the very thing it
+    // was written to reject.
+    assert!(
+        steps[0] < middle * 0.9 && steps[3] < middle * 0.9,
+        "the falloff is not flattened at its ends: {steps:?}"
+    );
+}
+
+#[test]
+fn a_zero_radius_moves_only_the_selection() {
+    let (mut doc, ctx) = scene(strip());
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1]);
+    let before = positions(&doc);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[
+            ("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+            ("proportional_size", PropertyValue::Float(0.0)),
+        ],
+    )
+    .expect("translate");
+    let after = positions(&doc);
+    for i in 2..before.len() {
+        assert_eq!(after[i], before[i], "vertex {i} moved with no radius");
+    }
+    assert_ne!(after[0], before[0]);
+}
+
+#[test]
+fn distance_is_measured_to_the_nearest_selected_vertex() {
+    // Not to the selection's median. Dragging a whole edge loop should pull the
+    // mesh evenly along its length; a distance to the median would pull hardest
+    // in the middle and leave the ends behind.
+    let (mut doc, ctx) = scene(strip());
+    // The two ends, leaving a gap in the middle.
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1, 10, 11]);
+    let before = positions(&doc);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[
+            ("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+            ("proportional_size", PropertyValue::Float(1.5)),
+        ],
+    )
+    .expect("translate");
+    let after = positions(&doc);
+    let lift = |i: usize| (after[i * 2].z - before[i * 2].z) as f64;
+
+    // x = 1 is next to the left end and x = 4 next to the right: both move, and
+    // by the same amount. Measured from a median at x = 2.5 they would instead
+    // be the two *closest* points and move most, with the ends least.
+    assert!(lift(1) > 0.1, "x=1 lifted {}", lift(1));
+    assert!(lift(4) > 0.1, "x=4 lifted {}", lift(4));
+    assert!((lift(1) - lift(4)).abs() < 1e-6, "the two sides differ");
+    // And the middle, further than the radius from either end, does not move.
+    assert!(lift(2).abs() < 1e-6, "x=2 lifted {}", lift(2));
+}
+
+#[test]
+fn a_proportional_rotation_turns_by_a_smaller_angle_rather_than_moving_less() {
+    // The two are different, and the difference is visible. Interpolating the
+    // *result* drags a partly-weighted vertex along the chord between where it
+    // was and where a full turn would put it — which pulls it towards the pivot
+    // and shrinks the mesh. Interpolating the *rotation* turns it through a
+    // smaller angle, which keeps its distance and is what the tool means.
+    let (mut doc, ctx) = scene(strip());
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1]);
+    let before = positions(&doc);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.rotate",
+        &[
+            ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+            ("axis", PropertyValue::Enum(2)),
+            ("proportional_size", PropertyValue::Float(4.0)),
+        ],
+    )
+    .expect("rotate");
+    let after = positions(&doc);
+
+    // The pivot is the selection's median, at (0, 0.5, 0). A partly-weighted
+    // vertex has to keep its distance from it.
+    let pivot = (before[0] + before[1]) * 0.5;
+    for i in [2usize, 4, 6] {
+        let was = before[i].distance(pivot);
+        let now = after[i].distance(pivot);
+        assert!(
+            (was - now).abs() < 1e-4,
+            "vertex {i} moved from {was} to {now} from the pivot; the rotation \
+             was blended as positions rather than as an angle"
+        );
+        assert!(
+            before[i].distance(after[i]) > 1e-4,
+            "vertex {i} did not move at all"
+        );
+    }
+}
+
+#[test]
+fn a_proportional_scale_keeps_the_selection_at_full_strength() {
+    // Note that this cannot distinguish blending the factor from blending the
+    // result: scaling is linear in the position, so the two are algebraically
+    // identical. The rotation above is the one where the difference is real.
+    let (mut doc, ctx) = scene(strip());
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0, 1, 10, 11]);
+    let before = positions(&doc);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.scale",
+        &[
+            ("scale", PropertyValue::Vec3([2.0, 1.0, 1.0])),
+            ("proportional_size", PropertyValue::Float(1.5)),
+        ],
+    )
+    .expect("scale");
+    let after = positions(&doc);
+
+    // The pivot is the median of the four selected, at x = 2.5.
+    let pivot_x = 2.5f32;
+    for i in [0usize, 10] {
+        let was = before[i].x - pivot_x;
+        let now = after[i].x - pivot_x;
+        assert!(
+            (now - was * 2.0).abs() < 1e-4,
+            "selected vertex {i} scaled by {} rather than 2",
+            now / was
+        );
+    }
+    // A neighbour scales by less than the full factor but more than not at all.
+    let was = before[2].x - pivot_x;
+    let now = after[2].x - pivot_x;
+    let factor = now / was;
+    assert!(
+        factor > 1.0 && factor < 2.0,
+        "the neighbour scaled by {factor}"
+    );
+}

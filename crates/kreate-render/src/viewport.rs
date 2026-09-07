@@ -17,6 +17,7 @@ use crate::gpu::{self, DEPTH_CLEAR, DEPTH_FORMAT};
 use crate::hiz::HiZ;
 use crate::lod::{Budget, Detail, ViewSize};
 use crate::mesh_gpu::{MeshCounts, RenderMeshCpu};
+use crate::palette;
 use crate::picking::PickDomain;
 use kreate_math::Aabb;
 
@@ -49,6 +50,14 @@ struct ObjectData {
 struct EdgeGlobals {
     view_proj: [[f32; 4]; 4],
     params: [f32; 4],
+    /// The three edge diagnostics, linear RGBA.
+    ///
+    /// Per frame rather than per object: they never vary by object, and they
+    /// belong in the palette rather than in the shader so a contrast change is
+    /// one edit instead of a hunt through WGSL.
+    non_manifold_color: [f32; 4],
+    seam_color: [f32; 4],
+    sharp_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -121,6 +130,15 @@ struct GridGlobals {
     inv_view_row2: [f32; 4],
     eye_and_tan: [f32; 4],
     params: [f32; 4],
+    /// The lattice and the two visible axis lines, linear RGBA.
+    ///
+    /// Passed in rather than written into the shader so the axis colours are
+    /// the same three values the interface puts on a numeric field. A grid
+    /// whose X is a different red from the X in the transform panel teaches
+    /// the user nothing.
+    line_color: [f32; 4],
+    axis_x_color: [f32; 4],
+    axis_y_color: [f32; 4],
 }
 
 /// A mesh resident on the GPU.
@@ -769,9 +787,15 @@ pub struct PreviewSelection {
 
 /// The colour every selected element is drawn in.
 ///
-/// One constant for vertices, edges and faces: three shades of orange would
-/// read as three different states rather than as one selection.
-const SELECTED_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
+/// One value for vertices, edges and faces: three shades of orange would read
+/// as three different states rather than as one selection. It comes from
+/// [`crate::palette`] because it is the same accent the interface uses for a
+/// selected row, and it goes through the transfer function on the way because
+/// this value is written to an sRGB target — see the palette's module docs for
+/// what it looked like when it did not.
+fn selected_color() -> [f32; 4] {
+    palette::to_linear(palette::ACCENT)
+}
 
 /// Opacity of the selected-face fill.
 ///
@@ -1597,12 +1621,7 @@ impl Viewport {
             size: (width.max(1), height.max(1)),
             render_size: (width.max(1), height.max(1)),
             shading: ShadingMode::Studio,
-            background: wgpu::Color {
-                r: 0.055,
-                g: 0.058,
-                b: 0.065,
-                a: 1.0,
-            },
+            background: palette::clear(palette::VIEWPORT),
             show_grid: true,
             cluster_path: false,
             lod_budget: Budget::default(),
@@ -1798,6 +1817,9 @@ impl Viewport {
                     0.0,
                     0.0,
                 ],
+                line_color: palette::to_linear(palette::GRID_LINE),
+                axis_x_color: palette::to_linear(palette::AXIS_X),
+                axis_y_color: palette::to_linear(palette::AXIS_Y),
             }),
         );
 
@@ -1815,6 +1837,9 @@ impl Viewport {
                     // and at a kilometre, which a constant bias cannot manage.
                     EDGE_DEPTH_OFFSET,
                 ],
+                non_manifold_color: palette::to_linear(palette::EDGE_NON_MANIFOLD),
+                seam_color: palette::to_linear(palette::EDGE_SEAM),
+                sharp_color: palette::to_linear(palette::EDGE_SHARP),
             }),
         );
 
@@ -1883,11 +1908,8 @@ impl Viewport {
                 self.element_objects.offset(i) as u64,
                 bytemuck::bytes_of(&ElementObject {
                     model: m.to_cols_array_2d(),
-                    selected_color: SELECTED_COLOR,
-                    // Unselected vertices are drawn too, and pale: they are the
-                    // handles, and a vertex you cannot see is a vertex you
-                    // cannot aim at.
-                    unselected_color: [0.62, 0.64, 0.68, 1.0],
+                    selected_color: selected_color(),
+                    unselected_color: palette::to_linear(palette::HANDLE),
                     flags: [
                         f32::from(u8::from(draw.preview)),
                         // Fades the vertex dots as they grow too dense to read.
@@ -1905,10 +1927,8 @@ impl Viewport {
                 self.edge_objects.offset(i) as u64,
                 bytemuck::bytes_of(&EdgeObject {
                     model: m.to_cols_array_2d(),
-                    // Darker than the surface so the wireframe reads as structure
-                    // rather than competing with the shading.
-                    base_color: [0.05, 0.05, 0.06, 1.0],
-                    selected_color: SELECTED_COLOR,
+                    base_color: palette::to_linear(palette::WIRE),
+                    selected_color: selected_color(),
                     flags_params: [
                         // The wireframe's base alpha, scaled by the density
                         // fade. Folded in here rather than in the shader so the
@@ -2657,7 +2677,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<GridGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<Globals>(), 80);
         assert_eq!(std::mem::size_of::<ObjectData>(), 128);
-        assert_eq!(std::mem::size_of::<GridGlobals>(), 144);
+        assert_eq!(std::mem::size_of::<GridGlobals>(), 192);
+        assert_eq!(std::mem::size_of::<EdgeGlobals>() % 16, 0);
+        assert_eq!(std::mem::size_of::<EdgeGlobals>(), 128);
     }
 
     #[test]

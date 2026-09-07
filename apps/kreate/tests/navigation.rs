@@ -305,6 +305,11 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_wireframe",
     "view.cycle_shading",
     "view.toggle_projection",
+    // The two standing transform settings, which are application state rather
+    // than document state: no undo step restores "snapping was off".
+    "view.toggle_snap",
+    "view.toggle_proportional",
+    "view.cycle_snap_mode",
     "edit.undo",
     "edit.redo",
     "edit.adjust_last",
