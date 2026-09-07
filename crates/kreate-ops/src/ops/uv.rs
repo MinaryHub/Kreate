@@ -15,6 +15,7 @@
 //! none of those, and the redo panel could not re-run it.
 
 use kreate_mesh::arena::FaceId;
+use kreate_mesh::edit::uv_edit;
 use kreate_mesh::edit::uv_project::{self, Fit, Projection};
 use kreate_scene::{DocMut, Document};
 
@@ -175,8 +176,232 @@ impl Operator for Project {
     }
 }
 
+// --- selection ---------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectParams {
+    /// All, none, invert, or grow to whole islands.
+    #[param(variants("all", "none", "invert", "linked"))]
+    pub action: u32,
+    /// Which UV set to act on. Empty means the default set.
+    pub layer: String,
+}
+
+/// Selects UVs wholesale: all, none, inverted, or grown to islands.
+pub struct Select;
+
+impl Operator for Select {
+    type Params = SelectParams;
+
+    fn id() -> &'static str {
+        "uv.select"
+    }
+    fn label() -> &'static str {
+        "Select UVs"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let layer = layer_or_default(&params.layer).to_string();
+        let action = params.action;
+        with_bmesh(doc, |bm| {
+            match action {
+                1 => uv_edit::select_all(bm, false),
+                2 => uv_edit::select_invert(bm),
+                3 => uv_edit::select_linked(bm, &layer),
+                _ => uv_edit::select_all(bm, true),
+            };
+            Ok(())
+        })?;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectSetParams {
+    /// The corners to act on, by slot.
+    ///
+    /// The resolved *set*, not the rectangle that produced it — the same rule
+    /// as the 3D box select, and for the same reasons: a region depends on a
+    /// view, cannot be replayed headlessly, and re-running it after the view
+    /// has moved silently picks something else.
+    pub corners: Vec<u32>,
+    /// Add to the selection instead of replacing it.
+    pub extend: bool,
+    /// Remove the listed corners instead of adding them.
+    pub deselect: bool,
+}
+
+/// Selects a resolved set of corners — what a click or a box drag commits.
+pub struct SelectSet;
+
+impl Operator for SelectSet {
+    type Params = SelectSetParams;
+
+    fn id() -> &'static str {
+        "uv.select_set"
+    }
+    fn label() -> &'static str {
+        "Select UVs"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let action = if params.deselect {
+            uv_edit::SelectAction::Subtract
+        } else if params.extend {
+            uv_edit::SelectAction::Extend
+        } else {
+            uv_edit::SelectAction::Replace
+        };
+        let corners = params.corners.clone();
+        with_bmesh(doc, |bm| {
+            // Slots to handles through the arena, so a stale index from a
+            // selection captured before a topology edit is dropped rather than
+            // aliasing whatever now occupies that slot.
+            let ids: Vec<kreate_mesh::arena::LoopId> = corners
+                .iter()
+                .filter_map(|slot| bm.corner_at(*slot))
+                .collect();
+            uv_edit::set_selection(bm, &ids, action);
+            Ok(())
+        })?;
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- transform ---------------------------------------------------------------
+
+/// Where a UV transform turns and scales about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pivot {
+    /// The median of the selection's distinct positions.
+    #[default]
+    Median,
+    /// The map's origin.
+    Origin,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct TransformParams {
+    #[param(soft_min = -2.0, soft_max = 2.0)]
+    pub offset_u: f64,
+    #[param(soft_min = -2.0, soft_max = 2.0)]
+    pub offset_v: f64,
+    #[param(unit = "angle")]
+    pub rotation: f64,
+    /// Scale along U. Zero is read as one, so a bare invocation is a move.
+    #[param(soft_min = -4.0, soft_max = 4.0)]
+    pub scale_u: f64,
+    /// Scale along V.
+    #[param(soft_min = -4.0, soft_max = 4.0)]
+    pub scale_v: f64,
+    /// The selection's median, or the map's origin.
+    #[param(variants("median", "origin"))]
+    pub pivot: u32,
+    /// Which UV set to act on. Empty means the default set.
+    pub layer: String,
+}
+
+/// Moves, turns and scales the selected UVs.
+pub struct Transform;
+
+impl Operator for Transform {
+    type Params = TransformParams;
+
+    fn id() -> &'static str {
+        "uv.transform"
+    }
+    fn label() -> &'static str {
+        "Transform UVs"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let layer = layer_or_default(&params.layer).to_string();
+        // Zero reads as one, so `uv.transform(offset_u=0.5)` is a move rather
+        // than a move that also collapses the selection to a point. A default
+        // of one cannot be expressed by `#[derive(Default)]`, and a parameter
+        // whose default is a silent destruction of the mesh is a trap.
+        let scale = glam::Vec2::new(
+            if params.scale_u == 0.0 {
+                1.0
+            } else {
+                params.scale_u as f32
+            },
+            if params.scale_v == 0.0 {
+                1.0
+            } else {
+                params.scale_v as f32
+            },
+        );
+        let offset = glam::Vec2::new(params.offset_u as f32, params.offset_v as f32);
+        let rotation = params.rotation as f32;
+        let origin_pivot = params.pivot == Pivot::Origin as u32;
+
+        let moved = with_bmesh(doc, |bm| {
+            let corners = uv_edit::selected(bm);
+            if corners.is_empty() {
+                return Ok(0);
+            }
+            let pivot = if origin_pivot {
+                glam::Vec2::ZERO
+            } else {
+                uv_edit::median(bm, &corners, &layer)
+            };
+            Ok(uv_edit::transform(
+                bm,
+                &corners,
+                &layer,
+                &uv_edit::Transform2 {
+                    translation: offset,
+                    rotation,
+                    scale,
+                    pivot,
+                },
+            ))
+        })?;
+
+        Ok(if moved == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
+/// The layer a parameter names, or the default set.
+fn layer_or_default(name: &str) -> &str {
+    if name.is_empty() {
+        uv_project::DEFAULT_LAYER
+    } else {
+        name
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Project>();
+    registry.register::<Select>();
+    registry.register::<SelectSet>();
+    registry.register::<Transform>();
 }
 
 #[cfg(test)]
@@ -457,6 +682,334 @@ mod tests {
             ],
         );
         assert_ne!(front, uvs(&doc, mesh, uv_project::DEFAULT_LAYER));
+    }
+
+    fn selected_count(doc: &Document, mesh: MeshId) -> usize {
+        doc.mesh(mesh)
+            .unwrap()
+            .attributes()
+            .get_bool(kreate_mesh::attribute::names::SELECT_UV)
+            .map(|f| f.iter().filter(|x| **x).count())
+            .unwrap_or(0)
+    }
+
+    /// A cube with box-projected UVs and nothing selected.
+    fn projected_cube(r: &OperatorRegistry, h: &mut History) -> (Document, MeshId, Context) {
+        let (mut doc, mesh, ctx) = doc_with(primitives::cube(2.0));
+        project(
+            r,
+            h,
+            &mut doc,
+            &ctx,
+            &[("mode", PropertyValue::Enum(Mode::Box as u32))],
+        );
+        (doc, mesh, ctx)
+    }
+
+    #[test]
+    fn select_all_none_and_invert_go_through_the_operator() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+
+        let sel = |doc: &mut Document, h: &mut History, action: u32| {
+            h.dispatch(
+                &r,
+                doc,
+                &ctx,
+                "uv.select",
+                &params(&[("action", PropertyValue::Enum(action))]),
+            )
+            .expect("uv.select ran");
+        };
+
+        sel(&mut doc, &mut h, 0);
+        assert_eq!(selected_count(&doc, mesh), 24);
+        sel(&mut doc, &mut h, 1);
+        assert_eq!(selected_count(&doc, mesh), 0);
+        sel(&mut doc, &mut h, 2);
+        assert_eq!(selected_count(&doc, mesh), 24);
+    }
+
+    #[test]
+    fn a_resolved_set_of_corners_is_what_a_click_commits() {
+        // The parameter is the set, not the rectangle. Same rule as the 3D box
+        // select: a region depends on a view and cannot be replayed.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[("corners", PropertyValue::Ints(vec![0, 1, 2, 3]))]),
+        )
+        .expect("select_set ran");
+        assert_eq!(selected_count(&doc, mesh), 4);
+
+        // Extend adds, replace replaces.
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[
+                ("corners", PropertyValue::Ints(vec![4, 5])),
+                ("extend", PropertyValue::Bool(true)),
+            ]),
+        )
+        .expect("select_set extended");
+        assert_eq!(selected_count(&doc, mesh), 6);
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[
+                ("corners", PropertyValue::Ints(vec![0])),
+                ("extend", PropertyValue::Bool(true)),
+                ("deselect", PropertyValue::Bool(true)),
+            ]),
+        )
+        .expect("select_set deselected");
+        assert_eq!(selected_count(&doc, mesh), 5);
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[("corners", PropertyValue::Ints(vec![7]))]),
+        )
+        .expect("select_set replaced");
+        assert_eq!(selected_count(&doc, mesh), 1);
+    }
+
+    #[test]
+    fn a_slot_that_no_longer_holds_a_corner_is_dropped() {
+        // A selection captured before a topology edit carries stale slots. The
+        // arena's generation check is what keeps them from aliasing whatever
+        // now occupies the slot, and `corner_at` is where that happens — an
+        // out-of-range index must simply not select anything.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[("corners", PropertyValue::Ints(vec![0, 9_999]))]),
+        )
+        .expect("select_set ran");
+        assert_eq!(selected_count(&doc, mesh), 1, "a stale slot was honoured");
+    }
+
+    #[test]
+    fn select_linked_grows_to_whole_islands() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[("corners", PropertyValue::Ints(vec![0]))]),
+        )
+        .expect("select_set ran");
+        assert_eq!(selected_count(&doc, mesh), 1);
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select",
+            &params(&[("action", PropertyValue::Enum(3))]),
+        )
+        .expect("select linked ran");
+        // A box-projected cube's islands are single quads.
+        assert_eq!(selected_count(&doc, mesh), 4);
+    }
+
+    #[test]
+    fn a_transform_moves_only_the_selected_uvs() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select_set",
+            &params(&[("corners", PropertyValue::Ints(vec![0, 1, 2, 3]))]),
+        )
+        .expect("select_set ran");
+
+        let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.transform",
+            &params(&[
+                ("offset_u", PropertyValue::Float(0.25)),
+                ("offset_v", PropertyValue::Float(-0.5)),
+            ]),
+        )
+        .expect("transform ran");
+        let after = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+
+        let moved: Vec<usize> = before
+            .iter()
+            .zip(&after)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(moved.len(), 4, "{} corners moved", moved.len());
+        for i in moved {
+            let d = after[i] - before[i];
+            assert!((d - glam::Vec2::new(0.25, -0.5)).length() < 1e-6, "{d:?}");
+        }
+    }
+
+    #[test]
+    fn a_zero_scale_parameter_reads_as_one() {
+        // `#[derive(Default)]` gives zero, and a scale of zero collapses the
+        // selection to a point. A parameter whose default silently destroys
+        // the mesh is a trap, so zero means "not given".
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select",
+            &params(&[("action", PropertyValue::Enum(0))]),
+        )
+        .expect("select all");
+
+        let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.transform",
+            &params(&[("offset_u", PropertyValue::Float(0.1))]),
+        )
+        .expect("transform ran");
+        let after = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+
+        let distinct_before = {
+            let mut v: Vec<String> = before.iter().map(|uv| format!("{uv:?}")).collect();
+            v.sort();
+            v.dedup();
+            v.len()
+        };
+        let distinct_after = {
+            let mut v: Vec<String> = after.iter().map(|uv| format!("{uv:?}")).collect();
+            v.sort();
+            v.dedup();
+            v.len()
+        };
+        assert_eq!(
+            distinct_before, distinct_after,
+            "the map collapsed: a default scale of zero was applied"
+        );
+    }
+
+    #[test]
+    fn the_pivot_choice_changes_where_a_rotation_turns_about() {
+        let r = registry();
+        let mut h = History::new();
+
+        let run = |pivot: u32| -> Vec<glam::Vec2> {
+            let mut h2 = History::new();
+            let (mut doc, mesh, ctx) = projected_cube(&r, &mut h2);
+            h2.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "uv.select",
+                &params(&[("action", PropertyValue::Enum(0))]),
+            )
+            .expect("select all");
+            h2.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "uv.transform",
+                &params(&[
+                    ("rotation", PropertyValue::Float(0.7)),
+                    ("pivot", PropertyValue::Enum(pivot)),
+                ]),
+            )
+            .expect("transform ran");
+            uvs(&doc, mesh, uv_project::DEFAULT_LAYER)
+        };
+
+        let _ = &mut h;
+        assert_ne!(run(0), run(1), "median and origin gave the same answer");
+    }
+
+    #[test]
+    fn undo_restores_the_uvs_a_transform_moved() {
+        // §1.7 on a layer the operator only *modifies*, as opposed to the
+        // projection test, which covers a layer it creates.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.select",
+            &params(&[("action", PropertyValue::Enum(0))]),
+        )
+        .expect("select all");
+
+        let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.transform",
+            &params(&[("offset_u", PropertyValue::Float(0.3))]),
+        )
+        .expect("transform ran");
+        assert_ne!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER), before);
+
+        assert!(h.undo(&mut doc), "nothing to undo");
+        assert_eq!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER), before);
+    }
+
+    #[test]
+    fn a_transform_with_nothing_selected_is_cancelled() {
+        // Not an error, and not a no-op that still lands on the undo stack: a
+        // tool that reports Finished with nothing to do puts an empty step in
+        // the history, and the user's next undo does nothing visible.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, _, ctx) = projected_cube(&r, &mut h);
+        let depth = h.entries().len();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "uv.transform",
+            &params(&[("offset_u", PropertyValue::Float(0.3))]),
+        )
+        .expect("transform ran");
+        assert_eq!(
+            h.entries().len(),
+            depth,
+            "an empty transform reached the history"
+        );
     }
 
     #[test]

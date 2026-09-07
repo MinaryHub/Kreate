@@ -214,7 +214,9 @@ impl BMesh {
     /// The bridge from an outside index to a handle. A click resolves to an
     /// element *index* — from the GPU id buffer, which knows nothing about
     /// arena generations — and this is what turns it into something safe to
-    /// look up. `Corner` has no public handle type, so it is not offered.
+    /// look up. A corner is not one of the three things a 3D click can hit, so
+    /// it is not part of this enum — see [`Self::corner_at`], which the UV
+    /// editor uses instead.
     pub fn handle_at(&self, domain: Domain, index: u32) -> Option<ElementId> {
         match domain {
             Domain::Point => self.verts.handle_at(index).map(ElementId::Vert),
@@ -222,6 +224,18 @@ impl BMesh {
             Domain::Face => self.faces.handle_at(index).map(ElementId::Face),
             Domain::Corner => None,
         }
+    }
+
+    /// The live handle for a corner slot, if that slot is occupied.
+    ///
+    /// Separate from [`Self::handle_at`] because a corner is not something a
+    /// 3D click can land on — the id buffer knows vertices, edges and faces.
+    /// The UV editor is the one place that picks corners, because a UV *is* a
+    /// corner, and it needs the same generation check: a slot index captured
+    /// before a topology edit must be dropped rather than aliasing whatever
+    /// now lives in that slot.
+    pub fn corner_at(&self, index: u32) -> Option<LoopId> {
+        self.loops.handle_at(index)
     }
 
     /// Bytes held by the four arenas and the attribute layers.

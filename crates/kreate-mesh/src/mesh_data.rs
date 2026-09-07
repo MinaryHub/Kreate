@@ -922,6 +922,40 @@ mod tests {
     }
 
     #[test]
+    fn a_uv_selection_change_is_recognised_as_one() {
+        // The UV editor's equivalent of the click test above, and it matters
+        // for the same reason: without it every click in the UV editor is a
+        // full geometry re-upload of the mesh, which is exactly the coarse
+        // invalidation the plan names as the top cause of DCC hitching.
+        //
+        // Nothing checked this until a falsification sweep removed
+        // `SELECT_UV` from `is_selection` and no test noticed.
+        let mesh = selectable_cube();
+        let mut with_uv_selection = mesh.clone();
+        let corners = with_uv_selection.num_corners() as usize;
+        with_uv_selection.attributes_mut().ensure(
+            names::SELECT_UV,
+            Domain::Corner,
+            AttrType::Bool,
+            corners,
+        );
+        assert!(
+            mesh.only_selection_differs(&with_uv_selection),
+            "the UV selection layer appearing was mistaken for a geometry change"
+        );
+
+        let mut clicked = with_uv_selection.clone();
+        clicked
+            .attributes_mut()
+            .make_mut_bool(names::SELECT_UV)
+            .expect("the layer is there")[3] = true;
+        assert!(
+            with_uv_selection.only_selection_differs(&clicked),
+            "a UV click was mistaken for a geometry change"
+        );
+    }
+
+    #[test]
     fn changing_a_uv_is_not_a_selection_change() {
         // Any layer that is not a selection layer means a full upload. A
         // renderer applying a UV edit as a flags write would show the old

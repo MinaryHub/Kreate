@@ -368,20 +368,28 @@ pub mod names {
     pub const SELECT_VERT: &str = ".select_vert";
     pub const SELECT_EDGE: &str = ".select_edge";
     pub const SELECT_FACE: &str = ".select_face";
+    /// Corner / `Bool`. What is selected in the UV editor.
+    ///
+    /// Its own domain and its own layer rather than a reuse of the vertex
+    /// selection, because they are genuinely different states: one vertex can
+    /// be two UVs on opposite sides of a seam, and selecting one of them must
+    /// not select the other. That is the same reason UVs are Corner data in
+    /// the first place.
+    pub const SELECT_UV: &str = ".select_uv";
 
     /// `true` for layers that are internal bookkeeping rather than user data.
     pub fn is_internal(name: &str) -> bool {
         name.starts_with('.')
     }
 
-    /// `true` for the three selection layers.
+    /// `true` for the selection layers.
     ///
     /// Named rather than inferred from the leading dot: selection is the one
     /// internal layer a renderer can apply without touching geometry, and a
     /// future internal layer that happens to start with a dot must not be
     /// swept into that category by accident.
     pub fn is_selection(name: &str) -> bool {
-        matches!(name, SELECT_VERT | SELECT_EDGE | SELECT_FACE)
+        matches!(name, SELECT_VERT | SELECT_EDGE | SELECT_FACE | SELECT_UV)
     }
 }
 
