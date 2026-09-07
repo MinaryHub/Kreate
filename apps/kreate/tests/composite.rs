@@ -673,6 +673,46 @@ fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
 }
 
 #[test]
+fn many_recovered_documents_do_not_eat_the_window() {
+    // A stale session directory per crashed process is normal, and a run of
+    // interrupted tests left forty-two. The offer was a `horizontal_wrapped`
+    // flow of every entry with its two buttons: it filled two thirds of the
+    // window and pushed the viewport off the bottom, which is what the
+    // screenshot that prompted this showed.
+    //
+    // Measured as the viewport's height, because that is what the user loses.
+    let none = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
+    let many = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.recoverable = (0..60)
+            .map(|i| kreate::shell::RecoveryOffer {
+                path: std::path::PathBuf::from(format!("/tmp/session-{i}/recovery-loop.kreate")),
+                name: "recovery-loop.kreate".into(),
+                age: format!("{i}분 전"),
+            })
+            .collect();
+    }));
+
+    let lost = none.viewport_rect.height() - many.viewport_rect.height();
+    // More than one row, or the offer is not being drawn and this test is
+    // asserting nothing.
+    assert!(
+        lost > 60.0,
+        "the offer cost only {lost} points, so it is probably not drawn"
+    );
+    // And bounded. The original wrapped flow cost 416; four rows cost 117.
+    assert!(
+        lost < 160.0,
+        "sixty recovery offers cost the viewport {lost} points of height; the \
+         list is not bounded"
+    );
+    assert!(
+        many.viewport_rect.height() > f32::from(H as u16) * 0.6,
+        "the viewport is down to {} points",
+        many.viewport_rect.height()
+    );
+}
+
+#[test]
 fn panels_and_viewport_produce_many_distinct_colours() {
     // Text, panel chrome, the grid and the shaded cube together should span a
     // wide range. A handful of colours means one of those layers is missing.

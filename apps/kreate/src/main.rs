@@ -794,6 +794,45 @@ impl App {
     /// opened *at* something, where most rows are dead, makes the user hunt for
     /// the live ones. The menu bar can afford that; a menu under the cursor
     /// cannot.
+    /// How long ago an autosave was written, in words.
+    ///
+    /// Formatted here rather than in the panel because it is prose, and
+    /// because the panel has no business knowing about clocks. It matters more
+    /// than it looks: a crashed run leaves one autosave per session, they are
+    /// all called whatever the document was called, and the time is the only
+    /// thing that tells the user which one they want back.
+    fn describe_age(&self, modified: Option<std::time::SystemTime>) -> String {
+        let t = |key: &str, n: u64| {
+            self.ui
+                .catalog
+                .format(key, kreate_i18n::TextKind::Ui, &[("n", &n.to_string())])
+        };
+        let Some(modified) = modified else {
+            // No timestamp is not an error worth a message of its own; an
+            // unknown age reads as the oldest thing there is, which is also
+            // where the list puts it.
+            return String::new();
+        };
+        let Ok(elapsed) = modified.elapsed() else {
+            // A file dated in the future — a clock change, or a copy from
+            // another machine. "Just now" is the least misleading answer.
+            return self
+                .ui
+                .catalog
+                .format("recover-age-now", kreate_i18n::TextKind::Ui, &[]);
+        };
+        let seconds = elapsed.as_secs();
+        match seconds {
+            0..=59 => self
+                .ui
+                .catalog
+                .format("recover-age-now", kreate_i18n::TextKind::Ui, &[]),
+            60..=3599 => t("recover-age-minutes", seconds / 60),
+            3600..=86_399 => t("recover-age-hours", seconds / 3600),
+            _ => t("recover-age-days", seconds / 86_400),
+        }
+    }
+
     /// Publishes the UV map for the editor panel.
     ///
     /// Read from the *edit structure*, not from the document, and that is not
@@ -1042,7 +1081,11 @@ impl App {
             self.ui.recoverable = self
                 .recoverable
                 .iter()
-                .map(|r| (r.path.clone(), r.name.clone()))
+                .map(|r| shell::RecoveryOffer {
+                    path: r.path.clone(),
+                    name: r.name.clone(),
+                    age: self.describe_age(r.modified),
+                })
                 .collect();
         }
     }

@@ -101,7 +101,7 @@ pub struct ShellState {
     /// dialog at startup that the user has to dismiss before seeing the
     /// application at all. A crash is already a bad moment; being unable to look
     /// at the program while deciding makes it worse.
-    pub recoverable: Vec<(std::path::PathBuf, String)>,
+    pub recoverable: Vec<RecoveryOffer>,
     /// Whether the remapping panel is open.
     pub show_keymap: bool,
     /// The binding waiting for a keystroke, if any.
@@ -134,6 +134,20 @@ pub struct ShellState {
     /// and the status bar is the wrong place for it: the user is looking at
     /// the model, not at the bottom of the window.
     pub modal: Option<ModalHeader>,
+}
+
+/// One autosave the user is being offered back.
+pub struct RecoveryOffer {
+    pub path: std::path::PathBuf,
+    /// The name the document had when it was written.
+    pub name: String,
+    /// How long ago, already translated.
+    ///
+    /// Formatted by the application rather than here: forty autosaves of a
+    /// document called `untitled` are indistinguishable by name, and the time
+    /// is the only thing that tells the user which one they want. Prose is the
+    /// caller's to supply — the same rule every other panel follows.
+    pub age: String,
 }
 
 /// What the modal header says while a transform is being dragged.
@@ -431,9 +445,9 @@ struct Labels {
     file_open: String,
     file_save: String,
     file_save_as: String,
-    recover_title: String,
     recover_open: String,
     recover_discard: String,
+    recover_discard_all: String,
     add_cube: String,
     duplicate: String,
     delete: String,
@@ -477,9 +491,9 @@ impl Labels {
             file_open: t("menu-file-open"),
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
-            recover_title: t("recover-title"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
+            recover_discard_all: t("recover-discard-all"),
             add_cube: t("menu-add-cube"),
             duplicate: t("menu-duplicate"),
             delete: t("menu-delete"),
@@ -564,28 +578,28 @@ pub fn draw(
     // choice goes through the command queue like every other action instead of
     // blocking the event loop at startup.
     if !state.recoverable.is_empty() {
-        Panel::top("recover").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&l.recover_title);
-                // A clone, because the buttons queue commands that will mutate
-                // this list and the loop would otherwise hold a borrow across it.
-                let offers = state.recoverable.clone();
-                for (path, name) in offers {
-                    ui.separator();
-                    ui.label(&name);
-                    if ui.button(&l.recover_open).clicked() {
-                        state
-                            .queue
-                            .push(Command::RecoverDocument { path: path.clone() });
-                    }
-                    if ui.button(&l.recover_discard).clicked() {
-                        state
-                            .queue
-                            .push(Command::DiscardRecovery { path: path.clone() });
-                    }
-                }
+        // The height goes on the *panel*, and it takes both setters. Measured,
+        // because none of this is guessable:
+        //
+        // - `ScrollArea::max_height` inside a non-resizable top panel is
+        //   inert. A hundred points came out whether it asked for two rows or
+        //   twenty-five.
+        // - `Panel::max_size` alone only ever *lowers* the height: two rows
+        //   worked, ten did nothing, because a non-resizable top panel falls
+        //   back to a default of about a hundred points.
+        // - `default_size` is the one that sets it, and `max_size` beside it
+        //   keeps a one-entry offer short.
+        //
+        // With both, the height tracks the row count: one row costs the
+        // viewport 47 points, four cost 117, ten cost 258.
+        let row = recovery_row_height(ui);
+        let height = row * (RECOVERY_VISIBLE_ROWS + 1.0);
+        Panel::top("recover")
+            .default_size(height)
+            .max_size(height)
+            .show(ui, |ui| {
+                draw_recovery(ui, state, &l);
             });
-        });
     }
 
     Panel::top("menu").show(ui, |ui| {
@@ -1048,6 +1062,103 @@ fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
     );
 }
 
+/// Queues a discard for every offer.
+///
+/// A function rather than three lines inside the button, so the behaviour can
+/// be tested: a pixel test can see that the panel is bounded but not that this
+/// affordance exists, and with forty-two offers it is the one a user needs
+/// most. A falsification sweep deleted the button and nothing failed.
+pub fn discard_all_recoveries(state: &mut ShellState) {
+    // Every offer named individually rather than a single "discard all"
+    // command, because the application answers each one by forgetting a path —
+    // and one command per path means the two cannot disagree about which
+    // paths were meant.
+    for offer in &state.recoverable {
+        state.queue.push(Command::DiscardRecovery {
+            path: offer.path.clone(),
+        });
+    }
+}
+
+/// How many rows the recovery offer shows before it starts scrolling.
+///
+/// Four is enough to see that there are several and to reach the newest
+/// without scrolling, and small enough that the panel never dominates the
+/// window however many there are.
+const RECOVERY_VISIBLE_ROWS: f32 = 4.0;
+
+/// The height of one row of the recovery offer, including its spacing.
+fn recovery_row_height(ui: &Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y * 2.0
+}
+
+/// The recovery offer: one row per autosave, in a bounded scrolling list.
+///
+/// It used to be a `horizontal_wrapped` flow of every entry with its two
+/// buttons, which is fine for one and unusable for forty: a stale session
+/// directory per crashed process is normal, and a run of interrupted tests
+/// left forty-two. The offer filled two thirds of the window and pushed the
+/// viewport off the bottom.
+///
+/// So: a fixed maximum height, one row each, the count in the heading, and a
+/// way to dismiss the lot. The list is newest first, which `find_recoverable`
+/// guarantees — the one a user wants is almost always the last one written.
+fn draw_recovery(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let count = state.recoverable.len();
+    let heading = state.catalog.format(
+        "recover-count",
+        TextKind::Ui,
+        &[("count", &count.to_string())],
+    );
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(heading).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Present from the first row, not only when the list is long: a
+            // user who wants none of them should not have to click forty times
+            // to say so.
+            if ui.button(&l.recover_discard_all).clicked() {
+                discard_all_recoveries(state);
+            }
+        });
+    });
+
+    // The scroll area is what makes the overflow reachable rather than
+    // clipped; the panel above is what bounds it.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // A clone, because the buttons queue commands that will mutate this
+            // list and the loop would otherwise hold a borrow across it.
+            let offers: Vec<(std::path::PathBuf, String, String)> = state
+                .recoverable
+                .iter()
+                .map(|o| (o.path.clone(), o.name.clone(), o.age.clone()))
+                .collect();
+            for (path, name, age) in offers {
+                ui.horizontal(|ui| {
+                    // The full path on hover. Forty autosaves called
+                    // `untitled.kreate` differ only by the session directory
+                    // they came from, and the user occasionally needs to see it.
+                    ui.label(&name).on_hover_text(path.display().to_string());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(&l.recover_discard).clicked() {
+                            state
+                                .queue
+                                .push(Command::DiscardRecovery { path: path.clone() });
+                        }
+                        if ui.button(&l.recover_open).clicked() {
+                            state
+                                .queue
+                                .push(Command::RecoverDocument { path: path.clone() });
+                        }
+                        ui.weak(&age);
+                    });
+                });
+            }
+        });
+}
+
 /// The running transform's header, over the top of the viewport.
 ///
 /// Painted rather than laid out as a widget: it has to be centred over the
@@ -1217,9 +1328,14 @@ menu-file-new = New
 menu-file-open = Open...
 menu-file-save = Save
 menu-file-save-as = Save As...
-recover-title = Recovered work
+recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
+recover-discard-all = Discard all
+recover-age-now = just now
+recover-age-minutes = { $n } min ago
+recover-age-hours = { $n } h ago
+recover-age-days = { $n } d ago
 status-saved = Saved { $path }
 status-opened = Opened { $path }
 menu-add-cube = Add Cube
@@ -1386,9 +1502,14 @@ menu-file-new = 새로
 menu-file-open = 열기...
 menu-file-save = 저장
 menu-file-save-as = 다른 이름으로 저장...
-recover-title = 복구된 작업
+recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
+recover-discard-all = 모두 버리기
+recover-age-now = 방금
+recover-age-minutes = { $n }분 전
+recover-age-hours = { $n }시간 전
+recover-age-days = { $n }일 전
 status-saved = { $path } 저장함
 status-opened = { $path } 열었음
 menu-add-cube = 큐브 추가
@@ -1561,6 +1682,49 @@ mod tests {
     use kreate_scene::document::Object;
 
     #[test]
+    fn discarding_all_recoveries_names_every_one() {
+        // The affordance that makes a pile of them manageable: a crashed run
+        // leaves one autosave per session, and forty-two of them is a normal
+        // outcome, not a pathological one. A user who wants none should not
+        // have to click forty-two times to say so.
+        let mut state = ShellState {
+            recoverable: (0..5)
+                .map(|i| RecoveryOffer {
+                    path: std::path::PathBuf::from(format!("/tmp/session-{i}/a.kreate")),
+                    name: "a.kreate".into(),
+                    age: String::new(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        discard_all_recoveries(&mut state);
+        let queued: Vec<std::path::PathBuf> = state
+            .queue
+            .drain()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::DiscardRecovery { path } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queued.len(), 5, "not every offer was named");
+        // Each path exactly once: a duplicate would ask the application to
+        // forget something it has already forgotten.
+        let mut unique = queued.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), queued.len(), "a path was queued twice");
+    }
+
+    #[test]
+    fn discarding_all_of_nothing_queues_nothing() {
+        let mut state = ShellState::default();
+        discard_all_recoveries(&mut state);
+        assert!(state.queue.drain().is_empty());
+    }
+
+    #[test]
     fn the_built_in_catalogs_parse() {
         // A malformed built-in resource would leave every label showing its key,
         // which is the sort of thing that ships if nothing checks it.
@@ -1697,9 +1861,14 @@ mod tests {
             "menu-file-open",
             "menu-file-save",
             "menu-file-save-as",
-            "recover-title",
+            "recover-count",
             "recover-open",
             "recover-discard",
+            "recover-discard-all",
+            "recover-age-now",
+            "recover-age-minutes",
+            "recover-age-hours",
+            "recover-age-days",
             "menu-add-cube",
             "menu-duplicate",
             "menu-delete",
