@@ -110,6 +110,13 @@ pub struct UvState {
     pub centre: Vec2,
     /// Pixels per UV unit.
     pub scale: f32,
+    /// Where the panel last drew, in interface points.
+    ///
+    /// Geometry rather than a "the pointer is over me" flag, for the same
+    /// reason the navigation gizmo publishes its circle: a flag goes stale
+    /// between frames, because the interface only runs when something
+    /// redraws, while a rectangle stays true until the layout changes.
+    pub rect: Option<Rect>,
     /// A selection band being dragged, in screen space.
     pub band: Option<(Pos2, Pos2)>,
     /// Whether the band removes rather than adds.
@@ -123,6 +130,7 @@ impl Default for UvState {
             // first frame it knows its own size.
             centre: Vec2::splat(0.5),
             scale: 256.0,
+            rect: None,
             band: None,
             band_deselect: false,
         }
@@ -276,6 +284,11 @@ pub fn uv_editor(
     if rect.width() < 32.0 || rect.height() < 32.0 {
         return out;
     }
+
+    // Published so the application can tell whether the pointer is over this
+    // panel — which is how `G` means "move UVs" here and "move geometry" in
+    // the viewport, without either one knowing about the other.
+    state.rect = Some(rect);
 
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter().with_clip_rect(rect);

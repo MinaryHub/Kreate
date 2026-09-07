@@ -78,6 +78,7 @@ pub fn context_key(context: Context) -> &'static str {
         Context::Viewport => "keymap-context-viewport",
         Context::ObjectMode => "keymap-context-object",
         Context::EditMesh => "keymap-context-edit",
+        Context::UvEditor => "keymap-context-uv",
         Context::Modal => "keymap-context-modal",
     }
 }
@@ -106,11 +107,12 @@ pub struct KeymapText {
 
 /// The order contexts are listed in: outermost first, matching how a user thinks
 /// about scope rather than how resolution walks it.
-pub const CONTEXT_ORDER: [Context; 5] = [
+pub const CONTEXT_ORDER: [Context; 6] = [
     Context::Global,
     Context::Viewport,
     Context::ObjectMode,
     Context::EditMesh,
+    Context::UvEditor,
     Context::Modal,
 ];
 
@@ -351,11 +353,21 @@ mod tests {
         for context in CONTEXT_ORDER {
             assert!(!context_key(context).is_empty());
         }
+        // Against the enum rather than a number written down here. A literal
+        // needs a person to notice it went stale; this cannot, and adding a
+        // context without listing it is exactly the mistake that hides
+        // bindings from the panel while the panel still looks complete.
         assert_eq!(
             CONTEXT_ORDER.len(),
-            5,
+            Context::ALL.len(),
             "a new context must be added to the order, or its bindings vanish"
         );
+        for context in Context::ALL {
+            assert!(
+                CONTEXT_ORDER.contains(context),
+                "{context:?} is missing from the order"
+            );
+        }
     }
 
     #[test]

@@ -341,6 +341,56 @@ fn common() -> Vec<Binding> {
             Context::ObjectMode,
             Action::new("object.scale").with("scale", PropertyValue::Vec3([1.2, 1.2, 1.2])),
         ),
+        // --- the UV editor: the same three keys again ------------------------
+        //
+        // `G`, `R`, `S` mean move, turn and scale wherever the pointer is, and
+        // the operator behind them is what changes. That is the whole reason
+        // the UV editor is its own context rather than part of the viewport's:
+        // one key, one meaning, resolved by where the pointer is.
+        key(
+            "uv.translate",
+            "G",
+            Context::UvEditor,
+            enum_param(Action::new("uv.transform"), "mode", 0),
+        ),
+        key(
+            "uv.rotate",
+            "R",
+            Context::UvEditor,
+            enum_param(Action::new("uv.transform"), "mode", 1),
+        ),
+        key(
+            "uv.scale",
+            "S",
+            Context::UvEditor,
+            enum_param(Action::new("uv.transform"), "mode", 2),
+        ),
+        key(
+            "uv.select_all",
+            "A",
+            Context::UvEditor,
+            enum_param(Action::new("uv.select"), "action", 0),
+        ),
+        key(
+            "uv.select_none",
+            "A",
+            Context::UvEditor,
+            enum_param(Action::new("uv.select"), "action", 1),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "uv.select_invert",
+            "I",
+            Context::UvEditor,
+            enum_param(Action::new("uv.select"), "action", 2),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "uv.select_linked",
+            "L",
+            Context::UvEditor,
+            enum_param(Action::new("uv.select"), "action", 3),
+        ),
         // --- edit mode: the same three keys, acting on the selection --------
         //
         // One set of operators for vertices, edges and faces. An edge is its two
@@ -737,6 +787,49 @@ mod tests {
                 EventKind::Press
             )
             .is_none());
+    }
+
+    #[test]
+    fn the_three_uv_keys_reach_one_operator_with_three_different_modes() {
+        // One operator serves `G`, `R` and `S` in the UV editor, so the *mode*
+        // is the only thing telling them apart. A falsification sweep changed
+        // `R`'s mode to Move and nothing failed: all three keys would have
+        // started a move, and the panel would have looked like rotate and
+        // scale simply did nothing.
+        let k = load(Preset::Kreate);
+        let mode_of = |key: &str| -> Option<i64> {
+            let action = k.resolve(
+                Context::UvEditor,
+                &Input::key(key),
+                Modifiers::NONE,
+                EventKind::Press,
+            )?;
+            assert_eq!(
+                action.op_id, "uv.transform",
+                "{key} reached the wrong operator"
+            );
+            action.params.get("mode").and_then(|v| v.as_int())
+        };
+        assert_eq!(mode_of("G"), Some(0), "G must move");
+        assert_eq!(mode_of("R"), Some(1), "R must rotate");
+        assert_eq!(mode_of("S"), Some(2), "S must scale");
+    }
+
+    #[test]
+    fn the_four_uv_selection_keys_reach_four_different_actions() {
+        // The same failure from the other side: `uv.select` takes an `action`,
+        // and four bindings that agreed on it would look like three of the
+        // keys did nothing.
+        let k = load(Preset::Kreate);
+        let action_of = |key: &str, mods: Modifiers| -> Option<i64> {
+            let action = k.resolve(Context::UvEditor, &Input::key(key), mods, EventKind::Press)?;
+            assert_eq!(action.op_id, "uv.select");
+            action.params.get("action").and_then(|v| v.as_int())
+        };
+        assert_eq!(action_of("A", Modifiers::NONE), Some(0));
+        assert_eq!(action_of("A", Modifiers::alt()), Some(1));
+        assert_eq!(action_of("I", Modifiers::ctrl()), Some(2));
+        assert_eq!(action_of("L", Modifiers::NONE), Some(3));
     }
 
     #[test]

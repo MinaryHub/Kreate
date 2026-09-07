@@ -137,6 +137,14 @@ pub enum Context {
     Viewport,
     ObjectMode,
     EditMesh,
+    /// The pointer is over the UV editor.
+    ///
+    /// Its own context, and deliberately *not* inside `Viewport`: `G` in the
+    /// UV editor moves UVs and `G` in the viewport moves geometry, and a
+    /// context that inherited the viewport's would have to decide which one
+    /// won on every key. Keeping them siblings makes the answer "whichever
+    /// panel the pointer is over", which is what the user already believes.
+    UvEditor,
     /// Inside a running modal tool. First-class so `Transform Modal Map` can
     /// bind keys to *modal events* rather than to operators — the reason
     /// remapping works in Blender and not in most of its clones.
@@ -155,6 +163,7 @@ impl Context {
             Context::Viewport => &[Context::Viewport, Context::Global],
             Context::ObjectMode => &[Context::ObjectMode, Context::Viewport, Context::Global],
             Context::EditMesh => &[Context::EditMesh, Context::Viewport, Context::Global],
+            Context::UvEditor => &[Context::UvEditor, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
             // stray `S` would start a scale inside a running transform.
             Context::Modal => &[Context::Modal],
@@ -167,6 +176,7 @@ impl Context {
         Context::Viewport,
         Context::ObjectMode,
         Context::EditMesh,
+        Context::UvEditor,
         Context::Modal,
     ];
 
@@ -762,6 +772,7 @@ mod tests {
         assert!(leaves.contains(&Context::ObjectMode));
         assert!(leaves.contains(&Context::EditMesh));
         assert!(leaves.contains(&Context::Modal));
+        assert!(leaves.contains(&Context::UvEditor));
         // Parents, never active on their own — which is the whole reason
         // `conflicts` can tell a shadowed binding from a dead one.
         assert!(!leaves.contains(&Context::Viewport));

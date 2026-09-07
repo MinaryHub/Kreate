@@ -73,6 +73,9 @@ Kreate
              F fill hole  Shift+F grid fill
              Y split off faces  V rip along edges  Ctrl+B bevel
              U box-project UVs (right-click for the other projections)
+  UV editor  G move  R rotate  S scale   A all  Alt+A none  L linked
+             U / V or X / Y constrain an axis; the keys work where the
+             pointer is, so G means UVs here and geometry in the viewport
              1/2/3 vert/edge/face select  L loop  Shift+L ring
              Ctrl+A all elements  Alt+A none  Ctrl+I invert
   Transform  G move  R rotate  S scale
@@ -196,6 +199,48 @@ impl LatencyStats {
             self.reported_at = Some(now);
         }
     }
+}
+
+/// A digit or a sign, from a physical key.
+///
+/// Shared by both gesture handlers, because a number typed into a transform
+/// means the same thing whichever one is running — and two copies of this
+/// table is two chances for one of them to miss a key.
+fn typed_character(code: KeyCode) -> Option<char> {
+    match code {
+        KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+        KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+        KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+        KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+        KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+        KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+        KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+        KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+        KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+        KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+        KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+        KeyCode::Minus | KeyCode::NumpadSubtract => Some('-'),
+        KeyCode::Slash | KeyCode::NumpadDivide => Some('/'),
+        KeyCode::NumpadMultiply => Some('*'),
+        _ => None,
+    }
+}
+
+/// The gesture's parameters, with the mode the operator needs to read them.
+///
+/// The gesture reports its own numbers; the mode says which group of them is
+/// the live one. Set here rather than inside the gesture because it is a
+/// property of the *operator's* interface, and the gesture is deliberately
+/// ignorant of which operator it drives.
+fn mode_params(kind: kreate::uvmodal::Kind, gesture: &kreate::uvmodal::UvGesture) -> PropertyMap {
+    let mut params = gesture.params();
+    let mode = match kind {
+        kreate::uvmodal::Kind::Move => 0,
+        kreate::uvmodal::Kind::Rotate => 1,
+        kreate::uvmodal::Kind::Scale => 2,
+    };
+    params.set("mode", PropertyValue::Enum(mode));
+    params
 }
 
 /// The offscreen target the 3D scene renders into.
@@ -376,6 +421,13 @@ struct App {
     registry: OperatorRegistry,
     history: History,
     op_ctx: OpContext,
+    /// The UV transform being dragged, and its uncommitted history entry.
+    ///
+    /// Separate from `gesture` rather than a variant of it: the two cannot run
+    /// at once — one needs the pointer over the viewport and the other over
+    /// the UV panel — but they carry different state, and a shared enum would
+    /// mean every use site matching on which one it had.
+    uv_gesture: Option<(kreate::uvmodal::UvGesture, kreate_ops::ModalSession)>,
     /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
     select_mode: u32,
     /// The edit structure, held while edit mode is open.
@@ -506,6 +558,7 @@ impl App {
             registry,
             history: History::new(),
             op_ctx: OpContext::default(),
+            uv_gesture: None,
             select_mode: 2,
             edit: None,
             pick: kreate::pick::PickCache::new(),
@@ -1334,21 +1387,7 @@ impl App {
                 true
             }
             _ => {
-                let typed = match code {
-                    KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
-                    KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
-                    KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
-                    KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
-                    KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
-                    KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
-                    KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
-                    KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
-                    KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
-                    KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
-                    KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
-                    KeyCode::Minus | KeyCode::NumpadSubtract => Some('-'),
-                    _ => None,
-                };
+                let typed = typed_character(code);
                 match typed {
                     Some(c) => {
                         if let Some((gesture, _)) = &mut self.gesture {
@@ -2437,10 +2476,27 @@ impl App {
         // Rebuilt every frame rather than pushed on change: a gesture's numbers
         // move continuously, and a header a frame behind the drag would be
         // worse than no header.
-        self.ui.modal = self.gesture.as_ref().map(|(g, _)| shell::ModalHeader {
-            text: g.status(),
-            axis: g.axis_index(),
-        });
+        self.ui.modal = self
+            .gesture
+            .as_ref()
+            .map(|(g, _)| shell::ModalHeader {
+                text: g.status(),
+                axis: g.axis_index(),
+            })
+            .or_else(|| {
+                // The UV gesture wears the same header, over the same
+                // viewport: one place the tool reports itself, whichever panel
+                // started it. U and V take the X and Y axis colours, because
+                // that is what they are — the map's two directions, in the
+                // same order.
+                self.uv_gesture.as_ref().map(|(g, _)| shell::ModalHeader {
+                    text: g.status(),
+                    axis: g.axis().map(|a| match a {
+                        kreate::uvmodal::Axis::U => 0,
+                        kreate::uvmodal::Axis::V => 1,
+                    }),
+                })
+            });
 
         // --- run the interface, which tells us how big the viewport is -------
         let raw_input = state.take_egui_input(&window);
@@ -2752,9 +2808,196 @@ impl App {
     /// One value, computed once. Scattering `if mode == EditMesh` through the
     /// handler is the thing the keymap exists to remove.
     fn key_context(&self) -> KeyContext {
+        // The UV editor first, and by *where the pointer is* rather than by a
+        // focus flag: `G` means move-UVs over that panel and move-geometry
+        // over the viewport, which is what the user already believes and needs
+        // no third state to remember.
+        if self.pointer_in_uv_panel() {
+            return KeyContext::UvEditor;
+        }
         match self.op_ctx.mode {
             OpMode::EditMesh => KeyContext::EditMesh,
             OpMode::Object => KeyContext::ObjectMode,
+        }
+    }
+
+    /// Whether the pointer is over the open UV panel.
+    fn pointer_in_uv_panel(&self) -> bool {
+        self.uv_panel_cursor().is_some()
+    }
+
+    /// The pointer in UV units, if it is over the panel.
+    ///
+    /// `None` covers three different situations that all mean the same thing
+    /// here — the panel is closed, it has not drawn yet, or the pointer is
+    /// elsewhere — so they are deliberately not distinguished.
+    fn uv_panel_cursor(&self) -> Option<glam::Vec2> {
+        if !self.ui.show_uv {
+            return None;
+        }
+        let rect = self.ui.uv_state.rect?;
+        let (x, y) = self.input.cursor?;
+        // Physical pixels to interface points: the pointer is tracked in the
+        // window's pixels and the panel laid out in points.
+        let scale = f64::from(self.egui_ctx.pixels_per_point().max(0.01));
+        let at = egui::pos2((x / scale) as f32, (y / scale) as f32);
+        if !rect.contains(at) {
+            return None;
+        }
+        let uv = kreate_ui::uv_editor::to_uv(&self.ui.uv_state, rect, at);
+        Some(glam::Vec2::new(uv.x, uv.y))
+    }
+
+    /// Starts a UV transform, if there is a selection to transform.
+    fn begin_uv_gesture(&mut self, kind: kreate::uvmodal::Kind) {
+        use kreate_mesh::edit::uv_edit;
+
+        // Any gesture already running is confirmed rather than abandoned:
+        // pressing `S` during a move means "and now scale it", which is what
+        // the viewport's transform does too.
+        self.confirm_uv_gesture();
+        self.confirm_gesture();
+
+        let Some(cursor) = self.uv_panel_cursor() else {
+            return;
+        };
+        let Some(session) = self.edit.as_ref() else {
+            return;
+        };
+        let bm = session.bmesh();
+        let corners = uv_edit::selected(bm);
+        if corners.is_empty() {
+            self.status("nothing selected in the UV editor");
+            return;
+        }
+        let pivot = uv_edit::median(bm, &corners, kreate_mesh::attribute::names::UV);
+
+        let mut gesture = kreate::uvmodal::UvGesture::begin(kind, cursor, pivot);
+        gesture.set_precise(self.input.shift_down);
+        let params = mode_params(kind, &gesture);
+        match self.history.begin_modal(
+            &self.registry,
+            &mut self.doc,
+            self.edit.as_mut(),
+            &self.op_ctx,
+            "uv.transform",
+            &params,
+        ) {
+            Ok(Some(session)) => {
+                let status = gesture.status();
+                self.uv_gesture = Some((gesture, session));
+                self.status(&status);
+            }
+            Ok(None) => self.status("that is not possible here"),
+            Err(e) => self.status(&format!("{e}")),
+        }
+    }
+
+    /// Feeds the pointer to the UV gesture and re-applies the operator.
+    fn drive_uv_gesture(&mut self) {
+        let Some(cursor) = self.uv_panel_cursor() else {
+            return;
+        };
+        let Some((gesture, session)) = &mut self.uv_gesture else {
+            return;
+        };
+        gesture.track(cursor);
+        let kind = gesture.kind();
+        let params = mode_params(kind, gesture);
+        let status = gesture.status();
+        // Restored and re-applied from the original every frame — §2.2's rule.
+        // `update_modal` owns that; nothing here is incremental.
+        if let Err(e) = self.history.update_modal(
+            &self.registry,
+            &mut self.doc,
+            self.edit.as_mut(),
+            &self.op_ctx,
+            session,
+            &params,
+        ) {
+            tracing::warn!(error = %e, "uv transform failed");
+        }
+        self.status(&status);
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Confirms the UV gesture, if one is running.
+    fn confirm_uv_gesture(&mut self) {
+        let Some((_, session)) = self.uv_gesture.take() else {
+            return;
+        };
+        let call = session.params().to_script_call(session.op_id());
+        self.history.commit_modal(session);
+        println!("{call}");
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Abandons the UV gesture. The document goes back and nothing is recorded.
+    fn cancel_uv_gesture(&mut self) {
+        let Some((_, session)) = self.uv_gesture.take() else {
+            return;
+        };
+        kreate_ops::History::cancel_modal(session, &mut self.doc);
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Keys that belong to a running UV gesture.
+    ///
+    /// Consulted before the keymap, for the same reason the viewport's are:
+    /// while a transform runs, `U` means "constrain to U" and `Escape` means
+    /// "cancel this", not "unwrap" and not "quit".
+    fn uv_gesture_key(&mut self, code: KeyCode) -> bool {
+        use kreate::uvmodal::Axis;
+        if self.uv_gesture.is_none() {
+            return false;
+        }
+        // `X` and `Y` as well as `U` and `V`: the keys are where the hand
+        // already is from the viewport, and the letters are what the panel
+        // labels its axes. Both, rather than making the user pick.
+        let axis = match code {
+            KeyCode::KeyU | KeyCode::KeyX => Some(Axis::U),
+            KeyCode::KeyV | KeyCode::KeyY => Some(Axis::V),
+            _ => None,
+        };
+        if let Some(axis) = axis {
+            if let Some((gesture, _)) = &mut self.uv_gesture {
+                gesture.constrain(axis);
+            }
+            self.drive_uv_gesture();
+            return true;
+        }
+        match code {
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.confirm_uv_gesture();
+                true
+            }
+            KeyCode::Escape => {
+                self.cancel_uv_gesture();
+                true
+            }
+            KeyCode::Backspace => {
+                if let Some((gesture, _)) = &mut self.uv_gesture {
+                    gesture.backspace();
+                }
+                self.drive_uv_gesture();
+                true
+            }
+            _ => {
+                let typed = typed_character(code);
+                match typed {
+                    Some(c) => {
+                        let taken = self
+                            .uv_gesture
+                            .as_mut()
+                            .is_some_and(|(g, _)| g.type_char(c));
+                        if taken {
+                            self.drive_uv_gesture();
+                        }
+                        taken
+                    }
+                    None => false,
+                }
+            }
         }
     }
 
@@ -2772,6 +3015,9 @@ impl App {
         // `Escape` means "cancel the transform" — not "delete" and not "quit".
         // Checked before the escape hatches below, because a gesture is exactly
         // the state a user most needs `Escape` to get them out of.
+        if self.uv_gesture_key(code) {
+            return;
+        }
         if self.gesture_key(code) {
             return;
         }
@@ -2840,6 +3086,20 @@ impl App {
             // script or a rebound key can invoke them directly with parameters —
             // the interactive path is a *way of arriving at* those parameters,
             // not a different operation.
+            // The UV transform arrives with the mode its binding named,
+            // which is how one operator serves three keys.
+            "uv.transform" => {
+                let mode = action
+                    .params
+                    .get("mode")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                self.begin_uv_gesture(match mode {
+                    1 => kreate::uvmodal::Kind::Rotate,
+                    2 => kreate::uvmodal::Kind::Scale,
+                    _ => kreate::uvmodal::Kind::Move,
+                });
+            }
             "object.translate" | "mesh.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "object.rotate" | "mesh.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "object.scale" | "mesh.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
@@ -3207,6 +3467,22 @@ impl ApplicationHandler for App {
                 // cancels, and neither may also start a selection or an orbit.
                 // Handled before the drag machinery for the same reason the
                 // modal stack sits above the keymap.
+                if self.uv_gesture.is_some() && pressed {
+                    match button {
+                        MouseButton::Left => {
+                            self.confirm_uv_gesture();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.cancel_uv_gesture();
+                            return;
+                        }
+                        // The middle button pans the UV view, which is allowed
+                        // during a transform for the same reason orbiting is:
+                        // looking at what you are doing is not a conflict.
+                        _ => {}
+                    }
+                }
                 if self.gesture.is_some() && pressed {
                     match button {
                         MouseButton::Left => {
@@ -3266,6 +3542,9 @@ impl ApplicationHandler for App {
                 // for where the pointer is.
                 if self.gesture.is_some() {
                     self.drive_gesture();
+                }
+                if self.uv_gesture.is_some() {
+                    self.drive_uv_gesture();
                 }
             }
 
@@ -3328,6 +3607,16 @@ impl ApplicationHandler for App {
                 }
                 if self.gesture.is_some() {
                     self.drive_gesture();
+                }
+                // Precision, on the same modifier and measured from where it
+                // was pressed. There is nothing to snap to in UV space, so
+                // Ctrl means nothing here — and pretending otherwise would be
+                // worse than leaving it alone.
+                if let Some((gesture, _)) = &mut self.uv_gesture {
+                    gesture.set_precise(self.input.shift_down);
+                }
+                if self.uv_gesture.is_some() {
+                    self.drive_uv_gesture();
                 }
             }
 

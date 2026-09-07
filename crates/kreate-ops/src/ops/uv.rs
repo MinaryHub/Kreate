@@ -294,8 +294,36 @@ pub enum Pivot {
     Origin,
 }
 
+/// Which of the three transforms this is.
+///
+/// A parameter rather than three operators, the way `mesh.select`'s `action`
+/// is: they share a pivot, a layer and a selection, and splitting them would
+/// mean maintaining the same wrapper three times. It also gives the keymap
+/// something to bind — `G`, `R` and `S` reach one operator and differ only
+/// here — and gives the redo panel a control that says which tool ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransformMode {
+    #[default]
+    Move,
+    Rotate,
+    Scale,
+}
+
+impl TransformMode {
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            1 => TransformMode::Rotate,
+            2 => TransformMode::Scale,
+            _ => TransformMode::Move,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct TransformParams {
+    /// Move, turn or scale.
+    #[param(variants("move", "rotate", "scale"))]
+    pub mode: u32,
     #[param(soft_min = -2.0, soft_max = 2.0)]
     pub offset_u: f64,
     #[param(soft_min = -2.0, soft_max = 2.0)]
@@ -337,24 +365,36 @@ impl Operator for Transform {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let layer = layer_or_default(&params.layer).to_string();
-        // Zero reads as one, so `uv.transform(offset_u=0.5)` is a move rather
-        // than a move that also collapses the selection to a point. A default
-        // of one cannot be expressed by `#[derive(Default)]`, and a parameter
-        // whose default is a silent destruction of the mesh is a trap.
-        let scale = glam::Vec2::new(
-            if params.scale_u == 0.0 {
-                1.0
-            } else {
-                params.scale_u as f32
-            },
-            if params.scale_v == 0.0 {
-                1.0
-            } else {
-                params.scale_v as f32
-            },
-        );
-        let offset = glam::Vec2::new(params.offset_u as f32, params.offset_v as f32);
-        let rotation = params.rotation as f32;
+        // Only the mode's own group is applied. Otherwise a redo panel left
+        // showing a rotation from the last gesture would silently fold it into
+        // the next move.
+        let mode = TransformMode::from_index(params.mode);
+        let offset = match mode {
+            TransformMode::Move => glam::Vec2::new(params.offset_u as f32, params.offset_v as f32),
+            _ => glam::Vec2::ZERO,
+        };
+        let rotation = match mode {
+            TransformMode::Rotate => params.rotation as f32,
+            _ => 0.0,
+        };
+        // Zero reads as one, because `#[derive(Default)]` gives zero and a
+        // scale of zero collapses the selection to a point. A parameter whose
+        // default silently destroys the map is a trap.
+        let scale = match mode {
+            TransformMode::Scale => glam::Vec2::new(
+                if params.scale_u == 0.0 {
+                    1.0
+                } else {
+                    params.scale_u as f32
+                },
+                if params.scale_v == 0.0 {
+                    1.0
+                } else {
+                    params.scale_v as f32
+                },
+            ),
+            _ => glam::Vec2::ONE,
+        };
         let origin_pivot = params.pivot == Pivot::Origin as u32;
 
         let moved = with_bmesh(doc, |bm| {
@@ -895,12 +935,17 @@ mod tests {
         .expect("select all");
 
         let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+        // In *scale* mode, which is where the rule bites: a move ignores the
+        // scale group entirely, so asking in move mode would prove nothing.
         h.dispatch(
             &r,
             &mut doc,
             &ctx,
             "uv.transform",
-            &params(&[("offset_u", PropertyValue::Float(0.1))]),
+            &params(&[
+                ("mode", PropertyValue::Enum(2)),
+                ("scale_v", PropertyValue::Float(1.5)),
+            ]),
         )
         .expect("transform ran");
         let after = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
@@ -920,6 +965,97 @@ mod tests {
         assert_eq!(
             distinct_before, distinct_after,
             "the map collapsed: a default scale of zero was applied"
+        );
+    }
+
+    #[test]
+    fn only_the_named_mode_is_applied() {
+        // The redo panel keeps whatever the last gesture left in it. Without
+        // this, a rotation from the previous tool would silently fold into the
+        // next move — one operator with three parameter groups has to apply
+        // exactly one of them.
+        //
+        // All three modes, each asked with all three groups populated. Testing
+        // only the move case cannot see an offset that is applied
+        // unconditionally, because in move mode that is the right answer:
+        // a falsification sweep removed the guard and the test still passed.
+        let r = registry();
+
+        let run = |mode: u32| -> (Vec<glam::Vec2>, Vec<glam::Vec2>) {
+            let mut h = History::new();
+            let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+            h.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "uv.select",
+                &params(&[("action", PropertyValue::Enum(0))]),
+            )
+            .expect("select all");
+            let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+            h.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "uv.transform",
+                &params(&[
+                    ("mode", PropertyValue::Enum(mode)),
+                    ("offset_u", PropertyValue::Float(0.25)),
+                    ("rotation", PropertyValue::Float(1.0)),
+                    ("scale_u", PropertyValue::Float(3.0)),
+                    ("scale_v", PropertyValue::Float(3.0)),
+                ]),
+            )
+            .expect("transform ran");
+            (before, uvs(&doc, mesh, uv_project::DEFAULT_LAYER))
+        };
+
+        let centroid = |v: &[glam::Vec2]| -> glam::Vec2 {
+            v.iter().copied().sum::<glam::Vec2>() / v.len() as f32
+        };
+        let spread = |v: &[glam::Vec2]| -> f32 {
+            let c = centroid(v);
+            v.iter().map(|p| (*p - c).length()).sum::<f32>() / v.len() as f32
+        };
+
+        // Move: every corner shifts by exactly the offset. No turn, no scale.
+        let (before, after) = run(0);
+        for (a, b) in before.iter().zip(&after) {
+            let d = *b - *a;
+            assert!(
+                (d - glam::Vec2::new(0.25, 0.0)).length() < 1e-5,
+                "move: a corner moved by {d:?}; the rotation or scale leaked in"
+            );
+        }
+
+        // Rotate: the centroid stays where it was — so no offset was applied —
+        // and the corners have moved, so the rotation did happen.
+        let (before, after) = run(1);
+        let drift = (centroid(&after) - centroid(&before)).length();
+        assert!(
+            drift < 1e-5,
+            "rotate: the centroid moved by {drift}; the offset leaked in"
+        );
+        assert!(
+            (spread(&after) - spread(&before)).abs() < 1e-4,
+            "rotate: the spread changed; the scale leaked in"
+        );
+        assert!(
+            before.iter().zip(&after).any(|(a, b)| a != b),
+            "rotate: nothing moved at all"
+        );
+
+        // Scale: the centroid stays put and the spread grows by the factor.
+        let (before, after) = run(2);
+        let drift = (centroid(&after) - centroid(&before)).length();
+        assert!(
+            drift < 1e-5,
+            "scale: the centroid moved by {drift}; the offset leaked in"
+        );
+        let grew = spread(&after) / spread(&before);
+        assert!(
+            (grew - 3.0).abs() < 1e-3,
+            "scale: the spread grew by {grew}, not three"
         );
     }
 
@@ -945,6 +1081,7 @@ mod tests {
                 &ctx,
                 "uv.transform",
                 &params(&[
+                    ("mode", PropertyValue::Enum(1)),
                     ("rotation", PropertyValue::Float(0.7)),
                     ("pivot", PropertyValue::Enum(pivot)),
                 ]),
