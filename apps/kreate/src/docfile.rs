@@ -398,7 +398,20 @@ struct Session {
 
 impl Session {
     fn acquire() -> Option<Self> {
-        let root = autosave_root()?;
+        Self::acquire_in(&autosave_root()?)
+    }
+
+    /// The same, in a directory the caller names.
+    ///
+    /// The tests use this against a temporary directory, and that is not
+    /// tidiness: against the real one they read whatever *other* sessions have
+    /// left behind, so a crash in an unrelated test — or in the application,
+    /// hours earlier — makes them fail. They also wrote into the user's own
+    /// autosave folder, which is nobody's idea of a test fixture. Forty-two
+    /// stale session directories accumulated there over one working session
+    /// before this was noticed.
+    fn acquire_in(root: &Path) -> Option<Self> {
+        let root = root.to_path_buf();
         // Named by process id, which is fine *here*: it only has to be unique
         // among live processes, and the lock file — not the name — is what says
         // whether this session is still running.
@@ -514,11 +527,16 @@ pub struct Recoverable {
 /// succeeds either way, so the lock is additionally flocked; a directory whose
 /// lock cannot be locked belongs to a live session.
 pub fn find_recoverable() -> Vec<Recoverable> {
-    let Some(root) = autosave_root() else {
-        return Vec::new();
-    };
+    match autosave_root() {
+        Some(root) => find_recoverable_in(&root),
+        None => Vec::new(),
+    }
+}
+
+/// The same, in a directory the caller names. See [`Session::acquire_in`].
+pub fn find_recoverable_in(root: &Path) -> Vec<Recoverable> {
     let mine = format!("session-{}", std::process::id());
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut out = Vec::new();

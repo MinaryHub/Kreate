@@ -9,8 +9,16 @@ use kreate::docfile::{self, DocumentFile};
 use kreate_mesh::MeshData;
 use kreate_scene::document::{Object, ObjectData};
 use kreate_scene::Document;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+/// A directory of this test's own, named for the test.
+///
+/// The recovery tests used to run against the *real* autosave folder instead —
+/// this helper was already here and they simply did not use it. That made them
+/// depend on what every other session had left behind: a crash in an unrelated
+/// test, or in the application hours earlier, could fail them. It also meant
+/// the suite wrote into the user's own autosave directory, where forty-two
+/// stale session directories had piled up before anyone looked.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("kreate-docfile-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -265,8 +273,7 @@ fn autosave_fires_once_a_change_has_settled() {
 /// Plants an autosave in a session directory named for `pid`, with a lock.
 ///
 /// Returns the autosave's path and a guard that removes the directory.
-fn plant_session(pid: u32, name: &str) -> Option<(PathBuf, PathBuf)> {
-    let root = docfile::autosave_root()?;
+fn plant_session(root: &Path, pid: u32, name: &str) -> Option<(PathBuf, PathBuf)> {
     let dir = root.join(format!("session-{pid}"));
     std::fs::create_dir_all(&dir).ok()?;
     let autosave = dir.join(name);
@@ -287,10 +294,11 @@ fn a_stale_session_is_offered_for_recovery() {
     // A process id that will not be live: Windows ids are multiples of four and
     // well below this, and Unix ids are bounded by `pid_max`.
     let pid = 4_294_967_294;
-    let Some((autosave, dir)) = plant_session(pid, "orphan.kreate") else {
+    let root = scratch("stale-session");
+    let Some((autosave, dir)) = plant_session(&root, pid, "orphan.kreate") else {
         return;
     };
-    let found = docfile::find_recoverable();
+    let found = docfile::find_recoverable_in(&root);
     let offered = found.iter().any(|r| r.path == autosave);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
@@ -304,10 +312,11 @@ fn the_running_session_is_never_offered_for_recovery() {
     // Offering a user their own open document back as a crash recovery is
     // nonsense, and acting on it would replace their work with a snapshot of it.
     let file = DocumentFile::new();
-    let Some((autosave, _dir)) = plant_session(std::process::id(), "live.kreate") else {
+    let root = scratch("running-session");
+    let Some((autosave, _dir)) = plant_session(&root, std::process::id(), "live.kreate") else {
         return;
     };
-    let found = docfile::find_recoverable();
+    let found = docfile::find_recoverable_in(&root);
     let _ = std::fs::remove_file(&autosave);
     drop(file);
     assert!(
@@ -322,13 +331,11 @@ fn a_session_with_no_autosave_in_it_is_not_offered() {
     // An instance that started and exited without ever having unsaved work
     // leaves a directory and a lock. There is nothing to recover from it, and
     // offering an empty entry would be a prompt with no answer.
-    let Some(root) = docfile::autosave_root() else {
-        return;
-    };
+    let root = scratch("empty-session");
     let dir = root.join("session-4294967293");
     std::fs::create_dir_all(&dir).expect("create");
     std::fs::write(dir.join("session.lock"), b"").expect("write");
-    let found = docfile::find_recoverable();
+    let found = docfile::find_recoverable_in(&root);
     let offered = found.iter().any(|r| r.path.starts_with(&dir));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!offered, "an empty session was offered for recovery");
@@ -337,7 +344,8 @@ fn a_session_with_no_autosave_in_it_is_not_offered() {
 #[test]
 fn recoverables_come_back_newest_first() {
     // The one a user wants is almost always the last one written.
-    let Some((older, older_dir)) = plant_session(4_294_967_292, "older.kreate") else {
+    let root = scratch("newest-first");
+    let Some((older, older_dir)) = plant_session(&root, 4_294_967_292, "older.kreate") else {
         return;
     };
     // A distinct, later timestamp. Filesystem timestamp granularity is coarse
@@ -346,12 +354,16 @@ fn recoverables_come_back_newest_first() {
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     let _ = std::fs::File::open(&older)
         .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(long_ago)));
-    let Some((newer, newer_dir)) = plant_session(4_294_967_291, "newer.kreate") else {
+    let Some((newer, newer_dir)) = plant_session(&root, 4_294_967_291, "newer.kreate") else {
         let _ = std::fs::remove_dir_all(&older_dir);
         return;
     };
 
-    let found = docfile::find_recoverable();
+    let found = docfile::find_recoverable_in(&root);
+    // The premise: both are there. Without this the ordering assertion below
+    // is skipped whenever the scan finds neither, which is how the whole test
+    // could pass while returning nothing at all.
+    assert_eq!(found.len(), 2, "expected both plants, got {found:?}");
     let position = |p: &PathBuf| found.iter().position(|r| &r.path == p);
     let (a, b) = (position(&newer), position(&older));
     let _ = std::fs::remove_dir_all(&older_dir);
@@ -516,20 +528,39 @@ fn a_second_autosave_is_not_started_while_one_is_in_flight() {
     use std::time::Duration;
 
     let dir = scratch("autosave_inflight");
-    let mut doc = document();
+    // Big enough that serialising it takes real time. With the three-object
+    // fixture this test was a coin flip: `maybe_autosave` drains finished
+    // replies before it checks the in-flight guard, so a worker that had
+    // already written its file left nothing to guard against. It passed alone
+    // and failed under a loaded workspace run, which is the wrong way round
+    // and the giveaway that it was timing and not logic.
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::grid(10.0, 220, 220));
+    doc.add_object(Object::new("big", ObjectData::Mesh(mesh)));
+
     let mut file = DocumentFile::new();
-    file.set_autosave_timing(Duration::from_millis(1), Duration::from_millis(1));
+    // Zero, so the second call is due the instant it is made and the test
+    // needs no sleep at all. Removing the sleep is what removes the race: the
+    // worker would have to be scheduled *and* finish writing a fifty-thousand
+    // face mesh between two adjacent statements.
+    //
+    // Honestly: a margin, not a proof. Truly deterministic would mean holding
+    // the worker on a barrier, which is test-only machinery inside the code
+    // being tested — a worse trade than a margin of several orders of
+    // magnitude.
+    file.set_autosave_timing(Duration::ZERO, Duration::ZERO);
     // A name of its own; see `autosave_writes_a_file_a_later_session_can_recover`.
     file.save(&dir.join("in-flight.kreate"), &doc)
         .expect("name the document");
     doc.add_object(Object::new("first", ObjectData::Empty));
     file.touch(&doc);
-    std::thread::sleep(Duration::from_millis(5));
-    assert!(file.maybe_autosave(&doc));
+    assert!(
+        file.maybe_autosave(&doc),
+        "the first autosave did not start"
+    );
 
     doc.add_object(Object::new("second", ObjectData::Empty));
     file.touch(&doc);
-    std::thread::sleep(Duration::from_millis(5));
     assert!(
         !file.maybe_autosave(&doc),
         "a second autosave started while the first was still running"

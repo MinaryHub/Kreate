@@ -74,6 +74,7 @@ Kreate
              Y split off faces  V rip along edges  Ctrl+B bevel
              U box-project UVs (right-click for the other projections)
   UV editor  G move  R rotate  S scale   A all  Alt+A none  L linked
+             U smart-project the whole thing  P repack the islands
              U / V or X / Y constrain an axis; the keys work where the
              pointer is, so G means UVs here and geometry in the viewport
              1/2/3 vert/edge/face select  L loop  Shift+L ring
@@ -916,6 +917,8 @@ impl App {
                             ("uv.project", &[("mode", PropertyValue::Enum(1))]),
                             ("uv.project", &[("mode", PropertyValue::Enum(2))]),
                             ("uv.project", &[("mode", PropertyValue::Enum(3))]),
+                            ("uv.smart_project", &[]),
+                            ("uv.pack", &[]),
                         ],
                         self,
                     )

@@ -16,6 +16,7 @@
 
 use kreate_mesh::arena::FaceId;
 use kreate_mesh::edit::uv_edit;
+use kreate_mesh::edit::uv_pack;
 use kreate_mesh::edit::uv_project::{self, Fit, Projection};
 use kreate_scene::{DocMut, Document};
 
@@ -437,11 +438,143 @@ fn layer_or_default(name: &str) -> &str {
     }
 }
 
+// --- smart project and packing ----------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SmartParams {
+    /// How far a face's normal may stray from its cluster's average before it
+    /// starts a new island.
+    #[param(min = 0.0, max = 3.15, unit = "angle")]
+    pub angle: f64,
+    /// The gap left between islands, as a fraction of the map.
+    #[param(min = 0.0, soft_max = 0.05)]
+    pub margin: f64,
+    /// Which UV set to write. Empty means the default set.
+    pub layer: String,
+}
+
+impl Default for SmartParams {
+    fn default() -> Self {
+        Self {
+            angle: f64::from(uv_pack::DEFAULT_ANGLE),
+            margin: f64::from(uv_pack::DEFAULT_MARGIN),
+            layer: String::new(),
+        }
+    }
+}
+
+/// Unwraps the selection by clustering it and packing the pieces.
+///
+/// The one unwrap here that is not a closed-form projection, and the one that
+/// makes a whole object usable in a single press: a projection puts every face
+/// on one plane, and an object facing six ways needs six.
+pub struct SmartProject;
+
+impl Operator for SmartProject {
+    type Params = SmartParams;
+
+    fn id() -> &'static str {
+        "uv.smart_project"
+    }
+    fn label() -> &'static str {
+        "Smart UV Project"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let layer = layer_or_default(&params.layer).to_string();
+        let angle = params.angle as f32;
+        let margin = params.margin as f32;
+
+        let written = with_bmesh(doc, |bm| {
+            let mut faces = bm.selected_faces();
+            if faces.is_empty() {
+                faces = bm.face_ids().collect::<Vec<FaceId>>();
+            }
+            Ok(uv_pack::smart_project(bm, &faces, &layer, angle, margin))
+        })?;
+
+        Ok(if written == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct PackParams {
+    /// The gap left between islands, as a fraction of the map.
+    #[param(min = 0.0, soft_max = 0.05)]
+    pub margin: f64,
+    /// Which UV set to act on. Empty means the default set.
+    pub layer: String,
+}
+
+impl Default for PackParams {
+    fn default() -> Self {
+        Self {
+            margin: f64::from(uv_pack::DEFAULT_MARGIN),
+            layer: String::new(),
+        }
+    }
+}
+
+/// Tidies the existing islands into the unit square without recutting them.
+///
+/// For the artist who has cut and arranged by hand: the cuts are theirs and
+/// the arithmetic is not worth doing by eye.
+pub struct Pack;
+
+impl Operator for Pack {
+    type Params = PackParams;
+
+    fn id() -> &'static str {
+        "uv.pack"
+    }
+    fn label() -> &'static str {
+        "Pack Islands"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let layer = layer_or_default(&params.layer).to_string();
+        let margin = params.margin as f32;
+
+        let written = with_bmesh(doc, |bm| {
+            // Every island, not the selection's: packing a subset would move
+            // it on top of the islands that were left where they were.
+            let islands = uv_edit::islands(bm, &layer);
+            Ok(uv_pack::pack(bm, &layer, &islands, margin))
+        })?;
+
+        Ok(if written == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Project>();
     registry.register::<Select>();
     registry.register::<SelectSet>();
     registry.register::<Transform>();
+    registry.register::<SmartProject>();
+    registry.register::<Pack>();
 }
 
 #[cfg(test)]
@@ -1147,6 +1280,139 @@ mod tests {
             depth,
             "an empty transform reached the history"
         );
+    }
+
+    #[test]
+    fn a_smart_project_unwraps_a_whole_cube_inside_the_map() {
+        // The one press that makes an object usable. Six faces facing six ways
+        // cannot go on one plane, which is what separates this from every other
+        // mode of `uv.project`.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = doc_with(primitives::cube(2.0));
+        h.dispatch(&r, &mut doc, &ctx, "uv.smart_project", &params(&[]))
+            .expect("smart project ran");
+
+        let got = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+        assert_eq!(got.len(), 24);
+        for uv in &got {
+            assert!(uv.is_finite(), "{uv:?}");
+            assert!(
+                uv.x >= -1e-3 && uv.x <= 1.0 + 1e-3 && uv.y >= -1e-3 && uv.y <= 1.0 + 1e-3,
+                "a corner landed outside the map at {uv:?}"
+            );
+        }
+        // And it really did cut: a single plane would have put every corner on
+        // one quad's worth of the map.
+        let distinct = {
+            let mut v: Vec<String> = got
+                .iter()
+                .map(|uv| format!("{:.3},{:.3}", uv.x, uv.y))
+                .collect();
+            v.sort();
+            v.dedup();
+            v.len()
+        };
+        assert!(
+            distinct >= 12,
+            "only {distinct} distinct UVs; nothing was cut"
+        );
+    }
+
+    #[test]
+    fn the_angle_parameter_changes_how_much_is_cut() {
+        // Guards the test above. A smart project that ignored its angle would
+        // still land inside the map and still look plausible.
+        let r = registry();
+
+        let distinct_for = |angle: f64| -> usize {
+            let mut h = History::new();
+            let (mut doc, mesh, ctx) = doc_with(primitives::cylinder(1.0, 2.0, 16));
+            h.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "uv.smart_project",
+                &params(&[("angle", PropertyValue::Float(angle))]),
+            )
+            .expect("smart project ran");
+            let got = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+            let mut v: Vec<String> = got
+                .iter()
+                .map(|uv| format!("{:.4},{:.4}", uv.x, uv.y))
+                .collect();
+            v.sort();
+            v.dedup();
+            v.len()
+        };
+
+        // A tight limit cuts the cylinder's side into many islands, so far more
+        // corners end up at distinct UVs than a loose one, which keeps the
+        // strip whole and shares corners along it.
+        let tight = distinct_for(5.0_f64.to_radians());
+        let loose = distinct_for(120.0_f64.to_radians());
+        assert!(
+            tight > loose,
+            "the angle changed nothing: {tight} distinct at 5 degrees, {loose} at 120"
+        );
+    }
+
+    #[test]
+    fn packing_tidies_without_recutting() {
+        // `uv.pack` is for the artist who has cut and arranged by hand. It must
+        // move the islands and not merge them.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = projected_cube(&r, &mut h);
+        let before = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+
+        h.dispatch(&r, &mut doc, &ctx, "uv.pack", &params(&[]))
+            .expect("pack ran");
+        let after = uvs(&doc, mesh, uv_project::DEFAULT_LAYER);
+
+        assert_ne!(before, after, "packing moved nothing");
+        for uv in &after {
+            assert!(
+                uv.x >= -1e-3 && uv.x <= 1.0 + 1e-3 && uv.y >= -1e-3 && uv.y <= 1.0 + 1e-3,
+                "a corner landed outside the map at {uv:?}"
+            );
+        }
+        // Six islands went in; six must come out. A packer that merged them
+        // would still put everything inside the square.
+        let (_, m) = doc.meshes().next().unwrap();
+        let bm = kreate_mesh::bmesh::BMesh::from_mesh_data(m);
+        assert_eq!(
+            uv_edit::islands(&bm, uv_project::DEFAULT_LAYER).len(),
+            6,
+            "the islands were merged"
+        );
+    }
+
+    #[test]
+    fn packing_a_mesh_with_no_uvs_is_cancelled() {
+        // Not an error, and not a history entry: there is nothing to pack, and
+        // an empty step between the user and the edit they wanted back is
+        // worse than nothing happening.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, _, ctx) = doc_with(primitives::cube(2.0));
+        let depth = h.entries().len();
+        h.dispatch(&r, &mut doc, &ctx, "uv.pack", &params(&[]))
+            .expect("pack ran");
+        assert_eq!(h.entries().len(), depth);
+    }
+
+    #[test]
+    fn undo_takes_back_a_smart_project() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = doc_with(primitives::cube(2.0));
+        assert!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER).is_empty());
+        h.dispatch(&r, &mut doc, &ctx, "uv.smart_project", &params(&[]))
+            .expect("smart project ran");
+        assert_eq!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER).len(), 24);
+        assert!(h.undo(&mut doc));
+        assert!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER).is_empty());
     }
 
     #[test]

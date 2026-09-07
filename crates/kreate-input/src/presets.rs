@@ -366,6 +366,13 @@ fn common() -> Vec<Binding> {
             enum_param(Action::new("uv.transform"), "mode", 2),
         ),
         key(
+            "uv.smart_project",
+            "U",
+            Context::UvEditor,
+            Action::new("uv.smart_project"),
+        ),
+        key("uv.pack", "P", Context::UvEditor, Action::new("uv.pack")),
+        key(
             "uv.select_all",
             "A",
             Context::UvEditor,
