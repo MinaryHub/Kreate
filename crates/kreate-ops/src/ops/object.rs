@@ -1,7 +1,8 @@
 //! Object-mode operators.
 
-use kreate_math::{DQuat, DVec3};
-use kreate_scene::document::ObjectId;
+use kreate_math::{DAffine3, DQuat, DVec3};
+use kreate_mesh::edit;
+use kreate_scene::document::{MeshId, ObjectId};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
@@ -558,6 +559,128 @@ impl Operator for Parent {
 }
 
 /// Registers every object-mode operator.
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct JoinParams {}
+
+/// Joins the selected objects' meshes into the active object's.
+///
+/// The active object survives and keeps its transform; the others are removed.
+/// Each arrival is brought through the active object's inverse world transform,
+/// so nothing moves on screen — which is the whole point of a join, and the
+/// part that is easy to get wrong.
+pub struct Join;
+
+impl Operator for Join {
+    type Params = JoinParams;
+
+    fn id() -> &'static str {
+        "object.join"
+    }
+    fn label() -> &'static str {
+        "Join Objects"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        // Two mesh objects at least, one of them active. A join of one is a
+        // no-op and a join with nothing active has no target.
+        let Some(active) = doc.selection.active else {
+            return false;
+        };
+        if doc.object(active).and_then(|o| o.mesh()).is_none() {
+            return false;
+        }
+        doc.selection
+            .objects
+            .iter()
+            .filter(|id| doc.object(**id).and_then(|o| o.mesh()).is_some())
+            .count()
+            >= 2
+    }
+
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let selection = doc.document().selection.clone();
+        let Some(active) = selection.active else {
+            return Err(OpError::Failed("no active object to join into".into()));
+        };
+        let Some(target_mesh) = doc.document().object(active).and_then(|o| o.mesh()) else {
+            return Err(OpError::Failed("the active object has no mesh".into()));
+        };
+
+        // Into the target's space. Read before anything is mutated, because a
+        // world transform depends on the hierarchy and the hierarchy is about
+        // to lose objects.
+        let into_target = doc.document().world_transform(active).inverse();
+        let sources: Vec<(ObjectId, MeshId, DAffine3)> = selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| *id != active)
+            .filter_map(|id| {
+                let mesh = doc.document().object(id).and_then(|o| o.mesh())?;
+                // A linked datablock is read-only, but *reading* it into a join
+                // is fine: what the join writes is the target.
+                Some((id, mesh, into_target * doc.document().world_transform(id)))
+            })
+            .collect();
+        if sources.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+
+        let (joined, report) = {
+            let d = doc.document();
+            let Some(target) = d.mesh(target_mesh) else {
+                return Err(OpError::Failed("the active mesh is missing".into()));
+            };
+            let mut parts = Vec::with_capacity(sources.len() + 1);
+            parts.push(edit::join::Part {
+                mesh: target,
+                transform: DAffine3::IDENTITY,
+            });
+            for (_, mesh, transform) in &sources {
+                if let Some(m) = d.mesh(*mesh) {
+                    parts.push(edit::join::Part {
+                        mesh: m,
+                        transform: *transform,
+                    });
+                }
+            }
+            edit::join::join(&parts)
+        };
+
+        let d = doc.document_mut();
+        if let Some(slot) = d.mesh_mut(target_mesh) {
+            *slot = joined;
+        }
+        for (id, _, _) in &sources {
+            d.remove_object(*id);
+        }
+        d.selection.objects.retain(|id| *id == active);
+        d.selection.active = Some(active);
+
+        if !report.conflicted.is_empty() {
+            // Said out loud rather than dropped in silence: these are layers
+            // the user authored, and §5.6's rule about never losing data
+            // quietly applies most where the data is their own.
+            //
+            // The log is not good enough, honestly. This belongs in the report
+            // panel the plan puts beside the importer, and an operator has no
+            // channel to carry a warning to the interface yet — adding one is a
+            // change to `OpResult` and to every caller, which is not a thing to
+            // do in passing. Returning an error is not the answer either: the
+            // join succeeded, and an error would roll it back.
+            tracing::warn!(
+                layers = %report.conflicted.join(", "),
+                "joined objects disagreed on these attribute layers; \
+                 they were left out"
+            );
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
     registry.register::<Delete>();
@@ -567,6 +690,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Scale>();
     registry.register::<SelectAll>();
     registry.register::<Parent>();
+    registry.register::<Join>();
 }
 
 #[cfg(test)]
@@ -580,6 +704,24 @@ mod tests {
         let mut r = OperatorRegistry::new();
         register(&mut r);
         (r, History::new(), Document::new(), Context::default())
+    }
+
+    /// Two cubes, both selected, the first active — a join's usual setup.
+    fn two_cubes() -> (
+        OperatorRegistry,
+        History,
+        Document,
+        Context,
+        ObjectId,
+        ObjectId,
+    ) {
+        let (r, h, mut doc, ctx) = setup();
+        let a = doc.add_mesh_object("a", kreate_mesh::primitives::cube(2.0));
+        let b = doc.add_mesh_object("b", kreate_mesh::primitives::cube(2.0));
+        doc.selection.add(a);
+        doc.selection.add(b);
+        doc.selection.active = Some(a);
+        (r, h, doc, ctx, a, b)
     }
 
     fn run(
@@ -1038,5 +1180,113 @@ mod tests {
             .num_faces();
         assert_ne!(faces, cube_faces);
         assert_eq!(faces, 10, "8 sides plus two caps");
+    }
+
+    #[test]
+    fn joining_moves_the_geometry_into_the_active_object_and_removes_the_rest() {
+        let (r, mut h, mut doc, ctx, a, b) = two_cubes();
+        if let Some(o) = doc.object_mut(b) {
+            o.transform.translation = DVec3::new(5.0, 0.0, 0.0);
+        }
+        h.dispatch(&r, &mut doc, &ctx, "object.join", &PropertyMap::new())
+            .expect("join ran");
+
+        assert_eq!(
+            doc.objects().count(),
+            1,
+            "the source object was not removed"
+        );
+        assert_eq!(doc.selection.active, Some(a), "the active object changed");
+        let mesh = doc.object(a).and_then(|o| o.mesh()).expect("still a mesh");
+        assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 12, "twelve faces");
+    }
+
+    #[test]
+    fn a_join_does_not_move_the_geometry_on_screen() {
+        // The whole point, and the part that is easy to get wrong: each arrival
+        // has to come through the *target's* inverse world transform, or the
+        // joined geometry snaps somewhere other than where it was drawn.
+        let (r, mut h, mut doc, ctx, a, b) = two_cubes();
+        // Both objects moved, so neither transform is the identity and getting
+        // the composition backwards is visible.
+        if let Some(o) = doc.object_mut(a) {
+            o.transform.translation = DVec3::new(0.0, 0.0, 10.0);
+        }
+        if let Some(o) = doc.object_mut(b) {
+            o.transform.translation = DVec3::new(5.0, 0.0, 10.0);
+        }
+
+        let before: Vec<DVec3> = {
+            let world = doc.world_transform(b);
+            let mesh = doc.object(b).and_then(|o| o.mesh()).unwrap();
+            doc.mesh(mesh)
+                .unwrap()
+                .positions()
+                .iter()
+                .map(|p| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64)))
+                .collect()
+        };
+
+        h.dispatch(&r, &mut doc, &ctx, "object.join", &PropertyMap::new())
+            .expect("join ran");
+
+        let world = doc.world_transform(a);
+        let mesh = doc.object(a).and_then(|o| o.mesh()).unwrap();
+        let after: Vec<DVec3> = doc
+            .mesh(mesh)
+            .unwrap()
+            .positions()
+            .iter()
+            .skip(8)
+            .map(|p| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64)))
+            .collect();
+
+        assert_eq!(after.len(), before.len());
+        for (was, now) in before.iter().zip(&after) {
+            assert!(
+                (*was - *now).length() < 1e-9,
+                "a vertex moved from {was:?} to {now:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_join_needs_two_mesh_objects_and_an_active_one() {
+        let (_, _, mut doc, ctx) = setup();
+        let a = doc.add_mesh_object("a", kreate_mesh::primitives::cube(2.0));
+
+        assert!(!Join::poll(&ctx, &doc), "nothing selected");
+
+        doc.selection.add(a);
+        doc.selection.active = Some(a);
+        assert!(!Join::poll(&ctx, &doc), "one object is a no-op, not a join");
+
+        let empty = doc.add_object(kreate_scene::document::Object::new(
+            "empty",
+            kreate_scene::document::ObjectData::Empty,
+        ));
+        doc.selection.add(empty);
+        assert!(!Join::poll(&ctx, &doc), "an empty counted as a mesh");
+
+        let b = doc.add_mesh_object("b", kreate_mesh::primitives::cube(2.0));
+        doc.selection.add(b);
+        assert!(Join::poll(&ctx, &doc));
+    }
+
+    #[test]
+    fn undo_puts_the_joined_objects_back() {
+        let (r, mut h, mut doc, ctx, a, _) = two_cubes();
+        h.dispatch(&r, &mut doc, &ctx, "object.join", &PropertyMap::new())
+            .expect("join ran");
+        assert_eq!(doc.objects().count(), 1);
+
+        assert!(h.undo(&mut doc), "nothing to undo");
+        assert_eq!(
+            doc.objects().count(),
+            2,
+            "the removed object did not return"
+        );
+        let mesh = doc.object(a).and_then(|o| o.mesh()).unwrap();
+        assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 6, "the target grew");
     }
 }

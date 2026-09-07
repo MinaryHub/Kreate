@@ -447,6 +447,22 @@ fn common() -> Vec<Binding> {
             Context::ObjectMode,
             Action::new("object.duplicate").with("linked", PropertyValue::Bool(true)),
         ),
+        // `Ctrl+J` to join and `P` to separate, where every modeller's hand
+        // expects them. `P` is free in edit mode; in the UV editor it packs,
+        // which is a different context and therefore not a conflict.
+        key(
+            "object.join",
+            "J",
+            Context::ObjectMode,
+            Action::new("object.join"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.separate",
+            "P",
+            Context::EditMesh,
+            Action::new("mesh.separate"),
+        ),
         key(
             "object.delete",
             "X",
@@ -837,6 +853,47 @@ mod tests {
         assert_eq!(action_of("A", Modifiers::alt()), Some(1));
         assert_eq!(action_of("I", Modifiers::ctrl()), Some(2));
         assert_eq!(action_of("L", Modifiers::NONE), Some(3));
+    }
+
+    #[test]
+    fn join_and_separate_are_reachable_from_the_keyboard() {
+        // An operator nothing can reach is an operator nobody uses. Nothing
+        // checked these two until a falsification sweep moved `Ctrl+J` to a key
+        // nobody presses and every test still passed.
+        let k = load(Preset::Kreate);
+        assert_eq!(
+            k.resolve(
+                Context::ObjectMode,
+                &Input::key("J"),
+                Modifiers::ctrl(),
+                EventKind::Press
+            )
+            .map(|a| a.op_id),
+            Some("object.join".to_string())
+        );
+        assert_eq!(
+            k.resolve(
+                Context::EditMesh,
+                &Input::key("P"),
+                Modifiers::NONE,
+                EventKind::Press
+            )
+            .map(|a| a.op_id),
+            Some("mesh.separate".to_string())
+        );
+        // `P` means something else in the UV editor, which is a different
+        // context and therefore not a conflict — worth pinning, because the
+        // two *would* conflict if either moved into the other's scope.
+        assert_eq!(
+            k.resolve(
+                Context::UvEditor,
+                &Input::key("P"),
+                Modifiers::NONE,
+                EventKind::Press
+            )
+            .map(|a| a.op_id),
+            Some("uv.pack".to_string())
+        );
     }
 
     #[test]

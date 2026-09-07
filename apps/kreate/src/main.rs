@@ -64,6 +64,7 @@ Kreate
              Y auto-depth orbit (on by default)
   Add        A cube  Shift+A next primitive shape
   Edit       D duplicate (linked)  X delete  Ctrl+A select all
+             Ctrl+J join selected into the active object
   Edit mode  Tab enter/leave  E extrude  X delete  Ctrl+X dissolve
              Shift+S subdivide  I inset  B bridge borders  Ctrl+R loop cut
              [ / ] after a loop cut slides it
@@ -72,6 +73,7 @@ Kreate
              K mark sharp  Alt+K clear  Shift+K auto-smooth 30 deg
              F fill hole  Shift+F grid fill
              Y split off faces  V rip along edges  Ctrl+B bevel
+             P separate the selection into a new object
              U box-project UVs (right-click for the other projections)
   UV editor  G move  R rotate  S scale   A all  Alt+A none  L linked
              U smart-project the whole thing  P repack the islands
@@ -891,6 +893,7 @@ impl App {
                         ("mesh.dissolve", &[]),
                         ("mesh.merge", &[]),
                         ("mesh.split", &[]),
+                        ("mesh.separate", &[]),
                     ],
                     self,
                 ),
@@ -955,6 +958,7 @@ impl App {
                             &[("linked", PropertyValue::Bool(false))],
                         ),
                         ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
+                        ("object.join", &[]),
                         ("object.delete", &[]),
                     ],
                     self,

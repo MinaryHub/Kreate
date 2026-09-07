@@ -19,7 +19,7 @@ use kreate_mesh::bmesh::{BMesh, SelectMode};
 use kreate_mesh::edit;
 use kreate_mesh::selection;
 use kreate_mesh::ArenaIndex;
-use kreate_scene::document::MeshId;
+use kreate_scene::document::{MeshId, Object, ObjectData};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, Mode, OpError, OpResult, Operator};
@@ -1693,6 +1693,78 @@ impl Operator for SelectSet {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SeparateParams {}
+
+/// Moves the selected faces into a new object.
+///
+/// The new object takes the source's transform, so the geometry does not move:
+/// a separate is a change of *ownership*, not a change of shape.
+pub struct Separate;
+
+impl Operator for Separate {
+    type Params = SeparateParams;
+
+    fn id() -> &'static str {
+        "mesh.separate"
+    }
+    fn label() -> &'static str {
+        "Separate Selection"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let source = doc
+            .document()
+            .selection
+            .active
+            .or_else(|| doc.document().selection.objects.first().copied());
+        let Some(source) = source else {
+            return Err(OpError::Failed("no object to separate from".into()));
+        };
+        let (name, transform, parent, parent_inverse) = {
+            let Some(object) = doc.document().object(source) else {
+                return Err(OpError::Failed("the object is missing".into()));
+            };
+            (
+                format!("{}.part", object.name),
+                object.transform,
+                object.parent,
+                object.parent_inverse,
+            )
+        };
+
+        let taken = with_bmesh(doc, |bm| Ok(edit::separate_selected(bm)))?;
+        let Some(taken) = taken else {
+            // Nothing selected, or everything: separating a whole mesh leaves
+            // an empty object behind, which is worse than declining.
+            return Ok(OpResult::Cancelled);
+        };
+
+        let d = doc.document_mut();
+        let mesh = d.add_mesh(taken);
+        let mut object = Object::new(name, ObjectData::Mesh(mesh));
+        // The source's placement, so the geometry stays where it was: the
+        // vertices were copied in the source's local space, and reading them
+        // in any other space would move them.
+        object.transform = transform;
+        object.parent = parent;
+        object.parent_inverse = parent_inverse;
+        let new_id = d.add_object(object);
+
+        // Selected and active, because the next thing a user does is move it.
+        d.selection.objects = vec![new_id];
+        d.selection.active = Some(new_id);
+        Ok(OpResult::Finished)
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DeleteElements>();
     registry.register::<SelectPick>();
@@ -1716,6 +1788,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<TranslateSelection>();
     registry.register::<RotateSelection>();
     registry.register::<ScaleSelection>();
+    registry.register::<Separate>();
 }
 
 #[cfg(test)]
@@ -3309,6 +3382,92 @@ mod tests {
             selected(&d, kreate_mesh::attribute::names::SELECT_VERT),
             vec![5],
             "vertex 5, and only vertex 5"
+        );
+    }
+
+    #[test]
+    fn separating_a_selection_makes_a_new_object() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = cube_doc();
+
+        // Two faces, by index.
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.select_set",
+            &params(&[
+                ("elements", PropertyValue::Ints(vec![0, 1])),
+                ("mode", PropertyValue::Enum(2)),
+            ]),
+        )
+        .unwrap();
+
+        h.dispatch(&r, &mut doc, &ctx, "mesh.separate", &params(&[]))
+            .expect("separate ran");
+
+        assert_eq!(doc.objects().count(), 2, "no new object appeared");
+        assert_eq!(
+            doc.mesh(mesh).unwrap().num_faces(),
+            4,
+            "the source kept them"
+        );
+        let new_id = doc.selection.active.expect("the new object is active");
+        let new_mesh = doc.object(new_id).and_then(|o| o.mesh()).unwrap();
+        assert_eq!(doc.mesh(new_mesh).unwrap().num_faces(), 2);
+    }
+
+    #[test]
+    fn the_separated_object_takes_the_sources_placement() {
+        // A separate is a change of ownership, not of shape: the vertices were
+        // copied in the source's local space, so reading them in any other
+        // space would move the geometry.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, _, ctx) = cube_doc();
+        let source = doc.selection.active.expect("the cube is active");
+        if let Some(o) = doc.object_mut(source) {
+            o.transform.translation = kreate_math::DVec3::new(3.0, -2.0, 1.0);
+        }
+        let placement = doc.object(source).unwrap().transform;
+
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.select_set",
+            &params(&[
+                ("elements", PropertyValue::Ints(vec![0])),
+                ("mode", PropertyValue::Enum(2)),
+            ]),
+        )
+        .unwrap();
+        h.dispatch(&r, &mut doc, &ctx, "mesh.separate", &params(&[]))
+            .expect("separate ran");
+
+        let new_id = doc.selection.active.unwrap();
+        assert_eq!(
+            doc.object(new_id).unwrap().transform,
+            placement,
+            "the new object did not take the source's placement"
+        );
+    }
+
+    #[test]
+    fn separating_nothing_is_cancelled_and_leaves_no_object() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, _, ctx) = cube_doc();
+        let before = doc.objects().count();
+        let depth = h.entries().len();
+        h.dispatch(&r, &mut doc, &ctx, "mesh.separate", &params(&[]))
+            .expect("separate ran");
+        assert_eq!(doc.objects().count(), before, "an object appeared anyway");
+        assert_eq!(
+            h.entries().len(),
+            depth,
+            "an empty step reached the history"
         );
     }
 }

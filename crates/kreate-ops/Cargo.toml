@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# For the one place an operator has something to say that is not a
+# success or a failure: see `ops::object::Join`.
+tracing.workspace = true
 kreate-math.workspace = true
 kreate-mesh.workspace = true
 kreate-scene.workspace = true
