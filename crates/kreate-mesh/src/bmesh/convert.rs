@@ -11,11 +11,11 @@
 
 use kreate_math::Vec3;
 
-use crate::arena::{ArenaIndex, VertId};
+use crate::arena::{ArenaIndex, EdgeId, LoopId, VertId};
 use crate::attribute::{names, AttributeStore, Domain};
 use crate::mesh_data::MeshData;
 
-use super::BMesh;
+use super::{BMesh, DiskLink, Edge, Face, Loop, Vert};
 
 impl BMesh {
     /// Builds an edit structure from storage form.
@@ -27,34 +27,7 @@ impl BMesh {
     /// permutation on an unedited mesh.
     pub fn from_mesh_data(mesh: &MeshData) -> Self {
         let mut bm = BMesh::new();
-
-        let positions = mesh.positions();
-        let verts: Vec<VertId> = positions.iter().map(|p| bm.add_vert(*p)).collect();
-
-        // Edges before faces, so they take slots in the source's order rather
-        // than in the order the faces happen to reach them. Without this the
-        // edge attribute layers would need a gather, and creases and seams would
-        // land on the wrong edges if anyone forgot it.
-        for [a, b] in mesh.edges() {
-            let (Some(&a), Some(&b)) = (verts.get(*a as usize), verts.get(*b as usize)) else {
-                continue;
-            };
-            let _ = bm.add_edge(a, b);
-        }
-
-        for face in mesh.faces() {
-            let ids: Vec<VertId> = face
-                .iter()
-                .filter_map(|v| verts.get(*v as usize).copied())
-                .collect();
-            if ids.len() != face.len() {
-                // A corner referenced a vertex that does not exist. `validate`
-                // on the source reports it; dropping the face here keeps the
-                // edit structure sound rather than propagating the corruption.
-                continue;
-            }
-            let _ = bm.add_face(&ids);
-        }
+        bm.build_elements(mesh);
 
         // Position is inline in `Vert`, so it must not also exist as a layer —
         // two copies means whichever one an operator happens to read decides the
@@ -66,6 +39,262 @@ impl BMesh {
         }
         bm.attributes = attributes;
         bm
+    }
+
+    /// Fills the arenas and links every cycle, in bulk.
+    ///
+    /// Split out from [`Self::from_mesh_data`] because it is the whole of the
+    /// cost, and because what it must *not* do is the interesting part.
+    ///
+    /// # Why not `add_edge` and `add_face`
+    ///
+    /// Those are the right API for an editing operation, where one element
+    /// arrives at a time and the structure has to be sound after each. They are
+    /// the wrong one for a conversion, where the entire answer is known up
+    /// front, and the difference is not a constant factor:
+    ///
+    /// - `add_edge` asks `edge_between`, which walks a vertex's disk cycle
+    ///   *and allocates a `Vec` to do it*. Two million edges, plus four million
+    ///   more calls from `add_face`, is six million allocations and six million
+    ///   walks to answer a question the source already answered.
+    /// - Each `disk_insert` and `radial_insert` splices one element into a
+    ///   cycle, which is three or four scattered writes into arenas far larger
+    ///   than any cache.
+    ///
+    /// Here the counts are known, so each cycle is built once from a contiguous
+    /// list: two counting passes and a linear link, with no search and no
+    /// per-element allocation. Measured on a million-vertex grid — 2 M edges,
+    /// 4 M corners — this took the conversion from 919 ms to the figure in
+    /// `tests/build_phases.rs`.
+    ///
+    /// The element *order* is the same as the incremental path gave: vertex
+    /// *i* in slot *i*, edge *i* in slot *i*, and a face's corners in
+    /// consecutive slots in winding order. That is load-bearing — the
+    /// attribute store is adopted wholesale rather than gathered — so it is
+    /// asserted by the round-trip test rather than merely intended.
+    fn build_elements(&mut self, mesh: &MeshData) {
+        let num_verts = mesh.num_verts() as usize;
+
+        // --- vertices ---------------------------------------------------------
+        for p in mesh.positions() {
+            self.verts.insert(Vert { co: *p, edge: None });
+        }
+
+        // --- edges, unlinked --------------------------------------------------
+        //
+        // Disk links are placeholders until the pass below; nothing may read
+        // them in between.
+        let placeholder_edge = EdgeId::from_parts(0, 0);
+        let mut edge_ids: Vec<EdgeId> = Vec::with_capacity(mesh.num_edges() as usize);
+        for [a, b] in mesh.edges() {
+            let (a, b) = (*a as usize, *b as usize);
+            if a == b || a >= num_verts || b >= num_verts {
+                // A degenerate or dangling edge, skipped as the incremental
+                // path skipped it. **Unreachable today**: every `MeshData`
+                // constructor ends in `rebuild_edges`, which derives the array
+                // from the faces and can produce neither — as
+                // `the_edge_array_is_always_normalised_in_range_and_non_degenerate`
+                // asserts, and as a falsification sweep confirmed by deleting
+                // this branch without failing anything.
+                //
+                // It stays because the alternative to skipping is indexing out
+                // of bounds, and a panic in the mesh kernel on a malformed file
+                // is a worse answer than a dropped edge. Kept as a guard, not
+                // claimed as tested.
+                continue;
+            }
+            let id = self.edges.insert(Edge {
+                verts: [
+                    VertId::from_parts(a as u32, 0),
+                    VertId::from_parts(b as u32, 0),
+                ],
+                disk: [DiskLink {
+                    prev: placeholder_edge,
+                    next: placeholder_edge,
+                }; 2],
+                first_loop: None,
+            });
+            edge_ids.push(id);
+        }
+
+        // --- the vertex-to-edge map, and the disk cycles from it --------------
+        //
+        // One CSR rather than a hash map: the keys are dense vertex indices, so
+        // counting sort is both faster and allocation-free per element. It is
+        // then reused to find each corner's edge below, which is the lookup
+        // `add_edge` was paying for.
+        let mut degree = vec![0u32; num_verts + 1];
+        for e in &edge_ids {
+            let [a, b] = self.edges[*e].verts;
+            degree[a.index() as usize + 1] += 1;
+            degree[b.index() as usize + 1] += 1;
+        }
+        for i in 1..degree.len() {
+            degree[i] += degree[i - 1];
+        }
+        let offsets = degree;
+        let mut cursor = offsets.clone();
+        let mut incident: Vec<EdgeId> = vec![placeholder_edge; offsets[num_verts] as usize];
+        for e in &edge_ids {
+            let [a, b] = self.edges[*e].verts;
+            for v in [a, b] {
+                let slot = &mut cursor[v.index() as usize];
+                incident[*slot as usize] = *e;
+                *slot += 1;
+            }
+        }
+
+        for v in 0..num_verts {
+            let from = offsets[v] as usize;
+            let to = offsets[v + 1] as usize;
+            if from == to {
+                continue;
+            }
+            let ring = &incident[from..to];
+            self.verts[VertId::from_parts(v as u32, 0)].edge = Some(ring[0]);
+            let n = ring.len();
+            for i in 0..n {
+                let e = ring[i];
+                let which = usize::from(self.edges[e].verts[1].index() as usize == v);
+                // Cyclic, and correct for a single edge: `prev` and `next` both
+                // become the edge itself, which is the invariant `disk_insert`
+                // establishes for the first edge of a disk.
+                self.edges[e].disk[which] = DiskLink {
+                    prev: ring[(i + n - 1) % n],
+                    next: ring[(i + 1) % n],
+                };
+            }
+        }
+
+        // --- faces and loops --------------------------------------------------
+        let placeholder_loop = LoopId::from_parts(0, 0);
+        let mut loop_edge: Vec<EdgeId> = Vec::with_capacity(mesh.num_corners() as usize);
+        let mut loop_ids: Vec<LoopId> = Vec::with_capacity(mesh.num_corners() as usize);
+
+        for face in mesh.faces() {
+            let n = face.len();
+            if n < 3 || face.iter().any(|v| *v as usize >= num_verts) {
+                // A corner referencing a vertex that does not exist, or a face
+                // too short to be one. Dropped rather than propagated, as
+                // before.
+                continue;
+            }
+            let mut repeated = false;
+            for (i, v) in face.iter().enumerate() {
+                if face[..i].contains(v) {
+                    repeated = true;
+                    break;
+                }
+            }
+            if repeated {
+                continue;
+            }
+
+            let f = self.faces.insert(Face {
+                first_loop: placeholder_loop,
+                len: n as u32,
+            });
+
+            let first = self.loops.len();
+            for i in 0..n {
+                let v = VertId::from_parts(face[i], 0);
+                let next_v = VertId::from_parts(face[(i + 1) % n], 0);
+                let e = match self.find_edge(&offsets, &incident, v, next_v) {
+                    Some(e) => e,
+                    // The source's edge array did not contain this face's edge.
+                    // `MeshData` derives its edges from its faces, so this only
+                    // happens on a hand-built mesh — and creating it here, with
+                    // the incremental splice, keeps the structure sound at the
+                    // cost of being slow on exactly the meshes nobody profiles.
+                    None => match self.add_edge(v, next_v) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    },
+                };
+                let id = self.loops.insert(Loop {
+                    vert: v,
+                    edge: e,
+                    face: f,
+                    next: placeholder_loop,
+                    prev: placeholder_loop,
+                    radial_next: placeholder_loop,
+                    radial_prev: placeholder_loop,
+                });
+                loop_ids.push(id);
+                loop_edge.push(e);
+            }
+
+            // The loop cycle, over the ids just pushed.
+            let ids = &loop_ids[first..];
+            let n = ids.len();
+            if n == 0 {
+                continue;
+            }
+            for i in 0..n {
+                let l = ids[i];
+                self.loops[l].next = ids[(i + 1) % n];
+                self.loops[l].prev = ids[(i + n - 1) % n];
+            }
+            self.faces[f].first_loop = ids[0];
+        }
+
+        // --- radial cycles ----------------------------------------------------
+        //
+        // The same counting sort, keyed by edge slot. Two passes over the loop
+        // list against four million individual splices.
+        let edge_slots = self.edges.slot_count();
+        let mut per_edge = vec![0u32; edge_slots + 1];
+        for e in &loop_edge {
+            per_edge[e.index() as usize + 1] += 1;
+        }
+        for i in 1..per_edge.len() {
+            per_edge[i] += per_edge[i - 1];
+        }
+        let radial_offsets = per_edge;
+        let mut cursor = radial_offsets.clone();
+        let mut radial: Vec<LoopId> = vec![placeholder_loop; radial_offsets[edge_slots] as usize];
+        for (l, e) in loop_ids.iter().zip(&loop_edge) {
+            let slot = &mut cursor[e.index() as usize];
+            radial[*slot as usize] = *l;
+            *slot += 1;
+        }
+
+        for slot in 0..edge_slots {
+            let from = radial_offsets[slot] as usize;
+            let to = radial_offsets[slot + 1] as usize;
+            if from == to {
+                continue;
+            }
+            let ring = &radial[from..to];
+            let e = EdgeId::from_parts(slot as u32, 0);
+            self.edges[e].first_loop = Some(ring[0]);
+            let n = ring.len();
+            for i in 0..n {
+                let l = ring[i];
+                self.loops[l].radial_prev = ring[(i + n - 1) % n];
+                self.loops[l].radial_next = ring[(i + 1) % n];
+            }
+        }
+    }
+
+    /// The edge between two vertices, through the CSR built above.
+    ///
+    /// A scan over one vertex's incident edges, which on any real mesh is four
+    /// to six. This is the question `edge_between` answers by walking a disk
+    /// cycle and allocating a `Vec`; here the answer is a slice.
+    fn find_edge(
+        &self,
+        offsets: &[u32],
+        incident: &[EdgeId],
+        a: VertId,
+        b: VertId,
+    ) -> Option<EdgeId> {
+        let from = *offsets.get(a.index() as usize)? as usize;
+        let to = *offsets.get(a.index() as usize + 1)? as usize;
+        incident.get(from..to)?.iter().copied().find(|e| {
+            let verts = self.edges[*e].verts;
+            verts == [a, b] || verts == [b, a]
+        })
     }
 
     /// Bakes the edit structure back to storage form.

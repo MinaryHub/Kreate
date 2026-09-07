@@ -280,17 +280,44 @@ impl MeshData {
     /// it, and a hasher with a per-run seed would make the answer depend on which
     /// run it was.
     pub fn corner_edges(&self) -> Vec<u32> {
-        let mut pairs: Vec<([u32; 2], u32)> = self
-            .edges
-            .iter()
-            .enumerate()
-            .map(|(i, [a, b])| {
-                let mut key = [*a, *b];
-                key.sort_unstable();
-                (key, i as u32)
-            })
-            .collect();
-        pairs.sort_unstable();
+        // A counting sort keyed by the *lower* endpoint, not a sort of pairs
+        // followed by a binary search per corner.
+        //
+        // The normalisation on both sides is symmetry rather than necessity:
+        // `rebuild_edges` already stores `[low, high]`, so keying on `a`
+        // directly would give the same answer, and a falsification sweep
+        // proved it by doing exactly that. Normalising both sides means the
+        // build and the lookup cannot disagree even if that ever changes. The keys are dense vertex
+        // indices, so counting is linear where sorting is not — and each
+        // corner then scans one vertex's handful of edges instead of paying a
+        // logarithm against two million of them.
+        //
+        // At a million faces the old shape was two million pair comparisons to
+        // sort plus four million binary searches, each about twenty-one probes
+        // into an array far larger than any cache. This is two counting passes
+        // and a short scan.
+        let num_verts = self.num_verts as usize;
+        let mut offsets = vec![0u32; num_verts + 1];
+        for [a, b] in self.edges.iter() {
+            let low = (*a).min(*b) as usize;
+            if low < num_verts {
+                offsets[low + 1] += 1;
+            }
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut cursor = offsets.clone();
+        // `(the other endpoint, the edge's index)`, grouped by lower endpoint.
+        let mut entries: Vec<(u32, u32)> = vec![(0, 0); offsets[num_verts] as usize];
+        for (index, [a, b]) in self.edges.iter().enumerate() {
+            let (low, high) = if a <= b { (*a, *b) } else { (*b, *a) };
+            if (low as usize) < num_verts {
+                let slot = &mut cursor[low as usize];
+                entries[*slot as usize] = (high, index as u32);
+                *slot += 1;
+            }
+        }
 
         let mut out = vec![u32::MAX; self.corner_verts.len()];
         for face in 0..self.num_faces() {
@@ -298,10 +325,11 @@ impl MeshData {
             let start = self.face_corner_range(face).start;
             for (i, v) in ring.iter().enumerate() {
                 let next = ring[(i + 1) % ring.len()];
-                let mut key = [*v, next];
-                key.sort_unstable();
-                if let Ok(found) = pairs.binary_search_by_key(&key, |(k, _)| *k) {
-                    out[start + i] = pairs[found].1;
+                let (low, high) = if *v <= next { (*v, next) } else { (next, *v) };
+                let from = offsets[low as usize] as usize;
+                let to = offsets[low as usize + 1] as usize;
+                if let Some(found) = entries[from..to].iter().find(|(o, _)| *o == high) {
+                    out[start + i] = found.1;
                 }
             }
         }
@@ -895,6 +923,61 @@ mod tests {
         let mesh = selectable_cube();
         let copy = mesh.clone();
         assert!(mesh.only_selection_differs(&copy));
+    }
+
+    #[test]
+    fn the_edge_array_is_always_normalised_in_range_and_non_degenerate() {
+        // The invariant three other pieces of code rest on: the bulk `BMesh`
+        // construction skips a degenerate or dangling edge, and `corner_edges`
+        // keys its lookup table on the lower endpoint. A falsification sweep
+        // removed both and nothing failed, which is the right answer — every
+        // constructor ends in `rebuild_edges`, which derives the array from the
+        // faces, drops `a == b`, and stores `[low, high]`.
+        //
+        // So the guards are unreachable today, and this is what says why. If
+        // this test ever fails, those guards are the reason the kernel skips
+        // instead of panicking, and they stop being dead code.
+        let check = |mesh: &MeshData, what: &str| {
+            for [a, b] in mesh.edges() {
+                assert!(a < b, "{what}: edge [{a}, {b}] is not normalised");
+                assert!(
+                    *b < mesh.num_verts(),
+                    "{what}: edge [{a}, {b}] is out of range"
+                );
+            }
+        };
+
+        for (name, mesh) in [
+            ("cube", crate::primitives::cube(2.0)),
+            ("sphere", crate::primitives::uv_sphere(1.0, 8, 4)),
+            ("grid", crate::primitives::grid(2.0, 3, 3)),
+            ("cylinder", crate::primitives::cylinder(1.0, 2.0, 7)),
+        ] {
+            check(&mesh, name);
+        }
+
+        // And through `from_csr`, which is the path a file takes: a supplied
+        // array that is unnormalised, self-referential and in the wrong order
+        // comes back derived from the faces instead.
+        let mesh = MeshData::from_csr(
+            4,
+            vec![0, 4],
+            vec![0, 1, 2, 3],
+            // Reversed, degenerate, and one that no face implies.
+            vec![[1, 0], [2, 2], [3, 0], [0, 3]],
+        )
+        .expect("the faces are sound even if the edges are not");
+        check(&mesh, "from_csr");
+        assert_eq!(
+            mesh.num_edges(),
+            4,
+            "the supplied array was trusted rather than rebuilt"
+        );
+
+        // An out-of-range *corner* is a different matter and is refused, not
+        // repaired: a face referencing a vertex that does not exist has no
+        // sound interpretation.
+        assert!(MeshData::from_csr(2, vec![0, 3], vec![0, 1, 9], Vec::new()).is_err());
     }
 
     #[test]

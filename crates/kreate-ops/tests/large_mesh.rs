@@ -96,9 +96,13 @@ fn entering_edit_mode_stays_within_budget() {
     let mut session = None;
     let elapsed = time(|| session = EditSession::open(&doc, mesh));
     assert!(session.is_some());
+    // Reported, not just asserted. A budget test that does not say what it
+    // measured makes the next round of tuning blind — this one was tightened
+    // from 2500 ms with nothing to go on but a comment.
+    eprintln!("entering edit mode: {elapsed:?}");
     assert!(
-        elapsed < Duration::from_millis(2500),
-        "entering edit mode took {elapsed:?}, against a measured 1.5 s and a          budget of 300 ms"
+        elapsed < Duration::from_millis(400),
+        "entering edit mode took {elapsed:?}, against the plan's 300 ms budget"
     );
 }
 
@@ -180,6 +184,62 @@ fn a_click_stays_cheap_when_repeated() {
     assert!(
         total < Duration::from_millis(400),
         "ten clicks took {total:?}; the adjacency is being rebuilt per click"
+    );
+}
+
+#[test]
+fn a_topology_edit_writes_back_within_budget() {
+    // The gap the other benchmarks left. A *selection* click writes three
+    // attribute layers straight to the document and never bakes, which is why
+    // `a_click_is_not_a_pass_over_the_mesh` is fast. An edit that changes
+    // topology has to bake: the edit structure is written back through
+    // `to_mesh_data`, and that is a pass over everything.
+    //
+    // Nothing measured it until now, so the cost of an actual edit on a
+    // million-face mesh was simply unknown.
+    if !measurable() {
+        return;
+    }
+    let (mut doc, mesh) = large_scene();
+    let registry = registry();
+    let mut history = History::new();
+    let ctx = edit_ctx();
+    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+
+    // One face selected, so the edit itself is tiny and what is left is the
+    // write-back. That is deliberate: the question is what the *crossing*
+    // costs, not what the operator does.
+    history
+        .dispatch_in_session(
+            &registry,
+            &mut doc,
+            Some(&mut session),
+            &ctx,
+            "mesh.select_pick",
+            &params(&[
+                ("element", PropertyValue::Int(500)),
+                ("mode", PropertyValue::Enum(2)),
+            ]),
+        )
+        .expect("mesh.select_pick");
+
+    let elapsed = time(|| {
+        history
+            .dispatch_in_session(
+                &registry,
+                &mut doc,
+                Some(&mut session),
+                &ctx,
+                "mesh.extrude_region",
+                &params(&[("offset", PropertyValue::Float(0.1))]),
+            )
+            .expect("mesh.extrude_region");
+    });
+    eprintln!("a one-face extrude on a million faces: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(900),
+        "a topology edit took {elapsed:?}; the write-back is the cost, not the \
+         edit"
     );
 }
 
