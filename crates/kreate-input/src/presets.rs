@@ -514,6 +514,17 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             Action::new("mesh.shade").with("smooth", PropertyValue::Bool(true)),
         ),
+        // Box projection on the bare key, because it is the one projection
+        // that needs nothing from the view: a binding is data and cannot carry
+        // a camera. The view-dependent variant lives on the right-click menu,
+        // which is the only place that has a view to pass. `U` for unwrap, as
+        // every modeller's hand expects.
+        key(
+            "uv.project",
+            "U",
+            Context::EditMesh,
+            enum_param(Action::new("uv.project"), "mode", 1),
+        ),
         key(
             "mesh.mark_sharp",
             "K",

@@ -72,6 +72,7 @@ Kreate
              K mark sharp  Alt+K clear  Shift+K auto-smooth 30 deg
              F fill hole  Shift+F grid fill
              Y split off faces  V rip along edges  Ctrl+B bevel
+             U box-project UVs (right-click for the other projections)
              1/2/3 vert/edge/face select  L loop  Shift+L ring
              Ctrl+A all elements  Alt+A none  Ctrl+I invert
   Transform  G move  R rotate  S scale
@@ -809,6 +810,33 @@ impl App {
                     ],
                     self,
                 ),
+                {
+                    // Project-from-view is the one row whose parameters the
+                    // *application* has to supply: the operator takes a basis
+                    // rather than a camera, on purpose — see `ops::uv` — so
+                    // the view-dependence lives here, at the one place that
+                    // legitimately has a view, and not in the keymap or the
+                    // kernel.
+                    let right = self.camera.right();
+                    let up = self.camera.up();
+                    group(
+                        &t("menu-group-uv"),
+                        &[
+                            (
+                                "uv.project",
+                                &[
+                                    ("mode", PropertyValue::Enum(0)),
+                                    ("right", PropertyValue::Vec3([right.x, right.y, right.z])),
+                                    ("up", PropertyValue::Vec3([up.x, up.y, up.z])),
+                                ],
+                            ),
+                            ("uv.project", &[("mode", PropertyValue::Enum(1))]),
+                            ("uv.project", &[("mode", PropertyValue::Enum(2))]),
+                            ("uv.project", &[("mode", PropertyValue::Enum(3))]),
+                        ],
+                        self,
+                    )
+                },
                 group(
                     &t("menu-group-shading"),
                     &[

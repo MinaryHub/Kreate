@@ -42,7 +42,7 @@ pub fn target_mesh(doc: &Document) -> Option<MeshId> {
 /// Takes the coarse undo path: every one of these changes topology, and a
 /// declared write set over positions cannot describe a mesh that has grown
 /// faces.
-fn with_bmesh<T>(
+pub(crate) fn with_bmesh<T>(
     doc: &mut DocMut<'_>,
     f: impl FnOnce(&mut BMesh) -> Result<T, OpError>,
 ) -> Result<T, OpError> {
@@ -133,7 +133,7 @@ fn flush(
 }
 
 /// True when there is a mesh to edit at all.
-fn can_edit(ctx: &Context, doc: &Document) -> bool {
+pub(crate) fn can_edit(ctx: &Context, doc: &Document) -> bool {
     ctx.mode == Mode::EditMesh && target_mesh(doc).is_some()
 }
 

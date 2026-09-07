@@ -351,6 +351,13 @@ pub mod names {
     pub const SHARP_EDGE: &str = "sharp_edge";
     /// Edge / `Bool`. UV seam.
     pub const SEAM: &str = "seam";
+    /// Corner / `F32x2`. The first UV set, and the one every format calls its
+    /// default: glTF's `TEXCOORD_0`, OBJ's `vt`, USD's `st`.
+    ///
+    /// A UV set is an ordinary named Corner layer, which is what makes several
+    /// of them free — and the Corner domain is what lets one vertex hold a
+    /// different UV on each side of a seam.
+    pub const UV: &str = "uv";
     /// Corner / `F32x3`. Present only when custom split normals are authored;
     /// its presence overrides computed normals.
     pub const CUSTOM_NORMAL: &str = "custom_normal";

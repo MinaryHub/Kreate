@@ -21,6 +21,7 @@ pub mod region;
 pub mod spin;
 pub mod split;
 pub mod subdivide;
+pub mod uv_project;
 pub mod walk;
 
 pub use bevel::{bevel_edges, bevel_selected, Bevel};
@@ -38,4 +39,5 @@ pub use region::Region;
 pub use spin::{close_spin, spin, spin_selected, Spin};
 pub use split::{rip_selected_edges, split_edges, split_region, split_selected_faces, Split};
 pub use subdivide::{subdivide_faces, subdivide_selected, Subdivision};
+pub use uv_project::{project as uv_project, project_with as uv_project_with, Fit, Projection};
 pub use walk::{edge_loop, edge_ring, face_loop};

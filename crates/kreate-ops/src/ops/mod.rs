@@ -8,10 +8,12 @@
 pub mod mesh;
 pub mod modifier;
 pub mod object;
+pub mod uv;
 
 /// Registers every built-in operator.
 pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     mesh::register(registry);
     modifier::register(registry);
     object::register(registry);
+    uv::register(registry);
 }
