@@ -53,3 +53,41 @@ fn report_where_the_conversion_spends_its_time() {
     eprintln!("to_mesh_data total: {:?}", start.elapsed());
     assert_eq!(back.num_faces(), mesh.num_faces());
 }
+
+#[test]
+fn probe_the_write_back_phases() {
+    if !measurable() {
+        return;
+    }
+    let mesh: MeshData = primitives::grid(10.0, DIVISIONS, DIVISIONS);
+    let bm = BMesh::from_mesh_data(&mesh);
+
+    let start = Instant::now();
+    let baked = bm.to_mesh_data();
+    eprintln!("PHASE to_mesh_data whole: {:?}", start.elapsed());
+
+    // `from_faces` and the edge rebuild inside it, on the same data.
+    let faces: Vec<Vec<u32>> = (0..mesh.num_faces())
+        .map(|f| mesh.face_verts(f).to_vec())
+        .collect();
+    let positions = mesh.positions().to_vec();
+    let start = Instant::now();
+    let rebuilt = MeshData::from_faces(positions, &faces);
+    eprintln!(
+        "PHASE from_faces (incl. rebuild_edges): {:?}",
+        start.elapsed()
+    );
+
+    let start = Instant::now();
+    let mut copy = rebuilt.clone();
+    copy.rebuild_edges();
+    eprintln!("PHASE rebuild_edges alone: {:?}", start.elapsed());
+
+    let start = Instant::now();
+    let _: Vec<Vec<u32>> = (0..mesh.num_faces())
+        .map(|f| mesh.face_verts(f).to_vec())
+        .collect();
+    eprintln!("PHASE building Vec<Vec<u32>>: {:?}", start.elapsed());
+
+    assert_eq!(baked.num_faces(), mesh.num_faces());
+}

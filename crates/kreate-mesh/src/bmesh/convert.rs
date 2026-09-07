@@ -316,23 +316,45 @@ impl BMesh {
         let positions: Vec<Vec3> = self.verts.values().map(|v| v.co).collect();
 
         // --- faces and corners ------------------------------------------------
+        //
+        // Straight into CSR, and the loop cycle walked in place. The obvious
+        // shape — a `Vec<Vec<u32>>` of faces, each built from `face_loops` —
+        // allocates twice per face and then has `from_faces` copy the lot: two
+        // million allocations on a million faces, measured at 220 ms for the
+        // outer vector alone. `from_csr` takes the arrays this produces
+        // directly.
         let face_slots: Vec<u32> = self.face_ids().map(|f| f.index()).collect();
-        let mut faces: Vec<Vec<u32>> = Vec::with_capacity(face_slots.len());
+        let mut face_offsets: Vec<u32> = Vec::with_capacity(face_slots.len() + 1);
+        let mut corner_verts: Vec<u32> = Vec::new();
         let mut loop_slots: Vec<u32> = Vec::new();
+        face_offsets.push(0);
         for f in self.face_ids() {
-            let loops = self.face_loops(f);
-            let mut corners = Vec::with_capacity(loops.len());
-            for l in &loops {
-                let Some(v) = self.loop_vert(*l) else {
-                    continue;
+            let Some(face) = self.faces.get(f) else {
+                face_offsets.push(corner_verts.len() as u32);
+                continue;
+            };
+            // Around the cycle from the face's anchor, bounded by the recorded
+            // length so a corrupt cycle cannot spin forever. `validate` is what
+            // reports that; this only has to terminate.
+            let mut l = face.first_loop;
+            for _ in 0..face.len {
+                let Some(node) = self.loops.get(l) else {
+                    break;
                 };
-                corners.push(vert_index[v.index() as usize]);
+                corner_verts.push(vert_index[node.vert.index() as usize]);
                 loop_slots.push(l.index());
+                l = node.next;
             }
-            faces.push(corners);
+            face_offsets.push(corner_verts.len() as u32);
         }
 
-        let mut mesh = MeshData::from_faces(positions, &faces);
+        let num_verts = positions.len() as u32;
+        // The edge array is rebuilt from the faces either way, so there is
+        // nothing to supply here — and supplying the edit structure's own would
+        // be supplying an order `from_csr` is about to discard.
+        let mut mesh = MeshData::from_csr(num_verts, face_offsets, corner_verts, Vec::new())
+            .expect("the edit structure's faces are sound by construction");
+        mesh.positions_mut().clone_from(&positions);
 
         // --- attribute layers -------------------------------------------------
         // Edges get their own pass: `from_faces` derives the edge array in its
@@ -364,33 +386,62 @@ impl BMesh {
     /// default: an edge the edit structure did not have gets a zero crease
     /// rather than someone else's.
     fn edge_gather(&self, vert_index: &[u32], baked: &MeshData) -> Vec<u32> {
-        // Sorted pairs plus binary search rather than a hash map: iteration
-        // order here decides the output, and a hasher with a per-run seed would
-        // make the result depend on which run it was.
-        let mut pairs: Vec<([u32; 2], u32)> = self
-            .edge_ids()
-            .filter_map(|e| {
-                let [a, b] = self.edge_verts(e)?;
-                let mut key = [
-                    *vert_index.get(a.index() as usize)?,
-                    *vert_index.get(b.index() as usize)?,
-                ];
-                key.sort_unstable();
-                Some((key, e.index()))
-            })
-            .collect();
-        pairs.sort_unstable();
+        // A bucket per lower endpoint, not a sort plus a binary search per
+        // edge. Deliberately not a hash map either, for the reason the old
+        // comment gave and which still holds: iteration order here decides the
+        // output, and a hasher with a per-run seed would make the result depend
+        // on which run it was. A counting sort on dense indices is ordered by
+        // construction.
+        //
+        // Normalising the key on the lookup side is symmetry, not necessity —
+        // `baked.edges()` is already `[low, high]`, so a falsification sweep
+        // that dropped the normalisation changed nothing, correctly. Both
+        // sides normalise so the build and the lookup cannot disagree if that
+        // ever changes.
+        let num_verts = baked.num_verts() as usize;
+        let mut offsets = vec![0u32; num_verts + 2];
+        let mut pairs: Vec<([u32; 2], u32)> = Vec::new();
+        for e in self.edge_ids() {
+            let Some([a, b]) = self.edge_verts(e) else {
+                continue;
+            };
+            let (Some(&a), Some(&b)) = (
+                vert_index.get(a.index() as usize),
+                vert_index.get(b.index() as usize),
+            ) else {
+                continue;
+            };
+            if a == u32::MAX || b == u32::MAX {
+                continue;
+            }
+            let (low, high) = if a < b { (a, b) } else { (b, a) };
+            if (low as usize) < num_verts {
+                offsets[low as usize + 1] += 1;
+                pairs.push(([low, high], e.index()));
+            }
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut cursor = offsets.clone();
+        let mut entries: Vec<(u32, u32)> = vec![(0, 0); pairs.len()];
+        for ([low, high], slot) in &pairs {
+            let at = &mut cursor[*low as usize];
+            entries[*at as usize] = (*high, *slot);
+            *at += 1;
+        }
 
         baked
             .edges()
             .iter()
             .map(|[a, b]| {
-                let mut key = [*a, *b];
-                key.sort_unstable();
-                match pairs.binary_search_by_key(&key, |(k, _)| *k) {
-                    Ok(i) => pairs[i].1,
-                    Err(_) => u32::MAX,
-                }
+                let (low, high) = if a < b { (*a, *b) } else { (*b, *a) };
+                let from = offsets[low as usize] as usize;
+                let to = offsets[low as usize + 1] as usize;
+                entries[from..to]
+                    .iter()
+                    .find(|(o, _)| *o == high)
+                    .map_or(u32::MAX, |(_, slot)| *slot)
             })
             .collect()
     }

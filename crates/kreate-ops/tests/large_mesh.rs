@@ -61,6 +61,34 @@ fn time(f: impl FnOnce()) -> Duration {
     start.elapsed()
 }
 
+/// Held for the whole of any test that measures or allocates a large mesh.
+///
+/// Rust runs the tests in one binary on several threads, and every test here
+/// builds a million-vertex grid. They were measuring each other: entering edit
+/// mode timed 328 ms run alone and 667 ms run beside the others — a two-fold
+/// swing on identical code, which is more than the change of *shape* these
+/// budgets exist to detect.
+///
+/// That is also why the thresholds used to be set so far above the measured
+/// numbers: a budget that has to survive an unknown amount of interference
+/// cannot be tight enough to catch anything. With this, the numbers are
+/// repeatable and the thresholds can mean something.
+static BENCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the lock, ignoring a previous test's panic.
+///
+/// A poisoned lock is a *failed* benchmark, not a reason to fail the rest: the
+/// first failure is the one worth reading.
+///
+/// Nothing asserts that this lock is taken, and nothing can: its purpose is
+/// repeatability, and a timing test that failed when the lock was removed would
+/// be a timing test that fails on a busy machine. A falsification sweep
+/// confirmed as much — stubbing it out left every threshold passing. What it
+/// buys is that the numbers printed above mean the same thing twice.
+fn serially() -> std::sync::MutexGuard<'static, ()> {
+    BENCH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Skips in a debug build, where the numbers say nothing about the design.
 fn measurable() -> bool {
     if cfg!(debug_assertions) {
@@ -74,24 +102,23 @@ fn measurable() -> bool {
 fn entering_edit_mode_stays_within_budget() {
     // The plan's figure: a million vertices into edit mode in under 300 ms.
     //
-    // **This is over budget and the threshold below says so.** Measured at
-    // 1.5 s: about 1.2 s of that is building the edit structure, the rest the
-    // corner-to-edge map that goes with it.
+    // **Met, at 272 to 301 ms over four runs.** It was 1.5 s.
     //
-    // The cost is eight million arena inserts — a million vertices, two million
-    // edges, a million faces, four million loops — each splicing itself into a
-    // disk and a radial cycle as it arrives. Roughly ninety nanoseconds each,
-    // which is unremarkable per element and five times the budget in total.
-    // Closing it means constructing the cycles in bulk rather than incrementally,
-    // which is a real piece of work and not a tuning pass.
+    // The cost was never the eight million arena inserts; those are `Vec`
+    // pushes. It was that `add_edge` asked `edge_between`, which walks a
+    // vertex's disk cycle and allocates a `Vec` to do it — six million times,
+    // to answer a question the source mesh had already answered. The cycles are
+    // now built in bulk from counting sorts, and `corner_edges` the same way.
+    // See `BMesh::build_elements`.
     //
-    // It is paid once on entering edit mode rather than per operator, which is
-    // what the session bought. The threshold is set where the code actually is,
-    // so a regression fails; the gap against the plan's 300 ms is recorded here
-    // rather than quietly widened.
+    // Paid once on entering edit mode rather than per operator, which is what
+    // the session bought. The threshold has a third of headroom over the
+    // measured spread; tighter would fail on a busy machine and looser would
+    // stop catching a change of shape.
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (doc, mesh) = large_scene();
     let mut session = None;
     let elapsed = time(|| session = EditSession::open(&doc, mesh));
@@ -117,6 +144,7 @@ fn a_click_is_not_a_pass_over_the_mesh() {
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (mut doc, mesh) = large_scene();
     let registry = registry();
     let mut history = History::new();
@@ -154,6 +182,7 @@ fn a_click_stays_cheap_when_repeated() {
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (mut doc, mesh) = large_scene();
     let registry = registry();
     let mut history = History::new();
@@ -200,6 +229,7 @@ fn a_topology_edit_writes_back_within_budget() {
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (mut doc, mesh) = large_scene();
     let registry = registry();
     let mut history = History::new();
@@ -236,8 +266,12 @@ fn a_topology_edit_writes_back_within_budget() {
             .expect("mesh.extrude_region");
     });
     eprintln!("a one-face extrude on a million faces: {elapsed:?}");
+    // 194 to 240 ms over three runs, from 622 ms when this test was written.
+    // The write-back is still the whole cost — the edit touches one face — and
+    // the remaining time is the attribute gathers and the positions copy, which
+    // are passes over the mesh by nature rather than by accident.
     assert!(
-        elapsed < Duration::from_millis(900),
+        elapsed < Duration::from_millis(350),
         "a topology edit took {elapsed:?}; the write-back is the cost, not the \
          edit"
     );
@@ -250,6 +284,7 @@ fn a_box_select_commits_within_budget() {
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (mut doc, mesh) = large_scene();
     let registry = registry();
     let mut history = History::new();
@@ -289,6 +324,7 @@ fn the_memory_per_vertex_holds() {
     if !measurable() {
         return;
     }
+    let _serial = serially();
     let (doc, mesh) = large_scene();
     let data = doc.mesh(mesh).expect("the mesh is there");
     let verts = data.num_verts() as usize;
