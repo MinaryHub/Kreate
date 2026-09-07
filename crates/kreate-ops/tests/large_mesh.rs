@@ -277,6 +277,160 @@ fn a_topology_edit_writes_back_within_budget() {
     );
 }
 
+/// Divisions giving 203,401 vertices — the plan’s two-hundred-thousand figure
+/// for a drag, which is a different budget from the million-vertex ones above.
+const DRAG_DIVISIONS: u32 = 450;
+
+/// A mesh and a session with a patch of faces selected, ready to drag.
+fn drag_scene() -> (Document, MeshId, EditSession, OperatorRegistry, History) {
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::grid(
+        10.0,
+        DRAG_DIVISIONS,
+        DRAG_DIVISIONS,
+    ));
+    let object = doc.add_object(Object::new("Grid", ObjectData::Mesh(mesh)));
+    doc.selection.add(object);
+
+    let registry = registry();
+    let mut history = History::new();
+    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    history
+        .dispatch_in_session(
+            &registry,
+            &mut doc,
+            Some(&mut session),
+            &edit_ctx(),
+            "mesh.select_set",
+            &params(&[
+                ("elements", PropertyValue::Ints((0..2_000).collect())),
+                ("mode", PropertyValue::Enum(2)),
+            ]),
+        )
+        .expect("mesh.select_set");
+    (doc, mesh, session, registry, history)
+}
+
+fn dragged(offset: f64, radius: f64) -> PropertyMap {
+    params(&[
+        ("translation", PropertyValue::Vec3([offset, 0.0, 0.0])),
+        ("proportional_size", PropertyValue::Float(radius)),
+    ])
+}
+
+#[test]
+fn a_drag_frame_stays_within_budget() {
+    // The plan’s figure, and one of Phase 2’s gates: dragging two hundred
+    // thousand vertices costs the CPU at most a millisecond a frame. It is the
+    // budget that decides whether the application feels like a modeller, because
+    // a frame is a pointer position and a frame that takes 95 ms is a drag at
+    // ten frames a second.
+    //
+    // **95 ms when first measured, and it was the mesh encode.** Every operator
+    // in `ops::mesh` crossed into `BMesh` and wrote the result back, which is
+    // right for the ones that change topology and pure cost for a transform:
+    // moving positions needs no adjacency. `to_mesh_data` rebuilt every array,
+    // every frame, to change one of them.
+    //
+    // Now 1.1 to 1.3 ms, through `DocMut::edit_positions`. What remains is the
+    // copy-on-write clone of the positions array — 2.4 MB, and the price of the
+    // snapshot undo that makes a cancelled drag free — and the pass over the
+    // selection layers that finds which vertices move. Both are invariant across
+    // a gesture, so both could be hoisted out of the frame; the budget is met
+    // closely enough that neither is worth the state it would take to cache.
+    if !measurable() {
+        return;
+    }
+    let _serial = serially();
+    let (mut doc, _, mut session, registry, mut history) = drag_scene();
+    let ctx = edit_ctx();
+
+    let mut modal = history
+        .begin_modal(
+            &registry,
+            &mut doc,
+            Some(&mut session),
+            &ctx,
+            "mesh.translate",
+            &dragged(0.0, 0.0),
+        )
+        .expect("dispatch")
+        .expect("a patch of faces is a selection");
+    // The median of several frames rather than one: the first pays for warming
+    // the caches, and a single sample on a busy machine measures the machine.
+    let mut frames: Vec<Duration> = Vec::new();
+    for frame in 1..=9 {
+        let step = dragged(frame as f64 * 0.01, 0.0);
+        frames.push(time(|| {
+            history
+                .update_modal(
+                    &registry,
+                    &mut doc,
+                    Some(&mut session),
+                    &ctx,
+                    &mut modal,
+                    &step,
+                )
+                .expect("update");
+        }));
+    }
+    frames.sort_unstable();
+    let median = frames[frames.len() / 2];
+    eprintln!("a drag frame at {DRAG_DIVISIONS} divisions: {median:?}");
+
+    // Loose against the plan’s 1 ms, as every budget here is: what it catches
+    // is a change of shape — a per-frame pass over the whole mesh coming back —
+    // rather than a millisecond on a busy machine. A ten-times margin still
+    // fails at 95.
+    assert!(
+        median < Duration::from_millis(10),
+        "one frame of a drag took {median:?}; the transform is doing something \
+         proportional to the mesh rather than to the selection"
+    );
+    History::cancel_modal(modal, &mut doc);
+}
+
+#[test]
+fn a_transform_records_only_what_it_moved() {
+    // §1.7’s first mitigation, and the reason the transform declares its write
+    // set. A snapshot is cheap to *make* because every array is shared, but an
+    // operator that rewrites the positions array makes the snapshot hold a
+    // private copy of it: a million vertices is 12 MB an undo step, and a
+    // modelling session is thousands of steps.
+    //
+    // Measured as bytes rather than as timing, so it holds in a debug build too.
+    if !measurable() {
+        return;
+    }
+    let _serial = serially();
+    let (mut doc, mesh, mut session, registry, mut history) = drag_scene();
+    let ctx = edit_ctx();
+
+    let moved = history
+        .dispatch_in_session(
+            &registry,
+            &mut doc,
+            Some(&mut session),
+            &ctx,
+            "mesh.translate",
+            &dragged(0.5, 0.0),
+        )
+        .expect("mesh.translate");
+    assert_eq!(moved, kreate_ops::operator::OpResult::Finished);
+
+    let entry = history.entries().last().expect("one entry");
+    let bytes = entry.bytes();
+    let verts = doc.mesh(mesh).expect("the mesh is there").num_verts();
+    eprintln!("a transform of {verts} vertices recorded {bytes} bytes");
+
+    // The selection is a patch of 2,000 faces, so a little over 2,000 vertices
+    // at 16 bytes each: an index and a position. The whole mesh would be 2.4 MB.
+    assert!(
+        bytes < 100_000,
+        "a transform recorded {bytes} bytes; the write set is not declared"
+    );
+}
+
 #[test]
 fn a_box_select_commits_within_budget() {
     // The plan's figure: a box select over a million vertices commits in under

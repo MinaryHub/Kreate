@@ -348,10 +348,7 @@ impl MeshData {
     /// full decode: at a million vertices that is two seconds, which is worse
     /// than having no session at all.
     pub fn same_geometry(&self, other: &MeshData) -> bool {
-        self.num_verts == other.num_verts
-            && Arc::ptr_eq(&self.face_offsets, &other.face_offsets)
-            && Arc::ptr_eq(&self.corner_verts, &other.corner_verts)
-            && Arc::ptr_eq(&self.edges, &other.edges)
+        self.same_topology(other)
             && match (
                 self.attributes.get(names::POSITION),
                 other.attributes.get(names::POSITION),
@@ -360,6 +357,29 @@ impl MeshData {
                 (None, None) => true,
                 _ => false,
             }
+    }
+
+    /// Whether `other` has the same connectivity as this mesh.
+    ///
+    /// Positions excluded, deliberately. Moving a vertex changes no
+    /// relationship between elements: the triangulation, the edge list, the
+    /// index buffers and the adjacency are all still correct, which is exactly
+    /// what §4.5 asks a positions-only change to leave alone. Answered by
+    /// pointer identity per array, so it costs four comparisons regardless of
+    /// the size of the mesh.
+    ///
+    /// The vertex count is compared too, inherited from `same_geometry` and
+    /// kept rather than removed. **No test reaches it, and a falsification
+    /// sweep that deleted it found nothing that failed** — which is what one
+    /// would expect: two meshes reach this line sharing all three arrays by
+    /// pointer, and nothing in the crate produces two of those with different
+    /// vertex counts. It stays because it costs one integer comparison and
+    /// describes the intent, not because it is known to be load-bearing.
+    pub fn same_topology(&self, other: &MeshData) -> bool {
+        self.num_verts == other.num_verts
+            && Arc::ptr_eq(&self.face_offsets, &other.face_offsets)
+            && Arc::ptr_eq(&self.corner_verts, &other.corner_verts)
+            && Arc::ptr_eq(&self.edges, &other.edges)
     }
 
     /// Whether `other` differs from this mesh in nothing but its selection.

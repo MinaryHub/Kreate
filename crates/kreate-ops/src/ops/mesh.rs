@@ -168,51 +168,6 @@ pub fn selected_vertices(bm: &BMesh) -> Vec<VertId> {
     verts
 }
 
-/// The mean position of the affected vertices: what a rotation or a scale
-/// happens about by default.
-///
-/// The mean rather than the bounding-box centre. For a symmetric selection they
-/// agree; for a lopsided one the mean follows where the geometry actually is,
-/// and the bounding-box centre can sit in empty space away from every vertex —
-/// which makes a rotation swing rather than turn.
-fn median(bm: &BMesh, verts: &[VertId]) -> Option<glam::Vec3> {
-    if verts.is_empty() {
-        return None;
-    }
-    let mut total = glam::Vec3::ZERO;
-    let mut count = 0.0;
-    for v in verts {
-        if let Some(p) = bm.position(*v) {
-            total += p;
-            count += 1.0;
-        }
-    }
-    (count > 0.0).then(|| total / count)
-}
-
-/// How many distinct positions a selection occupies.
-///
-/// Used by rotate and scale to refuse a selection that has nothing to turn or
-/// stretch: every affected vertex sitting on the pivot means both operations are
-/// exactly the identity, and reporting success for a no-op puts an entry in the
-/// history that undoes to the same thing.
-fn distinct_positions(bm: &BMesh, verts: &[VertId]) -> usize {
-    let mut keys: Vec<[i64; 3]> = verts
-        .iter()
-        .filter_map(|v| bm.position(*v))
-        .map(|p| {
-            // Quantised at a micrometre, so two vertices a float's breadth apart
-            // count as one place. Without this a "single vertex" that happens to
-            // be two welded ones would pass for something scalable.
-            let q = |x: f32| (x as f64 * 1e6).round() as i64;
-            [q(p.x), q(p.y), q(p.z)]
-        })
-        .collect();
-    keys.sort_unstable();
-    keys.dedup();
-    keys.len()
-}
-
 /// Every vertex a `MeshData` selection touches, as plain indices.
 ///
 /// The same union rule as [`selected_vertices`], against the stored mesh rather
@@ -252,6 +207,27 @@ pub fn selection_vertices(mesh: &kreate_mesh::MeshData) -> Vec<u32> {
     verts
 }
 
+// --- transform --------------------------------------------------------------
+//
+// # Why a transform does not cross into `BMesh`
+//
+// Every other operator in this file changes topology, and the crossing is what
+// pays for the adjacency it needs. A transform needs none: it moves positions
+// and leaves the connectivity exactly as it found it.
+//
+// Crossing anyway costs an encode of the whole mesh per pointer event, and it
+// costs it twice over. Once directly — **95 ms at two hundred thousand
+// vertices, measured, against a budget of one**. And once indirectly, because a
+// re-encode hands back arrays the renderer has never seen, so geometry that did
+// not change is re-uploaded. Writing through [`DocMut::edit_positions`] leaves
+// every other array shared, which is the property §4.5 asks for by name: a
+// change to positions must not invalidate the triangulation, the edge list or
+// the index buffers.
+//
+// It also fixes the undo record. The `BMesh` path took the coarse snapshot, so
+// moving four vertices of a million recorded a million; the declared write set
+// records the four.
+
 /// How influence falls off with distance, for proportional editing.
 ///
 /// Smooth by default. A modeller reaches for proportional editing to shape a
@@ -268,55 +244,167 @@ fn falloff(distance: f64, radius: f64) -> f32 {
     (s * s * (3.0 - 2.0 * s)) as f32
 }
 
-/// A weight per vertex: 1 for the selection, falling off for everything else.
+/// How many distinct places a set of vertices occupies.
 ///
-/// The distance is to the *nearest selected vertex*, not to the selection's
+/// Rotate and scale refuse a selection that occupies one: every affected vertex
+/// is then the pivot, so the operation is exactly the identity, and reporting
+/// success for a no-op puts an entry in the history that undoes to the same
+/// mesh.
+fn distinct_places(positions: &[glam::Vec3], verts: &[u32]) -> usize {
+    let mut keys: Vec<[i64; 3]> = verts
+        .iter()
+        .map(|v| {
+            let p = positions[*v as usize];
+            // Quantised at a micrometre, so two vertices a float's breadth
+            // apart count as one place. Without this a "single vertex" that
+            // happens to be two welded ones would pass for something scalable.
+            let q = |x: f32| (x as f64 * 1e6).round() as i64;
+            [q(p.x), q(p.y), q(p.z)]
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.len()
+}
+
+/// A weight for every vertex the transform reaches: 1 for the selection,
+/// falling off for the rest.
+///
+/// The distance is to the *nearest selected vertex*, not to the selection’s
 /// median. That matters as soon as the selection is more than a point: dragging
 /// a whole edge loop should pull the mesh evenly along its length, and a
 /// distance to the median would pull hardest in the middle and leave the ends
 /// behind.
 ///
-/// O(V x S) as written, which is honest about what it is. A million-vertex mesh
-/// with a large selection wants a spatial index over the selected vertices, and
-/// that is the shape of the eventual fix; the operator's signature does not
-/// change when it lands.
-fn proportional_weights(bm: &BMesh, selected: &[VertId], radius: f64) -> Vec<(VertId, f32)> {
-    let anchors: Vec<glam::Vec3> = selected.iter().filter_map(|v| bm.position(*v)).collect();
-    // A fast path, not a rule: `falloff` already returns zero for a
-    // non-positive radius, so the loop below would reach the same answer. What
-    // it would also do is measure every vertex in the mesh against every
-    // selected one to conclude that nothing moves — and proportional editing
-    // being *off* is the common case, so that cost is paid on almost every
-    // transform.
-    //
-    // Being redundant for correctness is why removing it changes no test. It is
-    // kept for what it costs, not for what it decides.
-    if anchors.is_empty() || radius <= 0.0 {
-        return selected.iter().map(|v| (*v, 1.0)).collect();
-    }
-    let mut out: Vec<(VertId, f32)> = Vec::new();
-    for v in bm.vert_ids() {
-        if selected
-            .binary_search_by_key(&v.index(), |s| s.index())
-            .is_ok()
-        {
+/// O(V x S) as written, which is honest about what it is: a spatial index over
+/// the selected vertices is the shape of the fix, and nothing above this
+/// function changes when it lands.
+fn weigh_neighbourhood(
+    positions: &[glam::Vec3],
+    selected: &[u32],
+    radius: f64,
+) -> (Vec<u32>, Vec<f32>) {
+    let anchors: Vec<glam::Vec3> = selected.iter().map(|v| positions[*v as usize]).collect();
+    let mut indices: Vec<u32> = Vec::with_capacity(selected.len());
+    let mut weights: Vec<f32> = Vec::with_capacity(selected.len());
+    let mut next_selected = 0usize;
+
+    for (v, p) in positions.iter().enumerate() {
+        let v = v as u32;
+        if selected.get(next_selected) == Some(&v) {
             // Full weight, and not measured: a selected vertex is at distance
             // zero from itself, but saying so explicitly means a rounding error
-            // can never give the selection less than 1.
-            out.push((v, 1.0));
+            // can never give the selection less than 1. `selected` is
+            // ascending, so a cursor finds them without a search.
+            next_selected += 1;
+            indices.push(v);
+            weights.push(1.0);
             continue;
         }
-        let Some(p) = bm.position(v) else { continue };
         let nearest = anchors
             .iter()
-            .map(|a| a.distance(p) as f64)
+            .map(|a| a.distance(*p) as f64)
             .fold(f64::INFINITY, f64::min);
         let weight = falloff(nearest, radius);
         if weight > 0.0 {
-            out.push((v, weight));
+            indices.push(v);
+            weights.push(weight);
         }
     }
-    out
+    (indices, weights)
+}
+
+/// What a transform is about to move, read off the document mesh.
+struct Targets {
+    /// Which vertices move, ascending. The order the weights are in.
+    indices: Vec<u32>,
+    /// Each one’s share of the transform. One for the selection itself.
+    weights: Vec<f32>,
+    /// The selection’s median: what a rotation or a scale happens about.
+    ///
+    /// The mean rather than the bounding-box centre. For a symmetric selection
+    /// they agree; for a lopsided one the mean follows where the geometry
+    /// actually is, and the bounding-box centre can sit in empty space away
+    /// from every vertex — which makes a rotation swing rather than turn.
+    median: glam::Vec3,
+    /// How many distinct places the *selection* occupies.
+    distinct: usize,
+}
+
+fn targets(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Targets> {
+    let selected = selection_vertices(mesh);
+    if selected.is_empty() {
+        return None;
+    }
+    let positions = mesh.positions();
+    let mut total = glam::Vec3::ZERO;
+    for v in &selected {
+        total += positions[*v as usize];
+    }
+    let median = total / selected.len() as f32;
+    let distinct = distinct_places(positions, &selected);
+
+    let (indices, weights) = if radius > 0.0 {
+        weigh_neighbourhood(positions, &selected, radius)
+    } else {
+        // Proportional editing off, which is the default and the common case.
+        // Nothing outside the selection moves, so there is nothing to measure
+        // — and measuring it would be a pass over the whole mesh to conclude
+        // that no other vertex is affected.
+        let weights = vec![1.0; selected.len()];
+        (selected, weights)
+    };
+    Some(Targets {
+        indices,
+        weights,
+        median,
+        distinct,
+    })
+}
+
+/// Applies a positional transform to whatever the selection reaches.
+///
+/// `place` is given a vertex’s position, its weight and the selection’s
+/// median, and returns where it goes. Whether a partial weight blends the
+/// *transform* or the *result* is the caller’s business, because the two
+/// differ for a rotation — see [`RotateSelection`].
+///
+/// `needs_extent` refuses a selection occupying a single place, which rotate
+/// and scale must and translate must not.
+fn run_transform(
+    doc: &mut DocMut<'_>,
+    radius: f64,
+    needs_extent: bool,
+    place: impl Fn(glam::Vec3, f32, glam::Vec3) -> glam::Vec3,
+) -> Result<OpResult, OpError> {
+    let mesh_id =
+        target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    let mesh = doc
+        .document()
+        .mesh(mesh_id)
+        .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    let Some(targets) = targets(mesh, radius) else {
+        return Ok(OpResult::Cancelled);
+    };
+    if needs_extent && targets.distinct < 2 {
+        return Ok(OpResult::Cancelled);
+    }
+
+    // `edit_positions` visits the indices in the order given, which is the
+    // order the weights are in. Asserted rather than assumed: a change of order
+    // there would pair each vertex with someone else’s weight, and a mesh
+    // transformed by scrambled weights still looks like a mesh.
+    let mut next = 0usize;
+    doc.edit_positions(mesh_id, &targets.indices, |index, p| {
+        debug_assert_eq!(
+            index, targets.indices[next],
+            "a weight was paired with the wrong vertex"
+        );
+        *p = place(*p, targets.weights[next], targets.median);
+        next += 1;
+    })
+    .map_err(|e| OpError::Failed(e.to_string()))?;
+    Ok(OpResult::Finished)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -355,23 +443,8 @@ impl Operator for TranslateSelection {
             params.translation[1] as f32,
             params.translation[2] as f32,
         );
-        let radius = params.proportional_size;
-        let moved = with_bmesh(doc, |bm| {
-            let verts = selected_vertices(bm);
-            if verts.is_empty() {
-                return Ok(false);
-            }
-            for (v, weight) in proportional_weights(bm, &verts, radius) {
-                if let Some(p) = bm.position(v) {
-                    bm.set_position(v, p + offset * weight);
-                }
-            }
-            Ok(true)
-        })?;
-        Ok(if moved {
-            OpResult::Finished
-        } else {
-            OpResult::Cancelled
+        run_transform(doc, params.proportional_size, false, |p, weight, _| {
+            p + offset * weight
         })
     }
 }
@@ -415,35 +488,15 @@ impl Operator for RotateSelection {
             _ => glam::Vec3::Z,
         };
         let rotation = glam::Quat::from_axis_angle(axis, params.angle as f32);
-        let radius = params.proportional_size;
-        let turned = with_bmesh(doc, |bm| {
-            let verts = selected_vertices(bm);
-            // A single point has nothing to turn: every vertex is the pivot, so
-            // the rotation is the identity.
-            if distinct_positions(bm, &verts) < 2 {
-                return Ok(false);
-            }
-            let Some(about) = median(bm, &verts) else {
-                return Ok(false);
-            };
-            for (v, weight) in proportional_weights(bm, &verts, radius) {
-                if let Some(p) = bm.position(v) {
-                    // The rotation is interpolated towards the identity rather
-                    // than the *result* being interpolated towards the original.
-                    // The two differ: blending positions drags a partly-weighted
-                    // vertex along the chord and shrinks the mesh towards the
-                    // pivot, while blending the rotation turns it through a
-                    // smaller angle, which is what the tool means.
-                    let partial = glam::Quat::IDENTITY.slerp(rotation, weight);
-                    bm.set_position(v, about + partial * (p - about));
-                }
-            }
-            Ok(true)
-        })?;
-        Ok(if turned {
-            OpResult::Finished
-        } else {
-            OpResult::Cancelled
+        run_transform(doc, params.proportional_size, true, |p, weight, about| {
+            // The rotation is interpolated towards the identity rather than the
+            // *result* being interpolated towards the original. The two differ:
+            // blending positions drags a partly-weighted vertex along the chord
+            // and shrinks the mesh towards the pivot, while blending the
+            // rotation turns it through a smaller angle, which is what the tool
+            // means.
+            let partial = glam::Quat::IDENTITY.slerp(rotation, weight);
+            about + partial * (p - about)
         })
     }
 }
@@ -501,36 +554,18 @@ impl Operator for ScaleSelection {
             params.scale[1] as f32,
             params.scale[2] as f32,
         );
-        let radius = params.proportional_size;
-        let scaled = with_bmesh(doc, |bm| {
-            let verts = selected_vertices(bm);
-            if distinct_positions(bm, &verts) < 2 {
-                return Ok(false);
-            }
-            let Some(about) = median(bm, &verts) else {
-                return Ok(false);
-            };
-            for (v, weight) in proportional_weights(bm, &verts, radius) {
-                if let Some(p) = bm.position(v) {
-                    // The factor is interpolated towards one.
-                    //
-                    // Unlike the rotation, this is *not* a correction: scaling is
-                    // linear in the position, so blending the factor and blending
-                    // the result are algebraically the same thing, and a test
-                    // cannot tell them apart. Written this way for symmetry with
-                    // the rotation above and because it says what is meant — a
-                    // vertex at half weight is scaled half as much, rather than
-                    // dragged half way to where a full scale would put it.
-                    let partial = glam::Vec3::ONE.lerp(factor, weight);
-                    bm.set_position(v, about + (p - about) * partial);
-                }
-            }
-            Ok(true)
-        })?;
-        Ok(if scaled {
-            OpResult::Finished
-        } else {
-            OpResult::Cancelled
+        run_transform(doc, params.proportional_size, true, |p, weight, about| {
+            // The factor is interpolated towards one.
+            //
+            // Unlike the rotation, this is *not* a correction: scaling is
+            // linear in the position, so blending the factor and blending the
+            // result are algebraically the same thing, and a test cannot tell
+            // them apart. Written this way for symmetry with the rotation above
+            // and because it says what is meant — a vertex at half weight is
+            // scaled half as much, rather than dragged half way to where a full
+            // scale would put it.
+            let partial = glam::Vec3::ONE.lerp(factor, weight);
+            about + (p - about) * partial
         })
     }
 }

@@ -117,6 +117,16 @@ fn measure(clusters: bool, instances: usize, distance: f64) -> Option<Result> {
 
 #[test]
 fn the_cluster_path_is_worth_measuring() {
+    // Not in a debug build. The scene is built on the CPU before it is handed
+    // to the GPU, and unoptimised mesh arithmetic is roughly fifty times
+    // slower: `cargo test --workspace` without `--release` spent **eleven
+    // hours** here before failing, which makes the plain command unusable. The
+    // mesh benchmarks in `kreate-ops` skip for the same reason; this one was
+    // missed.
+    if cfg!(debug_assertions) {
+        eprintln!("skipping: the scene build is ~50x slower without optimisation");
+        return;
+    }
     // Three scenes, because the answer is not one number. Culling costs a
     // dispatch and a level of indirection per vertex, and buys the rejection of
     // whole clusters — so it should lose on a small scene, and win where there

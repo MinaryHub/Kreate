@@ -185,10 +185,17 @@ fn an_operator_sees_a_selection_made_outside_the_session() {
 }
 
 #[test]
-fn a_session_stale_from_a_geometry_change_reopens_rather_than_overwriting() {
+fn a_move_made_outside_the_session_is_adopted_rather_than_overwritten() {
     // The dangerous case, and the one the staleness check exists for: something
-    // changed the geometry by another route. Writing back what the session holds
-    // would silently revert it.
+    // changed the mesh by another route. Writing back what the session holds
+    // would silently revert it — which for a transform means the user’s drag
+    // vanishing on their next extrude.
+    //
+    // A move is *not* staleness, though, and that distinction is the point.
+    // Positions carry no connectivity, so the structure the session holds is
+    // still the right one; it only has the wrong numbers in it. Copying four
+    // arrays across is a fraction of decoding the mesh again — measured at 35 ms
+    // against 81 for an extrude after a drag on two hundred thousand vertices.
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
     let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
@@ -197,7 +204,10 @@ fn a_session_stale_from_a_geometry_change_reopens_rather_than_overwriting() {
     for p in d.mesh_mut(mesh).unwrap().positions_mut() {
         p.z += 5.0;
     }
-    assert!(!session.matches(&d, mesh), "a geometry change is staleness");
+    assert!(
+        session.matches(&d, mesh),
+        "a move is not a change of connectivity"
+    );
 
     h.dispatch_in_session(
         &r,
@@ -209,8 +219,8 @@ fn a_session_stale_from_a_geometry_change_reopens_rather_than_overwriting() {
     )
     .expect("mesh.subdivide");
 
-    // The move survived: the session reopened and subdivided the moved mesh
-    // rather than writing its own copy back over it.
+    // The move survived: the operator subdivided the moved mesh rather than
+    // writing the session’s own copy back over it.
     let lowest = d
         .mesh(mesh)
         .unwrap()
@@ -220,7 +230,120 @@ fn a_session_stale_from_a_geometry_change_reopens_rather_than_overwriting() {
         .fold(f32::INFINITY, f32::min);
     assert!(
         lowest > 3.0,
-        "the session wrote stale geometry over the move: lowest z is {lowest}"
+        "the session wrote stale positions over the move: lowest z is {lowest}"
+    );
+}
+
+#[test]
+fn a_session_stale_from_a_topology_change_reopens_rather_than_overwriting() {
+    // The other side of the same line. Connectivity replaced by another route
+    // — an undo across an extrude, a modifier applied, a file reloaded — is a
+    // different mesh, and no amount of copying arrays across makes the held
+    // structure describe it. This one has to be decoded again.
+    let (r, mut h, mut d, mesh, c) = setup();
+    select_all(&r, &mut h, &mut d, &c);
+    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+
+    // A cylinder where the cube was: a different face count, so the difference
+    // cannot be papered over by adopting anything.
+    *d.mesh_mut(mesh).unwrap() = kreate_mesh::primitives::cylinder(1.0, 2.0, 12);
+    kreate_mesh::selection::select_all(d.mesh_mut(mesh).unwrap());
+    let replaced_faces = d.mesh(mesh).unwrap().num_faces();
+    assert!(
+        !session.matches(&d, mesh),
+        "a change of connectivity is staleness"
+    );
+
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.subdivide",
+        &PropertyMap::new(),
+    )
+    .expect("mesh.subdivide");
+
+    // Subdividing the *cylinder*, not the cube the session still held.
+    let faces = d.mesh(mesh).unwrap().num_faces();
+    assert!(
+        faces > replaced_faces,
+        "{faces} faces after subdividing {replaced_faces}"
+    );
+    assert_ne!(
+        faces, 24,
+        "the session wrote the cube back over the replacement"
+    );
+}
+
+#[test]
+fn positions_are_adopted_by_rank_even_when_the_arena_has_holes() {
+    // The rule `adopt_positions` has to get right, and the one a symmetric
+    // fixture cannot check. The document mesh is dense: vertex `i` is the
+    // `i`-th one. The edit structure is not — a delete frees arena slots and
+    // leaves gaps — so pairing by slot index puts every position after the
+    // first gap on the wrong vertex.
+    //
+    // Off by one is the whole failure, and it is invisible on any mesh where
+    // the vertices are interchangeable. So each vertex is given a position
+    // nothing else could have, and the operator that follows is one that
+    // changes no topology: every position must come out exactly where the move
+    // put it.
+    let (r, mut h, mut d, mesh, c) = setup();
+
+    // A delete, to make the gaps: one vertex, which frees its arena slot and
+    // takes the faces around it with it.
+    {
+        let m = d.mesh_mut(mesh).unwrap();
+        m.ensure_selection_layers();
+        kreate_mesh::selection::set_selected(m, kreate_mesh::attribute::Domain::Point, 0, true);
+    }
+    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.delete",
+        &params(&[("mode", PropertyValue::Enum(0))]),
+    )
+    .expect("mesh.delete");
+    let gaps = session
+        .bmesh()
+        .slot_count(kreate_mesh::attribute::Domain::Point)
+        - d.mesh(mesh).unwrap().num_verts() as usize;
+    assert!(
+        gaps > 0,
+        "the fixture has no gaps, so it cannot tell slot from rank"
+    );
+
+    // A distinctive position per vertex, written straight to the document the
+    // way a transform writes them.
+    let expected: Vec<glam::Vec3> = {
+        let m = d.mesh_mut(mesh).unwrap();
+        for (i, p) in m.positions_mut().iter_mut().enumerate() {
+            *p = glam::Vec3::new(i as f32 * 100.0, 0.0, 0.0);
+        }
+        m.positions().to_vec()
+    };
+
+    // An operator that touches attributes and no connectivity, so the vertex
+    // order it writes back is the order it read.
+    kreate_mesh::selection::select_all(d.mesh_mut(mesh).unwrap());
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.mark_sharp",
+        &params(&[("sharp", PropertyValue::Bool(true))]),
+    )
+    .expect("mesh.mark_sharp");
+
+    assert_eq!(
+        d.mesh(mesh).unwrap().positions(),
+        expected.as_slice(),
+        "positions were paired with the wrong vertices"
     );
 }
 

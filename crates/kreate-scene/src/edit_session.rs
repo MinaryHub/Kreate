@@ -41,17 +41,25 @@ pub struct EditSession {
     bmesh: BMesh,
     /// The mesh the `BMesh` was decoded from, held for comparison.
     ///
-    /// A session is current while the document's geometry arrays are still the
-    /// ones it decoded — pointer identity, the same free and exact test the
-    /// renderer and the modifier cache use. Anything that changes the geometry
-    /// by another route, an undo above all, makes it stale, and a session that
-    /// trusted itself would silently undo the user's last action.
+    /// A session is current while the document's *topology* arrays are still
+    /// the ones it decoded — pointer identity, the same free and exact test the
+    /// renderer and the modifier cache use. Anything that changes the
+    /// connectivity by another route, an undo above all, makes it stale, and a
+    /// session that trusted itself would silently undo the user's last action.
     ///
-    /// **Geometry, not the whole mesh.** A selection click rewrites a layer and
-    /// leaves everything else shared, and treating that as staleness costs a
-    /// full decode on the *next* operation — two seconds at a million vertices,
-    /// which is worse than having no session at all. Selection is instead copied
-    /// in when an operator asks for the structure.
+    /// **Topology, not the whole mesh.** Two things change without changing
+    /// connectivity, and treating either as staleness costs a full decode on
+    /// the *next* operation — two seconds at a million vertices, which is worse
+    /// than having no session at all:
+    ///
+    /// - A selection click rewrites one layer and leaves everything else
+    ///   shared.
+    /// - A transform rewrites the positions array and leaves everything else
+    ///   shared, which is the whole point of it declaring its write set.
+    ///
+    /// Both are copied in when an operator asks for the structure, rather than
+    /// decoded again. What is *not* excused is a change to the connectivity:
+    /// that is a different mesh, and the session has to be built from it.
     source: Arc<kreate_mesh::MeshData>,
     /// Which edge each corner walks along, for the mesh as it currently is.
     ///
@@ -98,17 +106,33 @@ impl EditSession {
         self.mesh == mesh
             && doc
                 .mesh(mesh)
-                .is_some_and(|current| self.source.same_geometry(current))
+                .is_some_and(|current| self.source.same_topology(current))
     }
 
-    /// The edit structure with the document's selection copied in.
+    /// The edit structure with the document's selection and positions copied
+    /// in.
     ///
-    /// Selection is authoritative in the document — clicks write it there
-    /// without decoding anything — so it has to be brought across before an
-    /// operator reads it. Three arrays of bools against a two-second decode.
+    /// Both are authoritative in the document, because both change by routes
+    /// that never touch the edit structure: a click writes a selection layer
+    /// and a transform writes positions, neither needing adjacency and neither
+    /// willing to pay for a decode. So both have to be brought across before an
+    /// operator reads them. Four arrays against a two-second decode.
+    ///
+    /// This is the other half of `matches` accepting a moved mesh as current.
+    /// Without the copy, an extrude after a drag would build its new faces from
+    /// the positions the vertices had *before* the drag — silently undoing the
+    /// user's last action, which is the exact failure the staleness check
+    /// exists to prevent.
     pub fn bmesh_for(&mut self, doc: &Document) -> &mut BMesh {
         if let Some(current) = doc.mesh(self.mesh) {
             self.bmesh.adopt_selection(current);
+            // Skipped when the positions array is still the one that was
+            // decoded, which is the common case: the copy is a pass over every
+            // vertex, and paying it on every selection click would give back
+            // what holding the session was for.
+            if !self.source.same_geometry(current) {
+                self.bmesh.adopt_positions(current);
+            }
         }
         &mut self.bmesh
     }
@@ -203,17 +227,39 @@ mod tests {
     }
 
     #[test]
-    fn a_session_is_stale_once_the_geometry_changes() {
-        // The check that makes a stale session harmless: geometry written by
+    fn a_session_survives_a_move() {
+        // A move is not a change of connectivity, so the structure the session
+        // holds is still the right one — it has the wrong numbers in it, and
+        // `bmesh_for` copies the right ones across. Treating a move as
+        // staleness would make an extrude after a drag pay for decoding the
+        // whole mesh again, which is the cost holding a session exists to
+        // avoid.
+        let (mut doc, mesh) = doc_with_cube();
+        let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+
+        doc.mesh_mut(mesh).unwrap().positions_mut()[0].y += 1.0;
+        assert!(session.matches(&doc, mesh), "a move is not staleness");
+
+        let moved = doc.mesh(mesh).unwrap().positions()[0];
+        let bm = session.bmesh_for(&doc);
+        let first = bm.vert_ids().next().expect("the first vertex");
+        let adopted = bm.position(first).expect("it has a position");
+        assert_eq!(adopted, moved, "the move was not copied in");
+    }
+
+    #[test]
+    fn a_session_is_stale_once_the_connectivity_changes() {
+        // The check that makes a stale session harmless: a mesh replaced by
         // another route — an undo above all — must not be overwritten by what
-        // the session still holds.
+        // the session still holds. No amount of copying arrays across makes the
+        // held structure describe a different mesh.
         let (mut doc, mesh) = doc_with_cube();
         let session = EditSession::open(&doc, mesh).expect("the mesh is there");
 
-        doc.mesh_mut(mesh).unwrap().positions_mut()[0].y += 1.0;
+        *doc.mesh_mut(mesh).unwrap() = kreate_mesh::primitives::cylinder(1.0, 2.0, 12);
         assert!(
             !session.matches(&doc, mesh),
-            "a session must not claim to be current after a geometry change"
+            "a session must not claim to be current after a change of topology"
         );
     }
 
