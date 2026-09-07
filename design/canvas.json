@@ -1,0 +1,26 @@
+{
+  "artboards": [
+    { "file": "DirectionQuiet.dc.html", "x": 0, "y": 0, "w": 480, "h": 340, "title": "A · 조용한 도구" },
+    { "file": "DirectionStudio.dc.html", "x": 560, "y": 0, "w": 480, "h": 340, "title": "B · 스튜디오 (권장)" },
+    { "file": "DirectionBlueprint.dc.html", "x": 1120, "y": 0, "w": 480, "h": 340, "title": "C · 제도판" },
+    { "file": "Main.dc.html", "x": 0, "y": 460, "w": 1440, "h": 900, "title": "B 전체 화면 — 1440×900" },
+    { "file": "Tokens.dc.html", "x": 1560, "y": 460, "w": 560, "h": 900, "title": "토큰" }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": 0,
+      "y": -190,
+      "w": 640,
+      "text": "Kreate에는 아직 중앙 테마 파일이 없습니다 — egui 기본값 위에 Color32::from_rgb가 네 파일에 흩어져 있는 상태입니다. 확정된 값은 선택 주황 #FF9E29, 활성 파랑 #78AAE6, 축 색 3개, 뷰포트 클리어 색, Pretendard 뿐입니다. 아래 세 방향은 그 위에서 갈라지는 서로 다른 축이고, B를 권장합니다."
+    },
+    {
+      "id": "note-main",
+      "x": 0,
+      "y": 1400,
+      "w": 520,
+      "text": "전체 화면 아트보드의 강조색과 밀도는 오른쪽 속성 패널에서 바꿔 볼 수 있습니다. 밀도 comfortable/compact는 컨트롤 높이 28px/24px에 대응합니다."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

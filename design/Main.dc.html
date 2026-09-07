@@ -1,0 +1,309 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; }
+    a { color: #ff9e29; text-decoration: none; }
+    a:hover { color: #ffb35c; }
+    .k { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  </style>
+</helmet>
+
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: {{t.base}}; font-family: Pretendard, 'IBM Plex Sans KR', system-ui, sans-serif; color: {{t.text}}; overflow: hidden;">
+
+  <!-- ── header ────────────────────────────────────────────────────────── -->
+  <div style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 16px; padding: 0 12px; background: {{t.raised}}; border-bottom: 1px solid {{t.border}};">
+
+    <div style="display: flex; align-items: center; gap: 8px; padding-right: 4px;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ff9e29" stroke-width="1.4" stroke-linejoin="round">
+        <path d="M8 1.5 14.2 5v6L8 14.5 1.8 11V5z"></path>
+        <path d="M1.8 5 8 8.5 14.2 5M8 8.5V14.5" stroke-opacity="0.55"></path>
+      </svg>
+      <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.02em;">Kreate</span>
+    </div>
+
+    <div style="width: 1px; height: 18px; background: {{t.border}};"></div>
+
+    <div style="display: flex; align-items: center; gap: 2px;">
+      <sc-for list="{{fileTools}}" as="item" hint-placeholder-count="4">
+        <div style="display: flex; align-items: center; gap: 6px; height: {{t.control}}; padding: 0 9px; border-radius: 3px; font-size: 12px; color: {{t.text2}};">
+          <span>{{item.label}}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="width: 1px; height: 18px; background: {{t.border}};"></div>
+
+    <!-- mode switch: two exclusive buttons, not a checkbox -->
+    <div style="display: flex; background: {{t.sunken}}; border: 1px solid {{t.border}}; border-radius: 4px; padding: 2px; gap: 2px;">
+      <div style="height: 22px; display: flex; align-items: center; padding: 0 11px; border-radius: 2px; font-size: 12px; font-weight: 500; background: {{t.accent}}; color: #1b1408;">오브젝트</div>
+      <div style="height: 22px; display: flex; align-items: center; padding: 0 11px; border-radius: 2px; font-size: 12px; color: {{t.text2}};">편집</div>
+    </div>
+
+    <div style="flex-grow: 1;"></div>
+
+    <!-- view toggles: icon-only, they are glanced at not read -->
+    <div style="display: flex; align-items: center; gap: 2px;">
+      <sc-for list="{{viewTools}}" as="item" hint-placeholder-count="4">
+        <div style="width: {{t.control}}; height: {{t.control}}; display: flex; align-items: center; justify-content: center; border-radius: 3px; background: {{item.bg}};">
+          <div style="width: 16px; height: 16px; color: {{item.fg}};" innerHTML="{{item.icon}}"></div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <!-- ── body ──────────────────────────────────────────────────────────── -->
+  <div style="flex-grow: 1; display: flex; min-height: 0;">
+
+    <!-- outliner -->
+    <div style="width: 240px; flex-shrink: 0; display: flex; flex-direction: column; background: {{t.base}}; border-right: 1px solid {{t.border}};">
+      <div style="height: 28px; display: flex; align-items: center; padding: 0 12px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: {{t.text3}};">아웃라이너</div>
+
+      <div style="display: flex; flex-direction: column; padding: 0 4px;">
+        <sc-for list="{{outliner}}" as="row" hint-placeholder-count="6">
+          <div style="display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 8px; padding-left: {{row.indent}}; border-radius: 3px; background: {{row.bg}};">
+            <div style="width: 12px; height: 12px; flex-shrink: 0; color: {{row.iconFg}};" innerHTML="{{row.icon}}"></div>
+            <span style="font-size: 12px; color: {{row.fg}}; flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{row.name}}</span>
+            <span class="k" style="font-size: 10px; color: {{t.text3}};">{{row.meta}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- viewport -->
+    <div style="flex-grow: 1; position: relative; background: {{t.viewport}}; min-width: 0;">
+      <svg width="100%" height="100%" viewBox="0 0 900 832" preserveAspectRatio="xMidYMid slice" style="display: block; position: absolute; inset: 0;">
+        <defs>
+          <linearGradient id="topFace" x1="0" y1="0" x2="0.4" y2="1">
+            <stop offset="0" stop-color="#e9e2d6"></stop>
+            <stop offset="1" stop-color="#cdc5b8"></stop>
+          </linearGradient>
+          <linearGradient id="leftFace" x1="0" y1="0" x2="1" y2="0.3">
+            <stop offset="0" stop-color="#8d8c8a"></stop>
+            <stop offset="1" stop-color="#75746f"></stop>
+          </linearGradient>
+          <linearGradient id="rightFace" x1="0" y1="0" x2="1" y2="0.2">
+            <stop offset="0" stop-color="#5b5a58"></stop>
+            <stop offset="1" stop-color="#4a4947"></stop>
+          </linearGradient>
+          <radialGradient id="fade" cx="0.5" cy="0.52" r="0.62">
+            <stop offset="0.45" stop-color="#000" stop-opacity="0"></stop>
+            <stop offset="1" stop-color="#000" stop-opacity="0.55"></stop>
+          </radialGradient>
+        </defs>
+
+        <!-- ground grid, drawn in perspective -->
+        <g stroke-width="1">
+          <sc-for list="{{grid.lines}}" as="l" hint-placeholder-count="18">
+            <line x1="{{l.x1}}" y1="{{l.y1}}" x2="{{l.x2}}" y2="{{l.y2}}" stroke="{{l.stroke}}" stroke-width="{{l.w}}"></line>
+          </sc-for>
+        </g>
+        <rect x="0" y="0" width="900" height="832" fill="url(#fade)"></rect>
+
+        <!-- the model: three shaded faces + selection outline -->
+        <g transform="translate(450 416)">
+          <path d="M0 -168 152 -80 0 8 -152 -80z" fill="url(#topFace)"></path>
+          <path d="M-152 -80 0 8 0 176 -152 88z" fill="url(#leftFace)"></path>
+          <path d="M152 -80 152 88 0 176 0 8z" fill="url(#rightFace)"></path>
+          <path d="M0 -168 152 -80 152 88 0 176 -152 88 -152 -80z" fill="none" stroke="{{t.accent}}" stroke-width="1.5" stroke-linejoin="round"></path>
+          <path d="M0 8 0 176M0 8 -152 -80M0 8 152 -80" fill="none" stroke="{{t.accent}}" stroke-width="1.5" stroke-opacity="0.85"></path>
+        </g>
+      </svg>
+
+      <!-- modal transform header: the tool talks to you while it runs -->
+      <div style="position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 4px; background: {{t.overlay}}; border: 1px solid {{t.accent}}; box-shadow: 0 6px 20px rgba(0,0,0,0.45);">
+        <span style="font-size: 12px; font-weight: 600; color: {{t.accent}};">이동</span>
+        <span style="font-size: 12px; font-weight: 600; color: {{t.axisX}};">X</span>
+        <span class="k" style="font-size: 12px; color: {{t.text}};">1.400</span>
+        <span style="width: 1px; height: 14px; background: {{t.border2}};"></span>
+        <span class="k" style="font-size: 11px; color: {{t.text3}};">1.4/8</span>
+        <span style="font-size: 11px; color: {{t.text3}};">스냅 정점</span>
+      </div>
+
+      <!-- navigation gizmo -->
+      <div style="position: absolute; top: 44px; right: 20px; width: 88px; height: 88px;">
+        <svg width="88" height="88" viewBox="0 0 88 88">
+          <line x1="44" y1="44" x2="44" y2="14" stroke="{{t.axisY}}" stroke-width="1.6"></line>
+          <line x1="44" y1="44" x2="72" y2="52" stroke="{{t.axisX}}" stroke-width="1.6"></line>
+          <line x1="44" y1="44" x2="20" y2="58" stroke="{{t.axisZ}}" stroke-width="1.6"></line>
+          <circle cx="44" cy="14" r="9" fill="{{t.axisY}}"></circle>
+          <text x="44" y="18" text-anchor="middle" font-size="10" font-weight="600" fill="#14170f" font-family="IBM Plex Mono, monospace">Y</text>
+          <circle cx="72" cy="52" r="9" fill="{{t.axisX}}"></circle>
+          <text x="72" y="56" text-anchor="middle" font-size="10" font-weight="600" fill="#1d0e0f" font-family="IBM Plex Mono, monospace">X</text>
+          <circle cx="20" cy="58" r="9" fill="{{t.axisZ}}"></circle>
+          <text x="20" y="62" text-anchor="middle" font-size="10" font-weight="600" fill="#0d1220" font-family="IBM Plex Mono, monospace">Z</text>
+          <circle cx="44" cy="74" r="7" fill="none" stroke="{{t.axisY}}" stroke-width="1.4" stroke-opacity="0.5"></circle>
+        </svg>
+      </div>
+    </div>
+
+    <!-- properties -->
+    <div style="width: 300px; flex-shrink: 0; display: flex; flex-direction: column; background: {{t.base}}; border-left: 1px solid {{t.border}};">
+      <div style="height: 28px; display: flex; align-items: center; padding: 0 12px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: {{t.text3}};">변형</div>
+
+      <div style="display: flex; flex-direction: column; gap: 10px; padding: 2px 12px 14px;">
+        <sc-for list="{{transform}}" as="grp" hint-placeholder-count="3">
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <span style="font-size: 11px; color: {{t.text3}};">{{grp.label}}</span>
+            <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px;">
+              <sc-for list="{{grp.fields}}" as="f" hint-placeholder-count="3">
+                <div style="display: flex; align-items: center; height: {{t.control}}; border-radius: 3px; background: {{t.sunken}}; border: 1px solid {{t.border}}; border-left: 2px solid {{f.axis}}; padding: 0 7px; gap: 6px;">
+                  <span class="k" style="font-size: 10px; color: {{t.text3}};">{{f.name}}</span>
+                  <span class="k" style="font-size: 12px; color: {{t.text}}; margin-left: auto;">{{f.value}}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="height: 1px; background: {{t.border}}; margin: 2px 0 0;"></div>
+      <div style="height: 28px; display: flex; align-items: center; padding: 0 12px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: {{t.text3}};">모디파이어</div>
+
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 0 12px 12px;">
+        <sc-for list="{{modifiers}}" as="m" hint-placeholder-count="2">
+          <div style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 9px; border-radius: 3px; background: {{t.raised}}; border: 1px solid {{t.border}};">
+            <div style="width: 12px; height: 12px; color: {{t.text3}};" innerHTML="{{m.icon}}"></div>
+            <span style="font-size: 12px; flex-grow: 1;">{{m.name}}</span>
+            <span class="k" style="font-size: 11px; color: {{t.text3}};">{{m.meta}}</span>
+          </div>
+        </sc-for>
+        <div style="display: flex; align-items: center; justify-content: center; height: 26px; border-radius: 3px; border: 1px dashed {{t.border2}}; font-size: 12px; color: {{t.text3}};">모디파이어 추가</div>
+      </div>
+
+      <div style="height: 1px; background: {{t.border}};"></div>
+      <div style="height: 28px; display: flex; align-items: center; padding: 0 12px; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: {{t.text3}};">마지막 작업 조정</div>
+      <div style="padding: 0 12px;">
+        <div style="display: flex; flex-direction: column; gap: 6px; padding: 9px 10px; border-radius: 3px; background: {{t.sunken}}; border: 1px solid {{t.border}};">
+          <div style="display: flex; align-items: baseline; gap: 6px;">
+            <span style="font-size: 12px; font-weight: 500;">돌출</span>
+            <span class="k" style="font-size: 10px; color: {{t.text3}};">mesh.extrude_region</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 11px; color: {{t.text3}}; width: 46px;">오프셋</span>
+            <div style="flex-grow: 1; height: 4px; border-radius: 2px; background: {{t.border}}; position: relative;">
+              <div style="position: absolute; inset: 0 38% 0 0; border-radius: 2px; background: {{t.accent}};"></div>
+            </div>
+            <span class="k" style="font-size: 11px;">1.000</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── status ────────────────────────────────────────────────────────── -->
+  <div style="height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 14px; padding: 0 12px; background: {{t.raised}}; border-top: 1px solid {{t.border}}; font-size: 11px; color: {{t.text3}};">
+    <span style="color: {{t.text2}};">오브젝트 모드</span>
+    <span style="width: 1px; height: 12px; background: {{t.border}};"></span>
+    <span class="k">오브젝트 1 · 메시 1 · 선택 1</span>
+    <span style="width: 1px; height: 12px; background: {{t.border}};"></span>
+    <span class="k" style="color: {{t.text2}};">mesh.translate(translation=(1.4, 0, 0))</span>
+    <div style="flex-grow: 1;"></div>
+    <span class="k">v · e · f 8 · 12 · 6</span>
+    <span style="width: 1px; height: 12px; background: {{t.border}};"></span>
+    <span class="k">4.1 ms</span>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{
+  "accent": {"editor": "color", "default": "#ff9e29", "options": ["#ff9e29", "#7fb3ff", "#63c9a3", "#e6737f"], "section": "테마"},
+  "density": {"editor": "enum", "options": ["compact", "comfortable"], "default": "compact", "section": "테마"},
+  "$preview": {"width": 1440, "height": 900}
+}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#ff9e29';
+    const control = (this.props.density ?? 'compact') === 'comfortable' ? '28px' : '24px';
+
+    // Chrome is warm-neutral; the viewport stays neutral so the model's own
+    // colour is judged against nothing.
+    const t = {
+      base: '#201e1b', raised: '#2a2724', sunken: '#171614',
+      border: '#363230', border2: '#47423e',
+      viewport: '#1c1c1e', overlay: 'rgba(26,24,21,0.92)',
+      text: '#ede8e2', text2: '#a39d95', text3: '#6e6862',
+      accent, axisX: '#d64a54', axisY: '#6aba54', axisZ: '#4a80d6',
+      control,
+    };
+
+    const icon = (d, extra) =>
+      '<svg viewBox="0 0 16 16" width="100%" height="100%" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">' + d + (extra || '') + '</svg>';
+
+    // A ground plane in one-point perspective: rows crowd towards the horizon,
+    // columns converge on it. Twelve of each is enough to read as a floor
+    // without becoming a texture that competes with the model.
+    const horizon = 250, vx = 450, lines = [];
+    for (let i = 1; i <= 12; i++) {
+      const k = i / 12;
+      const y = horizon + (832 - horizon) * Math.pow(k, 2.1);
+      const major = i % 4 === 0;
+      lines.push({ x1: 0, y1: y, x2: 900, y2: y, stroke: major ? '#3a3a3d' : '#2b2b2e', w: 1 });
+    }
+    for (let i = -8; i <= 8; i++) {
+      if (i === 0) continue;
+      const major = i % 4 === 0;
+      lines.push({ x1: vx + i * 26, y1: horizon, x2: vx + i * 190, y2: 832, stroke: major ? '#3a3a3d' : '#2b2b2e', w: 1 });
+    }
+    lines.push({ x1: vx, y1: horizon, x2: vx, y2: 832, stroke: '#5c9440', w: 1.4 });
+    lines.push({ x1: 0, y1: 585, x2: 900, y2: 585, stroke: '#9c3d44', w: 1.4 });
+
+    const dim = { bg: 'transparent', fg: t.text3 };
+    const on = { bg: 'rgba(255,158,41,0.14)', fg: accent };
+
+    return {
+      t,
+      grid: { lines },
+      fileTools: [{ label: '파일' }, { label: '편집' }, { label: '메시' }, { label: '보기' }],
+      viewTools: [
+        { ...on, icon: icon('<path d="M2 11.5 8 14.5l6-3M2 8 8 11l6-3"/><path d="M8 1.5 14 4.5l-6 3-6-3z"/>') },
+        { ...dim, icon: icon('<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c1.6 1.6 1.6 9.4 0 11M8 2.5c-1.6 1.6-1.6 9.4 0 11"/>') },
+        { ...dim, icon: icon('<path d="M1.5 8h13M8 1.5v13"/><path d="M4.2 4.2h7.6v7.6H4.2z"/>') },
+        { ...dim, icon: icon('<path d="M8 2.2c3.3 0 5.6 3 6.3 5.8-.7 2.8-3 5.8-6.3 5.8s-5.6-3-6.3-5.8C2.4 5.2 4.7 2.2 8 2.2z"/><circle cx="8" cy="8" r="2.1"/>') },
+      ],
+      outliner: [
+        { name: '장면', meta: '', indent: '8px', bg: 'transparent', fg: t.text2, iconFg: t.text3,
+          icon: icon('<path d="M2 4.5h12v8H2z"/><path d="M2 6.8h12"/>') },
+        { name: '몸체', meta: '8 v', indent: '22px', bg: 'rgba(255,158,41,0.13)', fg: t.text, iconFg: accent,
+          icon: icon('<path d="M8 1.8 14 5v6l-6 3.2L2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/>') },
+        { name: '거울', meta: '', indent: '36px', bg: 'transparent', fg: t.text2, iconFg: t.text3,
+          icon: icon('<path d="M8 1.5v13"/><path d="M6 4 2 8l4 4zM10 4l4 4-4 4z"/>') },
+        { name: '받침', meta: '24 v', indent: '22px', bg: 'transparent', fg: t.text2, iconFg: t.text3,
+          icon: icon('<path d="M8 1.8 14 5v6l-6 3.2L2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/>') },
+        { name: '피벗', meta: '', indent: '22px', bg: 'transparent', fg: t.text2, iconFg: t.text3,
+          icon: icon('<path d="M8 2.5v11M2.5 8h11"/>') },
+        { name: '카메라 01', meta: '', indent: '22px', bg: 'transparent', fg: t.text2, iconFg: t.text3,
+          icon: icon('<path d="M1.8 5.2h7.4v5.6H1.8z"/><path d="m9.2 8 5 -2.4v4.8z"/>') },
+      ],
+      transform: [
+        { label: '위치', fields: [
+          { name: 'X', value: '1.400', axis: t.axisX },
+          { name: 'Y', value: '0.000', axis: t.axisY },
+          { name: 'Z', value: '0.500', axis: t.axisZ } ] },
+        { label: '회전', fields: [
+          { name: 'X', value: '0°', axis: t.axisX },
+          { name: 'Y', value: '0°', axis: t.axisY },
+          { name: 'Z', value: '45°', axis: t.axisZ } ] },
+        { label: '크기', fields: [
+          { name: 'X', value: '1.000', axis: t.axisX },
+          { name: 'Y', value: '1.000', axis: t.axisY },
+          { name: 'Z', value: '1.000', axis: t.axisZ } ] },
+      ],
+      modifiers: [
+        { name: '거울', meta: 'X', icon: icon('<path d="M8 1.5v13"/><path d="M6 4 2 8l4 4zM10 4l4 4-4 4z"/>') },
+        { name: '섭디비전', meta: '2단계', icon: icon('<path d="M2 2h12v12H2z"/><path d="M8 2v12M2 8h12"/>') },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

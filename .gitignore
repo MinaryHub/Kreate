@@ -1,2 +1,11 @@
 /target
 **/*.rs.bk
+
+# Written beside a golden when the visual-regression harness finds a mismatch,
+# so the two can be looked at side by side. Debris, not a record.
+*.actual.png
+
+# The seeded design canvas: a 2.5 MB precompiled editor payload, rebuilt from
+# the .dc.html sources beside it by the design tooling.
+/design/*.html
+!/design/*.dc.html

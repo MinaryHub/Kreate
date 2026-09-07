@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; }
+    a { color: #5fd4d0; } a:hover { color: #8ee7e3; }
+  </style>
+</helmet>
+
+<div style="width: 480px; height: 340px; box-sizing: border-box; padding: 18px; display: flex; flex-direction: column; gap: 12px; background: #12181c; font-family: Pretendard, 'IBM Plex Sans KR', system-ui, sans-serif; color: #dde6ea;">
+
+  <div style="display: flex; flex-direction: column; gap: 3px;">
+    <div style="display: flex; align-items: baseline; gap: 8px;">
+      <span style="font-size: 15px; font-weight: 600; letter-spacing: -0.01em;">C · 제도판</span>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #56686f;">measured · numbers first</span>
+    </div>
+    <span style="font-size: 11px; line-height: 1.45; color: #7e929a; text-wrap: pretty;">수치가 주인공입니다. 모든 값이 고정폭으로 자리를 맞추고, 얇은 괘선과 눈금이 계측 도구의 인상을 만듭니다.</span>
+  </div>
+
+  <!-- miniature -->
+  <div style="flex-grow: 1; display: flex; flex-direction: column; border: 1px solid #24333a; border-radius: 2px; overflow: hidden;">
+    <div style="height: 20px; display: flex; align-items: center; gap: 10px; padding: 0 8px; background: #172026; border-bottom: 1px solid #24333a;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.1em; color: #5fd4d0;">KREATE</span>
+      <div style="display: flex; gap: 7px;">
+        <div style="width: 16px; height: 4px; background: #33474f;"></div>
+        <div style="width: 16px; height: 4px; background: #33474f;"></div>
+        <div style="width: 16px; height: 4px; background: #33474f;"></div>
+      </div>
+      <div style="flex-grow: 1;"></div>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #5fd4d0; border: 1px solid #2c4750; padding: 1px 5px;">OBJ</span>
+    </div>
+
+    <div style="flex-grow: 1; display: flex; min-height: 0;">
+      <div style="width: 74px; display: flex; flex-direction: column; padding: 6px 0 0; background: #12181c; border-right: 1px solid #24333a;">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; letter-spacing: 0.1em; color: #56686f; padding: 0 6px 5px;">OUTLINER</span>
+        <div style="display: flex; align-items: center; gap: 5px; height: 12px; padding: 0 6px; border-left: 2px solid #5fd4d0; background: rgba(95,212,208,0.09);">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #5fd4d0;">01</span>
+          <div style="width: 26px; height: 4px; background: #b6c8ce;"></div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 5px; height: 12px; padding: 0 6px; border-left: 2px solid transparent; border-bottom: 1px solid #1b262b;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #465b63;">02</span>
+          <div style="width: 22px; height: 4px; background: #3d525a;"></div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 5px; height: 12px; padding: 0 6px; border-left: 2px solid transparent; border-bottom: 1px solid #1b262b;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #465b63;">03</span>
+          <div style="width: 28px; height: 4px; background: #3d525a;"></div>
+        </div>
+      </div>
+
+      <div style="flex-grow: 1; position: relative; background: #0e1418;">
+        <svg width="100%" height="100%" viewBox="0 0 200 150" preserveAspectRatio="xMidYMid slice" style="display: block; position: absolute; inset: 0;">
+          <g stroke="#1b2b32" stroke-width="0.5">
+            <path d="M0 20h200M0 40h200M0 60h200M0 80h200M0 100h200M0 120h200M0 140h200"></path>
+            <path d="M20 0v150M40 0v150M60 0v150M80 0v150M100 0v150M120 0v150M140 0v150M160 0v150M180 0v150"></path>
+          </g>
+          <g transform="translate(100 76)">
+            <path d="M0 -30 27 -14 0 2 -27 -14z" fill="#233038" fill-opacity="0.85"></path>
+            <path d="M-27 -14 0 2v30l-27-16z" fill="#1a252b" fill-opacity="0.85"></path>
+            <path d="M27 -14 27 16 0 32V2z" fill="#151f24" fill-opacity="0.85"></path>
+            <path d="M0 -30 27 -14v30L0 32l-27-16v-30z" fill="none" stroke="#5fd4d0" stroke-width="0.9"></path>
+            <path d="M0 2v30M0 2-27-14M0 2 27-14" fill="none" stroke="#5fd4d0" stroke-width="0.7" stroke-opacity="0.7"></path>
+            <g stroke="#5fd4d0" stroke-width="0.5" stroke-opacity="0.75">
+              <path d="M-27-20-27-25M27-20 27-25M-27-22.5H27"></path>
+            </g>
+            <text x="0" y="-27" text-anchor="middle" font-size="5" fill="#5fd4d0" font-family="IBM Plex Mono, monospace">2.000</text>
+          </g>
+        </svg>
+        <div style="position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 6px; height: 13px; padding: 0 6px; background: rgba(14,20,24,0.94); border: 1px solid #2c4750;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; letter-spacing: 0.08em; color: #5fd4d0;">MOVE</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #e07a83;">X</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px;">+1.400</span>
+        </div>
+      </div>
+
+      <div style="width: 84px; display: flex; flex-direction: column; padding: 6px 0 0; background: #12181c; border-left: 1px solid #24333a;">
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; letter-spacing: 0.1em; color: #56686f; padding: 0 6px 5px;">TRANSFORM</span>
+        <div style="display: flex; align-items: center; justify-content: space-between; height: 12px; padding: 0 6px; border-bottom: 1px solid #1b262b;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #e07a83;">X</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #c3d2d8;">1.400</span>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; height: 12px; padding: 0 6px; border-bottom: 1px solid #1b262b;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #7fc472;">Y</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #c3d2d8;">0.000</span>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; height: 12px; padding: 0 6px; border-bottom: 1px solid #1b262b;">
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #7aa8e0;">Z</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #c3d2d8;">0.500</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 15px; display: flex; align-items: center; gap: 10px; padding: 0 8px; background: #172026; border-top: 1px solid #24333a;">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #5fd4d0;">V8 E12 F6</span>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 7px; color: #465b63;">4.1ms</span>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 14px; font-size: 10px; line-height: 1.4;">
+    <div style="flex-grow: 1;">
+      <span style="color: #56686f;">얻는 것 </span><span style="color: #a8bcc3;">치수가 중요한 작업에서 값을 훨씬 빨리 읽고 비교합니다.</span>
+    </div>
+    <div style="flex-grow: 1;">
+      <span style="color: #56686f;">잃는 것 </span><span style="color: #a8bcc3;">CAD처럼 읽혀서, 조형하러 온 아티스트에게는 차갑습니다.</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview": {"width": 480, "height": 340}}'>
+class Component extends DCLogic {}
+</script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; }
+    a { color: #ff9e29; } a:hover { color: #ffb35c; }
+    .m { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  </style>
+</helmet>
+
+<div style="width: 560px; height: 900px; box-sizing: border-box; padding: 26px 26px 22px; display: flex; flex-direction: column; gap: 18px; background: #201e1b; font-family: Pretendard, 'IBM Plex Sans KR', system-ui, sans-serif; color: #ede8e2; overflow: hidden;">
+
+  <div style="display: flex; flex-direction: column; gap: 5px;">
+    <span style="font-size: 18px; font-weight: 600; letter-spacing: -0.01em;">토큰</span>
+    <span style="font-size: 11px; line-height: 1.5; color: #a39d95; text-wrap: pretty;">지금은 <span class="m" style="color: #cdc4b8;">Color32::from_rgb</span>가 네 파일에 흩어져 있습니다. 여기 있는 값이 한 곳에 모이면 테마·대비 조정·나중의 라이트 모드가 전부 한 파일의 문제가 됩니다.</span>
+  </div>
+
+  <sc-for list="{{groups}}" as="g" hint-placeholder-count="4">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div style="display: flex; align-items: baseline; gap: 8px;">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6e6862;">{{g.title}}</span>
+        <span style="font-size: 10px; color: #55504b;">{{g.note}}</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <sc-for list="{{g.rows}}" as="r" hint-placeholder-count="5">
+          <div style="display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 9px; border-radius: 3px; background: #1a1815;">
+            <div style="width: 26px; height: 18px; border-radius: 2px; flex-shrink: 0; background: {{r.swatch}}; border: 1px solid rgba(255,255,255,0.09);"></div>
+            <span class="m" style="font-size: 11px; color: #cdc4b8; width: 132px; flex-shrink: 0;">{{r.name}}</span>
+            <span class="m" style="font-size: 11px; color: #837c74; width: 74px; flex-shrink: 0;">{{r.hex}}</span>
+            <span style="font-size: 11px; color: #837c74; flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.role}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-for>
+
+  <!-- type -->
+  <div style="display: flex; flex-direction: column; gap: 7px;">
+    <div style="display: flex; align-items: baseline; gap: 8px;">
+      <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6e6862;">서체</span>
+      <span style="font-size: 10px; color: #55504b;">Pretendard 유지 · 수치는 고정폭</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <sc-for list="{{type}}" as="ty" hint-placeholder-count="5">
+        <div style="display: flex; align-items: baseline; gap: 10px; padding: 5px 9px; border-radius: 3px; background: #1a1815;">
+          <span class="m" style="font-size: 10px; color: #837c74; width: 62px; flex-shrink: 0;">{{ty.size}}</span>
+          <span style="font-size: {{ty.px}}; font-weight: {{ty.weight}}; color: #ede8e2; flex-grow: 1;">{{ty.sample}}</span>
+          <span style="font-size: 10px; color: #6e6862; flex-shrink: 0;">{{ty.use}}</span>
+        </div>
+      </sc-for>
+      <div style="display: flex; align-items: baseline; gap: 10px; padding: 5px 9px; border-radius: 3px; background: #1a1815;">
+        <span class="m" style="font-size: 10px; color: #837c74; width: 62px; flex-shrink: 0;">mono 12</span>
+        <span class="m" style="font-size: 12px; color: #ede8e2; flex-grow: 1;">1.400  0.000  −0.500  45°</span>
+        <span style="font-size: 10px; color: #6e6862; flex-shrink: 0;">수치 readout</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- metrics -->
+  <div style="display: flex; flex-direction: column; gap: 7px;">
+    <div style="display: flex; align-items: baseline; gap: 8px;">
+      <span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6e6862;">치수</span>
+      <span style="font-size: 10px; color: #55504b;">밀도는 하나의 스위치로</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px;">
+      <sc-for list="{{metrics}}" as="mt" hint-placeholder-count="6">
+        <div style="display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 9px; border-radius: 3px; background: #1a1815;">
+          <span class="m" style="font-size: 10px; color: #837c74; flex-grow: 1;">{{mt.name}}</span>
+          <span class="m" style="font-size: 11px; color: #cdc4b8;">{{mt.value}}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="flex-grow: 1;"></div>
+
+  <div style="display: flex; gap: 9px; padding: 11px 12px; border-radius: 3px; background: #1a1815; border-left: 2px solid #ff9e29;">
+    <span style="font-size: 11px; line-height: 1.55; color: #bfb8b0; text-wrap: pretty;"><span style="color: #ff9e29; font-weight: 600;">뷰포트는 토큰을 따르지 않습니다.</span> 크롬은 따뜻하게 두되 뷰포트 배경은 중립 <span class="m">#1C1C1E</span>로 고정합니다. 주변색이 따뜻하면 모델의 회색이 차갑게 보입니다 — 재질 색을 판단하는 화면에서 그건 도구가 거짓말을 하는 것입니다.</span>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview": {"width": 560, "height": 900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      groups: [
+        {
+          title: '표면', note: '따뜻한 중성 · 채도 낮게',
+          rows: [
+            { name: 'surface.sunken',  hex: '#171614', swatch: '#171614', role: '입력 필드, 눌린 상태' },
+            { name: 'surface.base',    hex: '#201E1B', swatch: '#201e1b', role: '패널 바탕' },
+            { name: 'surface.raised',  hex: '#2A2724', swatch: '#2a2724', role: '헤더, 상태바, 카드' },
+            { name: 'border',          hex: '#363230', swatch: '#363230', role: '구획선' },
+            { name: 'border.strong',   hex: '#47423E', swatch: '#47423e', role: '점선, 포커스 링' },
+            { name: 'viewport',        hex: '#1C1C1E', swatch: '#1c1c1e', role: '중립 — 아래 참고' },
+          ],
+        },
+        {
+          title: '글자', note: '세 단계면 충분합니다',
+          rows: [
+            { name: 'text.primary',   hex: '#EDE8E2', swatch: '#ede8e2', role: '값, 이름' },
+            { name: 'text.secondary', hex: '#A39D95', swatch: '#a39d95', role: '레이블' },
+            { name: 'text.muted',     hex: '#6E6862', swatch: '#6e6862', role: '섹션 제목, 단축키' },
+          ],
+        },
+        {
+          title: '강조', note: '이미 쓰고 있는 색 — 새로 만들지 않습니다',
+          rows: [
+            { name: 'accent',      hex: '#FF9E29', swatch: '#ff9e29', role: '선택, 활성 모드, 진행 중인 도구' },
+            { name: 'accent.wash', hex: '#FF9E29 12%', swatch: 'rgba(255,158,41,0.12)', role: '선택된 행 바탕' },
+            { name: 'info',        hex: '#78AAE6', swatch: '#78aae6', role: '활성 오브젝트, 정보' },
+          ],
+        },
+        {
+          title: '축', note: '적록색약 대비 확인 완료',
+          rows: [
+            { name: 'axis.x', hex: '#D64A54', swatch: '#d64a54', role: 'X — 위치·회전·크기 필드 좌측 띠' },
+            { name: 'axis.y', hex: '#6ABA54', swatch: '#6aba54', role: 'Y' },
+            { name: 'axis.z', hex: '#4A80D6', swatch: '#4a80d6', role: 'Z' },
+          ],
+        },
+      ],
+      type: [
+        { size: '20 / 600', px: '20px', weight: '600', sample: '패널 제목', use: '거의 안 씀' },
+        { size: '13 / 500', px: '13px', weight: '500', sample: '오브젝트 이름', use: '강조 본문' },
+        { size: '12 / 400', px: '12px', weight: '400', sample: '메뉴, 버튼, 목록 행', use: '기본' },
+        { size: '11 / 500', px: '11px', weight: '500', sample: '아웃라이너 · 변형 · 모디파이어', use: '섹션 제목' },
+      ],
+      metrics: [
+        { name: 'control.h', value: '24 / 28' },
+        { name: 'row.h', value: '24' },
+        { name: 'radius', value: '3' },
+        { name: 'radius.pill', value: '4' },
+        { name: 'gap', value: '4 · 8 · 12 · 16' },
+        { name: 'panel.pad', value: '12' },
+        { name: 'hit.min', value: '24 (데스크톱)' },
+        { name: 'border.w', value: '1' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

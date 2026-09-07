@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+  <style>
+    body { margin: 0; }
+    a { color: #cfcfd2; } a:hover { color: #ffffff; }
+  </style>
+</helmet>
+
+<div style="width: 480px; height: 340px; box-sizing: border-box; padding: 18px; display: flex; flex-direction: column; gap: 12px; background: #0e0e0f; font-family: Pretendard, 'IBM Plex Sans KR', system-ui, sans-serif; color: #e6e6e8;">
+
+  <div style="display: flex; flex-direction: column; gap: 3px;">
+    <div style="display: flex; align-items: baseline; gap: 8px;">
+      <span style="font-size: 15px; font-weight: 600; letter-spacing: -0.01em;">A · 조용한 도구</span>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #5a5a5e;">neutral · chrome recedes</span>
+    </div>
+    <span style="font-size: 11px; line-height: 1.45; color: #8a8a8f; text-wrap: pretty;">크롬을 거의 지웁니다. 색은 상태를 말할 때만 나타나고, 나머지는 무채색 계조로만 구분합니다.</span>
+  </div>
+
+  <!-- miniature -->
+  <div style="flex-grow: 1; display: flex; flex-direction: column; border: 1px solid #232326; border-radius: 3px; overflow: hidden;">
+    <div style="height: 20px; display: flex; align-items: center; gap: 10px; padding: 0 8px; background: #131315; border-bottom: 1px solid #202023;">
+      <div style="width: 24px; height: 5px; border-radius: 1px; background: #38383c;"></div>
+      <div style="display: flex; gap: 7px;">
+        <div style="width: 16px; height: 4px; border-radius: 1px; background: #2c2c30;"></div>
+        <div style="width: 16px; height: 4px; border-radius: 1px; background: #2c2c30;"></div>
+        <div style="width: 16px; height: 4px; border-radius: 1px; background: #2c2c30;"></div>
+      </div>
+      <div style="flex-grow: 1;"></div>
+      <div style="width: 30px; height: 9px; border-radius: 2px; background: #26262a; border: 1px solid #313136;"></div>
+    </div>
+
+    <div style="flex-grow: 1; display: flex; min-height: 0;">
+      <div style="width: 74px; display: flex; flex-direction: column; gap: 4px; padding: 7px 6px; background: #0e0e0f; border-right: 1px solid #202023;">
+        <div style="width: 34px; height: 4px; border-radius: 1px; background: #2c2c30;"></div>
+        <div style="height: 11px; border-radius: 2px; background: #1a1a1d; display: flex; align-items: center; padding: 0 5px;">
+          <div style="width: 30px; height: 4px; border-radius: 1px; background: #55555a;"></div>
+        </div>
+        <div style="height: 11px; display: flex; align-items: center; padding: 0 5px;">
+          <div style="width: 24px; height: 4px; border-radius: 1px; background: #333338;"></div>
+        </div>
+        <div style="height: 11px; display: flex; align-items: center; padding: 0 5px;">
+          <div style="width: 28px; height: 4px; border-radius: 1px; background: #333338;"></div>
+        </div>
+      </div>
+
+      <div style="flex-grow: 1; position: relative; background: #191919;">
+        <svg width="100%" height="100%" viewBox="0 0 200 150" preserveAspectRatio="xMidYMid slice" style="display: block; position: absolute; inset: 0;">
+          <g stroke="#232323" stroke-width="0.6">
+            <path d="M0 96h200M0 112h200M0 133h200M100 84 40 150M100 84 160 150M100 84 84 150M100 84 116 150"></path>
+          </g>
+          <g transform="translate(100 76)">
+            <path d="M0 -30 27 -14 0 2 -27 -14z" fill="#d8d8da"></path>
+            <path d="M-27 -14 0 2v30l-27-16z" fill="#8c8c8e"></path>
+            <path d="M27 -14 27 16 0 32V2z" fill="#606063"></path>
+            <path d="M0 -30 27 -14v30L0 32l-27-16v-30z" fill="none" stroke="#ffffff" stroke-width="1"></path>
+          </g>
+        </svg>
+        <div style="position: absolute; top: 6px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 5px; height: 13px; padding: 0 7px; border-radius: 2px; background: rgba(10,10,11,0.9); border: 1px solid #3c3c42;">
+          <span style="font-size: 8px; font-weight: 600;">이동</span>
+          <span style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #9a9aa0;">1.400</span>
+        </div>
+      </div>
+
+      <div style="width: 84px; display: flex; flex-direction: column; gap: 4px; padding: 7px 6px; background: #0e0e0f; border-left: 1px solid #202023;">
+        <div style="width: 30px; height: 4px; border-radius: 1px; background: #2c2c30;"></div>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px;">
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px;">
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+          <div style="height: 11px; border-radius: 2px; background: #171719; border: 1px solid #232326;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 15px; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: #131315; border-top: 1px solid #202023;">
+      <div style="width: 34px; height: 4px; border-radius: 1px; background: #38383c;"></div>
+      <div style="width: 56px; height: 4px; border-radius: 1px; background: #26262a;"></div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 14px; font-size: 10px; line-height: 1.4;">
+    <div style="flex-grow: 1;">
+      <span style="color: #6f6f74;">얻는 것 </span><span style="color: #b8b8bd;">모델이 화면에서 유일하게 채도를 가진 것이 됩니다.</span>
+    </div>
+    <div style="flex-grow: 1;">
+      <span style="color: #6f6f74;">잃는 것 </span><span style="color: #b8b8bd;">패널을 눈으로 훑어 찾기 어렵고, 처음 배우기 더디게 만듭니다.</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview": {"width": 480, "height": 340}}'>
+class Component extends DCLogic {}
+</script>
+</body>
+</html>
