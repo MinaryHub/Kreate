@@ -112,6 +112,20 @@ pub struct ShellState {
     pub capturing: Option<kreate_input::BindingId>,
     /// What the panel asked for this frame.
     pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
+    /// Whether the UV editor is open.
+    pub show_uv: bool,
+    /// The UV editor's pan, zoom and drag.
+    ///
+    /// Kept across the panel being closed and reopened: an artist who has
+    /// zoomed into a sleeve does not want it reset for glancing at the
+    /// modifier stack.
+    pub uv_state: kreate_ui::UvState,
+    /// The UV map to draw, published by the application each frame.
+    ///
+    /// `None` outside edit mode, and empty when the mesh has no UVs yet —
+    /// which the panel says out loud rather than drawing an empty square and
+    /// leaving the user to guess.
+    pub uv: Option<kreate_ui::UvData>,
     /// The running modal transform, if one is running.
     ///
     /// Set by the application every frame a gesture is live and cleared the
@@ -154,6 +168,9 @@ impl Default for ShellState {
             show_keymap: false,
             capturing: None,
             keymap_edits: Vec::new(),
+            show_uv: false,
+            uv_state: kreate_ui::UvState::default(),
+            uv: None,
             modal: None,
         }
     }
@@ -426,6 +443,9 @@ struct Labels {
     properties: String,
     modifiers: String,
     keymap: String,
+    uv: String,
+    uv_none: String,
+    uv_not_editing: String,
     mode_object: String,
     mode_edit: String,
     extrude: String,
@@ -469,6 +489,9 @@ impl Labels {
             properties: t("panel-properties"),
             modifiers: t("panel-modifiers"),
             keymap: t("panel-keymap"),
+            uv: t("panel-uv"),
+            uv_none: t("uv-none"),
+            uv_not_editing: t("uv-not-editing"),
             mode_object: t("mode-object"),
             mode_edit: t("mode-edit"),
             extrude: t("menu-extrude"),
@@ -750,6 +773,7 @@ pub fn draw(
             ui.separator();
             ui.checkbox(&mut state.show_outliner, &l.outliner);
             ui.checkbox(&mut state.show_properties, &l.properties);
+            ui.checkbox(&mut state.show_uv, &l.uv);
             ui.checkbox(&mut state.show_keymap, &l.keymap);
         });
     });
@@ -829,6 +853,29 @@ pub fn draw(
                 &mut edits,
             );
             state.keymap_edits = edits;
+        });
+    }
+
+    if state.show_uv {
+        // Below the viewport rather than beside it: a UV map is square, and a
+        // square panel in a tall column wastes the column. This is also where
+        // every other tool puts it, which is worth more than a novel layout.
+        Panel::bottom("uv").default_size(280.0).show(ui, |ui| {
+            ui.heading(&l.uv);
+            let text = kreate_ui::UvText {
+                no_uvs: l.uv_none.clone(),
+                not_editing: l.uv_not_editing.clone(),
+            };
+            let data = state.uv.clone();
+            let commands = kreate_ui::uv_editor(
+                ui,
+                data.as_ref().map(|d| d.view()).as_ref(),
+                &mut state.uv_state,
+                &text,
+            );
+            for command in commands {
+                state.queue.push(command);
+            }
         });
     }
 
@@ -1217,6 +1264,9 @@ keymap-context-edit = Edit Mode
 keymap-context-modal = Modal Tools
 panel-outliner = Outliner
 panel-properties = Properties
+panel-uv = UV Editor
+uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
+uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
 adjust-nothing = No operation to adjust
 status-counts = { $objects } objects, { $meshes } meshes, { $selected } selected
 outliner-kind-empty = Empty
@@ -1374,6 +1424,9 @@ keymap-context-edit = 편집 모드
 keymap-context-modal = 모달 툴
 panel-outliner = 아웃라이너
 panel-properties = 속성
+panel-uv = UV 에디터
+uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
+uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
 adjust-nothing = 조정할 작업이 없습니다
 status-counts = 오브젝트 { $objects }개, 메시 { $meshes }개, 선택 { $selected }개
 outliner-kind-empty = 빈 오브젝트
@@ -1636,6 +1689,9 @@ mod tests {
             "menu-redo",
             "panel-outliner",
             "panel-properties",
+            "panel-uv",
+            "uv-none",
+            "uv-not-editing",
             "adjust-nothing",
             "status-counts",
             "outliner-kind-empty",

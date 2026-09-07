@@ -20,6 +20,15 @@ use kreate_scene::Document;
 const W: u32 = 1280;
 const H: u32 = 800;
 const BYTES_PER_ROW: u32 = W * 4;
+/// Rows inside the UV panel, below its heading and above the status bar.
+///
+/// Assertions about the panel are counted here rather than over the lower half
+/// of the frame: the viewport is also showing a selected object in the accent,
+/// and the shell draws the panel's heading whatever the panel contains. Both
+/// satisfied earlier versions of those counts on their own, which is how two
+/// of these assertions came to be measuring nothing.
+const PANEL_BODY: std::ops::Range<u32> = (H - 240)..(H - 60);
+
 /// The surface format egui composites into.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// The format egui samples the viewport through. See the comment at the view.
@@ -568,6 +577,98 @@ fn the_modal_header_draws_over_the_viewport_in_the_constrained_axis_colour() {
     assert_eq!(
         left_panel_changed, 0,
         "{left_panel_changed} pixels changed in the side panel"
+    );
+}
+
+#[test]
+fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
+    // Two states worth a picture, because they are the two the user actually
+    // meets: a mesh with UVs, and a mesh without. The second used to be an
+    // empty square with no explanation, which reads as a broken panel.
+    let with_uvs = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
+        state.show_uv = true;
+        // Two faces of a box-projected cube, one of them selected, in the
+        // arena's own corner numbering — which is what the panel is given
+        // and what the operators take.
+        state.uv = Some(kreate_ui::UvData {
+            uvs: vec![
+                egui::vec2(0.1, 0.1),
+                egui::vec2(0.4, 0.1),
+                egui::vec2(0.4, 0.4),
+                egui::vec2(0.1, 0.4),
+                egui::vec2(0.6, 0.6),
+                egui::vec2(0.9, 0.6),
+                egui::vec2(0.9, 0.9),
+                egui::vec2(0.6, 0.9),
+            ],
+            selected: vec![true, true, true, true, false, false, false, false],
+            offsets: vec![0, 4, 8],
+            corners: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        });
+    }));
+
+    let without = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
+        state.show_uv = true;
+        state.uv = Some(kreate_ui::UvData::default());
+    }));
+
+    // The panel is at the bottom, so the two frames must differ there and
+    // agree above it — a UV panel that redrew the viewport would be a layout
+    // bug hiding as a rendering one.
+    let band = |c: &Composited, from: u32, to: u32| -> usize {
+        let mut n = 0;
+        for y in from..to {
+            for x in 0..W {
+                if c.at(x, y) != without.at(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let lower = band(&with_uvs, H * 3 / 4, H - 40);
+    assert!(
+        lower > 500,
+        "only {lower} pixels differ in the UV panel; the map did not draw"
+    );
+
+    // The selected corners wear the accent. Checked against the palette, so a
+    // panel that invented its own orange would fail here — and counted only
+    // inside the panel, because the 3D viewport is *also* showing a selected
+    // cube in the accent. The first version of this scan covered the lower
+    // half of the whole frame and was satisfied by the cube, so recolouring
+    // the panel's selection changed nothing.
+    let accent = kreate_render::palette::rgb8(kreate_render::palette::ACCENT);
+    let mut accented = 0;
+    for y in PANEL_BODY {
+        for x in 0..W {
+            let p = with_uvs.at(x, y);
+            if (0..3).all(|i| (i32::from(p[i]) - i32::from(accent[i])).abs() < 40) {
+                accented += 1;
+            }
+        }
+    }
+    assert!(
+        accented > 4,
+        "found {accented} accent-coloured pixels in the UV panel; the selection is not shown"
+    );
+
+    // And the empty case says something rather than drawing a blank square.
+    // Below the panel's heading, which the shell draws either way: the first
+    // version of this scan included the heading and was satisfied by it, so
+    // deleting the note itself changed nothing.
+    let mut empty_ink = 0;
+    for y in PANEL_BODY {
+        for x in 0..W {
+            let p = without.at(x, y);
+            if p[0] > 80 && p[1] > 74 {
+                empty_ink += 1;
+            }
+        }
+    }
+    assert!(
+        empty_ink > 60,
+        "the empty UV panel drew {empty_ink} light pixels below its heading; it should be explaining itself rather than showing a blank square"
     );
 }
 

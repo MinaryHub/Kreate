@@ -17,6 +17,7 @@ pub mod outliner;
 pub mod property_editor;
 pub mod text;
 pub mod theme;
+pub mod uv_editor;
 
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};
@@ -26,3 +27,4 @@ pub use outliner::{outliner, ClickModifiers, OutlinerRow, RowKind};
 pub use property_editor::{property_editor, property_widget, UnitDisplay};
 pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};
 pub use theme::{install as install_theme, Density, Theme};
+pub use uv_editor::{uv_editor, UvData, UvState, UvText, UvView};

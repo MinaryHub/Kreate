@@ -738,6 +738,36 @@ impl App {
     /// opened *at* something, where most rows are dead, makes the user hunt for
     /// the live ones. The menu bar can afford that; a menu under the cursor
     /// cannot.
+    /// Publishes the UV map for the editor panel.
+    ///
+    /// Read from the *edit structure*, not from the document, and that is not
+    /// a convenience: the UV operators take corner slots, which are arena
+    /// slots with gaps in them, while the document's corners are dense. A
+    /// panel that published dense indices would select the wrong corners the
+    /// moment anything had been deleted — silently, and only on meshes that
+    /// had been edited.
+    ///
+    /// Rebuilt each frame the panel is open rather than cached against a
+    /// version: a UV drag changes it sixty times a second, and a cache that
+    /// every operator has to remember to invalidate is a cache one of them
+    /// will forget.
+    fn publish_uv_view(&mut self) {
+        if !self.ui.show_uv {
+            self.ui.uv = None;
+            return;
+        }
+        let Some(session) = self.edit.as_ref() else {
+            // Outside edit mode there is no UV map to show, which the panel
+            // says out loud rather than drawing an empty square.
+            self.ui.uv = None;
+            return;
+        };
+        // `Some(empty)` when the mesh has no UV layer, so the panel can tell
+        // "no mesh" from "no UVs" and say whichever is useful. The extraction
+        // itself lives in `uvview`, where it can be tested.
+        self.ui.uv = Some(kreate::uvview::from_bmesh(session.bmesh()).unwrap_or_default());
+    }
+
     fn build_context_menu(&mut self) {
         use kreate_ui::context_menu::{Entry, Group};
 
@@ -2353,6 +2383,9 @@ impl App {
         self.read_picks();
         self.evaluate_scene();
         self.sync_gpu();
+        // Before the interface borrows anything: the panel reads this, and it
+        // has to be settled while `self` is still free.
+        self.publish_uv_view();
         let Some(window) = self.window.clone() else {
             return;
         };

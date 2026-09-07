@@ -16,6 +16,7 @@ pub mod pick;
 pub mod prefs;
 pub mod shell;
 pub mod snap;
+pub mod uvview;
 
 /// The recently run operator ids, for the crash report.
 ///

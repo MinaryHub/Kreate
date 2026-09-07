@@ -113,6 +113,17 @@ impl EditSession {
         &mut self.bmesh
     }
 
+    /// The edit structure, to read.
+    ///
+    /// Read-only, and deliberately without the selection copy `bmesh_for`
+    /// does: this is for the interface, which draws what is there rather than
+    /// preparing it for an edit. The UV editor is the caller — a UV is a
+    /// corner, and corner *slots* are what the UV operators take, so the panel
+    /// has to read the arena's numbering rather than the document's dense one.
+    pub fn bmesh(&self) -> &BMesh {
+        &self.bmesh
+    }
+
     /// The edit structure, for an operator to work on.
     pub fn bmesh_mut(&mut self) -> &mut BMesh {
         &mut self.bmesh
