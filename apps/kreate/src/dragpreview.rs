@@ -33,7 +33,7 @@
 
 use glam::Vec3;
 use kreate_reflect::PropertyMap;
-use kreate_render::Gesture;
+use kreate_render::{Gesture, Placement};
 
 use crate::gpu_sync::SyncPlan;
 
@@ -44,14 +44,18 @@ use crate::gpu_sync::SyncPlan;
 /// That is a real fallback rather than a formality: extrude, inset, bevel and
 /// the rest are modal too, and they change topology, which no amount of
 /// deforming a frozen buffer will do.
-pub fn gesture_for(op_id: &str, params: &PropertyMap, pivot: Vec3) -> Option<Gesture> {
+///
+/// `place` carries the object the mesh belongs to and the world point a
+/// rotation or a scale turns about — the parameters are in world units and the
+/// mesh is in the object's own, and something has to say which object.
+pub fn gesture_for(op_id: &str, params: &PropertyMap, place: Placement) -> Option<Gesture> {
     match op_id {
         "mesh.translate" => {
             let [x, y, z] = params.get("translation")?.as_vec3()?;
-            // The pivot is not used by a translation, and is deliberately not
-            // passed on: a gesture that carried one would invite the reader to
-            // wonder whether a move happens about something.
-            Some(Gesture::moved(Vec3::new(x as f32, y as f32, z as f32)))
+            Some(Gesture::moved(
+                Vec3::new(x as f32, y as f32, z as f32),
+                place,
+            ))
         }
         "mesh.rotate" => {
             let angle = params.get("angle")?.as_float()? as f32;
@@ -62,14 +66,14 @@ pub fn gesture_for(op_id: &str, params: &PropertyMap, pivot: Vec3) -> Option<Ges
             };
             Some(Gesture::turned(
                 glam::Quat::from_axis_angle(axis, angle),
-                pivot,
+                place,
             ))
         }
         "mesh.scale" => {
             let [x, y, z] = params.get("scale")?.as_vec3()?;
             Some(Gesture::scaled(
                 Vec3::new(x as f32, y as f32, z as f32),
-                pivot,
+                place,
             ))
         }
         _ => None,
@@ -157,27 +161,32 @@ mod tests {
         map
     }
 
+    /// A placement about a pivot, with the mesh already in world space.
+    fn at(pivot: Vec3) -> Placement {
+        Placement::about(pivot.as_dvec3())
+    }
+
     #[test]
     fn a_move_becomes_a_translation_and_nothing_else() {
+        let place = at(Vec3::new(9.0, 9.0, 9.0));
         let g = gesture_for(
             "mesh.translate",
             &params(&[("translation", PropertyValue::Vec3([1.0, -2.0, 0.5]))]),
-            // A pivot is offered and must be ignored: a move is not about
-            // anything, and a shader that rotated or scaled about this point
-            // would be applying the identity to it — until someone made the
-            // rotation non-identity by accident.
-            Vec3::new(9.0, 9.0, 9.0),
+            place,
         )
         .expect("a translation is previewable");
         assert_eq!(g.translation, [1.0, -2.0, 0.5, 0.0]);
         assert_eq!(g.rotation, Gesture::IDENTITY.rotation);
         assert_eq!(g.scale, Gesture::IDENTITY.scale);
-        assert_eq!(g.pivot, [0.0; 4], "a move happens about nothing");
+        // The placement is passed on even for a move, which does not turn about
+        // anything: it also carries the *object*, and a move on a rotated object
+        // needs that as much as a rotation does.
+        assert_eq!(g.place, place);
     }
 
     #[test]
     fn a_rotation_turns_about_the_selection_median() {
-        let pivot = Vec3::new(0.5, -1.5, 2.0);
+        let place = at(Vec3::new(0.5, -1.5, 2.0));
         for (axis, expected) in [(0u32, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
             let g = gesture_for(
                 "mesh.rotate",
@@ -185,7 +194,7 @@ mod tests {
                     ("angle", PropertyValue::Float(0.75)),
                     ("axis", PropertyValue::Enum(axis)),
                 ]),
-                pivot,
+                place,
             )
             .expect("a rotation is previewable");
             let q = glam::Quat::from_array(g.rotation);
@@ -194,7 +203,7 @@ mod tests {
                 q.abs_diff_eq(want, 1e-6),
                 "axis {axis} gave {q:?}, wanted {want:?}"
             );
-            assert_eq!(g.pivot, [pivot.x, pivot.y, pivot.z, 0.0]);
+            assert_eq!(g.place, place);
             assert_eq!(g.translation, [0.0; 4]);
             assert_eq!(g.scale, Gesture::IDENTITY.scale);
         }
@@ -212,7 +221,7 @@ mod tests {
                     ("angle", PropertyValue::Float(0.75)),
                     ("axis", PropertyValue::Enum(axis)),
                 ]),
-                Vec3::ZERO,
+                at(Vec3::ZERO),
             )
             .unwrap();
             seen.push(g.rotation);
@@ -224,17 +233,17 @@ mod tests {
 
     #[test]
     fn a_scale_is_per_axis_about_the_median() {
-        let pivot = Vec3::new(1.0, 2.0, 3.0);
+        let place = at(Vec3::new(1.0, 2.0, 3.0));
         let g = gesture_for(
             "mesh.scale",
             &params(&[("scale", PropertyValue::Vec3([2.0, 1.0, 0.25]))]),
-            pivot,
+            place,
         )
         .expect("a scale is previewable");
         // Per axis, not one factor: an axis-constrained scale sends `[f, 1, 1]`
         // and a preview that took one component would scale uniformly.
         assert_eq!(g.scale, [2.0, 1.0, 0.25, 0.0]);
-        assert_eq!(g.pivot, [1.0, 2.0, 3.0, 0.0]);
+        assert_eq!(g.place, place);
         assert_eq!(g.rotation, Gesture::IDENTITY.rotation);
         assert_eq!(g.translation, [0.0; 4]);
     }
@@ -254,7 +263,7 @@ mod tests {
         ] {
             assert!(!is_previewable(op), "{op} was claimed previewable");
             assert!(
-                gesture_for(op, &params(&[]), Vec3::ZERO).is_none(),
+                gesture_for(op, &params(&[]), at(Vec3::ZERO)).is_none(),
                 "{op} produced a gesture"
             );
         }
@@ -270,17 +279,17 @@ mod tests {
         // default: previewing a rotation as zero degrees while the operator
         // turns the mesh is the exact failure this whole path is meant to
         // avoid.
-        assert!(gesture_for("mesh.translate", &params(&[]), Vec3::ZERO).is_none());
+        assert!(gesture_for("mesh.translate", &params(&[]), at(Vec3::ZERO)).is_none());
         assert!(gesture_for(
             "mesh.rotate",
             &params(&[("angle", PropertyValue::Float(1.0))]),
-            Vec3::ZERO
+            at(Vec3::ZERO)
         )
         .is_none());
         assert!(gesture_for(
             "mesh.scale",
             &params(&[("scale", PropertyValue::Float(2.0))]),
-            Vec3::ZERO
+            at(Vec3::ZERO)
         )
         .is_none());
         // A scale is three numbers and one number is not three of them. Worth
@@ -293,7 +302,7 @@ mod tests {
                 ("angle", PropertyValue::Vec3([1.0, 0.0, 0.0])),
                 ("axis", PropertyValue::Enum(0)),
             ]),
-            Vec3::ZERO
+            at(Vec3::ZERO)
         )
         .is_none());
     }

@@ -406,8 +406,13 @@ struct LivePreview {
     render_to_vert: Vec<u32>,
     /// The document mesh's vertex count, which the falloff is indexed by.
     mesh_verts: usize,
-    /// The selection's median: what a rotation or a scale happens about.
-    pivot: glam::Vec3,
+    /// Which object's space the mesh is in, and the world point a rotation or a
+    /// scale turns about.
+    ///
+    /// Both, because the shader needs both and they are found together: the
+    /// pivot is the selection's median in world coordinates, which can only be
+    /// worked out with the object's transform in hand.
+    place: kreate_render::Placement,
 }
 
 struct Gfx {
@@ -1474,7 +1479,16 @@ impl App {
         // what runs when the pointer comes up, so any divergence would show as
         // the mesh moving at the end of every drag.
         let radius = self.proportional.unwrap_or(0.0);
-        let Some(weighing) = kreate_ops::ops::mesh::weigh_selection(&doc_mesh, radius) else {
+        let to_world = self.doc.world_transform(active);
+        let Some(weighing) = kreate_ops::ops::mesh::weigh_selection(&doc_mesh, to_world, radius)
+        else {
+            return;
+        };
+        // An object flattened by a zero scale has no way back from world space.
+        // The operator refuses the same case, so the CPU path will decline too
+        // and the drag does nothing at all — which is the honest answer for a
+        // mesh whose every vertex is already at one world point.
+        let Some(place) = kreate_render::Placement::new(to_world, weighing.median) else {
             return;
         };
         // The one expensive thing a preview costs, and it is paid once per drag
@@ -1537,7 +1551,7 @@ impl App {
             op_id,
             render_to_vert: cpu.render_to_vert,
             mesh_verts: doc_mesh.num_verts() as usize,
-            pivot: weighing.median,
+            place,
         });
     }
 
@@ -1553,7 +1567,7 @@ impl App {
         let Some(preview) = gfx.preview.as_ref() else {
             return false;
         };
-        let Some(gesture) = dragpreview::gesture_for(preview.op_id, params, preview.pivot) else {
+        let Some(gesture) = dragpreview::gesture_for(preview.op_id, params, preview.place) else {
             // The params were not the shape this operator's preview reads.
             // Nothing here should produce that, which is exactly why it is
             // handled rather than unwrapped: showing a stale frame while the
@@ -1586,12 +1600,20 @@ impl App {
         let mesh = kreate_ops::ops::mesh::target_mesh(&self.doc)
             .and_then(|id| self.doc.mesh_arc(id).cloned());
         let Some(mesh) = mesh else { return };
-        let weighing = kreate_ops::ops::mesh::weigh_selection(&mesh, radius);
+        let to_world = kreate_ops::ops::mesh::target_object(&self.doc)
+            .map(|id| self.doc.world_transform(id))
+            .unwrap_or(kreate_math::glam::DAffine3::IDENTITY);
+        let weighing = kreate_ops::ops::mesh::weigh_selection(&mesh, to_world, radius);
         let Some(gfx) = self.gfx.as_mut() else { return };
         let Some(weighing) = weighing else {
             gfx.restore_preview();
             return;
         };
+        // The radius does not move the pivot — the median is the selection's and
+        // the selection has not changed — but it is free to carry the fresh one,
+        // and pinning it to what the falloff was measured with is one fewer
+        // thing that can drift apart.
+        let place = kreate_render::Placement::new(to_world, weighing.median);
         let Some(preview) = gfx.preview.as_mut() else {
             return;
         };
@@ -1601,7 +1623,9 @@ impl App {
             &weighing.indices,
             &weighing.weights,
         );
-        preview.pivot = weighing.median;
+        if let Some(place) = place {
+            preview.place = place;
+        }
         if !preview.deform.set_weights(&gfx.gpu.queue, &weights) {
             // A refused length means the render mesh is not the one this preview
             // was built against, which should be impossible while the document

@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use kreate_render::{Deform, Deformer, Gesture, GpuOptions, RenderMeshCpu};
+use kreate_render::{Deform, Deformer, Gesture, GpuOptions, Placement, RenderMeshCpu};
 
 /// Two hundred thousand vertices: the size the plan's drag budget is written
 /// for.
@@ -109,7 +109,10 @@ fn a_previewed_drag_frame_does_not_extract_a_render_mesh() {
     // encode three dispatches, submit. Waited on so that the number includes
     // the GPU actually doing the work rather than only the cost of asking.
     let previewed = median_time(9, || {
-        deform.set(&g.queue, &Gesture::moved(glam::Vec3::new(0.1, 0.0, 0.0)));
+        deform.set(
+            &g.queue,
+            &Gesture::moved(glam::Vec3::new(0.1, 0.0, 0.0), Placement::NOWHERE),
+        );
         let mut encoder = g
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

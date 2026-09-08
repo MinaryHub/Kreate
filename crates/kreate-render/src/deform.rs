@@ -39,6 +39,89 @@ use wgpu::util::DeviceExt as _;
 
 use crate::mesh_gpu::RenderMeshCpu;
 
+/// Where a gesture lands: the object's space, and the point it turns about.
+///
+/// A mesh's vertices are in the object's own coordinates and the gesture is in
+/// the world's, so something has to carry the object between them. This is that
+/// something, in the form the shader wants: the linear part of the
+/// object-to-world transform and its inverse, and the object's world position
+/// *measured from the pivot*.
+///
+/// # Relative to the pivot, not absolute
+///
+/// Everything here is a displacement from the point the gesture turns about,
+/// and that is deliberate. The shader is `f32`; world coordinates are not
+/// bounded. An object parked a million units from the origin, round-tripped
+/// through absolute single-precision world space, loses a millimetre drag
+/// entirely to rounding — while a displacement from the pivot is a metre or two
+/// however far away the object is parked. It also means the shader never sees
+/// a pivot: it is already the origin of the frame the arithmetic happens in.
+///
+/// The translation is not stored: only the linear part is needed, because the
+/// object's own offset cancels in a displacement. `origin` carries what does
+/// not cancel — where the object's origin sits relative to the pivot.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct Placement {
+    /// The object-to-world linear part, by column, each padded to a `vec4` as
+    /// a uniform block requires.
+    to_world: [[f32; 4]; 3],
+    /// Its inverse, the same way.
+    to_local: [[f32; 4]; 3],
+    /// The object's world translation minus the pivot. xyz used.
+    origin: [f32; 4],
+}
+
+fn columns(m: glam::DMat3) -> [[f32; 4]; 3] {
+    [m.x_axis, m.y_axis, m.z_axis].map(|c| [c.x as f32, c.y as f32, c.z as f32, 0.0])
+}
+
+impl Placement {
+    /// A mesh already in world coordinates, turning about the origin.
+    ///
+    /// What a test on bare geometry has, and what [`Gesture::IDENTITY`] uses.
+    pub const NOWHERE: Self = Self {
+        to_world: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        to_local: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        origin: [0.0; 4],
+    };
+
+    /// A mesh already in world coordinates, turning about `pivot`.
+    pub fn about(pivot: glam::DVec3) -> Self {
+        Self {
+            origin: [-pivot.x as f32, -pivot.y as f32, -pivot.z as f32, 0.0],
+            ..Self::NOWHERE
+        }
+    }
+
+    /// `to_world` maps the mesh's vertices into the world; `pivot` is where a
+    /// rotation or a scale happens, in world coordinates.
+    ///
+    /// `None` when the transform has no inverse — an object flattened by a zero
+    /// scale. There is no way back from world space then, and the operator
+    /// refuses the same case rather than writing NaN into the mesh.
+    pub fn new(to_world: glam::DAffine3, pivot: glam::DVec3) -> Option<Self> {
+        let inverse = to_world.matrix3.inverse();
+        if !inverse.is_finite() {
+            return None;
+        }
+        let origin = to_world.translation - pivot;
+        Some(Self {
+            to_world: columns(to_world.matrix3),
+            to_local: columns(inverse),
+            origin: [origin.x as f32, origin.y as f32, origin.z as f32, 0.0],
+        })
+    }
+}
+
 /// One frame of a drag, as the shader sees it.
 ///
 /// Decomposed rather than a matrix, because a weighted transform is not a
@@ -52,13 +135,14 @@ use crate::mesh_gpu::RenderMeshCpu;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct Gesture {
-    /// xyz used; w is padding a uniform block requires.
+    /// The world offset. xyz used; w is padding a uniform block requires.
     pub translation: [f32; 4],
-    /// A quaternion, xyzw.
+    /// A quaternion, xyzw, about the world axes.
     pub rotation: [f32; 4],
+    /// Per world axis.
     pub scale: [f32; 4],
-    /// What the rotation and the scale happen about.
-    pub pivot: [f32; 4],
+    /// Which object's space the mesh is in, and what the gesture turns about.
+    pub place: Placement,
 }
 
 impl Default for Gesture {
@@ -70,32 +154,38 @@ impl Default for Gesture {
 impl Gesture {
     /// Moves nothing. What a drag starts from, so the first frame of it is the
     /// mesh exactly as it was.
+    ///
+    /// Exact for any placement, not just this one: the shader's answer is a
+    /// displacement, the identity's displacement is zero before it is
+    /// transformed, and no matrix moves the zero vector. Which is what makes
+    /// this the way a cancelled drag puts a mesh back.
     pub const IDENTITY: Self = Self {
         translation: [0.0; 4],
         rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [1.0, 1.0, 1.0, 0.0],
-        pivot: [0.0; 4],
+        place: Placement::NOWHERE,
     };
 
-    pub fn moved(offset: glam::Vec3) -> Self {
+    pub fn moved(offset: glam::Vec3, place: Placement) -> Self {
         Self {
             translation: [offset.x, offset.y, offset.z, 0.0],
+            place,
             ..Self::IDENTITY
         }
     }
 
-    pub fn turned(rotation: glam::Quat, pivot: glam::Vec3) -> Self {
+    pub fn turned(rotation: glam::Quat, place: Placement) -> Self {
         Self {
             rotation: rotation.to_array(),
-            pivot: [pivot.x, pivot.y, pivot.z, 0.0],
+            place,
             ..Self::IDENTITY
         }
     }
 
-    pub fn scaled(factor: glam::Vec3, pivot: glam::Vec3) -> Self {
+    pub fn scaled(factor: glam::Vec3, place: Placement) -> Self {
         Self {
             scale: [factor.x, factor.y, factor.z, 0.0],
-            pivot: [pivot.x, pivot.y, pivot.z, 0.0],
+            place,
             ..Self::IDENTITY
         }
     }
@@ -430,28 +520,103 @@ mod tests {
         // The shader composes all three without a branch, which is only safe
         // because a gesture is one of them. A constructor that left a zero scale
         // behind would collapse the mesh to its pivot.
-        let m = Gesture::moved(glam::Vec3::new(1.0, 2.0, 3.0));
+        let place = Placement::about(glam::DVec3::new(4.0, 5.0, 6.0));
+        let m = Gesture::moved(glam::Vec3::new(1.0, 2.0, 3.0), place);
         assert_eq!(m.scale, Gesture::IDENTITY.scale);
         assert_eq!(m.rotation, Gesture::IDENTITY.rotation);
 
-        let pivot = glam::Vec3::new(4.0, 5.0, 6.0);
-        let t = Gesture::turned(glam::Quat::from_rotation_y(1.0), pivot);
+        let t = Gesture::turned(glam::Quat::from_rotation_y(1.0), place);
         assert_eq!(t.scale, Gesture::IDENTITY.scale);
         assert_eq!(t.translation, Gesture::IDENTITY.translation);
-        assert_eq!(t.pivot, [4.0, 5.0, 6.0, 0.0]);
+        assert_eq!(t.place, place);
 
-        let s = Gesture::scaled(glam::Vec3::splat(2.0), pivot);
+        let s = Gesture::scaled(glam::Vec3::splat(2.0), place);
         assert_eq!(s.rotation, Gesture::IDENTITY.rotation);
         assert_eq!(s.translation, Gesture::IDENTITY.translation);
-        assert_eq!(s.pivot, [4.0, 5.0, 6.0, 0.0]);
+        assert_eq!(s.place, place);
+    }
+
+    #[test]
+    fn a_pivot_is_carried_as_the_object_s_offset_from_it() {
+        // What makes the shader's arithmetic small: the pivot is the origin of
+        // the frame everything is measured in, so what travels is the object's
+        // position *relative to it* rather than two absolute world points.
+        let place = Placement::about(glam::DVec3::new(4.0, 5.0, -6.0));
+        assert_eq!(place.origin, [-4.0, -5.0, 6.0, 0.0]);
+
+        // With a real object transform, the same thing plus the object's own
+        // offset.
+        let to_world = glam::DAffine3::from_translation(glam::DVec3::new(10.0, 0.0, 0.0));
+        let placed = Placement::new(to_world, glam::DVec3::new(11.0, 2.0, 0.0))
+            .expect("a translation is invertible");
+        assert_eq!(placed.origin, [-1.0, -2.0, 0.0, 0.0]);
+        assert_eq!(placed.to_world, Placement::NOWHERE.to_world);
+    }
+
+    #[test]
+    fn a_placement_inverts_the_object_s_own_transform() {
+        // The two matrices have to be each other's inverse or a vertex does not
+        // come back to where it started, and a drag of nothing would move the
+        // mesh.
+        let to_world = glam::DAffine3::from_scale_rotation_translation(
+            glam::DVec3::new(3.0, 0.5, 1.75),
+            glam::DQuat::from_euler(glam::EulerRot::XYZ, 0.4, -0.9, 1.3),
+            glam::DVec3::new(-3.0, 7.0, 1.0),
+        );
+        let place = Placement::new(to_world, glam::DVec3::ZERO).expect("invertible");
+        let read = |m: &[[f32; 4]; 3]| {
+            glam::Mat3::from_cols_array(&[
+                m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
+            ])
+        };
+        let round_trip = read(&place.to_local) * read(&place.to_world);
+        let error = (round_trip - glam::Mat3::IDENTITY).to_cols_array();
+        let worst = error.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(worst < 1e-5, "the round trip is off by {worst:e}");
+    }
+
+    #[test]
+    fn an_object_with_no_inverse_has_no_placement() {
+        // A zero in the scale: there is no way back from world space, and the
+        // operator refuses the same case rather than writing NaN into the mesh.
+        // A `Placement` that returned matrices full of infinities would have
+        // the shader do it instead.
+        let flat = glam::DAffine3::from_scale(glam::DVec3::new(1.0, 0.0, 1.0));
+        assert!(Placement::new(flat, glam::DVec3::ZERO).is_none());
+        assert!(Placement::new(glam::DAffine3::ZERO, glam::DVec3::ZERO).is_none());
+        // And an ordinary one does.
+        assert!(Placement::new(glam::DAffine3::IDENTITY, glam::DVec3::ONE).is_some());
+    }
+
+    #[test]
+    fn the_identity_moves_nothing_whatever_the_placement() {
+        // What a cancelled drag relies on. The shader's answer is a
+        // displacement: the identity's is zero *before* it is transformed back,
+        // and no matrix moves the zero vector — so this holds for an object of
+        // any shape, parked anywhere.
+        let to_world = glam::DAffine3::from_scale_rotation_translation(
+            glam::DVec3::new(7.0, 0.1, 2.0),
+            glam::DQuat::from_rotation_z(2.2),
+            glam::DVec3::new(1e6, -4.0, 0.0),
+        );
+        let place = Placement::new(to_world, glam::DVec3::new(1e6, 0.0, 0.0)).expect("invertible");
+        let identity = Gesture {
+            place,
+            ..Gesture::IDENTITY
+        };
+        assert_eq!(identity.translation, [0.0; 4]);
+        assert_eq!(identity.rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(identity.scale, [1.0, 1.0, 1.0, 0.0]);
     }
 
     #[test]
     fn a_gesture_is_the_size_the_uniform_block_expects() {
-        // Four `vec4`s. A uniform block is padded to sixteen bytes a member, so
-        // a `vec3` here would be silently padded and the shader would read the
-        // next field's bytes as the previous one's w.
-        assert_eq!(std::mem::size_of::<Gesture>(), 64);
+        // Three `vec4`s, two `mat3x3` and one more `vec4`. A uniform block pads
+        // every member to sixteen bytes and every matrix column too, so a
+        // `vec3` or a `Mat3` here would be silently repacked and the shader
+        // would read one field's bytes as another's.
+        assert_eq!(std::mem::size_of::<Placement>(), 112);
+        assert_eq!(std::mem::size_of::<Gesture>(), 160);
         assert_eq!(std::mem::align_of::<Gesture>(), 4);
     }
 

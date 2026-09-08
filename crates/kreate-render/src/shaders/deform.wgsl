@@ -31,15 +31,45 @@
 // A gesture is one of move, rotate or scale, so exactly one of the three is
 // away from the identity. Composing all three costs a few instructions and
 // needs no branch, and it keeps this shader from having a mode.
+//
+// # The mesh is in the object's space and the gesture is in the world's
+//
+// The parameters come from a pointer travelling across the view, so they mean
+// world units — and the positions in the buffer are the object's own
+// coordinates. Applying the one to the other directly moves a quarter-turned
+// object's vertices at a right angle to the drag, which is what the CPU path
+// did until the same commit that wrote this paragraph.
+//
+// So each vertex goes out to world space, takes the gesture, and comes back:
+//
+//     local' = local + to_local * (T(to_world * local + origin) - d)
+//
+// Conjugating the gesture into the object's space instead would be less work
+// and would not survive a non-uniformly scaled object: a world-axis scale seen
+// from there is a shear, and no axis-and-factor can express one.
+//
+// # Everything is measured from the pivot
+//
+// `origin` is the object's world position *minus* the pivot, so `d` above is a
+// displacement from the point the gesture turns about — and the pivot itself
+// never appears. This is not tidiness. The shader is `f32` and world
+// coordinates are unbounded: an object parked a million units out, round-
+// tripped through absolute single-precision world space, loses a millimetre
+// drag entirely to rounding. A displacement from the pivot is a metre or two
+// wherever the object is parked.
 
 struct Gesture {
-    // xyz used, w ignored.
+    // The world offset. xyz used, w ignored.
     translation: vec4<f32>,
-    // A quaternion, xyzw.
+    // A quaternion, xyzw, about the world axes.
     rotation: vec4<f32>,
+    // Per world axis.
     scale: vec4<f32>,
-    // What the rotation and the scale happen about.
-    pivot: vec4<f32>,
+    // The object-to-world linear part and its inverse.
+    to_world: mat3x3<f32>,
+    to_local: mat3x3<f32>,
+    // The object's world translation minus the pivot. xyz used.
+    origin: vec4<f32>,
 }
 
 // Positions are `array<f32>` indexed by `3 * v`, not `array<vec3<f32>>`: a
@@ -180,14 +210,18 @@ fn deform_positions(@builtin(global_invocation_id) id: vec3<u32>) {
         store_live_position(v, rest);
         return;
     }
-    // Scale then rotate about the pivot, then translate. Only one of the three
-    // is ever away from the identity, so the order is not a decision anyone has
-    // to agree with.
+    // Out to world space, as a displacement from the pivot.
+    let d = gesture.to_world * rest + gesture.origin.xyz;
+    // Scale, then rotate, then translate. Only one of the three is ever away
+    // from the identity, so the order is not a decision anyone has to agree
+    // with.
     let s = mix(vec3<f32>(1.0, 1.0, 1.0), gesture.scale.xyz, w);
     let q = slerp_from_identity(gesture.rotation, w);
-    let about = gesture.pivot.xyz;
-    let local = (rest - about) * s;
-    store_live_position(v, about + quat_rotate(q, local) + gesture.translation.xyz * w);
+    let moved = quat_rotate(q, d * s) + gesture.translation.xyz * w;
+    // And back, as a displacement. `moved - d` rather than the two absolute
+    // positions, so nothing large is ever subtracted from something nearly
+    // equal to it.
+    store_live_position(v, rest + gesture.to_local * (moved - d));
 }
 
 /// Newell's method over the face's ring, from the deformed positions.
