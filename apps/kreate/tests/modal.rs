@@ -862,14 +862,31 @@ fn a_scale_started_on_the_pivot_holds_at_one() {
 
 #[test]
 fn the_operator_a_gesture_runs_depends_on_the_mode() {
-    // The same three keys, two sets of operators. Object mode moves objects;
-    // edit mode moves the elements inside one.
-    assert_eq!(Kind::Move.op_id(false), "object.translate");
-    assert_eq!(Kind::Move.op_id(true), "mesh.translate");
-    assert_eq!(Kind::Rotate.op_id(false), "object.rotate");
-    assert_eq!(Kind::Rotate.op_id(true), "mesh.rotate");
-    assert_eq!(Kind::Scale.op_id(false), "object.scale");
-    assert_eq!(Kind::Scale.op_id(true), "mesh.scale");
+    // The same three keys, one set of operators per mode. Object mode moves
+    // objects; edit mode moves the elements inside one.
+    use kreate_ops::operator::Mode;
+    assert_eq!(Kind::Move.op_id(Mode::Object), "object.translate");
+    assert_eq!(Kind::Move.op_id(Mode::EditMesh), "mesh.translate");
+    assert_eq!(Kind::Rotate.op_id(Mode::Object), "object.rotate");
+    assert_eq!(Kind::Rotate.op_id(Mode::EditMesh), "mesh.rotate");
+    assert_eq!(Kind::Scale.op_id(Mode::Object), "object.scale");
+    assert_eq!(Kind::Scale.op_id(Mode::EditMesh), "mesh.scale");
+
+    // And no two answers coincide. Three keys times the modes should be that
+    // many distinct operators; a `match` arm copied and not edited would
+    // otherwise pass every line above.
+    let mut ids: Vec<&str> = Mode::ALL
+        .iter()
+        .flat_map(|mode| {
+            [Kind::Move, Kind::Rotate, Kind::Scale]
+                .into_iter()
+                .map(move |kind| kind.op_id(*mode))
+        })
+        .collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "two gestures name the same operator");
 }
 
 #[test]
@@ -878,10 +895,16 @@ fn every_operator_a_gesture_names_exists() {
     // presses the key, which is the worst time to find out.
     let mut registry = kreate_ops::OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
+    // Every mode, from `Mode::ALL` rather than a list written here: a mode
+    // added without an operator behind it is exactly the failure this test is
+    // for, and a hardcoded pair would not see it.
     for kind in [Kind::Move, Kind::Rotate, Kind::Scale] {
-        for edit_mode in [false, true] {
-            let id = kind.op_id(edit_mode);
-            assert!(registry.get(id).is_some(), "{id} is not registered");
+        for mode in kreate_ops::operator::Mode::ALL {
+            let id = kind.op_id(mode);
+            assert!(
+                registry.get(id).is_some(),
+                "{id} is not registered ({kind:?} in {mode:?})"
+            );
         }
     }
 }
@@ -925,14 +948,14 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
     let mut registry = kreate_ops::OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
 
-    for (kind, edit_mode) in [
-        (Kind::Move, false),
-        (Kind::Rotate, false),
-        (Kind::Scale, false),
-        (Kind::Move, true),
-        (Kind::Rotate, true),
-        (Kind::Scale, true),
-    ] {
+    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale]
+        .into_iter()
+        .flat_map(|kind| {
+            kreate_ops::operator::Mode::ALL
+                .into_iter()
+                .map(move |mode| (kind, mode))
+        })
+    {
         let mut g = Gesture::begin(
             kind,
             (500.0, 300.0),
@@ -944,14 +967,14 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
             SnapWorld::default(),
         );
         let params = at(&mut g, (560.0, 260.0));
-        let info = registry.get(kind.op_id(edit_mode)).expect("registered");
+        let info = registry.get(kind.op_id(mode)).expect("registered");
         let names: Vec<&str> = info.schema.iter().map(|d| d.name).collect();
         for (key, _) in params.iter() {
             assert!(
                 names.contains(&key),
                 "{} produced `{key}`, which {} does not accept (it takes {names:?})",
                 kind.label(),
-                kind.op_id(edit_mode)
+                kind.op_id(mode)
             );
         }
     }

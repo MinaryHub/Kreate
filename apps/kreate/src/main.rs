@@ -723,31 +723,43 @@ impl App {
     /// nothing at all. Leaving clears it, so the object-mode outline is not
     /// competing with a stale element highlight.
     fn toggle_edit_mode(&mut self) {
-        let entering = self.op_ctx.mode == OpMode::Object;
-        if entering && kreate_ops::ops::mesh::target_mesh(&self.doc).is_none() {
+        // What `Tab` means, and it is not expressible as "set this mode": the
+        // user means "in or out of editing whatever this is". With more modes it
+        // is still a two-way gesture, between object mode and the last one they
+        // were editing in.
+        self.set_mode(kreate::mode::toggled(self.op_ctx.mode));
+    }
+
+    /// Switches mode, if the mode can be entered.
+    ///
+    /// One door, so that everything a mode change has to bring with it happens
+    /// once rather than at each caller: the selection sweep, the edit session,
+    /// the interface's copy of the mode, the tooltips and a redraw. There were
+    /// three callers before this and each remembered a different subset.
+    fn set_mode(&mut self, mode: OpMode) {
+        // The decision is `kreate::mode::plan`, where it can be tested: this
+        // function needs a window, a GPU and an event loop, so nothing written
+        // inside it can be. A sweep proved the point — the guard that used to
+        // live here, and the selection sweep below, could both be removed
+        // without a single test noticing.
+        let target = kreate_ops::ops::mesh::target_mesh(&self.doc);
+        let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, target.is_some()) else {
             return;
-        }
-        self.op_ctx.mode = if entering {
-            OpMode::EditMesh
-        } else {
-            OpMode::Object
         };
+        self.op_ctx.mode = change.to;
+
         self.run_op_with(
             "mesh.select",
-            &[("action", PropertyValue::Enum(if entering { 0 } else { 1 }))],
+            &[("action", PropertyValue::Enum(u32::from(!change.select_all)))],
         );
 
         // Opened after the selection change rather than before it, so the
         // session starts current with the document instead of immediately stale.
-        self.edit = match (entering, kreate_ops::ops::mesh::target_mesh(&self.doc)) {
+        self.edit = match (change.open_session, target) {
             (true, Some(mesh)) => kreate_ops::EditSession::open(&self.doc, mesh),
-            // Dropped on the way out. Holding a `BMesh` for a mesh nobody is
-            // editing costs about four times what the document form does, and
-            // the plan is explicit that it lives only as long as edit mode.
             _ => None,
         };
 
-        self.ui.edit_mode = self.op_ctx.mode == OpMode::EditMesh;
         // The mode decides which context a shortcut resolves in, so the
         // tooltips change with it: `X` deletes an object in one mode and
         // constrains an axis in the other.
@@ -1252,7 +1264,7 @@ impl App {
             return;
         };
 
-        let edit_mode = self.op_ctx.mode == OpMode::EditMesh;
+        let mode = self.op_ctx.mode;
         let mut gesture = kreate::modal::Gesture::begin(
             kind,
             cursor,
@@ -1271,10 +1283,13 @@ impl App {
         // neighbouring geometry to fall off towards, only other objects, and
         // dragging one object part-way because another is near it is not
         // something anyone asks for.
-        if edit_mode {
+        // Asked of the mode, because that is the claim: proportional editing
+        // falls off towards neighbouring *geometry*, and only a mode that has
+        // the elements on screen has any.
+        if mode.shows_elements() {
             gesture.set_proportional(self.proportional);
         }
-        let op_id = kind.op_id(edit_mode);
+        let op_id = kind.op_id(mode);
         // Started with the identity parameters, so pressing the key alone moves
         // nothing. The first pointer motion is what does anything.
         match self.history.begin_modal(
@@ -1459,6 +1474,13 @@ impl App {
             match command {
                 Command::RunOperator { op_id, params } => self.run_op(&op_id, params),
                 Command::ToggleEditMode => self.toggle_edit_mode(),
+                // An unknown tag is ignored, which is what a script or a keymap
+                // written against a later version should get.
+                Command::SetMode(tag) => {
+                    if let Some(mode) = OpMode::from_tag(&tag) {
+                        self.set_mode(mode);
+                    }
+                }
                 Command::SetSelectMode(mode) => self.set_select_mode(mode),
                 Command::SnapToAxis(axis) => {
                     let destination = self.camera.looking_along(axis);
@@ -1652,7 +1674,7 @@ impl App {
         self.history = History::new();
         self.edit = None;
         self.op_ctx.mode = OpMode::Object;
-        self.ui.edit_mode = false;
+
         self.pick = kreate::pick::PickCache::default();
         self.modifiers = kreate_scene::ModifierCache::new();
         self.evaluated.clear();
@@ -2586,9 +2608,15 @@ impl App {
             let keymap = &self.keymap;
             let preset = self.preset;
             let overrides = &self.key_overrides;
+            // Handed the mode rather than the interface keeping a copy of it. A
+            // duplicate of a value the application already owns is a value that
+            // can disagree with it, and the way that showed was a sweep removing
+            // the line that refreshed the copy: nothing failed, and the header
+            // would have gone on naming the mode the user had left.
+            let mode = self.op_ctx.mode;
             self.egui_ctx.run_ui(raw_input, |ui| {
                 viewport_rect = shell::draw(
-                    ui, ui_state, doc, registry, history, keymap, preset, overrides, image,
+                    ui, ui_state, doc, registry, history, keymap, preset, overrides, mode, image,
                 );
             })
         };
@@ -2737,7 +2765,10 @@ impl App {
         // Element overlays and the pick tolerance both belong to edit mode. A
         // scene full of vertex dots is unreadable when the user is arranging
         // objects, and picking an element they cannot see is worse.
-        gfx.viewport.show_elements = self.op_ctx.mode == OpMode::EditMesh;
+        // The overlay set, asked of the mode. `== EditMesh` said the wrong
+        // thing: sculpt and weight-paint modes will also be editing a mesh
+        // and will also not want element dots.
+        gfx.viewport.show_elements = self.op_ctx.mode.shows_elements();
         // A tolerance chosen in pixels is a tolerance chosen for one screen
         // density; without this, picking on a high-density display is a third as
         // forgiving as it was designed to be.

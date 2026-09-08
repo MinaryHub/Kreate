@@ -186,7 +186,11 @@ fn composite_with(
     let keymap = kreate_input::presets::load(kreate_input::Preset::default());
     let overrides = std::collections::BTreeMap::new();
     let mut state = kreate::shell::ShellState::with_catalog(kreate::shell::load_catalog(locale));
-    state.edit_mode = edit_mode;
+    let mode = if edit_mode {
+        kreate_ops::operator::Mode::EditMesh
+    } else {
+        kreate_ops::operator::Mode::Object
+    };
     arrange(&mut state);
     if state.context_menu.at.is_some() {
         label = format!("menu-{label}");
@@ -235,6 +239,7 @@ fn composite_with(
                 &keymap,
                 kreate_input::Preset::default(),
                 &overrides,
+                mode,
                 Some(kreate::shell::ViewportImage {
                     texture: vp_id,
                     uv: uv_extent,

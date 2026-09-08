@@ -74,7 +74,6 @@ pub struct ShellState {
     /// Set while an IME is composing.
     pub ime_active: bool,
     /// Whether the application is in mesh edit mode.
-    pub edit_mode: bool,
     /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
     pub select_mode: u32,
     /// The camera's rotation, for drawing the navigation gizmo. Interface state
@@ -317,7 +316,6 @@ impl Default for ShellState {
             dragging: None,
             egui_wants_keyboard: false,
             ime_active: false,
-            edit_mode: false,
             select_mode: 2,
             camera_rotation: kreate_math::DQuat::IDENTITY,
             gizmo_circle: None,
@@ -607,8 +605,6 @@ struct Labels {
     area_split_v: String,
     area_split_h: String,
     area_close: String,
-    mode_object: String,
-    mode_edit: String,
     extrude: String,
     subdivide: String,
     dissolve: String,
@@ -653,8 +649,6 @@ impl Labels {
             area_split_v: t("area-split-vertical"),
             area_split_h: t("area-split-horizontal"),
             area_close: t("area-close"),
-            mode_object: t("mode-object"),
-            mode_edit: t("mode-edit"),
             extrude: t("menu-extrude"),
             subdivide: t("menu-subdivide"),
             dissolve: t("menu-dissolve"),
@@ -689,6 +683,7 @@ pub fn draw(
     keymap: &kreate_input::Keymap,
     preset: kreate_input::Preset,
     overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+    mode: kreate_ops::operator::Mode,
     viewport_texture: Option<ViewportImage>,
 ) -> egui::Rect {
     // Resolved once per frame into owned strings. A closure over the catalog
@@ -799,26 +794,13 @@ pub fn draw(
             });
             ui.separator();
 
-            // The mode switch is a pair of exclusive buttons rather than a
-            // checkbox: which mode you are in governs what every other key does,
-            // so it has to be readable at a glance rather than inferred from a
-            // tick.
-            let label = if state.edit_mode {
-                &l.mode_edit
-            } else {
-                &l.mode_object
-            };
-            if ui
-                .add_enabled(
-                    state.edit_mode || doc.selection.active.is_some(),
-                    egui::Button::new(label),
-                )
-                .clicked()
-            {
-                state.queue.push(Command::ToggleEditMode);
-            }
+            // A dropdown over every mode rather than a button that toggles
+            // between two. Which mode you are in governs what every other key
+            // does, so it has to be readable at a glance — and it has to still
+            // read as one thing when there are seven of them.
+            draw_mode_menu(ui, state, doc, mode);
 
-            if state.edit_mode {
+            if mode.shows_elements() {
                 ui.separator();
                 for (index, text) in [
                     (0u32, &l.select_vert),
@@ -945,10 +927,14 @@ pub fn draw(
             // says everywhere else: this is what you are acting on. Object
             // mode is the resting state and says it quietly.
             let theme = kreate_ui::theme::from_ui(ui);
-            if state.edit_mode {
-                ui.colored_label(theme.accent, &l.mode_edit);
+            let name = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
+            if mode == Default::default() {
+                ui.label(name);
             } else {
-                ui.label(&l.mode_object);
+                // Anything but the resting state wears the accent, which is
+                // what the accent says everywhere else: this is what you are
+                // acting on.
+                ui.colored_label(theme.accent, name);
             }
             ui.separator();
             ui.label(&status);
@@ -1288,6 +1274,49 @@ fn drag_handles(ui: &mut Ui, state: &mut ShellState, layout: &kreate_ui::Layout)
             state.dragging = None;
         }
     }
+}
+
+/// The mode dropdown in the top bar.
+///
+/// Every mode, with the ones that cannot be entered disabled rather than
+/// hidden: a menu whose entries come and go is a menu the user cannot learn,
+/// and "edit mode is greyed out because nothing is selected" is a useful thing
+/// to be told. Whether a mode can be entered comes from the mode itself — see
+/// `Mode::needs_mesh`.
+fn draw_mode_menu(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    mode: kreate_ops::operator::Mode,
+) {
+    use kreate_ops::operator::Mode;
+
+    let current = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
+    let names: Vec<(Mode, String)> = Mode::ALL
+        .iter()
+        .map(|kind| {
+            (
+                *kind,
+                state.catalog.format(kind.label_key(), TextKind::Ui, &[]),
+            )
+        })
+        .collect();
+    // Asked once, outside the closure: the answer is the same for every entry
+    // and reading the document inside would hold a borrow across the queue.
+    let has_mesh = kreate_ops::ops::mesh::target_mesh(doc).is_some();
+
+    egui::ComboBox::from_id_salt("mode")
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            for (kind, name) in &names {
+                let available = kind.can_enter(has_mesh);
+                ui.add_enabled_ui(available, |ui| {
+                    if ui.selectable_label(*kind == mode, name).clicked() {
+                        state.queue.push(Command::SetMode(kind.tag().to_string()));
+                    }
+                });
+            }
+        });
 }
 
 /// A toolbar button carrying whatever is known about the command behind it.

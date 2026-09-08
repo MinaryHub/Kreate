@@ -59,6 +59,73 @@ pub enum Mode {
     EditMesh,
 }
 
+impl Mode {
+    /// Every mode, in the order the header should offer them.
+    pub const ALL: [Mode; 2] = [Mode::Object, Mode::EditMesh];
+
+    /// A stable name for keymaps, scripts and files.
+    ///
+    /// Not the enum's discriminant: serialising that would make a saved keymap
+    /// or a script depend on the order the variants happen to be declared in,
+    /// so inserting a mode in the middle would silently reinterpret both.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Mode::Object => "object",
+            Mode::EditMesh => "edit_mesh",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.tag() == tag)
+    }
+
+    /// The catalogue key for this mode's name.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Mode::Object => "mode-object",
+            Mode::EditMesh => "mode-edit",
+        }
+    }
+
+    /// Whether entering this mode requires an active mesh object.
+    ///
+    /// A `bool` while every mode that needs anything needs a mesh. Pose mode
+    /// needs an armature, and this becomes "which kind of datablock" on the day
+    /// that exists — which is a change the compiler will point at, because
+    /// every caller matches on the answer rather than testing a flag of its own.
+    pub fn needs_mesh(self) -> bool {
+        match self {
+            Mode::Object => false,
+            Mode::EditMesh => true,
+        }
+    }
+
+    /// Whether this mode can be entered, given what is active.
+    ///
+    /// One expression, in one place, because it had been written twice: once in
+    /// the header that greys out the entry and once in the application that
+    /// refuses the change. Two copies of a rule is two chances for them to
+    /// disagree, and the way that shows is a menu entry the user can click that
+    /// then does nothing.
+    pub fn can_enter(self, has_mesh: bool) -> bool {
+        !self.needs_mesh() || has_mesh
+    }
+
+    /// Whether a mesh's vertices, edges and faces are on screen as individually
+    /// selectable things.
+    ///
+    /// The overlay set, in the only form it currently takes. Written as a
+    /// question about the mode rather than as `mode == EditMesh` at the call
+    /// site, because those are not the same claim: sculpt and weight-paint
+    /// modes will also be editing a mesh and will also not want element dots.
+    pub fn shows_elements(self) -> bool {
+        match self {
+            Mode::Object => false,
+            Mode::EditMesh => true,
+        }
+    }
+}
+
 /// What an operator is allowed to know about the world beyond the document.
 ///
 /// Deliberately small. Anything an operator reads from here rather than from its
@@ -489,5 +556,67 @@ mod tests {
             info.schema[0].name_key(info.id),
             "op-object-rename-param-name-name"
         );
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::Mode;
+
+    #[test]
+    fn every_mode_has_a_distinct_tag_and_survives_a_round_trip() {
+        // The tags are what a keymap, a script and a saved file name a mode by.
+        // Serialising the discriminant instead would make all three depend on
+        // declaration order.
+        let mut seen: Vec<&str> = Vec::new();
+        for mode in Mode::ALL {
+            let tag = mode.tag();
+            assert!(!seen.contains(&tag), "duplicate tag {tag}");
+            seen.push(tag);
+            assert_eq!(Mode::from_tag(tag), Some(mode));
+            assert!(
+                mode.label_key().starts_with("mode-"),
+                "{tag} has key {}",
+                mode.label_key()
+            );
+        }
+        assert_eq!(Mode::from_tag("nonesuch"), None);
+        assert_eq!(Mode::ALL.len(), 2, "ALL must list every variant");
+    }
+
+    #[test]
+    fn the_modes_do_not_all_answer_the_same_way() {
+        // The point of asking the mode rather than comparing it. A set of
+        // derivations that answered the same for every mode would be a constant
+        // wearing a match, and a test that only checked one mode would not
+        // notice.
+        assert!(Mode::ALL.iter().any(|m| m.needs_mesh()));
+        assert!(Mode::ALL.iter().any(|m| !m.needs_mesh()));
+        assert!(Mode::ALL.iter().any(|m| m.shows_elements()));
+        assert!(Mode::ALL.iter().any(|m| !m.shows_elements()));
+
+        // And object mode in particular, which is the resting state: it needs
+        // nothing selected to enter and shows no element overlays.
+        assert!(!Mode::Object.needs_mesh());
+        assert!(!Mode::Object.shows_elements());
+        assert!(Mode::EditMesh.needs_mesh());
+        assert!(Mode::EditMesh.shows_elements());
+    }
+
+    #[test]
+    fn a_mode_that_needs_a_mesh_cannot_be_entered_without_one() {
+        // The rule the header and the application both ask, so that they cannot
+        // disagree about it. A menu entry the user can click that then does
+        // nothing is what disagreement looks like.
+        assert!(Mode::Object.can_enter(false));
+        assert!(Mode::Object.can_enter(true));
+        assert!(!Mode::EditMesh.can_enter(false));
+        assert!(Mode::EditMesh.can_enter(true));
+
+        // Every mode is reachable with a mesh present, or it could never be
+        // entered at all.
+        for mode in Mode::ALL {
+            assert!(mode.can_enter(true), "{mode:?} can never be entered");
+        }
     }
 }

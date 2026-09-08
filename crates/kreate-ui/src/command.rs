@@ -37,6 +37,18 @@ pub enum Command {
     /// so there is nothing for an undo step to restore. Making it one would put
     /// a history entry between the user and the edit they actually want back.
     ToggleEditMode,
+    /// Switches to a named mode.
+    ///
+    /// Carries the mode's *tag* rather than the mode, because the interface
+    /// cannot see `kreate_ops::Mode` — it does not depend on the operator crate,
+    /// on purpose, and this is the same reason it dispatches operators by
+    /// `op_id`. An unknown tag is ignored by the application, which is the
+    /// behaviour a script or a stale keymap should get.
+    ///
+    /// `ToggleEditMode` stays beside it as the gesture `Tab` performs: a toggle
+    /// is what the user means by that key, and it is not expressible as "set
+    /// this mode".
+    SetMode(String),
     /// Chooses which element type edit-mode selection acts on.
     SetSelectMode(u32),
     /// Snap the view to look along a world axis.

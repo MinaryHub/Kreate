@@ -83,14 +83,20 @@ pub enum Kind {
 
 impl Kind {
     /// The operator to run, which depends on what is being edited.
-    pub fn op_id(self, edit_mode: bool) -> &'static str {
-        match (self, edit_mode) {
-            (Kind::Move, false) => "object.translate",
-            (Kind::Rotate, false) => "object.rotate",
-            (Kind::Scale, false) => "object.scale",
-            (Kind::Move, true) => "mesh.translate",
-            (Kind::Rotate, true) => "mesh.rotate",
-            (Kind::Scale, true) => "mesh.scale",
+    ///
+    /// Exhaustive on the mode rather than taking a boolean. "Which operator
+    /// does `G` run in this mode" is a real question that a new mode has to
+    /// answer, and a boolean lets it be defaulted — silently, to whichever of
+    /// the two it happens not to equal.
+    pub fn op_id(self, mode: kreate_ops::operator::Mode) -> &'static str {
+        use kreate_ops::operator::Mode;
+        match (self, mode) {
+            (Kind::Move, Mode::Object) => "object.translate",
+            (Kind::Rotate, Mode::Object) => "object.rotate",
+            (Kind::Scale, Mode::Object) => "object.scale",
+            (Kind::Move, Mode::EditMesh) => "mesh.translate",
+            (Kind::Rotate, Mode::EditMesh) => "mesh.rotate",
+            (Kind::Scale, Mode::EditMesh) => "mesh.scale",
         }
     }
 

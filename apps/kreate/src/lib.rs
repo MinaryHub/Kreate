@@ -12,6 +12,7 @@ pub mod docfile;
 pub mod expr;
 pub mod gpu_sync;
 pub mod modal;
+pub mod mode;
 pub mod pick;
 pub mod prefs;
 pub mod shell;
