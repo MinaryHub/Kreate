@@ -303,6 +303,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_auto_depth",
     "view.toggle_grid",
     "view.toggle_wireframe",
+    "view.toggle_sidebar",
     "view.cycle_shading",
     "view.toggle_projection",
     // The two standing transform settings, which are application state rather
@@ -316,6 +317,45 @@ const APP_ACTIONS: &[&str] = &[
     "app.print_script",
     "object.add_next_primitive",
 ];
+
+#[test]
+fn the_sidebar_key_belongs_to_the_viewport_and_not_to_every_panel() {
+    // `N` opens the 3D viewport's sidebar, and the UV editor will want its own
+    // `N` for its own. So the binding lives in `Context::Viewport`: in `Global`
+    // it would answer over every panel, and the UV editor could then never have
+    // it without a conflict.
+    //
+    // Written as a claim about *resolution* rather than about the table,
+    // because that is what the user meets. A sweep moving the binding to
+    // `Global` broke nothing until this existed.
+    let keymap = kreate_input::presets::load(kreate_input::Preset::Kreate);
+    let press = |context: kreate_input::Context| -> Option<String> {
+        keymap
+            .resolve(
+                context,
+                &kreate_input::keymap::Input::Key("N".into()),
+                kreate_input::keymap::Modifiers::default(),
+                kreate_input::keymap::EventKind::Press,
+            )
+            .map(|action| action.op_id.clone())
+    };
+
+    for context in [
+        kreate_input::Context::ObjectMode,
+        kreate_input::Context::EditMesh,
+    ] {
+        assert_eq!(
+            press(context).as_deref(),
+            Some("view.toggle_sidebar"),
+            "`N` does not open the sidebar in {context:?}"
+        );
+    }
+    assert_eq!(
+        press(kreate_input::Context::UvEditor),
+        None,
+        "`N` is taken over the UV editor, which needs it for its own sidebar"
+    );
+}
 
 #[test]
 fn every_binding_names_something_that_exists() {

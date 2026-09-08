@@ -272,6 +272,102 @@ impl Operator for Translate {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetTransformParams {
+    /// Where the object goes, in its parent's space.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as XYZ euler angles.
+    ///
+    /// Euler rather than the quaternion the object stores, because these are
+    /// numbers a person types. The conversion is not one-to-one — several euler
+    /// triples name the same rotation — so reading a rotation back can give a
+    /// different triple from the one that was written. That is visible only when
+    /// a rotation is *read*, it never changes where the object points, and the
+    /// fix is a rotation mode on the object itself. The plan wants one for
+    /// animation regardless.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+    pub scale: [f64; 3],
+}
+
+impl Default for SetTransformParams {
+    fn default() -> Self {
+        Self {
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: [1.0; 3],
+        }
+    }
+}
+
+/// Places the active object exactly.
+///
+/// # Why this exists beside translate, rotate and scale
+///
+/// Those three are *relative*: they take a delta, which is what a drag and a
+/// keyboard gesture produce, and what makes them composable and drift-free
+/// (§2.2). Typing a coordinate is the other thing, and expressing it as a delta
+/// means the interface computing `wanted - current` and sending the difference —
+/// which is a subtraction the user did not ask for, in a place where a rounding
+/// error becomes a nudge.
+///
+/// The active object alone, not the selection. Typing a location means "put
+/// *this* here"; applying it to everything selected would stack them all on one
+/// point, which nobody has ever wanted.
+pub struct SetTransform;
+
+impl Operator for SetTransform {
+    type Params = SetTransformParams;
+
+    fn id() -> &'static str {
+        "object.set_transform"
+    }
+    fn label() -> &'static str {
+        "Set Transform"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.active.is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        // Unreachable through the dispatcher, which asks `poll` first. Here
+        // for a caller that reaches `execute` directly, and stated in the test
+        // as uncovered rather than left looking guarded.
+        let Some(active) = doc.document().selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
+        let wanted = kreate_math::DTransform {
+            translation: DVec3::from_array(params.location),
+            rotation: kreate_math::glam::DQuat::from_euler(
+                kreate_math::glam::EulerRot::XYZ,
+                params.rotation[0],
+                params.rotation[1],
+                params.rotation[2],
+            )
+            .normalize(),
+            scale: DVec3::from_array(params.scale),
+        };
+        let d = doc.document_mut();
+        let Some(object) = d.object_mut(active) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // Nothing to record if nothing moved. An operator that reports success
+        // for a no-op puts an entry in the history that undoes to the same
+        // scene — and this one runs on every keystroke in a coordinate field,
+        // where the value is usually the one already there.
+        if object.transform == wanted {
+            return Ok(OpResult::Cancelled);
+        }
+        object.transform = wanted;
+        Ok(OpResult::Finished)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct RotateParams {
     /// Angle in radians. The UI shows and parses degrees.
@@ -686,6 +782,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Delete>();
     registry.register::<Duplicate>();
     registry.register::<Translate>();
+    registry.register::<SetTransform>();
     registry.register::<Rotate>();
     registry.register::<Scale>();
     registry.register::<SelectAll>();
@@ -756,6 +853,185 @@ mod tests {
             assert_eq!(result, OpResult::Finished, "{name}");
         }
         assert_eq!(d.object_count(), PRIMITIVES.len());
+    }
+
+    /// One cube, selected and active: what the N panel edits.
+    fn one_cube() -> (OperatorRegistry, History, Document, Context, ObjectId) {
+        let (r, h, mut doc, ctx) = setup();
+        let cube = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(1.0));
+        doc.selection.add(cube);
+        doc.selection.active = Some(cube);
+        (r, h, doc, ctx, cube)
+    }
+
+    fn placed(
+        location: [f64; 3],
+        rotation: [f64; 3],
+        scale: [f64; 3],
+    ) -> Vec<(&'static str, PropertyValue)> {
+        vec![
+            ("location", PropertyValue::Vec3(location)),
+            ("rotation", PropertyValue::Vec3(rotation)),
+            ("scale", PropertyValue::Vec3(scale)),
+        ]
+    }
+
+    #[test]
+    fn setting_a_transform_places_the_object_exactly() {
+        // The point of it: typing a coordinate puts the object there, rather
+        // than moving it by the difference. Every component distinct and none of
+        // them a default, because a version that wrote one value into all three,
+        // or ignored an axis, would pass a symmetric fixture.
+        let (r, mut h, mut doc, ctx, cube) = one_cube();
+        let result = run(
+            &r,
+            &mut h,
+            &mut doc,
+            &ctx,
+            "object.set_transform",
+            &placed(
+                [1.5, -2.5, 7.0],
+                [0.0, std::f64::consts::FRAC_PI_2, 0.0],
+                [2.0, 3.0, 4.0],
+            ),
+        );
+        assert_eq!(result, OpResult::Finished);
+
+        let t = doc.object(cube).expect("still there").transform;
+        assert_eq!(t.translation, DVec3::new(1.5, -2.5, 7.0));
+        assert_eq!(t.scale, DVec3::new(2.0, 3.0, 4.0));
+
+        // A quarter turn about Y takes +X to -Z, which pins the axis and the
+        // direction. The wrong axis, or the wrong sign, sends it elsewhere.
+        let turned = t.rotation * DVec3::X;
+        assert!(
+            (turned - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-9,
+            "+X went to {turned:?}"
+        );
+    }
+
+    #[test]
+    fn setting_the_transform_it_already_has_records_nothing() {
+        // This runs on every keystroke in a coordinate field, where the value is
+        // usually the one already there. An operator that reported success would
+        // fill the history with entries that undo to the same scene, and the
+        // user's real last action would be buried under them.
+        let (r, mut h, mut doc, ctx, cube) = one_cube();
+        let fields = placed([1.0, 2.0, 3.0], [0.0; 3], [1.0; 3]);
+        run(&r, &mut h, &mut doc, &ctx, "object.set_transform", &fields);
+        let placed_at = doc.object(cube).expect("there").transform;
+
+        let mut second = History::new();
+        let again = run(
+            &r,
+            &mut second,
+            &mut doc,
+            &ctx,
+            "object.set_transform",
+            &fields,
+        );
+        assert_eq!(again, OpResult::Cancelled);
+        assert!(!second.can_undo(), "a no-op reached the history");
+        assert_eq!(
+            doc.object(cube).expect("there").transform,
+            placed_at,
+            "the object moved anyway"
+        );
+    }
+
+    #[test]
+    fn setting_a_transform_touches_the_active_object_and_no_other() {
+        // Typing a location means "put *this* here". Applying it to everything
+        // selected would stack them all on one point.
+        //
+        // **The active object is deliberately not the first one selected.**
+        // `two_cubes` makes it the first, and with that fixture a version
+        // reading `selection.objects.first()` instead of `selection.active`
+        // passes every line below — a sweep proved it. The two only differ when
+        // they disagree, so the fixture has to make them disagree.
+        let (r, mut h, mut doc, ctx, a, b) = two_cubes();
+        doc.selection.active = Some(b);
+        assert_eq!(
+            doc.selection.objects.first().copied(),
+            Some(a),
+            "the fixture must not have the active object first"
+        );
+        let before = doc.object(a).expect("there").transform;
+
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &ctx,
+            "object.set_transform",
+            &placed([5.0, 6.0, 7.0], [0.0; 3], [1.0; 3]),
+        );
+        assert_eq!(
+            doc.object(b).expect("there").transform.translation,
+            DVec3::new(5.0, 6.0, 7.0),
+            "the active object was not the one placed"
+        );
+        assert_eq!(
+            doc.object(a).expect("there").transform,
+            before,
+            "the other selected object moved too"
+        );
+    }
+
+    #[test]
+    fn setting_a_transform_needs_something_to_set() {
+        // With nothing active there is nothing to place, and the *dispatcher*
+        // is what refuses: it asks `poll` first and returns `PollFailed`
+        // without running the operator at all.
+        //
+        // Which makes the operator's own re-check unreachable from here, and
+        // the first version of this test asserted `Cancelled` and failed. The
+        // check stays as defence for a caller that reaches `execute` directly —
+        // a script, or a test — and it is stated here that nothing exercises it,
+        // rather than left looking covered.
+        let (r, mut h, mut doc, ctx) = setup();
+        assert!(!r
+            .get("object.set_transform")
+            .expect("registered")
+            .poll(&ctx, &doc));
+
+        let mut p = PropertyMap::new();
+        for (k, v) in placed([1.0, 0.0, 0.0], [0.0; 3], [1.0; 3]) {
+            p.set(k, v);
+        }
+        let error = h
+            .dispatch(&r, &mut doc, &ctx, "object.set_transform", &p)
+            .expect_err("the dispatcher must refuse it");
+        assert!(
+            matches!(error, crate::operator::OpError::PollFailed(_)),
+            "{error:?}"
+        );
+        assert!(!h.can_undo(), "a refused operator reached the history");
+    }
+
+    #[test]
+    fn a_transform_that_was_set_can_be_undone() {
+        // The coarse undo path, which is right here: an object transform is nine
+        // numbers, and the snapshot shares every array in the document.
+        let (r, mut h, mut doc, ctx, cube) = one_cube();
+        let before = doc.object(cube).expect("there").transform;
+
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &ctx,
+            "object.set_transform",
+            &placed([9.0, 8.0, 7.0], [0.5, 0.0, 0.0], [2.0; 3]),
+        );
+        assert_ne!(doc.object(cube).expect("there").transform, before);
+
+        assert!(h.undo(&mut doc));
+        assert_eq!(
+            doc.object(cube).expect("there").transform,
+            before,
+            "undo did not put it back"
+        );
     }
 
     #[test]

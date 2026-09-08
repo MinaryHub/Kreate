@@ -2114,13 +2114,20 @@ impl App {
         if !self.cursor_in_viewport() {
             return false;
         }
-        let Some((centre, radius)) = self.ui.gizmo_circle else {
-            return true;
-        };
         let Some((x, y)) = self.input.cursor else {
             return false;
         };
         let scale = self.egui_ctx.pixels_per_point() as f64;
+        let at = egui::pos2((x / scale) as f32, (y / scale) as f32);
+        // Anything drawn over the scene takes the pointer: the sidebar's
+        // coordinate fields above all, where a drag would otherwise type a
+        // number *and* orbit the camera.
+        if self.ui.viewport_blockers.iter().any(|r| r.contains(at)) {
+            return false;
+        }
+        let Some((centre, radius)) = self.ui.gizmo_circle else {
+            return true;
+        };
         let dx = x / scale - centre.x as f64;
         let dy = y / scale - centre.y as f64;
         // The gizmo takes its own circle, and the viewport everything else. One
@@ -3295,6 +3302,10 @@ impl App {
             }
             "view.frame_all" => self.frame_all(),
             "view.toggle_edit_mode" => self.toggle_edit_mode(),
+            "view.toggle_sidebar" => {
+                self.ui.toggle_sidebar();
+                self.redraw.set(RedrawReason::UI);
+            }
             "view.select_mode" => {
                 if let Some(PropertyValue::Enum(mode)) = action.params.get("mode") {
                     self.set_select_mode(*mode);

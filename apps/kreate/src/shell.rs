@@ -93,6 +93,26 @@ pub struct ShellState {
     /// rectangle, so it does not go stale between frames the way "the pointer is
     /// over me" does. The application uses it to decide who owns a press.
     pub gizmo_circle: Option<(egui::Pos2, f32)>,
+    /// Rectangles drawn over the viewport that the pointer belongs to rather
+    /// than to the scene.
+    ///
+    /// Refilled every frame by whatever draws over the viewport, and consulted
+    /// by the application before it decides a press is a navigation gesture.
+    /// The viewport is *painted* rather than being a widget, so egui's
+    /// `wants_pointer_input` answers a different question and answers it
+    /// wrongly here — see `App::press_belongs_to_viewport`, which has the whole
+    /// story. Geometry is what works, and this is the list of it.
+    ///
+    /// The navigation gizmo stays a circle of its own beside this: its bounding
+    /// rectangle would take four corners of the viewport with it, and a drag
+    /// starting in one of those corners should turn the scene.
+    pub viewport_blockers: Vec<egui::Rect>,
+    /// Which viewport areas have their sidebar open.
+    ///
+    /// Per area, like the UV editor's view: the layout permits two viewports,
+    /// and one of them having the numbers open is not a statement about the
+    /// other.
+    sidebars: std::collections::BTreeSet<kreate_ui::AreaId>,
     /// The outliner's cached row order.
     ///
     /// Lives here because it is view state: derived from the document, rebuilt
@@ -258,6 +278,35 @@ impl ShellState {
         self.area_edits.push(AreaEdit::Switch(index));
     }
 
+    /// Opens or closes the sidebar of every viewport area.
+    ///
+    /// Every one rather than the one under the pointer, because the key that
+    /// does this is pressed while looking at the viewport and the answer should
+    /// not depend on where the pointer happened to rest. With one viewport —
+    /// which is the usual case — the two are the same thing.
+    pub fn toggle_sidebar(&mut self) {
+        let viewports: Vec<kreate_ui::AreaId> = self
+            .screen()
+            .areas()
+            .into_iter()
+            .filter(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .map(|(id, _)| id)
+            .collect();
+        let opening = viewports.iter().any(|id| !self.sidebars.contains(id));
+        for id in viewports {
+            if opening {
+                self.sidebars.insert(id);
+            } else {
+                self.sidebars.remove(&id);
+            }
+        }
+    }
+
+    /// Whether a viewport area is showing its sidebar.
+    pub fn sidebar_open(&self, area: kreate_ui::AreaId) -> bool {
+        self.sidebars.contains(&area)
+    }
+
     /// Whether any area is showing this editor.
     ///
     /// What the application asks instead of reading a `show_*` boolean. It is
@@ -349,6 +398,8 @@ impl Default for ShellState {
             select_mode: 2,
             camera_rotation: kreate_math::DQuat::IDENTITY,
             gizmo_circle: None,
+            viewport_blockers: Vec::new(),
+            sidebars: std::collections::BTreeSet::new(),
             outliner: OutlinerOrder::default(),
             select_band: None,
             select_band_deselect: false,
@@ -632,6 +683,8 @@ struct Labels {
     uv_none: String,
     uv_not_editing: String,
     area_menu: String,
+    sidebar_item: String,
+    sidebar_nothing: String,
     area_split_v: String,
     area_split_h: String,
     area_close: String,
@@ -676,6 +729,8 @@ impl Labels {
             uv_none: t("uv-none"),
             uv_not_editing: t("uv-not-editing"),
             area_menu: t("area-menu"),
+            sidebar_item: t("sidebar-item"),
+            sidebar_nothing: t("sidebar-nothing"),
             area_split_v: t("area-split-vertical"),
             area_split_h: t("area-split-horizontal"),
             area_close: t("area-close"),
@@ -720,6 +775,10 @@ pub fn draw(
     // would hold a borrow of `state` for the whole function, which conflicts with
     // the mutable access the panels need to the command queue.
     let l = Labels::new(&state.catalog);
+    // Refilled by whatever draws over the viewport this frame. Cleared here
+    // rather than by each drawer, so an overlay that stops being drawn stops
+    // blocking the pointer on the very next frame.
+    state.viewport_blockers.clear();
     let status = state.catalog.format(
         "status-counts",
         TextKind::Ui,
@@ -1114,6 +1173,9 @@ fn draw_area(
             match area.editor {
                 kreate_ui::EditorKind::Viewport => {
                     draw_viewport(ui, state, inner, image);
+                    if state.sidebar_open(area.id) {
+                        draw_item_sidebar(ui, state, doc, registry, area.id, inner, l);
+                    }
                 }
                 kreate_ui::EditorKind::Outliner => {
                     let order = std::mem::take(&mut state.outliner);
@@ -1306,6 +1368,117 @@ fn drag_handles(ui: &mut Ui, state: &mut ShellState, layout: &kreate_ui::Layout)
             state.dragging = None;
         }
     }
+}
+
+/// How wide the viewport sidebar is, in interface points.
+///
+/// Fixed rather than fitted to its contents: a panel that changes width with
+/// the object selected moves its own fields every time the selection does, and
+/// the fields are what the eye is tracking.
+const SIDEBAR_WIDTH: f32 = 220.0;
+
+/// The viewport sidebar: where the active object is, as numbers.
+///
+/// # Generated, not written
+///
+/// The fields come from `object.set_transform`'s own schema, through the same
+/// `property_editor` the adjust panel uses. That is §1.6's promise being cashed
+/// in for the third time: one `#[derive(OpParams)]` gives the redo panel, the
+/// scripting binding, the i18n keys and now this, and adding a field to the
+/// operator adds it here with nothing written.
+///
+/// # Why it takes the pointer
+///
+/// The viewport is painted rather than being a widget, so the application
+/// decides by geometry whether a press is a navigation gesture. The sidebar
+/// registers its rectangle in `viewport_blockers` — without which a drag on a
+/// coordinate field would type a number *and* orbit the camera.
+#[allow(clippy::too_many_arguments)]
+fn draw_item_sidebar(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    area: kreate_ui::AreaId,
+    viewport: egui::Rect,
+    l: &Labels,
+) {
+    let width = SIDEBAR_WIDTH.min(viewport.width() * 0.5);
+    if width <= 0.0 {
+        return;
+    }
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(viewport.max.x - width, viewport.min.y),
+        viewport.max,
+    );
+    state.viewport_blockers.push(rect);
+
+    let theme = kreate_ui::theme::from_ui(ui);
+    ui.painter().rect_filled(rect, 0.0, theme.raised);
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, theme.border),
+        egui::StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink(theme.panel_padding);
+    if inner.width() <= 0.0 || inner.height() <= 0.0 {
+        return;
+    }
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .id_salt(("sidebar", area.0)),
+        |ui| {
+            ui.set_clip_rect(inner);
+            ui.heading(&l.sidebar_item);
+            ui.separator();
+
+            let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
+                // Said out loud rather than drawn as three empty boxes: a
+                // coordinate field with nothing behind it invites a number that
+                // goes nowhere.
+                ui.weak(&l.sidebar_nothing);
+                return;
+            };
+            // i18n-exempt: an object's name is the user's own text
+            ui.label(&active.name);
+
+            let Some(info) = registry.get("object.set_transform") else {
+                return;
+            };
+            let t = active.transform;
+            let (rx, ry, rz) = t.rotation.to_euler(kreate_math::glam::EulerRot::XYZ);
+            // The values the operator would need in order to leave things
+            // exactly as they are. Everything the panel does is edit one of
+            // them and send all of them, which is what makes the operator
+            // absolute rather than a delta — see `object.set_transform`.
+            let mut params = kreate_reflect::PropertyMap::new();
+            params.set(
+                "location",
+                kreate_reflect::PropertyValue::Vec3(t.translation.to_array()),
+            );
+            params.set(
+                "rotation",
+                kreate_reflect::PropertyValue::Vec3([rx, ry, rz]),
+            );
+            params.set(
+                "scale",
+                kreate_reflect::PropertyValue::Vec3(t.scale.to_array()),
+            );
+
+            if kreate_ui::property_editor::property_editor(
+                ui,
+                &state.catalog,
+                info.id,
+                info.schema,
+                &mut params,
+            ) {
+                state.queue.run("object.set_transform", params);
+            }
+        },
+    );
 }
 
 /// The workspace tabs.
@@ -1833,6 +2006,8 @@ keymap-context-uv = UV Editor
 keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
+sidebar-item = Item
+sidebar-nothing = Nothing is active. Select an object to see where it is.
 area-split-vertical = Split left / right
 area-split-horizontal = Split top / bottom
 area-close = Close area
@@ -2012,6 +2187,8 @@ keymap-context-uv = UV 편집기
 keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
+sidebar-item = 항목
+sidebar-nothing = 활성 오버젝트가 없습니다. 오버젝트를 선택하면 위치가 보입니다.
 area-split-vertical = 종으로 나누기
 area-split-horizontal = 가로로 나누기
 area-close = 여역 닫기
@@ -2433,6 +2610,93 @@ mod tests {
     }
 
     #[test]
+    fn the_sidebar_toggles_for_every_viewport_at_once() {
+        // Pressed while looking at the viewport, so the answer must not depend
+        // on where the pointer happened to rest. With one viewport — the usual
+        // case — the two readings are the same thing; with two they are not, and
+        // one open and one closed is a state neither of them asked for.
+        let mut state = ShellState {
+            workspaces: kreate_ui::Workspaces::single(
+                "Two",
+                kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport),
+            ),
+            ..Default::default()
+        };
+        let first = state.screen().areas()[0].0;
+        let second = state
+            .screen_mut()
+            .split(
+                first,
+                kreate_ui::Axis::Vertical,
+                0.5,
+                kreate_ui::EditorKind::Viewport,
+            )
+            .expect("split");
+
+        assert!(!state.sidebar_open(first));
+        assert!(!state.sidebar_open(second));
+
+        state.toggle_sidebar();
+        assert!(state.sidebar_open(first));
+        assert!(state.sidebar_open(second));
+
+        state.toggle_sidebar();
+        assert!(!state.sidebar_open(first));
+        assert!(!state.sidebar_open(second));
+    }
+
+    #[test]
+    fn a_half_open_sidebar_closes_rather_than_flipping() {
+        // The state a layout change can leave behind: an area opened its sidebar
+        // and was then split, so the new half has none. `N` from there should
+        // settle them, and settling on *open* is the reading that matches what
+        // the user last asked for.
+        let mut state = ShellState {
+            workspaces: kreate_ui::Workspaces::single(
+                "Two",
+                kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport),
+            ),
+            ..Default::default()
+        };
+        let first = state.screen().areas()[0].0;
+        state.toggle_sidebar();
+        let second = state
+            .screen_mut()
+            .split(
+                first,
+                kreate_ui::Axis::Vertical,
+                0.5,
+                kreate_ui::EditorKind::Viewport,
+            )
+            .expect("split");
+        assert!(state.sidebar_open(first));
+        assert!(!state.sidebar_open(second), "the new half starts closed");
+
+        state.toggle_sidebar();
+        assert!(state.sidebar_open(first));
+        assert!(
+            state.sidebar_open(second),
+            "the odd one out did not join in"
+        );
+    }
+
+    #[test]
+    fn a_sidebar_is_not_offered_where_there_is_no_viewport() {
+        // Otherwise `N` in a UV-editing workspace would set a flag nothing
+        // reads, and pressing it again would appear to do nothing twice.
+        let mut state = ShellState {
+            workspaces: kreate_ui::Workspaces::single(
+                "None",
+                kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+            ),
+            ..Default::default()
+        };
+        let only = state.screen().areas()[0].0;
+        state.toggle_sidebar();
+        assert!(!state.sidebar_open(only));
+    }
+
+    #[test]
     fn the_built_in_catalogs_parse() {
         // A malformed built-in resource would leave every label showing its key,
         // which is the sort of thing that ships if nothing checks it.
@@ -2585,6 +2849,8 @@ mod tests {
             "uv-none",
             "uv-not-editing",
             "area-menu",
+            "sidebar-item",
+            "sidebar-nothing",
             "area-split-vertical",
             "area-split-horizontal",
             "area-close",

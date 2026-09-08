@@ -490,6 +490,115 @@ fn the_viewport_texture_is_visible_in_the_middle_of_the_frame() {
 }
 
 #[test]
+fn the_sidebar_covers_the_viewport_and_takes_the_pointer() {
+    // Two claims, one frame, because they are the same rectangle.
+    //
+    // **It is drawn.** Over the scene, on the right, in the panel colour rather
+    // than the viewport's — so the pixels there change when it opens.
+    //
+    // **It takes the pointer.** The viewport is *painted* rather than being a
+    // widget, so the application decides by geometry whether a press is a
+    // navigation gesture; without the sidebar registering its rectangle, a drag
+    // on a coordinate field would type a number *and* orbit the camera. There
+    // is no `wants_pointer_input` that answers this — see
+    // `App::press_belongs_to_viewport`, which explains why.
+    let closed = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
+    let open = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.toggle_sidebar();
+    }));
+
+    assert!(
+        closed.state.viewport_blockers.is_empty(),
+        "something is blocking the viewport with the sidebar shut: {:?}",
+        closed.state.viewport_blockers
+    );
+    let blockers = &open.state.viewport_blockers;
+    assert_eq!(blockers.len(), 1, "{blockers:?}");
+    let bar = blockers[0];
+
+    // Inside the viewport, against its right edge, and a strip rather than the
+    // whole thing.
+    let vr = open.viewport_rect;
+    assert!(
+        vr.expand(1.0).contains_rect(bar),
+        "{bar:?} is not inside {vr:?}"
+    );
+    assert!(
+        (bar.max.x - vr.max.x).abs() < 1.0,
+        "the sidebar is not against the right edge: {bar:?} in {vr:?}"
+    );
+    assert!(
+        bar.width() < vr.width() * 0.6 && bar.width() > 40.0,
+        "the sidebar is {} of {} wide",
+        bar.width(),
+        vr.width()
+    );
+
+    // And it is painted: the strip differs from the frame without it, while the
+    // left of the viewport does not.
+    let band = |from: f32, to: f32| -> usize {
+        let mut n = 0;
+        for y in (vr.min.y as u32 + 40)..(vr.max.y as u32 - 8) {
+            for x in (from as u32)..(to as u32).min(W) {
+                if open.at(x, y) != closed.at(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let under_bar = band(bar.min.x + 2.0, bar.max.x - 2.0);
+    let left_of_it = band(vr.min.x + 2.0, bar.min.x - 8.0);
+    assert!(
+        under_bar > 2000,
+        "only {under_bar} pixels changed where the sidebar is; it did not draw"
+    );
+    assert!(
+        left_of_it * 20 < under_bar,
+        "{left_of_it} pixels changed away from the sidebar; it redrew the scene"
+    );
+}
+
+#[test]
+fn the_sidebar_shows_the_active_object_s_placement() {
+    // The reason it exists: a coordinate can be typed, not only dragged. The
+    // fields come from `object.set_transform`'s own schema, so what this checks
+    // is that the schema reached the panel at all — an empty one draws the
+    // "nothing active" note instead, and the two differ in ink.
+    let mut doc = Document::new();
+    let object = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+
+    let nothing_active = gpu_or_skip!(composite_with(&doc, "ko-KR", false, |state| {
+        state.toggle_sidebar();
+    }));
+    doc.selection.add(object);
+    let active = gpu_or_skip!(composite_with(&doc, "ko-KR", false, |state| {
+        state.toggle_sidebar();
+    }));
+
+    let bar = active.state.viewport_blockers[0];
+    // The fields are widgets with borders and numbers; the note is a line of
+    // dim text. Counted as distinct colours inside the strip, which a row of
+    // drag fields has many more of.
+    let variety = |c: &Composited| -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for y in (bar.min.y as u32 + 40)..(bar.max.y as u32 - 8) {
+            for x in (bar.min.x as u32 + 2)..(bar.max.x as u32 - 2) {
+                seen.insert(c.at(x, y));
+            }
+        }
+        seen.len()
+    };
+    let with = variety(&active);
+    let without = variety(&nothing_active);
+    assert!(
+        with > without + 8,
+        "the panel with an active object has {with} colours against {without}; \
+         the transform fields did not draw"
+    );
+}
+
+#[test]
 fn switching_workspace_changes_the_layout_on_screen() {
     // The point of named layouts: one click and the window is arranged for a
     // different job. Checked through the same deferred queue the layout edits

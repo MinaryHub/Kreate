@@ -227,6 +227,12 @@ fn common() -> Vec<Binding> {
         )
         .with_modifiers(Modifiers::shift()),
         key(
+            "view.sidebar",
+            "N",
+            Context::Viewport,
+            Action::new("view.toggle_sidebar"),
+        ),
+        key(
             "view.wireframe",
             "W",
             Context::Viewport,
@@ -581,12 +587,13 @@ fn common() -> Vec<Binding> {
             enum_param(Action::new("mesh.normals"), "action", 2),
         )
         .with_modifiers(Modifiers::shift()),
-        key(
-            "mesh.shade_smooth",
-            "N",
-            Context::EditMesh,
-            Action::new("mesh.shade").with("smooth", PropertyValue::Bool(true)),
-        ),
+        // Shade smooth has no key. It had bare `N`, and `N` is the
+        // viewport sidebar in every tool of this kind — which cannot share
+        // it: `EditMesh` is searched before `Viewport`, so a sidebar
+        // binding here would be *unreachable* in edit mode rather than
+        // merely shadowed, and `Keymap::conflicts` says so. Shade smooth
+        // stays on the toolbar and the right-click menu, which is also
+        // where every other tool leaves it.
         // Box projection on the bare key, because it is the one projection
         // that needs nothing from the view: a binding is data and cannot carry
         // a camera. The view-dependent variant lives on the right-click menu,
