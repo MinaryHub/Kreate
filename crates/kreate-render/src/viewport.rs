@@ -209,9 +209,13 @@ impl GpuMesh {
         let positions = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh positions"),
             contents: bytemuck::cast_slice(&cpu.positions),
+            // COPY_SRC as well: a drag copies these to a rest buffer on the GPU
+            // rather than having the CPU send them again, which is the whole
+            // cost it exists to avoid.
             usage: wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST,
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         });
         let normals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh normals"),
@@ -222,7 +226,8 @@ impl GpuMesh {
             // stream rather than from an index buffer.
             usage: wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST,
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         });
         // STORAGE as well as INDEX: the id pass draws faces *non-indexed* and
         // reads this as an array, because `vertex_index` in an indexed draw is
@@ -401,6 +406,19 @@ impl GpuMesh {
             color,
             bounds: cpu.bounds,
         }
+    }
+
+    /// The buffers a drag writes into, which are the ones the draw reads.
+    ///
+    /// Lent rather than copied, and deliberately the *live* ones: a deform
+    /// session reads its own rest copy and writes here, so the rasteriser needs
+    /// no knowledge that a drag is happening at all.
+    pub fn positions(&self) -> &wgpu::Buffer {
+        &self.positions
+    }
+
+    pub fn normals(&self) -> &wgpu::Buffer {
+        &self.normals
     }
 
     /// Rewrites only the position and normal buffers.

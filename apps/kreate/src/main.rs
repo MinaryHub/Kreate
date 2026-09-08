@@ -12,7 +12,7 @@
 
 // The shell lives in this package's library target so tests can drive it.
 use kreate::docfile::{self, DocumentFile};
-use kreate::{gpu_sync, shell};
+use kreate::{dragpreview, gpu_sync, shell};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -381,6 +381,35 @@ impl DragSelect {
     }
 }
 
+/// A transform being previewed on the GPU.
+///
+/// Held on `Gfx` rather than beside `self.gesture` because what it owns is GPU
+/// resources whose lifetime is the drag: bind groups naming the previewed
+/// mesh's own position and normal buffers, a rest copy of both, and the tables
+/// the normal passes walk. When this is dropped they go with it.
+///
+/// It deliberately does not hold the mesh it was built against. Nothing writes
+/// the document while a preview exists, so there is no drift to detect; and if
+/// something else changes the scene, `dragpreview::preview_survives` says so
+/// from the sync plan and the preview ends. A handle kept here would only
+/// invite a staleness check that cannot fire.
+struct LivePreview {
+    deform: kreate_render::Deform,
+    /// Which operator is being previewed, so the params can be read without
+    /// asking the modal session for its id.
+    op_id: &'static str,
+    /// Which mesh vertex each render vertex came from, kept so that changing
+    /// the proportional radius mid-drag does not re-extract the render mesh.
+    ///
+    /// Four bytes a render vertex. The whole `RenderMeshCpu` is about a hundred,
+    /// and the other ninety-six are on the GPU already.
+    render_to_vert: Vec<u32>,
+    /// The document mesh's vertex count, which the falloff is indexed by.
+    mesh_verts: usize,
+    /// The selection's median: what a rotation or a scale happens about.
+    pivot: glam::Vec3,
+}
+
 struct Gfx {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -403,9 +432,47 @@ struct Gfx {
     pick_target: kreate_render::PickTarget,
     /// The compute reduction behind box, circle and lasso selection.
     region: kreate_render::RegionSelect,
+    /// The three compute pipelines a drag runs. Built once; a `Deform` borrows
+    /// them per drag.
+    deformer: kreate_render::Deformer,
+    /// The drag being previewed on the GPU, if there is one.
+    preview: Option<LivePreview>,
 
     egui_renderer: egui_wgpu::Renderer,
     target: ViewportTarget,
+}
+
+impl Gfx {
+    /// Puts the previewed mesh back where the document says it is, and forgets
+    /// the preview.
+    ///
+    /// The identity gesture rather than a re-upload: the shader recomputes from
+    /// the rest copy every frame, so running it with nothing to apply writes
+    /// exactly the buffers `upload` wrote. A device test asserts that, which is
+    /// what makes this two dispatches instead of an eighty-millisecond
+    /// extraction.
+    ///
+    /// Needed because a cancelled drag leaves the document holding the very
+    /// handle the cache already has — that is what makes undo cheap — so
+    /// `gpu_sync` finds nothing to do and would leave the deformed positions on
+    /// screen with the document at rest.
+    fn restore_preview(&mut self) -> bool {
+        let Some(preview) = self.preview.take() else {
+            return false;
+        };
+        preview
+            .deform
+            .set(&self.gpu.queue, &kreate_render::Gesture::IDENTITY);
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview restore"),
+            });
+        preview.deform.dispatch(&mut encoder, &self.deformer);
+        self.gpu.queue.submit([encoder.finish()]);
+        true
+    }
 }
 
 struct App {
@@ -1340,6 +1407,10 @@ impl App {
             Ok(Some(session)) => {
                 let status = gesture.status();
                 self.gesture = Some((gesture, session));
+                // After the session, not before: a preview for a gesture the
+                // operator declined would deform a mesh nothing is going to
+                // transform.
+                self.begin_preview(op_id);
                 self.status(&status);
             }
             // The operator declined. Nothing was started, and nothing must be:
@@ -1350,6 +1421,196 @@ impl App {
         }
     }
 
+    /// Starts previewing the drag on the GPU, if this one can be.
+    ///
+    /// Everything about it is best-effort: every `None` below falls through to
+    /// the CPU path, which is the path that ran before any of this existed and
+    /// still produces the authoritative answer at confirm. So a mesh with a
+    /// modifier stack, an operator that changes topology, an empty selection or
+    /// a missing GPU all simply drag the old way.
+    fn begin_preview(&mut self, op_id: &'static str) {
+        if !dragpreview::is_previewable(op_id) {
+            return;
+        }
+        let Some(mesh_id) = kreate_ops::ops::mesh::target_mesh(&self.doc) else {
+            return;
+        };
+        let Some(doc_mesh) = self.doc.mesh_arc(mesh_id).cloned() else {
+            return;
+        };
+        let active = self
+            .doc
+            .selection
+            .active
+            .or_else(|| self.doc.selection.objects.first().copied());
+        let Some(active) = active else { return };
+        // A modifier stack means the mesh on the GPU is not the mesh the
+        // operator transforms, and deforming the stack's output with weights
+        // measured on its input is not an approximation of anything — the two
+        // need not even have the same vertex count. So a stack means the CPU
+        // path, which re-evaluates properly every frame.
+        //
+        // Asked of the object rather than inferred by comparing handles,
+        // because that comparison cannot be made here: see below.
+        if self
+            .doc
+            .object(active)
+            .is_none_or(|o| !o.modifiers.is_empty())
+        {
+            return;
+        }
+        // The slot this object's geometry is in, found by the handle the cache
+        // was built with — which is *last frame's*, not the document's. The
+        // identity parameters `begin_modal` just applied replaced the document's
+        // handle, since `mesh_mut` is `Arc::make_mut` and the cache holds a
+        // clone.
+        let Some((_, stale)) = self.evaluated.iter().find(|(id, _)| *id == active) else {
+            return;
+        };
+        let stale = stale.clone();
+
+        // The operator's own falloff, not a second implementation of it: the
+        // preview is what the user shapes the mesh against and the operator is
+        // what runs when the pointer comes up, so any divergence would show as
+        // the mesh moving at the end of every drag.
+        let radius = self.proportional.unwrap_or(0.0);
+        let Some(weighing) = kreate_ops::ops::mesh::weigh_selection(&doc_mesh, radius) else {
+            return;
+        };
+        // The one expensive thing a preview costs, and it is paid once per drag
+        // instead of once per frame — which is the entire point. What it buys is
+        // the tables the normal passes walk, and they depend only on topology,
+        // which a transform does not change.
+        //
+        // Measured at 190 ms for two hundred thousand vertices, against 0.3 ms
+        // for a previewed frame. It is the obvious next thing to move: the
+        // tables belong beside the resident mesh, and then a drag begins for
+        // free. Until then, pressing the key costs what every *frame* used to.
+        let cpu = RenderMeshCpu::extract(&doc_mesh);
+        let weights = dragpreview::spread_weights(
+            &cpu.render_to_vert,
+            doc_mesh.num_verts() as usize,
+            &weighing.indices,
+            &weighing.weights,
+        );
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let Some((held, gpu_mesh)) = gfx.meshes.iter_mut().find(|(m, _)| Arc::ptr_eq(m, &stale))
+        else {
+            return;
+        };
+        // Bringing the slot up to date out of the extraction that was needed
+        // anyway. Without this the next `sync_gpu` would find a positions-only
+        // change and extract the mesh a second time, on the frame the user
+        // pressed the key — and adopting the handle is what makes that sync find
+        // nothing to do, which is in turn what lets the preview survive it.
+        //
+        // Refused rather than forced if the topology moved: `update_positions`
+        // has no size check of its own, and a mismatch would write past the end
+        // of a buffer.
+        if !stale.only_positions_differ(&doc_mesh) && !Arc::ptr_eq(&stale, &doc_mesh) {
+            return;
+        }
+        if cpu.positions.len() as u32 != gpu_mesh.render_verts {
+            return;
+        }
+        gpu_mesh.update_positions(&gfx.gpu.queue, &cpu);
+        *held = doc_mesh.clone();
+
+        let mut encoder = gfx
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview begin"),
+            });
+        let deform = kreate_render::Deform::begin(
+            &gfx.gpu.device,
+            &mut encoder,
+            &gfx.deformer,
+            gpu_mesh,
+            &cpu,
+            &weights,
+        );
+        let Some(deform) = deform else { return };
+        gfx.gpu.queue.submit([encoder.finish()]);
+        gfx.preview = Some(LivePreview {
+            deform,
+            op_id,
+            render_to_vert: cpu.render_to_vert,
+            mesh_verts: doc_mesh.num_verts() as usize,
+            pivot: weighing.median,
+        });
+    }
+
+    /// Shows this frame of the drag on the GPU. `true` when it did.
+    ///
+    /// A false return means the caller has to write the document instead, and
+    /// the preview has already been given up and the mesh put back — so the
+    /// fallback is a frame late at worst, never a frame wrong.
+    fn drive_preview(&mut self, params: &kreate_reflect::PropertyMap) -> bool {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return false;
+        };
+        let Some(preview) = gfx.preview.as_ref() else {
+            return false;
+        };
+        let Some(gesture) = dragpreview::gesture_for(preview.op_id, params, preview.pivot) else {
+            // The params were not the shape this operator's preview reads.
+            // Nothing here should produce that, which is exactly why it is
+            // handled rather than unwrapped: showing a stale frame while the
+            // pointer moves is the one failure this path must not have.
+            gfx.restore_preview();
+            return false;
+        };
+        preview.deform.set(&gfx.gpu.queue, &gesture);
+        let mut encoder = gfx
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview frame"),
+            });
+        preview.deform.dispatch(&mut encoder, &gfx.deformer);
+        gfx.gpu.queue.submit([encoder.finish()]);
+        true
+    }
+
+    /// Rewrites the falloff a live preview is using.
+    ///
+    /// Called when the wheel changes the proportional radius mid-drag. The
+    /// weights are the only thing that changes: the rest copy, the tables and
+    /// the split all depend on topology and the radius is not part of it.
+    fn reweigh_preview(&mut self) {
+        if self.gfx.as_ref().is_none_or(|g| g.preview.is_none()) {
+            return;
+        }
+        let radius = self.proportional.unwrap_or(0.0);
+        let mesh = kreate_ops::ops::mesh::target_mesh(&self.doc)
+            .and_then(|id| self.doc.mesh_arc(id).cloned());
+        let Some(mesh) = mesh else { return };
+        let weighing = kreate_ops::ops::mesh::weigh_selection(&mesh, radius);
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let Some(weighing) = weighing else {
+            gfx.restore_preview();
+            return;
+        };
+        let Some(preview) = gfx.preview.as_mut() else {
+            return;
+        };
+        let weights = dragpreview::spread_weights(
+            &preview.render_to_vert,
+            preview.mesh_verts,
+            &weighing.indices,
+            &weighing.weights,
+        );
+        preview.pivot = weighing.median;
+        if !preview.deform.set_weights(&gfx.gpu.queue, &weights) {
+            // A refused length means the render mesh is not the one this preview
+            // was built against, which should be impossible while the document
+            // is untouched. Put the mesh back rather than leave a falloff that
+            // is right at one end of the buffer and stale at the other.
+            gfx.restore_preview();
+        }
+    }
+
     /// Feeds the pointer to the gesture and re-applies the operator.
     fn drive_gesture(&mut self) {
         let Some(cursor) = self.cursor_viewport_unclamped() else {
@@ -1357,20 +1618,46 @@ impl App {
         };
         // Copied out before the mutable borrow of `self.gesture` below.
         let camera = self.camera;
-        let Some((gesture, session)) = &mut self.gesture else {
-            return;
+        let viewport_px = self.viewport_px;
+        // Scoped, because the preview below needs `&mut self` and the params are
+        // all it needs from here.
+        let (params, status) = {
+            let Some((gesture, _)) = &mut self.gesture else {
+                return;
+            };
+            // The camera first: orbiting during a transform is allowed, and a
+            // snap resolved against a stale view would catch on whatever used to
+            // be under the cursor.
+            if let Some((_, _, w, h)) = viewport_px {
+                gesture.set_view(&camera, (w, h));
+            }
+            gesture.track(cursor);
+            (gesture.params(), gesture.status())
         };
-        // The camera first: orbiting during a transform is allowed, and a snap
-        // resolved against a stale view would catch on whatever used to be under
-        // the cursor.
-        if let Some((_, _, w, h)) = self.viewport_px {
-            gesture.set_view(&camera, (w, h));
+
+        // The GPU preview, when there is one: a 64-byte uniform and three
+        // dispatches, and the document is not written at all.
+        //
+        // Which is the whole optimisation. The CPU path below writes the
+        // positions array, which makes a new `MeshData`, which `gpu_sync`
+        // recognises as positions-only and repositions — and `update_positions`
+        // calls `RenderMeshCpu::extract` to find out what to write. That
+        // extraction is 83 ms at two hundred thousand vertices against a budget
+        // of one, and almost none of it is work a move changes.
+        //
+        // §1.7 already said the document should not be written until the
+        // gesture is confirmed. This is what it costs not to.
+        if self.drive_preview(&params) {
+            self.status(&status);
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+            return;
         }
-        gesture.track(cursor);
-        let params = gesture.params();
-        let status = gesture.status();
+
         // Restore and re-apply from the original — §2.2's rule. `update_modal`
         // owns that; nothing here is incremental.
+        let Some((_, session)) = &mut self.gesture else {
+            return;
+        };
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
@@ -1387,9 +1674,34 @@ impl App {
 
     /// Confirms the gesture: one history entry, carrying the final parameters.
     fn confirm_gesture(&mut self) {
-        let Some((gesture, session)) = self.gesture.take() else {
+        let Some((gesture, mut session)) = self.gesture.take() else {
             return;
         };
+        // A previewed drag never wrote the document, so the operator has to run
+        // now — once, with the final parameters. Which is exactly the shape
+        // §1.6 wants anyway: the history entry, the adjust panel and the script
+        // line all come from one `(op_id, params)` call, and the pointer's whole
+        // journey leaves no trace beyond where it ended up.
+        //
+        // The preview is dropped rather than restored: this run rewrites the
+        // positions, which makes a new handle, which `gpu_sync` repositions. One
+        // extraction, at mouse-up, instead of one per frame.
+        if self
+            .gfx
+            .as_mut()
+            .is_some_and(|gfx| gfx.preview.take().is_some())
+        {
+            if let Err(e) = self.history.update_modal(
+                &self.registry,
+                &mut self.doc,
+                self.edit.as_mut(),
+                &self.op_ctx,
+                &mut session,
+                &gesture.params(),
+            ) {
+                tracing::warn!(error = %e, "transform failed");
+            }
+        }
         let call = session.params().to_script_call(session.op_id());
         self.history.commit_modal(session);
         // Printed like any other operator, because it *is* like any other
@@ -1404,6 +1716,14 @@ impl App {
         let Some((gesture, session)) = self.gesture.take() else {
             return;
         };
+        // The preview has to be undone explicitly, and this is the one place
+        // where that is not obvious. A cancel puts the document back to the very
+        // handle the GPU cache is already holding — that is what makes it free
+        // — so `gpu_sync` sees nothing to do and would leave the deformed
+        // positions on screen with the document at rest.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.restore_preview();
+        }
         History::cancel_modal(session, &mut self.doc);
         self.status(&format!("{} cancelled", gesture.kind.label()));
         self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -1425,6 +1745,10 @@ impl App {
         if let Some((gesture, _)) = &mut self.gesture {
             gesture.set_proportional(Some(radius));
         }
+        // Before the frame, not after: the falloff is what the frame is about to
+        // be drawn with, and a frame drawn with the old one would show the wheel
+        // lagging a notch behind the hand.
+        self.reweigh_preview();
         self.drive_gesture();
         true
     }
@@ -1886,6 +2210,14 @@ impl App {
         let plan = gpu_sync::plan_sync(&held, &self.evaluated);
         if !plan.needs_work(held.len()) {
             return;
+        }
+        // Past that return, so something other than the drag changed the scene
+        // and buffers are about to be rebuilt or dropped. A live preview's bind
+        // groups name the ones it was built against; see
+        // `dragpreview::preview_survives` for why the answer is the whole plan
+        // rather than the previewed slot.
+        if !dragpreview::preview_survives(&plan, held.len()) && gfx.restore_preview() {
+            tracing::debug!("the scene changed under a GPU preview; finishing the drag on the CPU");
         }
 
         const PALETTE: [[f32; 3]; 4] = [
@@ -3544,6 +3876,12 @@ impl ApplicationHandler for App {
 
         let pick_target = kreate_render::PickTarget::new(&gpu.device, target.size.0, target.size.1);
         let region = kreate_render::RegionSelect::new(&gpu.device);
+        // Built with the rest of the pipelines rather than when the first drag
+        // starts, for the same reason `warm_up` exists above: a driver compiles
+        // a compute pipeline on first dispatch, and paying for three of them on
+        // the frame the user presses `G` puts the cost exactly where it is most
+        // visible.
+        let deformer = kreate_render::Deformer::new(&gpu.device);
         self.gfx = Some(Gfx {
             surface,
             config,
@@ -3552,6 +3890,8 @@ impl ApplicationHandler for App {
             meshes: Vec::new(),
             pick_target,
             region,
+            deformer,
+            preview: None,
             egui_renderer,
             target,
         });

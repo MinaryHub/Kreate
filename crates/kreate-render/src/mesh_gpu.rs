@@ -246,6 +246,41 @@ pub struct RenderMeshCpu {
     /// in. Which of the split copies is named is irrelevant: they differ only in
     /// their normal.
     pub vert_to_render: Vec<u32>,
+    // --- what a drag needs, and only a drag ------------------------------
+    //
+    // The four fields below describe the mesh in the terms a deformation is
+    // expressed in. They are **not** part of what a resident mesh costs on the
+    // GPU: `upload` does not send them, `gpu_bytes` does not count them, and
+    // the budget test would fail if it did — it caught exactly that, at 116
+    // bytes a vertex against a hundred. A deform session uploads them for the
+    // one mesh being dragged and drops them when the drag ends; see
+    // `deform_bytes` for that cost and why it is affordable.
+    /// Which *mesh* vertex each render vertex came from.
+    ///
+    /// The other direction from `vert_to_render`, and not derivable from it: a
+    /// mesh vertex can have several render vertices and that field names only
+    /// one. A drag needs this one, because the weight it applies is a property
+    /// of the mesh vertex and the buffer it writes is indexed by render vertex.
+    pub render_to_vert: Vec<u32>,
+    /// Where each face's corners begin, as CSR over `corner_render`.
+    ///
+    /// A copy of the mesh's own `face_offsets`, because a deform session walks
+    /// faces on the GPU and cannot reach the `MeshData` it came from.
+    pub face_offsets: Vec<u32>,
+    /// Which faces each render vertex averages, as CSR: render vertex `v` owns
+    /// `group_faces[group_offsets[v] .. group_offsets[v + 1]]`.
+    ///
+    /// Its *smooth group*, not every face at its vertex. A render vertex is a
+    /// (vertex, smooth group) pair by construction — that is what the split is
+    /// for — so this is exactly the set `compute_corner_normals` sums, and a
+    /// GPU pass over it produces the same normals the CPU would.
+    pub group_offsets: Vec<u32>,
+    pub group_faces: Vec<u32>,
+    /// Which render vertex each mesh corner resolves to.
+    ///
+    /// What lets a face be walked in render-vertex terms, which is what
+    /// recomputing a face normal from deformed positions needs.
+    pub corner_render: Vec<u32>,
     pub vert_flags: Vec<u32>,
     pub edge_flags: Vec<u32>,
     pub face_flags: Vec<u32>,
@@ -326,6 +361,7 @@ impl RenderMeshCpu {
         // back to one vertex each; a hard-surface one splits only where it must.
         let mut positions = Vec::with_capacity(nverts);
         let mut normals = Vec::with_capacity(nverts);
+        let mut render_to_vert: Vec<u32> = Vec::with_capacity(nverts);
         let mut corner_to_render = vec![u32::MAX; corner_verts.len()];
         // One representative render vertex per mesh vertex, so the overlay
         // buffers — which index mesh vertices — still resolve to a position.
@@ -344,6 +380,7 @@ impl RenderMeshCpu {
                     None => {
                         positions.push(GpuPosition(mesh_positions[v].to_array()));
                         normals.push(normal);
+                        render_to_vert.push(v as u32);
                         let index = (positions.len() - 1) as u32;
                         distinct.push((normal, index));
                         index
@@ -366,6 +403,40 @@ impl RenderMeshCpu {
             .iter()
             .map(|c| corner_to_render[*c as usize])
             .collect();
+
+        // Which face each corner belongs to, for the groups below. One pass,
+        // because the CSR walk needs it per corner and `tri_to_face` answers a
+        // different question — it is per *triangle*.
+        let mut corner_face = vec![0u32; corner_verts.len()];
+        for f in 0..mesh.num_faces() {
+            for c in mesh.face_corner_range(f) {
+                corner_face[c] = f;
+            }
+        }
+
+        // Each render vertex's smooth group, by counting sort over the corners
+        // that resolved to it. A face contributes at most one corner to a render
+        // vertex — a face never repeats a vertex, and a render vertex sits at one
+        // — so no face lands in a group twice.
+        let render_verts = positions.len();
+        let mut group_offsets = vec![0u32; render_verts + 1];
+        for r in corner_to_render.iter() {
+            if (*r as usize) < render_verts {
+                group_offsets[*r as usize + 1] += 1;
+            }
+        }
+        for r in 0..render_verts {
+            group_offsets[r + 1] += group_offsets[r];
+        }
+        let mut cursor = group_offsets.clone();
+        let mut group_faces = vec![0u32; group_offsets[render_verts] as usize];
+        for (corner, r) in corner_to_render.iter().enumerate() {
+            if (*r as usize) < render_verts {
+                let slot = &mut cursor[*r as usize];
+                group_faces[*slot as usize] = corner_face[corner];
+                *slot += 1;
+            }
+        }
 
         // Edges are authored against mesh vertices; point them at a render vertex
         // that shares the position. Which of the split copies is irrelevant — they
@@ -393,6 +464,11 @@ impl RenderMeshCpu {
             tri_to_face: tri.tri_to_face,
             edge_verts,
             vert_to_render,
+            render_to_vert,
+            face_offsets: mesh.face_offsets().to_vec(),
+            group_offsets,
+            group_faces,
+            corner_render: corner_to_render,
             vert_flags: vec![0; mesh.num_verts() as usize],
             edge_flags: vec![0; mesh.num_edges() as usize],
             face_flags: vec![0; mesh.num_faces() as usize],
@@ -466,6 +542,26 @@ impl RenderMeshCpu {
     }
 
     /// GPU bytes per vertex. The plan's budget is 100.
+    /// What a drag on this mesh would cost the GPU on top of its residency.
+    ///
+    /// Transient and for one mesh at a time: a deform session holds a copy of
+    /// the rest positions and normals, a weight per render vertex, and the two
+    /// index tables the normal pass walks. At a million render vertices and four
+    /// million corners that is about forty megabytes, against the plan's two
+    /// gigabytes for a ten-million-vertex scene — and it is released the moment
+    /// the pointer comes up.
+    pub fn deform_bytes(&self) -> usize {
+        let verts = self.positions.len();
+        verts * 12 // rest positions
+            + verts * 4 // rest normals
+            + verts * 4 // weights
+            + (verts + 1) * 4 // group offsets
+            + self.group_faces.len() * 4
+            + self.corner_render.len() * 4
+            + (self.counts.faces as usize + 1) * 4 // face offsets
+            + self.counts.faces as usize * 12 // face normals
+    }
+
     /// GPU bytes per *render* vertex, which is what is actually uploaded.
     ///
     /// Measured against the split count rather than the document's, because
@@ -693,6 +789,118 @@ mod tests {
             0,
             "the bit must clear, not stick"
         );
+    }
+
+    #[test]
+    fn a_drag_s_buffers_are_not_counted_as_residency() {
+        // The distinction the budget test forced. A resident mesh pays for its
+        // positions, normals, indices and flags; a *drag* pays for a rest copy
+        // and the tables its normal pass walks, for one mesh, until the pointer
+        // comes up. Counting the second as the first put a grid at 116 bytes a
+        // vertex against a hundred, and it was not wrong about the memory — only
+        // about when it is spent.
+        let mesh = primitives::grid(10.0, 40, 40);
+        let r = RenderMeshCpu::extract(&mesh);
+
+        let resident = r.gpu_bytes();
+        let dragging = r.deform_bytes();
+        assert!(dragging > 0, "a drag has to cost something");
+        // Both real, and of the same order: the drag is not a rounding error on
+        // the residency, which is why it needs saying out loud.
+        assert!(
+            dragging > resident / 8 && dragging < resident * 2,
+            "residency {resident}, drag {dragging}"
+        );
+        assert!(
+            r.bytes_per_vertex() <= 100.0,
+            "{:.1} bytes/vertex: a drag's buffers are being counted as residency",
+            r.bytes_per_vertex()
+        );
+    }
+
+    #[test]
+    fn a_render_vertex_knows_which_mesh_vertex_it_came_from() {
+        // The direction `vert_to_render` cannot give: a cube's corner is three
+        // render vertices and that field names one of them. A drag needs all
+        // three, because the weight is a property of the mesh vertex and the
+        // buffer it writes is indexed by render vertex.
+        let cube = primitives::cube(2.0);
+        let r = RenderMeshCpu::extract(&cube);
+        assert_eq!(r.render_to_vert.len(), r.positions.len());
+
+        // Every render vertex sits exactly where its mesh vertex does.
+        let mesh_positions = cube.positions();
+        for (i, v) in r.render_to_vert.iter().enumerate() {
+            assert_eq!(
+                r.positions[i].0,
+                mesh_positions[*v as usize].to_array(),
+                "render vertex {i} is not where mesh vertex {v} is"
+            );
+        }
+        // And the two directions agree where they overlap.
+        for (v, render) in r.vert_to_render.iter().enumerate() {
+            assert_eq!(r.render_to_vert[*render as usize], v as u32);
+        }
+        // A cube splits three ways, so this is not a one-to-one mapping being
+        // checked against itself.
+        assert_eq!(r.positions.len(), 24);
+    }
+
+    #[test]
+    fn a_render_vertex_s_group_is_the_faces_its_normal_averages() {
+        // What makes a GPU normal pass produce the same answer as the CPU: the
+        // group is the set `compute_corner_normals` sums, so summing it again
+        // has to give the normal already in the buffer.
+        //
+        // Two meshes, because they exercise the two ends of the split: a cube
+        // where every group is one face, and a sphere where a group is the
+        // whole fan.
+        for mesh in [primitives::cube(2.0), primitives::uv_sphere(1.0, 12, 6)] {
+            let r = RenderMeshCpu::extract(&mesh);
+            let faces = mesh.compute_face_normals();
+            assert_eq!(r.group_offsets.len(), r.positions.len() + 1);
+
+            for v in 0..r.positions.len() {
+                let group =
+                    &r.group_faces[r.group_offsets[v] as usize..r.group_offsets[v + 1] as usize];
+                assert!(!group.is_empty(), "render vertex {v} averages nothing");
+
+                // No face twice: a face has one corner per vertex, and a render
+                // vertex sits at one vertex.
+                let mut unique = group.to_vec();
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), group.len(), "a face is in group {v} twice");
+
+                let sum: Vec3 = group.iter().map(|f| faces[*f as usize]).sum();
+                let expected = oct_decode(r.normals[v]);
+                assert!(
+                    sum.normalize_or_zero().dot(expected) > 0.999,
+                    "group {v} sums to {:?}, buffer says {expected:?}",
+                    sum.normalize_or_zero()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_corner_resolves_to_a_render_vertex_at_its_own_vertex() {
+        // What lets a face be walked in render-vertex terms, which is what
+        // recomputing a face normal from deformed positions needs. A corner
+        // pointing at a render vertex of the *wrong* mesh vertex would give a
+        // face normal computed from someone else's geometry.
+        let mesh = primitives::uv_sphere(1.0, 10, 5);
+        let r = RenderMeshCpu::extract(&mesh);
+        assert_eq!(r.corner_render.len(), mesh.num_corners() as usize);
+
+        let corner_verts = mesh.corner_verts();
+        for (corner, render) in r.corner_render.iter().enumerate() {
+            assert_ne!(*render, u32::MAX, "corner {corner} resolves to nothing");
+            assert_eq!(
+                r.render_to_vert[*render as usize], corner_verts[corner],
+                "corner {corner} points at a render vertex of another vertex"
+            );
+        }
     }
 
     #[test]

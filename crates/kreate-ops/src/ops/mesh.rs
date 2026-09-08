@@ -342,23 +342,34 @@ fn weigh_neighbourhood(
 }
 
 /// What a transform is about to move, read off the document mesh.
-struct Targets {
+///
+/// Public because the GPU transform preview needs *these* weights and not its
+/// own. The preview and the operator have to agree exactly — the preview is
+/// what the user shapes the mesh against, and the operator is what runs when
+/// the pointer comes up — so a second implementation of the falloff would
+/// diverge, and the divergence would show as the mesh moving at the end of
+/// every drag. Same argument as §2.3's one-graph-two-consumers rule, applied to
+/// arithmetic rather than to shading.
+pub struct Weighting {
     /// Which vertices move, ascending. The order the weights are in.
-    indices: Vec<u32>,
+    pub indices: Vec<u32>,
     /// Each one’s share of the transform. One for the selection itself.
-    weights: Vec<f32>,
+    pub weights: Vec<f32>,
     /// The selection’s median: what a rotation or a scale happens about.
     ///
     /// The mean rather than the bounding-box centre. For a symmetric selection
     /// they agree; for a lopsided one the mean follows where the geometry
     /// actually is, and the bounding-box centre can sit in empty space away
     /// from every vertex — which makes a rotation swing rather than turn.
-    median: glam::Vec3,
+    pub median: glam::Vec3,
     /// How many distinct places the *selection* occupies.
-    distinct: usize,
+    ///
+    /// Rotate and scale refuse a selection occupying one; see
+    /// [`distinct_places`].
+    pub distinct: usize,
 }
 
-fn targets(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Targets> {
+pub fn weigh_selection(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Weighting> {
     let selected = selection_vertices(mesh);
     if selected.is_empty() {
         return None;
@@ -381,7 +392,7 @@ fn targets(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Targets> {
         let weights = vec![1.0; selected.len()];
         (selected, weights)
     };
-    Some(Targets {
+    Some(Weighting {
         indices,
         weights,
         median,
@@ -410,7 +421,7 @@ fn run_transform(
         .document()
         .mesh(mesh_id)
         .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
-    let Some(targets) = targets(mesh, radius) else {
+    let Some(targets) = weigh_selection(mesh, radius) else {
         return Ok(OpResult::Cancelled);
     };
     if needs_extent && targets.distinct < 2 {

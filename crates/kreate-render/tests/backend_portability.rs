@@ -63,6 +63,7 @@ fn shaders() -> Vec<(&'static str, &'static str)> {
             include_str!("../src/shaders/cluster_cull.wgsl"),
         ),
         ("hiz_build", include_str!("../src/shaders/hiz_build.wgsl")),
+        ("deform", include_str!("../src/shaders/deform.wgsl")),
     ]
 }
 
