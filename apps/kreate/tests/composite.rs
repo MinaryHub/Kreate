@@ -490,6 +490,97 @@ fn the_viewport_texture_is_visible_in_the_middle_of_the_frame() {
 }
 
 #[test]
+fn switching_workspace_changes_the_layout_on_screen() {
+    // The point of named layouts: one click and the window is arranged for a
+    // different job. Checked through the same deferred queue the layout edits
+    // use, because it has the same reason to be deferred — the frame is drawing
+    // tabs and areas from the list this changes.
+    //
+    // Asserted as the *viewport rect*, not just the index: a switch that moved
+    // the index and went on drawing the old arrangement would pass any test of
+    // the model alone, and the application sizes its render target from that
+    // rectangle.
+    let shipped = kreate_ui::Workspaces::default();
+    let uv_editing = shipped
+        .iter()
+        .position(|space| {
+            space
+                .screen
+                .areas()
+                .iter()
+                .any(|(_, kind)| *kind == kreate_ui::EditorKind::UvEditor)
+        })
+        .expect("a shipped workspace has a UV editor");
+    assert_ne!(
+        uv_editing, 0,
+        "the fixture must switch away from the default"
+    );
+
+    let first = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
+    let switched = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.switch_workspace(uv_editing)
+    }));
+
+    assert_eq!(
+        switched.state.workspaces.active_index(),
+        uv_editing,
+        "the switch was asked for and never happened"
+    );
+    // The default layout gives the viewport most of the width; the UV one
+    // splits it in half with the UV editor. So the rectangle has to shrink, and
+    // by a lot.
+    assert!(
+        switched.viewport_rect.width() < first.viewport_rect.width() * 0.75,
+        "the viewport went from {} to {}; the old layout is still being drawn",
+        first.viewport_rect.width(),
+        switched.viewport_rect.width()
+    );
+    // And a UV editor is on screen now, which is what the workspace is for.
+    assert!(switched.state.has_editor(kreate_ui::EditorKind::UvEditor));
+    assert!(!first.state.has_editor(kreate_ui::EditorKind::UvEditor));
+}
+
+#[test]
+fn an_edit_lands_in_the_workspace_that_is_showing() {
+    // Otherwise arranging one layout quietly rearranges another, and the user
+    // finds out the next time they switch. `screen_mut` going through the active
+    // workspace is what prevents it; a field of its own could not.
+    let target = 1;
+    let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.switch_workspace(target);
+    }));
+    assert_eq!(c.state.workspaces.active_index(), target);
+
+    let after = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.switch_workspace(target);
+        // Queued behind the switch, so it lands in the workspace switched *to*.
+        let area = state.screen().areas()[0].0;
+        state.split_area(area, kreate_ui::Axis::Horizontal);
+    }));
+
+    let untouched = kreate_ui::Workspaces::default();
+    for (index, space) in after.state.workspaces.iter().enumerate() {
+        let expected = untouched
+            .iter()
+            .nth(index)
+            .expect("the same number of workspaces");
+        if index == target {
+            assert_ne!(
+                space.screen.to_nodes(),
+                expected.screen.to_nodes(),
+                "the split did not land in the active workspace"
+            );
+        } else {
+            assert_eq!(
+                space.screen.to_nodes(),
+                expected.screen.to_nodes(),
+                "workspace {index} was rearranged behind the user's back"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
     // Splitting and closing are deferred: the frame is drawing against a layout
     // derived from the tree, so editing it where the button is would leave every
@@ -499,11 +590,11 @@ fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
     // than by a test calling `apply_area_edits` itself. A sweep that replaced
     // the call with `clear()` — splitting and closing dead in the application,
     // silently — passed everything until this existed.
-    let before = kreate::shell::ShellState::default().screen.area_count();
+    let before = kreate::shell::ShellState::default().screen().area_count();
 
     let split = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
         let viewport = state
-            .screen
+            .screen()
             .areas()
             .into_iter()
             .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
@@ -512,14 +603,14 @@ fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
         state.split_area(viewport, kreate_ui::Axis::Horizontal);
     }));
     assert_eq!(
-        split.state.screen.area_count(),
+        split.state.screen().area_count(),
         before + 1,
         "the split was asked for and never happened"
     );
 
     let closed = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
         let properties = state
-            .screen
+            .screen()
             .areas()
             .into_iter()
             .find(|(_, kind)| *kind == kreate_ui::EditorKind::Properties)
@@ -527,7 +618,7 @@ fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
             .0;
         state.close_area(properties);
     }));
-    assert_eq!(closed.state.screen.area_count(), before - 1);
+    assert_eq!(closed.state.screen().area_count(), before - 1);
     assert!(!closed.state.has_editor(kreate_ui::EditorKind::Properties));
 }
 
@@ -551,7 +642,7 @@ fn a_second_viewport_does_not_show_the_first_one_s_picture() {
     let plan = screen.clone();
 
     let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
-        state.screen = plan.clone()
+        *state.screen_mut() = plan.clone()
     }));
 
     // The cube is at the centre of whichever viewport is rendering, so it is the
@@ -604,7 +695,7 @@ fn two_uv_editors_keep_their_own_view() {
     let plan = screen.clone();
 
     let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
-        state.screen = plan.clone();
+        *state.screen_mut() = plan.clone();
         state.uv = Some(kreate_ui::UvData::default());
     }));
 
@@ -668,7 +759,7 @@ fn every_area_paints_its_own_background() {
 
     let plan = layout.clone();
     let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
-        state.screen = plan.clone()
+        *state.screen_mut() = plan.clone()
     }));
 
     // The screen occupies what is left after the top bar and the status bar.
@@ -750,13 +841,13 @@ fn the_viewport_follows_the_layout_it_is_given() {
     let narrow = {
         let plan = left.clone();
         gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
-            state.screen = plan.clone()
+            *state.screen_mut() = plan.clone()
         }))
     };
     let wide = {
         let plan = right.clone();
         gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
-            state.screen = plan.clone()
+            *state.screen_mut() = plan.clone()
         }))
     };
 
@@ -912,7 +1003,7 @@ fn uv_below_viewport(state: &mut kreate::shell::ShellState) {
             kreate_ui::EditorKind::UvEditor,
         )
         .expect("the screen has one area");
-    state.screen = screen;
+    *state.screen_mut() = screen;
 }
 
 #[test]

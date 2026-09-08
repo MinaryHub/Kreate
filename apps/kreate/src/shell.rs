@@ -48,14 +48,14 @@ pub struct ShellState {
     pub queue: CommandQueue,
     /// Parameters shown in the adjust-last-operation panel.
     pub adjust_params: Option<(String, PropertyMap)>,
-    /// The layout: a tree of areas, each showing one editor.
+    /// The named layouts, and which is in use.
     ///
-    /// This replaced four `show_*` booleans and the panels that read them. The
-    /// booleans could not express the thing a user of a tool like this expects
-    /// to be able to do — put an editor where they want it, at the size they
-    /// want, and save that arrangement — and every new editor added a line to
-    /// `draw`. See `kreate_ui::area`.
-    pub screen: kreate_ui::Screen,
+    /// This replaced four `show_*` booleans and the panels that read them, and
+    /// then a single screen. The booleans could not express the thing a user of
+    /// a tool like this expects to be able to do — put an editor where they
+    /// want it, at the size they want, and *save that arrangement under a
+    /// name*. See `kreate_ui::area` and `kreate_ui::workspace`.
+    pub workspaces: kreate_ui::Workspaces,
     /// Layout changes asked for during the frame, applied after it.
     ///
     /// Editing the tree mid-frame would leave the rest of the frame drawing
@@ -190,28 +190,25 @@ enum AreaEdit {
     Split(kreate_ui::AreaId, kreate_ui::Axis),
     Close(kreate_ui::AreaId),
     Resize(kreate_ui::SplitId, f32, f32),
-}
-
-/// The layout a new session starts with.
-///
-/// A large viewport with the outliner above the properties down the right,
-/// which is where every tool in this category puts them and therefore where a
-/// user’s eye goes looking. A novel arrangement costs the user something and
-/// buys nothing.
-fn default_screen() -> kreate_ui::Screen {
-    use kreate_ui::{Axis, EditorKind, Screen};
-    let mut screen = Screen::single(EditorKind::Viewport);
-    let viewport = screen.areas()[0].0;
-    let outliner = screen
-        .split(viewport, Axis::Vertical, 0.78, EditorKind::Outliner)
-        .expect("the screen has one area to split");
-    screen
-        .split(outliner, Axis::Horizontal, 0.4, EditorKind::Properties)
-        .expect("the outliner was just created");
-    screen
+    /// Switch to another workspace. Deferred like the rest, because the frame
+    /// is drawing tabs and areas from the list this changes.
+    Switch(usize),
 }
 
 impl ShellState {
+    /// The layout on screen.
+    ///
+    /// Through the workspace rather than a field of its own, so that an edit
+    /// cannot land in a layout the user is not looking at.
+    pub fn screen(&self) -> &kreate_ui::Screen {
+        self.workspaces.screen()
+    }
+
+    /// The layout on screen, to change.
+    pub fn screen_mut(&mut self) -> &mut kreate_ui::Screen {
+        self.workspaces.screen_mut()
+    }
+
     /// The default state, with a catalogue already loaded.
     ///
     /// A constructor rather than `ShellState { catalog, ..default() }` at the
@@ -248,13 +245,18 @@ impl ShellState {
         self.area_edits.push(AreaEdit::SetEditor(area, kind));
     }
 
+    /// Asks to switch workspace when the frame ends.
+    pub fn switch_workspace(&mut self, index: usize) {
+        self.area_edits.push(AreaEdit::Switch(index));
+    }
+
     /// Whether any area is showing this editor.
     ///
     /// What the application asks instead of reading a `show_*` boolean. It is
     /// deliberately a question about the layout rather than about a setting:
     /// there is no separate notion of an editor being "on".
     pub fn has_editor(&self, kind: kreate_ui::EditorKind) -> bool {
-        self.screen.areas().iter().any(|(_, k)| *k == kind)
+        self.screen().areas().iter().any(|(_, k)| *k == kind)
     }
 
     /// The UV editor under `at`, with the state it last drew with.
@@ -263,7 +265,7 @@ impl ShellState {
     /// no UV editor is open, none has drawn yet, or the pointer is elsewhere —
     /// so they are deliberately not distinguished.
     pub fn uv_at(&self, at: egui::Pos2) -> Option<(kreate_ui::AreaId, &kreate_ui::UvState)> {
-        self.screen
+        self.screen()
             .areas()
             .into_iter()
             .filter(|(_, kind)| *kind == kreate_ui::EditorKind::UvEditor)
@@ -277,7 +279,7 @@ impl ShellState {
         for edit in std::mem::take(&mut self.area_edits) {
             match edit {
                 AreaEdit::SetEditor(area, kind) => {
-                    self.screen.set_editor(area, kind);
+                    self.screen_mut().set_editor(area, kind);
                 }
                 AreaEdit::Split(area, axis) => {
                     // The new area shows what the old one showed. Splitting is
@@ -285,20 +287,23 @@ impl ShellState {
                     // separate act, and guessing a different editor would be
                     // wrong more often than right.
                     let kind = self
-                        .screen
+                        .screen()
                         .editor(area)
                         .unwrap_or(kreate_ui::EditorKind::Viewport);
-                    self.screen.split(area, axis, 0.5, kind);
+                    self.screen_mut().split(area, axis, 0.5, kind);
                 }
                 AreaEdit::Close(area) => {
-                    if self.screen.close(area) {
+                    if self.screen_mut().close(area) {
                         // The state of an area that no longer exists would
                         // otherwise accumulate for the life of the session.
                         self.uv_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
-                    self.screen.resize(split, ratio, extent);
+                    self.screen_mut().resize(split, ratio, extent);
+                }
+                AreaEdit::Switch(index) => {
+                    self.workspaces.switch_to(index);
                 }
             }
         }
@@ -311,7 +316,7 @@ impl Default for ShellState {
             catalog: Catalog::new(),
             queue: CommandQueue::new(),
             adjust_params: None,
-            screen: default_screen(),
+            workspaces: kreate_ui::Workspaces::default(),
             area_edits: Vec::new(),
             dragging: None,
             egui_wants_keyboard: false,
@@ -913,6 +918,8 @@ pub fn draw(
                 }
             }
 
+            ui.separator();
+            draw_workspace_tabs(ui, state);
             // No panel toggles here any more. An editor is opened by
             // pointing an area at it, from that area's own header — which is
             // where the user is looking when they want to change what they are
@@ -962,7 +969,7 @@ pub fn draw(
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             let screen = ui.available_rect_before_wrap();
-            let layout = state.screen.layout(screen);
+            let layout = state.screen().layout(screen);
             drag_handles(ui, state, &layout);
 
             // Only the first viewport area gets the rendered image. Several
@@ -1170,7 +1177,7 @@ fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaR
             }
             // Disabled rather than hidden on the last area: a menu whose
             // entries come and go is a menu the user cannot learn.
-            ui.add_enabled_ui(state.screen.area_count() > 1, |ui| {
+            ui.add_enabled_ui(state.screen().area_count() > 1, |ui| {
                 if ui.button(&l.area_close).clicked() {
                     state.close_area(area.id);
                     ui.close();
@@ -1272,6 +1279,28 @@ fn drag_handles(ui: &mut Ui, state: &mut ShellState, layout: &kreate_ui::Layout)
         }
         if response.drag_stopped() {
             state.dragging = None;
+        }
+    }
+}
+
+/// The workspace tabs.
+///
+/// A row of them rather than a dropdown: switching layout is something a
+/// modeller does dozens of times an hour, and a tab is one click where a
+/// dropdown is two. It is also the only affordance that shows the *set* — a
+/// user who cannot see that other layouts exist does not go looking for them.
+fn draw_workspace_tabs(ui: &mut Ui, state: &mut ShellState) {
+    let active = state.workspaces.active_index();
+    // Collected first: the loop borrows the queue, and iterating the list while
+    // pushing to it is the same mistake the layout edits are deferred to avoid.
+    let names: Vec<String> = state
+        .workspaces
+        .iter()
+        .map(|space| space.name.clone())
+        .collect();
+    for (index, name) in names.iter().enumerate() {
+        if ui.selectable_label(index == active, name).clicked() {
+            state.switch_workspace(index);
         }
     }
 }
@@ -2137,7 +2166,7 @@ mod tests {
     fn screen_state() -> (ShellState, kreate_ui::AreaId) {
         let state = ShellState::default();
         let viewport = state
-            .screen
+            .screen()
             .areas()
             .into_iter()
             .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
@@ -2153,17 +2182,17 @@ mod tests {
         // from the tree. Applying immediately would leave every area after
         // this one placed by a layout that no longer exists.
         let (mut state, viewport) = screen_state();
-        let before = state.screen.area_count();
+        let before = state.screen().area_count();
 
         state.split_area(viewport, kreate_ui::Axis::Vertical);
         assert_eq!(
-            state.screen.area_count(),
+            state.screen().area_count(),
             before,
             "the queue acted on its own"
         );
 
         state.apply_area_edits();
-        assert_eq!(state.screen.area_count(), before + 1);
+        assert_eq!(state.screen().area_count(), before + 1);
         assert!(state.area_edits.is_empty(), "the queue was not drained");
     }
 
@@ -2174,7 +2203,7 @@ mod tests {
         // has the header dropdown for when it is not.
         let (mut state, viewport) = screen_state();
         let outliner = state
-            .screen
+            .screen()
             .areas()
             .into_iter()
             .find(|(_, kind)| *kind == kreate_ui::EditorKind::Outliner)
@@ -2182,13 +2211,13 @@ mod tests {
             .0;
 
         for area in [viewport, outliner] {
-            let was = state.screen.editor(area).expect("the area is there");
-            let known: Vec<_> = state.screen.areas();
+            let was = state.screen().editor(area).expect("the area is there");
+            let known: Vec<_> = state.screen().areas();
             state.split_area(area, kreate_ui::Axis::Horizontal);
             state.apply_area_edits();
 
             let new_area = state
-                .screen
+                .screen()
                 .areas()
                 .into_iter()
                 .find(|(id, _)| !known.iter().any(|(k, _)| k == id))
@@ -2207,7 +2236,7 @@ mod tests {
         state.split_area(viewport, kreate_ui::Axis::Horizontal);
         state.apply_area_edits();
         let extra = state
-            .screen
+            .screen()
             .areas()
             .into_iter()
             .map(|(id, _)| id)
@@ -2230,15 +2259,18 @@ mod tests {
         // The last area cannot be closed, and the state that belongs to it must
         // not be discarded on the strength of a request that did not happen.
         let mut state = ShellState {
-            screen: kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+            workspaces: kreate_ui::Workspaces::single(
+                "Only",
+                kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+            ),
             ..Default::default()
         };
-        let only = state.screen.areas()[0].0;
+        let only = state.screen().areas()[0].0;
         state.uv_views.insert(only, kreate_ui::UvState::default());
 
         state.close_area(only);
         state.apply_area_edits();
-        assert_eq!(state.screen.area_count(), 1);
+        assert_eq!(state.screen().area_count(), 1);
         assert!(
             state.uv_views.contains_key(&only),
             "the view state was discarded although the area survived"
@@ -2254,7 +2286,7 @@ mod tests {
         // outliner and the properties below it — which this test then resized
         // and reported no change to the viewport, correctly.
         let split = state
-            .screen
+            .screen()
             .layout(space)
             .handles
             .iter()
@@ -2262,7 +2294,7 @@ mod tests {
             .expect("the default layout has a vertical boundary")
             .id;
         let before = state
-            .screen
+            .screen()
             .layout(space)
             .areas
             .iter()
@@ -2277,7 +2309,7 @@ mod tests {
         state.apply_area_edits();
 
         let after = state
-            .screen
+            .screen()
             .layout(space)
             .areas
             .iter()
@@ -2297,7 +2329,7 @@ mod tests {
         // to be there — the application sizes its render target from it, and a
         // layout without one would start up showing nothing.
         let state = ShellState::default();
-        let areas = state.screen.areas();
+        let areas = state.screen().areas();
         assert!(state.has_editor(kreate_ui::EditorKind::Viewport));
         assert_eq!(areas.len(), 3, "viewport, outliner, properties");
 

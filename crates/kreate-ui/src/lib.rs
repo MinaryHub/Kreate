@@ -19,8 +19,9 @@ pub mod property_editor;
 pub mod text;
 pub mod theme;
 pub mod uv_editor;
+pub mod workspace;
 
-pub use area::{AreaId, AreaRect, Axis, EditorKind, Handle, Layout, Screen, SplitId};
+pub use area::{AreaId, AreaRect, Axis, EditorKind, Handle, Layout, NodeSpec, Screen, SplitId};
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};
 pub use keymap_editor::{keymap_editor, KeymapEdit, KeymapText};
@@ -30,3 +31,4 @@ pub use property_editor::{property_editor, property_widget, UnitDisplay};
 pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};
 pub use theme::{install as install_theme, Density, Theme};
 pub use uv_editor::{uv_editor, UvData, UvState, UvText, UvView};
+pub use workspace::{Workspace, Workspaces};

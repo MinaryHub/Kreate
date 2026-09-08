@@ -119,6 +119,42 @@ impl EditorKind {
     }
 }
 
+/// One node of a screen, in the order a pre-order walk visits them.
+///
+/// The serialised form of the tree. A pre-order sequence of a full binary tree
+/// is unambiguous — read a node, and if it is a split, read its two children
+/// the same way — which means the file needs no nesting, no brackets and no
+/// indentation to be read back exactly.
+///
+/// **Area ids are not part of it.** They are session-local handles for
+/// session-local state, and inventing them at load time is both simpler and
+/// more honest than writing numbers that mean nothing to the next run. What is
+/// lost is a UV editor's zoom across a restart, which is worth less than a
+/// format that cannot be got wrong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NodeSpec {
+    Split { axis: Axis, ratio: f32 },
+    Area { editor: EditorKind },
+}
+
+impl Axis {
+    /// A stable name for the file format.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Axis::Vertical => "v",
+            Axis::Horizontal => "h",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "v" => Some(Axis::Vertical),
+            "h" => Some(Axis::Horizontal),
+            _ => None,
+        }
+    }
+}
+
 /// How thin an area may become, in interface points.
 ///
 /// Applied when the user drags a boundary. Not applied when the *window*
@@ -250,7 +286,7 @@ impl Screen {
         // needs `&mut self` and so does the walk.
         let split_id = SplitId(self.take_id());
         let new_area = AreaId(self.take_id());
-        let ratio = ratio.clamp(0.0, 1.0);
+        let ratio = sane_ratio(ratio);
 
         let Some(node) = find_node_mut(&mut self.root, area) else {
             // Nothing was split, so the ids are spent. Harmless: they are a
@@ -296,13 +332,37 @@ impl Screen {
         // A space too small for two minimum areas cannot honour the clamp, and
         // pinning the ratio to 0.5 there at least keeps the drag continuous
         // rather than snapping to one end.
-        *r = if extent < MIN_AREA * 2.0 {
+        *r = if extent < MIN_AREA * 2.0 || !ratio.is_finite() {
             0.5
         } else {
             let low = MIN_AREA / extent;
             ratio.clamp(low, 1.0 - low)
         };
         true
+    }
+
+    /// The tree as a flat pre-order sequence.
+    pub fn to_nodes(&self) -> Vec<NodeSpec> {
+        let mut out = Vec::new();
+        flatten(&self.root, &mut out);
+        out
+    }
+
+    /// Rebuilds a screen from a pre-order sequence, with fresh area ids.
+    ///
+    /// `None` when the sequence is not exactly one tree: empty, truncated — a
+    /// split whose children are missing — or with nodes left over. A caller
+    /// reading a file should fall back to the default layout, which is what the
+    /// rest of the preferences layer does with anything it cannot make sense of:
+    /// a settings file must never be a reason the application will not start.
+    pub fn from_nodes(nodes: &[NodeSpec]) -> Option<Self> {
+        let mut next = 0u32;
+        let mut rest = nodes;
+        let root = build(&mut rest, &mut next)?;
+        // Trailing nodes mean the file described more than one tree, which is
+        // not a layout. Accepting the first and discarding the rest would give
+        // the user a screen they did not save.
+        rest.is_empty().then_some(Self { root, next })
     }
 
     /// Where everything goes, given the space the screen has.
@@ -316,6 +376,54 @@ impl Screen {
         let mut out = Layout::default();
         place(&self.root, rect, &mut out);
         out
+    }
+}
+
+fn flatten(node: &Node, out: &mut Vec<NodeSpec>) {
+    match node {
+        Node::Leaf { editor, .. } => out.push(NodeSpec::Area { editor: *editor }),
+        Node::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            out.push(NodeSpec::Split {
+                axis: *axis,
+                ratio: *ratio,
+            });
+            flatten(first, out);
+            flatten(second, out);
+        }
+    }
+}
+
+/// Consumes one node and its children from the front of `nodes`.
+fn build(nodes: &mut &[NodeSpec], next: &mut u32) -> Option<Node> {
+    let (head, tail) = nodes.split_first()?;
+    *nodes = tail;
+    match *head {
+        NodeSpec::Area { editor } => {
+            let id = AreaId(*next);
+            *next += 1;
+            Some(Node::Leaf { id, editor })
+        }
+        NodeSpec::Split { axis, ratio } => {
+            let id = SplitId(*next);
+            *next += 1;
+            // Both children, in order, or nothing: a split with one child is
+            // not a smaller tree, it is a broken one.
+            let first = Box::new(build(nodes, next)?);
+            let second = Box::new(build(nodes, next)?);
+            Some(Node::Split {
+                id,
+                axis,
+                ratio: sane_ratio(ratio),
+                first,
+                second,
+            })
+        }
     }
 }
 
@@ -405,6 +513,41 @@ fn close_in(node: &mut Node, area: AreaId) -> bool {
     close_in(first, area) || close_in(second, area)
 }
 
+/// A ratio that can be used, whatever arrived.
+///
+/// The file is text a user or another build can have written, and `clamp`
+/// answers NaN with NaN — so clamping alone leaves a NaN in the tree, and every
+/// coordinate derived from it is NaN too. An area at NaN is not drawn and cannot
+/// be clicked, and nothing says why.
+fn sane_ratio(ratio: f32) -> f32 {
+    if ratio.is_finite() {
+        ratio.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Where a boundary sits inside the space it divides.
+///
+/// Held half a handle away from both edges, because that is what stops a child
+/// coming out with a negative extent. A ratio of exactly zero or one is *legal*
+/// — `split` clamps into that range and so does the file format — and it puts
+/// the line on an edge, half a handle past the child on that side.
+/// `Rect::from_min_max` builds the inverted result without complaint, and an
+/// inverted rect is not something egui reports: the area is simply not there.
+///
+/// When the space is narrower than a handle there is no such position and the
+/// midpoint is the least bad answer: the areas come out with nothing in them,
+/// which is what a window dragged narrower than its contents should do.
+fn boundary(min: f32, extent: f32, ratio: f32) -> f32 {
+    let half = HANDLE * 0.5;
+    let (lo, hi) = (min + half, min + extent - half);
+    if lo > hi {
+        return min + extent * 0.5;
+    }
+    (min + extent * sane_ratio(ratio)).clamp(lo, hi)
+}
+
 fn place(node: &Node, rect: Rect, out: &mut Layout) {
     match node {
         Node::Leaf { id, editor } => out.areas.push(AreaRect {
@@ -422,7 +565,7 @@ fn place(node: &Node, rect: Rect, out: &mut Layout) {
             let half = HANDLE * 0.5;
             match axis {
                 Axis::Vertical => {
-                    let x = rect.min.x + rect.width() * *ratio;
+                    let x = boundary(rect.min.x, rect.width(), *ratio);
                     place(
                         first,
                         Rect::from_min_max(rect.min, Pos2::new(x - half, rect.max.y)),
@@ -444,7 +587,7 @@ fn place(node: &Node, rect: Rect, out: &mut Layout) {
                     });
                 }
                 Axis::Horizontal => {
-                    let y = rect.min.y + rect.height() * *ratio;
+                    let y = boundary(rect.min.y, rect.height(), *ratio);
                     place(
                         first,
                         Rect::from_min_max(rect.min, Pos2::new(rect.max.x, y - half)),
@@ -506,6 +649,160 @@ mod tests {
             .split(outliner, Axis::Horizontal, 0.4, EditorKind::Properties)
             .expect("split the outliner");
         (screen, [viewport, outliner, properties, uv])
+    }
+
+    #[test]
+    fn a_screen_survives_being_flattened_and_rebuilt() {
+        // The claim the file format rests on. Compared by *layout* rather than
+        // by `==`, because the ids are deliberately not preserved: what has to
+        // come back is the arrangement, not the handles.
+        let (screen, _) = nested();
+        let rebuilt = Screen::from_nodes(&screen.to_nodes()).expect("its own output");
+
+        let before = screen.layout(space());
+        let after = rebuilt.layout(space());
+        assert_eq!(before.areas.len(), after.areas.len());
+        for (a, b) in before.areas.iter().zip(&after.areas) {
+            assert_eq!(a.editor, b.editor, "editor moved");
+            assert_eq!(a.rect, b.rect, "area moved");
+        }
+        assert_eq!(before.handles.len(), after.handles.len());
+        for (a, b) in before.handles.iter().zip(&after.handles) {
+            assert_eq!(a.axis, b.axis);
+            assert_eq!(a.rect, b.rect, "boundary moved");
+        }
+    }
+
+    #[test]
+    fn a_rebuilt_screen_can_still_be_edited() {
+        // Fresh ids have to be usable and distinct. A rebuild that handed every
+        // area the same id would round-trip perfectly and then break the first
+        // time the user split anything.
+        let (screen, _) = nested();
+        let mut rebuilt = Screen::from_nodes(&screen.to_nodes()).expect("rebuilds");
+
+        let mut ids: Vec<_> = rebuilt.areas().iter().map(|(id, _)| *id).collect();
+        let count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "an id was handed out twice");
+
+        let victim = rebuilt.areas()[1].0;
+        assert!(rebuilt
+            .split(victim, Axis::Vertical, 0.5, EditorKind::Preferences)
+            .is_some());
+        assert_eq!(rebuilt.area_count(), count + 1);
+        // And the new id collides with nothing, which is what `next` is for.
+        let mut ids: Vec<_> = rebuilt.areas().iter().map(|(id, _)| *id).collect();
+        let count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), count);
+    }
+
+    #[test]
+    fn a_single_area_flattens_to_one_node() {
+        let screen = Screen::single(EditorKind::UvEditor);
+        assert_eq!(
+            screen.to_nodes(),
+            vec![NodeSpec::Area {
+                editor: EditorKind::UvEditor
+            }]
+        );
+    }
+
+    #[test]
+    fn a_broken_sequence_is_refused_rather_than_half_read() {
+        // Every way a file can be wrong. A layout is one tree exactly; the
+        // alternative to refusing is handing the user a screen they never
+        // saved, which they then have to work out how to undo.
+        assert!(Screen::from_nodes(&[]).is_none(), "empty");
+
+        // A split with no children at all, and one with only the first.
+        let split = NodeSpec::Split {
+            axis: Axis::Vertical,
+            ratio: 0.5,
+        };
+        let area = NodeSpec::Area {
+            editor: EditorKind::Viewport,
+        };
+        assert!(Screen::from_nodes(&[split]).is_none(), "no children");
+        assert!(Screen::from_nodes(&[split, area]).is_none(), "one child");
+
+        // Two trees, one after the other.
+        assert!(
+            Screen::from_nodes(&[area, area]).is_none(),
+            "trailing nodes"
+        );
+        assert!(
+            Screen::from_nodes(&[split, area, area, area]).is_none(),
+            "a whole extra area"
+        );
+
+        // And the well-formed one in the middle of all that really does work,
+        // so this is not a test that everything is refused.
+        assert!(Screen::from_nodes(&[split, area, area]).is_some());
+    }
+
+    #[test]
+    fn no_ratio_can_invert_an_area() {
+        // Found by this test. A ratio of exactly zero or one is *legal* —
+        // `split` clamps into that range and so does the file format — and it
+        // puts the boundary on an edge, half a handle past the child on that
+        // side. `Rect::from_min_max` builds the inverted result without
+        // complaint, and an inverted rect is not something egui reports: the
+        // area simply is not there, with no indication why.
+        //
+        // The out-of-range values are here because the file is text a user or
+        // another build can have written; the in-range ones are here because
+        // they were the actual defect.
+        for bad in [-1.0, 0.0, 1.0, 2.0, f32::INFINITY, f32::NAN] {
+            let nodes = [
+                NodeSpec::Split {
+                    axis: Axis::Vertical,
+                    ratio: bad,
+                },
+                NodeSpec::Area {
+                    editor: EditorKind::Viewport,
+                },
+                NodeSpec::Area {
+                    editor: EditorKind::Outliner,
+                },
+            ];
+            let screen = Screen::from_nodes(&nodes).expect("well formed");
+            let layout = screen.layout(space());
+            assert_eq!(layout.areas.len(), 2, "ratio {bad} lost an area");
+            for area in &layout.areas {
+                assert!(
+                    area.rect.width() >= 0.0 && area.rect.height() >= 0.0,
+                    "ratio {bad} inverted {:?}",
+                    area.rect
+                );
+                assert!(
+                    space().expand(1.0).contains_rect(area.rect),
+                    "ratio {bad} put {:?} outside the screen",
+                    area.rect
+                );
+            }
+            // And the boundary stays somewhere the pointer can reach it, or the
+            // user has no way to undo whatever put it there.
+            for handle in &layout.handles {
+                assert!(
+                    space().expand(1.0).contains_rect(handle.rect),
+                    "ratio {bad} put the boundary at {:?}",
+                    handle.rect
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_axis_has_a_distinct_tag_and_survives_a_round_trip() {
+        for axis in [Axis::Vertical, Axis::Horizontal] {
+            assert_eq!(Axis::from_tag(axis.tag()), Some(axis));
+        }
+        assert_ne!(Axis::Vertical.tag(), Axis::Horizontal.tag());
+        assert_eq!(Axis::from_tag("nonesuch"), None);
     }
 
     #[test]
