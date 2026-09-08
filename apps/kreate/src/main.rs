@@ -509,9 +509,14 @@ struct App {
     ///
     /// Opened on entering edit mode and dropped on leaving, so the decode
     /// happens once rather than once per operator. Lives in the application
-    /// rather than the document: it is a staging area for edits, and a document
-    /// carrying one would snapshot it into every undo step.
-    edit: Option<kreate_ops::EditSession>,
+    /// rather than the document: they are a staging area for edits, and a
+    /// document carrying one would snapshot it into every undo step.
+    ///
+    /// One per mesh, because edit mode is a set of meshes. Without that, every
+    /// operator on anything but the active mesh would decode and re-encode it —
+    /// which is the cost a session exists to avoid, put back for every object
+    /// after the first.
+    edit: kreate_ops::EditSessions,
     /// Lazily built BVHs, for auto-depth and — later — snapping and knife.
     pick: kreate::pick::PickCache,
     /// Evaluated geometry, kept between frames.
@@ -636,7 +641,7 @@ impl App {
             op_ctx: OpContext::default(),
             uv_gesture: None,
             select_mode: 2,
-            edit: None,
+            edit: kreate_ops::EditSessions::new(),
             pick: kreate::pick::PickCache::new(),
             modifiers: kreate_scene::ModifierCache::new(),
             evaluated: Vec::new(),
@@ -685,7 +690,7 @@ impl App {
         match self.history.dispatch_in_session(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             op_id,
             &params,
@@ -863,11 +868,20 @@ impl App {
         );
 
         // Opened after the selection change rather than before it, so the
-        // session starts current with the document instead of immediately stale.
-        self.edit = match (change.open_session, target) {
-            (true, Some(mesh)) => kreate_ops::EditSession::open(&self.doc, mesh),
-            _ => None,
-        };
+        // sessions start current with the document instead of immediately
+        // stale.
+        //
+        // One per mesh in edit mode, in `edit_targets` order — the same order
+        // the operators walk them in, so a multi-mesh edit is deterministic.
+        if change.open_session {
+            let meshes: Vec<_> = kreate_ops::ops::mesh::edit_targets(&self.doc)
+                .into_iter()
+                .map(|t| t.mesh)
+                .collect();
+            self.edit.open_for(&self.doc, &meshes);
+        } else {
+            self.edit.clear();
+        }
 
         // The mode decides which context a shortcut resolves in, so the
         // tooltips change with it: `X` deletes an object in one mode and
@@ -969,7 +983,12 @@ impl App {
             self.ui.uv = None;
             return;
         }
-        let Some(session) = self.edit.as_ref() else {
+        // The target's, because a UV editor shows one layout. Which mesh in
+        // edit mode that is follows the same rule everything else does: the
+        // active object, or the first selected one.
+        let session =
+            kreate_ops::ops::mesh::target_mesh(&self.doc).and_then(|mesh| self.edit.get(mesh));
+        let Some(session) = session else {
             // Outside edit mode there is no UV map to show, which the panel
             // says out loud rather than drawing an empty square.
             self.ui.uv = None;
@@ -1225,24 +1244,17 @@ impl App {
     /// document.
     fn selection_pivot(&self) -> Option<DVec3> {
         if self.op_ctx.mode == OpMode::EditMesh {
-            let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc)?;
-            let mesh = self.doc.mesh(mesh_id)?;
-            let object = self
-                .doc
-                .selection
-                .active
-                .or_else(|| self.doc.selection.objects.first().copied())?;
-            let world = self.doc.world_transform(object);
-            let verts = kreate_ops::ops::mesh::selection_vertices(mesh);
-            if verts.is_empty() {
-                return None;
-            }
-            let mut total = DVec3::ZERO;
-            for v in &verts {
-                let p = mesh.positions()[*v as usize];
-                total += DVec3::new(p.x as f64, p.y as f64, p.z as f64);
-            }
-            return Some(world.transform_point3(total / verts.len() as f64));
+            // The operator's own answer, not a second calculation of it. The
+            // gesture measures the pointer's angle and its scale factor from
+            // this point, so a pivot that disagreed with the one the transform
+            // turns about would make the mesh lag the cursor — and with several
+            // objects in edit mode the joint median is nowhere near any one
+            // object's own.
+            //
+            // Zero radius on purpose: proportional editing widens what *moves*
+            // and not what the selection's median is.
+            return kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, 0.0)
+                .map(|weighing| weighing.pivot);
         }
         let objects = &self.doc.selection.objects;
         if objects.is_empty() {
@@ -1404,7 +1416,7 @@ impl App {
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             op_id,
             &gesture.params(),
@@ -1480,15 +1492,24 @@ impl App {
         // the mesh moving at the end of every drag.
         let radius = self.proportional.unwrap_or(0.0);
         let to_world = self.doc.world_transform(active);
-        let Some(weighing) = kreate_ops::ops::mesh::weigh_selection(&doc_mesh, to_world, radius)
-        else {
+        let Some(weighing) = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, radius) else {
             return;
         };
+        // One `Deform` covers one mesh, so a drag reaching several takes the CPU
+        // path. Not a placeholder: previewing one of them and leaving the rest
+        // to the operator would put two different transforms on screen at once,
+        // which is worse than a slow frame — and the pivot the preview would use
+        // is the joint one, so the previewed mesh would be visibly turning about
+        // a point the others have not agreed to yet.
+        let [part] = &weighing.parts[..] else {
+            return;
+        };
+        if part.target.mesh != mesh_id {
+            return;
+        }
         // An object flattened by a zero scale has no way back from world space.
-        // The operator refuses the same case, so the CPU path will decline too
-        // and the drag does nothing at all — which is the honest answer for a
-        // mesh whose every vertex is already at one world point.
-        let Some(place) = kreate_render::Placement::new(to_world, weighing.median) else {
+        // The operator skips the same case, so this mesh would not move anyway.
+        let Some(place) = kreate_render::Placement::new(to_world, weighing.pivot) else {
             return;
         };
         // The one expensive thing a preview costs, and it is paid once per drag
@@ -1504,8 +1525,8 @@ impl App {
         let weights = dragpreview::spread_weights(
             &cpu.render_to_vert,
             doc_mesh.num_verts() as usize,
-            &weighing.indices,
-            &weighing.weights,
+            &part.indices,
+            &part.weights,
         );
         let Some(gfx) = self.gfx.as_mut() else { return };
         let Some((held, gpu_mesh)) = gfx.meshes.iter_mut().find(|(m, _)| Arc::ptr_eq(m, &stale))
@@ -1597,31 +1618,33 @@ impl App {
             return;
         }
         let radius = self.proportional.unwrap_or(0.0);
-        let mesh = kreate_ops::ops::mesh::target_mesh(&self.doc)
-            .and_then(|id| self.doc.mesh_arc(id).cloned());
-        let Some(mesh) = mesh else { return };
         let to_world = kreate_ops::ops::mesh::target_object(&self.doc)
             .map(|id| self.doc.world_transform(id))
             .unwrap_or(kreate_math::glam::DAffine3::IDENTITY);
-        let weighing = kreate_ops::ops::mesh::weigh_selection(&mesh, to_world, radius);
+        let weighing = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, radius);
         let Some(gfx) = self.gfx.as_mut() else { return };
-        let Some(weighing) = weighing else {
+        // A wider radius can reach a *second* mesh, and one `Deform` cannot
+        // follow it there. Giving the preview up is the honest answer: the drag
+        // finishes on the CPU path, which does reach.
+        let single = weighing.as_ref().filter(|w| w.parts.len() == 1);
+        let Some(weighing) = single else {
             gfx.restore_preview();
             return;
         };
+        let part = &weighing.parts[0];
         // The radius does not move the pivot — the median is the selection's and
         // the selection has not changed — but it is free to carry the fresh one,
         // and pinning it to what the falloff was measured with is one fewer
         // thing that can drift apart.
-        let place = kreate_render::Placement::new(to_world, weighing.median);
+        let place = kreate_render::Placement::new(to_world, weighing.pivot);
         let Some(preview) = gfx.preview.as_mut() else {
             return;
         };
         let weights = dragpreview::spread_weights(
             &preview.render_to_vert,
             preview.mesh_verts,
-            &weighing.indices,
-            &weighing.weights,
+            &part.indices,
+            &part.weights,
         );
         if let Some(place) = place {
             preview.place = place;
@@ -1685,7 +1708,7 @@ impl App {
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             session,
             &params,
@@ -1718,7 +1741,7 @@ impl App {
             if let Err(e) = self.history.update_modal(
                 &self.registry,
                 &mut self.doc,
-                self.edit.as_mut(),
+                Some(&mut self.edit),
                 &self.op_ctx,
                 &mut session,
                 &gesture.params(),
@@ -2057,7 +2080,7 @@ impl App {
     fn adopt(&mut self, document: Document) {
         self.doc = document;
         self.history = History::new();
-        self.edit = None;
+        self.edit.clear();
         self.op_ctx.mode = OpMode::Object;
 
         self.pick = kreate::pick::PickCache::default();
@@ -2758,6 +2781,11 @@ impl App {
                         params.set("element", PropertyValue::Int(hit.element as i64));
                         params.set("mode", PropertyValue::Enum(mode));
                         params.set("extend", PropertyValue::Bool(extend));
+                        // Which object the click landed on, so a second mesh in
+                        // edit mode can be selected in at all. Slot plus one,
+                        // because slot zero is a real object and the operator
+                        // reads zero as "not stated".
+                        params.set("object", PropertyValue::Int(hit.object as i64 + 1));
                         self.run_op("mesh.select_pick", params);
                     }
                     // Clicking empty space clears the selection — but not when
@@ -3363,7 +3391,12 @@ impl App {
         let Some(cursor) = self.uv_panel_cursor() else {
             return;
         };
-        let Some(session) = self.edit.as_ref() else {
+        // The target's, because a UV editor shows one layout. Which mesh in
+        // edit mode that is follows the same rule everything else does: the
+        // active object, or the first selected one.
+        let session =
+            kreate_ops::ops::mesh::target_mesh(&self.doc).and_then(|mesh| self.edit.get(mesh));
+        let Some(session) = session else {
             return;
         };
         let bm = session.bmesh();
@@ -3380,7 +3413,7 @@ impl App {
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             "uv.transform",
             &params,
@@ -3412,7 +3445,7 @@ impl App {
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             session,
             &params,

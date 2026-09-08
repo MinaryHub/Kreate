@@ -36,7 +36,7 @@
 use std::time::{Duration, Instant};
 
 use kreate_ops::operator::{Context, Mode};
-use kreate_ops::{EditSession, History, OperatorRegistry, PropertyMap, PropertyValue};
+use kreate_ops::{EditSessions, History, OperatorRegistry, PropertyMap, PropertyValue};
 use kreate_scene::document::{MeshId, Object, ObjectData};
 use kreate_scene::Document;
 
@@ -159,7 +159,13 @@ fn entering_edit_mode_stays_within_budget() {
     let _serial = serially();
     let (doc, mesh) = large_scene();
     let mut session = None;
-    let elapsed = median_time(3, || session = EditSession::open(&doc, mesh));
+    let elapsed = median_time(3, || {
+        session = {
+            let mut set = EditSessions::new();
+            set.open_for(&doc, &[mesh]);
+            Some(set)
+        }
+    });
     assert!(session.is_some());
     // Reported, not just asserted. A budget test that does not say what it
     // measured makes the next round of tuning blind — this one was tightened
@@ -187,7 +193,8 @@ fn a_click_is_not_a_pass_over_the_mesh() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // The first click warms nothing that later ones rely on; measured on its own.
     let elapsed = time(|| {
@@ -225,9 +232,10 @@ fn a_click_stays_cheap_when_repeated() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
-    let mut click = |element: i64, session: &mut EditSession, doc: &mut Document| {
+    let mut click = |element: i64, session: &mut EditSessions, doc: &mut Document| {
         history
             .dispatch_in_session(
                 &registry,
@@ -272,7 +280,8 @@ fn a_topology_edit_writes_back_within_budget() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // One face selected, so the edit itself is tiny and what is left is the
     // write-back. That is deliberate: the question is what the *crossing*
@@ -307,21 +316,45 @@ fn a_topology_edit_writes_back_within_budget() {
             )
             .expect("mesh.extrude_region");
     });
-    eprintln!("a one-face extrude on a million faces: {elapsed:?}");
-    // 188 to 387 ms depending on machine load, from 622 ms when this test was
-    // written. The write-back is still the whole cost — the edit touches one
-    // face — and the remaining time is the attribute gathers and the positions
-    // copy, which are passes over the mesh by nature rather than by accident.
+    // A reference pass over the same mesh: one visit to every corner, with
+    // arithmetic, allocating its result. Not a model of the write-back — just
+    // something of the same order that the same processor has to do at the same
+    // moment.
+    let reference = median_time(3, || {
+        let mesh = doc.mesh(mesh).expect("a mesh");
+        std::hint::black_box(mesh.compute_face_normals());
+    });
+    let ratio = elapsed.as_secs_f64() / reference.as_secs_f64();
+    eprintln!(
+        "a one-face extrude on a million faces: {elapsed:?} \
+         (reference pass {reference:?}, ratio {ratio:.1})"
+    );
+
+    // Measured as a ratio rather than in milliseconds, and that is the point of
+    // this block. The absolute figure has been 222 ms and 484 ms for the same
+    // code within a few minutes of each other, purely by machine load — which
+    // is how the 500 ms bound that used to be here came to fail. Its own
+    // comment had already admitted it could not both survive a slow run and
+    // catch the 622 ms it was written against.
     //
-    // The threshold is uncomfortably close to the figure this was written to
-    // catch, and there is no honest way to tighten it: 387 ms is this same code
-    // on a throttled machine. What it still catches is the shape — a write-back
-    // that became more than one pass — and it is stated here that it would not
-    // reliably catch the original 622 ms regression on a slow run.
+    // A ratio cannot be thrown by that: whatever throttling does to the
+    // write-back it does to the reference in the same breath. Sixteen when this
+    // was written, against roughly forty-two for the version the test exists to
+    // reject, so twenty-five sits between them with room on both sides.
+    //
+    // What it catches is still the *shape* — a write-back that became several
+    // passes over the mesh where it was a few — and now it catches it on a busy
+    // afternoon too.
     assert!(
-        elapsed < Duration::from_millis(500),
-        "a topology edit took {elapsed:?}; the write-back is the cost, not the \
-         edit"
+        ratio < 25.0,
+        "a topology edit cost {ratio:.1} reference passes ({elapsed:?} against \
+         {reference:?}); the write-back is the cost, not the edit"
+    );
+    // And a catastrophe net, loose enough to be about correctness rather than
+    // speed: something that has stopped being linear in the mesh at all.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a topology edit took {elapsed:?}; that is not a slow machine"
     );
 }
 
@@ -330,7 +363,7 @@ fn a_topology_edit_writes_back_within_budget() {
 const DRAG_DIVISIONS: u32 = 450;
 
 /// A mesh and a session with a patch of faces selected, ready to drag.
-fn drag_scene() -> (Document, MeshId, EditSession, OperatorRegistry, History) {
+fn drag_scene() -> (Document, MeshId, EditSessions, OperatorRegistry, History) {
     drag_scene_selecting((0..2_000).collect())
 }
 
@@ -338,7 +371,7 @@ fn drag_scene() -> (Document, MeshId, EditSession, OperatorRegistry, History) {
 /// index behaves, so the tests that care have to choose.
 fn drag_scene_selecting(
     elements: Vec<u32>,
-) -> (Document, MeshId, EditSession, OperatorRegistry, History) {
+) -> (Document, MeshId, EditSessions, OperatorRegistry, History) {
     let mut doc = Document::new();
     let mesh = doc.add_mesh(kreate_mesh::primitives::grid(
         10.0,
@@ -350,7 +383,8 @@ fn drag_scene_selecting(
 
     let registry = registry();
     let mut history = History::new();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
     history
         .dispatch_in_session(
             &registry,
@@ -582,7 +616,8 @@ fn a_box_select_commits_within_budget() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // A hundred thousand faces, which is what a generous drag over a dense mesh
     // resolves to.

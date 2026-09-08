@@ -40,7 +40,7 @@ use glam::Vec3;
 use kreate_mesh::attribute::names;
 
 use crate::document::{Document, MeshId};
-use crate::edit_session::EditSession;
+use crate::edit_session::EditSessions;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EditError {
@@ -131,12 +131,15 @@ pub struct DocMut<'a> {
     /// Snapshot taken lazily, only if something asks for the coarse path.
     before: Option<Box<Document>>,
     deltas: Vec<UndoPayload>,
-    /// The edit-mode structure, when one is open.
+    /// The edit-mode structures, when edit mode is open.
     ///
-    /// Carried here because this is the mutation gateway and the `BMesh` is a
+    /// Carried here because this is the mutation gateway and a `BMesh` is a
     /// staging area for mutations: an operator that reaches for one is about to
     /// change the document, and both have to be reached through the same borrow.
-    session: Option<&'a mut EditSession>,
+    ///
+    /// A set rather than one, because edit mode is a set of meshes. An operator
+    /// asks for the mesh it wants and gets that mesh's structure or nothing.
+    sessions: Option<&'a mut EditSessions>,
 }
 
 impl<'a> DocMut<'a> {
@@ -145,17 +148,17 @@ impl<'a> DocMut<'a> {
             doc,
             before: None,
             deltas: Vec::new(),
-            session: None,
+            sessions: None,
         }
     }
 
-    /// The same, with an edit session an operator may use.
-    pub fn with_session(doc: &'a mut Document, session: Option<&'a mut EditSession>) -> Self {
+    /// The same, with the edit sessions an operator may use.
+    pub fn with_sessions(doc: &'a mut Document, sessions: Option<&'a mut EditSessions>) -> Self {
         Self {
             doc,
             before: None,
             deltas: Vec::new(),
-            session,
+            sessions,
         }
     }
 
@@ -171,10 +174,7 @@ impl<'a> DocMut<'a> {
     /// every operator after a click slow instead of just the first.
     pub fn edit_bmesh(&mut self, mesh: MeshId) -> Option<&mut kreate_mesh::BMesh> {
         let doc = &*self.doc;
-        let session = self.session.as_mut()?;
-        if session.mesh() != mesh {
-            return None;
-        }
+        let session = self.sessions.as_mut()?.get_mut(mesh)?;
         if !session.matches(doc, mesh) && !session.reopen(doc) {
             return None;
         }
@@ -192,25 +192,25 @@ impl<'a> DocMut<'a> {
     /// there.
     pub fn edit_corner_edges(&mut self, mesh: MeshId) -> Option<std::sync::Arc<Vec<u32>>> {
         let doc = &*self.doc;
-        let session = self.session.as_mut()?;
-        if session.mesh() != mesh {
-            return None;
-        }
+        let session = self.sessions.as_mut()?.get_mut(mesh)?;
         if !session.matches(doc, mesh) && !session.reopen(doc) {
             return None;
         }
         Some(session.corner_edges())
     }
 
-    /// Writes the edit structure back to the document.
+    /// Writes one mesh's edit structure back to the document.
     ///
     /// Takes the coarse snapshot first, like [`DocMut::document_mut`]: a
     /// topology change is exactly what the whole-document path is for.
-    pub fn bake_edit(&mut self) -> bool {
+    ///
+    /// Named rather than implied, because edit mode holds several structures
+    /// and baking the wrong one would write a mesh nobody edited over itself.
+    pub fn bake_edit(&mut self, mesh: MeshId) -> bool {
         if self.before.is_none() {
             self.before = Some(Box::new(self.doc.clone()));
         }
-        match self.session.as_mut() {
+        match self.sessions.as_mut().and_then(|s| s.get_mut(mesh)) {
             Some(session) => session.bake(self.doc),
             None => false,
         }
