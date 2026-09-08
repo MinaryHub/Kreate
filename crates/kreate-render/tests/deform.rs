@@ -27,7 +27,26 @@
 //! belongs in a test rather than in a comment.
 
 use kreate_render::mesh_gpu::oct_decode;
-use kreate_render::{Deform, Deformer, Gesture, GpuOptions, RenderMeshCpu};
+use kreate_render::{Deform, Deformer, Gesture, GpuOptions, Placement, RenderMeshCpu};
+
+/// The object transform a fixture's mesh sits under.
+///
+/// Almost every fixture here leaves it at the identity, which is deliberate but
+/// not sufficient: local and world space are the same thing there, so a shader
+/// applying a world gesture straight to local positions passes. `OBJECT` is a
+/// real one — moved, turned and non-uniformly scaled — and the tests that use
+/// it are the ones that can tell the difference.
+fn identity() -> glam::DAffine3 {
+    glam::DAffine3::IDENTITY
+}
+
+fn awkward_object() -> glam::DAffine3 {
+    glam::DAffine3::from_scale_rotation_translation(
+        glam::DVec3::new(3.0, 0.4, 1.75),
+        glam::DQuat::from_euler(glam::EulerRot::XYZ, 0.4, -0.9, 1.3),
+        glam::DVec3::new(-3.0, 7.0, 1.0),
+    )
+}
 
 struct Gpu {
     device: wgpu::Device,
@@ -93,12 +112,7 @@ struct Shaded {
 /// once there has been a previous frame. Each gesture gets its own encoder and
 /// its own submit, so the passes really do run in order and the second frame
 /// really does see what the first one left behind.
-fn on_gpu(
-    gpu: &Gpu,
-    mesh: &kreate_mesh::MeshData,
-    weights: &[f32],
-    gestures: &[Gesture],
-) -> Shaded {
+fn on_gpu(gpu: &Gpu, mesh: &kreate_mesh::MeshData, weights: &[f32], drags: &[Drag]) -> Shaded {
     let cpu = RenderMeshCpu::extract(mesh);
     // `MeshLayouts` is owned by a viewport rather than free-standing, and this
     // is the cheapest honest way to get one: nothing is drawn, but the layouts
@@ -125,13 +139,13 @@ fn on_gpu(
     .expect("a mesh with vertices and one weight each");
     gpu.queue.submit([encoder.finish()]);
 
-    for gesture in gestures {
+    for drag in drags {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("deform frame"),
             });
-        deform.set(&gpu.queue, gesture);
+        deform.set(&gpu.queue, &drag.gesture);
         deform.dispatch(&mut encoder, &deformer);
         gpu.queue.submit([encoder.finish()]);
     }
@@ -164,44 +178,98 @@ fn to_normals(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// What a drag is: a gesture, the object it lands on, and where it turns.
+///
+/// Carried together because the CPU mirror below needs all three and a
+/// `Gesture` deliberately does not expose the placement it packed — the shader
+/// reads it and nothing else should have to unpack matrices to agree with it.
+#[derive(Clone, Copy)]
+struct Drag {
+    gesture: Gesture,
+    to_world: glam::DAffine3,
+    pivot: glam::DVec3,
+}
+
+impl Drag {
+    fn moved(offset: glam::Vec3, to_world: glam::DAffine3, pivot: glam::DVec3) -> Self {
+        Self {
+            gesture: Gesture::moved(offset, place(to_world, pivot)),
+            to_world,
+            pivot,
+        }
+    }
+    fn turned(rotation: glam::Quat, to_world: glam::DAffine3, pivot: glam::DVec3) -> Self {
+        Self {
+            gesture: Gesture::turned(rotation, place(to_world, pivot)),
+            to_world,
+            pivot,
+        }
+    }
+    fn scaled(factor: glam::Vec3, to_world: glam::DAffine3, pivot: glam::DVec3) -> Self {
+        Self {
+            gesture: Gesture::scaled(factor, place(to_world, pivot)),
+            to_world,
+            pivot,
+        }
+    }
+    fn nothing() -> Self {
+        Self {
+            gesture: Gesture::IDENTITY,
+            to_world: glam::DAffine3::IDENTITY,
+            pivot: glam::DVec3::ZERO,
+        }
+    }
+}
+
+fn place(to_world: glam::DAffine3, pivot: glam::DVec3) -> Placement {
+    Placement::new(to_world, pivot).expect("the fixture's object is invertible")
+}
+
 /// The gesture applied to the document mesh, the way `ops::mesh` applies it.
 fn deformed(
     mesh: &kreate_mesh::MeshData,
     weight_of: &impl Fn(u32) -> f32,
-    gesture: &Gesture,
+    drag: &Drag,
 ) -> kreate_mesh::MeshData {
     let mut moved = mesh.clone();
-    let pivot = glam::Vec3::new(gesture.pivot[0], gesture.pivot[1], gesture.pivot[2]);
-    let offset = glam::Vec3::new(
-        gesture.translation[0],
-        gesture.translation[1],
-        gesture.translation[2],
+    let g = &drag.gesture;
+    let offset = glam::DVec3::new(
+        g.translation[0] as f64,
+        g.translation[1] as f64,
+        g.translation[2] as f64,
     );
-    let scale = glam::Vec3::new(gesture.scale[0], gesture.scale[1], gesture.scale[2]);
-    let rotation = glam::Quat::from_array(gesture.rotation);
+    let scale = glam::DVec3::new(g.scale[0] as f64, g.scale[1] as f64, g.scale[2] as f64);
+    let rotation = glam::DQuat::from_xyzw(
+        g.rotation[0] as f64,
+        g.rotation[1] as f64,
+        g.rotation[2] as f64,
+        g.rotation[3] as f64,
+    );
+    let to_local = drag.to_world.inverse();
     for (v, p) in moved.positions_mut().iter_mut().enumerate() {
-        let w = weight_of(v as u32);
+        let w = weight_of(v as u32) as f64;
         if w == 0.0 {
             continue;
         }
+        // World in, world out — the arrangement `run_transform` uses, and for
+        // the same reason: the gesture is in world units and the mesh is in the
+        // object's own.
+        let world = drag.to_world.transform_point3(p.as_dvec3());
         // The rule §2.2 states and the shader mirrors: the *transform* is
         // blended towards the identity, not the result towards the rest
         // position. For a rotation those differ, and the difference is the whole
         // reason the gesture travels decomposed.
-        let s = glam::Vec3::ONE.lerp(scale, w);
-        let q = glam::Quat::IDENTITY.slerp(rotation, w);
-        *p = pivot + q * ((*p - pivot) * s) + offset * w;
+        let s = glam::DVec3::ONE.lerp(scale, w);
+        let q = glam::DQuat::IDENTITY.slerp(rotation, w);
+        let placed = drag.pivot + q * ((world - drag.pivot) * s) + offset * w;
+        *p = to_local.transform_point3(placed).as_vec3();
     }
     moved
 }
 
 /// The CPU's answer: deform the document, then extract as always.
-fn on_cpu(
-    mesh: &kreate_mesh::MeshData,
-    weight_of: &impl Fn(u32) -> f32,
-    gesture: &Gesture,
-) -> Shaded {
-    let cpu = RenderMeshCpu::extract(&deformed(mesh, weight_of, gesture));
+fn on_cpu(mesh: &kreate_mesh::MeshData, weight_of: &impl Fn(u32) -> f32, drag: &Drag) -> Shaded {
+    let cpu = RenderMeshCpu::extract(&deformed(mesh, weight_of, drag));
     Shaded {
         positions: cpu
             .positions
@@ -222,10 +290,10 @@ fn assert_split_holds(
     label: &str,
     mesh: &kreate_mesh::MeshData,
     weight_of: &impl Fn(u32) -> f32,
-    gesture: &Gesture,
+    drag: &Drag,
 ) {
     let rest = RenderMeshCpu::extract(mesh);
-    let after = RenderMeshCpu::extract(&deformed(mesh, weight_of, gesture));
+    let after = RenderMeshCpu::extract(&deformed(mesh, weight_of, drag));
     assert_eq!(
         rest.render_to_vert,
         after.render_to_vert,
@@ -293,9 +361,9 @@ fn both_ways(
     label: &str,
     mesh: &kreate_mesh::MeshData,
     weight_of: impl Fn(u32) -> f32,
-    gesture: Gesture,
+    drag: Drag,
 ) {
-    frames_then(gpu, label, mesh, weight_of, &[gesture]);
+    frames_then(gpu, label, mesh, weight_of, &[drag]);
 }
 
 /// Runs a whole drag, and asserts the *last* frame is the CPU's answer to the
@@ -305,12 +373,12 @@ fn frames_then(
     label: &str,
     mesh: &kreate_mesh::MeshData,
     weight_of: impl Fn(u32) -> f32,
-    gestures: &[Gesture],
+    drags: &[Drag],
 ) {
-    let last = gestures.last().expect("a drag has at least one frame");
+    let last = drags.last().expect("a drag has at least one frame");
     assert_split_holds(label, mesh, &weight_of, last);
     let weights = per_render_vertex(mesh, &weight_of);
-    let from_gpu = on_gpu(gpu, mesh, &weights, gestures);
+    let from_gpu = on_gpu(gpu, mesh, &weights, drags);
     let from_cpu = on_cpu(mesh, &weight_of, last);
     compare(label, &from_gpu, &from_cpu);
 }
@@ -362,7 +430,11 @@ fn a_move_deforms_the_same_way_on_both() {
         "move",
         &mesh,
         interior(6),
-        Gesture::moved(glam::Vec3::new(0.1, -0.05, 0.12)),
+        Drag::moved(
+            glam::Vec3::new(0.1, -0.05, 0.12),
+            identity(),
+            glam::DVec3::ZERO,
+        ),
     );
 }
 
@@ -379,9 +451,10 @@ fn a_rotation_deforms_the_same_way_on_both() {
         "rotate a whole cube",
         &mesh,
         |_| 1.0,
-        Gesture::turned(
+        Drag::turned(
             glam::Quat::from_euler(glam::EulerRot::XYZ, 0.7, -0.4, 1.1),
-            glam::Vec3::new(0.3, -0.2, 0.5),
+            identity(),
+            glam::DVec3::new(0.3, -0.2, 0.5),
         ),
     );
 }
@@ -399,9 +472,10 @@ fn a_non_uniform_scale_deforms_the_same_way_on_both() {
         "scale a whole cube",
         &mesh,
         |_| 1.0,
-        Gesture::scaled(
+        Drag::scaled(
             glam::Vec3::new(1.7, 0.4, 2.5),
-            glam::Vec3::new(-0.3, 0.4, 0.0),
+            identity(),
+            glam::DVec3::new(-0.3, 0.4, 0.0),
         ),
     );
 }
@@ -418,7 +492,11 @@ fn a_partial_scale_deforms_the_same_way_on_both() {
         "scale a grid's interior",
         &mesh,
         interior(6),
-        Gesture::scaled(glam::Vec3::new(0.85, 0.9, 1.0), glam::Vec3::ZERO),
+        Drag::scaled(
+            glam::Vec3::new(0.85, 0.9, 1.0),
+            identity(),
+            glam::DVec3::ZERO,
+        ),
     );
 }
 
@@ -441,7 +519,11 @@ fn a_weighted_rotation_deforms_the_same_way_on_both() {
         "weighted rotate",
         &mesh,
         weight_of,
-        Gesture::turned(glam::Quat::from_rotation_x(0.5), glam::Vec3::ZERO),
+        Drag::turned(
+            glam::Quat::from_rotation_x(0.5),
+            identity(),
+            glam::DVec3::ZERO,
+        ),
     );
 }
 
@@ -460,7 +542,11 @@ fn a_weighted_move_deforms_the_same_way_on_both() {
         "weighted move",
         &mesh,
         weight_of,
-        Gesture::moved(glam::Vec3::new(0.1, 0.05, 0.3)),
+        Drag::moved(
+            glam::Vec3::new(0.1, 0.05, 0.3),
+            identity(),
+            glam::DVec3::ZERO,
+        ),
     );
 }
 
@@ -478,9 +564,10 @@ fn a_weighted_scale_deforms_the_same_way_on_both() {
         "weighted scale",
         &mesh,
         weight_of,
-        Gesture::scaled(
+        Drag::scaled(
             glam::Vec3::new(1.2, 1.15, 1.6),
-            glam::Vec3::new(0.0, 0.0, -1.0),
+            identity(),
+            glam::DVec3::new(0.0, 0.0, -1.0),
         ),
     );
 }
@@ -509,7 +596,11 @@ fn a_rotation_past_a_half_turn_takes_the_shorter_arc() {
         "past a half turn",
         &mesh,
         |_| 0.5,
-        Gesture::turned(quarter_turn_past_pi, glam::Vec3::new(0.2, -0.1, 0.3)),
+        Drag::turned(
+            quarter_turn_past_pi,
+            identity(),
+            glam::DVec3::new(0.2, -0.1, 0.3),
+        ),
     );
 }
 
@@ -528,11 +619,15 @@ fn a_composed_gesture_agrees_on_the_order() {
         "composed",
         &mesh,
         |_| 1.0,
-        Gesture {
-            translation: [0.4, -0.2, 0.7, 0.0],
-            rotation: glam::Quat::from_euler(glam::EulerRot::XYZ, 0.6, 0.3, -0.9).to_array(),
-            scale: [1.4, 0.6, 2.1, 0.0],
-            pivot: [0.1, 0.5, -0.3, 0.0],
+        Drag {
+            gesture: Gesture {
+                translation: [0.4, -0.2, 0.7, 0.0],
+                rotation: glam::Quat::from_euler(glam::EulerRot::XYZ, 0.6, 0.3, -0.9).to_array(),
+                scale: [1.4, 0.6, 2.1, 0.0],
+                place: place(identity(), glam::DVec3::new(0.1, 0.5, -0.3)),
+            },
+            to_world: identity(),
+            pivot: glam::DVec3::new(0.1, 0.5, -0.3),
         },
     );
 }
@@ -556,18 +651,23 @@ fn every_frame_starts_from_the_rest_state() {
     // A pointer travelling: several frames of a move, then a turn, then the
     // frame that actually gets compared. Every one of them is a different
     // gesture, so a shader accumulating deltas ends up somewhere else entirely.
-    let target = Gesture::moved(glam::Vec3::new(0.1, 0.05, 0.25));
+    let at = |p: glam::Vec3| Drag::moved(p, identity(), glam::DVec3::ZERO);
+    let target = at(glam::Vec3::new(0.1, 0.05, 0.25));
     frames_then(
         &g,
         "a whole drag",
         &mesh,
         weight_of,
         &[
-            Gesture::IDENTITY,
-            Gesture::moved(glam::Vec3::new(0.5, 0.0, -0.4)),
-            Gesture::moved(glam::Vec3::new(-0.3, 0.8, 0.9)),
-            Gesture::turned(glam::Quat::from_rotation_y(0.4), glam::Vec3::ZERO),
-            Gesture::scaled(glam::Vec3::splat(1.6), glam::Vec3::ZERO),
+            Drag::nothing(),
+            at(glam::Vec3::new(0.5, 0.0, -0.4)),
+            at(glam::Vec3::new(-0.3, 0.8, 0.9)),
+            Drag::turned(
+                glam::Quat::from_rotation_y(0.4),
+                identity(),
+                glam::DVec3::ZERO,
+            ),
+            Drag::scaled(glam::Vec3::splat(1.6), identity(), glam::DVec3::ZERO),
             target,
         ],
     );
@@ -589,7 +689,11 @@ fn shrinking_the_proportional_radius_mid_drag_releases_what_it_let_go() {
     // this path needs rather than one it might like.
     let g = gpu_or_skip!(gpu());
     let mesh = kreate_mesh::primitives::grid(4.0, 8, 8);
-    let gesture = Gesture::moved(glam::Vec3::new(0.1, 0.05, 0.25));
+    let drag = Drag::moved(
+        glam::Vec3::new(0.1, 0.05, 0.25),
+        identity(),
+        glam::DVec3::ZERO,
+    );
 
     // Wide first, then narrow — the wheel turned the wrong way and the user
     // pulled it back.
@@ -606,7 +710,7 @@ fn shrinking_the_proportional_radius_mid_drag_releases_what_it_let_go() {
         "only {released} vertices were let go; the radius barely changed"
     );
 
-    assert_split_holds("a shrinking radius", &mesh, &narrow, &gesture);
+    assert_split_holds("a shrinking radius", &mesh, &narrow, &drag);
     let cpu = RenderMeshCpu::extract(&mesh);
     let viewport =
         kreate_render::Viewport::new(&g.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
@@ -627,7 +731,7 @@ fn shrinking_the_proportional_radius_mid_drag_releases_what_it_let_go() {
         &per_render_vertex(&mesh, &wide),
     )
     .expect("a mesh with vertices and one weight each");
-    deform.set(&g.queue, &gesture);
+    deform.set(&g.queue, &drag.gesture);
     deform.dispatch(&mut encoder, &deformer);
     g.queue.submit([encoder.finish()]);
 
@@ -652,7 +756,7 @@ fn shrinking_the_proportional_radius_mid_drag_releases_what_it_let_go() {
     compare(
         "a shrinking radius",
         &from_gpu,
-        &on_cpu(&mesh, &narrow, &gesture),
+        &on_cpu(&mesh, &narrow, &drag),
     );
 }
 
@@ -709,6 +813,71 @@ fn a_falloff_of_the_wrong_length_is_refused() {
 }
 
 #[test]
+fn a_drag_on_a_moved_and_scaled_object_deforms_the_same_way_on_both() {
+    // The case every other fixture here cannot see. Until this test the mesh
+    // was always already in world space, where local and world are the same
+    // thing — so a shader that wrote a world offset straight into local
+    // positions passed all of them, and the CPU path did exactly that for
+    // months.
+    //
+    // A move, because it is the one gesture where the error is a pure
+    // direction change: on this object a drag along world X comes out along
+    // some other axis entirely, scaled by a factor of three.
+    let g = gpu_or_skip!(gpu());
+    let mesh = kreate_mesh::primitives::grid(4.0, 6, 6);
+    both_ways(
+        &g,
+        "move a placed object",
+        &mesh,
+        interior(6),
+        Drag::moved(
+            glam::Vec3::new(0.12, -0.06, 0.09),
+            awkward_object(),
+            glam::DVec3::ZERO,
+        ),
+    );
+}
+
+#[test]
+fn a_weighted_rotation_on_a_sheared_object_deforms_the_same_way_on_both() {
+    // The case that rules out conjugating the gesture into the object's space
+    // instead of going out to the world and back. This object is non-uniformly
+    // scaled *and* rotated, so a world-axis rotation seen from its space is a
+    // shear — and no quaternion can express one. The round trip can, exactly.
+    //
+    // Weighted as well, so the slerp is evaluated between its endpoints under
+    // the conjugation rather than only at them.
+    //
+    // A small angle, and the object is why: it scales x by three and y by
+    // four tenths, so a gentle world rotation arrives in the mesh's own space
+    // as a much steeper bend. Anything larger crosses the auto-smooth angle and
+    // `assert_split_holds` stops the test — correctly, since it would then be
+    // measuring the frozen split rather than the arithmetic.
+    let g = gpu_or_skip!(gpu());
+    let mesh = kreate_mesh::primitives::grid(4.0, 8, 8);
+    let to_world = awkward_object();
+    let weight_of = falloff(&mesh, 2.5);
+    assert_graded("rotate a sheared object", &mesh, &weight_of);
+
+    // The pivot in world space, where the selection actually is — the median of
+    // the whole mesh here, which is what a select-all drag would give.
+    let positions = mesh.positions().to_vec();
+    let mut total = glam::DVec3::ZERO;
+    for p in &positions {
+        total += to_world.transform_point3(p.as_dvec3());
+    }
+    let pivot = total / positions.len() as f64;
+
+    both_ways(
+        &g,
+        "rotate a sheared object",
+        &mesh,
+        weight_of,
+        Drag::turned(glam::Quat::from_rotation_x(0.08), to_world, pivot),
+    );
+}
+
+#[test]
 fn the_identity_gesture_leaves_the_mesh_exactly_where_it_was() {
     // What the first frame of a drag uploads. Pressing `G` alone must change
     // nothing at all: a shader that wrote something slightly different would
@@ -718,7 +887,7 @@ fn the_identity_gesture_leaves_the_mesh_exactly_where_it_was() {
     let cpu = RenderMeshCpu::extract(&mesh);
     let weights = vec![1.0f32; cpu.positions.len()];
 
-    let after = on_gpu(&g, &mesh, &weights, &[Gesture::IDENTITY]);
+    let after = on_gpu(&g, &mesh, &weights, &[Drag::nothing()]);
     for (i, (a, b)) in after.positions.iter().zip(&cpu.positions).enumerate() {
         let b = glam::Vec3::from_array(b.0);
         assert!((*a - b).length() < 1e-6, "vertex {i} moved: {a:?} vs {b:?}");
@@ -744,7 +913,7 @@ fn the_shader_encodes_a_normal_the_way_the_cpu_does() {
     // Nothing moves, so the GPU recomputes the normals of the mesh as it is:
     // the CPU's own answer, run through the GPU's encoder.
     let weights = vec![0.0f32; cpu.positions.len()];
-    let after = on_gpu(&g, &mesh, &weights, &[Gesture::IDENTITY]);
+    let after = on_gpu(&g, &mesh, &weights, &[Drag::nothing()]);
 
     let mut folded = 0;
     let mut worst = 0.0f32;
@@ -821,10 +990,14 @@ fn a_crease_sharp_enough_to_split_is_the_known_limit() {
     let weight_of = interior(6);
     // Far enough out of plane that the boundary faces meet at well over the
     // thirty degrees `DEFAULT_AUTO_SMOOTH` allows.
-    let gesture = Gesture::moved(glam::Vec3::new(0.0, 0.0, 1.5));
+    let drag = Drag::moved(
+        glam::Vec3::new(0.0, 0.0, 1.5),
+        identity(),
+        glam::DVec3::ZERO,
+    );
 
     let rest = RenderMeshCpu::extract(&mesh);
-    let after = RenderMeshCpu::extract(&deformed(&mesh, &weight_of, &gesture));
+    let after = RenderMeshCpu::extract(&deformed(&mesh, &weight_of, &drag));
     assert!(
         after.positions.len() > rest.positions.len(),
         "this gesture was supposed to split vertices: {} at rest, {} after. If \

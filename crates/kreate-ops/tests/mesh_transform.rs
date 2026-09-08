@@ -6,6 +6,8 @@
 //! twice, a rotation about a pivot that sits in the wrong place, and the two
 //! operations that have nothing to do on a single point.
 
+use kreate_math::glam::{DQuat, DVec3};
+use kreate_math::DTransform;
 use kreate_mesh::attribute::{names, AttrData, Domain};
 use kreate_mesh::MeshData;
 use kreate_ops::operator::{Context, Mode};
@@ -71,6 +73,52 @@ fn select(doc: &mut Document, layer: &str, domain: Domain, on: &[usize]) {
 fn positions(doc: &Document) -> Vec<glam::Vec3> {
     let id = doc.meshes().next().expect("a mesh").0;
     doc.mesh(id).expect("mesh").positions().to_vec()
+}
+
+/// Gives the scene's one object a transform.
+///
+/// The whole reason the tests below exist: every other fixture in this file
+/// leaves it at the identity, where local and world space are the same thing
+/// and a transform applied in the wrong one is indistinguishable from a correct
+/// one.
+fn place(doc: &mut Document, transform: DTransform) {
+    let id = doc.objects().next().expect("an object").0;
+    doc.object_mut(id).expect("object").transform = transform;
+}
+
+/// Where the mesh's vertices are in the world.
+fn world_positions(doc: &Document) -> Vec<DVec3> {
+    let object = doc.objects().next().expect("an object").0;
+    let to_world = doc.world_transform(object);
+    let id = doc.meshes().next().expect("a mesh").0;
+    doc.mesh(id)
+        .expect("mesh")
+        .positions()
+        .iter()
+        .map(|p| to_world.transform_point3(p.as_dvec3()))
+        .collect()
+}
+
+/// Compares world positions to what a mesh of `f32` positions can hold.
+///
+/// The arithmetic is `f64` throughout — the parameters, the object transform and
+/// the round trip through world space — but the answer is written back into a
+/// `Vec3`, so a vertex on a scaled object several units out comes back a few
+/// parts in 10⁸ from the exact value. That is storage resolution and nothing
+/// else: every failure these tests are looking for is off by a whole unit or at
+/// a right angle.
+fn assert_close(label: &str, got: &[DVec3], want: &[DVec3]) {
+    assert_eq!(got.len(), want.len(), "{label}: vertex count");
+    let mut worst = 0.0f64;
+    for (i, (a, b)) in got.iter().zip(want).enumerate() {
+        let d = (*a - *b).length();
+        worst = worst.max(d);
+        assert!(
+            d < 1e-6,
+            "{label}: vertex {i} is at {a:?}, wanted {b:?} ({d:e} apart)"
+        );
+    }
+    eprintln!("{label}: worst {worst:e}");
 }
 
 fn run(
@@ -682,5 +730,265 @@ fn a_proportional_scale_keeps_the_selection_at_full_strength() {
     assert!(
         factor > 1.0 && factor < 2.0,
         "the neighbour scaled by {factor}"
+    );
+}
+
+// --- the space a transform happens in ---------------------------------------
+//
+// The parameters come from a pointer travelling across the view, or from a
+// typed number, and both of those mean *world* units. They were being written
+// straight into local mesh positions, so a quarter-turned object's vertices
+// moved at a right angle to the drag — and nothing noticed, because every
+// fixture in this file until now left the object at the identity.
+
+#[test]
+fn a_move_on_a_rotated_object_goes_where_the_pointer_went() {
+    let (mut doc, ctx) = scene(two_quads());
+    // A quarter turn about Z: the object's +X now points along world +Y.
+    place(
+        &mut doc,
+        DTransform {
+            rotation: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            ..DTransform::default()
+        },
+    );
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let before = world_positions(&doc);
+
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[("translation", PropertyValue::Vec3([1.0, 0.0, 0.0]))],
+    )
+    .expect("translate");
+
+    let want: Vec<DVec3> = before
+        .iter()
+        .enumerate()
+        // Face 0 is vertices 0..=3; 4 and 5 belong to the other quad.
+        .map(|(i, p)| if i < 4 { *p + DVec3::X } else { *p })
+        .collect();
+    assert_close("a move on a rotated object", &world_positions(&doc), &want);
+}
+
+#[test]
+fn a_move_on_a_scaled_object_travels_the_distance_asked_for() {
+    // The failure a rotation cannot show: under a scale of two, writing the
+    // world offset into local positions moves the vertex *twice* as far as the
+    // pointer went. Which reads as the tool being oversensitive rather than as
+    // a coordinate bug, and is the sort of thing that gets "fixed" with a fudge
+    // factor.
+    let (mut doc, ctx) = scene(two_quads());
+    place(
+        &mut doc,
+        DTransform {
+            scale: DVec3::new(2.0, 4.0, 0.5),
+            ..DTransform::default()
+        },
+    );
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let before = world_positions(&doc);
+
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[("translation", PropertyValue::Vec3([0.5, -0.25, 3.0]))],
+    )
+    .expect("translate");
+
+    let offset = DVec3::new(0.5, -0.25, 3.0);
+    let want: Vec<DVec3> = before
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if i < 4 { *p + offset } else { *p })
+        .collect();
+    assert_close("a move on a scaled object", &world_positions(&doc), &want);
+}
+
+#[test]
+fn a_rotation_on_a_moved_object_turns_about_the_selection_not_the_origin() {
+    // The pivot is the selection's median, and it has to be the median in the
+    // world: an object translated ten units away would otherwise turn about a
+    // point ten units from where the gizmo is drawn, which swings the mesh
+    // across the screen instead of turning it.
+    let (mut doc, ctx) = scene(two_quads());
+    place(
+        &mut doc,
+        DTransform {
+            translation: DVec3::new(10.0, -4.0, 2.0),
+            rotation: DQuat::from_rotation_x(0.6),
+            scale: DVec3::splat(1.5),
+        },
+    );
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let before = world_positions(&doc);
+    let pivot: DVec3 = before[..4].iter().copied().sum::<DVec3>() / 4.0;
+
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.rotate",
+        &[
+            ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+            ("axis", PropertyValue::Enum(2)),
+        ],
+    )
+    .expect("rotate");
+
+    let turn = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+    let want: Vec<DVec3> = before
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i < 4 {
+                pivot + turn * (*p - pivot)
+            } else {
+                *p
+            }
+        })
+        .collect();
+    assert_close(
+        "a rotation on a moved object",
+        &world_positions(&doc),
+        &want,
+    );
+}
+
+#[test]
+fn a_scale_on_a_sheared_object_is_still_exact() {
+    // The case that rules out folding the object's transform into the operation
+    // instead of converting per vertex. A world-axis scale conjugated into the
+    // space of a non-uniformly scaled and rotated object is a shear, which no
+    // axis-and-factor can express — so `run_transform` goes to world and back
+    // rather than trying to rewrite the gesture.
+    let (mut doc, ctx) = scene(two_quads());
+    place(
+        &mut doc,
+        DTransform {
+            translation: DVec3::new(-3.0, 7.0, 1.0),
+            rotation: DQuat::from_euler(kreate_math::glam::EulerRot::XYZ, 0.4, -0.9, 1.3),
+            scale: DVec3::new(3.0, 0.5, 1.75),
+        },
+    );
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let before = world_positions(&doc);
+    let pivot: DVec3 = before[..4].iter().copied().sum::<DVec3>() / 4.0;
+
+    let factor = DVec3::new(2.0, 0.25, 1.0);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.scale",
+        &[("scale", PropertyValue::Vec3([factor.x, factor.y, factor.z]))],
+    )
+    .expect("scale");
+
+    let want: Vec<DVec3> = before
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i < 4 {
+                pivot + (*p - pivot) * factor
+            } else {
+                *p
+            }
+        })
+        .collect();
+    assert_close("a scale on a sheared object", &world_positions(&doc), &want);
+}
+
+#[test]
+fn the_proportional_radius_is_a_world_length() {
+    // The circle the viewport draws is a world circle and the wheel adjusts a
+    // world length, so the falloff has to be measured there. On an object
+    // scaled by four, a radius measured in local space reaches a quarter as far
+    // as the circle says — and differently in each axis under a non-uniform
+    // scale, which is not a discrepancy anyone could reason about.
+    //
+    // The fixture: two quads three world units wide once the object is scaled,
+    // one vertex selected, and a radius that reaches its neighbour in world
+    // space but would not in local space.
+    let scale = 4.0;
+    let mut reached = Vec::new();
+    for local_space in [false, true] {
+        let (mut doc, ctx) = scene(two_quads());
+        place(
+            &mut doc,
+            DTransform {
+                scale: DVec3::splat(if local_space { 1.0 } else { scale }),
+                ..DTransform::default()
+            },
+        );
+        select(&mut doc, names::SELECT_VERT, Domain::Point, &[0]);
+        let before = positions(&doc);
+        // 1.5 world units: on the unscaled object that reaches vertex 1 (one
+        // unit away) and not vertex 4 (two away). On the object scaled by four,
+        // vertex 1 is four world units away and nothing but the selection
+        // should move.
+        run(
+            &mut doc,
+            &ctx,
+            "mesh.translate",
+            &[
+                ("translation", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+                ("proportional_size", PropertyValue::Float(1.5)),
+            ],
+        )
+        .expect("translate");
+        let after = positions(&doc);
+        reached.push(
+            before
+                .iter()
+                .zip(&after)
+                .filter(|(a, b)| (**a - **b).length() > 1e-6)
+                .count(),
+        );
+    }
+    let (scaled, unscaled) = (reached[0], reached[1]);
+    // The selection plus its three neighbours within 1.5 units: (1,0) and (0,1)
+    // at one, and (1,1) at 1.414. Not (2,0) or (2,1), at two and 2.236.
+    assert_eq!(
+        unscaled, 4,
+        "on an unscaled object a 1.5-unit radius should reach the three          neighbours within it"
+    );
+    assert_eq!(
+        scaled, 1,
+        "on an object scaled by {scale} the same radius reaches nothing but          the selection, because the neighbour is now {scale} world units away"
+    );
+}
+
+#[test]
+fn an_object_flattened_to_nothing_is_refused_rather_than_written_as_nan() {
+    // A zero in the scale makes the object-to-world transform singular: there
+    // is no way back from world space, and every vertex of the mesh is already
+    // at the same world point. Writing the inverse anyway fills the positions
+    // array with NaN, which is a mesh no undo can rescue because the *next*
+    // operation reads it too.
+    let (mut doc, ctx) = scene(two_quads());
+    place(
+        &mut doc,
+        DTransform {
+            scale: DVec3::new(1.0, 0.0, 1.0),
+            ..DTransform::default()
+        },
+    );
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let before = positions(&doc);
+
+    let result = run(
+        &mut doc,
+        &ctx,
+        "mesh.translate",
+        &[("translation", PropertyValue::Vec3([1.0, 1.0, 1.0]))],
+    )
+    .expect("translate");
+
+    assert_eq!(result, kreate_ops::OpResult::Cancelled);
+    assert_eq!(positions(&doc), before, "the mesh was written anyway");
+    assert!(
+        positions(&doc).iter().all(|p| p.is_finite()),
+        "the mesh has NaN in it"
     );
 }

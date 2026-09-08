@@ -112,12 +112,20 @@ fn a_click_does_not_pay_for_a_render_mesh() {
         flags * 5 < whole,
         "reading the flags took {flags:?} against {whole:?} for the whole render \n         mesh; a click is paying for geometry it does not change"
     );
-    // Below the 559 ms of the version before last — tightened as the figure
-    // came down, so it keeps catching a return of what it was written for.
-    // Not tighter than that: the load-dependent spread on this processor is
-    // about 1.5x, and a threshold inside that is testing what else ran first.
+    // The ratio above is the claim; this is a shape guard, and it has to sit
+    // outside the machine's load-dependent spread or it tests what else ran
+    // first. It did not: at 518 ms measured alone and about 1.5x that under a
+    // full `cargo test --workspace`, a 550 ms threshold was inside the spread —
+    // the very mistake the comment here used to warn about while the number
+    // committed it. So: above the loaded figure, and below the 922 ms this file
+    // was written against.
+    //
+    // Which means it catches a return to the per-corner search and not a
+    // fifty-per-cent regression. An absolute threshold on a processor that
+    // throttles cannot do better, and pretending otherwise buys a test that
+    // fails on a busy afternoon.
     assert!(
-        whole < Duration::from_millis(550),
+        whole < Duration::from_millis(850),
         "extracting a render mesh took {whole:?}; the per-corner search is back"
     );
 }

@@ -37,6 +37,17 @@ pub fn target_mesh(doc: &Document) -> Option<MeshId> {
     doc.object(active)?.mesh()
 }
 
+/// The object whose space an edit-mode operator works in.
+///
+/// The same choice `target_mesh` makes, and it has to be the same one: the
+/// transform this returns is the one that maps that mesh's vertices into the
+/// world.
+pub fn target_object(doc: &Document) -> Option<kreate_scene::document::ObjectId> {
+    doc.selection
+        .active
+        .or_else(|| doc.selection.objects.first().copied())
+}
+
 /// Runs `f` over the mesh in edit form and writes the result back.
 ///
 /// Takes the coarse undo path: every one of these changes topology, and a
@@ -304,6 +315,14 @@ fn distinct_places(positions: &[glam::Vec3], verts: &[u32]) -> usize {
 /// weights depend only on the rest positions, the selection and the radius, and
 /// none of those change during a drag. Computing them once when the gesture
 /// starts is the GPU preview path, and it is where the rest of this goes.
+///
+/// # Measured in world space
+///
+/// `positions` arrives already in world coordinates, because the radius is a
+/// world length: it is the circle the viewport draws and the number the wheel
+/// adjusts. On an object scaled by two, a falloff measured in local space would
+/// reach twice as far on screen as the circle says — and differently in each
+/// axis under a non-uniform scale.
 fn weigh_neighbourhood(
     positions: &[glam::Vec3],
     selected: &[u32],
@@ -355,13 +374,26 @@ pub struct Weighting {
     pub indices: Vec<u32>,
     /// Each one’s share of the transform. One for the selection itself.
     pub weights: Vec<f32>,
+    /// The object-to-world transform the median and the falloff were measured
+    /// with, kept so a caller applying the transform uses the same one.
+    pub to_world: glam::DAffine3,
     /// The selection’s median: what a rotation or a scale happens about.
     ///
     /// The mean rather than the bounding-box centre. For a symmetric selection
     /// they agree; for a lopsided one the mean follows where the geometry
     /// actually is, and the bounding-box centre can sit in empty space away
     /// from every vertex — which makes a rotation swing rather than turn.
-    pub median: glam::Vec3,
+    ///
+    /// **In world space**, like everything a transform operator is told. The
+    /// pointer speaks world coordinates and so does a typed number, so the
+    /// pivot has to as well or a rotation on a moved object turns about the
+    /// wrong point.
+    ///
+    /// `f64`, like the rest of the world: an object ten units out already
+    /// costs a rotation about this point 3e-7 of accuracy in `f32`, and there
+    /// is no reason to spend it when the parameters and the object transform
+    /// are both `f64` already.
+    pub median: glam::DVec3,
     /// How many distinct places the *selection* occupies.
     ///
     /// Rotate and scale refuse a selection occupying one; see
@@ -369,21 +401,43 @@ pub struct Weighting {
     pub distinct: usize,
 }
 
-pub fn weigh_selection(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Weighting> {
+/// `to_world` maps the mesh's vertices into the world, and everything this
+/// returns is measured there — see [`Weighting::median`] and
+/// [`weigh_neighbourhood`]. Pass the identity for a mesh with no object behind
+/// it, which is what a script or a test operating on bare geometry has.
+pub fn weigh_selection(
+    mesh: &kreate_mesh::MeshData,
+    to_world: glam::DAffine3,
+    radius: f64,
+) -> Option<Weighting> {
     let selected = selection_vertices(mesh);
     if selected.is_empty() {
         return None;
     }
-    let positions = mesh.positions();
-    let mut total = glam::Vec3::ZERO;
+    let local = mesh.positions();
+    let into_world = |p: glam::Vec3| to_world.transform_point3(p.as_dvec3());
+
+    let mut total = glam::DVec3::ZERO;
     for v in &selected {
-        total += positions[*v as usize];
+        total += into_world(local[*v as usize]);
     }
-    let median = total / selected.len() as f32;
-    let distinct = distinct_places(positions, &selected);
+    let median = total / selected.len() as f64;
+    // Distinctness in local space, because it is what the check means — do these
+    // vertices occupy one place — and an invertible transform cannot change the
+    // answer. A degenerate one (a zero scale) can, and would collapse them; the
+    // refusal that follows is then correct anyway.
+    let distinct = distinct_places(local, &selected);
 
     let (indices, weights) = if radius > 0.0 {
-        weigh_neighbourhood(positions, &selected, radius)
+        // The one place the whole mesh has to be transformed. Only reached with
+        // proportional editing on, and once per drag rather than once per frame
+        // now that the preview owns the frames.
+        let world: Vec<glam::Vec3> = local
+            .iter()
+            .copied()
+            .map(|p| into_world(p).as_vec3())
+            .collect();
+        weigh_neighbourhood(&world, &selected, radius)
     } else {
         // Proportional editing off, which is the default and the common case.
         // Nothing outside the selection moves, so there is nothing to measure
@@ -395,6 +449,7 @@ pub fn weigh_selection(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Weig
     Some(Weighting {
         indices,
         weights,
+        to_world,
         median,
         distinct,
     })
@@ -409,11 +464,27 @@ pub fn weigh_selection(mesh: &kreate_mesh::MeshData, radius: f64) -> Option<Weig
 ///
 /// `needs_extent` refuses a selection occupying a single place, which rotate
 /// and scale must and translate must not.
+///
+/// # World in, world out
+///
+/// `place` sees world coordinates, and its answer is brought back into the
+/// mesh's own space before it is written. Which is the only arrangement that
+/// works: the parameters come from a pointer travelling across the view, or
+/// from a typed number, and both of those mean world units. Applying a world
+/// vector to local positions — which is what this did — moves a quarter-turned
+/// object's vertices at a right angle to the drag.
+///
+/// Done per vertex as `world⁻¹(op(world(p)))` rather than by folding the
+/// object's transform into the operation, and deliberately: conjugating a world
+/// rotation into the space of a non-uniformly scaled object is a shear, which
+/// no axis-and-angle can express. Two matrix-vector products a vertex costs
+/// nothing here — the operator runs once per drag — and it is exact for any
+/// object transform, including a sheared one.
 fn run_transform(
     doc: &mut DocMut<'_>,
     radius: f64,
     needs_extent: bool,
-    place: impl Fn(glam::Vec3, f32, glam::Vec3) -> glam::Vec3,
+    place: impl Fn(glam::DVec3, f32, glam::DVec3) -> glam::DVec3,
 ) -> Result<OpResult, OpError> {
     let mesh_id =
         target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
@@ -421,10 +492,21 @@ fn run_transform(
         .document()
         .mesh(mesh_id)
         .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
-    let Some(targets) = weigh_selection(mesh, radius) else {
+    let to_world = target_object(doc.document())
+        .map(|id| doc.document().world_transform(id))
+        .unwrap_or(glam::DAffine3::IDENTITY);
+    let Some(targets) = weigh_selection(mesh, to_world, radius) else {
         return Ok(OpResult::Cancelled);
     };
     if needs_extent && targets.distinct < 2 {
+        return Ok(OpResult::Cancelled);
+    }
+    // A degenerate object transform — a zero scale in some axis — has no
+    // inverse, and every vertex of the mesh is already at the same world point.
+    // Refused rather than written as NaN, which would be a mesh nobody can
+    // recover.
+    let to_local = to_world.inverse();
+    if !to_local.is_finite() {
         return Ok(OpResult::Cancelled);
     }
 
@@ -438,7 +520,9 @@ fn run_transform(
             index, targets.indices[next],
             "a weight was paired with the wrong vertex"
         );
-        *p = place(*p, targets.weights[next], targets.median);
+        let world = to_world.transform_point3(p.as_dvec3());
+        let moved = place(world, targets.weights[next], targets.median);
+        *p = to_local.transform_point3(moved).as_vec3();
         next += 1;
     })
     .map_err(|e| OpError::Failed(e.to_string()))?;
@@ -476,13 +560,9 @@ impl Operator for TranslateSelection {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let offset = glam::Vec3::new(
-            params.translation[0] as f32,
-            params.translation[1] as f32,
-            params.translation[2] as f32,
-        );
+        let offset = glam::DVec3::from_array(params.translation);
         run_transform(doc, params.proportional_size, false, |p, weight, _| {
-            p + offset * weight
+            p + offset * weight as f64
         })
     }
 }
@@ -521,11 +601,11 @@ impl Operator for RotateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let axis = match params.axis {
-            0 => glam::Vec3::X,
-            1 => glam::Vec3::Y,
-            _ => glam::Vec3::Z,
+            0 => glam::DVec3::X,
+            1 => glam::DVec3::Y,
+            _ => glam::DVec3::Z,
         };
-        let rotation = glam::Quat::from_axis_angle(axis, params.angle as f32);
+        let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
         run_transform(doc, params.proportional_size, true, |p, weight, about| {
             // The rotation is interpolated towards the identity rather than the
             // *result* being interpolated towards the original. The two differ:
@@ -533,7 +613,7 @@ impl Operator for RotateSelection {
             // and shrinks the mesh towards the pivot, while blending the
             // rotation turns it through a smaller angle, which is what the tool
             // means.
-            let partial = glam::Quat::IDENTITY.slerp(rotation, weight);
+            let partial = glam::DQuat::IDENTITY.slerp(rotation, weight as f64);
             about + partial * (p - about)
         })
     }
@@ -587,11 +667,7 @@ impl Operator for ScaleSelection {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let factor = glam::Vec3::new(
-            params.scale[0] as f32,
-            params.scale[1] as f32,
-            params.scale[2] as f32,
-        );
+        let factor = glam::DVec3::from_array(params.scale);
         run_transform(doc, params.proportional_size, true, |p, weight, about| {
             // The factor is interpolated towards one.
             //
@@ -602,7 +678,7 @@ impl Operator for ScaleSelection {
             // and because it says what is meant — a vertex at half weight is
             // scaled half as much, rather than dragged half way to where a full
             // scale would put it.
-            let partial = glam::Vec3::ONE.lerp(factor, weight);
+            let partial = glam::DVec3::ONE.lerp(factor, weight as f64);
             about + (p - about) * partial
         })
     }
