@@ -25,6 +25,7 @@ mod aabb;
 mod axis;
 mod bvh;
 mod plane;
+mod point_tree;
 mod ray;
 mod transform;
 
@@ -32,6 +33,7 @@ pub use aabb::Aabb;
 pub use axis::{Axis, AxisConvention, Handedness, UpAxis};
 pub use bvh::{Bvh, Hit};
 pub use plane::Plane;
+pub use point_tree::{Nearest, PointTree};
 pub use ray::Ray;
 pub use transform::{DTransform, Transform};
 
