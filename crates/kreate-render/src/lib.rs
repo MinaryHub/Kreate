@@ -26,7 +26,7 @@ pub use gpu::{
 };
 pub use hiz::HiZ;
 pub use lod::{sphere_diameter_px, Budget, Detail, ViewSize};
-pub use mesh_gpu::{MeshCounts, RenderMeshCpu};
+pub use mesh_gpu::{ElementFlags, MeshCounts, RenderMeshCpu};
 pub use motion::{CameraMotion, DEFAULT_SMOOTHING, DEFAULT_TRANSITION};
 pub use picking::{PickDomain, PickHit, PickRegion, PickTarget};
 pub use region_select::{Collect, RegionSelect, SelectShape, MAX_LASSO};

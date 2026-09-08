@@ -24,4 +24,4 @@ pub use edit::{
     subdivide_faces, subdivide_selected, DeleteMode, Dissolution, Extrusion, Subdivision,
 };
 pub use mesh_data::{MeshData, Violation};
-pub use tessellate::{triangulate_polygon, Triangulation};
+pub use tessellate::{triangulate_polygon, CornerTriangulation, Triangulation};

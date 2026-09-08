@@ -833,8 +833,8 @@ impl MeshCache {
             let Some(Some((handle, gpu_mesh))) = old.get_mut(*slot) else {
                 continue;
             };
-            let cpu = RenderMeshCpu::extract(mesh);
-            if gpu_mesh.update_flags(&gpu.queue, &cpu) {
+            let flags = kreate_render::ElementFlags::extract(mesh);
+            if gpu_mesh.update_flags(&gpu.queue, &flags) {
                 *handle = mesh.clone();
             } else {
                 old[*slot] = None;

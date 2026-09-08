@@ -39,6 +39,19 @@ pub struct MeshCounts {
     pub triangles: u32,
 }
 
+impl MeshCounts {
+    /// Whether these describe the same number of vertices, edges and faces.
+    ///
+    /// Deliberately not the derived equality: the triangle count is a property
+    /// of the *triangulation*, and the flag buffers are sized by element counts
+    /// alone. Something that read only the flags off a mesh never triangulated
+    /// it and has nothing to report there, and demanding equality would refuse
+    /// every such write.
+    pub fn same_elements(&self, other: &MeshCounts) -> bool {
+        self.verts == other.verts && self.edges == other.edges && self.faces == other.faces
+    }
+}
+
 /// Per-element flag bits, shared by the vertex, edge and face flag buffers.
 ///
 /// One `u32` per element. Changing a selection is a write to *this* buffer only,
@@ -107,6 +120,109 @@ pub struct GpuPosition(pub [f32; 3]);
 /// The CPU side of a render mesh: everything derived from a [`MeshData`],
 /// laid out exactly as it will be uploaded.
 #[derive(Clone, Debug, Default)]
+/// The per-element flag buffers, and nothing else.
+///
+/// Separate from [`RenderMeshCpu`] because a selection click needs *only these*,
+/// and going through the render mesh to get them was the most expensive thing a
+/// click did: **922 ms on a million faces, measured** — triangulating,
+/// computing corner normals and splitting vertices, all of it discarded, and
+/// none of it changed by a click.
+///
+/// Which is this module's own warning arrived at from the other side. The
+/// *buffers* were split by update frequency so that a click would write three
+/// small ones; what was never split was the extraction that fills them.
+pub struct ElementFlags {
+    pub vert_flags: Vec<u32>,
+    pub edge_flags: Vec<u32>,
+    pub face_flags: Vec<u32>,
+    /// The element counts these were sized from, so a caller can refuse to
+    /// write them into buffers built for a different mesh.
+    pub counts: MeshCounts,
+}
+
+impl ElementFlags {
+    /// Reads the selection and the edge marks off a mesh.
+    pub fn extract(mesh: &MeshData) -> Self {
+        let mut flags = Self {
+            vert_flags: vec![0; mesh.num_verts() as usize],
+            edge_flags: vec![0; mesh.num_edges() as usize],
+            face_flags: vec![0; mesh.num_faces() as usize],
+            counts: MeshCounts {
+                verts: mesh.num_verts(),
+                edges: mesh.num_edges(),
+                faces: mesh.num_faces(),
+                // Not knowable without triangulating, and nothing that reads
+                // flags needs it. Zero rather than guessed, which is why the
+                // guard on a flag write is `same_elements` and not equality.
+                triangles: 0,
+            },
+        };
+        flags.read(mesh);
+        flags
+    }
+
+    /// Fills the flags from the mesh's attribute layers.
+    fn read(&mut self, mesh: &MeshData) {
+        let attrs = mesh.attributes();
+
+        if let Some(sel) = attrs.get_bool(names::SELECT_VERT) {
+            for (f, s) in self.vert_flags.iter_mut().zip(sel) {
+                set_bit(f, flags::SELECTED, *s);
+            }
+        }
+        if let Some(sel) = attrs.get_bool(names::SELECT_FACE) {
+            for (f, s) in self.face_flags.iter_mut().zip(sel) {
+                set_bit(f, flags::SELECTED, *s);
+            }
+        }
+        if let Some(sel) = attrs.get_bool(names::SELECT_EDGE) {
+            for (f, s) in self.edge_flags.iter_mut().zip(sel) {
+                set_bit(f, flags::SELECTED, *s);
+            }
+        }
+        if let Some(sharp) = attrs.get_bool(names::SHARP_EDGE) {
+            for (f, s) in self.edge_flags.iter_mut().zip(sharp) {
+                set_bit(f, flags::SHARP, *s);
+            }
+        }
+        if let Some(seam) = attrs.get_bool(names::SEAM) {
+            for (f, s) in self.edge_flags.iter_mut().zip(seam) {
+                set_bit(f, flags::SEAM, *s);
+            }
+        }
+
+        self.mark_edge_topology(mesh);
+    }
+
+    /// Flags boundary and non-manifold edges.
+    ///
+    /// Worth surfacing prominently in the viewport: a non-manifold edge is
+    /// usually a mistake, and one the user cannot see any other way until an
+    /// operation fails on it much later.
+    ///
+    /// Counted through `corner_edges`, which already answers "which edge does
+    /// this corner walk along" as a counting sort. The version before built an
+    /// `AHashMap` of every edge keyed on its endpoints and then probed it once
+    /// per corner — two million inserts and four million lookups on a million
+    /// faces, to recover a mapping the mesh can produce without hashing
+    /// anything.
+    fn mark_edge_topology(&mut self, mesh: &MeshData) {
+        let mut face_count = vec![0u32; mesh.num_edges() as usize];
+        for edge in mesh.corner_edges() {
+            // `u32::MAX` is a corner with no edge — a face that repeats a
+            // vertex, which the validator rejects but an operator may produce
+            // in an intermediate state.
+            if let Some(slot) = face_count.get_mut(edge as usize) {
+                *slot += 1;
+            }
+        }
+        for (f, count) in self.edge_flags.iter_mut().zip(&face_count) {
+            set_bit(f, flags::BOUNDARY, *count == 1);
+            set_bit(f, flags::NON_MANIFOLD, *count > 2);
+        }
+    }
+}
+
 pub struct RenderMeshCpu {
     pub positions: Vec<GpuPosition>,
     /// Octahedral-encoded vertex normals, one per vertex.
@@ -174,45 +290,82 @@ impl RenderMeshCpu {
     /// what lets a cube stay eight vertices in the document while shading
     /// correctly on screen.
     pub fn extract_with_auto_smooth(mesh: &MeshData, angle_threshold: f32) -> Self {
-        let tri = mesh.triangulate();
+        let tri = mesh.triangulate_corners();
         let corner_normals = mesh.compute_corner_normals(angle_threshold);
+        let corner_verts = mesh.corner_verts();
         let mesh_positions = mesh.positions();
+        let nverts = mesh.num_verts() as usize;
+
+        // Every corner's normal, packed once. It was packed per *triangle
+        // corner* before, so a quad's shared diagonal packed the same normal
+        // twice and an n-gon fanned into k triangles packed it k times.
+        let packed: Vec<u32> = corner_normals.iter().map(|n| oct_encode(*n)).collect();
+
+        // Corners grouped by their vertex, by counting sort. This replaces a
+        // hash map keyed on `(vertex, packed normal)` that was probed once per
+        // triangle corner — six million probes on a million faces, and the
+        // dominant cost of the whole extraction. Within a vertex the distinct
+        // normals are found by scanning its own corners, of which there are as
+        // many as the vertex has faces: four, usually.
+        let mut offsets = vec![0u32; nverts + 1];
+        for v in corner_verts {
+            offsets[*v as usize + 1] += 1;
+        }
+        for v in 0..nverts {
+            offsets[v + 1] += offsets[v];
+        }
+        let mut cursor = offsets.clone();
+        let mut incident = vec![0u32; corner_verts.len()];
+        for (corner, v) in corner_verts.iter().enumerate() {
+            let slot = &mut cursor[*v as usize];
+            incident[*slot as usize] = corner as u32;
+            *slot += 1;
+        }
 
         // Deduplicate by (mesh vertex, encoded normal). A smooth mesh collapses
         // back to one vertex each; a hard-surface one splits only where it must.
-        let mut lookup: ahash::AHashMap<(u32, u32), u32> = ahash::AHashMap::new();
-        let mut positions = Vec::with_capacity(mesh.num_verts() as usize);
-        let mut normals = Vec::with_capacity(mesh.num_verts() as usize);
-        let mut indices = Vec::with_capacity(tri.indices.len());
+        let mut positions = Vec::with_capacity(nverts);
+        let mut normals = Vec::with_capacity(nverts);
+        let mut corner_to_render = vec![u32::MAX; corner_verts.len()];
         // One representative render vertex per mesh vertex, so the overlay
         // buffers — which index mesh vertices — still resolve to a position.
-        let mut representative = vec![u32::MAX; mesh.num_verts() as usize];
+        let mut representative = vec![u32::MAX; nverts];
+        // The distinct normals of the vertex being worked on. Reused rather than
+        // reallocated per vertex, which at a million vertices is a million
+        // allocations for a list that never exceeds a vertex's face count.
+        let mut distinct: Vec<(u32, u32)> = Vec::new();
 
-        for (t, corner) in tri.indices.as_chunks::<3>().0.iter().enumerate() {
-            let face = tri.tri_to_face[t];
-            let face_verts = mesh.face_verts(face);
-            let face_start = mesh.face_corner_range(face).start;
-            for &v in corner {
-                // Which corner of the source face this triangle vertex came
-                // from. A face never repeats a vertex — the validator enforces
-                // it — so the search is unambiguous.
-                let normal = face_verts
-                    .iter()
-                    .position(|fv| *fv == v)
-                    .map(|i| corner_normals[face_start + i])
-                    .unwrap_or(Vec3::Z);
-                let packed = oct_encode(normal);
-                let index = *lookup.entry((v, packed)).or_insert_with(|| {
-                    positions.push(GpuPosition(mesh_positions[v as usize].to_array()));
-                    normals.push(packed);
-                    (positions.len() - 1) as u32
-                });
-                if representative[v as usize] == u32::MAX {
-                    representative[v as usize] = index;
-                }
-                indices.push(index);
+        for v in 0..nverts {
+            distinct.clear();
+            for &corner in &incident[offsets[v] as usize..offsets[v + 1] as usize] {
+                let normal = packed[corner as usize];
+                let index = match distinct.iter().find(|(n, _)| *n == normal) {
+                    Some((_, index)) => *index,
+                    None => {
+                        positions.push(GpuPosition(mesh_positions[v].to_array()));
+                        normals.push(normal);
+                        let index = (positions.len() - 1) as u32;
+                        distinct.push((normal, index));
+                        index
+                    }
+                };
+                corner_to_render[corner as usize] = index;
+            }
+            // Which of the split copies is named is irrelevant: they differ only
+            // in their normal.
+            if let Some((_, first)) = distinct.first() {
+                representative[v] = *first;
             }
         }
+
+        // The index buffer, now a lookup rather than a search. Corners of a
+        // degenerate face were never triangulated, so they keep `u32::MAX` and
+        // are never named here.
+        let indices: Vec<u32> = tri
+            .corners
+            .iter()
+            .map(|c| corner_to_render[*c as usize])
+            .collect();
 
         // Edges are authored against mesh vertices; point them at a render vertex
         // that shares the position. Which of the split copies is irrelevant — they
@@ -270,64 +423,19 @@ impl RenderMeshCpu {
     /// selection change re-runs only this, and only the flag buffers are
     /// re-uploaded.
     pub fn update_flags(&mut self, mesh: &MeshData) {
-        let attrs = mesh.attributes();
-
-        if let Some(sel) = attrs.get_bool(names::SELECT_VERT) {
-            for (f, s) in self.vert_flags.iter_mut().zip(sel) {
-                set_bit(f, flags::SELECTED, *s);
-            }
-        }
-        if let Some(sel) = attrs.get_bool(names::SELECT_FACE) {
-            for (f, s) in self.face_flags.iter_mut().zip(sel) {
-                set_bit(f, flags::SELECTED, *s);
-            }
-        }
-        if let Some(sel) = attrs.get_bool(names::SELECT_EDGE) {
-            for (f, s) in self.edge_flags.iter_mut().zip(sel) {
-                set_bit(f, flags::SELECTED, *s);
-            }
-        }
-        if let Some(sharp) = attrs.get_bool(names::SHARP_EDGE) {
-            for (f, s) in self.edge_flags.iter_mut().zip(sharp) {
-                set_bit(f, flags::SHARP, *s);
-            }
-        }
-        if let Some(seam) = attrs.get_bool(names::SEAM) {
-            for (f, s) in self.edge_flags.iter_mut().zip(seam) {
-                set_bit(f, flags::SEAM, *s);
-            }
-        }
-
-        self.mark_edge_topology(mesh);
-    }
-
-    /// Flags boundary and non-manifold edges.
-    ///
-    /// Worth surfacing prominently in the viewport: a non-manifold edge is
-    /// usually a mistake, and one the user cannot see any other way until an
-    /// operation fails on it much later.
-    fn mark_edge_topology(&mut self, mesh: &MeshData) {
-        let mut face_count = vec![0u32; mesh.num_edges() as usize];
-        let mut index: ahash::AHashMap<(u32, u32), u32> = ahash::AHashMap::new();
-        for (e, &[a, b]) in mesh.edges().iter().enumerate() {
-            index.insert(if a < b { (a, b) } else { (b, a) }, e as u32);
-        }
-        for f in 0..mesh.num_faces() {
-            let verts = mesh.face_verts(f);
-            for i in 0..verts.len() {
-                let (a, b) = (verts[i], verts[(i + 1) % verts.len()]);
-                if a == b {
-                    continue;
-                }
-                if let Some(&e) = index.get(&if a < b { (a, b) } else { (b, a) }) {
-                    face_count[e as usize] += 1;
-                }
-            }
-        }
-        for (f, count) in self.edge_flags.iter_mut().zip(&face_count) {
-            set_bit(f, flags::BOUNDARY, *count == 1);
-            set_bit(f, flags::NON_MANIFOLD, *count > 2);
-        }
+        // The arrays are moved out and back rather than copied: they are one
+        // per element, and a million-vertex mesh should not allocate them twice
+        // to set some bits in them.
+        let mut flags = ElementFlags {
+            vert_flags: std::mem::take(&mut self.vert_flags),
+            edge_flags: std::mem::take(&mut self.edge_flags),
+            face_flags: std::mem::take(&mut self.face_flags),
+            counts: self.counts,
+        };
+        flags.read(mesh);
+        self.vert_flags = flags.vert_flags;
+        self.edge_flags = flags.edge_flags;
+        self.face_flags = flags.face_flags;
     }
 
     /// Total GPU bytes this mesh will occupy.
@@ -585,6 +693,81 @@ mod tests {
             0,
             "the bit must clear, not stick"
         );
+    }
+
+    #[test]
+    fn the_flags_alone_agree_with_the_whole_render_mesh() {
+        // The two must not drift. A click takes the cheap path and everything
+        // else takes the full one, so a disagreement would show as a selection
+        // highlight that is right until something unrelated forces a re-upload
+        // and then changes.
+        //
+        // The fixture has a boundary, a non-manifold edge and a partial
+        // selection, because a closed cube with nothing selected has every flag
+        // at zero and two empty answers agree about everything.
+        let mut mesh = MeshData::from_faces(
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+                Vec3::new(1.0, 0.0, -1.0),
+                Vec3::new(1.0, 1.0, -1.0),
+            ],
+            // Three faces meeting at the edge 1-2: non-manifold there, and
+            // every other edge is a boundary.
+            &[vec![0, 1, 2, 3], vec![1, 4, 5, 2], vec![1, 2, 7, 6]],
+        );
+        mesh.ensure_selection_layers();
+        // One of three faces, so both a set and an unset bit are present.
+        kreate_mesh::selection::set_selected(&mut mesh, Domain::Face, 1, true);
+
+        let whole = RenderMeshCpu::extract(&mesh);
+        let alone = ElementFlags::extract(&mesh);
+
+        assert_eq!(alone.vert_flags, whole.vert_flags);
+        assert_eq!(alone.edge_flags, whole.edge_flags);
+        assert_eq!(alone.face_flags, whole.face_flags);
+        assert!(alone.counts.same_elements(&whole.counts));
+
+        // And the fixture is doing its job.
+        assert!(
+            alone
+                .edge_flags
+                .iter()
+                .any(|f| f & flags::NON_MANIFOLD != 0),
+            "no non-manifold edge, so the topology half is untested"
+        );
+        assert!(
+            alone.edge_flags.iter().any(|f| f & flags::BOUNDARY != 0),
+            "no boundary edge"
+        );
+        assert!(
+            alone.face_flags.iter().any(|f| f & flags::SELECTED != 0),
+            "nothing selected, so the selection half is untested"
+        );
+        assert!(
+            alone.face_flags.iter().any(|f| f & flags::SELECTED == 0),
+            "everything selected, so a flag stuck on would pass"
+        );
+    }
+
+    #[test]
+    fn the_flags_alone_are_refused_for_a_different_mesh() {
+        // What stops a write past the end of somebody's buffer. The counts
+        // comparison has to ignore the triangle count, which the cheap path
+        // never learns, while still catching a mesh of another shape.
+        let cube = ElementFlags::extract(&primitives::cube(1.0));
+        let sphere = RenderMeshCpu::extract(&primitives::uv_sphere(1.0, 8, 4));
+        assert!(!cube.counts.same_elements(&sphere.counts));
+
+        // And the triangle count alone is not grounds for refusal, which is the
+        // whole reason `same_elements` exists.
+        let whole_cube = RenderMeshCpu::extract(&primitives::cube(1.0));
+        assert_ne!(cube.counts, whole_cube.counts, "the triangle count differs");
+        assert!(cube.counts.same_elements(&whole_cube.counts));
     }
 
     #[test]

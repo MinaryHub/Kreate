@@ -16,7 +16,7 @@ use crate::cluster_cull::{ClusterCull, CullDraws, CullView, Pass};
 use crate::gpu::{self, DEPTH_CLEAR, DEPTH_FORMAT};
 use crate::hiz::HiZ;
 use crate::lod::{Budget, Detail, ViewSize};
-use crate::mesh_gpu::{MeshCounts, RenderMeshCpu};
+use crate::mesh_gpu::{ElementFlags, MeshCounts, RenderMeshCpu};
 use crate::palette;
 use crate::picking::PickDomain;
 use kreate_math::Aabb;
@@ -421,24 +421,27 @@ impl GpuMesh {
     /// the mesh's element counts and a selection cannot change those, so a
     /// caller reaching this with a differently shaped mesh has a topology change
     /// on its hands and needs a full upload instead.
-    pub fn update_flags(&self, queue: &wgpu::Queue, cpu: &RenderMeshCpu) -> bool {
-        if cpu.counts != self.counts {
+    pub fn update_flags(&self, queue: &wgpu::Queue, flags: &ElementFlags) -> bool {
+        // The element counts, not the whole `MeshCounts`: what arrives here may
+        // have been read off the mesh without triangulating it, so it has no
+        // triangle count to agree about. See `MeshCounts::same_elements`.
+        if !flags.counts.same_elements(&self.counts) {
             return false;
         }
         queue.write_buffer(
             &self.vert_flags,
             0,
-            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.vert_flags)),
+            bytemuck::cast_slice(&pad_if_empty_u32(&flags.vert_flags)),
         );
         queue.write_buffer(
             &self.edge_flags,
             0,
-            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.edge_flags)),
+            bytemuck::cast_slice(&pad_if_empty_u32(&flags.edge_flags)),
         );
         queue.write_buffer(
             &self.face_flags,
             0,
-            bytemuck::cast_slice(&pad_if_empty_u32(&cpu.face_flags)),
+            bytemuck::cast_slice(&pad_if_empty_u32(&flags.face_flags)),
         );
         true
     }

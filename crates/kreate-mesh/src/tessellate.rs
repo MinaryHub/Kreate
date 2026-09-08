@@ -31,6 +31,34 @@ impl Triangulation {
     }
 }
 
+/// The same triangulation, in *corner* indices rather than vertex indices.
+///
+/// A corner says both which vertex a triangle vertex is and which face it came
+/// through; a vertex index says only the first. Anything that needs a per-corner
+/// attribute — a UV, a split normal, a vertex colour — needs the second half,
+/// and recovering it from a vertex index means searching the face for it.
+///
+/// That search was real: the renderer's extraction did it for every triangle
+/// corner, six million times on a million faces, to find out something
+/// [`MeshData::triangulate`] had discarded one line earlier.
+#[derive(Clone, Debug, Default)]
+pub struct CornerTriangulation {
+    /// Corner indices, three per triangle.
+    pub corners: Vec<u32>,
+    /// Source face per triangle.
+    pub tri_to_face: Vec<u32>,
+}
+
+impl CornerTriangulation {
+    pub fn num_triangles(&self) -> usize {
+        self.tri_to_face.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tri_to_face.is_empty()
+    }
+}
+
 /// Best-fit normal of a polygon via Newell's method.
 ///
 /// Correct for non-planar n-gons, where any single cross product would depend on
@@ -169,8 +197,33 @@ impl MeshData {
     /// negligible; retriangulating affected faces once on mouse-up is correct and
     /// costs nothing per frame.
     pub fn triangulate(&self) -> Triangulation {
+        let corners = self.triangulate_corners();
+        let corner_verts = self.corner_verts();
+        Triangulation {
+            indices: corners
+                .corners
+                .iter()
+                .map(|c| corner_verts[*c as usize])
+                .collect(),
+            tri_to_face: corners.tri_to_face,
+        }
+    }
+
+    /// Triangulates every face, in corner indices.
+    ///
+    /// The primitive of the two: [`Self::triangulate`] is this plus one pass
+    /// through `corner_verts`. A caller that wants per-corner attributes should
+    /// use this and skip the round trip, because recovering a corner from a
+    /// vertex index means searching the face for it.
+    ///
+    /// Cached by the caller: this is invalidated by topology changes, **not** by
+    /// position changes. A vertex drag can technically flip the valid
+    /// triangulation of a concave n-gon, but the artifact during a drag is
+    /// negligible; retriangulating affected faces once on mouse-up is correct and
+    /// costs nothing per frame.
+    pub fn triangulate_corners(&self) -> CornerTriangulation {
         let pos = self.positions();
-        let mut tri = Triangulation::default();
+        let mut tri = CornerTriangulation::default();
         let mut local: Vec<[u32; 3]> = Vec::new();
         let mut points: Vec<Vec3> = Vec::new();
 
@@ -183,13 +236,12 @@ impl MeshData {
             points.clear();
             points.extend(verts.iter().map(|&v| pos[v as usize]));
             let count = triangulate_polygon(&points, &mut local);
+            // Local indices are into `verts`, which is the face's corner range:
+            // corner `start + i` is the vertex `verts[i]`.
+            let start = self.face_corner_range(f).start as u32;
             for t in &local {
-                // Local indices are into `verts`; map back to mesh vertices.
-                tri.indices.extend_from_slice(&[
-                    verts[t[0] as usize],
-                    verts[t[1] as usize],
-                    verts[t[2] as usize],
-                ]);
+                tri.corners
+                    .extend_from_slice(&[start + t[0], start + t[1], start + t[2]]);
             }
             tri.tri_to_face.extend(std::iter::repeat_n(f, count));
         }
@@ -201,6 +253,75 @@ impl MeshData {
 mod tests {
     use super::*;
     use crate::MeshData;
+
+    /// A mesh whose faces have different sizes and whose vertices are shared,
+    /// so a corner index and a vertex index cannot be confused for each other.
+    /// On a mesh of one triangle they coincide, and the test would prove
+    /// nothing.
+    fn mixed() -> MeshData {
+        let p = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        MeshData::from_faces(
+            vec![
+                p(0.0, 0.0),
+                p(1.0, 0.0),
+                p(2.0, 0.0),
+                p(2.0, 1.0),
+                p(1.0, 1.0),
+                p(0.0, 1.0),
+                p(3.0, 0.5),
+            ],
+            &[
+                vec![0, 1, 4, 5],
+                vec![1, 2, 3, 4],
+                vec![2, 6, 3],
+                vec![0, 1, 2, 6, 3, 4, 5],
+            ],
+        )
+    }
+
+    #[test]
+    fn the_corner_triangulation_names_the_same_vertices() {
+        // The two have to agree, because `triangulate` is now built on the
+        // other one and the renderer uses the corner form directly.
+        let mesh = mixed();
+        let verts = mesh.triangulate();
+        let corners = mesh.triangulate_corners();
+
+        assert_eq!(verts.tri_to_face, corners.tri_to_face);
+        assert_eq!(verts.indices.len(), corners.corners.len());
+        let corner_verts = mesh.corner_verts();
+        for (i, (&v, &c)) in verts.indices.iter().zip(&corners.corners).enumerate() {
+            assert_eq!(
+                corner_verts[c as usize], v,
+                "triangle vertex {i}: corner {c} is vertex {} not {v}",
+                corner_verts[c as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn a_reported_corner_belongs_to_its_own_triangle_s_face() {
+        // The property the renderer depends on and a vertex index cannot
+        // supply: the corner identifies *which face* the triangle vertex came
+        // through, which is what makes a per-corner attribute — a split normal,
+        // a UV — readable without searching the face for the vertex.
+        //
+        // A shared vertex is the case that distinguishes this from "some corner
+        // with the right vertex", so `mixed` shares every vertex between at
+        // least two faces.
+        let mesh = mixed();
+        let corners = mesh.triangulate_corners();
+        for (t, tri) in corners.corners.as_chunks::<3>().0.iter().enumerate() {
+            let face = corners.tri_to_face[t];
+            let range = mesh.face_corner_range(face);
+            for &c in tri {
+                assert!(
+                    range.contains(&(c as usize)),
+                    "triangle {t} of face {face} names corner {c}, outside {range:?}"
+                );
+            }
+        }
+    }
 
     fn area_of(points: &[Vec3], tris: &[[u32; 3]]) -> f32 {
         tris.iter()

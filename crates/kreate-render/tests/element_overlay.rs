@@ -427,9 +427,11 @@ fn changing_a_selection_needs_no_geometry_upload() {
     // mesh design rests on has stopped paying for itself.
     let selected = cube_with(Selection { faces: 6, verts: 8 });
     let Some(pixels) = render(&cube_with(Selection::default()), true, |queue, mesh| {
-        let cpu = RenderMeshCpu::extract(&selected);
+        // The flags alone, which is the path the application takes: a click
+        // must not pay to extract a render mesh it does not use.
+        let flags = kreate_render::ElementFlags::extract(&selected);
         assert!(
-            mesh.update_flags(queue, &cpu),
+            mesh.update_flags(queue, &flags),
             "a selection change must not be rejected as a topology change"
         );
     }) else {
@@ -558,7 +560,8 @@ fn a_flags_update_is_refused_when_the_topology_changed() {
     // topology change on its hands and needs a full upload — writing past the
     // end of the buffers instead would be a silent corruption.
     let rendered = render(&cube_with(Selection::default()), true, |queue, mesh| {
-        let other = RenderMeshCpu::extract(&kreate_mesh::primitives::uv_sphere(1.0, 8, 4));
+        let other =
+            kreate_render::ElementFlags::extract(&kreate_mesh::primitives::uv_sphere(1.0, 8, 4));
         assert!(
             !mesh.update_flags(queue, &other),
             "a differently shaped mesh must be refused"

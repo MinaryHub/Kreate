@@ -1859,8 +1859,11 @@ impl App {
             let Some(Some((held, gpu_mesh))) = old.get_mut(*slot) else {
                 continue;
             };
-            let cpu = RenderMeshCpu::extract(mesh);
-            if gpu_mesh.update_flags(&gfx.gpu.queue, &cpu) {
+            // The flags alone. Extracting the whole render mesh to reach
+            // them cost 922 ms on a million faces, and a click changes none of
+            // it: not the triangulation, not the normals, not the split.
+            let flags = kreate_render::ElementFlags::extract(mesh);
+            if gpu_mesh.update_flags(&gfx.gpu.queue, &flags) {
                 *held = mesh.clone();
             } else {
                 // The element counts moved, so this was not a selection change
