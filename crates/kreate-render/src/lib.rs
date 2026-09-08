@@ -7,6 +7,7 @@ pub mod camera;
 pub mod capability;
 pub mod cluster;
 pub mod cluster_cull;
+pub mod deform;
 pub mod gpu;
 pub mod hiz;
 pub mod lod;
@@ -21,6 +22,7 @@ pub use camera::{Camera, OrbitStyle, Projection, ViewAxis};
 pub use capability::{Capabilities, Tier};
 pub use cluster::{is_occluded, survives, Cluster, ClusterMesh, Frustum, PyramidData, WorldSphere};
 pub use cluster_cull::{ClusterCull, CullSlot, VERTICES_PER_CLUSTER};
+pub use deform::{Deform, Deformer, Gesture};
 pub use gpu::{
     AdapterSummary, Gpu, GpuError, GpuOptions, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };
