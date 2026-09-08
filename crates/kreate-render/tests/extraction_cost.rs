@@ -73,17 +73,24 @@ fn a_click_does_not_pay_for_a_render_mesh() {
     //
     // **A drag.** A frame that moves vertices rebuilds the positions and the
     // normals, and that goes through the whole extraction. **922 ms when first
-    // measured, now 559**: it did a hash-map probe and a linear search of the
-    // source face for every triangle corner — six million of each — to recover
-    // which corner a triangle vertex came from, which `triangulate_corners` now
-    // simply reports.
+    // measured, then 559, now 377.** Two things were searching for what they
+    // had already been told:
     //
-    // That is nowhere near a frame and this does not pretend otherwise. What
-    // remains is dominated by `compute_corner_normals`, which floods the smooth
-    // group per *corner* rather than per vertex: **401 ms of the 559.** §4.5's
-    // answer is that a drag should not come through here at all — the GPU
-    // transforms an immutable rest-position buffer and the CPU uploads one small
-    // uniform — so this budget guards the shape, not the speed.
+    // - the extraction probed a hash map and linearly searched the source face
+    //   for every triangle corner — six million of each — to recover which
+    //   corner a triangle vertex came from, which `triangulate_corners` now
+    //   simply reports;
+    // - `compute_corner_normals` flood-filled the smooth group once per
+    //   *corner*, asking the same question for every corner of every vertex.
+    //   Written as connected components over edges it is **111 ms against 401**.
+    //
+    // Where the 377 goes, measured on this machine: triangulation 137,
+    // corner normals 111, the flags 28, and the rest in the counting sort and
+    // the vertex split. Still nowhere near a frame, and this does not pretend
+    // otherwise: §4.5's answer is that a drag should not come through here at
+    // all — the GPU transforms an immutable rest-position buffer and the CPU
+    // uploads one small uniform — so this budget guards the shape, not the
+    // speed.
     if !measurable() {
         return;
     }
@@ -105,11 +112,12 @@ fn a_click_does_not_pay_for_a_render_mesh() {
         flags * 5 < whole,
         "reading the flags took {flags:?} against {whole:?} for the whole render \n         mesh; a click is paying for geometry it does not change"
     );
-    // Below the 922 ms this was written to catch and above anything the machine
-    // has produced since. The load-dependent spread on this processor is about
-    // 1.5x, so a tighter threshold would be testing what else ran first.
+    // Below the 559 ms of the version before last — tightened as the figure
+    // came down, so it keeps catching a return of what it was written for.
+    // Not tighter than that: the load-dependent spread on this processor is
+    // about 1.5x, and a threshold inside that is testing what else ran first.
     assert!(
-        whole < Duration::from_millis(800),
+        whole < Duration::from_millis(550),
         "extracting a render mesh took {whole:?}; the per-corner search is back"
     );
 }

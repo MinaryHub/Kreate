@@ -735,127 +735,146 @@ impl MeshData {
     /// touch each other, so smoothing leaks straight across it. The symptom is a
     /// shading seam that ignores the sharp edge the user just marked, which
     /// reads as the mark not working rather than as an averaging bug.
+    /// A normal per corner, split where shading must break.
+    ///
+    /// # The shape of the problem
+    ///
+    /// A corner's normal is the average of the face normals in its *smooth
+    /// group*: the faces around its vertex reachable without crossing a break.
+    /// So the question is one of connected components, and the thing that
+    /// breaks a group is a property of an **edge** — marked sharp, creased past
+    /// the threshold, or with anything other than two faces on it.
+    ///
+    /// Written as such, the whole computation is a union-find over corners with
+    /// one pass per edge. It used to be a flood fill *per corner*, which asked
+    /// the same question once for every corner of every vertex and answered it
+    /// by searching each candidate face's ring for the vertex. **401 ms on a
+    /// million faces, measured, of a 559 ms render-mesh extraction.**
+    ///
+    /// # Why corners rather than faces
+    ///
+    /// A component has to be per (vertex, face) pair, not per face: two faces
+    /// can be smooth across one shared edge and split across another, at a
+    /// different vertex. A corner *is* that pair, and a face never repeats a
+    /// vertex — the validator enforces it — so each face contributes exactly one
+    /// corner, and therefore exactly one normal, to each group it is in.
+    ///
+    /// # Non-manifold edges break the group
+    ///
+    /// An edge with three or more faces has no well-defined "the other side",
+    /// and the old flood fill joined across it in whatever order it happened to
+    /// walk. Breaking is the deterministic answer, it is what other tools of
+    /// this kind do, and a non-manifold edge is usually a mistake the user
+    /// wants to see rather than have smoothed over.
     pub fn compute_corner_normals(&self, angle_threshold: f32) -> Vec<Vec3> {
         let face_normals = self.compute_face_normals();
         let unit: Vec<Vec3> = face_normals.iter().map(|n| n.normalize_or_zero()).collect();
         let cos_threshold = angle_threshold.cos();
         let smooth = self.attributes.get_bool(names::SHADE_SMOOTH);
+        // Read straight off the edge domain. The old version rebuilt a sorted
+        // list of vertex pairs and binary-searched it once per candidate,
+        // because the flood fill only knew the two vertices; an edge index
+        // knows the edge.
+        let sharp = self.attributes.get_bool(names::SHARP_EDGE);
+        let corner_edges = self.corner_edges();
+        let corners = self.corner_verts.len();
 
-        // Sharp edges, as sorted vertex pairs for binary search. Sorted rather
-        // than hashed because this decides the output geometry's shading and a
-        // per-run hash seed would make it depend on which run it was.
-        let mut sharp: Vec<[u32; 2]> = Vec::new();
-        if let Some(flags) = self.attributes.get_bool(names::SHARP_EDGE) {
-            for (edge, &is_sharp) in self.edges.iter().zip(flags) {
-                if is_sharp {
-                    let mut key = *edge;
-                    key.sort_unstable();
-                    sharp.push(key);
-                }
-            }
-            sharp.sort_unstable();
-        }
-        let is_sharp = |a: u32, b: u32| -> bool {
-            if sharp.is_empty() {
-                return false;
-            }
-            let mut key = [a, b];
-            key.sort_unstable();
-            sharp.binary_search(&key).is_ok()
-        };
-
-        // Which faces touch each vertex, as CSR so the inner loop is a slice.
-        let mut counts = vec![0u32; self.num_verts() as usize + 1];
-        for &v in self.corner_verts.iter() {
-            counts[v as usize + 1] += 1;
-        }
-        for i in 1..counts.len() {
-            counts[i] += counts[i - 1];
-        }
-        let offsets = counts.clone();
-        let mut cursor = counts;
-        let mut adjacent = vec![0u32; self.corner_verts.len()];
+        // Which face each corner belongs to, and which corner comes next round
+        // that face. Both in one pass, because the union loop below reads them
+        // millions of times and neither is worth working out again there: the
+        // first version asked `face_of_corner`, a binary search over the CSR
+        // offsets, twice per edge.
+        let mut corner_face = vec![0u32; corners];
+        let mut next_corner = vec![0u32; corners];
         for f in 0..self.num_faces() {
-            for &v in self.face_verts(f) {
-                adjacent[cursor[v as usize] as usize] = f;
-                cursor[v as usize] += 1;
+            let range = self.face_corner_range(f);
+            for c in range.clone() {
+                corner_face[c] = f;
+                next_corner[c] = if c + 1 < range.end {
+                    c as u32 + 1
+                } else {
+                    range.start as u32
+                };
             }
         }
 
-        /// The two vertices a face's ring reaches from `v`, i.e. the far ends of
-        /// its two edges at that corner.
-        fn neighbours_at(ring: &[u32], v: u32) -> Option<[u32; 2]> {
-            let n = ring.len();
-            let i = ring.iter().position(|&x| x == v)?;
-            Some([ring[(i + n - 1) % n], ring[(i + 1) % n]])
+        // Corners grouped by the edge they walk along, by counting sort. For a
+        // manifold edge there are exactly two.
+        let num_edges = self.edges.len();
+        let mut offsets = vec![0u32; num_edges + 1];
+        for e in corner_edges.iter() {
+            if (*e as usize) < num_edges {
+                offsets[*e as usize + 1] += 1;
+            }
+        }
+        for e in 0..num_edges {
+            offsets[e + 1] += offsets[e];
+        }
+        let mut cursor = offsets.clone();
+        let mut by_edge = vec![0u32; offsets[num_edges] as usize];
+        for (corner, e) in corner_edges.iter().enumerate() {
+            if (*e as usize) < num_edges {
+                let slot = &mut cursor[*e as usize];
+                by_edge[*slot as usize] = corner as u32;
+                *slot += 1;
+            }
         }
 
-        let mut out = Vec::with_capacity(self.corner_verts.len());
-        // Reused across corners so the walk allocates once rather than per
-        // corner; a vertex fan is small but there is one per corner.
-        let mut group: Vec<u32> = Vec::new();
-        let mut queue: Vec<u32> = Vec::new();
+        let mut groups = Components::new(corners);
+        for e in 0..num_edges {
+            if sharp.is_some_and(|s| s.get(e).copied().unwrap_or(false)) {
+                continue;
+            }
+            let here = &by_edge[offsets[e] as usize..offsets[e + 1] as usize];
+            // Exactly two faces, or there is nothing to join across: one is a
+            // boundary, three or more is non-manifold and breaks the group.
+            let [c0, c1] = match here {
+                [a, b] => [*a as usize, *b as usize],
+                _ => continue,
+            };
+            let (f0, f1) = (corner_face[c0] as usize, corner_face[c1] as usize);
+            let is_smooth = |f: usize| smooth.is_some_and(|s| !s[f]).eq(&false);
+            if !is_smooth(f0) || !is_smooth(f1) {
+                continue;
+            }
+            // A crease as steep as the threshold breaks the group just as a
+            // sharp edge does, so an auto-smooth angle needs no marks on the
+            // mesh to take effect.
+            if unit[f0].dot(unit[f1]) < cos_threshold {
+                continue;
+            }
+            // The two corners at each end of the edge. `c` sits at the edge's
+            // first vertex as its own face traverses it, and the next corner
+            // round that face sits at the other end — so which pairs with which
+            // depends on whether the two faces wind the same way.
+            let (n0, n1) = (next_corner[c0] as usize, next_corner[c1] as usize);
+            if self.corner_verts[c0] == self.corner_verts[c1] {
+                groups.union(c0, c1);
+                groups.union(n0, n1);
+            } else {
+                groups.union(c0, n1);
+                groups.union(n0, c1);
+            }
+        }
 
-        for f in 0..self.num_faces() {
-            let face_is_smooth = smooth.map(|s| s[f as usize]).unwrap_or(true);
-            for &v in self.face_verts(f) {
-                if !face_is_smooth {
-                    out.push(unit[f as usize]);
-                    continue;
-                }
-                let fan = &adjacent[offsets[v as usize] as usize..offsets[v as usize + 1] as usize];
-
-                group.clear();
-                queue.clear();
-                group.push(f);
-                queue.push(f);
-                while let Some(current) = queue.pop() {
-                    let Some(from) = neighbours_at(self.face_verts(current), v) else {
-                        continue;
-                    };
-                    for &g in fan {
-                        if group.contains(&g) {
-                            continue;
-                        }
-                        if !smooth.map(|s| s[g as usize]).unwrap_or(true) {
-                            continue;
-                        }
-                        // A crease as steep as the threshold breaks the group
-                        // just as a sharp edge does, so an auto-smooth angle
-                        // needs no marks on the mesh to take effect.
-                        if unit[current as usize].dot(unit[g as usize]) < cos_threshold {
-                            continue;
-                        }
-                        let Some(to) = neighbours_at(self.face_verts(g), v) else {
-                            continue;
-                        };
-                        // Fan-adjacent: they share one of the edges at `v`.
-                        let shared = to.iter().find(|w| from.contains(w));
-                        if let Some(&w) = shared {
-                            if !is_sharp(v, w) {
-                                group.push(g);
-                                queue.push(g);
-                            }
-                        }
-                    }
-                }
-
-                let mut n = Vec3::ZERO;
-                for &g in &group {
-                    // Unnormalised, so the average is area-weighted: a strip of
-                    // slivers beside one large quad should not outvote the quad.
-                    n += face_normals[g as usize];
-                }
+        // Unnormalised, so the average is area-weighted: a strip of slivers
+        // beside one large quad should not outvote the quad.
+        let mut sums = vec![Vec3::ZERO; corners];
+        for c in 0..corners {
+            sums[groups.find(c)] += face_normals[corner_face[c] as usize];
+        }
+        (0..corners)
+            .map(|c| {
+                let n = sums[groups.find(c)];
                 // Falling back to the face's own normal keeps a degenerate
                 // neighbourhood from producing a zero normal and a black face.
-                out.push(if n == Vec3::ZERO {
-                    unit[f as usize]
+                if n == Vec3::ZERO {
+                    unit[corner_face[c] as usize]
                 } else {
                     n.normalize_or_zero()
-                });
-            }
-        }
-        out
+                }
+            })
+            .collect()
     }
 
     pub fn bounds(&self) -> kreate_math::Aabb {
@@ -994,6 +1013,144 @@ impl MeshData {
 impl Default for MeshData {
     fn default() -> Self {
         Self::empty()
+    }
+}
+
+/// Disjoint sets over `0..n`, for grouping corners into smooth groups.
+///
+/// Union by size with path halving. Written here rather than taken from a crate
+/// because it is twenty lines and the mesh kernel's dependency list is a thing
+/// the plan asks to keep short.
+struct Components {
+    parent: Vec<u32>,
+    size: Vec<u32>,
+}
+
+impl Components {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n as u32).collect(),
+            size: vec![1; n],
+        }
+    }
+
+    /// The root of `i`'s set.
+    ///
+    /// **The loop is not reachable by anything here, and that is worth saying
+    /// rather than leaving to look covered.** Union by size and path halving
+    /// between them keep the trees so shallow that a sweep replacing this
+    /// `while` with a single `if` failed no test: unioning a line of a thousand
+    /// elements produces a *star*, because each merge attaches a singleton to a
+    /// root, and halving jumps two levels whenever it is deeper than that.
+    ///
+    /// It stays a loop because that is what makes `find` correct on its own,
+    /// independently of the two things that happen to keep the trees flat. A
+    /// version that depends on them is one that breaks when either is changed
+    /// for a reason unrelated to it.
+    fn find(&mut self, mut i: usize) -> usize {
+        while self.parent[i] as usize != i {
+            // Path halving: point at the grandparent as we go, which flattens
+            // the tree without a second pass.
+            let grand = self.parent[self.parent[i] as usize];
+            self.parent[i] = grand;
+            i = grand as usize;
+        }
+        i
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (mut a, mut b) = (self.find(a), self.find(b));
+        if a == b {
+            return;
+        }
+        // The smaller tree hangs off the larger, which is what keeps `find`
+        // shallow. It changes no answer — a sweep removing it failed nothing,
+        // correctly — only how deep the trees get.
+        if self.size[a] < self.size[b] {
+            std::mem::swap(&mut a, &mut b);
+        }
+        self.parent[b] = a as u32;
+        self.size[a] += self.size[b];
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::Components;
+
+    #[test]
+    fn a_chain_of_unions_still_finds_one_root() {
+        // The disjoint sets on their own, because the shading fixtures barely
+        // exercise them: a vertex fan is four or five faces.
+        //
+        // What this does *not* reach is `find`'s loop. Unioning in a line looks
+        // like the shape that makes a tree deep and is not: each merge attaches
+        // a singleton to a root, so the result is a star. See `find`, which says
+        // so and says why the loop stays anyway.
+        let n = 1000;
+        let mut c = Components::new(n);
+        for i in 1..n {
+            c.union(i - 1, i);
+        }
+        let root = c.find(0);
+        for i in 0..n {
+            assert_eq!(c.find(i), root, "{i} is in a different set from 0");
+        }
+    }
+
+    #[test]
+    fn the_order_of_the_unions_does_not_change_the_sets() {
+        // Two sets built the same way in opposite orders have to come out the
+        // same. Union by size chooses which root survives, so an implementation
+        // that let the order matter would give a different *root* — which is
+        // fine — but must never give different *membership*.
+        let mut forwards = Components::new(64);
+        for i in 1..32 {
+            forwards.union(i - 1, i);
+        }
+        for i in 33..64 {
+            forwards.union(i - 1, i);
+        }
+
+        let mut backwards = Components::new(64);
+        for i in (1..32).rev() {
+            backwards.union(i, i - 1);
+        }
+        for i in (33..64).rev() {
+            backwards.union(i, i - 1);
+        }
+
+        for a in 0..64 {
+            for b in 0..64 {
+                assert_eq!(
+                    forwards.find(a) == forwards.find(b),
+                    backwards.find(a) == backwards.find(b),
+                    "{a} and {b} disagree about being in one set"
+                );
+            }
+        }
+        // And the two sets really are two, split at the element nothing joined.
+        assert_ne!(forwards.find(0), forwards.find(63));
+        assert_ne!(forwards.find(0), forwards.find(32));
+    }
+
+    #[test]
+    fn an_element_starts_in_a_set_of_its_own() {
+        let mut c = Components::new(4);
+        let roots: Vec<usize> = (0..4).map(|i| c.find(i)).collect();
+        assert_eq!(roots, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn uniting_a_set_with_itself_changes_nothing() {
+        let mut c = Components::new(8);
+        c.union(3, 5);
+        let before: Vec<usize> = (0..8).map(|i| c.find(i)).collect();
+        c.union(3, 5);
+        c.union(5, 3);
+        c.union(3, 3);
+        let after: Vec<usize> = (0..8).map(|i| c.find(i)).collect();
+        assert_eq!(before, after);
     }
 }
 
@@ -1391,6 +1548,233 @@ mod tests {
             2
         );
         m.assert_valid();
+    }
+
+    /// The corner normals of every corner at `vertex`, one per face.
+    fn normals_at(m: &MeshData, vertex: u32, threshold: f32) -> Vec<(u32, Vec3)> {
+        let corners = m.compute_corner_normals(threshold);
+        let mut out = Vec::new();
+        for f in 0..m.num_faces() {
+            let range = m.face_corner_range(f);
+            for (i, &v) in m.face_verts(f).iter().enumerate() {
+                if v == vertex {
+                    out.push((f, corners[range.start + i]));
+                }
+            }
+        }
+        out
+    }
+
+    /// How many distinct directions are in a set, to within a degree or so.
+    fn distinct(normals: &[(u32, Vec3)]) -> usize {
+        let mut groups: Vec<Vec3> = Vec::new();
+        for (_, n) in normals {
+            if !groups.iter().any(|g| g.dot(*n) > 0.999) {
+                groups.push(*n);
+            }
+        }
+        groups.len()
+    }
+
+    fn edge_index(m: &MeshData, a: u32, b: u32) -> usize {
+        m.edges()
+            .iter()
+            .position(|e| (e[0] == a && e[1] == b) || (e[0] == b && e[1] == a))
+            .expect("the mesh has that edge")
+    }
+
+    fn mark_sharp(m: &mut MeshData, edges: &[usize]) {
+        let mut flags = vec![false; m.num_edges() as usize];
+        for e in edges {
+            flags[*e] = true;
+        }
+        m.attributes_mut().insert(
+            names::SHARP_EDGE,
+            Domain::Edge,
+            AttrData::Bool(Arc::new(flags)),
+        );
+    }
+
+    /// Four triangles round an apex, each facing a different way.
+    ///
+    /// The fan is a *cycle*: cutting one edge of it leaves every face still
+    /// reachable the long way round, so it takes two cuts to split the group.
+    /// That is the case a naive "a sharp edge splits the vertex" would get
+    /// wrong, and the reason this fixture is a closed fan rather than a strip.
+    fn tent() -> MeshData {
+        let apex = Vec3::new(0.0, 0.0, 1.0);
+        MeshData::from_faces(
+            vec![
+                apex,
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(-1.0, 1.0, 0.0),
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+            ],
+            &[vec![0, 1, 2], vec![0, 2, 3], vec![0, 3, 4], vec![0, 4, 1]],
+        )
+    }
+
+    #[test]
+    fn the_average_is_weighted_by_area() {
+        // Stated in the code as "a strip of slivers beside one large quad
+        // should not outvote the quad", and until now not tested: a sweep
+        // summing *unit* normals instead of the unnormalised ones broke
+        // nothing.
+        //
+        // A fan of one large triangle and two slivers, connected so they are
+        // one smooth group. Both candidate answers are computed here from the
+        // face normals, so the test cannot drift with the fixture and says
+        // exactly which of the two the code produces.
+        let m = MeshData::from_faces(
+            vec![
+                Vec3::ZERO,
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(0.0, 10.0, 0.0),
+                Vec3::new(-0.1, 10.0, 4.0),
+                Vec3::new(-0.2, 10.0, 8.0),
+            ],
+            &[vec![0, 1, 2], vec![0, 2, 3], vec![0, 3, 4]],
+        );
+        let faces = m.compute_face_normals();
+        assert_eq!(faces.len(), 3);
+
+        let weighted = (faces[0] + faces[1] + faces[2]).normalize();
+        let unweighted = (faces[0].normalize_or_zero()
+            + faces[1].normalize_or_zero()
+            + faces[2].normalize_or_zero())
+        .normalize();
+        // The fixture only means something if the two answers differ.
+        let apart = weighted
+            .dot(unweighted)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        assert!(
+            apart > 10.0,
+            "the two averages are only {apart} degrees apart; the fixture \
+             cannot tell them apart"
+        );
+
+        let at_origin = normals_at(&m, 0, std::f32::consts::PI);
+        assert_eq!(at_origin.len(), 3, "all three faces meet at the origin");
+        for (face, n) in &at_origin {
+            assert!(
+                n.dot(weighted) > 0.9999,
+                "face {face} got {n}, which is the unweighted average"
+            );
+        }
+    }
+
+    #[test]
+    fn cutting_a_closed_fan_once_does_not_split_it() {
+        // A cycle cut in one place is still connected. A version that split the
+        // vertex on the first sharp edge it met would answer four groups here,
+        // or two, and both would be wrong.
+        let mut m = tent();
+        let smooth_threshold = std::f32::consts::PI;
+        assert_eq!(
+            distinct(&normals_at(&m, 0, smooth_threshold)),
+            1,
+            "the apex should have one normal before anything is marked"
+        );
+
+        let cut = edge_index(&m, 0, 1);
+        mark_sharp(&mut m, &[cut]);
+        assert_eq!(
+            distinct(&normals_at(&m, 0, smooth_threshold)),
+            1,
+            "one cut in a cycle still leaves one group"
+        );
+    }
+
+    #[test]
+    fn cutting_a_closed_fan_twice_splits_it_along_the_cuts() {
+        // Two cuts on opposite sides give two arcs of two faces. Which faces
+        // land together is the part that pins the component logic: a version
+        // that grouped by anything other than reachability could produce two
+        // groups of the wrong two.
+        let mut m = tent();
+        let cuts = [edge_index(&m, 0, 1), edge_index(&m, 0, 3)];
+        mark_sharp(&mut m, &cuts);
+
+        let at_apex = normals_at(&m, 0, std::f32::consts::PI);
+        assert_eq!(at_apex.len(), 4, "four faces meet at the apex");
+        assert_eq!(distinct(&at_apex), 2, "two cuts should give two arcs");
+
+        let of = |face: u32| {
+            at_apex
+                .iter()
+                .find(|(f, _)| *f == face)
+                .expect("that face is at the apex")
+                .1
+        };
+        // The cuts are at edges 0-1 (between faces 3 and 0) and 0-3 (between
+        // faces 1 and 2), so the arcs are {0, 1} and {2, 3}.
+        assert!(of(0).dot(of(1)) > 0.999, "faces 0 and 1 should agree");
+        assert!(of(2).dot(of(3)) > 0.999, "faces 2 and 3 should agree");
+        assert!(
+            of(0).dot(of(2)) < 0.999,
+            "the two arcs should not agree with each other"
+        );
+    }
+
+    #[test]
+    fn two_fans_meeting_at_a_point_do_not_average() {
+        // The tempting wrong shortcut, written down so it cannot be taken: "if
+        // nothing at this vertex breaks, the group is the whole fan". Two cones
+        // tip to tip share a vertex and no edge, so nothing breaks and the fan
+        // is still two groups. Shading them together would round off a point
+        // that is geometrically sharp.
+        let m = MeshData::from_faces(
+            vec![
+                Vec3::ZERO,
+                // A triangle in the XY plane.
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                // And one in the XZ plane, sharing only the origin.
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 1.0),
+            ],
+            &[vec![0, 1, 2], vec![0, 3, 4]],
+        );
+        let at_tip = normals_at(&m, 0, std::f32::consts::PI);
+        assert_eq!(at_tip.len(), 2);
+        assert_eq!(
+            distinct(&at_tip),
+            2,
+            "the two fans were shaded as one: {at_tip:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_manifold_edge_breaks_the_smooth_group() {
+        // The behaviour this rewrite chose, so it is written down. An edge with
+        // three faces has no well-defined "the other side", and the flood fill
+        // it replaced joined across one in whatever order it happened to walk.
+        // Breaking is deterministic, it is what other tools of this kind do, and
+        // a non-manifold edge is usually a mistake the user wants to see rather
+        // than have smoothed over.
+        let m = MeshData::from_faces(
+            vec![
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, -1.0, 1.0),
+            ],
+            // Three faces on the edge 0-1.
+            &[vec![0, 1, 2], vec![0, 1, 3], vec![0, 1, 4]],
+        );
+        for vertex in [0, 1] {
+            let at = normals_at(&m, vertex, std::f32::consts::PI);
+            assert_eq!(at.len(), 3, "three faces meet at vertex {vertex}");
+            assert_eq!(
+                distinct(&at),
+                3,
+                "vertex {vertex} averaged across a non-manifold edge: {at:?}"
+            );
+        }
     }
 
     #[test]
