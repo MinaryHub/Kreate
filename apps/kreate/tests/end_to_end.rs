@@ -840,6 +840,18 @@ impl MeshCache {
                 old[*slot] = None;
             }
         }
+        for (slot, mesh) in &plan.repositions {
+            let Some(Some((handle, gpu_mesh))) = old.get_mut(*slot) else {
+                continue;
+            };
+            let cpu = RenderMeshCpu::extract(mesh);
+            if cpu.positions.len() as u32 == gpu_mesh.render_verts {
+                gpu_mesh.update_positions(&gpu.queue, &cpu);
+                *handle = mesh.clone();
+            } else {
+                old[*slot] = None;
+            }
+        }
         let mut next = Vec::with_capacity(plan.total());
         for slot in &plan.keep {
             if let Some(entry) = old.get_mut(*slot).and_then(Option::take) {
@@ -862,6 +874,260 @@ impl MeshCache {
             .find(|(a, _)| std::sync::Arc::ptr_eq(a, mesh))
             .map(|(_, m)| m)
     }
+}
+
+/// Draws whatever the cache holds for the document's objects, and reads it back.
+///
+/// Separate from `render_as` because that one uploads every mesh afresh on every
+/// call, which is exactly what makes it blind to a cache: a test using it passes
+/// whether or not the cache path works. This draws through the cache.
+fn render_through_cache(
+    gpu: &kreate_render::Gpu,
+    viewport: &mut Viewport,
+    target: &wgpu::Texture,
+    cache: &MeshCache,
+    doc: &Document,
+    scene: &[(
+        kreate_scene::ObjectId,
+        std::sync::Arc<kreate_mesh::MeshData>,
+    )],
+    camera: &Camera,
+) -> Vec<[u8; 4]> {
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut draws: Vec<Draw> = Vec::new();
+    for (id, mesh) in scene {
+        if let Some(gpu_mesh) = cache.find(mesh) {
+            draws.push(Draw::new(gpu_mesh, doc.world_transform(*id)));
+        }
+    }
+    viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
+
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cache readback"),
+        size: (BYTES_PER_ROW * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cache"),
+        });
+    viewport.render(&mut encoder, &view, &draws);
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(BYTES_PER_ROW),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = slice.get_mapped_range();
+    let pixels: Vec<[u8; 4]> = data.as_chunks::<4>().0.to_vec();
+    drop(data);
+    readback.unmap();
+    pixels
+}
+
+/// The mean x of the pixels that are not background, in pixels.
+///
+/// A silhouette's horizontal centre of mass, which is what moves when the
+/// geometry does. `None` when nothing is drawn at all — which a test has to
+/// distinguish from "drawn in the middle", because an object that vanished would
+/// otherwise read as one that never moved.
+fn lit_centroid_x(pixels: &[[u8; 4]]) -> Option<f32> {
+    let mut total = 0.0f64;
+    let mut count = 0u32;
+    for (i, p) in pixels.iter().enumerate() {
+        if p[0] > 90 || p[1] > 90 || p[2] > 90 {
+            total += (i as u32 % SIZE) as f64;
+            count += 1;
+        }
+    }
+    (count > 0).then(|| (total / count as f64) as f32)
+}
+
+#[test]
+fn a_moved_mesh_is_drawn_where_it_moved_to() {
+    // `GpuMesh::update_positions` had never been called by anything. It was
+    // written to "prove the buffer split works" and then left unreachable,
+    // because the sync plan had no state for "the same mesh, moved" — so every
+    // drag frame rebuilt every buffer. Activating it makes this the first thing
+    // that checks it does what it says.
+    //
+    // Asserted as pixels rather than as a plan, because the plan tests already
+    // cover the decision and cannot cover the write: positions sent to the wrong
+    // buffer, or in the wrong layout, produce a correct-looking plan and a wrong
+    // image.
+    let opts = GpuOptions::default();
+    let instance = kreate_render::Gpu::create_instance(&opts);
+    let Ok(gpu) = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)) else {
+        eprintln!("no adapter; skipping");
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("drag target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
+    // The grid is anchored to the world and would mask a change in the geometry.
+    viewport.show_grid = false;
+
+    let mut doc = Document::new();
+    doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+    let camera = Camera::default();
+    let mut cache = MeshCache::new();
+    let mut modifiers = kreate_scene::ModifierCache::new();
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    let before = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
+    let centre_before = lit_centroid_x(&before).expect("the cube is on screen");
+
+    // A drag, applied the way a transform applies one: positions and nothing
+    // else. Far enough that the silhouette moves by more than a pixel of
+    // anti-aliasing.
+    let id = doc.meshes().next().expect("a mesh").0;
+    for p in doc.mesh_mut(id).expect("a mesh").positions_mut() {
+        p.x += 1.5;
+    }
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    assert_eq!(
+        cache.slots.len(),
+        1,
+        "the mesh was re-uploaded rather than repositioned"
+    );
+    assert!(
+        cache.find(&scene[0].1).is_some(),
+        "the slot kept the previous handle, so the draw loop would not find it"
+    );
+
+    let after = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
+    let centre_after = lit_centroid_x(&after).expect("the cube is still on screen");
+
+    // The direction, not merely the fact of a change: an image that differed
+    // because the object vanished, or because it moved the other way, would pass
+    // a "the pixels changed" assertion.
+    assert!(
+        centre_after > centre_before + 1.0,
+        "the cube's silhouette went from x={centre_before} to x={centre_after}; \
+         the new positions never reached the GPU"
+    );
+}
+
+#[test]
+fn a_moved_mesh_brings_its_normals_with_it() {
+    // `update_positions` writes two buffers, and the translation test above can
+    // only see one of them: a translation does not change a single normal, so
+    // dropping the normals write passes it. A falsification sweep said so, which
+    // is why this exists.
+    //
+    // The fixture is a cube turned a quarter turn about Y, applied to its
+    // positions. A cube maps onto itself under that rotation, so the silhouette
+    // is *identical* — which means every pixel that differs differs because of
+    // shading, and nothing else. And because the shading rotates with the
+    // geometry, the correct image is the one that did not change.
+    //
+    // Stale normals light each face as though it were still where it was, and
+    // that is a large, obvious difference.
+    let opts = GpuOptions::default();
+    let instance = kreate_render::Gpu::create_instance(&opts);
+    let Ok(gpu) = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)) else {
+        eprintln!("no adapter; skipping");
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("normals target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
+    viewport.show_grid = false;
+
+    let mut doc = Document::new();
+    doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+    let camera = Camera::default();
+    let mut cache = MeshCache::new();
+    let mut modifiers = kreate_scene::ModifierCache::new();
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    let before = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
+    let lit_before = lit_pixels(&before);
+    assert!(lit_before > 100, "only {lit_before} lit pixels to compare");
+
+    // A quarter turn about Y: (x, y, z) -> (z, y, -x). Every vertex moves to
+    // another corner, and the set of corners is unchanged.
+    let id = doc.meshes().next().expect("a mesh").0;
+    for p in doc.mesh_mut(id).expect("a mesh").positions_mut() {
+        *p = glam::Vec3::new(p.z, p.y, -p.x);
+    }
+
+    let scene = modifiers.evaluate_scene(&doc);
+    cache.sync(&gpu, &viewport.layouts, &scene);
+    assert_eq!(cache.slots.len(), 1, "the mesh was re-uploaded");
+    let after = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
+
+    // Compared as a count of pixels that moved by more than rounding. On this
+    // adapter the answer is exactly **0 of 5578**, and with the normals write
+    // removed it is **2871** — so the threshold is nowhere near either. It is
+    // not tightened to zero because a different rasteriser may disagree by a
+    // pixel along the shared diagonals, where the triangulation is emitted in a
+    // different order; a stale normal buffer relights whole faces and could not
+    // hide in that.
+    let changed = before
+        .iter()
+        .zip(&after)
+        .filter(|(a, b)| (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() > 8))
+        .count();
+    eprintln!("turned onto itself: {changed} of {lit_before} lit pixels changed");
+    assert!(
+        changed * 20 < lit_before,
+        "{changed} of {lit_before} lit pixels changed shading when the cube was \
+         turned onto itself; the normals did not follow the positions"
+    );
 }
 
 #[test]

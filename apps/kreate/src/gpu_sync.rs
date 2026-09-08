@@ -41,6 +41,24 @@
 //! So a handle the cache has not seen is checked against the one it holds with
 //! [`MeshData::only_selection_differs`], and when that is all that changed the
 //! plan says to rewrite three small flag buffers instead.
+//!
+//! # Nor is a moved mesh
+//!
+//! The same argument, for the thing a drag does. A transform rewrites the
+//! positions array and leaves every other array shared, which is the whole
+//! point of it declaring its write set — and a plan that could only say "new
+//! handle, upload it" answered a pointer position by building new buffers for
+//! the indices, the triangle-to-face map, the edge list and the flags, every
+//! one of them byte-for-byte what was already there.
+//!
+//! §4.5 asks for exactly this by name: a change to positions must not
+//! invalidate the triangulation, the edge list or the index buffers. So there is
+//! a third state, and [`MeshData::only_positions_differ`] recognises it.
+//!
+//! The three are mutually exclusive by construction, and a change that is
+//! *both* — a drag that also moved the selection — matches neither and takes
+//! the full upload. Conservative, and correct: a plan that guessed would leave
+//! one of the two sets of buffers stale.
 
 use std::sync::Arc;
 
@@ -58,6 +76,12 @@ pub struct SyncPlan {
     /// The slot keeps its GPU buffers and has its flags rewritten. These slots
     /// also appear in `keep`, because that is what says they survive.
     pub reflags: Vec<(usize, Arc<MeshData>)>,
+    /// Slots whose mesh differs only in where its vertices are.
+    ///
+    /// The slot keeps its GPU buffers and has its positions and normals
+    /// rewritten — the two buffers a drag actually changes. Like `reflags`,
+    /// these also appear in `keep`.
+    pub repositions: Vec<(usize, Arc<MeshData>)>,
     /// Meshes that are not on the GPU yet.
     pub uploads: Vec<Arc<MeshData>>,
 }
@@ -68,7 +92,10 @@ impl SyncPlan {
     /// The overwhelmingly common case is a scene that has not changed, and it
     /// should cost one comparison per object and no GPU work whatever.
     pub fn needs_work(&self, cached: usize) -> bool {
-        !self.uploads.is_empty() || !self.reflags.is_empty() || self.keep.len() != cached
+        !self.uploads.is_empty()
+            || !self.reflags.is_empty()
+            || !self.repositions.is_empty()
+            || self.keep.len() != cached
     }
 
     /// How many meshes the cache will hold once the plan is applied.
@@ -109,14 +136,24 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
         // stack diverged is a genuinely different mesh that happens to share most
         // of its arrays, and adopting it into the original's slot would leave
         // both objects drawing the same thing.
+        let unclaimed = |slot: &usize| !plan.keep.contains(slot);
         let selection_only = cached
             .iter()
             .enumerate()
-            .find(|(slot, held)| !plan.keep.contains(slot) && held.only_selection_differs(mesh));
-        match selection_only {
+            .find(|(slot, held)| unclaimed(slot) && held.only_selection_differs(mesh));
+        if let Some((slot, _)) = selection_only {
+            plan.keep.push(slot);
+            plan.reflags.push((slot, mesh.clone()));
+            continue;
+        }
+        let moved_only = cached
+            .iter()
+            .enumerate()
+            .find(|(slot, held)| unclaimed(slot) && held.only_positions_differ(mesh));
+        match moved_only {
             Some((slot, _)) => {
                 plan.keep.push(slot);
-                plan.reflags.push((slot, mesh.clone()));
+                plan.repositions.push((slot, mesh.clone()));
             }
             None => plan.uploads.push(mesh.clone()),
         }
@@ -147,6 +184,121 @@ mod tests {
         out
     }
 
+    /// Moves one vertex of a document's first mesh, the way a transform does:
+    /// through the positions array and nothing else.
+    fn nudge(doc: &mut Document) {
+        let id = doc.meshes().next().expect("a mesh").0;
+        doc.mesh_mut(id).expect("a mesh").positions_mut()[0].x += 0.25;
+    }
+
+    #[test]
+    fn a_moved_mesh_rewrites_positions_rather_than_uploading() {
+        // What a drag frame costs. A transform rewrites the positions array and
+        // leaves the indices, the triangle-to-face map, the edge list and the
+        // flags shared, so a plan that scheduled an upload would rebuild every
+        // one of them — byte-for-byte what was already there — on every pointer
+        // position. §4.5 asks for this by name.
+        let mut doc = doc_with(2);
+        let mut cache = ModifierCache::new();
+        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+
+        nudge(&mut doc);
+        let mut cache = ModifierCache::new();
+        let scene = cache.evaluate_scene(&doc);
+        let plan = plan_sync(&held, &scene);
+
+        assert!(
+            plan.uploads.is_empty(),
+            "a move re-uploaded {} mesh(es)",
+            plan.uploads.len()
+        );
+        assert_eq!(plan.repositions.len(), 1, "one mesh moved");
+        assert_eq!(plan.repositions[0].0, 0, "the slot it was already in");
+        assert!(plan.reflags.is_empty(), "nothing was selected");
+        assert_eq!(plan.keep, vec![0, 1], "both slots survive");
+        assert!(
+            plan.needs_work(held.len()),
+            "the positions have to be written"
+        );
+    }
+
+    #[test]
+    fn the_moved_slot_adopts_the_new_handle() {
+        // The bug this shape of code had once before, for `reflags`: the draw
+        // loop finds a slot by `Arc::ptr_eq` against the evaluated mesh, so a
+        // slot left holding the *previous* handle matches nothing and the object
+        // silently stops being drawn. The plan has to carry the handle to adopt,
+        // and applying it has to leave the cache holding that one.
+        let mut doc = doc_with(1);
+        let mut cache = ModifierCache::new();
+        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+
+        nudge(&mut doc);
+        let mut cache = ModifierCache::new();
+        let scene = cache.evaluate_scene(&doc);
+        let plan = plan_sync(&held, &scene);
+
+        let (_, adopted) = &plan.repositions[0];
+        assert!(
+            Arc::ptr_eq(adopted, &scene[0].1),
+            "the plan carries a handle the draw loop will not find"
+        );
+
+        // And once adopted, the next frame is free.
+        let after = vec![adopted.clone()];
+        let quiet = plan_sync(&after, &scene);
+        assert!(!quiet.needs_work(after.len()), "an idle frame did work");
+    }
+
+    #[test]
+    fn a_move_and_a_selection_together_take_the_full_upload() {
+        // The two states are mutually exclusive, and a change that is both
+        // matches neither. That is the conservative answer and the only correct
+        // one: acting on either predicate alone would leave the other set of
+        // buffers stale, and a mesh drawn with last frame’s selection or last
+        // frame’s positions is a bug nobody would look for here.
+        let mut doc = doc_with(1);
+        let mut cache = ModifierCache::new();
+        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+
+        let id = doc.meshes().next().expect("a mesh").0;
+        {
+            let mesh = doc.mesh_mut(id).expect("a mesh");
+            mesh.ensure_selection_layers();
+            kreate_mesh::selection::select_all(mesh);
+            mesh.positions_mut()[0].x += 0.25;
+        }
+        let mut cache = ModifierCache::new();
+        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+
+        assert_eq!(
+            plan.uploads.len(),
+            1,
+            "a mixed change must not be guessed at"
+        );
+        assert!(plan.reflags.is_empty());
+        assert!(plan.repositions.is_empty());
+    }
+
+    #[test]
+    fn a_topology_change_is_not_mistaken_for_a_move() {
+        // The guard on the whole thing. `only_positions_differ` rests on the
+        // topology arrays being pointer-identical, so a mesh whose connectivity
+        // changed must fall through — rewriting positions into buffers sized for
+        // a different mesh is how a renderer draws garbage.
+        let mut doc = doc_with(1);
+        let mut cache = ModifierCache::new();
+        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+
+        let id = doc.meshes().next().expect("a mesh").0;
+        *doc.mesh_mut(id).expect("a mesh") = kreate_mesh::primitives::uv_sphere(1.0, 8, 4);
+        let mut cache = ModifierCache::new();
+        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+
+        assert_eq!(plan.uploads.len(), 1, "a new topology needs new buffers");
+        assert!(plan.repositions.is_empty());
+    }
+
     #[test]
     fn an_empty_cache_uploads_everything() {
         let doc = doc_with(3);
@@ -174,10 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn editing_one_mesh_uploads_only_that_one() {
+    fn editing_one_mesh_touches_only_that_one() {
         // The reason for handle identity rather than a document version: with a
         // version, editing one object re-uploads every other, and the cost of an
         // edit grows with the size of the scene.
+        //
+        // Counted as "how many meshes does the plan act on" rather than "how
+        // many does it upload", because which path the edited one takes is a
+        // separate question — a move now has its own — and this test is about
+        // the two it does *not* touch.
         let mut doc = doc_with(3);
         let mut cache = ModifierCache::new();
         let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
@@ -186,8 +343,9 @@ mod tests {
         doc.mesh_mut(target).unwrap().positions_mut()[0].y += 1.0;
 
         let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
-        assert_eq!(plan.uploads.len(), 1, "only the edited mesh");
-        assert_eq!(plan.keep.len(), 2);
+        let acted_on = plan.uploads.len() + plan.reflags.len() + plan.repositions.len();
+        assert_eq!(acted_on, 1, "only the edited mesh");
+        assert_eq!(plan.keep.len(), 3, "all three slots survive");
     }
 
     #[test]
@@ -381,19 +539,37 @@ mod tests {
     }
 
     #[test]
-    fn a_geometry_change_still_uploads() {
-        // The companion: the shortcut must not swallow a real edit, or the screen
-        // shows the old shape until something else forces a rebuild.
+    fn a_geometry_change_is_never_silently_kept() {
+        // The companion to every shortcut here: none of them may swallow a real
+        // edit, or the screen shows the old shape until something else forces a
+        // rebuild. The failure mode is a slot that lands in `keep` with nothing
+        // scheduled against it, which is indistinguishable from an idle frame.
+        //
+        // Both kinds of change, because they take different paths and the
+        // shortcut that could swallow each is a different one.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
         let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
-
         let target = doc.objects().next().unwrap().1.mesh().unwrap();
-        doc.mesh_mut(target).unwrap().positions_mut()[0].y += 1.0;
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
-        assert_eq!(plan.uploads.len(), 1);
-        assert!(plan.reflags.is_empty());
+        doc.mesh_mut(target).unwrap().positions_mut()[0].y += 1.0;
+        let moved = plan_sync(&held, &cache.evaluate_scene(&doc));
+        assert!(
+            moved.needs_work(held.len()),
+            "a move was reported as an idle frame"
+        );
+        assert_eq!(moved.repositions.len(), 1);
+        assert!(moved.reflags.is_empty(), "nothing was selected");
+
+        *doc.mesh_mut(target).unwrap() = kreate_mesh::primitives::uv_sphere(1.0, 8, 4);
+        let replaced = plan_sync(&held, &cache.evaluate_scene(&doc));
+        assert!(replaced.needs_work(held.len()));
+        assert_eq!(
+            replaced.uploads.len(),
+            1,
+            "new connectivity needs new buffers"
+        );
+        assert!(replaced.repositions.is_empty());
     }
 
     #[test]

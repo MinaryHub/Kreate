@@ -1871,6 +1871,29 @@ impl App {
             }
         }
 
+        // And a slot the plan wants moved keeps everything but its positions
+        // and normals: two writes instead of rebuilding every buffer
+        // because the user dragged the pointer one pixel.
+        //
+        // `update_positions` has no size check to fail, unlike
+        // `update_flags` — the render vertex count follows from the
+        // topology, and `only_positions_differ` has already established
+        // that the topology is identical. It is asserted rather than
+        // trusted, because a wrong answer here writes past the end of
+        // somebody's buffer.
+        for (slot, mesh) in &plan.repositions {
+            let Some(Some((held, gpu_mesh))) = old.get_mut(*slot) else {
+                continue;
+            };
+            let cpu = RenderMeshCpu::extract(mesh);
+            if cpu.positions.len() as u32 == gpu_mesh.render_verts {
+                gpu_mesh.update_positions(&gfx.gpu.queue, &cpu);
+                *held = mesh.clone();
+            } else {
+                old[*slot] = None;
+            }
+        }
+
         let mut next: Vec<(Arc<MeshData>, GpuMesh)> = Vec::with_capacity(plan.total());
         for slot in &plan.keep {
             if let Some(entry) = old.get_mut(*slot).and_then(Option::take) {

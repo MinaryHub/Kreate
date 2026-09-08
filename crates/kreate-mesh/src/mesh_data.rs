@@ -404,11 +404,51 @@ impl MeshData {
     /// changed, appeared or vanished means a full upload, which is correct but
     /// slower, rather than risking a buffer that quietly stays stale.
     pub fn only_selection_differs(&self, other: &MeshData) -> bool {
-        if self.num_verts != other.num_verts
-            || !Arc::ptr_eq(&self.face_offsets, &other.face_offsets)
-            || !Arc::ptr_eq(&self.corner_verts, &other.corner_verts)
-            || !Arc::ptr_eq(&self.edges, &other.edges)
-        {
+        self.only_these_layers_differ(other, names::is_selection)
+    }
+
+    /// Whether `other` differs from this mesh in nothing but where its vertices
+    /// are.
+    ///
+    /// The second question a renderer has to answer cheaply, and the one a drag
+    /// asks. A transform rewrites the positions array and leaves every other
+    /// array shared — that is what `DocMut::edit_positions` is for — but a
+    /// cache that can only ask "is this the same mesh, or is it only the
+    /// selection" falls through to a full upload: new buffers for the indices,
+    /// the triangle-to-face map, the edge list and the flags, every one of them
+    /// byte-for-byte what was already there, on every pointer position.
+    ///
+    /// §4.5 states the requirement directly: a change to positions must not
+    /// invalidate the triangulation, the edge list or the index buffers. This is
+    /// the predicate that lets a caller act on it.
+    ///
+    /// Normals are recomputed from positions rather than compared, so they are
+    /// not a layer this asks about — the renderer derives them either way.
+    pub fn only_positions_differ(&self, other: &MeshData) -> bool {
+        self.only_these_layers_differ(other, |name| name == names::POSITION)
+    }
+
+    /// The shared shape of both predicates: identical connectivity, and no
+    /// attribute layer changed except the ones `allowed` names.
+    ///
+    /// Answered by pointer identity per array, so it costs a handful of
+    /// comparisons regardless of how large the mesh is. Copy-on-write is what
+    /// makes that valid: an array nobody wrote to keeps its pointer.
+    ///
+    /// An allowed layer *appearing* counts as an allowed difference, which is
+    /// not a nicety: the selection layers are created when the user enters edit
+    /// mode, so without it the first click on every mesh is a full upload — the
+    /// one moment when the mesh is largest and the user is most attentive.
+    ///
+    /// Conservative in every other direction. Any other layer that changed,
+    /// appeared or vanished means a full upload, which is correct but slower,
+    /// rather than risking a buffer that quietly stays stale.
+    fn only_these_layers_differ(
+        &self,
+        other: &MeshData,
+        allowed: impl Fn(&str) -> bool + Copy,
+    ) -> bool {
+        if !self.same_topology(other) {
             return false;
         }
 
@@ -417,10 +457,10 @@ impl MeshData {
         // over two short sorted lists either way round.
         let unmatched = |a: &AttributeStore, b: &AttributeStore| {
             a.iter().any(|layer| match b.get(&layer.name) {
-                None => !names::is_selection(&layer.name),
+                None => !allowed(&layer.name),
                 Some(theirs) => {
                     theirs.domain != layer.domain
-                        || (!layer.data.ptr_eq(&theirs.data) && !names::is_selection(&layer.name))
+                        || (!layer.data.ptr_eq(&theirs.data) && !allowed(&layer.name))
                 }
             })
         };
