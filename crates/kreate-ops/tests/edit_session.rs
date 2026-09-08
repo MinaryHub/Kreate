@@ -10,7 +10,7 @@
 //! converted for itself leaves the session untouched and stale.
 
 use kreate_ops::operator::{Context, Mode};
-use kreate_ops::{EditSession, History, OperatorRegistry, PropertyMap, PropertyValue};
+use kreate_ops::{EditSessions, History, OperatorRegistry, PropertyMap, PropertyValue};
 use kreate_scene::document::{MeshId, Object, ObjectData};
 use kreate_scene::Document;
 
@@ -50,7 +50,8 @@ fn select_all(r: &OperatorRegistry, h: &mut History, d: &mut Document, c: &Conte
 fn an_operator_works_in_the_session_when_one_is_open() {
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     h.dispatch_in_session(
         &r,
@@ -65,9 +66,17 @@ fn an_operator_works_in_the_session_when_one_is_open() {
     // The session holds what the operator produced, which is what says it worked
     // there rather than on a copy of its own.
     assert_eq!(d.mesh(mesh).unwrap().num_faces(), 24);
-    assert_eq!(session.bmesh_mut().face_ids().count(), 24);
+    assert_eq!(
+        session
+            .get_mut(mesh)
+            .expect("a session")
+            .bmesh_mut()
+            .face_ids()
+            .count(),
+        24
+    );
     assert!(
-        session.matches(&d, mesh),
+        session.get(mesh).is_some_and(|s| s.matches(&d, mesh)),
         "the session should be current with what it just wrote"
     );
 }
@@ -78,11 +87,12 @@ fn the_session_carries_across_several_operators() {
     // subdivisions in a row, and the session is current before each.
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     for level in 0..3 {
         assert!(
-            session.matches(&d, mesh),
+            session.get(mesh).is_some_and(|s| s.matches(&d, mesh)),
             "session went stale before level {level}"
         );
         h.dispatch_in_session(
@@ -116,7 +126,8 @@ fn a_session_for_another_mesh_is_not_used() {
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
     let other = d.add_mesh(kreate_mesh::primitives::uv_sphere(1.0, 8, 4));
-    let mut session = EditSession::open(&d, other).expect("the other mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[other]);
     let before = d.mesh(other).unwrap().num_faces();
 
     h.dispatch_in_session(
@@ -150,7 +161,8 @@ fn an_operator_sees_a_selection_made_outside_the_session() {
     // So the structure has to be told. An extrude that acted on the selection
     // the session was holding when it opened would do nothing at all.
     let (r, mut h, mut d, mesh, c) = setup();
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     h.dispatch(
         &r,
@@ -164,7 +176,7 @@ fn an_operator_sees_a_selection_made_outside_the_session() {
     )
     .expect("mesh.select_pick");
     assert!(
-        session.matches(&d, mesh),
+        session.get(mesh).is_some_and(|s| s.matches(&d, mesh)),
         "a click is not a geometry change and must not invalidate the session"
     );
 
@@ -198,14 +210,15 @@ fn a_move_made_outside_the_session_is_adopted_rather_than_overwritten() {
     // against 81 for an extrude after a drag on two hundred thousand vertices.
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     // A move, applied straight to the document — a transform, or an undo.
     for p in d.mesh_mut(mesh).unwrap().positions_mut() {
         p.z += 5.0;
     }
     assert!(
-        session.matches(&d, mesh),
+        session.get(mesh).is_some_and(|s| s.matches(&d, mesh)),
         "a move is not a change of connectivity"
     );
 
@@ -242,7 +255,8 @@ fn a_session_stale_from_a_topology_change_reopens_rather_than_overwriting() {
     // structure describe it. This one has to be decoded again.
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     // A cylinder where the cube was: a different face count, so the difference
     // cannot be papered over by adopting anything.
@@ -250,7 +264,7 @@ fn a_session_stale_from_a_topology_change_reopens_rather_than_overwriting() {
     kreate_mesh::selection::select_all(d.mesh_mut(mesh).unwrap());
     let replaced_faces = d.mesh(mesh).unwrap().num_faces();
     assert!(
-        !session.matches(&d, mesh),
+        !session.get(mesh).is_some_and(|s| s.matches(&d, mesh)),
         "a change of connectivity is staleness"
     );
 
@@ -298,7 +312,8 @@ fn positions_are_adopted_by_rank_even_when_the_arena_has_holes() {
         m.ensure_selection_layers();
         kreate_mesh::selection::set_selected(m, kreate_mesh::attribute::Domain::Point, 0, true);
     }
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
     h.dispatch_in_session(
         &r,
         &mut d,
@@ -309,6 +324,8 @@ fn positions_are_adopted_by_rank_even_when_the_arena_has_holes() {
     )
     .expect("mesh.delete");
     let gaps = session
+        .get(mesh)
+        .expect("a session")
         .bmesh()
         .slot_count(kreate_mesh::attribute::Domain::Point)
         - d.mesh(mesh).unwrap().num_verts() as usize;
@@ -354,7 +371,8 @@ fn undo_still_restores_through_a_session() {
     // topology the session was holding.
     let (r, mut h, mut d, mesh, c) = setup();
     select_all(&r, &mut h, &mut d, &c);
-    let mut session = EditSession::open(&d, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
 
     h.dispatch_in_session(
         &r,

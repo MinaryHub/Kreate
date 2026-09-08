@@ -36,7 +36,7 @@
 use std::time::{Duration, Instant};
 
 use kreate_ops::operator::{Context, Mode};
-use kreate_ops::{EditSession, History, OperatorRegistry, PropertyMap, PropertyValue};
+use kreate_ops::{EditSessions, History, OperatorRegistry, PropertyMap, PropertyValue};
 use kreate_scene::document::{MeshId, Object, ObjectData};
 use kreate_scene::Document;
 
@@ -159,7 +159,13 @@ fn entering_edit_mode_stays_within_budget() {
     let _serial = serially();
     let (doc, mesh) = large_scene();
     let mut session = None;
-    let elapsed = median_time(3, || session = EditSession::open(&doc, mesh));
+    let elapsed = median_time(3, || {
+        session = {
+            let mut set = EditSessions::new();
+            set.open_for(&doc, &[mesh]);
+            Some(set)
+        }
+    });
     assert!(session.is_some());
     // Reported, not just asserted. A budget test that does not say what it
     // measured makes the next round of tuning blind — this one was tightened
@@ -187,7 +193,8 @@ fn a_click_is_not_a_pass_over_the_mesh() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // The first click warms nothing that later ones rely on; measured on its own.
     let elapsed = time(|| {
@@ -225,9 +232,10 @@ fn a_click_stays_cheap_when_repeated() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
-    let mut click = |element: i64, session: &mut EditSession, doc: &mut Document| {
+    let mut click = |element: i64, session: &mut EditSessions, doc: &mut Document| {
         history
             .dispatch_in_session(
                 &registry,
@@ -272,7 +280,8 @@ fn a_topology_edit_writes_back_within_budget() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // One face selected, so the edit itself is tiny and what is left is the
     // write-back. That is deliberate: the question is what the *crossing*
@@ -354,7 +363,7 @@ fn a_topology_edit_writes_back_within_budget() {
 const DRAG_DIVISIONS: u32 = 450;
 
 /// A mesh and a session with a patch of faces selected, ready to drag.
-fn drag_scene() -> (Document, MeshId, EditSession, OperatorRegistry, History) {
+fn drag_scene() -> (Document, MeshId, EditSessions, OperatorRegistry, History) {
     drag_scene_selecting((0..2_000).collect())
 }
 
@@ -362,7 +371,7 @@ fn drag_scene() -> (Document, MeshId, EditSession, OperatorRegistry, History) {
 /// index behaves, so the tests that care have to choose.
 fn drag_scene_selecting(
     elements: Vec<u32>,
-) -> (Document, MeshId, EditSession, OperatorRegistry, History) {
+) -> (Document, MeshId, EditSessions, OperatorRegistry, History) {
     let mut doc = Document::new();
     let mesh = doc.add_mesh(kreate_mesh::primitives::grid(
         10.0,
@@ -374,7 +383,8 @@ fn drag_scene_selecting(
 
     let registry = registry();
     let mut history = History::new();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
     history
         .dispatch_in_session(
             &registry,
@@ -606,7 +616,8 @@ fn a_box_select_commits_within_budget() {
     let registry = registry();
     let mut history = History::new();
     let ctx = edit_ctx();
-    let mut session = EditSession::open(&doc, mesh).expect("the mesh is there");
+    let mut session = EditSessions::new();
+    session.open_for(&doc, &[mesh]);
 
     // A hundred thousand faces, which is what a generous drag over a dense mesh
     // resolves to.

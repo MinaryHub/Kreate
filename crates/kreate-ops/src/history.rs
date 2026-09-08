@@ -181,7 +181,7 @@ impl History {
         &mut self,
         registry: &OperatorRegistry,
         doc: &mut Document,
-        session: Option<&mut crate::EditSession>,
+        sessions: Option<&mut crate::EditSessions>,
         ctx: &Context,
         op_id: &str,
         params: &PropertyMap,
@@ -196,7 +196,7 @@ impl History {
         let mut full = info.defaults();
         full.overlay(params);
 
-        let mut edit = DocMut::with_session(doc, session);
+        let mut edit = DocMut::with_sessions(doc, sessions);
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 
@@ -253,7 +253,7 @@ impl History {
         &mut self,
         registry: &OperatorRegistry,
         doc: &mut Document,
-        session: Option<&mut crate::EditSession>,
+        sessions: Option<&mut crate::EditSessions>,
         ctx: &Context,
         op_id: &str,
         params: &PropertyMap,
@@ -271,7 +271,7 @@ impl History {
 
         let mut full = info.defaults();
         full.overlay(params);
-        let mut edit = DocMut::with_session(doc, session);
+        let mut edit = DocMut::with_sessions(doc, sessions);
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 
@@ -314,7 +314,7 @@ impl History {
         &mut self,
         registry: &OperatorRegistry,
         doc: &mut Document,
-        session: Option<&mut crate::EditSession>,
+        sessions: Option<&mut crate::EditSessions>,
         ctx: &Context,
         modal: &mut ModalSession,
         params: &PropertyMap,
@@ -327,7 +327,7 @@ impl History {
         let mut full = info.defaults();
         full.overlay(params);
 
-        let mut edit = DocMut::with_session(doc, session);
+        let mut edit = DocMut::with_sessions(doc, sessions);
         let result = registry.execute(&modal.op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 

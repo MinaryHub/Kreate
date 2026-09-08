@@ -190,6 +190,87 @@ impl EditSession {
     }
 }
 
+/// The sessions edit mode has open, one per mesh.
+///
+/// Edit mode is a set of meshes — see `kreate_ops::ops::mesh::edit_targets` — and
+/// each of them needs its own edit structure for the same reason the first one
+/// does: without it every operator pays a decode and an encode of the whole
+/// mesh, which at a million faces is most of a second. One session and a set of
+/// meshes would have put that cost back for every object after the active one.
+///
+/// A `Vec` and not a map. The set is the user's object selection, so it is tens
+/// of entries at the very most, and a linear scan of ten `MeshId`s is faster
+/// than hashing one. It also keeps the order the sessions were opened in, which
+/// is `edit_targets`' order, which is the order operators walk them in — so a
+/// multi-mesh edit is deterministic without anyone arranging for it.
+#[derive(Default)]
+pub struct EditSessions {
+    open: Vec<EditSession>,
+}
+
+impl EditSessions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.open.len()
+    }
+
+    /// Which meshes have a session, in the order they were opened.
+    pub fn meshes(&self) -> impl Iterator<Item = MeshId> + '_ {
+        self.open.iter().map(|s| s.mesh())
+    }
+
+    /// Opens sessions for exactly `meshes`, keeping any already open.
+    ///
+    /// Kept rather than rebuilt because a session is expensive to make and
+    /// cheap to check: entering edit mode on three objects and then changing
+    /// which is active must not decode all three again. A mesh that has left
+    /// the set is dropped, which is what stops the collection growing with
+    /// every mode change.
+    ///
+    /// A mesh whose session cannot be opened — it is not in the document — is
+    /// left out rather than reported. The caller asked for a set, and an
+    /// operator reaching for a missing one converts for itself, which is the
+    /// same thing that happens outside edit mode.
+    pub fn open_for(&mut self, doc: &Document, meshes: &[MeshId]) {
+        self.open.retain(|s| meshes.contains(&s.mesh()));
+        for mesh in meshes {
+            if self.open.iter().any(|s| s.mesh() == *mesh) {
+                continue;
+            }
+            if let Some(session) = EditSession::open(doc, *mesh) {
+                self.open.push(session);
+            }
+        }
+        // Back into the caller's order, so operators walk the meshes in the
+        // order `edit_targets` named them however the set was arrived at.
+        self.open.sort_by_key(|s| {
+            meshes
+                .iter()
+                .position(|m| *m == s.mesh())
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    pub fn get(&self, mesh: MeshId) -> Option<&EditSession> {
+        self.open.iter().find(|s| s.mesh() == mesh)
+    }
+
+    pub fn get_mut(&mut self, mesh: MeshId) -> Option<&mut EditSession> {
+        self.open.iter_mut().find(|s| s.mesh() == mesh)
+    }
+
+    pub fn clear(&mut self) {
+        self.open.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +442,131 @@ mod tests {
         let (_, mesh) = doc_with_cube();
         let empty = Document::new();
         assert!(EditSession::open(&empty, mesh).is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_set_tests {
+    use super::*;
+    use crate::document::{Object, ObjectData};
+
+    fn doc_with(n: usize) -> (Document, Vec<MeshId>) {
+        let mut doc = Document::new();
+        let mut meshes = Vec::new();
+        for i in 0..n {
+            let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0 + i as f32));
+            doc.add_object(Object::new(format!("Cube{i}"), ObjectData::Mesh(mesh)));
+            meshes.push(mesh);
+        }
+        (doc, meshes)
+    }
+
+    #[test]
+    fn a_session_is_opened_for_every_mesh_asked_for() {
+        let (doc, meshes) = doc_with(3);
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &meshes);
+        assert_eq!(sessions.len(), 3);
+        for mesh in &meshes {
+            assert!(sessions.get(*mesh).is_some(), "no session for {mesh:?}");
+        }
+    }
+
+    #[test]
+    fn opening_again_keeps_the_sessions_that_are_still_wanted() {
+        // The reason this is `open_for` and not `open`: a session costs a
+        // decode of the whole mesh, and changing which object is active must
+        // not pay for all of them again.
+        //
+        // Observed through *staleness* rather than through the address of the
+        // decoded structure, which was the first attempt and does not work: a
+        // collection that clears and rebuilds frees each `BMesh` immediately
+        // before allocating the next, so the replacement lands at the same
+        // address and the comparison passes. A falsification sweep caught that
+        // — the break survived.
+        //
+        // A session knows whether it still agrees with the document. Change the
+        // mesh out from under it and a *kept* session stays stale, while one
+        // that was decoded again would come back current. Nothing about that
+        // depends on the allocator.
+        let (mut doc, meshes) = doc_with(3);
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &meshes);
+        assert!(
+            sessions
+                .get(meshes[1])
+                .is_some_and(|s| s.matches(&doc, meshes[1])),
+            "the fixture starts stale, so it cannot tell kept from rebuilt"
+        );
+
+        *doc.mesh_mut(meshes[1]).expect("a mesh") = kreate_mesh::primitives::cube(3.0);
+        sessions.open_for(&doc, &meshes);
+        assert!(
+            !sessions
+                .get(meshes[1])
+                .expect("a session")
+                .matches(&doc, meshes[1]),
+            "the session was decoded again"
+        );
+        // And the ones that were not disturbed are still current, so the
+        // assertion above is about keeping and not about breaking.
+        for mesh in [meshes[0], meshes[2]] {
+            assert!(
+                sessions.get(mesh).is_some_and(|s| s.matches(&doc, mesh)),
+                "session for {mesh:?} went stale on its own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mesh_that_leaves_the_set_loses_its_session() {
+        // Otherwise the collection grows with every mode change, holding a
+        // `BMesh` — two hundred bytes a vertex — for every mesh ever edited.
+        let (doc, meshes) = doc_with(3);
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &meshes);
+
+        sessions.open_for(&doc, &meshes[..1]);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.get(meshes[0]).is_some());
+        assert!(sessions.get(meshes[2]).is_none());
+    }
+
+    #[test]
+    fn the_sessions_are_in_the_order_they_were_asked_for() {
+        // Operators walk the set, so the order decides which mesh an edit
+        // touches first — and a deterministic answer is worth having for free.
+        let (doc, meshes) = doc_with(3);
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &meshes);
+        assert_eq!(sessions.meshes().collect::<Vec<_>>(), meshes);
+
+        // Reversed, and after the set has already been built once — which is
+        // the case a `retain`-then-push would get wrong: the kept ones stay
+        // where they were and the new ones land at the end.
+        let flipped: Vec<MeshId> = meshes.iter().rev().copied().collect();
+        sessions.open_for(&doc, &flipped);
+        assert_eq!(sessions.meshes().collect::<Vec<_>>(), flipped);
+    }
+
+    #[test]
+    fn a_mesh_the_document_does_not_have_is_left_out() {
+        let (doc, meshes) = doc_with(1);
+        let mut other = Document::new();
+        let stranger = other.add_mesh(kreate_mesh::primitives::cube(1.0));
+
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &[meshes[0], stranger]);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.get(meshes[0]).is_some());
+    }
+
+    #[test]
+    fn an_empty_set_closes_everything() {
+        let (doc, meshes) = doc_with(2);
+        let mut sessions = EditSessions::new();
+        sessions.open_for(&doc, &meshes);
+        sessions.open_for(&doc, &[]);
+        assert!(sessions.is_empty());
     }
 }

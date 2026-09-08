@@ -509,9 +509,14 @@ struct App {
     ///
     /// Opened on entering edit mode and dropped on leaving, so the decode
     /// happens once rather than once per operator. Lives in the application
-    /// rather than the document: it is a staging area for edits, and a document
-    /// carrying one would snapshot it into every undo step.
-    edit: Option<kreate_ops::EditSession>,
+    /// rather than the document: they are a staging area for edits, and a
+    /// document carrying one would snapshot it into every undo step.
+    ///
+    /// One per mesh, because edit mode is a set of meshes. Without that, every
+    /// operator on anything but the active mesh would decode and re-encode it —
+    /// which is the cost a session exists to avoid, put back for every object
+    /// after the first.
+    edit: kreate_ops::EditSessions,
     /// Lazily built BVHs, for auto-depth and — later — snapping and knife.
     pick: kreate::pick::PickCache,
     /// Evaluated geometry, kept between frames.
@@ -636,7 +641,7 @@ impl App {
             op_ctx: OpContext::default(),
             uv_gesture: None,
             select_mode: 2,
-            edit: None,
+            edit: kreate_ops::EditSessions::new(),
             pick: kreate::pick::PickCache::new(),
             modifiers: kreate_scene::ModifierCache::new(),
             evaluated: Vec::new(),
@@ -685,7 +690,7 @@ impl App {
         match self.history.dispatch_in_session(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             op_id,
             &params,
@@ -863,11 +868,20 @@ impl App {
         );
 
         // Opened after the selection change rather than before it, so the
-        // session starts current with the document instead of immediately stale.
-        self.edit = match (change.open_session, target) {
-            (true, Some(mesh)) => kreate_ops::EditSession::open(&self.doc, mesh),
-            _ => None,
-        };
+        // sessions start current with the document instead of immediately
+        // stale.
+        //
+        // One per mesh in edit mode, in `edit_targets` order — the same order
+        // the operators walk them in, so a multi-mesh edit is deterministic.
+        if change.open_session {
+            let meshes: Vec<_> = kreate_ops::ops::mesh::edit_targets(&self.doc)
+                .into_iter()
+                .map(|t| t.mesh)
+                .collect();
+            self.edit.open_for(&self.doc, &meshes);
+        } else {
+            self.edit.clear();
+        }
 
         // The mode decides which context a shortcut resolves in, so the
         // tooltips change with it: `X` deletes an object in one mode and
@@ -969,7 +983,12 @@ impl App {
             self.ui.uv = None;
             return;
         }
-        let Some(session) = self.edit.as_ref() else {
+        // The target's, because a UV editor shows one layout. Which mesh in
+        // edit mode that is follows the same rule everything else does: the
+        // active object, or the first selected one.
+        let session =
+            kreate_ops::ops::mesh::target_mesh(&self.doc).and_then(|mesh| self.edit.get(mesh));
+        let Some(session) = session else {
             // Outside edit mode there is no UV map to show, which the panel
             // says out loud rather than drawing an empty square.
             self.ui.uv = None;
@@ -1397,7 +1416,7 @@ impl App {
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             op_id,
             &gesture.params(),
@@ -1689,7 +1708,7 @@ impl App {
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             session,
             &params,
@@ -1722,7 +1741,7 @@ impl App {
             if let Err(e) = self.history.update_modal(
                 &self.registry,
                 &mut self.doc,
-                self.edit.as_mut(),
+                Some(&mut self.edit),
                 &self.op_ctx,
                 &mut session,
                 &gesture.params(),
@@ -2061,7 +2080,7 @@ impl App {
     fn adopt(&mut self, document: Document) {
         self.doc = document;
         self.history = History::new();
-        self.edit = None;
+        self.edit.clear();
         self.op_ctx.mode = OpMode::Object;
 
         self.pick = kreate::pick::PickCache::default();
@@ -3372,7 +3391,12 @@ impl App {
         let Some(cursor) = self.uv_panel_cursor() else {
             return;
         };
-        let Some(session) = self.edit.as_ref() else {
+        // The target's, because a UV editor shows one layout. Which mesh in
+        // edit mode that is follows the same rule everything else does: the
+        // active object, or the first selected one.
+        let session =
+            kreate_ops::ops::mesh::target_mesh(&self.doc).and_then(|mesh| self.edit.get(mesh));
+        let Some(session) = session else {
             return;
         };
         let bm = session.bmesh();
@@ -3389,7 +3413,7 @@ impl App {
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             "uv.transform",
             &params,
@@ -3421,7 +3445,7 @@ impl App {
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
-            self.edit.as_mut(),
+            Some(&mut self.edit),
             &self.op_ctx,
             session,
             &params,

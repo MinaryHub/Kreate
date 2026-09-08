@@ -112,21 +112,20 @@ pub fn edit_targets(doc: &Document) -> Vec<EditTarget> {
     out
 }
 
-/// Runs `f` over the mesh in edit form and writes the result back.
+/// Runs `f` over one named mesh in edit form and writes the result back.
 ///
 /// Takes the coarse undo path: every one of these changes topology, and a
 /// declared write set over positions cannot describe a mesh that has grown
 /// faces.
-pub(crate) fn with_bmesh<T>(
+fn with_bmesh_id<T>(
     doc: &mut DocMut<'_>,
+    mesh_id: MeshId,
     f: impl FnOnce(&mut BMesh) -> Result<T, OpError>,
 ) -> Result<T, OpError> {
-    let mesh_id =
-        target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
-
     // The edit-mode structure, when edit mode is open and still agrees with the
     // document. Held across operators, so the decode happens once on entering
-    // edit mode rather than once per extrude.
+    // edit mode rather than once per extrude — and now for every mesh in edit
+    // mode rather than only the active one.
     if doc.edit_bmesh(mesh_id).is_some() {
         let out = {
             let bm = doc
@@ -134,7 +133,7 @@ pub(crate) fn with_bmesh<T>(
                 .expect("checked on the line above, and nothing has borrowed since");
             f(bm)?
         };
-        if !doc.bake_edit() {
+        if !doc.bake_edit(mesh_id) {
             return Err(OpError::Failed("mesh vanished mid-edit".into()));
         }
         return Ok(out);
@@ -156,6 +155,52 @@ pub(crate) fn with_bmesh<T>(
         .mesh_mut(mesh_id)
         .ok_or_else(|| OpError::Failed("mesh vanished mid-edit".into()))?;
     *slot = baked;
+    Ok(out)
+}
+
+/// Runs `f` over the *target* mesh in edit form and writes the result back.
+///
+/// For the operators that name an element by index — a loop cut names the edge
+/// the pointer was over — and can therefore only mean one mesh: an index is in
+/// one mesh's numbering, and handing it to another names a different edge.
+pub(crate) fn with_bmesh<T>(
+    doc: &mut DocMut<'_>,
+    f: impl FnOnce(&mut BMesh) -> Result<T, OpError>,
+) -> Result<T, OpError> {
+    let mesh_id =
+        target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    with_bmesh_id(doc, mesh_id, f)
+}
+
+/// Runs `f` over every mesh in edit mode in edit form, writing each back.
+///
+/// What a selection-driven topology operator wants: extruding with a body and
+/// its two arms in edit mode extrudes the selected faces of all three, and a
+/// mesh with nothing selected is a call in which `f` finds nothing to do.
+///
+/// Returns what `f` said for each mesh, in [`edit_targets`] order, so the
+/// caller folds the answers its own way — an extrude asks whether any mesh
+/// grew, a delete adds up what was removed.
+///
+/// # Each mesh baked as it goes
+///
+/// Not all decoded, then all edited, then all baked. A bake writes the whole
+/// mesh back and takes the coarse undo snapshot, and holding several structures
+/// mid-edit would mean holding several `BMesh`es — two hundred bytes a vertex —
+/// at once. One at a time costs nothing extra: the undo snapshot is taken on
+/// the first bake and the rest are free.
+pub(crate) fn each_bmesh<T>(
+    doc: &mut DocMut<'_>,
+    mut f: impl FnMut(&mut BMesh) -> Result<T, OpError>,
+) -> Result<Vec<T>, OpError> {
+    let targets = edit_targets(doc.document());
+    if targets.is_empty() {
+        return Err(OpError::Failed("no mesh to edit".into()));
+    }
+    let mut out = Vec::with_capacity(targets.len());
+    for target in targets {
+        out.push(with_bmesh_id(doc, target.mesh, &mut f)?);
+    }
     Ok(out)
 }
 
@@ -247,6 +292,23 @@ fn flush(
         Some(map) => selection::flush_with(mesh, mode, map),
         None => selection::flush(mesh, mode),
     }
+}
+
+/// Whether nothing at all is selected, in any mesh in edit mode.
+///
+/// Several operators fall back to the whole mesh when the selection is empty —
+/// recalculating normals or shading a model flat is something a user does to
+/// something they have just imported, and making them select everything first
+/// is friction with no purpose.
+///
+/// With edit mode holding several meshes that question has to be asked of all
+/// of them and not of each. Asked per mesh, selecting a few faces in one object
+/// would silently rewrite the normals of every *other* object in edit mode —
+/// which is the opposite of what selecting something means.
+fn nothing_selected_anywhere(doc: &Document) -> bool {
+    edit_targets(doc)
+        .iter()
+        .all(|t| doc.mesh(t.mesh).is_none_or(|m| !selection::any_selected(m)))
 }
 
 /// True when there is a mesh to edit at all.
@@ -944,7 +1006,10 @@ impl Operator for ExtrudeRegion {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let grew = with_bmesh(doc, |bm| {
+        // Every mesh in edit mode. A mesh with no faces selected returns
+        // early and is left alone, which is what makes this safe to run over
+        // the whole set.
+        let grew = each_bmesh(doc, |bm| {
             let faces = bm.selected_faces();
             if faces.is_empty() {
                 return Ok(false);
@@ -952,7 +1017,9 @@ impl Operator for ExtrudeRegion {
             edit::extrude_selected_faces(bm, params.offset as f32)
                 .map_err(|e| OpError::Failed(e.to_string()))?;
             Ok(true)
-        })?;
+        })?
+        .into_iter()
+        .any(|g| g);
 
         // Cancelled rather than Finished, so nothing lands in the history and
         // the user's next undo still reaches the edit they actually made.
@@ -1000,7 +1067,14 @@ impl Operator for DeleteElements {
             3 => edit::DeleteMode::FacesOnly,
             _ => edit::DeleteMode::Faces,
         };
-        let removed = with_bmesh(doc, |bm| Ok(edit::delete(bm, mode)))?;
+        let removed = each_bmesh(doc, |bm| Ok(edit::delete(bm, mode)))?
+            .into_iter()
+            .fold(
+                (0, 0, 0),
+                |a: (usize, usize, usize), b: (usize, usize, usize)| {
+                    (a.0 + b.0, a.1 + b.1, a.2 + b.2)
+                },
+            );
         Ok(if removed == (0, 0, 0) {
             OpResult::Cancelled
         } else {
@@ -1037,19 +1111,21 @@ impl Operator for DissolveElements {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let out = with_bmesh(doc, |bm| {
+        let healed = each_bmesh(doc, |bm| {
             let result = match params.mode {
                 0 => edit::dissolve_verts(bm, &bm.selected_verts()),
                 2 => edit::dissolve_faces(bm, &bm.selected_faces(), &[]),
                 _ => edit::dissolve_edges(bm, &bm.selected_edges()),
             };
             result.map_err(|e| OpError::Failed(e.to_string()))
-        })?;
+        })?
+        .into_iter()
+        .any(|out| !out.faces.is_empty());
 
         // A dissolve that healed nothing but refused some groups is not a
         // failure the user should have to undo — it is a report. Telling them
         // apart matters: `Cancelled` leaves the history clean.
-        Ok(if out.faces.is_empty() {
+        Ok(if !healed {
             OpResult::Cancelled
         } else {
             OpResult::Finished
@@ -1094,7 +1170,7 @@ impl Operator for Subdivide {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let grew = with_bmesh(doc, |bm| {
+        let grew = each_bmesh(doc, |bm| {
             let mut any = false;
             // Clamped rather than trusted: the parameter reaches here from a
             // script or a saved keymap as well as from the spinner, and six
@@ -1105,7 +1181,9 @@ impl Operator for Subdivide {
                 any |= !out.faces.is_empty();
             }
             Ok(any)
-        })?;
+        })?
+        .into_iter()
+        .any(|g| g);
         Ok(if grew {
             OpResult::Finished
         } else {
@@ -1150,11 +1228,13 @@ impl Operator for BevelEdges {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let built = with_bmesh(doc, |bm| {
+        let built: usize = each_bmesh(doc, |bm| {
             edit::bevel_selected(bm, params.width as f32)
                 .map(|out| out.faces.len())
                 .map_err(|e| OpError::Failed(e.to_string()))
-        })?;
+        })?
+        .into_iter()
+        .sum();
         // Every selected edge was a boundary or a non-manifold fan, so there was
         // nowhere to put a chamfer. A no-op rather than a failure: the selection
         // was legitimate, the operation just does not apply to it.
@@ -1196,7 +1276,7 @@ impl Operator for SplitGeometry {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let opened = with_bmesh(doc, |bm| {
+        let opened: usize = each_bmesh(doc, |bm| {
             let result = if params.mode == 1 {
                 edit::rip_selected_edges(bm)
             } else {
@@ -1205,7 +1285,9 @@ impl Operator for SplitGeometry {
             result
                 .map(|out| out.seams)
                 .map_err(|e| OpError::Failed(e.to_string()))
-        })?;
+        })?
+        .into_iter()
+        .sum();
         // Nothing shared means nothing to detach, which is a no-op rather than a
         // failure — the geometry was already separate.
         Ok(if opened == 0 {
@@ -1249,7 +1331,7 @@ impl Operator for FillHole {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let built = with_bmesh(doc, |bm| {
+        let built: usize = each_bmesh(doc, |bm| {
             let span = (params.span > 0).then_some(params.span as usize);
             match edit::fill_selected(bm, params.grid, span) {
                 Ok(out) => Ok(out.faces.len()),
@@ -1257,7 +1339,9 @@ impl Operator for FillHole {
                 // odd border" both tell the user exactly what to change.
                 Err(e) => Err(OpError::Failed(e.to_string())),
             }
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if built == 0 {
             OpResult::Cancelled
         } else {
@@ -1329,14 +1413,16 @@ impl Operator for SpinFaces {
             params.centre[1] as f32,
             params.centre[2] as f32,
         );
-        let grew = with_bmesh(doc, |bm| {
+        let grew: usize = each_bmesh(doc, |bm| {
             let out = edit::spin_selected(bm, centre, axis, params.angle as f32, params.steps)
                 .map_err(|e| OpError::Failed(e.to_string()))?;
             if params.close {
                 edit::close_spin(bm, &out).map_err(|e| OpError::Failed(e.to_string()))?;
             }
             Ok(out.verts.len())
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if grew == 0 {
             OpResult::Cancelled
         } else {
@@ -1375,12 +1461,16 @@ impl Operator for RecalculateNormals {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let changed = with_bmesh(doc, |bm| {
-            // The whole mesh when nothing is selected: recalculating normals is
-            // something a user does to a model they have just imported, and
-            // making them select everything first is friction with no purpose.
+        // Asked of the whole of edit mode, not of each mesh: see
+        // `nothing_selected_anywhere`.
+        let empty = nothing_selected_anywhere(doc.document());
+        let changed: usize = each_bmesh(doc, |bm| {
+            // The whole mesh when nothing is selected anywhere: recalculating
+            // normals is something a user does to a model they have just
+            // imported, and making them select everything first is friction
+            // with no purpose.
             let mut faces = bm.selected_faces();
-            if faces.is_empty() {
+            if faces.is_empty() && empty {
                 faces = bm.face_ids().collect();
             }
             Ok(match params.action {
@@ -1397,7 +1487,9 @@ impl Operator for RecalculateNormals {
                     out.flipped
                 }
             })
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if changed == 0 {
             OpResult::Cancelled
         } else {
@@ -1439,13 +1531,16 @@ impl Operator for ShadeFaces {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let changed = with_bmesh(doc, |bm| {
+        let empty = nothing_selected_anywhere(doc.document());
+        let changed: usize = each_bmesh(doc, |bm| {
             let mut faces = bm.selected_faces();
-            if faces.is_empty() {
+            if faces.is_empty() && empty {
                 faces = bm.face_ids().collect();
             }
             Ok(edit::set_shade_smooth(bm, &faces, params.smooth))
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if changed == 0 {
             OpResult::Cancelled
         } else {
@@ -1485,13 +1580,15 @@ impl Operator for MarkSharp {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let changed = with_bmesh(doc, |bm| {
+        let changed: usize = each_bmesh(doc, |bm| {
             Ok(if params.angle > 0.0 {
                 edit::auto_smooth(bm, params.angle as f32)
             } else {
                 edit::set_sharp_selected(bm, params.sharp)
             })
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if changed == 0 {
             OpResult::Cancelled
         } else {
@@ -1602,7 +1699,7 @@ impl Operator for InsetFaces {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let out = with_bmesh(doc, |bm| {
+        let out = each_bmesh(doc, |bm| {
             let faces = bm.selected_faces();
             if faces.is_empty() {
                 return Ok(None);
@@ -1615,7 +1712,20 @@ impl Operator for InsetFaces {
                 edit::inset_region(bm, &faces, t, d)
             };
             result.map(Some).map_err(|e| OpError::Failed(e.to_string()))
-        })?;
+        })?
+        .into_iter()
+        .flatten()
+        // The largest of them, when several meshes inset something. What the
+        // caller reads off this is whether anything happened and whether the
+        // thickness had to be clamped; adding several meshes' face lists
+        // together would answer neither question about any of them.
+        .reduce(|a, b| {
+            if a.inner_faces.len() >= b.inner_faces.len() {
+                a
+            } else {
+                b
+            }
+        });
         Ok(match out {
             Some(inset) if !inset.inner_faces.is_empty() => OpResult::Finished,
             _ => OpResult::Cancelled,
@@ -1649,11 +1759,15 @@ impl Operator for BridgeEdgeLoops {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let built = with_bmesh(doc, |bm| {
-            // Fall back to every open border when nothing is selected: two open
-            // ends is the common case, and making the user select both first is
-            // friction with no purpose.
+        let empty = nothing_selected_anywhere(doc.document());
+        let built: usize = each_bmesh(doc, |bm| {
+            // Fall back to every open border when nothing is selected anywhere:
+            // two open ends is the common case, and making the user select both
+            // first is friction with no purpose.
             if bm.selected_edges().is_empty() {
+                if !empty {
+                    return Ok(0);
+                }
                 let Some(borders) = edit::open_borders(bm) else {
                     return Ok(0);
                 };
@@ -1667,7 +1781,9 @@ impl Operator for BridgeEdgeLoops {
                 Ok(out) => Ok(out.faces.len()),
                 Err(e) => Err(OpError::Failed(e.to_string())),
             }
-        })?;
+        })?
+        .into_iter()
+        .sum();
         Ok(if built == 0 {
             OpResult::Cancelled
         } else {
@@ -1724,14 +1840,15 @@ impl Operator for MergeVerts {
             2 => edit::MergeTarget::Last,
             _ => edit::MergeTarget::Centre,
         };
-        let out = with_bmesh(doc, |bm| {
+        let empty = nothing_selected_anywhere(doc.document());
+        let out = each_bmesh(doc, |bm| {
             let result = if params.distance > 0.0 {
                 // By distance: the selection if there is one, the whole mesh
                 // otherwise. Welding a whole imported mesh is the common case,
                 // and making the user select everything first is friction with
                 // no purpose.
                 let mut verts = bm.selected_verts();
-                if verts.is_empty() {
+                if verts.is_empty() && empty {
                     verts = bm.vert_ids().collect();
                 }
                 edit::weld_by_distance(bm, &verts, params.distance as f32)
@@ -1740,7 +1857,8 @@ impl Operator for MergeVerts {
             };
             result.map_err(|e| OpError::Failed(e.to_string()))
         })?;
-        Ok(if out.removed == 0 {
+        let removed: usize = out.iter().map(|m| m.removed).sum();
+        Ok(if removed == 0 {
             OpResult::Cancelled
         } else {
             OpResult::Finished
@@ -1831,7 +1949,7 @@ impl Operator for SelectElements {
             });
         }
 
-        let grew = with_bmesh(doc, |bm| {
+        let grew = each_bmesh(doc, |bm| {
             // Loop, ring and face-loop grow from what is already selected.
             // Without a click to start from they have no seed, so an empty
             // selection means there is nothing to do rather than an error.
@@ -1847,7 +1965,9 @@ impl Operator for SelectElements {
                 };
             }
             Ok(true)
-        })?;
+        })?
+        .into_iter()
+        .any(|g| g);
         Ok(if grew {
             OpResult::Finished
         } else {

@@ -12,6 +12,6 @@ pub use document::{
     Collection, CollectionId, Document, Linkage, Material, MaterialId, MeshId, Object, ObjectData,
     ObjectId, ReparentError, Selection,
 };
-pub use edit_session::EditSession;
+pub use edit_session::{EditSession, EditSessions};
 pub use modifier::{apply_stack, ModifierCache, ModifierInstance, ModifierKind};
 pub use undo::{DocMut, EditError, UndoPayload};

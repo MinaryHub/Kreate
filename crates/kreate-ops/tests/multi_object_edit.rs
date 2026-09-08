@@ -188,6 +188,32 @@ impl Scene {
         self.objects[object].index() as i64 + 1
     }
 
+    /// How many faces one object's mesh has.
+    fn faces(&self, object: usize) -> usize {
+        let mesh_id = self
+            .doc
+            .object(self.objects[object])
+            .expect("object")
+            .mesh()
+            .expect("a mesh");
+        self.doc.mesh(mesh_id).expect("mesh").num_faces() as usize
+    }
+
+    /// Whether every face of one object's mesh is shaded smooth.
+    fn all_smooth(&self, object: usize) -> bool {
+        let mesh_id = self
+            .doc
+            .object(self.objects[object])
+            .expect("object")
+            .mesh()
+            .expect("a mesh");
+        let mesh = self.doc.mesh(mesh_id).expect("mesh");
+        match mesh.attributes().get_bool(names::SHADE_SMOOTH) {
+            Some(flags) => !flags.is_empty() && flags.iter().all(|on| *on),
+            None => false,
+        }
+    }
+
     fn run(&mut self, op: &str, pairs: &[(&'static str, PropertyValue)]) -> kreate_ops::OpResult {
         let registry = registry();
         let mut history = History::new();
@@ -892,4 +918,228 @@ fn selecting_in_two_objects_then_dragging_moves_both() {
         let want: Vec<DVec3> = was.iter().map(|p| *p + offset).collect();
         assert_close(&format!("object {object}"), &scene.world(object), &want);
     }
+}
+
+// --- topology across the meshes --------------------------------------------
+//
+// The other half of what a modeller means by having several objects in edit
+// mode: extruding, insetting and deleting act on all of them, on whatever each
+// one has selected.
+
+#[test]
+fn an_extrude_reaches_every_selected_object() {
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    scene.select_faces(0, &[0]);
+    scene.select_faces(1, &[0]);
+    let before = [scene.faces(0), scene.faces(1)];
+
+    assert_eq!(
+        scene.run(
+            "mesh.extrude_region",
+            &[("offset", PropertyValue::Float(0.5))],
+        ),
+        kreate_ops::OpResult::Finished
+    );
+    for (object, was) in before.iter().enumerate() {
+        assert!(
+            scene.faces(object) > *was,
+            "object {object} did not grow: {} faces, was {was}",
+            scene.faces(object)
+        );
+    }
+}
+
+#[test]
+fn an_extrude_leaves_a_mesh_with_nothing_selected_alone() {
+    // What makes it safe to run the loop over the whole set: a mesh with no
+    // faces selected returns early inside the closure, so it is not merely
+    // unchanged — it is untouched, and its arrays stay shared.
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    scene.select_faces(0, &[0]);
+    let untouched = scene.faces(1);
+
+    assert_eq!(
+        scene.run(
+            "mesh.extrude_region",
+            &[("offset", PropertyValue::Float(0.5))],
+        ),
+        kreate_ops::OpResult::Finished
+    );
+    assert_eq!(scene.faces(1), untouched, "the other mesh grew");
+}
+
+#[test]
+fn an_extrude_with_nothing_selected_anywhere_is_cancelled() {
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    assert_eq!(
+        scene.run(
+            "mesh.extrude_region",
+            &[("offset", PropertyValue::Float(0.5))],
+        ),
+        kreate_ops::OpResult::Cancelled
+    );
+}
+
+#[test]
+fn a_delete_reaches_every_selected_object() {
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    scene.select_faces(0, &[0]);
+    scene.select_faces(1, &[0]);
+
+    assert_eq!(
+        scene.run("mesh.delete", &[("mode", PropertyValue::Enum(2))]),
+        kreate_ops::OpResult::Finished
+    );
+    for object in 0..2 {
+        assert_eq!(scene.faces(object), 0, "object {object} kept its face");
+    }
+}
+
+#[test]
+fn an_inset_reaches_every_selected_object() {
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    scene.select_faces(0, &[0]);
+    scene.select_faces(1, &[0]);
+    let before = [scene.faces(0), scene.faces(1)];
+
+    assert_eq!(
+        scene.run("mesh.inset", &[("thickness", PropertyValue::Float(0.2))]),
+        kreate_ops::OpResult::Finished
+    );
+    for (object, was) in before.iter().enumerate() {
+        assert!(scene.faces(object) > *was, "object {object} was not inset");
+    }
+}
+
+#[test]
+fn shading_with_nothing_selected_anywhere_reaches_every_mesh() {
+    // The convenience these operators have: with nothing selected they act on
+    // the whole mesh, because shading a model flat is something a user does to
+    // something they have just imported.
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+
+    assert_eq!(
+        scene.run("mesh.shade", &[("smooth", PropertyValue::Bool(true))]),
+        kreate_ops::OpResult::Finished
+    );
+    for object in 0..2 {
+        assert!(scene.all_smooth(object), "object {object} was not shaded");
+    }
+}
+
+#[test]
+fn shading_a_selection_in_one_object_leaves_the_others_alone() {
+    // The half that the convenience above would have got wrong. Asked per
+    // mesh, "nothing selected here" is true of every object the user did *not*
+    // select in — so selecting two faces in one object would have re-shaded
+    // every face of every other object in edit mode, which is the opposite of
+    // what selecting something means.
+    let mut scene = Scene::new(3);
+    scene.select_objects(&[0, 1, 2]);
+    scene.select_faces(0, &[0]);
+
+    assert_eq!(
+        scene.run("mesh.shade", &[("smooth", PropertyValue::Bool(true))]),
+        kreate_ops::OpResult::Finished
+    );
+    assert!(
+        !scene.all_smooth(1),
+        "object 1 was shaded although nothing in it was selected"
+    );
+    assert!(!scene.all_smooth(2), "and so was object 2");
+}
+
+#[test]
+fn a_loop_cut_names_one_edge_and_so_stays_in_one_mesh() {
+    // The exception to the loop, and the reason it is an exception: a loop cut
+    // names the edge the pointer was over, and an index is in one mesh's
+    // numbering. Handing it to another mesh names a different edge — so this
+    // one keeps the target and the others are left alone.
+    let mut scene = Scene::new(2);
+    scene.select_objects(&[0, 1]);
+    scene.doc.selection.active = Some(scene.objects[0]);
+    let before = [scene.faces(0), scene.faces(1)];
+
+    scene.run(
+        "mesh.loop_cut",
+        &[
+            ("edge", PropertyValue::Int(0)),
+            ("cuts", PropertyValue::Int(1)),
+        ],
+    );
+    assert_eq!(
+        scene.faces(1),
+        before[1],
+        "the loop cut reached a mesh whose numbering it does not speak"
+    );
+    let _ = before[0];
+}
+
+#[test]
+fn every_mesh_in_edit_mode_gets_its_own_session() {
+    // What stops the second object costing a decode and an encode of its whole
+    // mesh on every operator — the cost `EditSession` exists to avoid, which a
+    // single session would have put back for every object after the first.
+    let (doc, meshes) = {
+        let mut scene = Scene::new(3);
+        scene.select_objects(&[0, 1, 2]);
+        let meshes: Vec<_> = kreate_ops::ops::mesh::edit_targets(&scene.doc)
+            .into_iter()
+            .map(|t| t.mesh)
+            .collect();
+        (scene.doc, meshes)
+    };
+    assert_eq!(meshes.len(), 3);
+
+    let mut sessions = kreate_ops::EditSessions::new();
+    sessions.open_for(&doc, &meshes);
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions.meshes().collect::<Vec<_>>(), meshes);
+}
+
+#[test]
+fn a_topology_edit_uses_the_session_of_the_mesh_it_is_editing() {
+    // The mistake a set makes possible: baking the wrong session writes a mesh
+    // nobody edited over itself, and the symptom is one object losing an edit
+    // when a *different* one is extruded.
+    //
+    // Driven through `dispatch_in_session` with all three sessions open, so the
+    // lookup is the thing under test rather than the fallback that converts for
+    // itself.
+    let mut scene = Scene::new(3);
+    scene.select_objects(&[0, 1, 2]);
+    scene.select_faces(1, &[0]);
+
+    let meshes: Vec<_> = kreate_ops::ops::mesh::edit_targets(&scene.doc)
+        .into_iter()
+        .map(|t| t.mesh)
+        .collect();
+    let mut sessions = kreate_ops::EditSessions::new();
+    sessions.open_for(&scene.doc, &meshes);
+
+    let before = [scene.faces(0), scene.faces(1), scene.faces(2)];
+    let registry = registry();
+    let mut history = History::new();
+    let mut params = PropertyMap::new();
+    params.set("offset", PropertyValue::Float(0.5));
+    history
+        .dispatch_in_session(
+            &registry,
+            &mut scene.doc,
+            Some(&mut sessions),
+            &scene.ctx,
+            "mesh.extrude_region",
+            &params,
+        )
+        .expect("mesh.extrude_region");
+
+    assert!(scene.faces(1) > before[1], "the selected mesh did not grow");
+    assert_eq!(scene.faces(0), before[0], "another mesh was written");
+    assert_eq!(scene.faces(2), before[2], "and so was the third");
 }
