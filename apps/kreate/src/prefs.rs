@@ -77,6 +77,32 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
     result
 }
 
+/// The workspace file's path.
+pub fn workspace_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("workspaces.toml"))
+}
+
+/// Loads the workspace file, reporting anything wrong with it.
+///
+/// A missing file is not a problem — it is a first run, and the shipped
+/// layouts are the right answer.
+pub fn load_workspaces(path: &Path) -> (kreate_ui::Workspaces, Vec<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (kreate_ui::Workspaces::default(), Vec::new());
+    };
+    let (spaces, problems) = kreate_ui::wsfile::parse(&text);
+    let messages = problems
+        .iter()
+        .map(|p| format!("{}: {p}", path.display()))
+        .collect();
+    (spaces, messages)
+}
+
+/// Saves the workspace file.
+pub fn save_workspaces(path: &Path, spaces: &kreate_ui::Workspaces) -> Result<(), std::io::Error> {
+    write_atomic(path, &kreate_ui::wsfile::write(spaces))
+}
+
 /// Loads the keymap file, reporting anything wrong with it.
 ///
 /// A missing file is not a problem — it is a first run.
@@ -138,6 +164,93 @@ mod tests {
             },
         );
         file
+    }
+
+    #[test]
+    fn workspaces_round_trip_through_a_file() {
+        let scratch = Scratch::new("workspaces");
+        let path = scratch.path("workspaces.toml");
+
+        let mut spaces = kreate_ui::Workspaces::default();
+        spaces.switch_to(1);
+        spaces.duplicate_active("Mine");
+        let area = spaces.screen().areas()[0].0;
+        spaces
+            .screen_mut()
+            .split(
+                area,
+                kreate_ui::Axis::Horizontal,
+                0.3,
+                kreate_ui::EditorKind::UvEditor,
+            )
+            .expect("split");
+
+        save_workspaces(&path, &spaces).expect("save");
+        let (loaded, problems) = load_workspaces(&path);
+        assert_eq!(problems, Vec::<String>::new());
+        assert_eq!(loaded.len(), spaces.len());
+        assert_eq!(loaded.active().name, "Mine");
+        assert_eq!(
+            loaded.screen().to_nodes().len(),
+            spaces.screen().to_nodes().len(),
+            "the arrangement did not come back"
+        );
+    }
+
+    #[test]
+    fn a_missing_workspace_file_is_a_first_run_not_a_problem() {
+        // The user who has never opened the preferences, and the user who
+        // deleted the file to get the shipped layouts back. Both ask for the
+        // same thing.
+        let scratch = Scratch::new("workspaces-missing");
+        let (spaces, problems) = load_workspaces(&scratch.path("nothing-here.toml"));
+        assert_eq!(spaces, kreate_ui::Workspaces::default());
+        assert_eq!(
+            problems,
+            Vec::<String>::new(),
+            "a first run is not an error"
+        );
+    }
+
+    #[test]
+    fn a_broken_workspace_file_costs_a_layout_not_a_session() {
+        // The failure this module exists to prevent, in the other file it now
+        // owns. What survives is loaded; what does not is reported in prose the
+        // user can act on.
+        let scratch = Scratch::new("workspaces-broken");
+        let path = scratch.path("workspaces.toml");
+        std::fs::write(
+            &path,
+            "schema_version = 1
+             active = \"Good\"
+             nonsense
+
+             [[workspace]]
+             name = \"Good\"
+             node = \"area viewport\"
+
+             [[workspace]]
+             name = \"Half\"
+             node = \"split v 0.5\"
+             node = \"area viewport\"
+",
+        )
+        .expect("write");
+
+        let (spaces, problems) = load_workspaces(&path);
+        assert_eq!(spaces.len(), 1, "the good layout did not survive");
+        assert_eq!(spaces.active().name, "Good");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        for message in &problems {
+            assert!(
+                message.contains("workspaces.toml"),
+                "a problem that does not name the file: {message}"
+            );
+            assert!(
+                !message.contains('{') && !message.contains("Problem"),
+                "a problem that reads as a debug dump: {message}"
+            );
+        }
     }
 
     #[test]

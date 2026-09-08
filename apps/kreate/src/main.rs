@@ -543,6 +543,7 @@ impl App {
         kreate_ops::register_builtin(&mut registry);
         let mut app = Self::empty(doc, locale, registry);
         app.load_keymap();
+        app.load_workspaces();
         app
     }
 
@@ -653,6 +654,42 @@ impl App {
         self.preset = file.preset;
         self.key_overrides = file.overrides;
         self.rebuild_keymap();
+    }
+
+    /// Loads the named layouts, or falls back to the ones Kreate ships with.
+    ///
+    /// Anything wrong with the file is logged and the rest still loads, on the
+    /// same grounds as the keymap: a broken preferences file must cost a
+    /// setting, not a session.
+    fn load_workspaces(&mut self) {
+        let Some(path) = kreate::prefs::workspace_path() else {
+            return;
+        };
+        let (spaces, problems) = kreate::prefs::load_workspaces(&path);
+        for problem in problems {
+            tracing::warn!("{problem}");
+            println!("workspaces: {problem}");
+        }
+        self.ui.workspaces = spaces;
+    }
+
+    /// Writes the named layouts, if they have changed and settled.
+    fn save_workspaces(&mut self) {
+        if !self.ui.layout_needs_saving() {
+            return;
+        }
+        // Marked saved either way. A failure that left the flag set would retry
+        // on the next frame, for ever, on a directory that is not going to
+        // become writable.
+        self.ui.layout_saved();
+        let Some(path) = kreate::prefs::workspace_path() else {
+            return;
+        };
+        if let Err(e) = kreate::prefs::save_workspaces(&path, &self.ui.workspaces) {
+            // Reported, never fatal: a read-only home directory is not a reason
+            // to stop working.
+            println!("workspaces: could not save to {}: {e}", path.display());
+        }
     }
 
     /// Rebuilds the resolved keymap from the preset and the user's changes.
@@ -2628,6 +2665,7 @@ impl App {
         self.ui.ime_active = output.platform_output.ime.is_some();
 
         self.apply_keymap_edits();
+        self.save_workspaces();
         self.drain_ui_commands();
         // After the commands, so a save or an open is reflected in the title on
         // the same frame it happened rather than the next one, and so the

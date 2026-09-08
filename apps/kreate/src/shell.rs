@@ -63,6 +63,14 @@ pub struct ShellState {
     /// list while iterating it does. The command queue takes the same shape for
     /// the same reason.
     area_edits: Vec<AreaEdit>,
+    /// Whether the layouts have changed since they were last written.
+    ///
+    /// Set by any applied layout edit, including a resize — which is why the
+    /// application also waits for the drag to end before writing. Dragging a
+    /// boundary changes the layout sixty times a second, and a file written on
+    /// each of those frames is a file the disk is busy with instead of the
+    /// frame.
+    layout_dirty: bool,
     /// Which boundary a drag is moving.
     ///
     /// Held for the duration of the drag rather than resolved from the pointer
@@ -275,8 +283,24 @@ impl ShellState {
             })
     }
 
+    /// Whether the layouts are worth writing to disk right now.
+    ///
+    /// Not while a boundary is being dragged: the layout changes every frame of
+    /// a drag and settles when the pointer is released, and only the settled
+    /// answer is worth a file.
+    pub fn layout_needs_saving(&self) -> bool {
+        self.layout_dirty && self.dragging.is_none()
+    }
+
+    /// Records that the layouts have been written.
+    pub fn layout_saved(&mut self) {
+        self.layout_dirty = false;
+    }
+
     fn apply_area_edits(&mut self) {
-        for edit in std::mem::take(&mut self.area_edits) {
+        let edits = std::mem::take(&mut self.area_edits);
+        self.layout_dirty |= !edits.is_empty();
+        for edit in edits {
             match edit {
                 AreaEdit::SetEditor(area, kind) => {
                     self.screen_mut().set_editor(area, kind);
@@ -318,6 +342,7 @@ impl Default for ShellState {
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
             area_edits: Vec::new(),
+            layout_dirty: false,
             dragging: None,
             egui_wants_keyboard: false,
             ime_active: false,
@@ -2340,6 +2365,71 @@ mod tests {
 
         assert!(!state.has_editor(kreate_ui::EditorKind::UvEditor));
         assert!(state.uv_at(egui::Pos2::ZERO).is_none(), "no UV editor open");
+    }
+
+    #[test]
+    fn a_layout_change_asks_to_be_saved_once_it_has_settled() {
+        // The file is written when the layout changes, and a boundary drag
+        // changes it sixty times a second. So the flag is set by any applied
+        // edit and the *question* also asks whether a drag is in progress:
+        // writing on every frame of a drag is a file the disk is busy with
+        // instead of the frame.
+        let (mut state, viewport) = screen_state();
+        assert!(!state.layout_needs_saving(), "nothing has changed yet");
+
+        state.split_area(viewport, kreate_ui::Axis::Vertical);
+        assert!(
+            !state.layout_needs_saving(),
+            "the queue asked to be saved before it was applied"
+        );
+        state.apply_area_edits();
+        assert!(state.layout_needs_saving(), "the change was not noticed");
+
+        state.layout_saved();
+        assert!(!state.layout_needs_saving(), "saving did not settle it");
+    }
+
+    #[test]
+    fn a_frame_that_changed_no_layout_asks_for_no_save() {
+        // Otherwise the file is rewritten sixty times a second for ever, which
+        // is a busy disk and a backup tool reporting a change every minute.
+        let (mut state, _) = screen_state();
+        for _ in 0..3 {
+            state.apply_area_edits();
+            assert!(!state.layout_needs_saving());
+        }
+    }
+
+    #[test]
+    fn a_boundary_still_being_dragged_is_not_worth_a_file() {
+        // Only the settled answer is. Checked through the same door the drag
+        // uses, so a resize queued mid-drag sets the flag and the question still
+        // says no.
+        let (mut state, viewport) = screen_state();
+        let space = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0));
+        let split = state
+            .screen()
+            .layout(space)
+            .handles
+            .iter()
+            .find(|h| h.axis == kreate_ui::Axis::Vertical)
+            .expect("a vertical boundary")
+            .id;
+        let _ = viewport;
+
+        state.dragging = Some(split);
+        state.area_edits.push(AreaEdit::Resize(split, 0.4, 1000.0));
+        state.apply_area_edits();
+        assert!(
+            !state.layout_needs_saving(),
+            "a file was asked for in the middle of a drag"
+        );
+
+        state.dragging = None;
+        assert!(
+            state.layout_needs_saving(),
+            "the settled layout was never asked for"
+        );
     }
 
     #[test]

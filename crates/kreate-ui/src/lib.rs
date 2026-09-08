@@ -20,6 +20,7 @@ pub mod text;
 pub mod theme;
 pub mod uv_editor;
 pub mod workspace;
+pub mod wsfile;
 
 pub use area::{AreaId, AreaRect, Axis, EditorKind, Handle, Layout, NodeSpec, Screen, SplitId};
 pub use command::{Command, CommandQueue};
