@@ -307,21 +307,45 @@ fn a_topology_edit_writes_back_within_budget() {
             )
             .expect("mesh.extrude_region");
     });
-    eprintln!("a one-face extrude on a million faces: {elapsed:?}");
-    // 188 to 387 ms depending on machine load, from 622 ms when this test was
-    // written. The write-back is still the whole cost — the edit touches one
-    // face — and the remaining time is the attribute gathers and the positions
-    // copy, which are passes over the mesh by nature rather than by accident.
+    // A reference pass over the same mesh: one visit to every corner, with
+    // arithmetic, allocating its result. Not a model of the write-back — just
+    // something of the same order that the same processor has to do at the same
+    // moment.
+    let reference = median_time(3, || {
+        let mesh = doc.mesh(mesh).expect("a mesh");
+        std::hint::black_box(mesh.compute_face_normals());
+    });
+    let ratio = elapsed.as_secs_f64() / reference.as_secs_f64();
+    eprintln!(
+        "a one-face extrude on a million faces: {elapsed:?} \
+         (reference pass {reference:?}, ratio {ratio:.1})"
+    );
+
+    // Measured as a ratio rather than in milliseconds, and that is the point of
+    // this block. The absolute figure has been 222 ms and 484 ms for the same
+    // code within a few minutes of each other, purely by machine load — which
+    // is how the 500 ms bound that used to be here came to fail. Its own
+    // comment had already admitted it could not both survive a slow run and
+    // catch the 622 ms it was written against.
     //
-    // The threshold is uncomfortably close to the figure this was written to
-    // catch, and there is no honest way to tighten it: 387 ms is this same code
-    // on a throttled machine. What it still catches is the shape — a write-back
-    // that became more than one pass — and it is stated here that it would not
-    // reliably catch the original 622 ms regression on a slow run.
+    // A ratio cannot be thrown by that: whatever throttling does to the
+    // write-back it does to the reference in the same breath. Sixteen when this
+    // was written, against roughly forty-two for the version the test exists to
+    // reject, so twenty-five sits between them with room on both sides.
+    //
+    // What it catches is still the *shape* — a write-back that became several
+    // passes over the mesh where it was a few — and now it catches it on a busy
+    // afternoon too.
     assert!(
-        elapsed < Duration::from_millis(500),
-        "a topology edit took {elapsed:?}; the write-back is the cost, not the \
-         edit"
+        ratio < 25.0,
+        "a topology edit cost {ratio:.1} reference passes ({elapsed:?} against \
+         {reference:?}); the write-back is the cost, not the edit"
+    );
+    // And a catastrophe net, loose enough to be about correctness rather than
+    // speed: something that has stopped being linear in the mesh at all.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a topology edit took {elapsed:?}; that is not a slow machine"
     );
 }
 

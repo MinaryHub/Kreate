@@ -48,6 +48,70 @@ pub fn target_object(doc: &Document) -> Option<kreate_scene::document::ObjectId>
         .or_else(|| doc.selection.objects.first().copied())
 }
 
+/// One mesh in edit mode, and the object whose space it is in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditTarget {
+    pub object: kreate_scene::document::ObjectId,
+    pub mesh: MeshId,
+    /// Object to world. Held rather than looked up again, because working it
+    /// out walks the parent chain and every vertex of the mesh needs it.
+    pub to_world: glam::DAffine3,
+}
+
+/// Every mesh edit mode is open on.
+///
+/// # Why edit mode is a set
+///
+/// A modeller selects a body and its two arms and moves a shared seam; doing
+/// that one object at a time means three drags that have to agree, and they
+/// will not. So the transform operators walk this list, and the pivot is the
+/// median of every selected vertex in *all* of them — which is the difference
+/// between one transform and three: three separate medians is three separate
+/// rotations, and the pieces come apart.
+///
+/// # Each datablock once
+///
+/// Deduplicated by [`MeshId`], and that is a correctness requirement rather
+/// than an efficiency one. Two linked duplicates share one `MeshData`: visiting
+/// it twice applies the transform twice, so a one-unit drag moves the vertices
+/// two units and a rotation turns them through double the angle. The second
+/// object's own transform is then unused, and the mesh moves in the first
+/// one's space — which is the same answer Blender gives, and the only
+/// self-consistent one available when one set of vertices is asked to live in
+/// two spaces at once.
+///
+/// # Order
+///
+/// The active object first, then the selection in its own order. So
+/// [`target_mesh`] is this list's first entry by construction, and an operator
+/// that still works on one mesh works on the one the user would name.
+///
+/// Linear in the selection squared, because the seen-set is a `Vec` scan. At
+/// the scale anyone puts into edit mode together — tens of objects — that is
+/// nothing, and it is paid once per operator rather than per vertex.
+pub fn edit_targets(doc: &Document) -> Vec<EditTarget> {
+    let mut out: Vec<EditTarget> = Vec::new();
+    let order = doc
+        .selection
+        .active
+        .into_iter()
+        .chain(doc.selection.objects.iter().copied());
+    for id in order {
+        let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) else {
+            continue;
+        };
+        if out.iter().any(|t| t.mesh == mesh) {
+            continue;
+        }
+        out.push(EditTarget {
+            object: id,
+            mesh,
+            to_world: doc.world_transform(id),
+        });
+    }
+    out
+}
+
 /// Runs `f` over the mesh in edit form and writes the result back.
 ///
 /// Takes the coarse undo path: every one of these changes topology, and a
@@ -118,6 +182,48 @@ fn with_mesh<T>(
         .mesh_mut(mesh_id)
         .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
     Ok(f(mesh))
+}
+
+/// Runs `f` over every mesh in edit mode, and says whether any said yes.
+///
+/// The selection counterpart of [`run_transform`]'s loop. A selection change is
+/// a layer write — no decode, no encode, and the geometry arrays stay shared —
+/// so this is as cheap per mesh as the single-mesh version was, and "select
+/// all" with three objects in edit mode means all of all three.
+///
+/// `f` is told which target it is looking at, because a caller may hold
+/// something that belongs to one of them: the edit session's adjacency map is
+/// the *target* mesh's, and handing it to another would be indexing one mesh's
+/// edges with another's numbering.
+fn for_each_edit_mesh(
+    doc: &mut DocMut<'_>,
+    mut f: impl FnMut(&EditTarget, &mut kreate_mesh::MeshData) -> bool,
+) -> Result<bool, OpError> {
+    let targets = edit_targets(doc.document());
+    if targets.is_empty() {
+        return Err(OpError::Failed("no mesh to edit".into()));
+    }
+    let mut any = false;
+    for target in targets {
+        let Some(mesh) = doc.document_mut().mesh_mut(target.mesh) else {
+            continue;
+        };
+        any |= f(&target, mesh);
+    }
+    Ok(any)
+}
+
+/// Runs `f` over one named mesh, whichever of the edit-mode set it is.
+fn with_named_mesh<T>(
+    doc: &mut DocMut<'_>,
+    mesh: MeshId,
+    f: impl FnOnce(&mut kreate_mesh::MeshData) -> T,
+) -> Result<T, OpError> {
+    let data = doc
+        .document_mut()
+        .mesh_mut(mesh)
+        .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    Ok(f(data))
 }
 
 /// The corner-to-edge map for the mesh being edited, from the session.
@@ -255,27 +361,38 @@ fn falloff(distance: f64, radius: f64) -> f32 {
     (s * s * (3.0 - 2.0 * s)) as f32
 }
 
-/// How many distinct places a set of vertices occupies.
+/// The one place a set of world positions occupies, or `None` for more.
 ///
-/// Rotate and scale refuse a selection that occupies one: every affected vertex
-/// is then the pivot, so the operation is exactly the identity, and reporting
-/// success for a no-op puts an entry in the history that undoes to the same
-/// mesh.
-fn distinct_places(positions: &[glam::Vec3], verts: &[u32]) -> usize {
-    let mut keys: Vec<[i64; 3]> = verts
-        .iter()
-        .map(|v| {
-            let p = positions[*v as usize];
-            // Quantised at a micrometre, so two vertices a float's breadth
-            // apart count as one place. Without this a "single vertex" that
-            // happens to be two welded ones would pass for something scalable.
-            let q = |x: f32| (x as f64 * 1e6).round() as i64;
-            [q(p.x), q(p.y), q(p.z)]
-        })
-        .collect();
-    keys.sort_unstable();
-    keys.dedup();
-    keys.len()
+/// Rotate and scale refuse a selection that occupies a single place: every
+/// affected vertex is then the pivot, so the operation is exactly the identity,
+/// and reporting success for a no-op puts an entry in the history that undoes
+/// to the same mesh.
+///
+/// Returns the place rather than a count, because the answer has to compose
+/// across the meshes in edit mode: one vertex selected in each of two objects
+/// occupies two places, and no per-mesh count can see that. Comparing the two
+/// meshes' places can.
+///
+/// Stops at the first disagreement, so a large selection costs two positions
+/// rather than a sort.
+fn one_place(world: impl Iterator<Item = glam::DVec3>) -> Option<[i64; 3]> {
+    // Quantised at a micrometre, so two vertices a float's breadth apart count
+    // as one place. Without this a "single vertex" that happens to be two
+    // welded ones would pass for something scalable.
+    let key = |p: glam::DVec3| {
+        let q = |x: f64| (x * 1e6).round() as i64;
+        [q(p.x), q(p.y), q(p.z)]
+    };
+    let mut first: Option<[i64; 3]> = None;
+    for p in world {
+        let k = key(p);
+        match first {
+            None => first = Some(k),
+            Some(seen) if seen == k => {}
+            Some(_) => return None,
+        }
+    }
+    first
 }
 
 /// A weight for every vertex the transform reaches: 1 for the selection,
@@ -316,20 +433,24 @@ fn distinct_places(positions: &[glam::Vec3], verts: &[u32]) -> usize {
 /// none of those change during a drag. Computing them once when the gesture
 /// starts is the GPU preview path, and it is where the rest of this goes.
 ///
-/// # Measured in world space
+/// # Measured in world space, over the whole selection
 ///
 /// `positions` arrives already in world coordinates, because the radius is a
 /// world length: it is the circle the viewport draws and the number the wheel
 /// adjusts. On an object scaled by two, a falloff measured in local space would
 /// reach twice as far on screen as the circle says — and differently in each
 /// axis under a non-uniform scale.
+///
+/// And `tree` is built over *every* selected vertex in edit mode, not this
+/// mesh's own. A tree per mesh cannot pull on a neighbour, so dragging a seam
+/// between two touching objects would leave the far side of it behind — which
+/// is the whole reason anyone puts two objects in edit mode together.
 fn weigh_neighbourhood(
+    tree: &kreate_math::PointTree,
     positions: &[glam::Vec3],
     selected: &[u32],
     radius: f64,
 ) -> (Vec<u32>, Vec<f32>) {
-    let anchors: Vec<glam::Vec3> = selected.iter().map(|v| positions[*v as usize]).collect();
-    let tree = kreate_math::PointTree::build(&anchors);
     let limit = radius as f32;
 
     let mut indices: Vec<u32> = Vec::with_capacity(selected.len());
@@ -374,10 +495,26 @@ pub struct Weighting {
     pub indices: Vec<u32>,
     /// Each one’s share of the transform. One for the selection itself.
     pub weights: Vec<f32>,
-    /// The object-to-world transform the median and the falloff were measured
-    /// with, kept so a caller applying the transform uses the same one.
-    pub to_world: glam::DAffine3,
-    /// The selection’s median: what a rotation or a scale happens about.
+    /// Which mesh, and the object whose space it is in.
+    pub target: EditTarget,
+}
+
+/// Everything a transform across edit mode is about to move.
+///
+/// One of these rather than a `Weighting` per mesh, because the two things a
+/// transform needs besides the weights — the pivot and the falloff — are
+/// properties of the *whole* selection and cannot be worked out one mesh at a
+/// time. The pivot obviously so. The falloff less obviously: it measures the
+/// distance to the nearest selected vertex, and the nearest one may be in
+/// another object.
+pub struct EditWeighting {
+    /// One per mesh with something to move, in [`edit_targets`] order.
+    ///
+    /// A mesh with nothing selected and nothing within the radius is absent
+    /// rather than present and empty.
+    pub parts: Vec<Weighting>,
+    /// What a rotation or a scale happens about: the median of every selected
+    /// vertex in every mesh.
     ///
     /// The mean rather than the bounding-box centre. For a symmetric selection
     /// they agree; for a lopsided one the mean follows where the geometry
@@ -387,71 +524,139 @@ pub struct Weighting {
     /// **In world space**, like everything a transform operator is told. The
     /// pointer speaks world coordinates and so does a typed number, so the
     /// pivot has to as well or a rotation on a moved object turns about the
-    /// wrong point.
+    /// wrong point. And `f64`, like the rest of the world: an object ten units
+    /// out already costs a rotation about this point 3e-7 of accuracy in `f32`.
+    pub pivot: glam::DVec3,
+    /// Where the selection sits, if it sits in one place.
     ///
-    /// `f64`, like the rest of the world: an object ten units out already
-    /// costs a rotation about this point 3e-7 of accuracy in `f32`, and there
-    /// is no reason to spend it when the parameters and the object transform
-    /// are both `f64` already.
-    pub median: glam::DVec3,
-    /// How many distinct places the *selection* occupies.
+    /// A world position quantised at a micrometre, or `None` when the selection
+    /// spans more than one. Rotate and scale refuse a selection occupying a
+    /// single place — every affected vertex is then the pivot, so the operation
+    /// is exactly the identity.
     ///
-    /// Rotate and scale refuse a selection occupying one; see
-    /// [`distinct_places`].
-    pub distinct: usize,
+    /// Asked of the whole selection, which is the only way it composes: one
+    /// vertex selected in each of two objects is two places with a point
+    /// between them, and turning them about it is a real operation.
+    pub one_place: Option<[i64; 3]>,
 }
 
-/// `to_world` maps the mesh's vertices into the world, and everything this
-/// returns is measured there — see [`Weighting::median`] and
-/// [`weigh_neighbourhood`]. Pass the identity for a mesh with no object behind
-/// it, which is what a script or a test operating on bare geometry has.
-pub fn weigh_selection(
-    mesh: &kreate_mesh::MeshData,
-    to_world: glam::DAffine3,
-    radius: f64,
-) -> Option<Weighting> {
-    let selected = selection_vertices(mesh);
-    if selected.is_empty() {
+/// Weighs the selection across every mesh in edit mode.
+///
+/// `None` when nothing at all is selected anywhere. Everything it returns is
+/// measured in world space — see [`EditWeighting::pivot`] and
+/// [`weigh_neighbourhood`].
+///
+/// Public because the GPU transform preview needs *these* weights and not its
+/// own. The preview and the operator have to agree exactly — the preview is
+/// what the user shapes the mesh against, and the operator is what runs when
+/// the pointer comes up — so a second implementation of the falloff would
+/// diverge, and the divergence would show as the mesh moving at the end of
+/// every drag. Same argument as §2.3's one-graph-two-consumers rule, applied to
+/// arithmetic rather than to shading.
+pub fn weigh_edit_selection(doc: &Document, radius: f64) -> Option<EditWeighting> {
+    let targets = edit_targets(doc);
+    if targets.is_empty() {
         return None;
     }
-    let local = mesh.positions();
-    let into_world = |p: glam::Vec3| to_world.transform_point3(p.as_dvec3());
 
-    let mut total = glam::DVec3::ZERO;
-    for v in &selected {
-        total += into_world(local[*v as usize]);
+    // Every mesh's own selection, and — when there is a falloff to measure —
+    // its vertices in world coordinates. Gathered first, because the anchors
+    // the falloff measures against are the union of all of them.
+    struct Gathered {
+        target: EditTarget,
+        selected: Vec<u32>,
+        /// This mesh's vertices in world space. Empty when the radius is zero,
+        /// where nothing outside the selection moves and transforming the whole
+        /// mesh would be a pass over it to conclude exactly that.
+        world: Vec<glam::Vec3>,
     }
-    let median = total / selected.len() as f64;
-    // Distinctness in local space, because it is what the check means — do these
-    // vertices occupy one place — and an invertible transform cannot change the
-    // answer. A degenerate one (a zero scale) can, and would collapse them; the
-    // refusal that follows is then correct anyway.
-    let distinct = distinct_places(local, &selected);
 
-    let (indices, weights) = if radius > 0.0 {
-        // The one place the whole mesh has to be transformed. Only reached with
-        // proportional editing on, and once per drag rather than once per frame
-        // now that the preview owns the frames.
-        let world: Vec<glam::Vec3> = local
-            .iter()
-            .copied()
-            .map(|p| into_world(p).as_vec3())
-            .collect();
-        weigh_neighbourhood(&world, &selected, radius)
-    } else {
-        // Proportional editing off, which is the default and the common case.
-        // Nothing outside the selection moves, so there is nothing to measure
-        // — and measuring it would be a pass over the whole mesh to conclude
-        // that no other vertex is affected.
-        let weights = vec![1.0; selected.len()];
-        (selected, weights)
-    };
-    Some(Weighting {
-        indices,
-        weights,
-        to_world,
-        median,
-        distinct,
+    let mut gathered: Vec<Gathered> = Vec::with_capacity(targets.len());
+    let mut anchors: Vec<glam::Vec3> = Vec::new();
+    let mut sum = glam::DVec3::ZERO;
+    let mut count = 0usize;
+    for target in targets {
+        let Some(mesh) = doc.mesh(target.mesh) else {
+            continue;
+        };
+        let selected = selection_vertices(mesh);
+        // A mesh with nothing selected is still gathered when there is a
+        // falloff, because the falloff may reach *into* it from a neighbour:
+        // that is what dragging a seam between two touching objects means, and
+        // skipping it here is the bug
+        // `the_proportional_falloff_does_not_reach_across_objects` was written
+        // to catch. With no falloff there is nothing to reach with, and it is
+        // dropped.
+        if selected.is_empty() && radius <= 0.0 {
+            continue;
+        }
+        let local = mesh.positions();
+        let into_world = |p: glam::Vec3| target.to_world.transform_point3(p.as_dvec3());
+        for v in &selected {
+            let p = into_world(local[*v as usize]);
+            sum += p;
+            anchors.push(p.as_vec3());
+        }
+        count += selected.len();
+        let world: Vec<glam::Vec3> = if radius > 0.0 {
+            local
+                .iter()
+                .copied()
+                .map(|p| into_world(p).as_vec3())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        gathered.push(Gathered {
+            target,
+            selected,
+            world,
+        });
+    }
+    if count == 0 {
+        return None;
+    }
+
+    let pivot = sum / count as f64;
+    // Over the anchors, which are already in world space and already the whole
+    // selection. The `f32` they were narrowed to for the tree is fine here: the
+    // quantisation is a micrometre and the question is only whether two
+    // vertices are in the same place.
+    let one = one_place(anchors.iter().map(|p| p.as_dvec3()));
+
+    // One tree for the whole selection. Building one per mesh is what let the
+    // falloff stop at an object boundary, and it is also more work: the tree's
+    // cost is logarithmic in the anchors, so N trees over S/N anchors each is
+    // slower than one over S as well as wrong.
+    let tree = (radius > 0.0).then(|| kreate_math::PointTree::build(&anchors));
+
+    let mut parts = Vec::with_capacity(gathered.len());
+    for g in gathered {
+        let (indices, weights) = match &tree {
+            Some(tree) => weigh_neighbourhood(tree, &g.world, &g.selected, radius),
+            // Proportional editing off, which is the default and the common
+            // case: nothing outside the selection moves.
+            None => {
+                let weights = vec![1.0; g.selected.len()];
+                (g.selected, weights)
+            }
+        };
+        if indices.is_empty() {
+            continue;
+        }
+        parts.push(Weighting {
+            indices,
+            weights,
+            target: g.target,
+        });
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(EditWeighting {
+        parts,
+        pivot,
+        one_place: one,
     })
 }
 
@@ -480,52 +685,71 @@ pub fn weigh_selection(
 /// no axis-and-angle can express. Two matrix-vector products a vertex costs
 /// nothing here — the operator runs once per drag — and it is exact for any
 /// object transform, including a sheared one.
+///
+/// # Every mesh in edit mode, about one pivot
+///
+/// The pivot is the median of every selected vertex in *all* of them, and that
+/// is what makes this one transform rather than several. Rotating a body and
+/// its two arms about three separate medians turns each about its own centre
+/// and pulls the model apart at the seams — which is not a subtler version of
+/// what the user asked for, it is a different operation.
+///
+/// A mesh with nothing selected contributes nothing and is skipped, but does
+/// not cancel: reaching for a tool with three objects in edit mode and elements
+/// selected in one of them is an ordinary thing to do.
 fn run_transform(
     doc: &mut DocMut<'_>,
     radius: f64,
     needs_extent: bool,
     place: impl Fn(glam::DVec3, f32, glam::DVec3) -> glam::DVec3,
 ) -> Result<OpResult, OpError> {
-    let mesh_id =
-        target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
-    let mesh = doc
-        .document()
-        .mesh(mesh_id)
-        .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
-    let to_world = target_object(doc.document())
-        .map(|id| doc.document().world_transform(id))
-        .unwrap_or(glam::DAffine3::IDENTITY);
-    let Some(targets) = weigh_selection(mesh, to_world, radius) else {
+    if edit_targets(doc.document()).is_empty() {
+        return Err(OpError::Failed("no mesh to edit".into()));
+    }
+    // The whole selection at once, because the pivot and the falloff are both
+    // properties of all of it and nothing can be written until they are known.
+    let Some(weighing) = weigh_edit_selection(doc.document(), radius) else {
         return Ok(OpResult::Cancelled);
     };
-    if needs_extent && targets.distinct < 2 {
-        return Ok(OpResult::Cancelled);
-    }
-    // A degenerate object transform — a zero scale in some axis — has no
-    // inverse, and every vertex of the mesh is already at the same world point.
-    // Refused rather than written as NaN, which would be a mesh nobody can
-    // recover.
-    let to_local = to_world.inverse();
-    if !to_local.is_finite() {
+    // Rotate and scale refuse a selection occupying a single place: every
+    // affected vertex is then the pivot, so the operation is the identity.
+    if needs_extent && weighing.one_place.is_some() {
         return Ok(OpResult::Cancelled);
     }
 
-    // `edit_positions` visits the indices in the order given, which is the
-    // order the weights are in. Asserted rather than assumed: a change of order
-    // there would pair each vertex with someone else’s weight, and a mesh
-    // transformed by scrambled weights still looks like a mesh.
-    let mut next = 0usize;
-    doc.edit_positions(mesh_id, &targets.indices, |index, p| {
-        debug_assert_eq!(
-            index, targets.indices[next],
-            "a weight was paired with the wrong vertex"
-        );
-        let world = to_world.transform_point3(p.as_dvec3());
-        let moved = place(world, targets.weights[next], targets.median);
-        *p = to_local.transform_point3(moved).as_vec3();
-        next += 1;
-    })
-    .map_err(|e| OpError::Failed(e.to_string()))?;
+    let mut moved_any = false;
+    for part in &weighing.parts {
+        // A degenerate object transform — a zero scale in some axis — has no
+        // inverse, and every vertex of the mesh is already at the same world
+        // point. Skipped rather than written as NaN, which would be a mesh
+        // nobody can recover; the others still move.
+        let to_world = part.target.to_world;
+        let to_local = to_world.inverse();
+        if !to_local.is_finite() {
+            continue;
+        }
+
+        // `edit_positions` visits the indices in the order given, which is the
+        // order the weights are in. Asserted rather than assumed: a change of
+        // order there would pair each vertex with someone else’s weight, and a
+        // mesh transformed by scrambled weights still looks like a mesh.
+        let mut next = 0usize;
+        doc.edit_positions(part.target.mesh, &part.indices, |index, p| {
+            debug_assert_eq!(
+                index, part.indices[next],
+                "a weight was paired with the wrong vertex"
+            );
+            let world = to_world.transform_point3(p.as_dvec3());
+            let placed = place(world, part.weights[next], weighing.pivot);
+            *p = to_local.transform_point3(placed).as_vec3();
+            next += 1;
+        })
+        .map_err(|e| OpError::Failed(e.to_string()))?;
+        moved_any = true;
+    }
+    if !moved_any {
+        return Ok(OpResult::Cancelled);
+    }
     Ok(OpResult::Finished)
 }
 
@@ -1577,13 +1801,24 @@ impl Operator for SelectElements {
         // Loop, ring and face-loop walk radial and disk cycles, which is what
         // the edit structure is for, and pay for it.
         if params.action <= 2 {
+            // Every mesh in edit mode: "select all" with three objects open
+            // means all of all three, and a user who wanted one of them would
+            // not have put three in.
+            //
+            // The session's adjacency map belongs to the *target* mesh, so it
+            // goes only to that one; the others recompute, which is a pass over
+            // their edges and is exactly what having no session costs. Only
+            // inversion reads it at all.
+            let target = target_mesh(doc.document());
             let adjacency = edit_adjacency(doc);
-            let grew = with_mesh(doc, |mesh| {
+            let grew = for_each_edit_mesh(doc, |t, mesh| {
                 match params.action {
                     1 => selection::select_none(mesh),
                     2 => match &adjacency {
-                        Some(map) => selection::select_invert_with(mesh, mode, map),
-                        None => selection::select_invert(mesh, mode),
+                        Some(map) if Some(t.mesh) == target => {
+                            selection::select_invert_with(mesh, mode, map)
+                        }
+                        _ => selection::select_invert(mesh, mode),
                     },
                     _ => selection::select_all(mesh),
                 }
@@ -1635,6 +1870,20 @@ pub struct SelectPickParams {
     /// element takes it back out, so a mis-click is undone by repeating it
     /// rather than by starting the selection again.
     pub extend: bool,
+    /// Which object's mesh the element belongs to, as its arena slot **plus
+    /// one**.
+    ///
+    /// Zero means the target mesh — what a keystroke or a script means when it
+    /// does not say, and what every caller meant before edit mode could hold
+    /// more than one. Plus-one for the reason the id buffer uses it too: slot
+    /// zero is a real object, so zero has to mean "not stated".
+    ///
+    /// An object that is not in edit mode is refused rather than selected in.
+    /// The id buffer covers the whole scene, so a click in edit mode lands on
+    /// objects whose cage is not even drawn, and selecting elements the user
+    /// cannot see is worse than a click that does nothing.
+    #[param(min = 0, unit = "count")]
+    pub object: u32,
 }
 
 /// Selects one element by index — what a click in the viewport resolves to.
@@ -1671,8 +1920,39 @@ impl Operator for SelectPick {
             _ => SelectMode::Vert,
         };
         let domain = mode.domain();
-        let adjacency = edit_adjacency(doc);
-        let changed = with_mesh(doc, |mesh| {
+        // Which mesh the click landed in. Named by the caller when it knows —
+        // the viewport does, because the id buffer stores the object alongside
+        // the element — and the target otherwise.
+        let target = target_mesh(doc.document());
+        let mesh_id = if params.object == 0 {
+            target
+        } else {
+            let slot = params.object - 1;
+            let targets = edit_targets(doc.document());
+            doc.document()
+                .object_at_slot(slot)
+                .and_then(|id| targets.iter().find(|t| t.object == id))
+                .map(|t| t.mesh)
+        };
+        // A click on something not in edit mode. Not an error: the id buffer
+        // covers the whole scene, so this is an ordinary miss.
+        let Some(mesh_id) = mesh_id else {
+            return Ok(OpResult::Cancelled);
+        };
+        // The session's map is the target's, so it is only useful when the
+        // click landed there.
+        let adjacency = edit_adjacency(doc).filter(|_| Some(mesh_id) == target);
+        // A plain click replaces the selection, and "the selection" is every
+        // mesh's — clicking a vertex of one object has to clear what was
+        // selected in the others, or the next transform moves geometry the user
+        // believes they deselected.
+        if !params.extend {
+            for_each_edit_mesh(doc, |_, mesh| {
+                selection::select_none(mesh);
+                true
+            })?;
+        }
+        let changed = with_named_mesh(doc, mesh_id, |mesh| {
             // An index the mesh does not have is not an error worth failing on:
             // the id buffer describes a frame the document may have moved on
             // from, which is normal a frame or two after an edit.
@@ -1680,12 +1960,10 @@ impl Operator for SelectPick {
                 return false;
             }
             let already = selection::is_selected(mesh, domain, params.element);
-            // A plain click replaces the selection; Shift+Click toggles this one
-            // element and leaves the rest.
+            // A plain click replaces the selection — already cleared above,
+            // across every mesh; Shift+Click toggles this one element and
+            // leaves the rest.
             let on = if params.extend { !already } else { true };
-            if !params.extend {
-                selection::select_none(mesh);
-            }
             selection::set_selected(mesh, domain, params.element, on);
             // Flushed so the other domains agree: selecting a face has to mark
             // its edges and vertices, or the next operator acts on a selection
@@ -1725,7 +2003,9 @@ impl Operator for SelectNothing {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let had = with_mesh(doc, |mesh| {
+        // Every mesh, because clicking empty space means "nothing is
+        // selected" and not "nothing is selected in the active object".
+        let had = for_each_edit_mesh(doc, |_, mesh| {
             let had = selection::any_selected(mesh);
             selection::select_none(mesh);
             had
