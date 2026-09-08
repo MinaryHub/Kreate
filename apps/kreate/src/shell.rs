@@ -48,8 +48,27 @@ pub struct ShellState {
     pub queue: CommandQueue,
     /// Parameters shown in the adjust-last-operation panel.
     pub adjust_params: Option<(String, PropertyMap)>,
-    pub show_outliner: bool,
-    pub show_properties: bool,
+    /// The layout: a tree of areas, each showing one editor.
+    ///
+    /// This replaced four `show_*` booleans and the panels that read them. The
+    /// booleans could not express the thing a user of a tool like this expects
+    /// to be able to do — put an editor where they want it, at the size they
+    /// want, and save that arrangement — and every new editor added a line to
+    /// `draw`. See `kreate_ui::area`.
+    pub screen: kreate_ui::Screen,
+    /// Layout changes asked for during the frame, applied after it.
+    ///
+    /// Editing the tree mid-frame would leave the rest of the frame drawing
+    /// against a layout that no longer exists, in the same way that mutating a
+    /// list while iterating it does. The command queue takes the same shape for
+    /// the same reason.
+    area_edits: Vec<AreaEdit>,
+    /// Which boundary a drag is moving.
+    ///
+    /// Held for the duration of the drag rather than resolved from the pointer
+    /// each frame: once the pointer has moved past the boundary it is no longer
+    /// over the handle, and a drag that re-resolved would let go.
+    dragging: Option<kreate_ui::SplitId>,
     /// Set while egui holds the keyboard, so the keymap stands down.
     pub egui_wants_keyboard: bool,
     /// Set while an IME is composing.
@@ -103,7 +122,7 @@ pub struct ShellState {
     /// at the program while deciding makes it worse.
     pub recoverable: Vec<RecoveryOffer>,
     /// Whether the remapping panel is open.
-    pub show_keymap: bool,
+
     /// The binding waiting for a keystroke, if any.
     ///
     /// Lives here rather than in the panel because the application, not the
@@ -113,13 +132,20 @@ pub struct ShellState {
     /// What the panel asked for this frame.
     pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
     /// Whether the UV editor is open.
-    pub show_uv: bool,
+
     /// The UV editor's pan, zoom and drag.
     ///
     /// Kept across the panel being closed and reopened: an artist who has
     /// zoomed into a sleeve does not want it reset for glancing at the
     /// modifier stack.
-    pub uv_state: kreate_ui::UvState,
+    /// Per-area view state for the UV editor: where it is looking and how
+    /// far in.
+    ///
+    /// Keyed on the area rather than held once, because two UV editors are a
+    /// thing the layout now permits and sharing a zoom between them would be
+    /// baffling. The area id is stable for the area's life, so the state stays
+    /// with it when a neighbour is split or closed.
+    uv_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::UvState>,
     /// The UV map to draw, published by the application each frame.
     ///
     /// `None` outside edit mode, and empty when the mesh has no UVs yet —
@@ -158,14 +184,137 @@ pub struct ModalHeader {
     pub axis: Option<usize>,
 }
 
+/// A layout change, queued during a frame and applied after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AreaEdit {
+    SetEditor(kreate_ui::AreaId, kreate_ui::EditorKind),
+    Split(kreate_ui::AreaId, kreate_ui::Axis),
+    Close(kreate_ui::AreaId),
+    Resize(kreate_ui::SplitId, f32, f32),
+}
+
+/// The layout a new session starts with.
+///
+/// A large viewport with the outliner above the properties down the right,
+/// which is where every tool in this category puts them and therefore where a
+/// user’s eye goes looking. A novel arrangement costs the user something and
+/// buys nothing.
+fn default_screen() -> kreate_ui::Screen {
+    use kreate_ui::{Axis, EditorKind, Screen};
+    let mut screen = Screen::single(EditorKind::Viewport);
+    let viewport = screen.areas()[0].0;
+    let outliner = screen
+        .split(viewport, Axis::Vertical, 0.78, EditorKind::Outliner)
+        .expect("the screen has one area to split");
+    screen
+        .split(outliner, Axis::Horizontal, 0.4, EditorKind::Properties)
+        .expect("the outliner was just created");
+    screen
+}
+
+impl ShellState {
+    /// The default state, with a catalogue already loaded.
+    ///
+    /// A constructor rather than `ShellState { catalog, ..default() }` at the
+    /// call site: the layout fields are private, and functional update syntax
+    /// needs every field visible even for the ones it takes from the default.
+    pub fn with_catalog(catalog: Catalog) -> Self {
+        Self {
+            catalog,
+            ..Self::default()
+        }
+    }
+
+    /// Asks for an area to be split when the frame ends.
+    ///
+    /// Named operations rather than a queue the caller pushes to, because there
+    /// are three of them and they are the whole vocabulary: a keymap binding
+    /// will want them as much as the header menu does, and a shortcut reaching
+    /// into a private enum would not be able to.
+    ///
+    /// Deferred, all three, because the frame is drawing against a layout
+    /// derived from the tree. Editing it here would leave every area after this
+    /// one placed by a layout that no longer exists.
+    pub fn split_area(&mut self, area: kreate_ui::AreaId, axis: kreate_ui::Axis) {
+        self.area_edits.push(AreaEdit::Split(area, axis));
+    }
+
+    /// Asks for an area to be closed when the frame ends.
+    pub fn close_area(&mut self, area: kreate_ui::AreaId) {
+        self.area_edits.push(AreaEdit::Close(area));
+    }
+
+    /// Asks for an area to show another editor when the frame ends.
+    pub fn set_area_editor(&mut self, area: kreate_ui::AreaId, kind: kreate_ui::EditorKind) {
+        self.area_edits.push(AreaEdit::SetEditor(area, kind));
+    }
+
+    /// Whether any area is showing this editor.
+    ///
+    /// What the application asks instead of reading a `show_*` boolean. It is
+    /// deliberately a question about the layout rather than about a setting:
+    /// there is no separate notion of an editor being "on".
+    pub fn has_editor(&self, kind: kreate_ui::EditorKind) -> bool {
+        self.screen.areas().iter().any(|(_, k)| *k == kind)
+    }
+
+    /// The UV editor under `at`, with the state it last drew with.
+    ///
+    /// `None` covers three situations that mean the same thing to the caller —
+    /// no UV editor is open, none has drawn yet, or the pointer is elsewhere —
+    /// so they are deliberately not distinguished.
+    pub fn uv_at(&self, at: egui::Pos2) -> Option<(kreate_ui::AreaId, &kreate_ui::UvState)> {
+        self.screen
+            .areas()
+            .into_iter()
+            .filter(|(_, kind)| *kind == kreate_ui::EditorKind::UvEditor)
+            .find_map(|(id, _)| {
+                let state = self.uv_views.get(&id)?;
+                state.rect.filter(|r| r.contains(at)).map(|_| (id, state))
+            })
+    }
+
+    fn apply_area_edits(&mut self) {
+        for edit in std::mem::take(&mut self.area_edits) {
+            match edit {
+                AreaEdit::SetEditor(area, kind) => {
+                    self.screen.set_editor(area, kind);
+                }
+                AreaEdit::Split(area, axis) => {
+                    // The new area shows what the old one showed. Splitting is
+                    // "I want two of these here"; changing one of them is a
+                    // separate act, and guessing a different editor would be
+                    // wrong more often than right.
+                    let kind = self
+                        .screen
+                        .editor(area)
+                        .unwrap_or(kreate_ui::EditorKind::Viewport);
+                    self.screen.split(area, axis, 0.5, kind);
+                }
+                AreaEdit::Close(area) => {
+                    if self.screen.close(area) {
+                        // The state of an area that no longer exists would
+                        // otherwise accumulate for the life of the session.
+                        self.uv_views.remove(&area);
+                    }
+                }
+                AreaEdit::Resize(split, ratio, extent) => {
+                    self.screen.resize(split, ratio, extent);
+                }
+            }
+        }
+    }
+}
+
 impl Default for ShellState {
     fn default() -> Self {
         Self {
             catalog: Catalog::new(),
             queue: CommandQueue::new(),
             adjust_params: None,
-            show_outliner: true,
-            show_properties: true,
+            screen: default_screen(),
+            area_edits: Vec::new(),
+            dragging: None,
             egui_wants_keyboard: false,
             ime_active: false,
             edit_mode: false,
@@ -179,11 +328,9 @@ impl Default for ShellState {
             command_info: std::collections::BTreeMap::new(),
             status: None,
             recoverable: Vec::new(),
-            show_keymap: false,
             capturing: None,
             keymap_edits: Vec::new(),
-            show_uv: false,
-            uv_state: kreate_ui::UvState::default(),
+            uv_views: std::collections::BTreeMap::new(),
             uv: None,
             modal: None,
         }
@@ -453,13 +600,13 @@ struct Labels {
     delete: String,
     undo: String,
     redo: String,
-    outliner: String,
-    properties: String,
     modifiers: String,
-    keymap: String,
-    uv: String,
     uv_none: String,
     uv_not_editing: String,
+    area_menu: String,
+    area_split_v: String,
+    area_split_h: String,
+    area_close: String,
     mode_object: String,
     mode_edit: String,
     extrude: String,
@@ -499,13 +646,13 @@ impl Labels {
             delete: t("menu-delete"),
             undo: t("menu-undo"),
             redo: t("menu-redo"),
-            outliner: t("panel-outliner"),
-            properties: t("panel-properties"),
             modifiers: t("panel-modifiers"),
-            keymap: t("panel-keymap"),
-            uv: t("panel-uv"),
             uv_none: t("uv-none"),
             uv_not_editing: t("uv-not-editing"),
+            area_menu: t("area-menu"),
+            area_split_v: t("area-split-vertical"),
+            area_split_h: t("area-split-horizontal"),
+            area_close: t("area-close"),
             mode_object: t("mode-object"),
             mode_edit: t("mode-edit"),
             extrude: t("menu-extrude"),
@@ -784,11 +931,11 @@ pub fn draw(
                 }
             }
 
-            ui.separator();
-            ui.checkbox(&mut state.show_outliner, &l.outliner);
-            ui.checkbox(&mut state.show_properties, &l.properties);
-            ui.checkbox(&mut state.show_uv, &l.uv);
-            ui.checkbox(&mut state.show_keymap, &l.keymap);
+            // No panel toggles here any more. An editor is opened by
+            // pointing an area at it, from that area's own header — which is
+            // where the user is looking when they want to change what they are
+            // looking at, and which scales to the nine more editors the plan
+            // has scheduled.
         });
     });
 
@@ -821,103 +968,326 @@ pub fn draw(
         });
     });
 
-    if state.show_outliner {
-        Panel::left("outliner").default_size(220.0).show(ui, |ui| {
-            ui.heading(&l.outliner);
-            let order = std::mem::take(&mut state.outliner);
-            kreate_ui::outliner(
-                ui,
-                &state.catalog,
-                order.ids(),
-                &selected,
-                active,
-                |index| order.row(doc, index),
-                &mut state.queue,
-            );
-            state.outliner = order;
-        });
-    }
-
-    if state.show_properties {
-        Panel::right("properties")
-            .default_size(260.0)
-            .show(ui, |ui| {
-                ui.heading(&l.properties);
-                draw_adjust_panel(ui, state, registry, history);
-                ui.separator();
-                ui.heading(&l.modifiers);
-                draw_modifier_stack(ui, state, &mut modifier_rows);
-            });
-    }
-
-    if state.show_keymap {
-        Panel::right("keymap").default_size(340.0).show(ui, |ui| {
-            ui.heading(&l.keymap);
-            let conflicts = keymap.conflicts();
-            let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
-            let mut edits = std::mem::take(&mut state.keymap_edits);
-            kreate_ui::keymap_editor(
-                ui,
-                keymap,
-                preset,
-                overrides,
-                &conflicts,
-                &text,
-                &mut state.capturing,
-                &mut edits,
-            );
-            state.keymap_edits = edits;
-        });
-    }
-
-    if state.show_uv {
-        // Below the viewport rather than beside it: a UV map is square, and a
-        // square panel in a tall column wastes the column. This is also where
-        // every other tool puts it, which is worth more than a novel layout.
-        Panel::bottom("uv").default_size(280.0).show(ui, |ui| {
-            ui.heading(&l.uv);
-            let text = kreate_ui::UvText {
-                no_uvs: l.uv_none.clone(),
-                not_editing: l.uv_not_editing.clone(),
-            };
-            let data = state.uv.clone();
-            let commands = kreate_ui::uv_editor(
-                ui,
-                data.as_ref().map(|d| d.view()).as_ref(),
-                &mut state.uv_state,
-                &text,
-            );
-            for command in commands {
-                state.queue.push(command);
-            }
-        });
-    }
-
+    // The screen. Boundaries are interacted with *before* the areas, so a drag
+    // that starts on one is not stolen by whatever is under it — a handle is
+    // four points wide and always overlaps an editor's edge.
+    let mut viewport_rect = egui::Rect::ZERO;
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
-            let rect = ui.available_rect_before_wrap();
-            if let Some(image) = viewport_texture {
-                // Only the part of the target that was drawn into. Sampling the
-                // whole texture would stretch the image by however much the
-                // allocation was rounded up.
-                ui.painter().image(
-                    image.texture,
-                    rect,
-                    egui::Rect::from_min_max(
-                        egui::pos2(0.0, 0.0),
-                        egui::pos2(image.uv.0, image.uv.1),
-                    ),
-                    egui::Color32::WHITE,
+            let screen = ui.available_rect_before_wrap();
+            let layout = state.screen.layout(screen);
+            drag_handles(ui, state, &layout);
+
+            // Only the first viewport area gets the rendered image. Several
+            // viewports means several cameras and several render targets, which
+            // is a real feature and a later one; until then the honest thing is
+            // for the extra ones to say nothing rather than to show a stale
+            // copy of the first one's picture.
+            let first_viewport = layout
+                .areas
+                .iter()
+                .find(|a| a.editor == kreate_ui::EditorKind::Viewport)
+                .map(|a| a.id);
+
+            let mut texture = viewport_texture;
+            for area in &layout.areas {
+                let image = (Some(area.id) == first_viewport)
+                    .then(|| texture.take())
+                    .flatten();
+                let rect = draw_area(
+                    ui,
+                    state,
+                    area,
+                    &l,
+                    registry,
+                    history,
+                    keymap,
+                    preset,
+                    overrides,
+                    doc,
+                    &selected,
+                    active,
+                    &mut modifier_rows,
+                    image,
                 );
+                if Some(area.id) == first_viewport {
+                    viewport_rect = rect;
+                }
             }
-            draw_select_band(ui, state, rect);
-            draw_modal_header(ui, state, rect);
-            draw_nav_gizmo(ui, state, rect);
-            draw_context_menu(ui, state, rect);
-            rect
-        })
-        .inner
+        });
+    state.apply_area_edits();
+    viewport_rect
+}
+
+/// One area: a header saying what it is, and the editor below it.
+#[allow(clippy::too_many_arguments)]
+fn draw_area(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    area: &kreate_ui::AreaRect,
+    l: &Labels,
+    registry: &OperatorRegistry,
+    history: &History,
+    keymap: &kreate_input::Keymap,
+    preset: kreate_input::Preset,
+    overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+    doc: &Document,
+    selected: &[u32],
+    active: Option<u32>,
+    modifier_rows: &mut [kreate_ui::ModifierRow],
+    image: Option<ViewportImage>,
+) -> egui::Rect {
+    let theme = kreate_ui::theme::from_ui(ui);
+
+    // An area paints its own chrome. `Panel` used to do this, and dropping it
+    // for a plain sub-`Ui` left every area transparent — which composited as
+    // pure black, because nothing else paints there either. The pixel test
+    // caught it at (1002, 240).
+    let header_height = theme.row_height + 6.0;
+    let header = egui::Rect::from_min_size(
+        area.rect.min,
+        egui::vec2(area.rect.width(), header_height.min(area.rect.height())),
+    );
+    let body = egui::Rect::from_min_max(egui::pos2(area.rect.min.x, header.max.y), area.rect.max);
+    ui.painter().rect_filled(header, 0.0, theme.raised);
+    ui.painter().rect_filled(body, 0.0, theme.base);
+    ui.painter().rect_stroke(
+        area.rect,
+        0.0,
+        egui::Stroke::new(1.0, theme.border),
+        egui::StrokeKind::Inside,
+    );
+
+    // The header, in its own strip. Inset so the combo box does not sit on the
+    // border.
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(header.shrink(2.0))
+            // Salted with the area's id, so two editors of the same kind do not
+            // share widget state — two outliners scrolling together would be
+            // the visible symptom.
+            .id_salt(("area-header", area.id.0)),
+        |ui| {
+            ui.set_clip_rect(header);
+            draw_area_header(ui, state, area, l);
+        },
+    );
+
+    // The viewport takes its body whole: the rendered image is meant to reach
+    // the edges, and padding around it would be a grey frame the user did not
+    // ask for. Everything else gets the panel inset.
+    let inner = if area.editor == kreate_ui::EditorKind::Viewport {
+        body
+    } else {
+        body.shrink(theme.panel_padding)
+    };
+    if inner.width() <= 0.0 || inner.height() <= 0.0 {
+        // An area squeezed to nothing by a small window. Drawing into an
+        // inverted rect is not an error egui reports, it is one it renders.
+        return body;
+    }
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .id_salt(("area-body", area.id.0)),
+        |ui| {
+            ui.set_clip_rect(inner);
+            match area.editor {
+                kreate_ui::EditorKind::Viewport => {
+                    draw_viewport(ui, state, inner, image);
+                }
+                kreate_ui::EditorKind::Outliner => {
+                    let order = std::mem::take(&mut state.outliner);
+                    kreate_ui::outliner(
+                        ui,
+                        &state.catalog,
+                        order.ids(),
+                        selected,
+                        active,
+                        |index| order.row(doc, index),
+                        &mut state.queue,
+                    );
+                    state.outliner = order;
+                }
+                kreate_ui::EditorKind::Properties => {
+                    draw_adjust_panel(ui, state, registry, history);
+                    ui.separator();
+                    ui.heading(&l.modifiers);
+                    draw_modifier_stack(ui, state, modifier_rows);
+                }
+                kreate_ui::EditorKind::UvEditor => {
+                    draw_uv_editor(ui, state, area.id, l);
+                }
+                kreate_ui::EditorKind::Preferences => {
+                    let conflicts = keymap.conflicts();
+                    let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
+                    let mut edits = std::mem::take(&mut state.keymap_edits);
+                    kreate_ui::keymap_editor(
+                        ui,
+                        keymap,
+                        preset,
+                        overrides,
+                        &conflicts,
+                        &text,
+                        &mut state.capturing,
+                        &mut edits,
+                    );
+                    state.keymap_edits = edits;
+                }
+            }
+        },
+    );
+    inner
+}
+
+/// The strip along the top of an area: which editor, and what can be done to
+/// the area itself.
+///
+/// Everything here queues rather than acting. The tree cannot be edited while
+/// the frame is drawing against a layout derived from it.
+fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaRect, l: &Labels) {
+    ui.horizontal(|ui| {
+        let names: Vec<(kreate_ui::EditorKind, String)> = kreate_ui::EditorKind::ALL
+            .iter()
+            .map(|kind| {
+                (
+                    *kind,
+                    state.catalog.format(kind.name_key(), TextKind::Ui, &[]),
+                )
+            })
+            .collect();
+        let current = names
+            .iter()
+            .find(|(kind, _)| *kind == area.editor)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_default();
+
+        egui::ComboBox::from_id_salt(("editor-kind", area.id.0))
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (kind, name) in &names {
+                    if ui.selectable_label(*kind == area.editor, name).clicked() {
+                        state.set_area_editor(area.id, *kind);
+                    }
+                }
+            });
+
+        ui.menu_button(&l.area_menu, |ui| {
+            if ui.button(&l.area_split_v).clicked() {
+                state.split_area(area.id, kreate_ui::Axis::Vertical);
+                ui.close();
+            }
+            if ui.button(&l.area_split_h).clicked() {
+                state.split_area(area.id, kreate_ui::Axis::Horizontal);
+                ui.close();
+            }
+            // Disabled rather than hidden on the last area: a menu whose
+            // entries come and go is a menu the user cannot learn.
+            ui.add_enabled_ui(state.screen.area_count() > 1, |ui| {
+                if ui.button(&l.area_close).clicked() {
+                    state.close_area(area.id);
+                    ui.close();
+                }
+            });
+        });
+    });
+}
+
+/// The 3D viewport: the rendered image, and everything painted over it.
+fn draw_viewport(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    rect: egui::Rect,
+    image: Option<ViewportImage>,
+) {
+    if let Some(image) = image {
+        // Only the part of the target that was drawn into. Sampling the whole
+        // texture would stretch the image by however much the allocation was
+        // rounded up.
+        ui.painter().image(
+            image.texture,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(image.uv.0, image.uv.1)),
+            egui::Color32::WHITE,
+        );
+    }
+    draw_select_band(ui, state, rect);
+    draw_modal_header(ui, state, rect);
+    draw_nav_gizmo(ui, state, rect);
+    draw_context_menu(ui, state, rect);
+}
+
+/// The UV editor, with the view state that belongs to this area.
+fn draw_uv_editor(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l: &Labels) {
+    let text = kreate_ui::UvText {
+        no_uvs: l.uv_none.clone(),
+        not_editing: l.uv_not_editing.clone(),
+    };
+    let data = state.uv.clone();
+    // Taken out and put back, because the editor writes to it while `state` is
+    // also lending its command queue.
+    let mut view = state.uv_views.remove(&area).unwrap_or_default();
+    let commands = kreate_ui::uv_editor(
+        ui,
+        data.as_ref().map(|d| d.view()).as_ref(),
+        &mut view,
+        &text,
+    );
+    state.uv_views.insert(area, view);
+    for command in commands {
+        state.queue.push(command);
+    }
+}
+
+/// Lets the pointer move the boundaries between areas.
+fn drag_handles(ui: &mut Ui, state: &mut ShellState, layout: &kreate_ui::Layout) {
+    for handle in &layout.handles {
+        let response = ui.interact(
+            handle.rect,
+            ui.id().with(("split", handle.id.0)),
+            egui::Sense::drag(),
+        );
+        let horizontal = handle.axis == kreate_ui::Axis::Vertical;
+        if response.hovered() || state.dragging == Some(handle.id) {
+            ui.ctx().set_cursor_icon(if horizontal {
+                egui::CursorIcon::ResizeHorizontal
+            } else {
+                egui::CursorIcon::ResizeVertical
+            });
+        }
+        if response.drag_started() {
+            state.dragging = Some(handle.id);
+        }
+        // The ratio comes from where the pointer *is*, not from how far it has
+        // moved. A boundary driven by accumulated deltas drifts away from the
+        // pointer over a long drag, and the clamp at either end makes it drift
+        // permanently: the delta keeps being added after the boundary has
+        // stopped moving.
+        if state.dragging == Some(handle.id) {
+            if let Some(at) = response.interact_pointer_pos() {
+                // The *parent's* extent, which is what the ratio is a share
+                // of. Measuring against the window would divide by the wrong
+                // number, and a boundary two levels down would move at a
+                // fraction of the pointer's speed.
+                let (pos, min, extent) = if horizontal {
+                    (at.x, handle.parent.min.x, handle.parent.width())
+                } else {
+                    (at.y, handle.parent.min.y, handle.parent.height())
+                };
+                if extent > 0.0 {
+                    state.area_edits.push(AreaEdit::Resize(
+                        handle.id,
+                        (pos - min) / extent,
+                        extent,
+                    ));
+                }
+            }
+        }
+        if response.drag_stopped() {
+            state.dragging = None;
+        }
+    }
 }
 
 /// A toolbar button carrying whatever is known about the command behind it.
@@ -1364,7 +1734,6 @@ mode-edit = Edit Mode
 select-mode-vert = Vertex
 select-mode-edge = Edge
 select-mode-face = Face
-panel-keymap = Keymap
 keymap-preset = Preset
 keymap-changed = { $count } changed
 keymap-reset-all = Reset all
@@ -1379,10 +1748,16 @@ keymap-context-object = Object Mode
 keymap-context-edit = Edit Mode
 keymap-context-uv = UV Editor
 keymap-context-modal = Modal Tools
-panel-outliner = Outliner
-panel-properties = Properties
-panel-uv = UV Editor
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
+area-menu = Area
+area-split-vertical = Split left / right
+area-split-horizontal = Split top / bottom
+area-close = Close area
+editor-viewport = 3D Viewport
+editor-outliner = Outliner
+editor-properties = Properties
+editor-uv = UV Editor
+editor-preferences = Preferences
 uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
 adjust-nothing = No operation to adjust
 status-counts = { $objects } objects, { $meshes } meshes, { $selected } selected
@@ -1538,7 +1913,6 @@ mode-edit = 편집 모드
 select-mode-vert = 정점
 select-mode-edge = 모서리
 select-mode-face = 면
-panel-keymap = 키맵
 keymap-preset = 프리셋
 keymap-changed = { $count }개 변경됨
 keymap-reset-all = 전부 초기화
@@ -1553,10 +1927,16 @@ keymap-context-object = 오브젝트 모드
 keymap-context-edit = 편집 모드
 keymap-context-uv = UV 편집기
 keymap-context-modal = 모달 툴
-panel-outliner = 아웃라이너
-panel-properties = 속성
-panel-uv = UV 에디터
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
+area-menu = 여역
+area-split-vertical = 종으로 나누기
+area-split-horizontal = 가로로 나누기
+area-close = 여역 닫기
+editor-viewport = 3D 뷰포트
+editor-outliner = 아웃라이너
+editor-properties = 특성
+editor-uv = UV 에디터
+editor-preferences = 환경 설정
 uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
 adjust-nothing = 조정할 작업이 없습니다
 status-counts = 오브젝트 { $objects }개, 메시 { $meshes }개, 선택 { $selected }개
@@ -1724,6 +2104,183 @@ mod tests {
         assert!(state.queue.drain().is_empty());
     }
 
+    /// The default screen and the id of its viewport area.
+    fn screen_state() -> (ShellState, kreate_ui::AreaId) {
+        let state = ShellState::default();
+        let viewport = state
+            .screen
+            .areas()
+            .into_iter()
+            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .expect("the default layout has a viewport")
+            .0;
+        (state, viewport)
+    }
+
+    #[test]
+    fn a_queued_split_is_applied_after_the_frame() {
+        // Layout changes are queued rather than applied where the button is,
+        // because the rest of the frame is drawing against a layout derived
+        // from the tree. Applying immediately would leave every area after
+        // this one placed by a layout that no longer exists.
+        let (mut state, viewport) = screen_state();
+        let before = state.screen.area_count();
+
+        state.split_area(viewport, kreate_ui::Axis::Vertical);
+        assert_eq!(
+            state.screen.area_count(),
+            before,
+            "the queue acted on its own"
+        );
+
+        state.apply_area_edits();
+        assert_eq!(state.screen.area_count(), before + 1);
+        assert!(state.area_edits.is_empty(), "the queue was not drained");
+    }
+
+    #[test]
+    fn a_split_area_shows_what_it_was_showing() {
+        // Splitting is "I want two of these here". Guessing a different editor
+        // for the new half would be wrong more often than right, and the user
+        // has the header dropdown for when it is not.
+        let (mut state, viewport) = screen_state();
+        let outliner = state
+            .screen
+            .areas()
+            .into_iter()
+            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Outliner)
+            .expect("the default layout has an outliner")
+            .0;
+
+        for area in [viewport, outliner] {
+            let was = state.screen.editor(area).expect("the area is there");
+            let known: Vec<_> = state.screen.areas();
+            state.split_area(area, kreate_ui::Axis::Horizontal);
+            state.apply_area_edits();
+
+            let new_area = state
+                .screen
+                .areas()
+                .into_iter()
+                .find(|(id, _)| !known.iter().any(|(k, _)| k == id))
+                .expect("a new area appeared");
+            assert_eq!(new_area.1, was, "the new half shows the wrong editor");
+        }
+    }
+
+    #[test]
+    fn closing_an_area_forgets_the_state_that_belonged_to_it() {
+        // Otherwise the view state of areas that no longer exist accumulates
+        // for the life of the session, and a new area that happened to reuse
+        // an id would inherit somebody else's zoom. Ids are not reused, so the
+        // second half of that cannot happen — the leak can.
+        let (mut state, viewport) = screen_state();
+        state.split_area(viewport, kreate_ui::Axis::Horizontal);
+        state.apply_area_edits();
+        let extra = state
+            .screen
+            .areas()
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| *id != viewport)
+            .expect("more than one area");
+
+        state.uv_views.insert(extra, kreate_ui::UvState::default());
+        assert!(state.uv_views.contains_key(&extra));
+
+        state.close_area(extra);
+        state.apply_area_edits();
+        assert!(
+            !state.uv_views.contains_key(&extra),
+            "the closed area's view state was left behind"
+        );
+    }
+
+    #[test]
+    fn a_close_that_the_layout_refuses_leaves_the_state_alone() {
+        // The last area cannot be closed, and the state that belongs to it must
+        // not be discarded on the strength of a request that did not happen.
+        let mut state = ShellState {
+            screen: kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+            ..Default::default()
+        };
+        let only = state.screen.areas()[0].0;
+        state.uv_views.insert(only, kreate_ui::UvState::default());
+
+        state.close_area(only);
+        state.apply_area_edits();
+        assert_eq!(state.screen.area_count(), 1);
+        assert!(
+            state.uv_views.contains_key(&only),
+            "the view state was discarded although the area survived"
+        );
+    }
+
+    #[test]
+    fn a_queued_resize_moves_the_boundary() {
+        let (mut state, viewport) = screen_state();
+        let space = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0));
+        // Chosen by axis, not by index. Handles come out innermost-first, so
+        // `handles[0]` in the default layout is the boundary between the
+        // outliner and the properties below it — which this test then resized
+        // and reported no change to the viewport, correctly.
+        let split = state
+            .screen
+            .layout(space)
+            .handles
+            .iter()
+            .find(|h| h.axis == kreate_ui::Axis::Vertical)
+            .expect("the default layout has a vertical boundary")
+            .id;
+        let before = state
+            .screen
+            .layout(space)
+            .areas
+            .iter()
+            .find(|a| a.id == viewport)
+            .expect("viewport")
+            .rect
+            .width();
+
+        state
+            .area_edits
+            .push(AreaEdit::Resize(split, 0.4, space.width()));
+        state.apply_area_edits();
+
+        let after = state
+            .screen
+            .layout(space)
+            .areas
+            .iter()
+            .find(|a| a.id == viewport)
+            .expect("viewport")
+            .rect
+            .width();
+        assert!(
+            after < before - 100.0,
+            "the viewport went from {before} to {after}"
+        );
+    }
+
+    #[test]
+    fn the_default_layout_has_a_viewport_and_no_duplicates() {
+        // What a new session opens onto. The viewport is the one area that has
+        // to be there — the application sizes its render target from it, and a
+        // layout without one would start up showing nothing.
+        let state = ShellState::default();
+        let areas = state.screen.areas();
+        assert!(state.has_editor(kreate_ui::EditorKind::Viewport));
+        assert_eq!(areas.len(), 3, "viewport, outliner, properties");
+
+        let mut ids: Vec<_> = areas.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), areas.len(), "an id was handed out twice");
+
+        assert!(!state.has_editor(kreate_ui::EditorKind::UvEditor));
+        assert!(state.uv_at(egui::Pos2::ZERO).is_none(), "no UV editor open");
+    }
+
     #[test]
     fn the_built_in_catalogs_parse() {
         // A malformed built-in resource would leave every label showing its key,
@@ -1874,11 +2431,17 @@ mod tests {
             "menu-delete",
             "menu-undo",
             "menu-redo",
-            "panel-outliner",
-            "panel-properties",
-            "panel-uv",
             "uv-none",
             "uv-not-editing",
+            "area-menu",
+            "area-split-vertical",
+            "area-split-horizontal",
+            "area-close",
+            "editor-viewport",
+            "editor-outliner",
+            "editor-properties",
+            "editor-uv",
+            "editor-preferences",
             "adjust-nothing",
             "status-counts",
             "outliner-kind-empty",

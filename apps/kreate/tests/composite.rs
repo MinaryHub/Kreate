@@ -38,6 +38,14 @@ struct Composited {
     pixels: Vec<[u8; 4]>,
     /// The rectangle the shell reserved for the viewport, in points.
     viewport_rect: egui::Rect,
+    /// The shell state as it stood after the frame.
+    ///
+    /// Kept because some of what a frame does is not visible in its pixels. The
+    /// layout edits an area's header queues are applied *after* the frame, so
+    /// "did the split happen" is a question about this and not about the
+    /// picture — and a sweep that stopped `draw` from applying them at all
+    /// broke nothing until this was here.
+    state: kreate::shell::ShellState,
 }
 
 impl Composited {
@@ -177,11 +185,8 @@ fn composite_with(
     let history = History::new();
     let keymap = kreate_input::presets::load(kreate_input::Preset::default());
     let overrides = std::collections::BTreeMap::new();
-    let mut state = kreate::shell::ShellState {
-        catalog: kreate::shell::load_catalog(locale),
-        edit_mode,
-        ..Default::default()
-    };
+    let mut state = kreate::shell::ShellState::with_catalog(kreate::shell::load_catalog(locale));
+    state.edit_mode = edit_mode;
     arrange(&mut state);
     if state.context_menu.at.is_some() {
         label = format!("menu-{label}");
@@ -379,6 +384,7 @@ fn composite_with(
     let composited = Composited {
         pixels,
         viewport_rect,
+        state,
     };
     composited.dump(&label);
     Some(composited)
@@ -479,6 +485,298 @@ fn the_viewport_texture_is_visible_in_the_middle_of_the_frame() {
 }
 
 #[test]
+fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
+    // Splitting and closing are deferred: the frame is drawing against a layout
+    // derived from the tree, so editing it where the button is would leave every
+    // area after that one placed by a layout that no longer exists.
+    //
+    // Which means the queue has to actually be drained, and by `draw` rather
+    // than by a test calling `apply_area_edits` itself. A sweep that replaced
+    // the call with `clear()` — splitting and closing dead in the application,
+    // silently — passed everything until this existed.
+    let before = kreate::shell::ShellState::default().screen.area_count();
+
+    let split = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        let viewport = state
+            .screen
+            .areas()
+            .into_iter()
+            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .expect("the default layout has a viewport")
+            .0;
+        state.split_area(viewport, kreate_ui::Axis::Horizontal);
+    }));
+    assert_eq!(
+        split.state.screen.area_count(),
+        before + 1,
+        "the split was asked for and never happened"
+    );
+
+    let closed = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        let properties = state
+            .screen
+            .areas()
+            .into_iter()
+            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Properties)
+            .expect("the default layout has a properties editor")
+            .0;
+        state.close_area(properties);
+    }));
+    assert_eq!(closed.state.screen.area_count(), before - 1);
+    assert!(!closed.state.has_editor(kreate_ui::EditorKind::Properties));
+}
+
+#[test]
+fn a_second_viewport_does_not_show_the_first_one_s_picture() {
+    // One render target, so only one area can be showing a rendered image.
+    // Several viewports means several cameras and several targets, which is a
+    // real feature and a later one; until then the honest thing is for the
+    // extra ones to show their own background rather than a copy of the first
+    // one's frame, which would be a picture from the wrong camera.
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let first = screen.areas()[0].0;
+    screen
+        .split(
+            first,
+            kreate_ui::Axis::Vertical,
+            0.5,
+            kreate_ui::EditorKind::Viewport,
+        )
+        .expect("split");
+    let plan = screen.clone();
+
+    let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.screen = plan.clone()
+    }));
+
+    // The cube is at the centre of whichever viewport is rendering, so it is the
+    // *variety* of colour that separates a rendered half from an empty one: a
+    // flat background is one colour, a shaded cube on a grid is many.
+    let vr = c.viewport_rect;
+    let band = |from: u32, to: u32| -> usize {
+        let mut seen: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+        for y in (vr.min.y as u32 + 8)..(vr.max.y as u32 - 8) {
+            for x in from..to {
+                seen.insert(c.at(x, y));
+            }
+        }
+        seen.len()
+    };
+    let rendered = band(vr.min.x as u32 + 4, vr.max.x as u32 - 4);
+    let other = band(vr.max.x as u32 + 8, W - 4);
+    assert!(
+        rendered > 20,
+        "the first viewport has only {rendered} distinct colours; nothing rendered"
+    );
+    assert!(
+        other * 4 < rendered,
+        "the second viewport has {other} distinct colours against {rendered}; it is \
+         showing the first one's picture"
+    );
+}
+
+#[test]
+fn two_uv_editors_keep_their_own_view() {
+    // The layout permits two of anything, and view state keyed once would mean
+    // they scroll and zoom together, which is baffling. Keyed on the area
+    // instead — and the area id is stable for the area's life, so the state
+    // stays put when a neighbour is split or closed.
+    //
+    // Asserted through `uv_at`, which is what the application asks in order to
+    // route `G` to the editor under the pointer: with the state shared, both
+    // points resolve to the same area, and a UV drag over one panel would move
+    // the other one's selection.
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor);
+    let first = screen.areas()[0].0;
+    let second = screen
+        .split(
+            first,
+            kreate_ui::Axis::Vertical,
+            0.5,
+            kreate_ui::EditorKind::UvEditor,
+        )
+        .expect("split");
+    let plan = screen.clone();
+
+    let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
+        state.screen = plan.clone();
+        state.uv = Some(kreate_ui::UvData::default());
+    }));
+
+    // A point well inside each half.
+    let left = egui::pos2(f32::from(W as u16) * 0.25, f32::from(H as u16) * 0.6);
+    let right = egui::pos2(f32::from(W as u16) * 0.75, f32::from(H as u16) * 0.6);
+    let a = c.state.uv_at(left).map(|(id, _)| id);
+    let b = c.state.uv_at(right).map(|(id, _)| id);
+
+    assert_eq!(
+        a,
+        Some(first),
+        "the left half is not the first editor: {a:?}"
+    );
+    assert_eq!(b, Some(second), "the right half is not the second: {b:?}");
+    assert_ne!(
+        a, b,
+        "both halves report the same area, so they share a view"
+    );
+}
+
+#[test]
+fn every_area_paints_its_own_background() {
+    // The defect this was written after. The shell used to draw each panel with
+    // `Panel::left` and friends, which paint a themed frame; laying the areas
+    // out with a plain sub-`Ui` instead left every one of them transparent, and
+    // nothing else paints there, so they composited as **pure black**.
+    //
+    // Sampled just inside each area's own boundary, where its background shows
+    // before any widget it draws. Pure black is the failure: an area that
+    // painted nothing, or one laid out at an inverted rect and so not painted
+    // at all.
+    let mut layout = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let viewport = layout.areas()[0].0;
+    let outliner = layout
+        .split(
+            viewport,
+            kreate_ui::Axis::Vertical,
+            0.6,
+            kreate_ui::EditorKind::Outliner,
+        )
+        .expect("split the only area");
+    layout
+        .split(
+            outliner,
+            kreate_ui::Axis::Horizontal,
+            0.5,
+            kreate_ui::EditorKind::Properties,
+        )
+        .expect("split the outliner");
+    layout
+        .split(
+            viewport,
+            kreate_ui::Axis::Horizontal,
+            0.7,
+            kreate_ui::EditorKind::UvEditor,
+        )
+        .expect("split the viewport");
+    let expected_areas = layout.area_count();
+    assert_eq!(expected_areas, 4, "the fixture should have four areas");
+
+    let plan = layout.clone();
+    let c = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+        state.screen = plan.clone()
+    }));
+
+    // The screen occupies what is left after the top bar and the status bar.
+    // Taken from the viewport rect the shell reported rather than guessed at:
+    // the viewport is one of the areas, so its rect pins the screen's bounds in
+    // both axes.
+    let vr = c.viewport_rect;
+    assert!(vr.width() > 0.0 && vr.height() > 0.0, "no viewport: {vr:?}");
+
+    let mut sampled = 0;
+    for (id, kind) in layout.areas() {
+        let rect = layout
+            .layout(egui::Rect::from_min_max(
+                egui::pos2(0.0, vr.min.y - 30.0),
+                egui::pos2(f32::from(W as u16), f32::from(H as u16) - 24.0),
+            ))
+            .areas
+            .iter()
+            .find(|a| a.id == id)
+            .expect("every area is laid out")
+            .rect;
+        // Well inside, and below the header strip, so the sample is the
+        // editor's own background rather than the header's or the border's.
+        let x = (rect.center().x) as u32;
+        let y = (rect.min.y + rect.height() * 0.75) as u32;
+        if x >= W || y >= H {
+            continue;
+        }
+        let p = c.at(x, y);
+        assert!(
+            p[0] > 4 || p[1] > 4 || p[2] > 4,
+            "{kind:?} at ({x},{y}) is pure black: {p:?} — the area painted nothing"
+        );
+        sampled += 1;
+    }
+    assert_eq!(
+        sampled, expected_areas,
+        "only {sampled} of {expected_areas} areas were sampled"
+    );
+}
+
+#[test]
+fn the_viewport_follows_the_layout_it_is_given() {
+    // The point of the layout being data: the shell has to draw where the tree
+    // says, not where a `Panel::left` call happens to put things. Checked as
+    // the *reported viewport rect*, because that is what the application sizes
+    // its render target from \u2014 a shell that ignored the tree would hand the
+    // renderer the wrong rectangle and the image would be stretched.
+    //
+    // Two arrangements that put the viewport on opposite sides, so a shell that
+    // returned a constant would fail one of them.
+    let left = {
+        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+        let viewport = screen.areas()[0].0;
+        screen
+            .split(
+                viewport,
+                kreate_ui::Axis::Vertical,
+                0.3,
+                kreate_ui::EditorKind::Outliner,
+            )
+            .expect("split");
+        screen
+    };
+    let right = {
+        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Outliner);
+        let outliner = screen.areas()[0].0;
+        screen
+            .split(
+                outliner,
+                kreate_ui::Axis::Vertical,
+                0.3,
+                kreate_ui::EditorKind::Viewport,
+            )
+            .expect("split");
+        screen
+    };
+
+    let narrow = {
+        let plan = left.clone();
+        gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+            state.screen = plan.clone()
+        }))
+    };
+    let wide = {
+        let plan = right.clone();
+        gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", false, |state| {
+            state.screen = plan.clone()
+        }))
+    };
+
+    // Thirty per cent of the width on the left, seventy on the right.
+    assert!(
+        narrow.viewport_rect.width() < wide.viewport_rect.width(),
+        "the viewport was {} wide either way; the tree is being ignored",
+        narrow.viewport_rect.width()
+    );
+    assert!(
+        narrow.viewport_rect.min.x < wide.viewport_rect.min.x,
+        "the viewport did not move: {:?} then {:?}",
+        narrow.viewport_rect,
+        wide.viewport_rect
+    );
+    // And the wide one really is most of the window, so this is not two
+    // arbitrary numbers that happen to differ.
+    assert!(
+        wide.viewport_rect.width() > f32::from(W as u16) * 0.55,
+        "the right-hand viewport is only {} wide",
+        wide.viewport_rect.width()
+    );
+}
+
+#[test]
 fn the_chrome_is_warm_and_the_viewport_is_not() {
     // The whole premise of the theme, checked where it actually matters: on
     // the composited frame, not on the token table. Warm chrome makes a
@@ -490,8 +788,20 @@ fn the_chrome_is_warm_and_the_viewport_is_not() {
     // "match" the panels.
     let c = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
 
-    // Several points well inside the side panels, away from text and borders.
-    let panel_samples = [(20, H / 2), (40, H / 2 + 60), (W - 30, H / 2)];
+    // Derived from where the viewport ended up rather than hardcoded. The
+    // layout is data now, and the coordinates that used to be written in here
+    // went stale the first time the default arrangement changed — they were
+    // sampling the left edge, which is viewport and not chrome any more.
+    //
+    // Just past the boundary on the right, where the editor's own background
+    // shows before any row it draws, and in the status bar under everything.
+    let vr = c.viewport_rect;
+    let inside_column = (vr.max.x + kreate_ui::area::HANDLE + 2.0) as u32;
+    let panel_samples = [
+        (inside_column, (vr.min.y + vr.height() * 0.25) as u32),
+        (inside_column, (vr.min.y + vr.height() * 0.75) as u32),
+        (W / 2, H - 4),
+    ];
     for (x, y) in panel_samples {
         let p = c.at(x, y);
         let (r, b) = (i32::from(p[0]), i32::from(p[2]));
@@ -503,7 +813,6 @@ fn the_chrome_is_warm_and_the_viewport_is_not() {
 
     // And an empty corner of the viewport, away from the cube and the axis
     // lines, which are deliberately coloured.
-    let vr = c.viewport_rect;
     let x = (vr.min.x + vr.width() * 0.08) as u32;
     let y = (vr.min.y + vr.height() * 0.08) as u32;
     let p = c.at(x, y);
@@ -580,13 +889,34 @@ fn the_modal_header_draws_over_the_viewport_in_the_constrained_axis_colour() {
     );
 }
 
+/// Puts a UV editor along the bottom of the screen, under the viewport.
+///
+/// The layout is data now, so a test that wants a UV editor has to say where.
+/// Explicit rather than "point some area at it": `PANEL_BODY` below is a band of
+/// scanlines, and it has to fall inside the editor's *body* rather than across
+/// its header — the header draws either way, and a scan that included it was
+/// satisfied by it once already.
+fn uv_below_viewport(state: &mut kreate::shell::ShellState) {
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let viewport = screen.areas()[0].0;
+    screen
+        .split(
+            viewport,
+            kreate_ui::Axis::Horizontal,
+            0.65,
+            kreate_ui::EditorKind::UvEditor,
+        )
+        .expect("the screen has one area");
+    state.screen = screen;
+}
+
 #[test]
 fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
     // Two states worth a picture, because they are the two the user actually
     // meets: a mesh with UVs, and a mesh without. The second used to be an
     // empty square with no explanation, which reads as a broken panel.
     let with_uvs = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
-        state.show_uv = true;
+        uv_below_viewport(state);
         // Two faces of a box-projected cube, one of them selected, in the
         // arena's own corner numbering — which is what the panel is given
         // and what the operators take.
@@ -608,7 +938,7 @@ fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
     }));
 
     let without = gpu_or_skip!(composite_with(&doc_with_cube(), "ko-KR", true, |state| {
-        state.show_uv = true;
+        uv_below_viewport(state);
         state.uv = Some(kreate_ui::UvData::default());
     }));
 

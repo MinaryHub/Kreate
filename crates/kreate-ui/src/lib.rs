@@ -6,6 +6,7 @@
 //! undo, macro recording and scripting working from one mechanism, and it means
 //! replacing the toolkit would replace one crate rather than the application.
 
+pub mod area;
 pub mod command;
 pub mod command_info;
 pub mod context_menu;
@@ -19,6 +20,7 @@ pub mod text;
 pub mod theme;
 pub mod uv_editor;
 
+pub use area::{AreaId, AreaRect, Axis, EditorKind, Handle, Layout, Screen, SplitId};
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};
 pub use keymap_editor::{keymap_editor, KeymapEdit, KeymapText};

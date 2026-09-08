@@ -579,10 +579,7 @@ impl App {
             buttons: [false; 3],
             drag_ops: [const { None }; 3],
             viewport_px: None,
-            ui: ShellState {
-                catalog: shell::load_catalog(locale),
-                ..ShellState::default()
-            },
+            ui: ShellState::with_catalog(shell::load_catalog(locale)),
             wanted_viewport: (0, 0),
             next_shape: 1,
             snap: kreate::modal::Snap::default(),
@@ -847,7 +844,7 @@ impl App {
     /// every operator has to remember to invalidate is a cache one of them
     /// will forget.
     fn publish_uv_view(&mut self) {
-        if !self.ui.show_uv {
+        if !self.ui.has_editor(kreate_ui::EditorKind::UvEditor) {
             self.ui.uv = None;
             return;
         }
@@ -2908,19 +2905,16 @@ impl App {
     /// here — the panel is closed, it has not drawn yet, or the pointer is
     /// elsewhere — so they are deliberately not distinguished.
     fn uv_panel_cursor(&self) -> Option<glam::Vec2> {
-        if !self.ui.show_uv {
-            return None;
-        }
-        let rect = self.ui.uv_state.rect?;
         let (x, y) = self.input.cursor?;
         // Physical pixels to interface points: the pointer is tracked in the
-        // window's pixels and the panel laid out in points.
+        // window's pixels and the areas laid out in points.
         let scale = f64::from(self.egui_ctx.pixels_per_point().max(0.01));
         let at = egui::pos2((x / scale) as f32, (y / scale) as f32);
-        if !rect.contains(at) {
-            return None;
-        }
-        let uv = kreate_ui::uv_editor::to_uv(&self.ui.uv_state, rect, at);
+        // Whichever UV editor the pointer is over. The layout permits more than
+        // one, and each has its own view, so the answer depends on which.
+        let (_, view) = self.ui.uv_at(at)?;
+        let rect = view.rect?;
+        let uv = kreate_ui::uv_editor::to_uv(view, rect, at);
         Some(glam::Vec2::new(uv.x, uv.y))
     }
 
