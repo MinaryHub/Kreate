@@ -187,6 +187,139 @@ fn a_long_drag_does_not_accumulate_drift() {
 }
 
 #[test]
+fn a_previewed_drag_leaves_what_a_frame_by_frame_one_would() {
+    // What the GPU transform preview relies on. While it is running the
+    // document is not written at all — that is the whole optimisation — so the
+    // operator runs once, at confirm, with the parameters the pointer ended on.
+    //
+    // Which had better produce the same document as a drag that applied every
+    // frame, and the same single history entry, and the same script line. If it
+    // did not, the mesh would move at the moment the user released the button:
+    // the one failure the preview must not have, since it is exactly what the
+    // preview was drawing to avoid.
+    let registry = registry();
+
+    // Frame by frame, the way a drag ran before the preview existed.
+    let (mut every_frame, ctx) = edit_scene();
+    let mut applied = History::new();
+    let mut session = applied
+        .begin_modal(
+            &registry,
+            &mut every_frame,
+            None,
+            &ctx,
+            "mesh.translate",
+            &moved(0.0),
+        )
+        .expect("dispatch")
+        .expect("accepted");
+    for step in 1..=40 {
+        applied
+            .update_modal(
+                &registry,
+                &mut every_frame,
+                None,
+                &ctx,
+                &mut session,
+                &moved(step as f64 * 0.05),
+            )
+            .expect("update");
+    }
+    let applied_call = session.params().to_script_call(session.op_id());
+    applied.commit_modal(session);
+
+    // Previewed: the same gesture, but the document only hears about it once.
+    let (mut previewed, ctx) = edit_scene();
+    let mut once = History::new();
+    let mut session = once
+        .begin_modal(
+            &registry,
+            &mut previewed,
+            None,
+            &ctx,
+            "mesh.translate",
+            &moved(0.0),
+        )
+        .expect("dispatch")
+        .expect("accepted");
+    once.update_modal(
+        &registry,
+        &mut previewed,
+        None,
+        &ctx,
+        &mut session,
+        &moved(2.0),
+    )
+    .expect("update");
+    let previewed_call = session.params().to_script_call(session.op_id());
+    once.commit_modal(session);
+
+    assert_eq!(
+        positions(&previewed),
+        positions(&every_frame),
+        "a previewed drag ended somewhere else"
+    );
+    assert_eq!(previewed_call, applied_call, "the script line differs");
+    assert_eq!(
+        once.entries().len(),
+        applied.entries().len(),
+        "a different number of entries"
+    );
+    assert_eq!(once.entries().len(), 1, "a drag is one entry");
+
+    // And undo has to reach the same place from both, or the preview has cost
+    // the user a step.
+    let (pristine, _) = edit_scene();
+    assert!(once.undo(&mut previewed), "a previewed drag did not undo");
+    assert!(
+        applied.undo(&mut every_frame),
+        "an applied drag did not undo"
+    );
+    assert_eq!(positions(&previewed), positions(&pristine));
+    assert_eq!(positions(&every_frame), positions(&pristine));
+}
+
+#[test]
+fn a_previewed_drag_that_is_cancelled_records_nothing() {
+    // The path the preview makes slightly odd: nothing was ever applied beyond
+    // the identity parameters `begin_modal` runs, so a cancel has almost
+    // nothing to undo — and it still must leave the document at the original
+    // and the history untouched.
+    //
+    // On the GPU side this is the one place the preview has to be undone
+    // explicitly: a cancel restores the document to the very handle the GPU
+    // cache is already holding, so the sync finds nothing to do and the
+    // deformed positions would stay on screen. That part is `App`'s, but this
+    // is the document contract it hangs on.
+    let registry = registry();
+    let (mut doc, ctx) = edit_scene();
+    let before = positions(&doc);
+    let mut history = History::new();
+
+    let session = history
+        .begin_modal(
+            &registry,
+            &mut doc,
+            None,
+            &ctx,
+            "mesh.translate",
+            &moved(0.0),
+        )
+        .expect("dispatch")
+        .expect("accepted");
+    // No updates at all: a preview ran instead, and then the user pressed
+    // Escape.
+    History::cancel_modal(session, &mut doc);
+
+    assert_eq!(positions(&doc), before, "a cancelled drag moved the mesh");
+    assert_eq!(
+        history.entries().len(),
+        0,
+        "a cancelled drag recorded an entry"
+    );
+}
+
+#[test]
 fn cancelling_restores_the_document_and_records_nothing() {
     let (mut doc, ctx) = edit_scene();
     let before = positions(&doc);
