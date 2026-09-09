@@ -116,6 +116,7 @@ impl fmt::Display for Uid {
 pub enum DatablockKind {
     Object,
     Mesh,
+    Camera,
     Material,
     Light,
     World,
@@ -130,6 +131,7 @@ impl DatablockKind {
         match self {
             DatablockKind::Object => "object",
             DatablockKind::Mesh => "mesh",
+            DatablockKind::Camera => "camera",
             DatablockKind::Material => "material",
             DatablockKind::Light => "light",
             DatablockKind::World => "world",
@@ -143,6 +145,7 @@ impl DatablockKind {
         Some(match id {
             "object" => DatablockKind::Object,
             "mesh" => DatablockKind::Mesh,
+            "camera" => DatablockKind::Camera,
             "material" => DatablockKind::Material,
             "light" => DatablockKind::Light,
             "world" => DatablockKind::World,
@@ -157,6 +160,7 @@ impl DatablockKind {
     pub const ALL: &'static [DatablockKind] = &[
         DatablockKind::Object,
         DatablockKind::Mesh,
+        DatablockKind::Camera,
         DatablockKind::Material,
         DatablockKind::Light,
         DatablockKind::World,

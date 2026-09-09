@@ -123,6 +123,86 @@ impl Operator for AddPrimitive {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddCameraParams {
+    /// Focal length in millimetres. What a lens is labelled with.
+    ///
+    /// The stored quantity, not the field of view — see
+    /// `kreate_scene::camera` for why that is the way round it is.
+    #[param(min = 1.0, soft_min = 8.0, soft_max = 300.0)]
+    pub focal_length_mm: f64,
+    /// Sensor width in millimetres. 36 is a full 35mm frame.
+    #[param(min = 0.1, soft_max = 100.0)]
+    pub sensor_width_mm: f64,
+    /// The f-number. Zero is a pinhole: everything in focus, and nothing to
+    /// sample.
+    #[param(min = 0.0, soft_min = 0.0, soft_max = 32.0)]
+    pub f_stop: f64,
+    /// How far away the plane of focus is, in metres.
+    #[param(min = 0.0, soft_max = 100.0, unit = "length")]
+    pub focus_distance: f64,
+    /// Where to place the new camera.
+    pub location: [f64; 3],
+}
+
+impl Default for AddCameraParams {
+    fn default() -> Self {
+        Self {
+            focal_length_mm: 50.0,
+            sensor_width_mm: 36.0,
+            f_stop: 0.0,
+            focus_distance: 10.0,
+            location: [0.0, -8.0, 2.0],
+        }
+    }
+}
+
+/// Adds a camera object and the datablock behind it.
+///
+/// Two things, and the distinction is the point: the object is *where* the
+/// camera is and the datablock is *what* it is. Two objects can share one lens.
+pub struct AddCamera;
+
+impl Operator for AddCamera {
+    type Params = AddCameraParams;
+
+    fn id() -> &'static str {
+        "object.add_camera"
+    }
+    fn label() -> &'static str {
+        "Add Camera"
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let camera = kreate_scene::Camera {
+            focal_length_mm: params.focal_length_mm,
+            sensor_width_mm: params.sensor_width_mm,
+            // A zero f-number is a pinhole and not an infinite aperture. The
+            // parameter is a plain float because a slider cannot be `None`, and
+            // this is where the two forms meet.
+            f_stop: (params.f_stop > 0.0).then_some(params.f_stop),
+            focus_distance: params.focus_distance,
+            ..kreate_scene::Camera::new("Camera")
+        };
+
+        let d = doc.document_mut();
+        let datablock = d.add_camera(camera);
+        let mut object = kreate_scene::document::Object::new(
+            "Camera",
+            kreate_scene::document::ObjectData::Camera(datablock),
+        );
+        object.transform.translation = DVec3::from_array(params.location);
+        let id = d.add_object(object);
+        d.selection.clear();
+        d.selection.add(id);
+        Ok(OpResult::Finished)
+    }
+}
+
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -779,6 +859,7 @@ impl Operator for Join {
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
+    registry.register::<AddCamera>();
     registry.register::<Delete>();
     registry.register::<Duplicate>();
     registry.register::<Translate>();

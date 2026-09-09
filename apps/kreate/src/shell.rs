@@ -504,7 +504,7 @@ impl OutlinerOrder {
         let object = doc.object(id)?;
         let kind = match object.data {
             ObjectData::Empty => RowKind::Empty,
-            ObjectData::Camera => RowKind::Camera,
+            ObjectData::Camera(_) => RowKind::Camera,
             ObjectData::Light => RowKind::Light,
             ObjectData::Mesh(mesh_id) => {
                 let mesh = doc.mesh(mesh_id);

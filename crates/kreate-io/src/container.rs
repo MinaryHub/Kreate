@@ -152,6 +152,9 @@ pub struct ObjectRecord {
     pub parent_inverse: [f64; 12],
     /// The mesh entry's key, for an object that has geometry.
     pub mesh: Option<String>,
+    /// Index into [`SceneFile::cameras`], for an object that is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<usize>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -162,6 +165,39 @@ pub struct ObjectRecord {
 }
 
 /// The scene graph, as the file describes it.
+/// A camera datablock.
+///
+/// Physical parameters, in the units the instruments are labelled in — see
+/// `kreate_scene::camera`, which is explicit that the focal length is stored
+/// and the field of view is derived. Writing the angle instead would have made
+/// this file the second source of truth about a camera's framing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraRecord {
+    pub name: String,
+    /// The datablock's identity, which outlives this file.
+    #[serde(default)]
+    pub uid: u64,
+    /// `perspective` or `orthographic`.
+    pub projection: String,
+    pub focal_length_mm: f64,
+    pub sensor_width_mm: f64,
+    pub sensor_height_mm: f64,
+    /// `auto`, `horizontal` or `vertical`.
+    pub sensor_fit: String,
+    pub ortho_scale: f64,
+    pub clip_near: f64,
+    pub clip_far: f64,
+    /// Absent for a pinhole. Distinguished from a very large number because
+    /// "no depth of field" and "almost none" are different code paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f_stop: Option<f64>,
+    pub focus_distance: f64,
+    /// A fraction of one frame's interval, not a duration.
+    pub shutter: f64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SceneFile {
     pub objects: Vec<ObjectRecord>,
@@ -175,6 +211,14 @@ pub struct SceneFile {
     /// Empty in a scene written before identities existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mesh_uids: BTreeMap<String, u64>,
+    /// Camera datablocks, in the order the document holds them.
+    ///
+    /// An object refers to one by its index here, the same way it refers to a
+    /// parent — a within-file link that is rebuilt on load, for which a
+    /// position is right. What has to outlive the file is the *identity*, and
+    /// that is `CameraRecord::uid`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cameras: Vec<CameraRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -254,9 +298,41 @@ pub fn write(
             })
             .collect();
 
+        let camera_index: BTreeMap<kreate_scene::document::CameraId, usize> = document
+            .cameras()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        scene.cameras = document
+            .cameras()
+            .map(|(_, camera)| CameraRecord {
+                name: camera.name.clone(),
+                uid: camera.uid.raw(),
+                projection: match camera.projection {
+                    kreate_scene::Projection::Perspective => "perspective".to_string(),
+                    kreate_scene::Projection::Orthographic => "orthographic".to_string(),
+                },
+                focal_length_mm: camera.focal_length_mm,
+                sensor_width_mm: camera.sensor_width_mm,
+                sensor_height_mm: camera.sensor_height_mm,
+                sensor_fit: camera.sensor_fit.id().to_string(),
+                ortho_scale: camera.ortho_scale,
+                clip_near: camera.clip_near,
+                clip_far: camera.clip_far,
+                f_stop: camera.f_stop,
+                focus_distance: camera.focus_distance,
+                shutter: camera.shutter,
+                extra: BTreeMap::new(),
+            })
+            .collect();
+
         for (id, object) in document.objects() {
             let mesh = match object.data {
                 ObjectData::Mesh(m) => keys.get(&m).cloned(),
+                _ => None,
+            };
+            let camera = match object.data {
+                ObjectData::Camera(c) => camera_index.get(&c).copied(),
                 _ => None,
             };
             let t = &object.transform;
@@ -270,6 +346,7 @@ pub fn write(
                 scale: t.scale.to_array(),
                 parent_inverse: affine_to_array(&m),
                 mesh,
+                camera,
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -385,6 +462,34 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         mesh_ids.insert(key, id);
     }
 
+    let mut camera_ids: Vec<kreate_scene::document::CameraId> =
+        Vec::with_capacity(scene.cameras.len());
+    for record in &scene.cameras {
+        // An unknown projection or sensor fit falls back to the default rather
+        // than failing the load. A scene from a later version is worth opening
+        // with one camera framed wrongly; it is not worth refusing.
+        let camera = kreate_scene::Camera {
+            name: record.name.clone(),
+            linkage: Linkage::Local,
+            uid: kreate_scene::Uid::NONE,
+            projection: match record.projection.as_str() {
+                "orthographic" => kreate_scene::Projection::Orthographic,
+                _ => kreate_scene::Projection::Perspective,
+            },
+            focal_length_mm: record.focal_length_mm,
+            sensor_width_mm: record.sensor_width_mm,
+            sensor_height_mm: record.sensor_height_mm,
+            sensor_fit: kreate_scene::SensorFit::from_id(&record.sensor_fit).unwrap_or_default(),
+            ortho_scale: record.ortho_scale,
+            clip_near: record.clip_near,
+            clip_far: record.clip_far,
+            f_stop: record.f_stop,
+            focus_distance: record.focus_distance,
+            shutter: record.shutter,
+        };
+        camera_ids.push(document.restore_camera(camera, kreate_scene::Uid::from_raw(record.uid)));
+    }
+
     let mut object_ids: Vec<ObjectId> = Vec::with_capacity(scene.objects.len());
     for record in &scene.objects {
         let data = match &record.mesh {
@@ -398,7 +503,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     })?;
                 ObjectData::Mesh(id)
             }
-            None => ObjectData::Empty,
+            None => match record.camera.and_then(|i| camera_ids.get(i)) {
+                Some(id) => ObjectData::Camera(*id),
+                None => ObjectData::Empty,
+            },
         };
         let mut object = Object::new(record.name.clone(), data);
         object.transform = DTransform {
