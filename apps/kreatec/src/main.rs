@@ -337,7 +337,7 @@ fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
                 ObjectData::Mesh(_) => "mesh",
                 ObjectData::Empty => "empty",
                 ObjectData::Camera(_) => "camera",
-                ObjectData::Light => "light",
+                ObjectData::Light(_) => "light",
             };
             println!(
                 "  {:indent$}{} [{kind}] at {:.4?}{}{}",
@@ -491,7 +491,7 @@ fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
             },
             ObjectData::Empty => print!(" empty"),
             ObjectData::Camera(_) => print!(" camera"),
-            ObjectData::Light => print!(" light"),
+            ObjectData::Light(_) => print!(" light"),
         }
         if !object.visible {
             print!(" hidden");

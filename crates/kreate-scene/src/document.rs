@@ -35,6 +35,7 @@ use kreate_reflect::{DatablockKind, Uid};
 
 use crate::camera::Camera;
 use crate::image::Image;
+use crate::light::{Light, World};
 
 define_id! {
     /// An object in the scene graph.
@@ -66,6 +67,25 @@ kreate_mesh::define_id! {
     /// A material datablock.
     pub struct MaterialId;
 }
+
+define_id! {
+    /// A light datablock.
+    ///
+    /// The same separation as a camera's, and §2.2 is explicit about it: a
+    /// hundred linked copies of a lamp share one bulb, so the object is *where*
+    /// the light is and the datablock is *what* it is. Changing a studio's
+    /// colour is then one edit rather than a hundred.
+    pub struct LightId;
+}
+
+define_id! {
+    /// A world datablock: what light arrives from no object in particular.
+    ///
+    /// An arena and not a field on the document, because a studio setup is a
+    /// thing to share between files — which is what library linking is for and
+    /// what a bare field could not be reached by.
+    pub struct WorldId;
+}
 define_id! {
     /// A collection: a named grouping of objects, orthogonal to the parent
     /// hierarchy.
@@ -79,7 +99,7 @@ pub enum ObjectData {
     Empty,
     Mesh(MeshId),
     Camera(CameraId),
-    Light,
+    Light(LightId),
 }
 
 /// Whether a datablock is owned by this file or linked from another.
@@ -259,6 +279,15 @@ pub struct Document {
     /// `Arc` per tile — so a document clone is a refcount bump and a brush
     /// stroke copies the tiles it touched. See [`crate::image`].
     images: Arena<ImageId, Arc<Image>>,
+    lights: Arena<LightId, Arc<Light>>,
+    worlds: Arena<WorldId, Arc<World>>,
+    /// Which world is lighting the scene.
+    ///
+    /// A pointer and not the world itself, so that swapping a lighting setup is
+    /// one assignment and the setup that was there is still in the file. `None`
+    /// is a scene lit by nothing but its own lights, which is a real thing to
+    /// want and not a missing value to paper over.
+    active_world: Option<WorldId>,
     collections: Arena<CollectionId, Collection>,
     /// Objects with no parent, in user-visible order.
     roots: Vec<ObjectId>,
@@ -297,6 +326,8 @@ struct UidCounters {
     mesh: Uid,
     camera: Uid,
     image: Uid,
+    light: Uid,
+    world: Uid,
 }
 
 impl Document {
@@ -382,6 +413,8 @@ impl Document {
             DatablockKind::Mesh => &mut self.uids.mesh,
             DatablockKind::Camera => &mut self.uids.camera,
             DatablockKind::Image => &mut self.uids.image,
+            DatablockKind::Light => &mut self.uids.light,
+            DatablockKind::World => &mut self.uids.world,
             // Nothing else is a datablock in this document yet. Reaching here
             // means a kind was added to the enum and not to the counters, and
             // handing back the unassigned id makes that a resolvable path to
@@ -850,6 +883,145 @@ impl Document {
             .iter()
             .find(|(_, i)| i.uid == uid)
             .map(|(id, _)| id)
+    }
+
+    // --- lights -------------------------------------------------------------
+
+    pub fn add_light(&mut self, light: Light) -> LightId {
+        let uid = self.issue(DatablockKind::Light);
+        self.touch();
+        self.lights.insert(Arc::new(Light { uid, ..light }))
+    }
+
+    /// Adds a light with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_light(&mut self, light: Light, uid: Uid) -> LightId {
+        if uid.is_none() {
+            return self.add_light(light);
+        }
+        self.uids.light = self.uids.light.max(uid);
+        self.touch();
+        self.lights.insert(Arc::new(Light { uid, ..light }))
+    }
+
+    pub fn light(&self, id: LightId) -> Option<&Light> {
+        self.lights.get(id).map(|l| l.as_ref())
+    }
+
+    /// Copy-on-write access to a light.
+    pub fn light_mut(&mut self, id: LightId) -> Option<&mut Light> {
+        self.touch();
+        self.lights.get_mut(id).map(Arc::make_mut)
+    }
+
+    /// Every light datablock, in arena slot order.
+    pub fn lights(&self) -> impl Iterator<Item = (LightId, &Light)> {
+        self.lights.iter().map(|(id, l)| (id, l.as_ref()))
+    }
+
+    pub fn light_count(&self) -> usize {
+        self.lights.len()
+    }
+
+    pub fn light_uid(&self, id: LightId) -> Option<Uid> {
+        self.lights.get(id).map(|l| l.uid)
+    }
+
+    pub fn light_by_uid(&self, uid: Uid) -> Option<LightId> {
+        self.lights
+            .iter()
+            .find(|(_, l)| l.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    /// Every light in the scene with the transform that places it.
+    ///
+    /// The join a renderer actually needs, and the reason it is here rather
+    /// than at each call site: a light's direction and position come from the
+    /// *object*, its colour and intensity from the datablock, and a caller that
+    /// walks objects itself gets the linked-copy case wrong by reading the
+    /// datablock once. Invisible objects are skipped, because turning an object
+    /// off has to turn its light off — anything else makes the eye icon a lie.
+    pub fn lit_by(&self) -> impl Iterator<Item = (ObjectId, &Light, DAffine3)> + '_ {
+        self.objects.iter().filter_map(move |(id, object)| {
+            if !object.visible {
+                return None;
+            }
+            let ObjectData::Light(light) = object.data else {
+                return None;
+            };
+            Some((id, self.light(light)?, self.world_transform(id)))
+        })
+    }
+
+    // --- worlds -------------------------------------------------------------
+
+    pub fn add_world(&mut self, world: World) -> WorldId {
+        let uid = self.issue(DatablockKind::World);
+        self.touch();
+        self.worlds.insert(Arc::new(World { uid, ..world }))
+    }
+
+    /// Adds a world with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_world(&mut self, world: World, uid: Uid) -> WorldId {
+        if uid.is_none() {
+            return self.add_world(world);
+        }
+        self.uids.world = self.uids.world.max(uid);
+        self.touch();
+        self.worlds.insert(Arc::new(World { uid, ..world }))
+    }
+
+    pub fn world(&self, id: WorldId) -> Option<&World> {
+        self.worlds.get(id).map(|w| w.as_ref())
+    }
+
+    /// Copy-on-write access to a world.
+    pub fn world_mut(&mut self, id: WorldId) -> Option<&mut World> {
+        self.touch();
+        self.worlds.get_mut(id).map(Arc::make_mut)
+    }
+
+    pub fn worlds(&self) -> impl Iterator<Item = (WorldId, &World)> {
+        self.worlds.iter().map(|(id, w)| (id, w.as_ref()))
+    }
+
+    pub fn world_count(&self) -> usize {
+        self.worlds.len()
+    }
+
+    pub fn world_uid(&self, id: WorldId) -> Option<Uid> {
+        self.worlds.get(id).map(|w| w.uid)
+    }
+
+    pub fn world_by_uid(&self, uid: Uid) -> Option<WorldId> {
+        self.worlds
+            .iter()
+            .find(|(_, w)| w.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    /// Which world is lighting the scene, if any.
+    pub fn active_world(&self) -> Option<WorldId> {
+        self.active_world
+    }
+
+    /// Lights the scene with `world`, or with nothing.
+    ///
+    /// A world that is not in this document is refused rather than stored: an
+    /// active pointer to nothing would have every consumer of the background
+    /// carry a "and if it is missing" branch for a state no honest path
+    /// produces.
+    pub fn set_active_world(&mut self, world: Option<WorldId>) -> bool {
+        if let Some(id) = world {
+            if self.worlds.get(id).is_none() {
+                return false;
+            }
+        }
+        self.active_world = world;
+        self.touch();
+        true
     }
 
     // --- materials ----------------------------------------------------------

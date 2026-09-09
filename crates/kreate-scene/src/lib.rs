@@ -7,16 +7,18 @@ pub mod camera;
 pub mod document;
 pub mod edit_session;
 pub mod image;
+pub mod light;
 pub mod modifier;
 pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    Collection, CollectionId, Document, Linkage, Material, MaterialId, MeshId, Object, ObjectData,
-    ObjectId, ReparentError, Selection,
+    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MeshId, Object,
+    ObjectData, ObjectId, ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};
 pub use image::{ColorSpace, Image, PixelFormat, Source, Tile, TILE};
+pub use light::{AreaShape, Background, Intensity, Light, LightKind, World};
 /// A datablock's persistent identity and what kind of thing it names.
 ///
 /// Re-exported rather than re-declared: the type lives in `kreate-reflect`

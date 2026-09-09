@@ -203,6 +203,110 @@ impl Operator for AddCamera {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddLightParams {
+    /// What kind of light.
+    ///
+    /// Indices are part of the scripting and keymap surface, so entries are
+    /// only ever appended.
+    #[param(variants("point", "sun", "spot", "area"))]
+    pub kind: u32,
+    /// The light's tint, as the colour picker holds it: sRGB, bounded by one.
+    ///
+    /// Not an amount of light — that is `intensity`, in physical units. The
+    /// operator decodes it into the working space on the way in, which is the
+    /// one place a colour conversion belongs.
+    pub color: [f64; 3],
+    /// How much light, in the unit the chosen kind uses — candela for a point
+    /// or a spot, lux for a sun, nits for an area light.
+    ///
+    /// **Zero means the kind's own default**, because a light of zero intensity
+    /// is a light that does nothing and nobody adds one deliberately. The
+    /// alternative is a single number in the parameter's default, and there is
+    /// no single number: 1000 is a bright room in candela and a dull overcast
+    /// afternoon in lux.
+    #[param(min = 0.0, soft_max = 100_000.0)]
+    pub intensity: f64,
+    /// Stops on top of `intensity`.
+    #[param(soft_min = -10.0, soft_max = 10.0)]
+    pub exposure: f64,
+    /// Where to put it.
+    pub location: [f64; 3],
+}
+
+impl Default for AddLightParams {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            color: [1.0, 1.0, 1.0],
+            // The kind's own default. See the field.
+            intensity: 0.0,
+            exposure: 0.0,
+            location: [0.0, 0.0, 4.0],
+        }
+    }
+}
+
+/// Adds a light object and the datablock behind it.
+///
+/// Two things, as with a camera, and §2.2 is explicit about why: a hundred
+/// linked copies of a lamp share one bulb. The object is *where* the light is
+/// — a sun's direction and a spot's aim are its rotation — and the datablock is
+/// what kind of light it is and how bright.
+pub struct AddLight;
+
+impl Operator for AddLight {
+    type Params = AddLightParams;
+
+    fn id() -> &'static str {
+        "object.add_light"
+    }
+    fn label() -> &'static str {
+        "Add Light"
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        // A stale keymap or an old script can name a kind this build does not
+        // have. Clamping rather than refusing, for the same reason the property
+        // map clamps an out-of-range enum: the user asked for a light and the
+        // worst honest answer is the first kind, not nothing.
+        let kind = kreate_scene::LightKind::ALL
+            [(params.kind as usize).min(kreate_scene::LightKind::ALL.len() - 1)];
+
+        let name = capitalise(kind.id());
+        let mut light = kreate_scene::Light::of_kind(name.clone(), kind);
+        if params.intensity > 0.0 {
+            light.intensity = params.intensity;
+        }
+        light.exposure = params.exposure;
+        // The one conversion: a picker's swatch read as a proportion of light.
+        // `as_reflectance` says in its own name that it is not an amount of
+        // light, which is exactly the distinction a light's two fields make.
+        light.color = kreate_math::Srgb::new(
+            params.color[0] as f32,
+            params.color[1] as f32,
+            params.color[2] as f32,
+        )
+        .as_reflectance();
+
+        let d = doc.document_mut();
+        let datablock = d.add_light(light);
+        let mut object = kreate_scene::document::Object::new(
+            name,
+            kreate_scene::document::ObjectData::Light(datablock),
+        );
+        object.transform.translation = DVec3::from_array(params.location);
+        let id = d.add_object(object);
+        d.selection.clear();
+        d.selection.add(id);
+        Ok(OpResult::Finished)
+    }
+}
+
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -860,6 +964,7 @@ impl Operator for Join {
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
     registry.register::<AddCamera>();
+    registry.register::<AddLight>();
     registry.register::<Delete>();
     registry.register::<Duplicate>();
     registry.register::<Translate>();

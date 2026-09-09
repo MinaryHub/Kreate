@@ -56,7 +56,13 @@ pub const VERSION_MAJOR: u32 = 1;
 /// reader that does not know them puts them in its `extra` map and writes them
 /// back, so a round trip through an older build does not lose a scene's
 /// animation targets.
-pub const VERSION_MINOR: u32 = 1;
+///
+/// 2: lights and the world (`SceneFile::lights`, `SceneFile::worlds`,
+/// `ObjectRecord::light`). A version-1 reader loses an object's *link* to its
+/// light — the object comes back as an empty and the light records travel in
+/// its `extra` map — which is the honest limit of forwards compatibility for
+/// something that changes what an object *is*. Nothing is discarded.
+pub const VERSION_MINOR: u32 = 2;
 
 const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
@@ -155,6 +161,9 @@ pub struct ObjectRecord {
     /// Index into [`SceneFile::cameras`], for an object that is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<usize>,
+    /// Index into [`SceneFile::lights`], for an object that is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<usize>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -198,6 +207,102 @@ pub struct CameraRecord {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// A light datablock.
+///
+/// Intensity is in the unit the *kind* uses — candela for a point or a spot,
+/// lux for a sun, nits for an area light — which is what `KHR_lights_punctual`
+/// holds, so a glTF export is a copy rather than a conversion. Writing a unit
+/// of our own would put a rounding step in every round trip and leave nobody
+/// able to say which side was authoritative.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightRecord {
+    pub name: String,
+    /// The datablock's identity, which outlives this file.
+    #[serde(default)]
+    pub uid: u64,
+    /// `point`, `sun`, `spot` or `area`.
+    pub kind: String,
+    /// The tint, linear and in the working space.
+    ///
+    /// Linear because that is what the document holds and what glTF holds;
+    /// encoding it here would put a transfer function in the middle of a round
+    /// trip for no gain. Not an amount of light — that is `intensity`.
+    pub color: [f32; 3],
+    pub intensity: f64,
+    /// Stops on top of `intensity`. Separate because `UsdLux` has both.
+    pub exposure: f64,
+
+    /// Metres, for a point or a spot: what makes the shadow soft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    /// Radians, for a sun: how wide the source appears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular_diameter: Option<f64>,
+    /// Radians, for a spot: the full cone angle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cone_angle: Option<f64>,
+    /// The fraction of a spot's cone that fades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<f64>,
+    /// `rect`, `disc` or `ellipse`, for an area light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// Metres. A disc uses `width` as its diameter and ignores `height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// Radians, for an area light: how far off the normal it emits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<f64>,
+
+    pub cast_shadow: bool,
+    pub affect_diffuse: bool,
+    pub affect_specular: bool,
+    pub max_bounces: u8,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A world datablock: what light arrives from no object in particular.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldRecord {
+    pub name: String,
+    #[serde(default)]
+    pub uid: u64,
+    /// `flat` or `image`.
+    pub background: String,
+    /// The flat colour, linear — and for an image background, what to fall back
+    /// to.
+    ///
+    /// A world's background is one thing or the other, so an image background
+    /// has no flat colour of its own to write and the writer puts a neutral
+    /// grey here. That matters because an image that cannot be resolved on
+    /// load lands on this value, and black would read as a broken file rather
+    /// than a missing texture.
+    ///
+    /// If a world ever holds both a colour *and* an image — which is how a
+    /// shading graph would express it — this field becomes the real colour and
+    /// nothing about the format changes.
+    pub color: [f32; 3],
+    /// The background image's *identity*, not its index.
+    ///
+    /// An identity because an image is a datablock in its own right and this
+    /// file does not yet carry images — the archive's `images/` layout is still
+    /// to come. Storing the uid now means the pointer survives every save in
+    /// between, and starts resolving the day images are written, with no change
+    /// to this format. An index into a list that does not exist would have had
+    /// to be invented and re-invented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_uid: Option<u64>,
+    pub strength: f64,
+    /// Radians about the up axis.
+    pub rotation: f64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SceneFile {
     pub objects: Vec<ObjectRecord>,
@@ -219,8 +324,195 @@ pub struct SceneFile {
     /// that is `CameraRecord::uid`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cameras: Vec<CameraRecord>,
+    /// Light datablocks, in the order the document holds them. An object refers
+    /// to one by its index here, like a camera.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lights: Vec<LightRecord>,
+    /// World datablocks. More than one, because a file holding a day setup and
+    /// a night setup is the ordinary case and switching between them should not
+    /// mean deleting one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worlds: Vec<WorldRecord>,
+    /// Index into `worlds`: which one is lighting the scene.
+    ///
+    /// `None` is a scene lit by nothing but its own lights, which is a real
+    /// thing to want rather than a missing value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_world: Option<usize>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A light datablock as the file describes it.
+///
+/// The kind's parameters are flattened into optional fields rather than a
+/// nested enum, so that a version-1 reader carries them through its `extra` map
+/// and a person can read the file. Which fields are meaningful follows `kind`.
+fn light_record(light: &kreate_scene::Light) -> LightRecord {
+    use kreate_scene::{AreaShape, LightKind};
+
+    let mut record = LightRecord {
+        name: light.name.clone(),
+        uid: light.uid.raw(),
+        kind: light.kind.id().to_string(),
+        color: light.color.to_array(),
+        intensity: light.intensity,
+        exposure: light.exposure,
+        radius: None,
+        angular_diameter: None,
+        cone_angle: None,
+        blend: None,
+        shape: None,
+        width: None,
+        height: None,
+        spread: None,
+        cast_shadow: light.cast_shadow,
+        affect_diffuse: light.affect_diffuse,
+        affect_specular: light.affect_specular,
+        max_bounces: light.max_bounces,
+        extra: BTreeMap::new(),
+    };
+    match light.kind {
+        LightKind::Point { radius } => record.radius = Some(radius),
+        LightKind::Sun { angular_diameter } => record.angular_diameter = Some(angular_diameter),
+        LightKind::Spot {
+            radius,
+            cone_angle,
+            blend,
+        } => {
+            record.radius = Some(radius);
+            record.cone_angle = Some(cone_angle);
+            record.blend = Some(blend);
+        }
+        LightKind::Area { shape, spread } => {
+            record.spread = Some(spread);
+            let (name, width, height) = match shape {
+                AreaShape::Rect { width, height } => ("rect", width, height),
+                // A disc's diameter goes in `width`, so that a reader that only
+                // understands rectangles gets a panel of about the right size
+                // rather than one of side zero.
+                AreaShape::Disc { radius } => ("disc", radius * 2.0, radius * 2.0),
+                AreaShape::Ellipse { width, height } => ("ellipse", width, height),
+            };
+            record.shape = Some(name.to_string());
+            record.width = Some(width);
+            record.height = Some(height);
+        }
+    }
+    record
+}
+
+/// The light a record describes.
+///
+/// An unknown kind, or a kind missing the parameters it needs, falls back to
+/// that kind's default rather than failing the load: a scene from a later
+/// version is worth opening with one lamp the wrong size, and is not worth
+/// refusing. The colour and the intensity survive either way, which is what
+/// the eye notices first.
+fn light_from_record(record: &LightRecord) -> kreate_scene::Light {
+    use kreate_scene::{AreaShape, LightKind};
+
+    let kind = match record.kind.as_str() {
+        "sun" => LightKind::Sun {
+            angular_diameter: record
+                .angular_diameter
+                .unwrap_or(LightKind::SUN_ANGULAR_DIAMETER),
+        },
+        "spot" => LightKind::Spot {
+            radius: record.radius.unwrap_or(0.05),
+            cone_angle: record
+                .cone_angle
+                .unwrap_or(45.0 * std::f64::consts::PI / 180.0),
+            blend: record.blend.unwrap_or(0.15),
+        },
+        "area" => {
+            let width = record.width.unwrap_or(1.0);
+            let height = record.height.unwrap_or(width);
+            LightKind::Area {
+                shape: match record.shape.as_deref() {
+                    Some("disc") => AreaShape::Disc {
+                        radius: width * 0.5,
+                    },
+                    Some("ellipse") => AreaShape::Ellipse { width, height },
+                    _ => AreaShape::Rect { width, height },
+                },
+                spread: record.spread.unwrap_or(std::f64::consts::PI),
+            }
+        }
+        // Including anything this build has never heard of.
+        _ => LightKind::Point {
+            radius: record.radius.unwrap_or(0.05),
+        },
+    };
+
+    kreate_scene::Light {
+        name: record.name.clone(),
+        linkage: Linkage::Local,
+        uid: kreate_scene::Uid::NONE,
+        kind,
+        color: kreate_math::SceneRgb::new(record.color[0], record.color[1], record.color[2]),
+        intensity: record.intensity,
+        exposure: record.exposure,
+        cast_shadow: record.cast_shadow,
+        affect_diffuse: record.affect_diffuse,
+        affect_specular: record.affect_specular,
+        max_bounces: record.max_bounces,
+    }
+}
+
+fn world_record(world: &kreate_scene::World, document: &Document) -> WorldRecord {
+    use kreate_scene::Background;
+
+    let (background, color, image_uid) = match world.background {
+        Background::Flat(color) => ("flat", color, None),
+        // The colour a flat background would have is not stored for an image
+        // one, so a neutral grey stands in — the field exists so that turning
+        // an image off lands somewhere sensible rather than on black.
+        Background::Image(id) => (
+            "image",
+            kreate_math::SceneRgb::new(0.05, 0.05, 0.05),
+            document.image_uid(id).map(|uid| uid.raw()),
+        ),
+    };
+    WorldRecord {
+        name: world.name.clone(),
+        uid: world.uid.raw(),
+        background: background.to_string(),
+        color: color.to_array(),
+        image_uid,
+        strength: world.strength,
+        rotation: world.rotation,
+        extra: BTreeMap::new(),
+    }
+}
+
+/// The world a record describes.
+///
+/// An image background whose image is not in this document comes back as the
+/// flat colour beside it. That is the ordinary case today rather than an error
+/// case: the archive has no `images/` layout yet, so nothing an image
+/// background points at survives a save. The *identity* does, which is why it
+/// is stored — the day images are written this resolves with no change here.
+fn world_from_record(record: &WorldRecord, document: &Document) -> kreate_scene::World {
+    use kreate_scene::Background;
+
+    let color = kreate_math::SceneRgb::new(record.color[0], record.color[1], record.color[2]);
+    let background = match record.background.as_str() {
+        "image" => record
+            .image_uid
+            .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw)))
+            .map(Background::Image)
+            .unwrap_or(Background::Flat(color)),
+        _ => Background::Flat(color),
+    };
+    kreate_scene::World {
+        name: record.name.clone(),
+        linkage: Linkage::Local,
+        uid: kreate_scene::Uid::NONE,
+        background,
+        strength: record.strength,
+        rotation: record.rotation,
+    }
 }
 
 /// A document plus everything in the archive this build did not recognise.
@@ -326,6 +618,29 @@ pub fn write(
             })
             .collect();
 
+        let light_index: BTreeMap<kreate_scene::LightId, usize> = document
+            .lights()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        scene.lights = document
+            .lights()
+            .map(|(_, light)| light_record(light))
+            .collect();
+
+        let world_index: BTreeMap<kreate_scene::WorldId, usize> = document
+            .worlds()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        scene.worlds = document
+            .worlds()
+            .map(|(_, world)| world_record(world, document))
+            .collect();
+        scene.active_world = document
+            .active_world()
+            .and_then(|id| world_index.get(&id).copied());
+
         for (id, object) in document.objects() {
             let mesh = match object.data {
                 ObjectData::Mesh(m) => keys.get(&m).cloned(),
@@ -333,6 +648,10 @@ pub fn write(
             };
             let camera = match object.data {
                 ObjectData::Camera(c) => camera_index.get(&c).copied(),
+                _ => None,
+            };
+            let light = match object.data {
+                ObjectData::Light(l) => light_index.get(&l).copied(),
                 _ => None,
             };
             let t = &object.transform;
@@ -347,6 +666,7 @@ pub fn write(
                 parent_inverse: affine_to_array(&m),
                 mesh,
                 camera,
+                light,
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -490,6 +810,23 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         camera_ids.push(document.restore_camera(camera, kreate_scene::Uid::from_raw(record.uid)));
     }
 
+    let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());
+    for record in &scene.lights {
+        let light = light_from_record(record);
+        light_ids.push(document.restore_light(light, kreate_scene::Uid::from_raw(record.uid)));
+    }
+
+    let mut world_ids: Vec<kreate_scene::WorldId> = Vec::with_capacity(scene.worlds.len());
+    for record in &scene.worlds {
+        let world = world_from_record(record, &document);
+        world_ids.push(document.restore_world(world, kreate_scene::Uid::from_raw(record.uid)));
+    }
+    // An out-of-range index leaves the scene lit by its own lights rather than
+    // failing the load, which is the same judgement as an unknown projection.
+    if let Some(id) = scene.active_world.and_then(|i| world_ids.get(i)) {
+        document.set_active_world(Some(*id));
+    }
+
     let mut object_ids: Vec<ObjectId> = Vec::with_capacity(scene.objects.len());
     for record in &scene.objects {
         let data = match &record.mesh {
@@ -505,7 +842,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             }
             None => match record.camera.and_then(|i| camera_ids.get(i)) {
                 Some(id) => ObjectData::Camera(*id),
-                None => ObjectData::Empty,
+                None => match record.light.and_then(|i| light_ids.get(i)) {
+                    Some(id) => ObjectData::Light(*id),
+                    None => ObjectData::Empty,
+                },
             },
         };
         let mut object = Object::new(record.name.clone(), data);
