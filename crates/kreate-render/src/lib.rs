@@ -3,6 +3,7 @@
 //! This crate never mutates a document. It consumes an immutable snapshot,
 //! which is what lets the render path stay lock-free.
 
+pub mod brdf;
 pub mod camera;
 pub mod capability;
 pub mod cluster;
