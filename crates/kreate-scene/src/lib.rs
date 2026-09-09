@@ -13,5 +13,11 @@ pub use document::{
     ObjectId, ReparentError, Selection,
 };
 pub use edit_session::{EditSession, EditSessions};
+/// A datablock's persistent identity and what kind of thing it names.
+///
+/// Re-exported rather than re-declared: the type lives in `kreate-reflect`
+/// because a property path has to be holdable by the interface, which cannot
+/// see a document. Anything that has a document in hand gets it from here.
+pub use kreate_reflect::{DatablockKind, Uid};
 pub use modifier::{apply_stack, ModifierCache, ModifierInstance, ModifierKind};
 pub use undo::{DocMut, EditError, UndoPayload};

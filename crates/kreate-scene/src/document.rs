@@ -31,6 +31,7 @@ use std::sync::Arc;
 use kreate_math::{DAffine3, DTransform, DVec3};
 use kreate_mesh::arena::Arena;
 use kreate_mesh::{define_id, MeshData};
+use kreate_reflect::{DatablockKind, Uid};
 
 define_id! {
     /// An object in the scene graph.
@@ -95,6 +96,18 @@ pub struct Object {
     pub visible: bool,
     pub selectable: bool,
     pub linkage: Linkage,
+    /// This object's identity, for as long as the document exists and across
+    /// saves.
+    ///
+    /// Assigned by [`Document::add_object`] and never by a caller — which is
+    /// what makes a duplicate a new object rather than a second handle on the
+    /// same one. `Uid::NONE` until then.
+    ///
+    /// Not the same thing as an `ObjectId`: that is an arena slot with a
+    /// generation only in debug builds, so in a release build a reused slot is
+    /// indistinguishable from the object that used to be there. A curve keyed
+    /// on one would start driving whatever was created next.
+    pub uid: Uid,
     /// Applied in order to produce the geometry that is drawn.
     ///
     /// The document holds the cage the user edits; what appears on screen is the
@@ -114,6 +127,7 @@ impl Object {
             visible: true,
             selectable: true,
             linkage: Linkage::Local,
+            uid: Uid::NONE,
             modifiers: Vec::new(),
         }
     }
@@ -217,7 +231,7 @@ pub struct Document {
     objects: Arena<ObjectId, Object>,
     /// Meshes are `Arc`ed so a document clone is a refcount bump. The `MeshData`
     /// inside is itself copy-on-write per attribute array.
-    meshes: Arena<MeshId, Arc<MeshData>>,
+    meshes: Arena<MeshId, MeshEntry>,
     materials: Arena<MaterialId, Arc<Material>>,
     collections: Arena<CollectionId, Collection>,
     /// Objects with no parent, in user-visible order.
@@ -226,6 +240,35 @@ pub struct Document {
     /// Bumped on every mutation. A cheap "has anything changed" check for
     /// callers that cannot use `Arc::ptr_eq` on a specific array.
     version: u64,
+    /// The last identity handed out for each kind of datablock.
+    ///
+    /// Travels with the document, which is what makes undo and redo
+    /// identity-preserving: undoing a creation restores the counter, so redoing
+    /// it hands out the *same* id and a curve pointing at the object is still
+    /// pointing at it. A counter living outside the snapshot would give the
+    /// redone object a new identity and orphan its animation.
+    uids: UidCounters,
+}
+
+/// A mesh datablock: its geometry and its identity.
+///
+/// The identity sits beside the data rather than in a table alongside the
+/// arena, because a table has to be kept in step and this cannot drift.
+#[derive(Clone, Debug)]
+struct MeshEntry {
+    uid: Uid,
+    data: Arc<MeshData>,
+}
+
+/// The last identity issued for each kind.
+///
+/// One counter per kind, so the numbers stay small and a person reading a scene
+/// file can match a curve to its target by eye. [`DatablockKind`] is what keeps
+/// object 1 and mesh 1 apart.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct UidCounters {
+    object: Uid,
+    mesh: Uid,
 }
 
 impl Document {
@@ -266,6 +309,35 @@ impl Document {
     // --- objects ------------------------------------------------------------
 
     pub fn add_object(&mut self, object: Object) -> ObjectId {
+        let uid = self.issue(DatablockKind::Object);
+        self.insert_object(object, uid)
+    }
+
+    /// Adds an object with an identity it already had.
+    ///
+    /// For a loader restoring a scene, and for nothing else: ordinary creation
+    /// goes through [`Document::add_object`], which is what stops a duplicate
+    /// silently inheriting the original's identity. The counter is advanced
+    /// past `uid` so that the next new object cannot collide with anything the
+    /// file already used — including ids the file skipped, which is the case a
+    /// naive "count what we loaded" would get wrong.
+    ///
+    /// `Uid::NONE` issues a fresh identity instead of storing it. That is what
+    /// a hand-edited or truncated file can present, and storing it would put a
+    /// datablock with no identity into the document — which every lookup would
+    /// then have to guard against, forever, for one bad file. Refusing it here
+    /// means **no datablock in a document holds `Uid::NONE`**, and that is an
+    /// invariant rather than a hope.
+    pub fn restore_object(&mut self, object: Object, uid: Uid) -> ObjectId {
+        if uid.is_none() {
+            return self.add_object(object);
+        }
+        self.uids.object = self.uids.object.max(uid);
+        self.insert_object(object, uid)
+    }
+
+    fn insert_object(&mut self, mut object: Object, uid: Uid) -> ObjectId {
+        object.uid = uid;
         let has_parent = object.parent.is_some();
         let id = self.objects.insert(object);
         if !has_parent {
@@ -273,6 +345,57 @@ impl Document {
         }
         self.touch();
         id
+    }
+
+    /// The next identity for a kind of datablock.
+    fn issue(&mut self, kind: DatablockKind) -> Uid {
+        let counter = match kind {
+            DatablockKind::Object => &mut self.uids.object,
+            DatablockKind::Mesh => &mut self.uids.mesh,
+            // Nothing else is a datablock in this document yet. Reaching here
+            // means a kind was added to the enum and not to the counters, and
+            // handing back the unassigned id makes that a resolvable path to
+            // nothing rather than a silent collision with object 1.
+            _ => return Uid::NONE,
+        };
+        *counter = counter.next();
+        *counter
+    }
+
+    /// This object's identity, for a property path.
+    pub fn object_uid(&self, id: ObjectId) -> Option<Uid> {
+        self.objects.get(id).map(|o| o.uid)
+    }
+
+    /// The object with this identity, if it is still here.
+    ///
+    /// A linear scan. The alternative is a map to keep in step, and the callers
+    /// are a curve resolving once per frame and a file loader resolving once
+    /// per link — at the scale of a scene's object count that is nothing, and
+    /// it becomes a map the moment a measurement says so.
+    /// `Uid::NONE` finds nothing, and needs no special case to do so: no
+    /// datablock in a document holds it — see [`Document::restore_object`] —
+    /// so the scan simply matches nothing. A guard here would be a branch
+    /// nothing can take, which is worse than none: a reader would take it for
+    /// evidence that the invariant is not relied on.
+    pub fn object_by_uid(&self, uid: Uid) -> Option<ObjectId> {
+        self.objects
+            .iter()
+            .find(|(_, o)| o.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    /// This mesh datablock's identity.
+    pub fn mesh_uid(&self, id: MeshId) -> Option<Uid> {
+        self.meshes.get(id).map(|m| m.uid)
+    }
+
+    /// The mesh datablock with this identity, if it is still here.
+    pub fn mesh_by_uid(&self, uid: Uid) -> Option<MeshId> {
+        self.meshes
+            .iter()
+            .find(|(_, m)| m.uid == uid)
+            .map(|(id, _)| id)
     }
 
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
@@ -488,12 +611,30 @@ impl Document {
     // --- datablocks ---------------------------------------------------------
 
     pub fn add_mesh(&mut self, mesh: MeshData) -> MeshId {
+        let uid = self.issue(DatablockKind::Mesh);
         self.touch();
-        self.meshes.insert(Arc::new(mesh))
+        self.meshes.insert(MeshEntry {
+            uid,
+            data: Arc::new(mesh),
+        })
+    }
+
+    /// Adds a mesh with an identity it already had. See
+    /// [`Document::restore_object`], including what `Uid::NONE` does.
+    pub fn restore_mesh(&mut self, mesh: MeshData, uid: Uid) -> MeshId {
+        if uid.is_none() {
+            return self.add_mesh(mesh);
+        }
+        self.uids.mesh = self.uids.mesh.max(uid);
+        self.touch();
+        self.meshes.insert(MeshEntry {
+            uid,
+            data: Arc::new(mesh),
+        })
     }
 
     pub fn mesh(&self, id: MeshId) -> Option<&MeshData> {
-        self.meshes.get(id).map(|m| m.as_ref())
+        self.meshes.get(id).map(|m| m.data.as_ref())
     }
 
     /// Copy-on-write access to a mesh.
@@ -503,7 +644,7 @@ impl Document {
     /// individually `Arc`ed.
     pub fn mesh_mut(&mut self, id: MeshId) -> Option<&mut MeshData> {
         self.version += 1;
-        self.meshes.get_mut(id).map(Arc::make_mut)
+        self.meshes.get_mut(id).map(|m| Arc::make_mut(&mut m.data))
     }
 
     /// The mesh datablock as a shared handle.
@@ -514,7 +655,7 @@ impl Document {
     /// copies when the handle is shared, so a cache that does *not* hold one
     /// would watch the document mutate in place behind an unchanged pointer.
     pub fn mesh_arc(&self, id: MeshId) -> Option<&Arc<MeshData>> {
-        self.meshes.get(id)
+        self.meshes.get(id).map(|m| &m.data)
     }
 
     /// Every mesh datablock, in arena slot order.
@@ -522,7 +663,7 @@ impl Document {
     /// Deterministic, which is what lets the debug-build validation hook name
     /// the same datablock on every run.
     pub fn meshes(&self) -> impl Iterator<Item = (MeshId, &MeshData)> + '_ {
-        self.meshes.iter().map(|(id, m)| (id, m.as_ref()))
+        self.meshes.iter().map(|(id, m)| (id, m.data.as_ref()))
     }
 
     pub fn mesh_count(&self) -> usize {
@@ -996,5 +1137,197 @@ mod tests {
         assert!(d.roots().is_empty());
         assert!(d.hierarchy().is_empty());
         assert!(d.world_bounds().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::*;
+    use kreate_mesh::primitives;
+
+    fn doc_with(n: usize) -> (Document, Vec<ObjectId>) {
+        let mut doc = Document::new();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let mesh = doc.add_mesh(primitives::cube(1.0 + i as f32));
+            ids.push(doc.add_object(Object::new(format!("Cube{i}"), ObjectData::Mesh(mesh))));
+        }
+        (doc, ids)
+    }
+
+    #[test]
+    fn every_datablock_gets_an_identity_and_no_two_share_one() {
+        let (doc, ids) = doc_with(4);
+        let mut seen: Vec<Uid> = Vec::new();
+        for id in &ids {
+            let uid = doc.object_uid(*id).expect("an identity");
+            assert!(!uid.is_none());
+            assert!(!seen.contains(&uid), "{uid} was handed out twice");
+            seen.push(uid);
+        }
+        assert_eq!(doc.object_by_uid(seen[2]), Some(ids[2]));
+    }
+
+    #[test]
+    fn renaming_an_object_does_not_change_its_identity() {
+        // The whole reason identities exist. Blender's name-based paths break
+        // here, and renaming is the first thing anyone does after adding an
+        // object.
+        let (mut doc, ids) = doc_with(1);
+        let before = doc.object_uid(ids[0]).expect("an identity");
+        doc.object_mut(ids[0]).expect("object").name = "Something else".to_string();
+        assert_eq!(doc.object_uid(ids[0]), Some(before));
+        assert_eq!(doc.object_by_uid(before), Some(ids[0]));
+    }
+
+    #[test]
+    fn a_duplicate_is_a_new_object_and_not_a_second_handle() {
+        // `duplicate_linked` clones the whole struct, identity field included,
+        // so the assignment has to happen on the way *in* to the document
+        // rather than being trusted from the caller. Two objects sharing an
+        // identity would have a curve drive both.
+        let (mut doc, ids) = doc_with(1);
+        let original = doc.object_uid(ids[0]).expect("an identity");
+
+        let linked = doc.duplicate_linked(ids[0]).expect("duplicates");
+        assert_ne!(doc.object_uid(linked), Some(original));
+        assert_eq!(doc.object_by_uid(original), Some(ids[0]));
+
+        // And a full duplicate's *mesh* is a new datablock with a new identity,
+        // which is the difference between the two duplicate operations.
+        let full = doc.duplicate_full(ids[0]).expect("duplicates");
+        let original_mesh = doc
+            .object(ids[0])
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh_uid(m))
+            .expect("an identity");
+        let copy_mesh = doc
+            .object(full)
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh_uid(m))
+            .expect("an identity");
+        assert_ne!(original_mesh, copy_mesh);
+
+        // Where a *linked* duplicate shares the datablock and therefore its
+        // identity, which is what makes them linked.
+        let linked_mesh = doc
+            .object(linked)
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh_uid(m))
+            .expect("an identity");
+        assert_eq!(linked_mesh, original_mesh);
+    }
+
+    #[test]
+    fn an_identity_is_not_reused_when_a_slot_is() {
+        // The failure an `ObjectId` cannot avoid. Arena slots are reused, and
+        // the generation that would tell them apart is only compiled in for a
+        // debug build — so a curve keyed on a slot starts driving whatever is
+        // created next. In a release build, silently.
+        let (mut doc, ids) = doc_with(1);
+        let gone = doc.object_uid(ids[0]).expect("an identity");
+        doc.remove_object(ids[0]);
+        assert_eq!(doc.object_by_uid(gone), None);
+
+        let replacement = doc.add_object(Object::new("Next", ObjectData::Empty));
+        assert_ne!(
+            doc.object_uid(replacement),
+            Some(gone),
+            "the identity of a deleted object was handed out again"
+        );
+        assert_eq!(doc.object_by_uid(gone), None);
+    }
+
+    #[test]
+    fn the_counters_travel_with_the_document_so_undo_preserves_identity() {
+        // Undo restores a whole `Document`, counters included, which is what
+        // makes undo and redo identity-preserving: the redone object is the
+        // same object, and a curve pointing at it still points at it.
+        //
+        // A counter living outside the snapshot would give the redone object a
+        // fresh identity and orphan its animation — and the user would see an
+        // undo followed by a redo silently lose their keys.
+        let (mut doc, _) = doc_with(1);
+        let snapshot = doc.clone();
+
+        let added = doc.add_object(Object::new("Added", ObjectData::Empty));
+        let uid = doc.object_uid(added).expect("an identity");
+
+        // Undo, then redo the same creation.
+        doc = snapshot;
+        let redone = doc.add_object(Object::new("Added", ObjectData::Empty));
+        assert_eq!(
+            doc.object_uid(redone),
+            Some(uid),
+            "redoing a creation should reach the same object"
+        );
+    }
+
+    #[test]
+    fn objects_and_meshes_number_separately() {
+        // One counter per kind keeps the numbers small enough for a person to
+        // match a curve to its target by eye in a scene file. `DatablockKind`
+        // is what stops object 1 and mesh 1 being confused, and it is carried
+        // in the path rather than in the id.
+        let (doc, ids) = doc_with(1);
+        let object = doc.object_uid(ids[0]).expect("an identity");
+        let mesh = doc
+            .object(ids[0])
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh_uid(m))
+            .expect("an identity");
+        assert_eq!(object, Uid::FIRST);
+        assert_eq!(mesh, Uid::FIRST);
+    }
+
+    #[test]
+    fn a_restored_identity_pushes_the_counter_past_it() {
+        // What a loader needs. A file holding ids 1, 2 and 40 must not have the
+        // next new object collide with 40 — including the case a naive "count
+        // what we loaded" gets wrong, where the file skipped numbers because
+        // objects were deleted before it was saved.
+        let mut doc = Document::new();
+        doc.restore_object(Object::new("A", ObjectData::Empty), Uid::from_raw(1));
+        doc.restore_object(Object::new("B", ObjectData::Empty), Uid::from_raw(40));
+        let next = doc.add_object(Object::new("C", ObjectData::Empty));
+        assert_eq!(doc.object_uid(next), Some(Uid::from_raw(41)));
+
+        // And restoring out of order does not walk the counter backwards.
+        let mut doc = Document::new();
+        doc.restore_object(Object::new("A", ObjectData::Empty), Uid::from_raw(40));
+        doc.restore_object(Object::new("B", ObjectData::Empty), Uid::from_raw(1));
+        let next = doc.add_object(Object::new("C", ObjectData::Empty));
+        assert_eq!(doc.object_uid(next), Some(Uid::from_raw(41)));
+    }
+
+    #[test]
+    fn nothing_in_a_document_holds_the_unassigned_identity() {
+        // The invariant `object_by_uid` relies on instead of a guard. An object
+        // holds `Uid::NONE` between `Object::new` and being added, and a
+        // hand-edited file can ask for it back — so the restore path issues one
+        // rather than storing nothing, and every lookup is spared a branch it
+        // would otherwise carry forever for the sake of one bad file.
+        let (mut doc, _) = doc_with(2);
+        assert!(Object::new("Loose", ObjectData::Empty).uid.is_none());
+
+        let restored =
+            doc.restore_object(Object::new("FromABadFile", ObjectData::Empty), Uid::NONE);
+        assert!(
+            doc.object_uid(restored).is_some_and(|u| !u.is_none()),
+            "restoring nothing stored nothing"
+        );
+        let mesh = doc.restore_mesh(primitives::cube(1.0), Uid::NONE);
+        assert!(doc.mesh_uid(mesh).is_some_and(|u| !u.is_none()));
+
+        for (_, object) in doc.objects() {
+            assert!(!object.uid.is_none(), "{} has no identity", object.name);
+        }
+        for (id, _) in doc.meshes() {
+            assert!(doc.mesh_uid(id).is_some_and(|u| !u.is_none()));
+        }
+
+        // And so the unassigned id finds nothing, without being asked about.
+        assert_eq!(doc.object_by_uid(Uid::NONE), None);
+        assert_eq!(doc.mesh_by_uid(Uid::NONE), None);
     }
 }

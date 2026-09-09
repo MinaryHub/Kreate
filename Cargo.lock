@@ -1679,6 +1679,7 @@ dependencies = [
  "glam",
  "kreate-math",
  "kreate-mesh",
+ "kreate-reflect",
  "thiserror 2.0.20",
 ]
 

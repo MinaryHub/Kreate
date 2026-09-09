@@ -9,5 +9,6 @@ repository.workspace = true
 [dependencies]
 kreate-math.workspace = true
 kreate-mesh.workspace = true
+kreate-reflect.workspace = true
 glam.workspace = true
 thiserror.workspace = true

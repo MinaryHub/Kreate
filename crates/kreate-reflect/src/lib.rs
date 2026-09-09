@@ -23,6 +23,19 @@
 //! ordinary struct and gets all of the above. Retrofitting reflection onto two
 //! hundred hand-written operators is the kind of task that kills a project's
 //! second year.
+//!
+//! # Property paths
+//!
+//! The other half of reflection, and a different question: not "what parameters
+//! does this operator take" but "which property of which datablock does this
+//! curve drive". [`PropertyPath`] is that, and it lives here for the same
+//! reason the schema does — the interface has to be able to hold one without
+//! being able to reach the document. See [`path`] for why the target is an id
+//! and the property is a name.
+
+mod path;
+
+pub use path::{AnimatableDesc, DatablockKind, PathError, PropertyPath, Uid};
 
 use std::fmt::Write as _;
 
