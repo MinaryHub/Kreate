@@ -389,7 +389,7 @@ mod tests {
         }
         let mut cache = kreate_scene::modifier::ModifierCache::new();
         let held = cache
-            .evaluate_scene(&doc)
+            .evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still())
             .iter()
             .map(|(_, m)| m.clone())
             .collect();
@@ -402,7 +402,8 @@ mod tests {
         kreate_scene::document::ObjectId,
         std::sync::Arc<kreate_mesh::MeshData>,
     )> {
-        kreate_scene::modifier::ModifierCache::new().evaluate_scene(doc)
+        kreate_scene::modifier::ModifierCache::new()
+            .evaluate_scene(doc, &kreate_scene::modifier::EvalCtx::still())
     }
 
     #[test]

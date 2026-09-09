@@ -17,6 +17,27 @@
 //! therefore lives here, is owned by the application, and takes the document as
 //! an argument.
 //!
+//! # An evaluated scene is a function of the document *and the time*
+//!
+//! §2.4's decision, made here while there is nothing animated to break. The
+//! evaluated mesh for an object is not a function of the document alone: as
+//! soon as one modifier reads the clock — a wave, a build, anything driven — it
+//! is a function of `(document, time)`, and the immutable snapshot the renderer
+//! draws is that pair's result.
+//!
+//! Adding that later is not a field. It is every evaluation path, every cache,
+//! and every operator context that had assumed the signature — which is why
+//! §5's fourth risk is the only one it calls fatal, and why [`EvalCtx`] exists
+//! before anything reads it.
+//!
+//! **The memory trap, decided with it.** Caching a result per frame is a copy
+//! of the mesh per frame: scrubbing a hundred frames of a subdivided model is a
+//! hundred subdivided models. So the cache holds *one* time. A stack that does
+//! not read the clock keeps its entry across a time change — which is every
+//! stack today, so scrubbing a scene with no animation in it costs nothing —
+//! and anything wanting several frames at once asks for them explicitly, which
+//! is what a bake is.
+//!
 //! # Keyed on the input handle and the stack, not on the object
 //!
 //! An entry is looked up by the identity of its input `Arc` plus the stack that
@@ -32,12 +53,46 @@
 
 use std::sync::Arc;
 
+use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
     array, mirror, subdivide, ArrayParams, MirrorParams, SubdivideParams,
 };
 use kreate_mesh::MeshData;
 
 use crate::document::{Document, ObjectId};
+
+/// Everything an evaluation depends on besides its input geometry.
+///
+/// One field today, and the whole reason the struct exists rather than a bare
+/// parameter: the next thing to go in here — a dependency graph's view of the
+/// scene, a random seed, a resolution the viewport wants and the renderer does
+/// not — goes in without touching a caller. A `time: f64` argument threaded
+/// through by hand would need every one of them changed again.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EvalCtx {
+    /// When the scene is.
+    ///
+    /// See [`SceneTime`] for why this is not an `f64`: a bare number is either a
+    /// frame or a quantity of seconds, and a modifier reading it as one while a
+    /// curve wrote the other is off by the frame rate.
+    pub time: SceneTime,
+}
+
+impl EvalCtx {
+    /// The context for a still scene at the first frame.
+    ///
+    /// What a script, a test, an importer or an exporter has. Named rather than
+    /// spelled `Default::default()` at fifty call sites, so that the day
+    /// something else joins `time` it is obvious which of those fifty meant
+    /// "the beginning" and which meant "I had nothing to pass".
+    pub fn still() -> Self {
+        Self::default()
+    }
+
+    pub fn at(time: SceneTime) -> Self {
+        Self { time }
+    }
+}
 
 /// One modifier and its parameters.
 ///
@@ -49,6 +104,21 @@ pub enum ModifierKind {
     Mirror(MirrorParams),
     Subdivide(SubdivideParams),
     Array(ArrayParams),
+    /// A modifier that moves the mesh according to the clock.
+    ///
+    /// Exists so that the cache's time-keyed path can be driven, and only in a
+    /// test build. Nothing in the shipped set reads the clock yet, which leaves
+    /// the two lines §2.4's memory decision lives in — record the time, and
+    /// replace the previous instant's entry rather than joining it —
+    /// unreachable. A test that could only inspect the *shape* of the cache key
+    /// would report success while the thing that stops a mesh accumulating per
+    /// frame went unexercised.
+    ///
+    /// It does what the first real one will: translates by an amount that
+    /// depends on the time, so "did this re-evaluate" is answerable by looking
+    /// at where the vertices are.
+    #[cfg(test)]
+    Drift(f32),
 }
 
 impl ModifierKind {
@@ -58,6 +128,8 @@ impl ModifierKind {
             ModifierKind::Mirror(_) => "mirror",
             ModifierKind::Subdivide(_) => "subdivide",
             ModifierKind::Array(_) => "array",
+            #[cfg(test)]
+            ModifierKind::Drift(_) => "drift",
         }
     }
 
@@ -70,14 +142,48 @@ impl ModifierKind {
             ModifierKind::Mirror(_) => "modifier-mirror",
             ModifierKind::Subdivide(_) => "modifier-subdivide",
             ModifierKind::Array(_) => "modifier-array",
+            #[cfg(test)]
+            ModifierKind::Drift(_) => "modifier-drift",
         }
     }
 
-    fn apply(&self, input: &MeshData) -> MeshData {
+    /// Whether this modifier's result changes when the clock does.
+    ///
+    /// `false` for all three of them, and that is not a placeholder: a mirror,
+    /// a subdivision and an array are functions of their input and their
+    /// parameters and nothing else. Asking the question is what lets the cache
+    /// keep their results across a time change, so scrubbing a scene with no
+    /// animation in it re-evaluates nothing.
+    ///
+    /// The day a modifier reads the clock, this returns `true` for it and the
+    /// cache does the right thing without being told again.
+    pub fn depends_on_time(&self) -> bool {
+        match self {
+            ModifierKind::Mirror(_) | ModifierKind::Subdivide(_) | ModifierKind::Array(_) => false,
+            #[cfg(test)]
+            ModifierKind::Drift(_) => true,
+        }
+    }
+
+    fn apply(&self, input: &MeshData, ctx: &EvalCtx) -> MeshData {
+        // Taken and not read, by every modifier that ships so far. The
+        // parameter is the point: it is the one place a time-dependent modifier
+        // needs it, and threading it through afterwards is the change §5 calls
+        // fatal.
+        let _ = ctx;
         match self {
             ModifierKind::Mirror(p) => mirror(input, p),
             ModifierKind::Subdivide(p) => subdivide(input, p),
             ModifierKind::Array(p) => array(input, p),
+            #[cfg(test)]
+            ModifierKind::Drift(per_second) => {
+                let mut moved = input.clone();
+                let offset = *per_second * ctx.time.seconds() as f32;
+                for p in moved.positions_mut() {
+                    p.x += offset;
+                }
+                moved
+            }
         }
     }
 }
@@ -106,13 +212,25 @@ impl ModifierInstance {
 /// Linear and in order, which is not a simplification to be apologised for:
 /// mirror-then-subdivide and subdivide-then-mirror are different results, and a
 /// stack whose order did not matter would be hiding that from the user.
-pub fn apply_stack(input: &MeshData, stack: &[ModifierInstance]) -> MeshData {
+pub fn apply_stack(input: &MeshData, stack: &[ModifierInstance], ctx: &EvalCtx) -> MeshData {
     let mut current: Option<MeshData> = None;
     for modifier in stack.iter().filter(|m| m.enabled) {
-        let next = modifier.kind.apply(current.as_ref().unwrap_or(input));
+        let next = modifier.kind.apply(current.as_ref().unwrap_or(input), ctx);
         current = Some(next);
     }
     current.unwrap_or_else(|| input.clone())
+}
+
+/// Whether any enabled modifier in a stack reads the clock.
+///
+/// What lets the cache keep a stack's result across a time change. False for
+/// every stack that can be built today, which is why scrubbing a scene with no
+/// animation in it re-evaluates nothing.
+fn depends_on_time(stack: &[ModifierInstance]) -> bool {
+    stack
+        .iter()
+        .filter(|m| m.enabled)
+        .any(|m| m.kind.depends_on_time())
 }
 
 /// Whether a stack would change its input at all.
@@ -129,6 +247,15 @@ struct Entry {
     input: Arc<MeshData>,
     stack: Vec<ModifierInstance>,
     output: Arc<MeshData>,
+    /// The time this entry was evaluated at, when its stack reads the clock.
+    ///
+    /// `None` for a stack that does not — which is every stack today — and that
+    /// is the whole point of storing it this way rather than storing the time
+    /// unconditionally. An entry with no time is valid at every time, so
+    /// scrubbing a scene with no animation in it re-evaluates nothing; an entry
+    /// *with* one is valid only at that instant, so scrubbing an animated scene
+    /// does not accumulate a mesh per frame.
+    at: Option<SceneTime>,
     /// The sweep generation this entry was last asked for.
     used: u64,
 }
@@ -156,17 +283,31 @@ impl ModifierCache {
     ///
     /// `None` when the object has no mesh, or references one that is not in the
     /// document.
-    pub fn evaluated(&mut self, doc: &Document, id: ObjectId) -> Option<Arc<MeshData>> {
+    pub fn evaluated(
+        &mut self,
+        doc: &Document,
+        id: ObjectId,
+        ctx: &EvalCtx,
+    ) -> Option<Arc<MeshData>> {
         let object = doc.object(id)?;
         let input = doc.mesh_arc(object.mesh()?)?;
-        Some(self.evaluate(input, &object.modifiers))
+        Some(self.evaluate(input, &object.modifiers, ctx))
     }
 
-    /// The evaluated result of applying `stack` to `input`.
-    pub fn evaluate(&mut self, input: &Arc<MeshData>, stack: &[ModifierInstance]) -> Arc<MeshData> {
+    /// The evaluated result of applying `stack` to `input` at `ctx`'s time.
+    pub fn evaluate(
+        &mut self,
+        input: &Arc<MeshData>,
+        stack: &[ModifierInstance],
+        ctx: &EvalCtx,
+    ) -> Arc<MeshData> {
         if is_identity(stack) {
             return input.clone();
         }
+        // Only recorded for a stack that reads the clock. An entry with no time
+        // is valid at every time, which is what stops a still scene
+        // re-evaluating when the frame changes; see [`Entry::at`].
+        let at = depends_on_time(stack).then_some(ctx.time);
         // The whole invalidation mechanism, in one comparison. It is exact and
         // free, and it works only because the entry *holds* the input handle:
         // `Arc::make_mut` copies on write only while a handle is shared, so an
@@ -175,19 +316,31 @@ impl ModifierCache {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|e| Arc::ptr_eq(&e.input, input) && e.stack == stack)
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at)
         {
             entry.used = self.generation;
             self.hits += 1;
             return entry.output.clone();
         }
 
-        let output = Arc::new(apply_stack(input, stack));
+        let output = Arc::new(apply_stack(input, stack, ctx));
         self.misses += 1;
+        // A time-dependent entry replaces the one for the previous instant
+        // rather than joining it. This is §2.4's memory decision: a result per
+        // frame is a copy of the mesh per frame, so scrubbing a hundred frames
+        // of a subdivided model would be a hundred subdivided models. Anything
+        // that genuinely wants several frames at once — motion blur wants two,
+        // a geometry cache wants all of them — asks explicitly, and that is what
+        // a bake is.
+        if at.is_some() {
+            self.entries
+                .retain(|e| !(Arc::ptr_eq(&e.input, input) && e.stack == stack));
+        }
         self.entries.push(Entry {
             input: input.clone(),
             stack: stack.to_vec(),
             output: output.clone(),
+            at,
             used: self.generation,
         });
         output
@@ -197,8 +350,12 @@ impl ModifierCache {
     ///
     /// The renderer's and the picker's view of the scene: neither of them sees a
     /// `MeshId` any more, which is the separation this module exists to create.
-    pub fn evaluate_scene(&mut self, doc: &Document) -> Vec<(ObjectId, Arc<MeshData>)> {
-        self.evaluate_scene_with_cage(doc, None)
+    pub fn evaluate_scene(
+        &mut self,
+        doc: &Document,
+        ctx: &EvalCtx,
+    ) -> Vec<(ObjectId, Arc<MeshData>)> {
+        self.evaluate_scene_with_cage(doc, None, ctx)
     }
 
     /// The same, with one object left unevaluated.
@@ -217,6 +374,7 @@ impl ModifierCache {
         &mut self,
         doc: &Document,
         cage: Option<ObjectId>,
+        ctx: &EvalCtx,
     ) -> Vec<(ObjectId, Arc<MeshData>)> {
         let ids: Vec<ObjectId> = doc
             .objects()
@@ -229,7 +387,7 @@ impl ModifierCache {
                     let mesh = doc.object(id)?.mesh()?;
                     return doc.mesh_arc(mesh).map(|m| (id, m.clone()));
                 }
-                self.evaluated(doc, id).map(|m| (id, m))
+                self.evaluated(doc, id, ctx).map(|m| (id, m))
             })
             .collect()
     }
@@ -289,7 +447,7 @@ mod tests {
         // existed, or every linked duplicate becomes its own GPU upload.
         let (doc, id) = doc_with_cube();
         let mut cache = ModifierCache::new();
-        let evaluated = cache.evaluated(&doc, id).unwrap();
+        let evaluated = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         let datablock = doc
             .mesh_arc(doc.object(id).unwrap().mesh().unwrap())
             .unwrap();
@@ -313,7 +471,7 @@ mod tests {
             )));
 
         let mut cache = ModifierCache::new();
-        let evaluated = cache.evaluated(&doc, id).unwrap();
+        let evaluated = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert_eq!(evaluated.num_faces(), 24);
         let mesh_id = doc.object(id).unwrap().mesh().unwrap();
         assert_eq!(doc.mesh(mesh_id).unwrap().num_faces(), 6, "the cage moved");
@@ -327,7 +485,7 @@ mod tests {
         doc.object_mut(id).unwrap().modifiers.push(instance);
 
         let mut cache = ModifierCache::new();
-        let evaluated = cache.evaluated(&doc, id).unwrap();
+        let evaluated = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert_eq!(evaluated.num_faces(), 6);
         assert_eq!(
             doc.object(id).unwrap().modifiers[0].kind,
@@ -349,8 +507,8 @@ mod tests {
         let cube = primitives::cube(2.0);
         let array = ModifierInstance::new(ModifierKind::Array(ArrayParams::default()));
         let mirror = ModifierInstance::new(ModifierKind::Mirror(MirrorParams::default()));
-        let a = apply_stack(&cube, &[mirror, array]);
-        let b = apply_stack(&cube, &[array, mirror]);
+        let a = apply_stack(&cube, &[mirror, array], &EvalCtx::still());
+        let b = apply_stack(&cube, &[array, mirror], &EvalCtx::still());
 
         assert_eq!(a.num_faces(), b.num_faces());
         assert_ne!(
@@ -368,8 +526,8 @@ mod tests {
         doc.object_mut(id).unwrap().modifiers.push(mirror_x());
 
         let mut cache = ModifierCache::new();
-        let first = cache.evaluated(&doc, id).unwrap();
-        let second = cache.evaluated(&doc, id).unwrap();
+        let first = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
+        let second = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.stats(), (1, 1));
     }
@@ -379,12 +537,12 @@ mod tests {
         let (mut doc, id) = doc_with_cube();
         doc.object_mut(id).unwrap().modifiers.push(mirror_x());
         let mut cache = ModifierCache::new();
-        let before = cache.evaluated(&doc, id).unwrap();
+        let before = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
 
         let mesh_id = doc.object(id).unwrap().mesh().unwrap();
         doc.mesh_mut(mesh_id).unwrap().positions_mut()[0].y += 1.0;
 
-        let after = cache.evaluated(&doc, id).unwrap();
+        let after = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert!(!Arc::ptr_eq(&before, &after), "stale geometry survived");
         assert_eq!(cache.stats().1, 2, "the second call re-evaluated");
     }
@@ -400,13 +558,13 @@ mod tests {
                 ..Default::default()
             })));
         let mut cache = ModifierCache::new();
-        let before = cache.evaluated(&doc, id).unwrap();
+        let before = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
 
         doc.object_mut(id).unwrap().modifiers[0].kind = ModifierKind::Array(ArrayParams {
             count: 3,
             ..Default::default()
         });
-        let after = cache.evaluated(&doc, id).unwrap();
+        let after = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert_eq!(before.num_verts(), 16);
         assert_eq!(after.num_verts(), 24);
     }
@@ -421,8 +579,8 @@ mod tests {
         let second = doc.duplicate_linked(first).unwrap();
 
         let mut cache = ModifierCache::new();
-        let a = cache.evaluated(&doc, first).unwrap();
-        let b = cache.evaluated(&doc, second).unwrap();
+        let a = cache.evaluated(&doc, first, &EvalCtx::still()).unwrap();
+        let b = cache.evaluated(&doc, second, &EvalCtx::still()).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(cache.len(), 1, "one entry for both instances");
     }
@@ -439,8 +597,8 @@ mod tests {
         });
 
         let mut cache = ModifierCache::new();
-        let a = cache.evaluated(&doc, first).unwrap();
-        let b = cache.evaluated(&doc, second).unwrap();
+        let a = cache.evaluated(&doc, first, &EvalCtx::still()).unwrap();
+        let b = cache.evaluated(&doc, second, &EvalCtx::still()).unwrap();
         assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(cache.len(), 2);
     }
@@ -458,12 +616,12 @@ mod tests {
                     count,
                     ..Default::default()
                 }))];
-            cache.evaluated(&doc, id).unwrap();
+            cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         }
         assert_eq!(cache.len(), 6, "every parameter value left an entry");
 
         cache.sweep();
-        cache.evaluated(&doc, id).unwrap();
+        cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         cache.sweep();
         assert_eq!(cache.len(), 1, "only the live one survives");
     }
@@ -473,12 +631,12 @@ mod tests {
         let (mut doc, id) = doc_with_cube();
         doc.object_mut(id).unwrap().modifiers.push(mirror_x());
         let mut cache = ModifierCache::new();
-        let before = cache.evaluated(&doc, id).unwrap();
+        let before = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         cache.sweep();
         cache.sweep();
         assert!(cache.is_empty());
 
-        let after = cache.evaluated(&doc, id).unwrap();
+        let after = cache.evaluated(&doc, id, &EvalCtx::still()).unwrap();
         assert_eq!(before.num_faces(), after.num_faces());
     }
 
@@ -490,7 +648,7 @@ mod tests {
         doc.add_object(Object::new("Empty", ObjectData::Empty));
 
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &EvalCtx::still());
         assert_eq!(scene.len(), 1);
         assert_eq!(scene[0].0, id);
     }
@@ -522,7 +680,7 @@ mod tests {
             )));
 
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene_with_cage(&doc, Some(edited));
+        let scene = cache.evaluate_scene_with_cage(&doc, Some(edited), &EvalCtx::still());
 
         let of = |id: ObjectId| {
             scene
@@ -544,13 +702,13 @@ mod tests {
         doc.object_mut(id).unwrap().modifiers.push(mirror_x());
         let mut cache = ModifierCache::new();
 
-        let scene = cache.evaluate_scene_with_cage(&doc, Some(id));
+        let scene = cache.evaluate_scene_with_cage(&doc, Some(id), &EvalCtx::still());
         let datablock = doc
             .mesh_arc(doc.object(id).unwrap().mesh().unwrap())
             .unwrap();
         assert!(Arc::ptr_eq(&scene[0].1, datablock));
 
-        let again = cache.evaluate_scene_with_cage(&doc, Some(id));
+        let again = cache.evaluate_scene_with_cage(&doc, Some(id), &EvalCtx::still());
         assert!(
             Arc::ptr_eq(&scene[0].1, &again[0].1),
             "a new handle every frame"
@@ -562,6 +720,267 @@ mod tests {
         let mut doc = Document::new();
         let id = doc.add_object(Object::new("Empty", ObjectData::Empty));
         let mut cache = ModifierCache::new();
-        assert!(cache.evaluated(&doc, id).is_none());
+        assert!(cache.evaluated(&doc, id, &EvalCtx::still()).is_none());
+    }
+}
+
+// --- time as an input -------------------------------------------------------
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+    use crate::document::{Object, ObjectData};
+    use kreate_mesh::primitives;
+
+    fn at(frame: f64) -> EvalCtx {
+        EvalCtx::at(SceneTime::new(frame, 24.0).expect("a valid time"))
+    }
+
+    fn cube_with_a_stack() -> (Arc<MeshData>, Vec<ModifierInstance>) {
+        let cube = Arc::new(primitives::cube(1.0));
+        let stack = vec![ModifierInstance::new(ModifierKind::Subdivide(
+            SubdivideParams::default(),
+        ))];
+        (cube, stack)
+    }
+
+    /// A stack that reads the clock: see [`ModifierKind::Drift`].
+    fn drifting() -> (Arc<MeshData>, Vec<ModifierInstance>) {
+        let cube = Arc::new(primitives::cube(1.0));
+        let stack = vec![ModifierInstance::new(ModifierKind::Drift(1.0))];
+        (cube, stack)
+    }
+
+    /// Where a mesh's first vertex is, for telling one frame from another.
+    fn first_x(mesh: &MeshData) -> f32 {
+        mesh.positions()[0].x
+    }
+
+    #[test]
+    fn nothing_that_exists_yet_reads_the_clock() {
+        // Stated so that the tests below are read correctly: the *reason*
+        // scrubbing is free today is that no modifier is time-dependent, and
+        // the day one is, this test is what says so.
+        for kind in [
+            ModifierKind::Mirror(MirrorParams::default()),
+            ModifierKind::Subdivide(SubdivideParams::default()),
+            ModifierKind::Array(ArrayParams::default()),
+        ] {
+            assert!(
+                !kind.depends_on_time(),
+                "{} claims to depend on time; the cache tests below assume \
+                 otherwise",
+                kind.id()
+            );
+        }
+        let (_, stack) = cube_with_a_stack();
+        assert!(!depends_on_time(&stack));
+        // And the test-only one does, or every test below is vacuous.
+        let (_, drifting) = drifting();
+        assert!(depends_on_time(&drifting));
+    }
+
+    #[test]
+    fn a_still_scene_does_not_re_evaluate_when_the_frame_changes() {
+        // The half of §2.4's memory decision that costs nothing and saves
+        // everything: a stack that does not read the clock is valid at every
+        // time, so scrubbing a model with no animation in it is free.
+        //
+        // Without this, moving the playhead one frame would re-subdivide every
+        // object in the scene — and it would look like the timeline being slow
+        // rather than like a cache key being too coarse.
+        let (cube, stack) = cube_with_a_stack();
+        let mut cache = ModifierCache::new();
+
+        let first = cache.evaluate(&cube, &stack, &at(1.0));
+        let (hits, misses) = cache.stats();
+        assert_eq!((hits, misses), (0, 1));
+
+        for frame in 2..=100 {
+            let again = cache.evaluate(&cube, &stack, &at(frame as f64));
+            assert!(
+                Arc::ptr_eq(&again, &first),
+                "frame {frame} got a different mesh"
+            );
+        }
+        let (hits, misses) = cache.stats();
+        assert_eq!(misses, 1, "the scene was re-evaluated {misses} times");
+        assert_eq!(hits, 99);
+        assert_eq!(cache.len(), 1, "one entry, not one per frame");
+    }
+
+    #[test]
+    fn the_time_is_part_of_the_key_when_the_stack_reads_it() {
+        // The other half: a stack that reads the clock gets a different answer
+        // at a different instant, and the cache does not hand back the previous
+        // frame's.
+        let (cube, stack) = drifting();
+        let mut cache = ModifierCache::new();
+
+        let one = cache.evaluate(&cube, &stack, &at(24.0));
+        let two = cache.evaluate(&cube, &stack, &at(48.0));
+        assert!(
+            (first_x(&two) - first_x(&one) - 1.0).abs() < 1e-5,
+            "a second later should be one unit along: {} then {}",
+            first_x(&one),
+            first_x(&two)
+        );
+
+        // And asking for the first instant again is a fresh evaluation rather
+        // than a hit, because its entry was replaced. Which is the trade: the
+        // cache holds one frame, and scrubbing back costs what scrubbing
+        // forward did.
+        let (_, misses_before) = cache.stats();
+        let again = cache.evaluate(&cube, &stack, &at(24.0));
+        let (_, misses_after) = cache.stats();
+        assert_eq!(misses_after, misses_before + 1);
+        assert!((first_x(&again) - first_x(&one)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scrubbing_an_animated_scene_does_not_accumulate_a_mesh_per_frame() {
+        // §2.4's memory decision, and the reason it is a decision rather than
+        // an oversight: a cache keyed on time with nothing dropping the old
+        // entries holds a copy of the mesh per frame, so scrubbing a hundred
+        // frames of a subdivided model is a hundred subdivided models.
+        let (cube, stack) = drifting();
+        let mut cache = ModifierCache::new();
+
+        for frame in 1..=100 {
+            cache.evaluate(&cube, &stack, &at(frame as f64));
+            assert_eq!(
+                cache.len(),
+                1,
+                "after frame {frame} the cache holds {} entries",
+                cache.len()
+            );
+        }
+        let (hits, misses) = cache.stats();
+        assert_eq!(misses, 100, "every frame is a fresh evaluation");
+        assert_eq!(hits, 0);
+    }
+
+    #[test]
+    fn two_frames_of_the_same_instant_still_hit() {
+        // The cache is not useless for an animated scene — it holds *one*
+        // instant, and a frame is drawn more than once. `evaluate_scene` is
+        // called twice a frame on purpose (the auto-depth pivot needs the
+        // scene before the frame is encoded), so a time-keyed entry that
+        // missed on the second call would double every animated frame's cost.
+        let (cube, stack) = drifting();
+        let mut cache = ModifierCache::new();
+        let first = cache.evaluate(&cube, &stack, &at(12.0));
+        let second = cache.evaluate(&cube, &stack, &at(12.0));
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.stats(), (1, 1));
+    }
+
+    #[test]
+    fn a_still_stack_and_an_animated_one_coexist() {
+        // Two objects, one animated. Moving the clock must re-evaluate the
+        // animated one and leave the other's entry alone — a cache that cleared
+        // itself on a time change would be correct and would re-subdivide the
+        // static half of the scene every frame.
+        let (cube, still) = cube_with_a_stack();
+        let (_, animated) = drifting();
+        let mut cache = ModifierCache::new();
+
+        let held = cache.evaluate(&cube, &still, &at(1.0));
+        cache.evaluate(&cube, &animated, &at(1.0));
+        assert_eq!(cache.len(), 2);
+
+        cache.evaluate(&cube, &animated, &at(2.0));
+        let again = cache.evaluate(&cube, &still, &at(2.0));
+        assert!(
+            Arc::ptr_eq(&again, &held),
+            "the still stack was re-evaluated when the clock moved"
+        );
+        assert_eq!(cache.len(), 2, "one entry each, still");
+    }
+
+    #[test]
+    fn a_disabled_modifier_cannot_make_a_stack_read_the_clock() {
+        // It is not applied, so it cannot contribute — the same rule
+        // `is_identity` follows. A stack whose only time-dependent modifier is
+        // switched off would otherwise be re-evaluated every frame for nothing.
+        let (cube, stack) = drifting();
+        let mut off = stack.clone();
+        off[0].enabled = false;
+        assert!(!depends_on_time(&off));
+        assert!(is_identity(&off));
+
+        let mut cache = ModifierCache::new();
+        let one = cache.evaluate(&cube, &off, &at(1.0));
+        let two = cache.evaluate(&cube, &off, &at(500.0));
+        assert!(Arc::ptr_eq(&one, &two));
+        assert!(
+            Arc::ptr_eq(&one, &cube),
+            "a switched-off stack is the input"
+        );
+    }
+
+    #[test]
+    fn the_rate_is_part_of_the_instant() {
+        // Frame 24 at 24 fps and frame 24 at 48 fps are different times, and a
+        // modifier reading seconds gets different answers. A key comparing only
+        // the frame number would serve one for the other, and the symptom would
+        // be an animation that stops responding to a rate change.
+        let (cube, stack) = drifting();
+        let mut cache = ModifierCache::new();
+        let slow = cache.evaluate(
+            &cube,
+            &stack,
+            &EvalCtx::at(SceneTime::new(24.0, 24.0).expect("valid")),
+        );
+        let slow_x = first_x(&slow);
+        let fast = cache.evaluate(
+            &cube,
+            &stack,
+            &EvalCtx::at(SceneTime::new(24.0, 48.0).expect("valid")),
+        );
+        assert!(
+            (first_x(&fast) - slow_x).abs() > 0.4,
+            "the same frame at another rate gave the same answer: {slow_x} and {}",
+            first_x(&fast)
+        );
+    }
+
+    #[test]
+    fn the_context_is_a_struct_so_that_the_next_field_costs_nobody_anything() {
+        // Why `EvalCtx` and not `time: SceneTime` as a parameter. §5's fourth
+        // risk is about the *signature*: the day evaluation also needs a
+        // dependency graph's view, or a seed, or a resolution the viewport
+        // wants and the renderer does not, it goes in here and no caller
+        // changes.
+        let ctx = EvalCtx::still();
+        assert_eq!(ctx.time, SceneTime::default());
+        assert_eq!(EvalCtx::at(SceneTime::default()), ctx);
+
+        let moved = EvalCtx::at(SceneTime::new(48.0, 24.0).expect("valid"));
+        assert_ne!(moved, ctx);
+        assert!((moved.time.seconds() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn evaluating_a_scene_passes_the_time_through() {
+        // End to end, so the parameter is not merely present but arriving.
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(primitives::cube(1.0));
+        let id = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+        doc.object_mut(id)
+            .expect("object")
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Subdivide(
+                SubdivideParams::default(),
+            )));
+
+        let mut cache = ModifierCache::new();
+        let early = cache.evaluate_scene(&doc, &at(1.0));
+        let late = cache.evaluate_scene(&doc, &at(240.0));
+        assert_eq!(early.len(), 1);
+        assert_eq!(late.len(), 1);
+        // The same mesh, because nothing in the stack reads the clock.
+        assert!(Arc::ptr_eq(&early[0].1, &late[0].1));
+        assert_eq!(cache.len(), 1);
     }
 }

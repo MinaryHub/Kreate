@@ -1009,7 +1009,7 @@ fn a_moved_mesh_is_drawn_where_it_moved_to() {
     let mut cache = MeshCache::new();
     let mut modifiers = kreate_scene::ModifierCache::new();
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     let before = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
     let centre_before = lit_centroid_x(&before).expect("the cube is on screen");
@@ -1022,7 +1022,7 @@ fn a_moved_mesh_is_drawn_where_it_moved_to() {
         p.x += 1.5;
     }
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     assert_eq!(
         cache.slots.len(),
@@ -1092,7 +1092,7 @@ fn a_moved_mesh_brings_its_normals_with_it() {
     let mut cache = MeshCache::new();
     let mut modifiers = kreate_scene::ModifierCache::new();
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     let before = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
     let lit_before = lit_pixels(&before);
@@ -1105,7 +1105,7 @@ fn a_moved_mesh_brings_its_normals_with_it() {
         *p = glam::Vec3::new(p.z, p.y, -p.x);
     }
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     assert_eq!(cache.slots.len(), 1, "the mesh was re-uploaded");
     let after = render_through_cache(&gpu, &mut viewport, &target, &cache, &doc, &scene, &camera);
@@ -1160,7 +1160,7 @@ fn a_selection_only_change_leaves_the_object_findable_in_the_cache() {
     let mut cache = MeshCache::new();
     let mut modifiers = kreate_scene::ModifierCache::new();
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     assert!(
         cache.find(&scene[0].1).is_some(),
@@ -1182,7 +1182,7 @@ fn a_selection_only_change_leaves_the_object_findable_in_the_cache() {
     )
     .expect("select all elements");
 
-    let scene = modifiers.evaluate_scene(&doc);
+    let scene = modifiers.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
     cache.sync(&gpu, &viewport.layouts, &scene);
     assert!(
         cache.find(&scene[0].1).is_some(),

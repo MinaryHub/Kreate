@@ -200,11 +200,17 @@ mod tests {
         // position. §4.5 asks for this by name.
         let mut doc = doc_with(2);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         nudge(&mut doc);
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let plan = plan_sync(&held, &scene);
 
         assert!(
@@ -231,11 +237,17 @@ mod tests {
         // and applying it has to leave the cache holding that one.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         nudge(&mut doc);
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let plan = plan_sync(&held, &scene);
 
         let (_, adopted) = &plan.repositions[0];
@@ -259,7 +271,13 @@ mod tests {
         // frame’s positions is a bug nobody would look for here.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let id = doc.meshes().next().expect("a mesh").0;
         {
@@ -269,7 +287,10 @@ mod tests {
             mesh.positions_mut()[0].x += 0.25;
         }
         let mut cache = ModifierCache::new();
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
 
         assert_eq!(
             plan.uploads.len(),
@@ -288,12 +309,21 @@ mod tests {
         // a different mesh is how a renderer draws garbage.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let id = doc.meshes().next().expect("a mesh").0;
         *doc.mesh_mut(id).expect("a mesh") = kreate_mesh::primitives::uv_sphere(1.0, 8, 4);
         let mut cache = ModifierCache::new();
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
 
         assert_eq!(plan.uploads.len(), 1, "a new topology needs new buffers");
         assert!(plan.repositions.is_empty());
@@ -303,7 +333,7 @@ mod tests {
     fn an_empty_cache_uploads_everything() {
         let doc = doc_with(3);
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let plan = plan_sync(&[], &scene);
         assert_eq!(plan.uploads.len(), 3);
         assert!(plan.keep.is_empty());
@@ -316,7 +346,7 @@ mod tests {
         // it must cost one comparison per object and no GPU work at all.
         let doc = doc_with(3);
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let held = apply(&[], &plan_sync(&[], &scene));
 
         let plan = plan_sync(&held, &scene);
@@ -337,12 +367,21 @@ mod tests {
         // the two it does *not* touch.
         let mut doc = doc_with(3);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let target = doc.objects().next().unwrap().1.mesh().unwrap();
         doc.mesh_mut(target).unwrap().positions_mut()[0].y += 1.0;
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         let acted_on = plan.uploads.len() + plan.reflags.len() + plan.repositions.len();
         assert_eq!(acted_on, 1, "only the edited mesh");
         assert_eq!(plan.keep.len(), 3, "all three slots survive");
@@ -352,12 +391,21 @@ mod tests {
     fn a_removed_object_drops_its_mesh() {
         let mut doc = doc_with(3);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let victim = doc.objects().next().unwrap().0;
         doc.remove_object(victim);
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert_eq!(plan.total(), 2);
         assert!(plan.uploads.is_empty());
         assert!(plan.needs_work(held.len()), "a slot has to be released");
@@ -367,12 +415,21 @@ mod tests {
     fn a_hidden_object_drops_its_mesh() {
         let mut doc = doc_with(2);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let id = doc.objects().next().unwrap().0;
         doc.object_mut(id).unwrap().visible = false;
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert_eq!(plan.total(), 1);
     }
 
@@ -387,7 +444,7 @@ mod tests {
             doc.duplicate_linked(original).unwrap();
         }
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         assert_eq!(scene.len(), 10, "ten objects");
 
         let plan = plan_sync(&[], &scene);
@@ -407,7 +464,10 @@ mod tests {
         doc.duplicate_linked(original).unwrap();
 
         let mut cache = ModifierCache::new();
-        let plan = plan_sync(&[], &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &[],
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert_eq!(plan.uploads.len(), 1);
     }
 
@@ -427,7 +487,7 @@ mod tests {
         doc.object_mut(second).unwrap().modifiers.clear();
 
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let plan = plan_sync(&[], &scene);
         assert_eq!(plan.uploads.len(), 2, "one mirrored, one not");
     }
@@ -446,7 +506,13 @@ mod tests {
                 },
             )));
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         doc.object_mut(id).unwrap().modifiers[0].kind =
             ModifierKind::Array(kreate_mesh::modifiers::ArrayParams {
@@ -454,7 +520,10 @@ mod tests {
                 ..Default::default()
             });
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert_eq!(plan.uploads.len(), 1);
         assert!(plan.keep.is_empty());
         assert_eq!(plan.uploads[0].num_verts(), 8 * 5);
@@ -468,7 +537,13 @@ mod tests {
         // selection a slideshow.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let target = doc.objects().next().unwrap().1.mesh().unwrap();
         {
@@ -481,7 +556,10 @@ mod tests {
             );
         }
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert!(
             plan.uploads.is_empty(),
             "a click re-uploaded the geometry: {} uploads",
@@ -508,7 +586,13 @@ mod tests {
         doc.selection.add(object);
 
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let mut registry = OperatorRegistry::new();
         kreate_ops::register_builtin(&mut registry);
@@ -529,7 +613,10 @@ mod tests {
             )
             .expect("mesh.select_pick");
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert!(
             plan.uploads.is_empty(),
             "a click re-uploaded the geometry: {} uploads",
@@ -549,11 +636,20 @@ mod tests {
         // shortcut that could swallow each is a different one.
         let mut doc = doc_with(1);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
         let target = doc.objects().next().unwrap().1.mesh().unwrap();
 
         doc.mesh_mut(target).unwrap().positions_mut()[0].y += 1.0;
-        let moved = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let moved = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert!(
             moved.needs_work(held.len()),
             "a move was reported as an idle frame"
@@ -562,7 +658,10 @@ mod tests {
         assert!(moved.reflags.is_empty(), "nothing was selected");
 
         *doc.mesh_mut(target).unwrap() = kreate_mesh::primitives::uv_sphere(1.0, 8, 4);
-        let replaced = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let replaced = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert!(replaced.needs_work(held.len()));
         assert_eq!(
             replaced.uploads.len(),
@@ -582,7 +681,13 @@ mod tests {
         let first = doc.objects().next().unwrap().0;
         let second = doc.duplicate_linked(first).unwrap();
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
         assert_eq!(held.len(), 1, "they share one mesh to begin with");
 
         doc.object_mut(second)
@@ -592,7 +697,10 @@ mod tests {
                 kreate_mesh::modifiers::ArrayParams::default(),
             )));
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert_eq!(plan.keep, vec![0], "the original keeps its slot");
         assert_eq!(plan.uploads.len(), 1, "the arrayed copy is new geometry");
         assert!(plan.reflags.is_empty());
@@ -604,12 +712,21 @@ mod tests {
         // parented rig re-upload the scene.
         let mut doc = doc_with(2);
         let mut cache = ModifierCache::new();
-        let held = apply(&[], &plan_sync(&[], &cache.evaluate_scene(&doc)));
+        let held = apply(
+            &[],
+            &plan_sync(
+                &[],
+                &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+            ),
+        );
 
         let id = doc.objects().next().unwrap().0;
         doc.object_mut(id).unwrap().transform.translation = kreate_math::DVec3::Y;
 
-        let plan = plan_sync(&held, &cache.evaluate_scene(&doc));
+        let plan = plan_sync(
+            &held,
+            &cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still()),
+        );
         assert!(!plan.needs_work(held.len()));
     }
 
@@ -619,7 +736,7 @@ mod tests {
         // does not reshuffle every frame.
         let doc = doc_with(4);
         let mut cache = ModifierCache::new();
-        let scene = cache.evaluate_scene(&doc);
+        let scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
         let held = apply(&[], &plan_sync(&[], &scene));
         let plan = plan_sync(&held, &scene);
         assert_eq!(plan.keep, vec![0, 1, 2, 3]);

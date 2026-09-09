@@ -517,6 +517,19 @@ struct App {
     /// which is the cost a session exists to avoid, put back for every object
     /// after the first.
     edit: kreate_ops::EditSessions,
+    /// When the scene is.
+    ///
+    /// Nothing reads it yet — no modifier depends on the clock and there is no
+    /// timeline to move it — but it is the input every evaluation now takes,
+    /// and threading that through afterwards is the change §5 calls fatal.
+    ///
+    /// Held here rather than in the document, for now. The frame a file opens
+    /// at is a scene setting and belongs in the document eventually; what it is
+    /// *not* is part of the undo snapshot, because scrubbing is not an edit and
+    /// undoing a move must not also move the playhead. Sorting out which half
+    /// goes where is Phase 10's, along with the timeline that would make it
+    /// visible.
+    time: kreate_math::SceneTime,
     /// Lazily built BVHs, for auto-depth and — later — snapping and knife.
     pick: kreate::pick::PickCache,
     /// Evaluated geometry, kept between frames.
@@ -642,6 +655,7 @@ impl App {
             uv_gesture: None,
             select_mode: 2,
             edit: kreate_ops::EditSessions::new(),
+            time: kreate_math::SceneTime::default(),
             pick: kreate::pick::PickCache::new(),
             modifiers: kreate_scene::ModifierCache::new(),
             evaluated: Vec::new(),
@@ -2229,8 +2243,13 @@ impl App {
     /// of that handle. It is called more than once a frame on purpose — the
     /// auto-depth pivot needs the evaluated scene before the frame is drawn —
     /// and the second call is hits all the way down.
+    /// What an evaluation depends on besides the document.
+    fn eval_ctx(&self) -> kreate_scene::modifier::EvalCtx {
+        kreate_scene::modifier::EvalCtx::at(self.time)
+    }
+
     fn evaluate_scene(&mut self) {
-        self.evaluated = self.modifiers.evaluate_scene(&self.doc);
+        self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
         // Both caches are keyed on handle identity, so an edit leaves the old
         // entry behind rather than replacing it — they have to be told when a
         // handle has left the scene or they grow with every edit. The modifier

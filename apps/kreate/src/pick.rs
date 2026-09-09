@@ -216,7 +216,7 @@ mod tests {
 
     /// The evaluated scene, as the application would hand it over.
     fn scene(doc: &Document) -> Vec<(ObjectId, Arc<MeshData>)> {
-        ModifierCache::new().evaluate_scene(doc)
+        ModifierCache::new().evaluate_scene(doc, &kreate_scene::modifier::EvalCtx::still())
     }
 
     /// Straight down the -Z axis from above.

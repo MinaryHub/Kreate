@@ -23,6 +23,13 @@
 //! Colour lives here, beside the axis convention and the unit of length, because
 //! it is the same kind of thing: an agreement every crate above has to share,
 //! and one that cannot be settled twice.
+//!
+//! # Time
+//!
+//! The same again, and for the same reason: a bare `f64` is either a frame or a
+//! quantity of seconds, and the two differ by the scene's rate. [`SceneTime`]
+//! carries the frame it was authored as, the rate, and the seconds that follow
+//! from both. See [`time`] for why the frame is the stored half.
 
 pub use glam;
 pub use glam::{
@@ -37,6 +44,7 @@ mod color;
 mod plane;
 mod point_tree;
 mod ray;
+mod time;
 mod transform;
 
 pub use aabb::Aabb;
@@ -46,6 +54,7 @@ pub use color::{linear_to_srgb, srgb_to_linear, DisplayRgb, SceneRgb, Srgb};
 pub use plane::Plane;
 pub use point_tree::{Nearest, PointTree};
 pub use ray::Ray;
+pub use time::SceneTime;
 pub use transform::{DTransform, Transform};
 
 /// Comparison epsilon for positions expressed in metres.
