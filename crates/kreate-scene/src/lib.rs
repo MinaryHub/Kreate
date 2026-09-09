@@ -6,6 +6,7 @@
 pub mod camera;
 pub mod document;
 pub mod edit_session;
+pub mod image;
 pub mod modifier;
 pub mod undo;
 
@@ -15,6 +16,7 @@ pub use document::{
     ObjectId, ReparentError, Selection,
 };
 pub use edit_session::{EditSession, EditSessions};
+pub use image::{ColorSpace, Image, PixelFormat, Source, Tile, TILE};
 /// A datablock's persistent identity and what kind of thing it names.
 ///
 /// Re-exported rather than re-declared: the type lives in `kreate-reflect`

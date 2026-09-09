@@ -34,6 +34,7 @@ use kreate_mesh::{define_id, MeshData};
 use kreate_reflect::{DatablockKind, Uid};
 
 use crate::camera::Camera;
+use crate::image::Image;
 
 define_id! {
     /// An object in the scene graph.
@@ -51,6 +52,14 @@ define_id! {
     /// what a stereo pair or a set of matched angles wants, and what §1.4's
     /// argument for meshes says about every datablock.
     pub struct CameraId;
+}
+
+kreate_mesh::define_id! {
+    /// An image datablock.
+    ///
+    /// Several materials share one texture routinely, which is the ordinary
+    /// case for datablock indirection rather than an exotic one.
+    pub struct ImageId;
 }
 
 kreate_mesh::define_id! {
@@ -246,6 +255,10 @@ pub struct Document {
     meshes: Arena<MeshId, MeshEntry>,
     materials: Arena<MaterialId, Arc<Material>>,
     cameras: Arena<CameraId, Arc<Camera>>,
+    /// Images are `Arc`ed like meshes, and each one is itself tiled with an
+    /// `Arc` per tile — so a document clone is a refcount bump and a brush
+    /// stroke copies the tiles it touched. See [`crate::image`].
+    images: Arena<ImageId, Arc<Image>>,
     collections: Arena<CollectionId, Collection>,
     /// Objects with no parent, in user-visible order.
     roots: Vec<ObjectId>,
@@ -283,6 +296,7 @@ struct UidCounters {
     object: Uid,
     mesh: Uid,
     camera: Uid,
+    image: Uid,
 }
 
 impl Document {
@@ -367,6 +381,7 @@ impl Document {
             DatablockKind::Object => &mut self.uids.object,
             DatablockKind::Mesh => &mut self.uids.mesh,
             DatablockKind::Camera => &mut self.uids.camera,
+            DatablockKind::Image => &mut self.uids.image,
             // Nothing else is a datablock in this document yet. Reaching here
             // means a kind was added to the enum and not to the counters, and
             // handing back the unassigned id makes that a resolvable path to
@@ -777,6 +792,63 @@ impl Document {
         self.cameras
             .iter()
             .find(|(_, c)| c.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    // --- images -------------------------------------------------------------
+
+    pub fn add_image(&mut self, image: Image) -> ImageId {
+        let uid = self.issue(DatablockKind::Image);
+        self.touch();
+        let mut image = image;
+        image.uid = uid;
+        self.images.insert(Arc::new(image))
+    }
+
+    /// Adds an image with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_image(&mut self, image: Image, uid: Uid) -> ImageId {
+        if uid.is_none() {
+            return self.add_image(image);
+        }
+        self.uids.image = self.uids.image.max(uid);
+        self.touch();
+        let mut image = image;
+        image.uid = uid;
+        self.images.insert(Arc::new(image))
+    }
+
+    pub fn image(&self, id: ImageId) -> Option<&Image> {
+        self.images.get(id).map(|i| i.as_ref())
+    }
+
+    /// Copy-on-write access to an image.
+    ///
+    /// The outer `make_mut` copies the image's *structure* — its dimensions and
+    /// its vector of tile handles — and not its pixels: the handles are cloned,
+    /// so the tiles stay shared until one is written to. Which is what makes a
+    /// stroke on a shared texture cost the tiles it touched.
+    pub fn image_mut(&mut self, id: ImageId) -> Option<&mut Image> {
+        self.touch();
+        self.images.get_mut(id).map(Arc::make_mut)
+    }
+
+    pub fn images(&self) -> impl Iterator<Item = (ImageId, &Image)> {
+        self.images.iter().map(|(id, i)| (id, i.as_ref()))
+    }
+
+    pub fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
+    pub fn image_uid(&self, id: ImageId) -> Option<Uid> {
+        self.images.get(id).map(|i| i.uid)
+    }
+
+    pub fn image_by_uid(&self, uid: Uid) -> Option<ImageId> {
+        self.images
+            .iter()
+            .find(|(_, i)| i.uid == uid)
             .map(|(id, _)| id)
     }
 
