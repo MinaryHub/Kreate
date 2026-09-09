@@ -19,7 +19,7 @@ const ASPECT: f64 = 16.0 / 9.0;
 /// Ray queries run against the geometry the user can see, so they take the
 /// evaluated meshes rather than reading the document's datablocks.
 fn evaluated(doc: &Document) -> Vec<(ObjectId, std::sync::Arc<kreate_mesh::MeshData>)> {
-    ModifierCache::new().evaluate_scene(doc)
+    ModifierCache::new().evaluate_scene(doc, &kreate_scene::modifier::EvalCtx::still())
 }
 
 /// A cube off to one side, which is the situation auto-depth exists for: the

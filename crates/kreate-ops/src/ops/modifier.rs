@@ -612,7 +612,13 @@ mod tests {
 
         // And a disabled modifier really does nothing.
         let mut cache = ModifierCache::new();
-        assert_eq!(cache.evaluated(&d, id).unwrap().num_verts(), 8);
+        assert_eq!(
+            cache
+                .evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still())
+                .unwrap()
+                .num_verts(),
+            8
+        );
     }
 
     #[test]
@@ -624,7 +630,10 @@ mod tests {
         add(&r, &mut h, &mut d, &c, 2);
 
         let mut cache = ModifierCache::new();
-        let before = cache.evaluated(&d, id).unwrap().bounds();
+        let before = cache
+            .evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap()
+            .bounds();
 
         run(
             &r,
@@ -639,7 +648,10 @@ mod tests {
         );
         assert_eq!(kinds(&d, id), vec!["array", "mirror"]);
 
-        let after = cache.evaluated(&d, id).unwrap().bounds();
+        let after = cache
+            .evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap()
+            .bounds();
         assert_ne!(before.min.x, after.min.x, "reordering changed nothing");
     }
 
@@ -705,7 +717,13 @@ mod tests {
         );
 
         let mut cache = ModifierCache::new();
-        assert_eq!(cache.evaluated(&d, id).unwrap().num_faces(), 96);
+        assert_eq!(
+            cache
+                .evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still())
+                .unwrap()
+                .num_faces(),
+            96
+        );
     }
 
     /// Dispatches an add, returning the error rather than unwrapping it.
