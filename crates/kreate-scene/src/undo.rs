@@ -36,10 +36,12 @@
 //! direction runs that way: operators are the only thing permitted to mutate a
 //! document, and the scene layer must not depend on them.
 
+use std::sync::Arc;
+
 use glam::Vec3;
 use kreate_mesh::attribute::names;
 
-use crate::document::{Document, MeshId};
+use crate::document::{Document, ImageId, MeshId};
 use crate::edit_session::EditSessions;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -61,6 +63,25 @@ pub enum UndoPayload {
         mesh: MeshId,
         indices: Vec<u32>,
         values: Vec<Vec3>,
+    },
+    /// The previous state of specific tiles of one image.
+    ///
+    /// §3's eleventh "decide now", and the payload the tiling exists to make
+    /// possible. A brush stroke records the handles of the tiles it is about to
+    /// touch, and holding a handle is what makes the image copy that tile
+    /// instead of writing through — so the record costs 64 KB a tile and
+    /// nothing at all for the rest of the image.
+    ///
+    /// `None` for a tile that was not resident, which is a real state a stroke
+    /// creates a tile out of: undoing the first dab on an empty texture has to
+    /// leave *no* tile rather than a blank one, because a blank tile is 64 KB
+    /// and no tile is nothing.
+    ImageTileDelta {
+        image: ImageId,
+        /// Tile coordinates, not pixels.
+        tiles: Vec<(u32, u32)>,
+        /// What was there, in the same order.
+        was: Vec<Option<Arc<crate::image::Tile>>>,
     },
     /// The operator reported success but changed nothing worth recording.
     Nothing,
@@ -85,6 +106,19 @@ impl UndoPayload {
             UndoPayload::PositionDelta {
                 indices, values, ..
             } => indices.len() * 4 + values.len() * 12,
+            // Only the tiles this record *uniquely* holds. A tile whose handle
+            // the image still has is shared, and charging it to both would make
+            // the budget say a painting session uses twice what it does — which
+            // is the same argument `Snapshot` above makes about a mesh's arrays.
+            UndoPayload::ImageTileDelta { tiles, was, .. } => {
+                let held: usize = was
+                    .iter()
+                    .flatten()
+                    .filter(|tile| Arc::strong_count(tile) == 1)
+                    .map(|tile| tile.bytes().len())
+                    .sum();
+                held + tiles.len() * std::mem::size_of::<(u32, u32)>()
+            }
             UndoPayload::Nothing => 0,
         }
     }
@@ -112,6 +146,16 @@ impl UndoPayload {
                         if let Some(slot) = positions.get_mut(*i as usize) {
                             *slot = *v;
                         }
+                    }
+                }
+            }
+            UndoPayload::ImageTileDelta { image, tiles, was } => {
+                if let Some(img) = doc.image_mut(*image) {
+                    for ((x, y), tile) in tiles.iter().zip(was) {
+                        // The handle goes back as it was, `None` included: a
+                        // stroke that created a tile has to leave none behind
+                        // when it is undone, not a blank one.
+                        img.set_tile(*x, *y, tile.clone());
                     }
                 }
             }
