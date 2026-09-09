@@ -8,6 +8,9 @@
 //!   consume an immutable snapshot and dispatch `(op_id, params)` respectively.
 //!   That is what gives the renderer a lock-free path and what makes undo,
 //!   scripting, and macro recording fall out of the operator system for free.
+//! - The sRGB transfer function is implemented once, in `kreate-math`. A second
+//!   copy — or a `powf(2.2)` standing in for it — is how a colour ends up in
+//!   the wrong space, and §2.1 records that having happened twice already.
 //!
 //! Every one of these is easy to violate with a single convenient `use`, and
 //! each violation is expensive to unwind six months later. A grep-level check
@@ -454,4 +457,203 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+// --- colour gate ------------------------------------------------------------
+
+/// The sRGB curve's own constants, which give it away in any language.
+///
+/// Matched as numbers rather than as expressions, because there are many ways
+/// to spell the same conversion and only a handful of numbers in it. Each of
+/// these is specific enough that finding one outside `kreate-math` means
+/// somebody wrote the curve again.
+const COLOUR_CONSTANTS: &[&str] = &[
+    "12.92",
+    "1.055",
+    "0.055",
+    "0.04045",
+    "0.040_45",
+    "0.0031308",
+    "0.003_130_8",
+];
+
+/// A gamma exponent, which only gives itself away next to a power.
+///
+/// `2.2` on its own is any number at all; `pow` and `2.2` on one line is the
+/// approximation the real curve is meant to replace. Both members have to
+/// appear, which is what keeps this from objecting to `vec2(1.0, 2.2)`.
+///
+/// Two spellings, and that is the point of this list existing separately: Rust
+/// writes `x.powf(2.2)` and WGSL writes `pow(x, 2.2)`. A gate built from the
+/// Rust side read every shader and found nothing, which is how the one place
+/// the mistake actually happened stayed unguarded.
+const COLOUR_POWERS: &[(&str, &str)] = &[
+    ("pow", "2.2"),
+    ("pow", "2.4"),
+    ("pow", "0.4545"),
+    ("pow", "0.41666"),
+];
+
+/// Marker allowing a specific line, for the one implementation and for
+/// arithmetic that only looks like it.
+const COLOUR_EXEMPT: &str = "srgb-exempt";
+
+/// Whether a line of Rust or WGSL is converting a colour.
+fn smells_of_colour(line: &str) -> bool {
+    COLOUR_CONSTANTS.iter().any(|c| line.contains(c))
+        || COLOUR_POWERS
+            .iter()
+            .any(|(call, exponent)| line.contains(call) && line.contains(exponent))
+}
+
+/// Where the transfer function is allowed to live.
+const COLOUR_HOME: &str = "kreate-math";
+
+/// Every file a colour conversion could hide in.
+///
+/// Shaders included, and they are the reason this is not just `rust_files`: a
+/// `pow(2.2)` in WGSL is the same mistake in a place no Rust scan would look,
+/// and the one time it happened the symptom was a viewport seven times too
+/// dark.
+fn source_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(source_files(&path));
+        } else if path.extension().is_some_and(|e| e == "rs" || e == "wgsl") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn the_transfer_function_is_implemented_once() {
+    // §2.1's rule, as a gate. Two implementations of a colour conversion do not
+    // stay equal, and the way anyone finds out is by putting the product next to
+    // another tool — by which time every scene and every imported texture is
+    // already wrong.
+    //
+    // The exemption marker exists because some of these numbers are innocent
+    // elsewhere; what it does not permit is a *second* conversion, which is why
+    // it has to be written on the line and read by a person.
+    let mut offences = Vec::new();
+    for crate_dir in [
+        "crates/kreate-render",
+        "crates/kreate-ui",
+        "crates/kreate-mesh",
+        "crates/kreate-scene",
+        "crates/kreate-ops",
+        "crates/kreate-io",
+        "apps/kreate",
+    ] {
+        let src = workspace_root().join(crate_dir).join("src");
+        for file in source_files(&src) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") || line.contains(COLOUR_EXEMPT) {
+                    continue;
+                }
+                if smells_of_colour(line) {
+                    offences.push(format!("{}:{}: {}", file.display(), i + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offences.is_empty(),
+        "colour conversion outside {COLOUR_HOME}. Use `Srgb::decode`,          `DisplayRgb::encode`, or `srgb_to_linear`/`linear_to_srgb` from          kreate-math — or write `{COLOUR_EXEMPT}` on the line if the number is          not a colour:\n{}",
+        offences.join("\n")
+    );
+}
+
+#[test]
+fn the_one_implementation_is_where_it_says_it_is() {
+    // Guards the gate: a rule that forbids the function everywhere would pass
+    // just as well if the function had been deleted, and then every colour in
+    // the product would be converted by nothing at all.
+    let color = workspace_root()
+        .join("crates")
+        .join(COLOUR_HOME)
+        .join("src/color.rs");
+    let text =
+        std::fs::read_to_string(&color).unwrap_or_else(|e| panic!("{}: {e}", color.display()));
+    assert!(
+        text.contains("pub fn srgb_to_linear") && text.contains("pub fn linear_to_srgb"),
+        "the transfer function is not in kreate-math any more; the gate above          is now forbidding something that does not exist"
+    );
+    // And it is the piecewise curve rather than the approximation the gate
+    // rejects elsewhere.
+    assert!(
+        text.contains("12.92") && text.contains("2.4"),
+        "the implementation does not look like the sRGB curve"
+    );
+}
+
+#[test]
+fn the_colour_gate_reads_shaders() {
+    // Stated as a test because the difference between `rust_files` and
+    // `source_files` is one word and reverting it would leave the gate passing
+    // while the place the mistake actually happened stopped being read.
+    let shaders = source_files(&workspace_root().join("crates/kreate-render/src/shaders"));
+    assert!(
+        shaders
+            .iter()
+            .any(|p| p.extension().is_some_and(|e| e == "wgsl")),
+        "no shaders found, so the gate is not reading any"
+    );
+}
+
+#[test]
+fn the_colour_scanner_detects_what_it_claims_to() {
+    // Guards the gate itself, the same way `the_i18n_scanner_detects_what_it
+    // _claims_to` does. Without this a scanner that matched nothing would
+    // report success forever while the rule quietly stopped applying.
+    let offending = [
+        // Rust
+        "let linear = c.powf(2.2);",
+        "let encoded = v.powf(1.0 / 2.4);",
+        "let toe = c / 12.92;",
+        "let shifted = (c + 0.055) / 1.055;",
+        // WGSL, which spells the call the other way round — and is the shape
+        // the first version of this gate missed entirely.
+        "    return pow(c, 2.2);",
+        "    let lin = pow((s + 0.055) / 1.055, 2.4);",
+        "    return select(c / 12.92, pow(c, 2.4), c > 0.04045);",
+    ];
+    for sample in offending {
+        assert!(
+            smells_of_colour(sample),
+            "the scanner would miss `{sample}`"
+        );
+    }
+
+    let innocent = [
+        "let scale = size.powf(2.0);",
+        "let ratio = a / 12.0;",
+        "let angle = t.powf(1.0 / 3.0);",
+        // A number that only looks like an exponent, with no power in sight.
+        "let step = vec2(1.0, 2.2);",
+        // And a power with an exponent that is nobody's gamma.
+        "let falloff = d.powf(3.0);",
+    ];
+    for sample in innocent {
+        assert!(
+            !smells_of_colour(sample),
+            "the scanner would object to `{sample}`"
+        );
+    }
+
+    // And the exemption marker has to work, or the gate is unsatisfiable for
+    // the cases that are genuinely not colours.
+    let excused = format!("let x = c.powf(2.2); // {COLOUR_EXEMPT}: a falloff curve");
+    assert!(excused.contains(COLOUR_EXEMPT));
 }
