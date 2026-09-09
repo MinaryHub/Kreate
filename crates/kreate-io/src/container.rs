@@ -50,7 +50,13 @@ use std::io::{Cursor, Read, Seek, Write};
 /// What this build writes.
 pub const FORMAT: &str = "kreate";
 pub const VERSION_MAJOR: u32 = 1;
-pub const VERSION_MINOR: u32 = 0;
+/// Bumped for an addition an older reader can ignore.
+///
+/// 1: datablock identities (`ObjectRecord::uid`, `SceneFile::mesh_uids`). A
+/// reader that does not know them puts them in its `extra` map and writes them
+/// back, so a round trip through an older build does not lose a scene's
+/// animation targets.
+pub const VERSION_MINOR: u32 = 1;
 
 const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
@@ -120,6 +126,18 @@ impl Default for Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectRecord {
     pub name: String,
+    /// The object's identity, which outlives this file.
+    ///
+    /// Not a position and not the name: a curve, a driver or a constraint
+    /// stored in a scene has to find its target when the scene is opened
+    /// again, and both of the other candidates move when the user does
+    /// ordinary work. See `kreate_reflect::path`.
+    ///
+    /// Zero, or absent, in a scene written before identities existed. Such a
+    /// scene has no curves in it either — nothing could have stored a path
+    /// there was nothing to point at — so a fresh id on load loses nothing.
+    #[serde(default)]
+    pub uid: u64,
     /// Index into [`SceneFile::objects`], not an arena id.
     ///
     /// Arena ids carry a generation and are only meaningful to the process that
@@ -149,6 +167,14 @@ pub struct SceneFile {
     pub objects: Vec<ObjectRecord>,
     /// Indices into `objects`, in user-visible order.
     pub roots: Vec<usize>,
+    /// Mesh datablock identities, by the key the archive files them under.
+    ///
+    /// Beside the objects rather than inside them, because a mesh is not owned
+    /// by an object: two may share one, and one may belong to none at all.
+    ///
+    /// Empty in a scene written before identities existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mesh_uids: BTreeMap<String, u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -220,6 +246,13 @@ pub fn write(
             .enumerate()
             .map(|(slot, (id, _))| (id, mesh_key(slot)))
             .collect();
+        scene.mesh_uids = keys
+            .iter()
+            .filter_map(|(id, key)| {
+                let uid = document.mesh_uid(*id)?;
+                (!uid.is_none()).then(|| (key.clone(), uid.raw()))
+            })
+            .collect();
 
         for (id, object) in document.objects() {
             let mesh = match object.data {
@@ -230,6 +263,7 @@ pub fn write(
             let m = object.parent_inverse;
             scene.objects.push(ObjectRecord {
                 name: object.name.clone(),
+                uid: object.uid.raw(),
                 parent: object.parent.and_then(|p| index_of.get(&p).copied()),
                 translation: t.translation.to_array(),
                 rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
@@ -341,7 +375,14 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     let mut document = Document::new();
     let mut mesh_ids: BTreeMap<String, kreate_scene::MeshId> = BTreeMap::new();
     for (key, mesh) in meshes {
-        mesh_ids.insert(key, document.add_mesh(mesh));
+        // A scene written before identities existed has none to restore, and
+        // gets fresh ones. It has no curves in it either, so nothing is
+        // orphaned by that.
+        let id = match scene.mesh_uids.get(&key) {
+            Some(raw) => document.restore_mesh(mesh, kreate_scene::Uid::from_raw(*raw)),
+            None => document.add_mesh(mesh),
+        };
+        mesh_ids.insert(key, id);
     }
 
     let mut object_ids: Vec<ObjectId> = Vec::with_capacity(scene.objects.len());
@@ -380,7 +421,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 name: name.clone(),
             },
         };
-        object_ids.push(document.add_object(object));
+        object_ids.push(match record.uid {
+            0 => document.add_object(object),
+            raw => document.restore_object(object, kreate_scene::Uid::from_raw(raw)),
+        });
     }
 
     // Parenting in a second pass: a record may name a parent that appears later

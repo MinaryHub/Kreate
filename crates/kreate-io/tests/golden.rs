@@ -25,10 +25,21 @@
 //!
 //! # What these files are
 //!
-//! Written by version 1.0, the first released format. When a migration is added,
-//! this file becomes the input its test uses — see [`kreate_io::migrate`], which
-//! is explicit that a migration tested against a file synthesised by today's
-//! code tests today's *idea* of what the old version wrote.
+//! Two kinds, and they stopped being the same file when the format first gained
+//! a field:
+//!
+//! - `golden-v1.*` were written by version 1.0, the first released format.
+//!   **Never regenerated.** They are what backwards compatibility is proved
+//!   against, and a compatibility test whose input this build wrote proves
+//!   nothing. When a migration is added, these are its input — see
+//!   [`kreate_io::migrate`], which is explicit that a migration tested against
+//!   a file synthesised by today's code tests today's *idea* of what the old
+//!   version wrote.
+//! - `golden-current.*` are what this build writes, and are the tripwire.
+//!   Regenerated deliberately, with the diff read.
+//!
+//! A new `golden-vN` joins the first list whenever a released version's output
+//! is worth keeping. The list only grows: that is the whole point of it.
 
 use kreate_io::container::{self, Manifest};
 use kreate_io::kmesh;
@@ -166,13 +177,128 @@ fn golden_manifest() -> Manifest {
 
 #[test]
 fn the_golden_kmesh_is_still_what_this_build_writes() {
-    check_golden("golden-v1.kmesh", &kmesh::write(&golden_mesh(), &[]));
+    check_golden("golden-current.kmesh", &kmesh::write(&golden_mesh(), &[]));
 }
 
 #[test]
 fn the_golden_kreate_is_still_what_this_build_writes() {
     let bytes = container::write(&golden_document(), &golden_manifest(), &[]).expect("writes");
-    check_golden("golden-v1.kreate", &bytes);
+    check_golden("golden-current.kreate", &bytes);
+}
+
+#[test]
+fn what_this_build_writes_is_not_what_version_one_wrote() {
+    // Says out loud that the two files are different, and why the tripwire
+    // moved off the compatibility input. If they were ever identical again,
+    // one of them is redundant and somebody should find out which.
+    let current = std::fs::read(assets().join("golden-current.kreate")).expect("current golden");
+    let v1 = std::fs::read(assets().join("golden-v1.kreate")).expect("v1 golden");
+    assert_ne!(
+        current, v1,
+        "the tripwire and the compatibility input are the same bytes; either \
+         the format has not changed since 1.0 and one file will do, or the v1 \
+         file was regenerated — which it must never be"
+    );
+}
+
+#[test]
+fn a_version_one_scene_gets_fresh_identities() {
+    // The migration, such as it is. A v1 scene has no identities in it, and it
+    // has no curves either — nothing could have stored a path when there was
+    // nothing to point at — so assigning fresh ones on load loses nothing.
+    //
+    // What it must not do is leave them unassigned: an object with no identity
+    // cannot be animated, and the user would find that out by keying it and
+    // watching nothing happen.
+    let bytes = std::fs::read(assets().join("golden-v1.kreate")).expect("v1 golden");
+    let loaded = container::read(Cursor::new(bytes)).expect("opens");
+
+    let mut seen = Vec::new();
+    for (_, object) in loaded.document.objects() {
+        assert!(
+            !object.uid.is_none(),
+            "{} came back without an identity",
+            object.name
+        );
+        seen.push(object.uid);
+    }
+    seen.sort_unstable();
+    let distinct = {
+        let mut d = seen.clone();
+        d.dedup();
+        d.len()
+    };
+    assert_eq!(distinct, seen.len(), "two objects share an identity");
+
+    for (id, _) in loaded.document.meshes() {
+        assert!(
+            loaded.document.mesh_uid(id).is_some_and(|u| !u.is_none()),
+            "a mesh came back without an identity"
+        );
+    }
+}
+
+#[test]
+fn identities_survive_a_save_and_a_load() {
+    // The promise the whole mechanism exists for: a path stored in a file finds
+    // its target when the file is opened again.
+    //
+    // The fixture has **gaps** in its identities, and that is the whole test. A
+    // loader that ignored what the file said and issued fresh ids in order
+    // would give the same answer for a document numbered 1, 2, 3 — which is
+    // what the first version of this test used, and it passed with the reading
+    // side deleted. A falsification sweep caught that; the comment it replaced
+    // claimed name-to-identity pairs were enough, and they are not, because the
+    // names come back in the same order too.
+    let mut before = golden_document();
+    // Create and delete, so the survivors are not numbered from one.
+    let spare_a = before.add_object(Object::new("Spare A", ObjectData::Empty));
+    let last = before.add_object(Object::new("Last", ObjectData::Empty));
+    let spare_b = before.add_object(Object::new("Spare B", ObjectData::Empty));
+    before.remove_object(spare_a);
+    before.remove_object(spare_b);
+
+    let gappy: Vec<u64> = before.objects().map(|(_, o)| o.uid.raw()).collect();
+    assert!(
+        gappy.windows(2).any(|w| w[1] != w[0] + 1),
+        "the fixture is numbered contiguously ({gappy:?}), so it cannot tell \
+         reading identities from issuing them"
+    );
+    let _ = last;
+
+    let bytes = container::write(&before, &golden_manifest(), &[]).expect("writes");
+    let after = container::read(Cursor::new(bytes)).expect("opens").document;
+
+    let pairs = |doc: &Document| -> Vec<(String, u64)> {
+        doc.objects()
+            .map(|(_, o)| (o.name.clone(), o.uid.raw()))
+            .collect()
+    };
+    assert_eq!(pairs(&after), pairs(&before));
+    assert!(
+        pairs(&before).iter().all(|(_, uid)| *uid != 0),
+        "the fixture has an object with no identity"
+    );
+
+    // And a new object added after loading does not collide with anything the
+    // file used, including the numbers the deletions left behind.
+    let mut after = after;
+    let fresh = after.add_object(Object::new("Fresh", ObjectData::Empty));
+    let taken: Vec<u64> = pairs(&before).iter().map(|(_, uid)| *uid).collect();
+    let fresh_uid = after.object_uid(fresh).expect("an identity").raw();
+    assert!(
+        !taken.contains(&fresh_uid),
+        "a new object took {fresh_uid}, which the file already used"
+    );
+
+    // And a mesh shared by two objects is still one datablock with one
+    // identity.
+    let uids: Vec<u64> = after
+        .meshes()
+        .filter_map(|(id, _)| after.mesh_uid(id).map(|u| u.raw()))
+        .collect();
+    assert_eq!(uids.len(), 1);
+    assert_ne!(uids[0], 0);
 }
 
 #[test]
@@ -260,7 +386,12 @@ fn the_golden_kreate_still_reads_correctly() {
 fn the_golden_files_are_committed() {
     // A golden test that silently creates its own input the first time it runs
     // is a golden test that never fails. This says so out loud.
-    for name in ["golden-v1.kmesh", "golden-v1.kreate"] {
+    for name in [
+        "golden-v1.kmesh",
+        "golden-v1.kreate",
+        "golden-current.kmesh",
+        "golden-current.kreate",
+    ] {
         let path = assets().join(name);
         assert!(
             path.exists(),
