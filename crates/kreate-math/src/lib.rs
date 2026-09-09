@@ -38,6 +38,7 @@ pub use glam::{
 };
 
 mod aabb;
+mod agx;
 mod axis;
 mod bvh;
 mod color;
@@ -48,6 +49,10 @@ mod time;
 mod transform;
 
 pub use aabb::Aabb;
+/// The display transform. `MIN_EV`/`MAX_EV` are renamed on the way out:
+/// they are AgX's exposure range and nothing else's, and a bare `MIN_EV`
+/// at the crate root would read as a property of the working space.
+pub use agx::{DisplayTransform, ViewTransform, MAX_EV as AGX_MAX_EV, MIN_EV as AGX_MIN_EV};
 pub use axis::{Axis, AxisConvention, Handedness, UpAxis};
 pub use bvh::{Bvh, Hit};
 pub use color::{linear_to_srgb, srgb_to_linear, DisplayRgb, SceneRgb, Srgb};

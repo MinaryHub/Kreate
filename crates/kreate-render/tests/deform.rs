@@ -53,14 +53,30 @@ struct Gpu {
     queue: wgpu::Queue,
 }
 
+/// The one device this test binary uses.
+///
+/// Shared rather than created per test, and a falsification sweep is what
+/// forced the question: eighteen repeated runs of this binary created several
+/// hundred devices between them and the driver eventually wedged, leaving
+/// `poll(wait_indefinitely)` waiting forever — fifteen minutes elapsed against
+/// two seconds of CPU.
+///
+/// There was never a reason for one each. No test here mutates device state,
+/// so per-test creation buys no isolation and costs the driver eight times the
+/// work. `wgpu::Device` and `Queue` are `Arc` handles, so cloning them is a
+/// refcount bump and every call site stays as it was.
 fn gpu() -> Option<Gpu> {
-    let opts = GpuOptions::default();
-    let instance = kreate_render::Gpu::create_instance(&opts);
-    let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
-    Some(Gpu {
-        device: gpu.device.clone(),
-        queue: gpu.queue.clone(),
-    })
+    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+        std::sync::OnceLock::new();
+    let (device, queue) = SHARED
+        .get_or_init(|| {
+            let opts = GpuOptions::default();
+            let instance = kreate_render::Gpu::create_instance(&opts);
+            let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
+            Some((gpu.device.clone(), gpu.queue.clone()))
+        })
+        .clone()?;
+    Some(Gpu { device, queue })
 }
 
 /// Skips when there is no adapter, which is the state of a headless runner.

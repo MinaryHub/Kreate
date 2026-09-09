@@ -8,6 +8,7 @@ pub mod capability;
 pub mod cluster;
 pub mod cluster_cull;
 pub mod deform;
+pub mod display;
 pub mod gpu;
 pub mod hiz;
 pub mod lod;
