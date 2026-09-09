@@ -336,7 +336,7 @@ fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
             let kind = match object.data {
                 ObjectData::Mesh(_) => "mesh",
                 ObjectData::Empty => "empty",
-                ObjectData::Camera => "camera",
+                ObjectData::Camera(_) => "camera",
                 ObjectData::Light => "light",
             };
             println!(
@@ -490,7 +490,7 @@ fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
                 None => print!(" mesh missing"),
             },
             ObjectData::Empty => print!(" empty"),
-            ObjectData::Camera => print!(" camera"),
+            ObjectData::Camera(_) => print!(" camera"),
             ObjectData::Light => print!(" light"),
         }
         if !object.visible {

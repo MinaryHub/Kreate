@@ -33,6 +33,8 @@ use kreate_mesh::arena::Arena;
 use kreate_mesh::{define_id, MeshData};
 use kreate_reflect::{DatablockKind, Uid};
 
+use crate::camera::Camera;
+
 define_id! {
     /// An object in the scene graph.
     pub struct ObjectId;
@@ -42,6 +44,16 @@ define_id! {
     pub struct MeshId;
 }
 define_id! {
+    /// A camera datablock.
+    ///
+    /// Distinct from `ObjectId`: the object is *where* the camera is and the
+    /// datablock is *what* it is. Two objects can share one lens, which is
+    /// what a stereo pair or a set of matched angles wants, and what §1.4's
+    /// argument for meshes says about every datablock.
+    pub struct CameraId;
+}
+
+kreate_mesh::define_id! {
     /// A material datablock.
     pub struct MaterialId;
 }
@@ -57,7 +69,7 @@ pub enum ObjectData {
     /// A transform with no geometry. Useful as a pivot or a rig control.
     Empty,
     Mesh(MeshId),
-    Camera,
+    Camera(CameraId),
     Light,
 }
 
@@ -233,6 +245,7 @@ pub struct Document {
     /// inside is itself copy-on-write per attribute array.
     meshes: Arena<MeshId, MeshEntry>,
     materials: Arena<MaterialId, Arc<Material>>,
+    cameras: Arena<CameraId, Arc<Camera>>,
     collections: Arena<CollectionId, Collection>,
     /// Objects with no parent, in user-visible order.
     roots: Vec<ObjectId>,
@@ -269,6 +282,7 @@ struct MeshEntry {
 struct UidCounters {
     object: Uid,
     mesh: Uid,
+    camera: Uid,
 }
 
 impl Document {
@@ -352,6 +366,7 @@ impl Document {
         let counter = match kind {
             DatablockKind::Object => &mut self.uids.object,
             DatablockKind::Mesh => &mut self.uids.mesh,
+            DatablockKind::Camera => &mut self.uids.camera,
             // Nothing else is a datablock in this document yet. Reaching here
             // means a kind was added to the enum and not to the counters, and
             // handing back the unassigned id makes that a resolvable path to
@@ -715,6 +730,57 @@ impl Document {
     pub fn object_at_slot(&self, index: u32) -> Option<ObjectId> {
         self.objects.handle_at(index)
     }
+
+    // --- cameras ------------------------------------------------------------
+
+    pub fn add_camera(&mut self, camera: Camera) -> CameraId {
+        let uid = self.issue(DatablockKind::Camera);
+        self.touch();
+        self.cameras.insert(Arc::new(Camera { uid, ..camera }))
+    }
+
+    /// Adds a camera with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_camera(&mut self, camera: Camera, uid: Uid) -> CameraId {
+        if uid.is_none() {
+            return self.add_camera(camera);
+        }
+        self.uids.camera = self.uids.camera.max(uid);
+        self.touch();
+        self.cameras.insert(Arc::new(Camera { uid, ..camera }))
+    }
+
+    pub fn camera(&self, id: CameraId) -> Option<&Camera> {
+        self.cameras.get(id).map(|c| c.as_ref())
+    }
+
+    /// Copy-on-write access to a camera.
+    pub fn camera_mut(&mut self, id: CameraId) -> Option<&mut Camera> {
+        self.touch();
+        self.cameras.get_mut(id).map(Arc::make_mut)
+    }
+
+    /// Every camera datablock, in arena slot order.
+    pub fn cameras(&self) -> impl Iterator<Item = (CameraId, &Camera)> {
+        self.cameras.iter().map(|(id, c)| (id, c.as_ref()))
+    }
+
+    pub fn camera_count(&self) -> usize {
+        self.cameras.len()
+    }
+
+    pub fn camera_uid(&self, id: CameraId) -> Option<Uid> {
+        self.cameras.get(id).map(|c| c.uid)
+    }
+
+    pub fn camera_by_uid(&self, uid: Uid) -> Option<CameraId> {
+        self.cameras
+            .iter()
+            .find(|(_, c)| c.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    // --- materials ----------------------------------------------------------
 
     pub fn add_material(&mut self, material: Material) -> MaterialId {
         self.touch();
