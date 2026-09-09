@@ -993,7 +993,7 @@ impl App {
     /// every operator has to remember to invalidate is a cache one of them
     /// will forget.
     fn publish_uv_view(&mut self) {
-        if !self.ui.has_editor(kreate_ui::EditorKind::UvEditor) {
+        if !self.ui.has_editor(kreate_ui::EditorId::UV_EDITOR) {
             self.ui.uv = None;
             return;
         }

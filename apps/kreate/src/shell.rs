@@ -45,6 +45,12 @@ pub struct ContextMenu {
 
 pub struct ShellState {
     pub catalog: Catalog,
+    /// Every editor this build can show.
+    ///
+    /// A registry and not a variant list, which is what lets an add-on add one
+    /// (Phase 9) and what lets an area name an editor this build does not have
+    /// without the layout being thrown away. See [`kreate_ui::EditorRegistry`].
+    pub editors: kreate_ui::EditorRegistry,
     pub queue: CommandQueue,
     /// Parameters shown in the adjust-last-operation panel.
     pub adjust_params: Option<(String, PropertyMap)>,
@@ -212,9 +218,9 @@ pub struct ModalHeader {
 }
 
 /// A layout change, queued during a frame and applied after it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum AreaEdit {
-    SetEditor(kreate_ui::AreaId, kreate_ui::EditorKind),
+    SetEditor(kreate_ui::AreaId, kreate_ui::EditorId),
     Split(kreate_ui::AreaId, kreate_ui::Axis),
     Close(kreate_ui::AreaId),
     Resize(kreate_ui::SplitId, f32, f32),
@@ -269,7 +275,7 @@ impl ShellState {
     }
 
     /// Asks for an area to show another editor when the frame ends.
-    pub fn set_area_editor(&mut self, area: kreate_ui::AreaId, kind: kreate_ui::EditorKind) {
+    pub fn set_area_editor(&mut self, area: kreate_ui::AreaId, kind: kreate_ui::EditorId) {
         self.area_edits.push(AreaEdit::SetEditor(area, kind));
     }
 
@@ -289,7 +295,7 @@ impl ShellState {
             .screen()
             .areas()
             .into_iter()
-            .filter(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .filter(|(_, kind)| *kind == kreate_ui::EditorId::VIEWPORT)
             .map(|(id, _)| id)
             .collect();
         let opening = viewports.iter().any(|id| !self.sidebars.contains(id));
@@ -312,7 +318,7 @@ impl ShellState {
     /// What the application asks instead of reading a `show_*` boolean. It is
     /// deliberately a question about the layout rather than about a setting:
     /// there is no separate notion of an editor being "on".
-    pub fn has_editor(&self, kind: kreate_ui::EditorKind) -> bool {
+    pub fn has_editor(&self, kind: kreate_ui::EditorId) -> bool {
         self.screen().areas().iter().any(|(_, k)| *k == kind)
     }
 
@@ -325,7 +331,7 @@ impl ShellState {
         self.screen()
             .areas()
             .into_iter()
-            .filter(|(_, kind)| *kind == kreate_ui::EditorKind::UvEditor)
+            .filter(|(_, kind)| *kind == kreate_ui::EditorId::UV_EDITOR)
             .find_map(|(id, _)| {
                 let state = self.uv_views.get(&id)?;
                 state.rect.filter(|r| r.contains(at)).map(|_| (id, state))
@@ -362,7 +368,7 @@ impl ShellState {
                     let kind = self
                         .screen()
                         .editor(area)
-                        .unwrap_or(kreate_ui::EditorKind::Viewport);
+                        .unwrap_or(kreate_ui::EditorId::VIEWPORT);
                     self.screen_mut().split(area, axis, 0.5, kind);
                 }
                 AreaEdit::Close(area) => {
@@ -386,6 +392,7 @@ impl ShellState {
 impl Default for ShellState {
     fn default() -> Self {
         Self {
+            editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
             queue: CommandQueue::new(),
             adjust_params: None,
@@ -683,6 +690,7 @@ struct Labels {
     uv_none: String,
     uv_not_editing: String,
     area_menu: String,
+    editor_unavailable: String,
     sidebar_item: String,
     sidebar_nothing: String,
     area_split_v: String,
@@ -729,6 +737,7 @@ impl Labels {
             uv_none: t("uv-none"),
             uv_not_editing: t("uv-not-editing"),
             area_menu: t("area-menu"),
+            editor_unavailable: t("editor-unavailable"),
             sidebar_item: t("sidebar-item"),
             sidebar_nothing: t("sidebar-nothing"),
             area_split_v: t("area-split-vertical"),
@@ -1064,7 +1073,7 @@ pub fn draw(
             let first_viewport = layout
                 .areas
                 .iter()
-                .find(|a| a.editor == kreate_ui::EditorKind::Viewport)
+                .find(|a| a.editor == kreate_ui::EditorId::VIEWPORT)
                 .map(|a| a.id);
 
             let mut texture = viewport_texture;
@@ -1154,7 +1163,11 @@ fn draw_area(
     // The viewport takes its body whole: the rendered image is meant to reach
     // the edges, and padding around it would be a grey frame the user did not
     // ask for. Everything else gets the panel inset.
-    let inner = if area.editor == kreate_ui::EditorKind::Viewport {
+    //
+    // Asked of the registry rather than compared against one id, so an editor
+    // that wants the same treatment says so where it is registered instead of
+    // here.
+    let inner = if state.editors.full_bleed(&area.editor) {
         body
     } else {
         body.shrink(theme.panel_padding)
@@ -1170,14 +1183,14 @@ fn draw_area(
             .id_salt(("area-body", area.id.0)),
         |ui| {
             ui.set_clip_rect(inner);
-            match area.editor {
-                kreate_ui::EditorKind::Viewport => {
+            match area.editor.as_str() {
+                "viewport" => {
                     draw_viewport(ui, state, inner, image);
                     if state.sidebar_open(area.id) {
                         draw_item_sidebar(ui, state, doc, registry, area.id, inner, l);
                     }
                 }
-                kreate_ui::EditorKind::Outliner => {
+                "outliner" => {
                     let order = std::mem::take(&mut state.outliner);
                     kreate_ui::outliner(
                         ui,
@@ -1190,16 +1203,16 @@ fn draw_area(
                     );
                     state.outliner = order;
                 }
-                kreate_ui::EditorKind::Properties => {
+                "properties" => {
                     draw_adjust_panel(ui, state, registry, history);
                     ui.separator();
                     ui.heading(&l.modifiers);
                     draw_modifier_stack(ui, state, modifier_rows);
                 }
-                kreate_ui::EditorKind::UvEditor => {
+                "uv" => {
                     draw_uv_editor(ui, state, area.id, l);
                 }
-                kreate_ui::EditorKind::Preferences => {
+                "preferences" => {
                     let conflicts = keymap.conflicts();
                     let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
                     let mut edits = std::mem::take(&mut state.keymap_edits);
@@ -1215,6 +1228,19 @@ fn draw_area(
                     );
                     state.keymap_edits = edits;
                 }
+                // An area naming an editor this build does not have. Said out
+                // loud, with the id it wants, because the likeliest cause is a
+                // missing add-on and the user can act on that. Silently drawing
+                // a viewport instead — which is what the closed enum did — has
+                // them rearrange a layout that was never broken.
+                unknown => {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(theme.panel_padding * 2.0);
+                        ui.weak(&l.editor_unavailable);
+                        // i18n-exempt: an editor id is data from a file
+                        ui.monospace(unknown);
+                    });
+                }
             }
         },
     );
@@ -1228,27 +1254,35 @@ fn draw_area(
 /// the frame is drawing against a layout derived from it.
 fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaRect, l: &Labels) {
     ui.horizontal(|ui| {
-        let names: Vec<(kreate_ui::EditorKind, String)> = kreate_ui::EditorKind::ALL
+        // From the registry, so an editor an add-on registered appears in the
+        // dropdown without the shell being told about it. A variant list here
+        // was the other half of what made registration impossible.
+        let names: Vec<(kreate_ui::EditorId, String)> = state
+            .editors
             .iter()
-            .map(|kind| {
+            .map(|info| {
                 (
-                    *kind,
-                    state.catalog.format(kind.name_key(), TextKind::Ui, &[]),
+                    info.id.clone(),
+                    state.catalog.format(info.name_key, TextKind::Ui, &[]),
                 )
             })
             .collect();
+        // An area showing an editor this build does not have says so, with the
+        // id it is asking for. Falling back to a blank would leave the user
+        // unable to tell a missing add-on from a broken layout.
         let current = names
             .iter()
-            .find(|(kind, _)| *kind == area.editor)
+            .find(|(id, _)| *id == area.editor)
             .map(|(_, name)| name.clone())
-            .unwrap_or_default();
+            // i18n-exempt: an unknown editor's id is data from a file, not prose
+            .unwrap_or_else(|| format!("? {}", area.editor));
 
         egui::ComboBox::from_id_salt(("editor-kind", area.id.0))
             .selected_text(current)
             .show_ui(ui, |ui| {
-                for (kind, name) in &names {
-                    if ui.selectable_label(*kind == area.editor, name).clicked() {
-                        state.set_area_editor(area.id, *kind);
+                for (id, name) in &names {
+                    if ui.selectable_label(*id == area.editor, name).clicked() {
+                        state.set_area_editor(area.id, id.clone());
                     }
                 }
             });
@@ -2371,7 +2405,7 @@ mod tests {
             .screen()
             .areas()
             .into_iter()
-            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .find(|(_, kind)| *kind == kreate_ui::EditorId::VIEWPORT)
             .expect("the default layout has a viewport")
             .0;
         (state, viewport)
@@ -2408,7 +2442,7 @@ mod tests {
             .screen()
             .areas()
             .into_iter()
-            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Outliner)
+            .find(|(_, kind)| *kind == kreate_ui::EditorId::OUTLINER)
             .expect("the default layout has an outliner")
             .0;
 
@@ -2463,7 +2497,7 @@ mod tests {
         let mut state = ShellState {
             workspaces: kreate_ui::Workspaces::single(
                 "Only",
-                kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+                kreate_ui::Screen::single(kreate_ui::EditorId::UV_EDITOR),
             ),
             ..Default::default()
         };
@@ -2532,7 +2566,7 @@ mod tests {
         // layout without one would start up showing nothing.
         let state = ShellState::default();
         let areas = state.screen().areas();
-        assert!(state.has_editor(kreate_ui::EditorKind::Viewport));
+        assert!(state.has_editor(kreate_ui::EditorId::VIEWPORT));
         assert_eq!(areas.len(), 3, "viewport, outliner, properties");
 
         let mut ids: Vec<_> = areas.iter().map(|(id, _)| *id).collect();
@@ -2540,7 +2574,7 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), areas.len(), "an id was handed out twice");
 
-        assert!(!state.has_editor(kreate_ui::EditorKind::UvEditor));
+        assert!(!state.has_editor(kreate_ui::EditorId::UV_EDITOR));
         assert!(state.uv_at(egui::Pos2::ZERO).is_none(), "no UV editor open");
     }
 
@@ -2618,7 +2652,7 @@ mod tests {
         let mut state = ShellState {
             workspaces: kreate_ui::Workspaces::single(
                 "Two",
-                kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport),
+                kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT),
             ),
             ..Default::default()
         };
@@ -2629,7 +2663,7 @@ mod tests {
                 first,
                 kreate_ui::Axis::Vertical,
                 0.5,
-                kreate_ui::EditorKind::Viewport,
+                kreate_ui::EditorId::VIEWPORT,
             )
             .expect("split");
 
@@ -2654,7 +2688,7 @@ mod tests {
         let mut state = ShellState {
             workspaces: kreate_ui::Workspaces::single(
                 "Two",
-                kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport),
+                kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT),
             ),
             ..Default::default()
         };
@@ -2666,7 +2700,7 @@ mod tests {
                 first,
                 kreate_ui::Axis::Vertical,
                 0.5,
-                kreate_ui::EditorKind::Viewport,
+                kreate_ui::EditorId::VIEWPORT,
             )
             .expect("split");
         assert!(state.sidebar_open(first));
@@ -2687,7 +2721,7 @@ mod tests {
         let mut state = ShellState {
             workspaces: kreate_ui::Workspaces::single(
                 "None",
-                kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor),
+                kreate_ui::Screen::single(kreate_ui::EditorId::UV_EDITOR),
             ),
             ..Default::default()
         };

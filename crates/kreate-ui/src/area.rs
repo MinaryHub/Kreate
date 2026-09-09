@@ -60,62 +60,148 @@ pub enum Axis {
     Horizontal,
 }
 
-/// What an area is showing.
+/// Which editor an area is showing.
 ///
-/// A closed set for now, matched in one place in the shell. It becomes a
-/// registry of trait objects when a script can register an editor of its own —
-/// the tree above does not change when that happens, which is the point of
-/// keeping the two apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum EditorKind {
-    Viewport,
-    Outliner,
-    Properties,
-    UvEditor,
-    Preferences,
+/// A string and not an enum, and that is the whole of §2.6's registry
+/// decision. An enum is a closed set: nothing outside this crate can add a
+/// variant, so a script cannot register an editor (Phase 9) and every new one
+/// costs a variant plus an arm in each of several matches. Four new pillars
+/// want nine more editor types.
+///
+/// The id *is* the serialised form, which removes a whole class of mistake as
+/// well. The enum needed a separate `tag`, because writing a discriminant would
+/// have made a saved layout depend on the order the variants happened to be
+/// declared in — insert an editor in the middle and everyone's workspaces
+/// silently reinterpret. With the id as the name there is nothing to keep in
+/// step.
+///
+/// # An id this build does not know is kept, not replaced
+///
+/// A layout from a later version, or one saved while an add-on was installed,
+/// names editors that are not here. Such an area keeps its id and is drawn as
+/// missing. What it must not do is quietly become a viewport: the user's
+/// carefully arranged layout would come back subtly wrong, they would fix it,
+/// and installing the add-on again would not bring it back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EditorId(std::borrow::Cow<'static, str>);
+
+impl EditorId {
+    pub const VIEWPORT: Self = Self::known("viewport");
+    pub const OUTLINER: Self = Self::known("outliner");
+    pub const PROPERTIES: Self = Self::known("properties");
+    pub const UV_EDITOR: Self = Self::known("uv");
+    pub const PREFERENCES: Self = Self::known("preferences");
+
+    /// An id spelled out in this build.
+    pub const fn known(id: &'static str) -> Self {
+        Self(std::borrow::Cow::Borrowed(id))
+    }
+
+    /// An id read from a file, which may name nothing this build has.
+    pub fn parse(id: &str) -> Self {
+        Self(std::borrow::Cow::Owned(id.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-impl EditorKind {
-    /// Every kind, in the order a menu should offer them.
-    pub const ALL: [EditorKind; 5] = [
-        EditorKind::Viewport,
-        EditorKind::Outliner,
-        EditorKind::Properties,
-        EditorKind::UvEditor,
-        EditorKind::Preferences,
-    ];
+impl std::fmt::Display for EditorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
+/// What the shell needs to know about an editor without drawing it.
+///
+/// The drawing itself is still a match in the shell, and deliberately so for
+/// now: moving it behind a trait means a context object carrying everything any
+/// editor could want, which is the same pile of arguments in a different shape
+/// until there is a second family of editors to make the abstraction pay. What
+/// could not wait is the *registration*, because the closed enum is what makes
+/// an add-on's editor impossible and makes an unknown id unrepresentable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorInfo {
+    pub id: EditorId,
     /// The catalogue key for this editor's name.
     ///
-    /// A key rather than a string: the editor-type dropdown is UI prose and goes
-    /// through Fluent like the rest of it.
-    pub fn name_key(self) -> &'static str {
-        match self {
-            EditorKind::Viewport => "editor-viewport",
-            EditorKind::Outliner => "editor-outliner",
-            EditorKind::Properties => "editor-properties",
-            EditorKind::UvEditor => "editor-uv",
-            EditorKind::Preferences => "editor-preferences",
-        }
-    }
-
-    /// A stable name for the file format, independent of the enum's order.
+    /// A key rather than a string: the editor-type dropdown is UI prose and
+    /// goes through Fluent like the rest of it.
+    pub name_key: &'static str,
+    /// Whether the body reaches the edges of the area.
     ///
-    /// Serialising the discriminant would make a saved layout depend on the
-    /// order variants happen to be declared in, so inserting an editor in the
-    /// middle would silently reinterpret everyone's saved workspaces.
-    pub fn tag(self) -> &'static str {
-        match self {
-            EditorKind::Viewport => "viewport",
-            EditorKind::Outliner => "outliner",
-            EditorKind::Properties => "properties",
-            EditorKind::UvEditor => "uv",
-            EditorKind::Preferences => "preferences",
+    /// True for the viewport, whose rendered image is meant to touch the edges;
+    /// everything else takes the panel inset. A property of the editor rather
+    /// than a special case in the shell, which is what it used to be.
+    pub full_bleed: bool,
+}
+
+/// Every editor this build can show, in the order a menu offers them.
+#[derive(Clone, Debug, Default)]
+pub struct EditorRegistry {
+    entries: Vec<EditorInfo>,
+}
+
+impl EditorRegistry {
+    /// The editors this build ships.
+    pub fn with_builtins() -> Self {
+        let mut registry = Self::default();
+        for (id, name_key, full_bleed) in [
+            (EditorId::VIEWPORT, "editor-viewport", true),
+            (EditorId::OUTLINER, "editor-outliner", false),
+            (EditorId::PROPERTIES, "editor-properties", false),
+            (EditorId::UV_EDITOR, "editor-uv", false),
+            (EditorId::PREFERENCES, "editor-preferences", false),
+        ] {
+            registry.register(EditorInfo {
+                id,
+                name_key,
+                full_bleed,
+            });
+        }
+        registry
+    }
+
+    /// Adds an editor, or replaces one already registered under the same id.
+    ///
+    /// Replacing rather than refusing, so that an add-on can override a
+    /// built-in — and so that registering twice is not a hard error in a
+    /// reload, which is the commonest thing a script does.
+    pub fn register(&mut self, info: EditorInfo) {
+        match self.entries.iter_mut().find(|e| e.id == info.id) {
+            Some(slot) => *slot = info,
+            None => self.entries.push(info),
         }
     }
 
-    pub fn from_tag(tag: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.tag() == tag)
+    pub fn get(&self, id: &EditorId) -> Option<&EditorInfo> {
+        self.entries.iter().find(|e| &e.id == id)
+    }
+
+    pub fn is_known(&self, id: &EditorId) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// Every registered editor, in registration order.
+    pub fn iter(&self) -> impl Iterator<Item = &EditorInfo> {
+        self.entries.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether an area's body reaches the edges.
+    ///
+    /// An id this build does not know takes the inset, because what is drawn
+    /// there is a message and a message wants a margin.
+    pub fn full_bleed(&self, id: &EditorId) -> bool {
+        self.get(id).is_some_and(|e| e.full_bleed)
     }
 }
 
@@ -131,10 +217,10 @@ impl EditorKind {
 /// more honest than writing numbers that mean nothing to the next run. What is
 /// lost is a UV editor's zoom across a restart, which is worth less than a
 /// format that cannot be got wrong.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NodeSpec {
     Split { axis: Axis, ratio: f32 },
-    Area { editor: EditorKind },
+    Area { editor: EditorId },
 }
 
 impl Axis {
@@ -177,7 +263,7 @@ enum Node {
     },
     Leaf {
         id: AreaId,
-        editor: EditorKind,
+        editor: EditorId,
     },
 }
 
@@ -191,10 +277,10 @@ pub struct Screen {
 }
 
 /// Where an area ended up.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AreaRect {
     pub id: AreaId,
-    pub editor: EditorKind,
+    pub editor: EditorId,
     pub rect: Rect,
 }
 
@@ -224,7 +310,7 @@ pub struct Layout {
 
 impl Screen {
     /// A screen of one area.
-    pub fn single(editor: EditorKind) -> Self {
+    pub fn single(editor: EditorId) -> Self {
         Self {
             root: Node::Leaf {
                 id: AreaId(0),
@@ -241,7 +327,7 @@ impl Screen {
     }
 
     /// Every area, in tree order.
-    pub fn areas(&self) -> Vec<(AreaId, EditorKind)> {
+    pub fn areas(&self) -> Vec<(AreaId, EditorId)> {
         let mut out = Vec::new();
         collect(&self.root, &mut out);
         out
@@ -252,7 +338,7 @@ impl Screen {
     }
 
     /// What `area` is showing.
-    pub fn editor(&self, area: AreaId) -> Option<EditorKind> {
+    pub fn editor(&self, area: AreaId) -> Option<EditorId> {
         self.areas()
             .into_iter()
             .find(|(id, _)| *id == area)
@@ -260,7 +346,7 @@ impl Screen {
     }
 
     /// Points `area` at another editor. `false` if there is no such area.
-    pub fn set_editor(&mut self, area: AreaId, kind: EditorKind) -> bool {
+    pub fn set_editor(&mut self, area: AreaId, kind: EditorId) -> bool {
         match find_leaf_mut(&mut self.root, area) {
             Some(editor) => {
                 *editor = kind;
@@ -280,7 +366,7 @@ impl Screen {
         area: AreaId,
         axis: Axis,
         ratio: f32,
-        editor: EditorKind,
+        editor: EditorId,
     ) -> Option<AreaId> {
         // The ids are taken before the tree is touched, because taking them
         // needs `&mut self` and so does the walk.
@@ -381,7 +467,9 @@ impl Screen {
 
 fn flatten(node: &Node, out: &mut Vec<NodeSpec>) {
     match node {
-        Node::Leaf { editor, .. } => out.push(NodeSpec::Area { editor: *editor }),
+        Node::Leaf { editor, .. } => out.push(NodeSpec::Area {
+            editor: editor.clone(),
+        }),
         Node::Split {
             axis,
             ratio,
@@ -403,11 +491,14 @@ fn flatten(node: &Node, out: &mut Vec<NodeSpec>) {
 fn build(nodes: &mut &[NodeSpec], next: &mut u32) -> Option<Node> {
     let (head, tail) = nodes.split_first()?;
     *nodes = tail;
-    match *head {
+    match head {
         NodeSpec::Area { editor } => {
             let id = AreaId(*next);
             *next += 1;
-            Some(Node::Leaf { id, editor })
+            Some(Node::Leaf {
+                id,
+                editor: editor.clone(),
+            })
         }
         NodeSpec::Split { axis, ratio } => {
             let id = SplitId(*next);
@@ -418,8 +509,8 @@ fn build(nodes: &mut &[NodeSpec], next: &mut u32) -> Option<Node> {
             let second = Box::new(build(nodes, next)?);
             Some(Node::Split {
                 id,
-                axis,
-                ratio: sane_ratio(ratio),
+                axis: *axis,
+                ratio: sane_ratio(*ratio),
                 first,
                 second,
             })
@@ -427,9 +518,9 @@ fn build(nodes: &mut &[NodeSpec], next: &mut u32) -> Option<Node> {
     }
 }
 
-fn collect(node: &Node, out: &mut Vec<(AreaId, EditorKind)>) {
+fn collect(node: &Node, out: &mut Vec<(AreaId, EditorId)>) {
     match node {
-        Node::Leaf { id, editor } => out.push((*id, *editor)),
+        Node::Leaf { id, editor } => out.push((*id, editor.clone())),
         Node::Split { first, second, .. } => {
             collect(first, out);
             collect(second, out);
@@ -437,7 +528,7 @@ fn collect(node: &Node, out: &mut Vec<(AreaId, EditorKind)>) {
     }
 }
 
-fn find_leaf_mut(node: &mut Node, area: AreaId) -> Option<&mut EditorKind> {
+fn find_leaf_mut(node: &mut Node, area: AreaId) -> Option<&mut EditorId> {
     match node {
         Node::Leaf { id, editor } => (*id == area).then_some(editor),
         Node::Split { first, second, .. } => {
@@ -499,7 +590,7 @@ fn close_in(node: &mut Node, area: AreaId) -> bool {
             node,
             Node::Leaf {
                 id: AreaId(u32::MAX),
-                editor: EditorKind::Viewport,
+                editor: EditorId::VIEWPORT,
             },
         ) else {
             unreachable!("matched a split on the line above");
@@ -552,7 +643,7 @@ fn place(node: &Node, rect: Rect, out: &mut Layout) {
     match node {
         Node::Leaf { id, editor } => out.areas.push(AreaRect {
             id: *id,
-            editor: *editor,
+            editor: editor.clone(),
             rect,
         }),
         Node::Split {
@@ -637,16 +728,16 @@ mod tests {
     /// └───────────────────────┘
     /// ```
     fn nested() -> (Screen, [AreaId; 4]) {
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let viewport = screen.areas()[0].0;
         let uv = screen
-            .split(viewport, Axis::Horizontal, 0.7, EditorKind::UvEditor)
+            .split(viewport, Axis::Horizontal, 0.7, EditorId::UV_EDITOR)
             .expect("split the only area");
         let outliner = screen
-            .split(viewport, Axis::Vertical, 0.75, EditorKind::Outliner)
+            .split(viewport, Axis::Vertical, 0.75, EditorId::OUTLINER)
             .expect("split the viewport");
         let properties = screen
-            .split(outliner, Axis::Horizontal, 0.4, EditorKind::Properties)
+            .split(outliner, Axis::Horizontal, 0.4, EditorId::PROPERTIES)
             .expect("split the outliner");
         (screen, [viewport, outliner, properties, uv])
     }
@@ -689,7 +780,7 @@ mod tests {
 
         let victim = rebuilt.areas()[1].0;
         assert!(rebuilt
-            .split(victim, Axis::Vertical, 0.5, EditorKind::Preferences)
+            .split(victim, Axis::Vertical, 0.5, EditorId::PREFERENCES)
             .is_some());
         assert_eq!(rebuilt.area_count(), count + 1);
         // And the new id collides with nothing, which is what `next` is for.
@@ -702,11 +793,11 @@ mod tests {
 
     #[test]
     fn a_single_area_flattens_to_one_node() {
-        let screen = Screen::single(EditorKind::UvEditor);
+        let screen = Screen::single(EditorId::UV_EDITOR);
         assert_eq!(
             screen.to_nodes(),
             vec![NodeSpec::Area {
-                editor: EditorKind::UvEditor
+                editor: EditorId::UV_EDITOR
             }]
         );
     }
@@ -724,24 +815,31 @@ mod tests {
             ratio: 0.5,
         };
         let area = NodeSpec::Area {
-            editor: EditorKind::Viewport,
+            editor: EditorId::VIEWPORT,
         };
-        assert!(Screen::from_nodes(&[split]).is_none(), "no children");
-        assert!(Screen::from_nodes(&[split, area]).is_none(), "one child");
+        assert!(
+            Screen::from_nodes(std::slice::from_ref(&split)).is_none(),
+            "no children"
+        );
+        assert!(
+            Screen::from_nodes(&[split.clone(), area.clone()]).is_none(),
+            "one child"
+        );
 
         // Two trees, one after the other.
         assert!(
-            Screen::from_nodes(&[area, area]).is_none(),
+            Screen::from_nodes(&[area.clone(), area.clone()]).is_none(),
             "trailing nodes"
         );
         assert!(
-            Screen::from_nodes(&[split, area, area, area]).is_none(),
+            Screen::from_nodes(&[split.clone(), area.clone(), area.clone(), area.clone()])
+                .is_none(),
             "a whole extra area"
         );
 
         // And the well-formed one in the middle of all that really does work,
         // so this is not a test that everything is refused.
-        assert!(Screen::from_nodes(&[split, area, area]).is_some());
+        assert!(Screen::from_nodes(&[split.clone(), area.clone(), area.clone()]).is_some());
     }
 
     #[test]
@@ -763,10 +861,10 @@ mod tests {
                     ratio: bad,
                 },
                 NodeSpec::Area {
-                    editor: EditorKind::Viewport,
+                    editor: EditorId::VIEWPORT,
                 },
                 NodeSpec::Area {
-                    editor: EditorKind::Outliner,
+                    editor: EditorId::OUTLINER,
                 },
             ];
             let screen = Screen::from_nodes(&nodes).expect("well formed");
@@ -807,7 +905,7 @@ mod tests {
 
     #[test]
     fn one_area_fills_the_space_exactly() {
-        let screen = Screen::single(EditorKind::Viewport);
+        let screen = Screen::single(EditorId::VIEWPORT);
         let layout = screen.layout(space());
         assert_eq!(layout.areas.len(), 1);
         assert_eq!(layout.areas[0].rect, space());
@@ -819,10 +917,10 @@ mod tests {
         // Which axis is which, checked against the arithmetic rather than
         // against a symmetric picture. `Vertical` names the boundary, so the
         // *width* is what gets divided.
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let left = screen.areas()[0].0;
         screen
-            .split(left, Axis::Vertical, 0.25, EditorKind::Outliner)
+            .split(left, Axis::Vertical, 0.25, EditorId::OUTLINER)
             .expect("split");
 
         let layout = screen.layout(space());
@@ -844,10 +942,10 @@ mod tests {
 
     #[test]
     fn a_horizontal_split_divides_the_height() {
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let top = screen.areas()[0].0;
         screen
-            .split(top, Axis::Horizontal, 0.25, EditorKind::UvEditor)
+            .split(top, Axis::Horizontal, 0.25, EditorId::UV_EDITOR)
             .expect("split");
 
         let layout = screen.layout(space());
@@ -914,7 +1012,7 @@ mod tests {
         let before: Vec<_> = screen.areas();
 
         screen
-            .split(viewport, Axis::Vertical, 0.5, EditorKind::Preferences)
+            .split(viewport, Axis::Vertical, 0.5, EditorId::PREFERENCES)
             .expect("split");
 
         for id in [outliner, properties, uv] {
@@ -923,7 +1021,7 @@ mod tests {
                 before
                     .iter()
                     .find(|(b, _)| *b == id)
-                    .map(|(_, editor)| *editor),
+                    .map(|(_, editor)| editor.clone()),
                 "area {id:?} changed editor"
             );
         }
@@ -999,7 +1097,7 @@ mod tests {
     #[test]
     fn the_last_area_cannot_be_closed() {
         // A screen with no areas shows nothing and offers no way back.
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let only = screen.areas()[0].0;
         assert!(!screen.close(only));
         assert_eq!(screen.area_count(), 1);
@@ -1016,20 +1114,20 @@ mod tests {
     #[test]
     fn changing_an_area_s_editor_changes_only_that_one() {
         let (mut screen, [viewport, outliner, ..]) = nested();
-        assert!(screen.set_editor(viewport, EditorKind::Preferences));
-        assert_eq!(screen.editor(viewport), Some(EditorKind::Preferences));
-        assert_eq!(screen.editor(outliner), Some(EditorKind::Outliner));
-        assert!(!screen.set_editor(AreaId(999), EditorKind::Viewport));
+        assert!(screen.set_editor(viewport, EditorId::PREFERENCES));
+        assert_eq!(screen.editor(viewport), Some(EditorId::PREFERENCES));
+        assert_eq!(screen.editor(outliner), Some(EditorId::OUTLINER));
+        assert!(!screen.set_editor(AreaId(999), EditorId::VIEWPORT));
     }
 
     #[test]
     fn a_boundary_drag_cannot_squeeze_an_area_to_nothing() {
         // Without the clamp a boundary dragged to the edge leaves an area a few
         // pixels wide, which the user then cannot grab to undo.
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let left = screen.areas()[0].0;
         screen
-            .split(left, Axis::Vertical, 0.5, EditorKind::Outliner)
+            .split(left, Axis::Vertical, 0.5, EditorId::OUTLINER)
             .expect("split");
         let split = screen.layout(space()).handles[0].id;
 
@@ -1055,10 +1153,10 @@ mod tests {
         // A window dragged narrower than two minimum areas. Refusing to lay out
         // would be worse than laying out small, and the clamp has no valid
         // answer to give.
-        let mut screen = Screen::single(EditorKind::Viewport);
+        let mut screen = Screen::single(EditorId::VIEWPORT);
         let left = screen.areas()[0].0;
         screen
-            .split(left, Axis::Vertical, 0.5, EditorKind::Outliner)
+            .split(left, Axis::Vertical, 0.5, EditorId::OUTLINER)
             .expect("split");
         let split = screen.layout(space()).handles[0].id;
         assert!(screen.resize(split, 0.9, 60.0));
@@ -1157,28 +1255,126 @@ mod tests {
         let (mut screen, _) = nested();
         let before = screen.areas();
         assert!(screen
-            .split(AreaId(999), Axis::Vertical, 0.5, EditorKind::Viewport)
+            .split(AreaId(999), Axis::Vertical, 0.5, EditorId::VIEWPORT)
             .is_none());
         assert_eq!(screen.areas(), before);
     }
 
     #[test]
-    fn every_editor_kind_has_a_distinct_tag_and_survives_a_round_trip() {
-        // The tags are the file format. Serialising the enum's discriminant
-        // would make a saved layout depend on declaration order, so inserting an
-        // editor in the middle would reinterpret everybody's workspaces.
+    fn every_registered_editor_has_a_distinct_id_and_a_translation_key() {
+        // The id *is* the file format. It used to be a separate `tag`, because
+        // writing the enum's discriminant would have made a saved layout depend
+        // on declaration order — insert an editor in the middle and everybody's
+        // workspaces reinterpret. With the id as the name there is nothing to
+        // keep in step, which is one whole class of mistake gone.
+        let registry = EditorRegistry::with_builtins();
+        assert!(registry.len() >= 5, "the builtins are not registered");
+
         let mut seen: Vec<&str> = Vec::new();
-        for kind in EditorKind::ALL {
-            let tag = kind.tag();
-            assert!(!seen.contains(&tag), "duplicate tag {tag}");
-            seen.push(tag);
-            assert_eq!(EditorKind::from_tag(tag), Some(kind));
+        for info in registry.iter() {
+            let id = info.id.as_str();
+            assert!(!seen.contains(&id), "duplicate id {id}");
+            seen.push(id);
             assert!(
-                kind.name_key().starts_with("editor-"),
-                "{tag} has key {}",
-                kind.name_key()
+                info.name_key.starts_with("editor-"),
+                "{id} has key {}",
+                info.name_key
+            );
+            assert_eq!(
+                registry.get(&info.id).map(|e| e.id.clone()),
+                Some(info.id.clone())
             );
         }
-        assert_eq!(EditorKind::from_tag("nonesuch"), None);
+    }
+
+    #[test]
+    fn an_editor_can_be_registered_without_this_crate_knowing_about_it() {
+        // §2.6's decision, and the thing a closed enum made impossible. Four
+        // new pillars want nine more editor types and Phase 9 wants a script to
+        // be able to add one; neither can happen if the set is a `match` in
+        // here.
+        let mut registry = EditorRegistry::with_builtins();
+        let before = registry.len();
+        let mine = EditorId::parse("com.example.graph");
+        assert!(!registry.is_known(&mine));
+
+        registry.register(EditorInfo {
+            id: mine.clone(),
+            name_key: "editor-example-graph",
+            full_bleed: false,
+        });
+        assert_eq!(registry.len(), before + 1);
+        assert!(registry.is_known(&mine));
+        // And it appears where a menu would look for it.
+        assert!(registry.iter().any(|e| e.id == mine));
+    }
+
+    #[test]
+    fn registering_twice_replaces_rather_than_duplicating() {
+        // A script reloading is the commonest thing that happens, and it must
+        // not leave two entries with the same id — which would put the editor
+        // in the menu twice and make "which one is it" undecidable.
+        let mut registry = EditorRegistry::with_builtins();
+        let before = registry.len();
+        registry.register(EditorInfo {
+            id: EditorId::VIEWPORT,
+            name_key: "editor-viewport-replaced",
+            full_bleed: false,
+        });
+        assert_eq!(registry.len(), before, "a duplicate entry was added");
+        assert_eq!(
+            registry.get(&EditorId::VIEWPORT).map(|e| e.name_key),
+            Some("editor-viewport-replaced")
+        );
+        assert!(!registry.full_bleed(&EditorId::VIEWPORT));
+    }
+
+    #[test]
+    fn an_id_this_build_does_not_know_is_a_representable_thing() {
+        // The other half of why the enum had to go. An area naming an editor
+        // that is not here — a layout from a later version, or one saved while
+        // an add-on was installed — has to be *expressible*, so that it can be
+        // kept and shown as missing instead of quietly becoming a viewport.
+        let registry = EditorRegistry::with_builtins();
+        let stranger = EditorId::parse("com.example.compositor");
+        assert!(!registry.is_known(&stranger));
+        assert_eq!(registry.get(&stranger), None);
+        // And it takes the panel inset, because what is drawn there is a
+        // message and a message wants a margin.
+        assert!(!registry.full_bleed(&stranger));
+
+        // A screen can hold one, which is the point: the tree does not care
+        // whether the editor exists.
+        let screen = Screen::single(stranger.clone());
+        assert_eq!(screen.areas().len(), 1);
+        assert_eq!(screen.areas()[0].1, stranger);
+    }
+
+    #[test]
+    fn a_known_id_and_a_parsed_one_are_the_same_value() {
+        // So that a layout read from a file compares equal to one built in
+        // code. Two representations of the same id that did not compare equal
+        // would make every loaded workspace look like it named unknown
+        // editors.
+        assert_eq!(EditorId::parse("viewport"), EditorId::VIEWPORT);
+        assert_eq!(EditorId::VIEWPORT.as_str(), "viewport");
+        assert!(EditorRegistry::with_builtins().is_known(&EditorId::parse("viewport")));
+    }
+
+    #[test]
+    fn the_viewport_is_the_only_builtin_that_reaches_the_edges() {
+        // Which used to be a comparison against one id in the shell. As a
+        // property of the registered editor, an editor that wants the same
+        // treatment says so where it is registered.
+        let registry = EditorRegistry::with_builtins();
+        assert!(registry.full_bleed(&EditorId::VIEWPORT));
+        for id in [
+            EditorId::OUTLINER,
+            EditorId::PROPERTIES,
+            EditorId::UV_EDITOR,
+            EditorId::PREFERENCES,
+        ] {
+            assert!(!registry.full_bleed(&id), "{id} claims the whole area");
+        }
     }
 }

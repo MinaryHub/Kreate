@@ -30,7 +30,7 @@
 
 use std::fmt::Write as _;
 
-use crate::area::{Axis, EditorKind, NodeSpec, Screen};
+use crate::area::{Axis, EditorId, NodeSpec, Screen};
 use crate::workspace::{Workspace, Workspaces};
 
 /// The current schema. Every bump adds a step to [`MIGRATIONS`].
@@ -153,7 +153,7 @@ pub fn write(spaces: &Workspaces) -> String {
         for node in space.screen.to_nodes() {
             match node {
                 NodeSpec::Area { editor } => {
-                    let _ = writeln!(out, "node = \"area {}\"", editor.tag());
+                    let _ = writeln!(out, "node = \"area {}\"", editor.as_str());
                 }
                 NodeSpec::Split { axis, ratio } => {
                     let _ = writeln!(out, "node = \"split {} {ratio:.4}\"", axis.tag());
@@ -297,7 +297,11 @@ fn node_from_text(text: &str) -> Option<NodeSpec> {
     let mut parts = text.split_whitespace();
     match parts.next()? {
         "area" => {
-            let editor = EditorKind::from_tag(parts.next()?)?;
+            // An id this build does not know is *kept*, not refused. Refusing it
+            // discarded the whole layout — one unknown area and every workspace in
+            // the file was lost — and falling back to a viewport would have the
+            // user's arrangement come back subtly wrong. See `EditorId`.
+            let editor = EditorId::parse(parts.next()?);
             parts.next().is_none().then_some(NodeSpec::Area { editor })
         }
         "split" => {
@@ -618,8 +622,8 @@ node = \"area viewport\"
             r#"trailing""#,
             r#"# leading hash"#,
         ] {
-            let mut spaces = Workspaces::single(awkward, Screen::single(EditorKind::Viewport));
-            spaces.add("Plain", Screen::single(EditorKind::Outliner));
+            let mut spaces = Workspaces::single(awkward, Screen::single(EditorId::VIEWPORT));
+            spaces.add("Plain", Screen::single(EditorId::OUTLINER));
             spaces.switch_to(0);
 
             let (loaded, problems) = parse(&write(&spaces));
@@ -636,7 +640,6 @@ node = \"area viewport\"
         // ratio that defaulted to something would move the user's boundary.
         for bad in [
             "area",
-            "area nonesuch",
             "area viewport extra",
             "split",
             "split v",
@@ -652,7 +655,23 @@ node = \"area viewport\"
         assert_eq!(
             node_from_text("area viewport"),
             Some(NodeSpec::Area {
-                editor: EditorKind::Viewport
+                editor: EditorId::VIEWPORT
+            })
+        );
+
+        // An editor id this build does not know is **not** one of the bad
+        // forms, and that changed deliberately. Refusing it used to fail the
+        // whole node, which failed the whole file — one unknown area and every
+        // workspace in it was replaced by the shipped defaults. A layout saved
+        // while an add-on was installed is not a corrupt layout.
+        //
+        // Kept rather than mapped to a viewport, too: the area is drawn as
+        // missing, with the id it wants, so the user can install the add-on
+        // instead of rebuilding an arrangement that was never broken.
+        assert_eq!(
+            node_from_text("area com.example.graph"),
+            Some(NodeSpec::Area {
+                editor: EditorId::parse("com.example.graph")
             })
         );
         assert_eq!(
