@@ -489,7 +489,18 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     let nol = nol.min(1.0);
     let nov = nov.clamp(1e-4, 1.0);
 
-    let h = (v + l).normalize_or_zero();
+    // Plain `normalize`, and the early return above is what makes it safe.
+    //
+    // `v + l` vanishes only when `l = -v`, and that forces `n·l = -(n·v)`, so
+    // the two cannot both be positive — the return above has already taken
+    // that case. A falsification sweep proved the guard that used to be here
+    // was dead, on both this side and the shader's.
+    //
+    // Which means this line depends on that early return. Anyone relaxing it —
+    // to shade a two-sided surface, say — brings the NaN back, and a NaN in a
+    // fragment shader spreads through the blend and is not traceable to a
+    // light.
+    let h = (v + l).normalize();
     let noh = n.dot(h).clamp(0.0, 1.0);
     let voh = v.dot(h).clamp(0.0, 1.0);
 
@@ -568,6 +579,35 @@ pub fn shade(
         }
         out[c] = f * illuminance[c] * nol;
     }
+    out
+}
+
+/// The shader source, for a pass that shades with this BRDF.
+///
+/// There is no `#import` in this build, so a shader needing `brdf_evaluate`
+/// takes the text. A function exposed rather than the file copied, because a
+/// copy is the drift the device test exists to prevent.
+pub fn shader_source() -> &'static str {
+    include_str!("shaders/brdf.wgsl")
+}
+
+/// How many `vec2` entries the shader's buffer holds.
+///
+/// The table, then its per-roughness averages. One buffer rather than two,
+/// because the forward pass will already be carrying lights, materials and a
+/// camera, and a binding saved there is a binding not spent.
+pub const DFG_ENTRIES: usize = ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
+
+/// The buffer the shader reads: the table, then the averages.
+///
+/// Interleaved as `(a, b)` pairs, row-major in roughness, which is what
+/// `dfg_lookup` indexes. Built here rather than in the pass so that the layout
+/// has one author — a table and a shader that disagree about the order produce
+/// a picture that is merely wrong.
+pub fn dfg_buffer(table: &AlbedoTable) -> Vec<f32> {
+    let mut out = table.as_flat();
+    out.extend(table.averages_flat());
+    debug_assert_eq!(out.len(), DFG_ENTRIES * 2);
     out
 }
 
@@ -805,7 +845,12 @@ mod tests {
     fn the_table_is_the_same_on_every_run() {
         // Deterministic, because it is integrated with a Hammersley sequence
         // and not a random one. A table that differed between runs would make
-        // every energy test above a flaky test.
+        // every energy test above a flaky one.
+        //
+        // Weak on its own, and a sweep showed it: two computations in the same
+        // process catch an actual random source and not much else. The
+        // committed values below are what catch a table that differs between
+        // *machines*, which is the thing the comment above was really claiming.
         let once = AlbedoTable::compute();
         let twice = AlbedoTable::compute();
         for roughness in [0.1, 0.37, 0.9] {
@@ -813,6 +858,109 @@ mod tests {
                 assert_eq!(once.lookup(nov, roughness), twice.lookup(nov, roughness));
             }
         }
+    }
+
+    #[test]
+    fn the_table_is_what_it_was_measured_to_be() {
+        // A tripwire, in the sense the golden files are: a build whose table
+        // differs makes a different picture, and nothing else says so.
+        //
+        // The tolerance is not arbitrary. It is wider than the Monte Carlo
+        // error of five hundred samples and far narrower than anything that
+        // changes the table — the analytic line this replaced was six percent
+        // out, and every break in the sweep moved a value by more than a
+        // percent.
+        //
+        // These numbers are also readable as physics, which is why they are
+        // spelled out rather than hashed. A nearly smooth surface at a
+        // head-on view reflects everything (`a` is one and `b` is nothing,
+        // because Fresnel barely rises within so narrow a lobe). At a grazing
+        // view the same surface has moved almost all of its weight into `b`,
+        // which is the grazing reflection that makes a shallow view of water
+        // mirror-like. And a rough surface has lost a third of its light,
+        // which is what the compensation puts back.
+        const TOLERANCE: f32 = 1e-3;
+        let table = albedo_table();
+        for (nov, roughness, a, b) in [
+            (0.1f32, 0.1f32, 0.414_533, 0.578_614),
+            (0.5, 0.1, 0.968_274, 0.031_726),
+            (0.9, 0.1, 0.999_987, 0.000_013),
+            (0.1, 0.5, 0.761_214, 0.140_154),
+            (0.5, 0.5, 0.833_992, 0.022_562),
+            (0.9, 0.5, 0.907_693, 0.000_353),
+            (0.1, 0.95, 0.745_469, 0.027_652),
+            (0.5, 0.95, 0.489_465, 0.003_689),
+            (0.9, 0.95, 0.379_899, 0.000_200),
+        ] {
+            let (got_a, got_b) = table.lookup(nov, roughness);
+            assert!(
+                (got_a - a).abs() < TOLERANCE,
+                "a at ({nov}, {roughness}): {got_a} against {a}"
+            );
+            assert!(
+                (got_b - b).abs() < TOLERANCE,
+                "b at ({nov}, {roughness}): {got_b} against {b}"
+            );
+        }
+
+        for (roughness, a, b) in [
+            (0.1f32, 0.952_497, 0.047_106),
+            (0.5, 0.863_642, 0.018_785),
+            (0.95, 0.451_463, 0.003_321),
+        ] {
+            let (got_a, got_b) = table.average(roughness);
+            assert!(
+                (got_a - a).abs() < TOLERANCE && (got_b - b).abs() < TOLERANCE,
+                "average at {roughness}: ({got_a}, {got_b}) against ({a}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shader_declares_the_same_constants() {
+        // The four numbers both implementations have to agree on, and the kind
+        // of disagreement a parity test would show as a puzzling offset rather
+        // than as a mismatched constant.
+        let source = shader_source();
+        for declaration in [
+            format!("const ALBEDO_LUT: u32 = {ALBEDO_LUT}u;"),
+            format!("const DIELECTRIC_F0: f32 = {DIELECTRIC_F0};"),
+            format!("const MIN_ROUGHNESS: f32 = {MIN_ROUGHNESS};"),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "the shader does not declare `{declaration}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shader_parses() {
+        naga::front::wgsl::parse_str(shader_source()).expect("brdf.wgsl parses");
+    }
+
+    #[test]
+    fn the_buffer_is_the_table_then_the_averages() {
+        // The layout the shader indexes, asserted here so that the table and
+        // the shader have one author rather than two conventions.
+        let table = albedo_table();
+        let buffer = dfg_buffer(table);
+        assert_eq!(buffer.len(), DFG_ENTRIES * 2);
+
+        // A cell of the table, at its documented offset.
+        let (ri, vi) = (5usize, 11usize);
+        let at = 2 * (ri * ALBEDO_LUT + vi);
+        let nov = (vi as f32 + 0.5) / ALBEDO_LUT as f32;
+        let roughness = (ri as f32 + 0.5) / ALBEDO_LUT as f32;
+        let (a, b) = table.lookup(nov, roughness);
+        assert!((buffer[at] - a).abs() < 1e-6);
+        assert!((buffer[at + 1] - b).abs() < 1e-6);
+
+        // And an average, after the table.
+        let base = 2 * ALBEDO_LUT * ALBEDO_LUT;
+        let (avg_a, avg_b) = table.average(roughness);
+        assert!((buffer[base + 2 * ri] - avg_a).abs() < 1e-6);
+        assert!((buffer[base + 2 * ri + 1] - avg_b).abs() < 1e-6);
     }
 
     #[test]

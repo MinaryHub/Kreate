@@ -66,6 +66,7 @@ fn shaders() -> Vec<(&'static str, &'static str)> {
         ("deform", include_str!("../src/shaders/deform.wgsl")),
         ("agx", include_str!("../src/shaders/agx.wgsl")),
         ("lights", include_str!("../src/shaders/lights.wgsl")),
+        ("brdf", include_str!("../src/shaders/brdf.wgsl")),
     ]
 }
 
