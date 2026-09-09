@@ -617,7 +617,7 @@ fn switching_workspace_changes_the_layout_on_screen() {
                 .screen
                 .areas()
                 .iter()
-                .any(|(_, kind)| *kind == kreate_ui::EditorKind::UvEditor)
+                .any(|(_, kind)| *kind == kreate_ui::EditorId::UV_EDITOR)
         })
         .expect("a shipped workspace has a UV editor");
     assert_ne!(
@@ -645,8 +645,8 @@ fn switching_workspace_changes_the_layout_on_screen() {
         switched.viewport_rect.width()
     );
     // And a UV editor is on screen now, which is what the workspace is for.
-    assert!(switched.state.has_editor(kreate_ui::EditorKind::UvEditor));
-    assert!(!first.state.has_editor(kreate_ui::EditorKind::UvEditor));
+    assert!(switched.state.has_editor(kreate_ui::EditorId::UV_EDITOR));
+    assert!(!first.state.has_editor(kreate_ui::EditorId::UV_EDITOR));
 }
 
 #[test]
@@ -706,7 +706,7 @@ fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
             .screen()
             .areas()
             .into_iter()
-            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Viewport)
+            .find(|(_, kind)| *kind == kreate_ui::EditorId::VIEWPORT)
             .expect("the default layout has a viewport")
             .0;
         state.split_area(viewport, kreate_ui::Axis::Horizontal);
@@ -722,13 +722,13 @@ fn a_layout_edit_asked_for_during_a_frame_is_applied_after_it() {
             .screen()
             .areas()
             .into_iter()
-            .find(|(_, kind)| *kind == kreate_ui::EditorKind::Properties)
+            .find(|(_, kind)| *kind == kreate_ui::EditorId::PROPERTIES)
             .expect("the default layout has a properties editor")
             .0;
         state.close_area(properties);
     }));
     assert_eq!(closed.state.screen().area_count(), before - 1);
-    assert!(!closed.state.has_editor(kreate_ui::EditorKind::Properties));
+    assert!(!closed.state.has_editor(kreate_ui::EditorId::PROPERTIES));
 }
 
 #[test]
@@ -738,14 +738,14 @@ fn a_second_viewport_does_not_show_the_first_one_s_picture() {
     // real feature and a later one; until then the honest thing is for the
     // extra ones to show their own background rather than a copy of the first
     // one's frame, which would be a picture from the wrong camera.
-    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT);
     let first = screen.areas()[0].0;
     screen
         .split(
             first,
             kreate_ui::Axis::Vertical,
             0.5,
-            kreate_ui::EditorKind::Viewport,
+            kreate_ui::EditorId::VIEWPORT,
         )
         .expect("split");
     let plan = screen.clone();
@@ -791,14 +791,14 @@ fn two_uv_editors_keep_their_own_view() {
     // route `G` to the editor under the pointer: with the state shared, both
     // points resolve to the same area, and a UV drag over one panel would move
     // the other one's selection.
-    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::UvEditor);
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorId::UV_EDITOR);
     let first = screen.areas()[0].0;
     let second = screen
         .split(
             first,
             kreate_ui::Axis::Vertical,
             0.5,
-            kreate_ui::EditorKind::UvEditor,
+            kreate_ui::EditorId::UV_EDITOR,
         )
         .expect("split");
     let plan = screen.clone();
@@ -837,14 +837,14 @@ fn every_area_paints_its_own_background() {
     // before any widget it draws. Pure black is the failure: an area that
     // painted nothing, or one laid out at an inverted rect and so not painted
     // at all.
-    let mut layout = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let mut layout = kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT);
     let viewport = layout.areas()[0].0;
     let outliner = layout
         .split(
             viewport,
             kreate_ui::Axis::Vertical,
             0.6,
-            kreate_ui::EditorKind::Outliner,
+            kreate_ui::EditorId::OUTLINER,
         )
         .expect("split the only area");
     layout
@@ -852,7 +852,7 @@ fn every_area_paints_its_own_background() {
             outliner,
             kreate_ui::Axis::Horizontal,
             0.5,
-            kreate_ui::EditorKind::Properties,
+            kreate_ui::EditorId::PROPERTIES,
         )
         .expect("split the outliner");
     layout
@@ -860,7 +860,7 @@ fn every_area_paints_its_own_background() {
             viewport,
             kreate_ui::Axis::Horizontal,
             0.7,
-            kreate_ui::EditorKind::UvEditor,
+            kreate_ui::EditorId::UV_EDITOR,
         )
         .expect("split the viewport");
     let expected_areas = layout.area_count();
@@ -921,27 +921,27 @@ fn the_viewport_follows_the_layout_it_is_given() {
     // Two arrangements that put the viewport on opposite sides, so a shell that
     // returned a constant would fail one of them.
     let left = {
-        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT);
         let viewport = screen.areas()[0].0;
         screen
             .split(
                 viewport,
                 kreate_ui::Axis::Vertical,
                 0.3,
-                kreate_ui::EditorKind::Outliner,
+                kreate_ui::EditorId::OUTLINER,
             )
             .expect("split");
         screen
     };
     let right = {
-        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Outliner);
+        let mut screen = kreate_ui::Screen::single(kreate_ui::EditorId::OUTLINER);
         let outliner = screen.areas()[0].0;
         screen
             .split(
                 outliner,
                 kreate_ui::Axis::Vertical,
                 0.3,
-                kreate_ui::EditorKind::Viewport,
+                kreate_ui::EditorId::VIEWPORT,
             )
             .expect("split");
         screen
@@ -1102,14 +1102,14 @@ fn the_modal_header_draws_over_the_viewport_in_the_constrained_axis_colour() {
 /// its header — the header draws either way, and a scan that included it was
 /// satisfied by it once already.
 fn uv_below_viewport(state: &mut kreate::shell::ShellState) {
-    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorKind::Viewport);
+    let mut screen = kreate_ui::Screen::single(kreate_ui::EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
     screen
         .split(
             viewport,
             kreate_ui::Axis::Horizontal,
             0.65,
-            kreate_ui::EditorKind::UvEditor,
+            kreate_ui::EditorId::UV_EDITOR,
         )
         .expect("the screen has one area");
     *state.screen_mut() = screen;

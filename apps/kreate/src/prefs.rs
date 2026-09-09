@@ -181,7 +181,7 @@ mod tests {
                 area,
                 kreate_ui::Axis::Horizontal,
                 0.3,
-                kreate_ui::EditorKind::UvEditor,
+                kreate_ui::EditorId::UV_EDITOR,
             )
             .expect("split");
 

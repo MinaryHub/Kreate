@@ -22,7 +22,7 @@
 //! goes through the same deferred queue the layout edits use, rather than
 //! happening halfway through a frame that is drawing tabs from the list.
 
-use crate::area::{Axis, EditorKind, Screen};
+use crate::area::{Axis, EditorId, Screen};
 
 /// One named layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,13 +66,13 @@ impl Default for Workspaces {
 
 /// The viewport with the scene beside it: what a new session opens onto.
 fn layout_screen() -> Screen {
-    let mut screen = Screen::single(EditorKind::Viewport);
+    let mut screen = Screen::single(EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
     let outliner = screen
-        .split(viewport, Axis::Vertical, 0.78, EditorKind::Outliner)
+        .split(viewport, Axis::Vertical, 0.78, EditorId::OUTLINER)
         .expect("the screen has one area to split");
     screen
-        .split(outliner, Axis::Horizontal, 0.4, EditorKind::Properties)
+        .split(outliner, Axis::Horizontal, 0.4, EditorId::PROPERTIES)
         .expect("the outliner was just created");
     screen
 }
@@ -83,20 +83,20 @@ fn layout_screen() -> Screen {
 /// and the modifier stack are, and those are what a hand reaches for while
 /// shaping something. The scene list is a different question.
 fn modeling_screen() -> Screen {
-    let mut screen = Screen::single(EditorKind::Viewport);
+    let mut screen = Screen::single(EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
     screen
-        .split(viewport, Axis::Vertical, 0.82, EditorKind::Properties)
+        .split(viewport, Axis::Vertical, 0.82, EditorId::PROPERTIES)
         .expect("the screen has one area to split");
     screen
 }
 
 /// The mesh and its UVs side by side, which is the only way to unwrap anything.
 fn uv_screen() -> Screen {
-    let mut screen = Screen::single(EditorKind::UvEditor);
+    let mut screen = Screen::single(EditorId::UV_EDITOR);
     let uv = screen.areas()[0].0;
     screen
-        .split(uv, Axis::Vertical, 0.5, EditorKind::Viewport)
+        .split(uv, Axis::Vertical, 0.5, EditorId::VIEWPORT)
         .expect("the screen has one area to split");
     screen
 }
@@ -247,7 +247,7 @@ mod tests {
                     .screen
                     .areas()
                     .iter()
-                    .any(|(_, kind)| *kind == EditorKind::Viewport),
+                    .any(|(_, kind)| *kind == EditorId::VIEWPORT),
                 "{} has no viewport",
                 space.name
             );
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(w.active_index(), 2);
         let area = w.screen().areas()[0].0;
         w.screen_mut()
-            .split(area, Axis::Horizontal, 0.5, EditorKind::Preferences)
+            .split(area, Axis::Horizontal, 0.5, EditorId::PREFERENCES)
             .expect("split the active screen");
 
         let after: Vec<_> = w.iter().map(|s| s.screen.to_nodes()).collect();
@@ -300,7 +300,7 @@ mod tests {
         // And it is a copy, not a share: editing one must not move the other.
         let area = w.screen().areas()[0].0;
         w.screen_mut()
-            .split(area, Axis::Vertical, 0.5, EditorKind::Outliner)
+            .split(area, Axis::Vertical, 0.5, EditorId::OUTLINER)
             .expect("split");
         assert_ne!(
             w.iter().nth(2).expect("the original").screen.to_nodes(),
