@@ -14,6 +14,15 @@
 //! must survive a large scene — object transforms and the camera — are `f64`,
 //! and are converted to camera-relative space in `f64` before being downcast for
 //! the GPU. Without that, a scene 10 km from the origin visibly jitters.
+//!
+//! # Colour
+//!
+//! The working space is **scene-linear with Rec.709 primaries**, and which space
+//! a colour is in is carried in its type — [`Srgb`], [`DisplayRgb`],
+//! [`SceneRgb`]. See [`color`] for why that is a type and not a convention.
+//! Colour lives here, beside the axis convention and the unit of length, because
+//! it is the same kind of thing: an agreement every crate above has to share,
+//! and one that cannot be settled twice.
 
 pub use glam;
 pub use glam::{
@@ -24,6 +33,7 @@ pub use glam::{
 mod aabb;
 mod axis;
 mod bvh;
+mod color;
 mod plane;
 mod point_tree;
 mod ray;
@@ -32,6 +42,7 @@ mod transform;
 pub use aabb::Aabb;
 pub use axis::{Axis, AxisConvention, Handedness, UpAxis};
 pub use bvh::{Bvh, Hit};
+pub use color::{linear_to_srgb, srgb_to_linear, DisplayRgb, SceneRgb, Srgb};
 pub use plane::Plane;
 pub use point_tree::{Nearest, PointTree};
 pub use ray::Ray;

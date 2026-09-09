@@ -815,7 +815,7 @@ pub struct PreviewSelection {
 /// this value is written to an sRGB target — see the palette's module docs for
 /// what it looked like when it did not.
 fn selected_color() -> [f32; 4] {
-    palette::to_linear(palette::ACCENT)
+    palette::display_rgba(palette::ACCENT)
 }
 
 /// Opacity of the selected-face fill.
@@ -1838,9 +1838,9 @@ impl Viewport {
                     0.0,
                     0.0,
                 ],
-                line_color: palette::to_linear(palette::GRID_LINE),
-                axis_x_color: palette::to_linear(palette::AXIS_X),
-                axis_y_color: palette::to_linear(palette::AXIS_Y),
+                line_color: palette::display_rgba(palette::GRID_LINE),
+                axis_x_color: palette::display_rgba(palette::AXIS_X),
+                axis_y_color: palette::display_rgba(palette::AXIS_Y),
             }),
         );
 
@@ -1858,9 +1858,9 @@ impl Viewport {
                     // and at a kilometre, which a constant bias cannot manage.
                     EDGE_DEPTH_OFFSET,
                 ],
-                non_manifold_color: palette::to_linear(palette::EDGE_NON_MANIFOLD),
-                seam_color: palette::to_linear(palette::EDGE_SEAM),
-                sharp_color: palette::to_linear(palette::EDGE_SHARP),
+                non_manifold_color: palette::display_rgba(palette::EDGE_NON_MANIFOLD),
+                seam_color: palette::display_rgba(palette::EDGE_SEAM),
+                sharp_color: palette::display_rgba(palette::EDGE_SHARP),
             }),
         );
 
@@ -1930,7 +1930,7 @@ impl Viewport {
                 bytemuck::bytes_of(&ElementObject {
                     model: m.to_cols_array_2d(),
                     selected_color: selected_color(),
-                    unselected_color: palette::to_linear(palette::HANDLE),
+                    unselected_color: palette::display_rgba(palette::HANDLE),
                     flags: [
                         f32::from(u8::from(draw.preview)),
                         // Fades the vertex dots as they grow too dense to read.
@@ -1948,7 +1948,7 @@ impl Viewport {
                 self.edge_objects.offset(i) as u64,
                 bytemuck::bytes_of(&EdgeObject {
                     model: m.to_cols_array_2d(),
-                    base_color: palette::to_linear(palette::WIRE),
+                    base_color: palette::display_rgba(palette::WIRE),
                     selected_color: selected_color(),
                     flags_params: [
                         // The wireframe's base alpha, scaled by the density

@@ -8,15 +8,21 @@
 //! the outliner, and two constants that are *meant* to be equal will not stay
 //! equal. The theme in `kreate-ui` builds its `Color32`s from these.
 //!
-//! The interesting part is [`to_linear`]. A shader writes to an sRGB-format
-//! target, which means the value it returns is *linear* and the hardware
-//! encodes it on the way out. Writing `0.62` for a channel whose sRGB value is
-//! 158 therefore does not produce 158 on screen — it produces 208. That is not
-//! a rounding difference: the selection colour was a pale yellow rather than
-//! the orange it was declared to be, and the grid's X axis was pink. Every
-//! colour crossing into a shader goes through [`to_linear`] for that reason,
-//! and `the_naive_conversion_is_visibly_wrong` pins the size of the mistake so
-//! it cannot be reintroduced by simplifying the maths away.
+//! The interesting part is which *space* a value is in, and that is carried in
+//! the type: see [`kreate_math::color`]. A shader writes to an sRGB-format
+//! target, which means the value it returns is [`DisplayRgb`] — linear — and
+//! the hardware encodes it on the way out. Handing over the [`Srgb`] number
+//! instead does not produce 158 on screen for a channel whose sRGB value is
+//! 158; it produces 208. That is not a rounding difference: the selection
+//! colour was a pale yellow rather than the orange it was declared to be, and
+//! the grid's X axis was pink.
+//!
+//! Which is why the transfer function is not implemented here any more. It
+//! lives in `kreate-math` beside the axis convention and the unit of length,
+//! because it is the same kind of agreement, and two implementations of it is
+//! one too many.
+
+use kreate_math::{DisplayRgb, Srgb};
 
 /// The selection colour, and the single accent of the whole product.
 ///
@@ -67,50 +73,30 @@ pub const EDGE_NON_MANIFOLD: u32 = 0xF2_40_D8;
 pub const EDGE_SEAM: u32 = 0xE6_73_26;
 pub const EDGE_SHARP: u32 = 0x33_BF_F2;
 
-/// The sRGB channels of a hex colour, as `0..=1`.
-pub fn channels(hex: u32) -> [f32; 3] {
-    [
-        ((hex >> 16) & 0xFF) as f32 / 255.0,
-        ((hex >> 8) & 0xFF) as f32 / 255.0,
-        (hex & 0xFF) as f32 / 255.0,
-    ]
+/// A palette entry as the colour it was authored as.
+pub fn srgb(hex: u32) -> Srgb {
+    Srgb::from_hex(hex)
 }
 
 /// The 8-bit sRGB components of a hex colour.
-pub fn rgb8(hex: u32) -> [u8; 3] {
-    [
-        ((hex >> 16) & 0xFF) as u8,
-        ((hex >> 8) & 0xFF) as u8,
-        (hex & 0xFF) as u8,
-    ]
-}
-
-/// One channel, sRGB to linear.
 ///
-/// The piecewise IEC 61966-2-1 transfer function, not the 2.2 power
-/// approximation: the approximation is wrong by enough at the dark end to
-/// matter, and the dark end is where this palette lives.
-pub fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.040_45 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+/// What a pixel test compares against, because a framebuffer holds encoded
+/// bytes.
+pub fn rgb8(hex: u32) -> [u8; 3] {
+    Srgb::from_hex(hex).to_bytes()
 }
 
-/// One channel, linear to sRGB. The inverse of [`srgb_to_linear`].
-pub fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
+/// A palette entry ready for a shader or a uniform.
+///
+/// The decode is the whole content of this function, and the return type is
+/// what says so.
+pub fn display(hex: u32) -> DisplayRgb {
+    Srgb::from_hex(hex).decode()
 }
 
-/// A hex colour as an opaque linear RGBA, ready for a shader or a uniform.
-pub fn to_linear(hex: u32) -> [f32; 4] {
-    let [r, g, b] = channels(hex);
-    [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), 1.0]
+/// A palette entry as an opaque RGBA, for a uniform block.
+pub fn display_rgba(hex: u32) -> [f32; 4] {
+    display(hex).to_rgba(1.0)
 }
 
 /// A hex colour as a clear value.
@@ -118,11 +104,11 @@ pub fn to_linear(hex: u32) -> [f32; 4] {
 /// `wgpu::Color` is linear for the same reason a shader's output is: the
 /// attachment format does the encoding.
 pub fn clear(hex: u32) -> wgpu::Color {
-    let [r, g, b] = channels(hex);
+    let DisplayRgb { r, g, b } = display(hex);
     wgpu::Color {
-        r: srgb_to_linear(r) as f64,
-        g: srgb_to_linear(g) as f64,
-        b: srgb_to_linear(b) as f64,
+        r: r as f64,
+        g: g as f64,
+        b: b as f64,
         a: 1.0,
     }
 }
@@ -135,76 +121,69 @@ mod tests {
     fn hex_splits_into_channels() {
         assert_eq!(rgb8(ACCENT), [0xFF, 0x9E, 0x29]);
         assert_eq!(rgb8(VIEWPORT), [0x1C, 0x1C, 0x1E]);
-        let [r, g, b] = channels(0xFF_80_00);
+        let Srgb { r, g, b } = srgb(0xFF_80_00);
         assert!((r - 1.0).abs() < 1e-6);
         assert!((g - 128.0 / 255.0).abs() < 1e-6);
         assert_eq!(b, 0.0);
     }
 
+    /// Every colour this module ships.
+    const EVERY: &[u32] = &[
+        ACCENT,
+        INFO,
+        AXIS_X,
+        AXIS_Y,
+        AXIS_Z,
+        VIEWPORT,
+        WIRE,
+        HANDLE,
+        GRID_LINE,
+        EDGE_NON_MANIFOLD,
+        EDGE_SEAM,
+        EDGE_SHARP,
+    ];
+
     #[test]
-    fn the_transfer_function_round_trips() {
-        // Every channel of every constant in this module, both ways. A
-        // transfer function that is subtly wrong in one direction is the kind
-        // of bug that shows up as "the colours are nearly right".
-        for hex in [
-            ACCENT,
-            INFO,
-            AXIS_X,
-            AXIS_Y,
-            AXIS_Z,
-            VIEWPORT,
-            WIRE,
-            HANDLE,
-            GRID_LINE,
-            EDGE_NON_MANIFOLD,
-            EDGE_SEAM,
-            EDGE_SHARP,
-        ] {
-            for c in channels(hex) {
-                let back = linear_to_srgb(srgb_to_linear(c));
-                assert!(
-                    (back - c).abs() < 1e-5,
-                    "{hex:#08X}: {c} round-tripped to {back}"
-                );
-            }
+    fn every_constant_reaches_the_screen_as_the_colour_it_was_written_as() {
+        // The bug this module exists to prevent, end to end and for every
+        // entry. The accent was declared #FF9E29 and handed to a shader as
+        // (1.0, 0.62, 0.16) — which the hardware then encoded a second time,
+        // arriving as a pale yellow.
+        //
+        // `display` decodes and `encode` is what the attachment does, so this
+        // walks the whole path a palette colour actually takes.
+        for hex in EVERY {
+            let authored = srgb(*hex);
+            let on_screen = display(*hex).encode();
+            assert_eq!(
+                on_screen.to_bytes(),
+                authored.to_bytes(),
+                "{hex:#08X} arrives as {:?}, was written as {:?}",
+                on_screen.to_bytes(),
+                authored.to_bytes()
+            );
         }
     }
 
     #[test]
-    fn the_piecewise_toe_is_used_at_the_dark_end() {
-        // Below the knee the function is linear, and a pure 2.2 power would
-        // give a visibly different answer. This is the part the approximation
-        // gets wrong, and this palette's darkest values sit right here.
-        let c = 0.02;
-        assert!((srgb_to_linear(c) - c / 12.92).abs() < 1e-9);
-        assert!((srgb_to_linear(c) - c.powf(2.2)).abs() > 1e-4);
-    }
-
-    #[test]
-    fn the_naive_conversion_is_visibly_wrong() {
-        // The bug this module exists to prevent: passing sRGB channels to a
-        // shader that writes an sRGB target. The selection accent was declared
-        // #FF9E29 and drawn as (1.0, 0.62, 0.16), which the hardware then
-        // encoded again — arriving on screen as a pale yellow.
-        let [_, g, b, _] = to_linear(ACCENT);
-        let naive = channels(ACCENT);
-
-        // What the naive value would actually have displayed as, in 8-bit sRGB.
-        let displayed = |c: f32| (linear_to_srgb(c) * 255.0).round() as i32;
-        assert_eq!(displayed(naive[1]), 206, "declared 158");
-        assert_eq!(displayed(naive[2]), 112, "declared 41");
-
-        // And what the corrected value displays as: the colour as written.
-        assert_eq!(displayed(g), 158);
-        assert_eq!(displayed(b), 41);
+    fn skipping_the_decode_would_have_been_visibly_wrong() {
+        // The size of the mistake, pinned so nobody simplifies the decode away
+        // on the grounds that the numbers look close. It is no longer
+        // *representable* — `display` returns a `DisplayRgb` and a uniform
+        // cannot be given an `Srgb` — but the arithmetic is worth keeping on
+        // the record.
+        let authored = srgb(ACCENT);
+        let mistake = DisplayRgb::new(authored.r, authored.g, authored.b).encode();
+        assert_eq!(mistake.to_bytes()[1], 206, "green was declared 158");
+        assert_eq!(mistake.to_bytes()[2], 112, "blue was declared 41");
     }
 
     #[test]
     fn a_clear_value_is_linear() {
         let c = clear(VIEWPORT);
-        let [r, _, b] = channels(VIEWPORT);
-        assert!((c.r - srgb_to_linear(r) as f64).abs() < 1e-9);
-        assert!((c.b - srgb_to_linear(b) as f64).abs() < 1e-9);
+        let want = display(VIEWPORT);
+        assert!((c.r - f64::from(want.r)).abs() < 1e-9);
+        assert!((c.b - f64::from(want.b)).abs() < 1e-9);
         assert_eq!(c.a, 1.0);
         // Sanity: the viewport is dark, and this is the value the hardware
         // encodes back up to 0x1C.

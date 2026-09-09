@@ -326,7 +326,7 @@ mod tests {
         // actually responds to; 3:1 is the WCAG floor for large text and the
         // honest minimum for a section title.
         let lum = |c: Color32| {
-            let f = |v: u8| palette::srgb_to_linear(f32::from(v) / 255.0);
+            let f = |v: u8| kreate_math::srgb_to_linear(f32::from(v) / 255.0);
             0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
         };
         let ratio = (lum(t.text_faint) + 0.05) / (lum(t.sunken) + 0.05);
@@ -343,7 +343,7 @@ mod tests {
         // viewport would be worse than two colours.
         let t = Theme::default();
         let lum = |r: u8, g: u8, b: u8| {
-            let f = |v: u8| palette::srgb_to_linear(f32::from(v) / 255.0);
+            let f = |v: u8| kreate_math::srgb_to_linear(f32::from(v) / 255.0);
             0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
         };
         let accent = lum(t.accent.r(), t.accent.g(), t.accent.b());
