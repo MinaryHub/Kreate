@@ -11,6 +11,7 @@ pub mod deform;
 pub mod display;
 pub mod gpu;
 pub mod hiz;
+pub mod lights;
 pub mod lod;
 pub mod mesh_gpu;
 pub mod motion;

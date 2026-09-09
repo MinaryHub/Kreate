@@ -16,6 +16,7 @@ pub mod modal;
 pub mod mode;
 pub mod pick;
 pub mod prefs;
+pub mod scenelights;
 pub mod shell;
 pub mod snap;
 pub mod uvmodal;
