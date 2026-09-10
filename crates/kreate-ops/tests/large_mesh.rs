@@ -480,6 +480,44 @@ fn a_drag_frame_stays_within_budget() {
     History::cancel_modal(modal, &mut doc);
 }
 
+/// The median of five drag frames at `radius`, on an already-built scene.
+///
+/// Extracted so the baseline and the measurements it is compared against are
+/// the same code: a baseline measured differently is not a baseline.
+#[allow(clippy::too_many_arguments)]
+fn drag_median(
+    registry: &OperatorRegistry,
+    doc: &mut Document,
+    session: &mut EditSessions,
+    ctx: &Context,
+    history: &mut History,
+    radius: f64,
+) -> Duration {
+    let mut modal = history
+        .begin_modal(
+            registry,
+            doc,
+            Some(session),
+            ctx,
+            "mesh.translate",
+            &dragged(0.0, radius),
+        )
+        .expect("dispatch")
+        .expect("a selection");
+    let mut frames: Vec<Duration> = Vec::new();
+    for frame in 1..=5 {
+        let step = dragged(frame as f64 * 0.01, radius);
+        frames.push(time(|| {
+            history
+                .update_modal(registry, doc, Some(session), ctx, &mut modal, &step)
+                .expect("update");
+        }));
+    }
+    History::cancel_modal(modal, doc);
+    frames.sort_unstable();
+    frames[frames.len() / 2]
+}
+
 #[test]
 fn a_proportional_drag_frame_stays_within_budget() {
     // The same budget as the plain drag, and the plan puts proportional editing
@@ -519,6 +557,20 @@ fn a_proportional_drag_frame_stays_within_budget() {
         ),
     ] {
         let (mut doc, _, mut session, registry, mut history) = drag_scene_selecting(elements);
+
+        // The same drag with the falloff switched off, measured here so the
+        // comparison below is against a number from this machine at this
+        // moment. See the note above the assertion.
+        let plain = drag_median(
+            &registry,
+            &mut doc,
+            &mut session,
+            &ctx,
+            &mut history,
+            0.0,
+        );
+        eprintln!("{shape}, no falloff: {plain:?} a frame");
+
         for radius in [0.2, 1.0, 4.0] {
             let mut modal = history
                 .begin_modal(
@@ -552,12 +604,35 @@ fn a_proportional_drag_frame_stays_within_budget() {
             eprintln!("{shape}, radius {radius}: {median:?} a frame");
             History::cancel_modal(modal, &mut doc);
 
-            // Loose, like every budget here, and still an order of magnitude
-            // under what any of the three rejected structures managed.
+            // A ratio against the same drag without the falloff, not an
+            // absolute time.
+            //
+            // The absolute form was 40 ms, and running the whole workspace
+            // moved this measurement from 18 ms to 46 ms: cargo runs one test
+            // binary per crate in parallel, and `serially()` only serialises
+            // within this one. The threshold sat inside the machine's load
+            // spread.
+            //
+            // A ratio between *radii* would have been the wrong fix, and this
+            // is worth stating because it is the tempting one: the original
+            // defect asked every vertex for its distance to every selected
+            // one, which costs the same whatever the radius — both radii would
+            // have measured 450 ms and the ratio would have been one. Against
+            // a drag with the falloff *off*, whose cost the defect does not
+            // touch, the broken version is some four hundred times over and
+            // this one is under twenty.
+            let ratio = median.as_secs_f64() / plain.as_secs_f64().max(1e-6);
             assert!(
-                median < Duration::from_millis(40),
-                "{shape} at radius {radius} took {median:?} a frame; the falloff \
+                ratio < 60.0,
+                "{shape} at radius {radius} took {median:?} a frame against \
+                 {plain:?} without the falloff — {ratio:.0} times; the falloff \
                  is measuring against the whole selection again"
+            );
+            // And a catastrophe is still a failure even if the baseline
+            // inflated with it.
+            assert!(
+                median < Duration::from_millis(250),
+                "{shape} at radius {radius} took {median:?} a frame"
             );
         }
     }

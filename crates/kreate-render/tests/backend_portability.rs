@@ -41,32 +41,41 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 const MSL_FLOOR: (u8, u8) = (2, 0);
 
 /// Every shader the renderer ships, by the name its file has.
-fn shaders() -> Vec<(&'static str, &'static str)> {
+///
+/// The source is a `Cow` because not every file is a shader on its own.
+/// `shading.wgsl` is a *fragment*: `Surface`, `Light`, `brdf_shade` and
+/// `illuminance_at` all come from the two files concatenated ahead of it, so
+/// parsing it alone fails. What a device receives is the composition, so that
+/// is what is checked here — and dropping the file from this list instead
+/// would have left the fragment tested by nothing at all.
+fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
     vec![
-        ("solid", include_str!("../src/shaders/solid.wgsl")),
-        ("grid", include_str!("../src/shaders/grid.wgsl")),
-        ("id", include_str!("../src/shaders/id.wgsl")),
+        ("solid", include_str!("../src/shaders/solid.wgsl").into()),
+        ("grid", include_str!("../src/shaders/grid.wgsl").into()),
+        ("id", include_str!("../src/shaders/id.wgsl").into()),
         (
             "overlay_edge",
-            include_str!("../src/shaders/overlay_edge.wgsl"),
+            include_str!("../src/shaders/overlay_edge.wgsl").into(),
         ),
         (
             "overlay_element",
-            include_str!("../src/shaders/overlay_element.wgsl"),
+            include_str!("../src/shaders/overlay_element.wgsl").into(),
         ),
         (
             "select_region",
-            include_str!("../src/shaders/select_region.wgsl"),
+            include_str!("../src/shaders/select_region.wgsl").into(),
         ),
         (
             "cluster_cull",
-            include_str!("../src/shaders/cluster_cull.wgsl"),
+            include_str!("../src/shaders/cluster_cull.wgsl").into(),
         ),
-        ("hiz_build", include_str!("../src/shaders/hiz_build.wgsl")),
-        ("deform", include_str!("../src/shaders/deform.wgsl")),
-        ("agx", include_str!("../src/shaders/agx.wgsl")),
-        ("lights", include_str!("../src/shaders/lights.wgsl")),
-        ("brdf", include_str!("../src/shaders/brdf.wgsl")),
+        ("hiz_build", include_str!("../src/shaders/hiz_build.wgsl").into()),
+        ("deform", include_str!("../src/shaders/deform.wgsl").into()),
+        ("agx", include_str!("../src/shaders/agx.wgsl").into()),
+        ("lights", include_str!("../src/shaders/lights.wgsl").into()),
+        ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
+        // The composition, not the fragment. See the note above.
+        ("shading", kreate_render::shading::probe_source().into()),
     ]
 }
 
@@ -90,7 +99,7 @@ fn every_shader_translates_to_metal() {
     // `POLYGON_MODE_LINE`, mesh shaders on a separate path. The architecture
     // avoids all three by design; this checks the shaders followed suit.
     for (name, source) in shaders() {
-        let (module, info) = front(name, source);
+        let (module, info) = front(name, &source);
         let options = msl::Options {
             lang_version: MSL_FLOOR,
             ..msl::Options::default()
@@ -104,7 +113,7 @@ fn every_shader_translates_to_metal() {
 #[test]
 fn every_shader_translates_to_hlsl() {
     for (name, source) in shaders() {
-        let (module, info) = front(name, source);
+        let (module, info) = front(name, &source);
         let mut out = String::new();
         let options = hlsl::Options::default();
         let pipeline = hlsl::PipelineOptions::default();
@@ -118,7 +127,7 @@ fn every_shader_translates_to_hlsl() {
 #[test]
 fn every_shader_translates_to_spirv() {
     for (name, source) in shaders() {
-        let (module, info) = front(name, source);
+        let (module, info) = front(name, &source);
         let options = spv::Options::default();
         spv::write_vec(&module, &info, &options, None)
             .unwrap_or_else(|e| panic!("{name} does not translate to SPIR-V: {e:?}"));
@@ -136,8 +145,8 @@ fn no_shader_needs_a_capability_beyond_the_webgpu_core() {
     // kind: those say "this backend cannot express it", this says "this needs a
     // feature we promised not to require".
     for (name, source) in shaders() {
-        let module = naga::front::wgsl::parse_str(source)
-            .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&source)));
         Validator::new(ValidationFlags::all(), Capabilities::default())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name} needs a capability outside the WebGPU core: {e:?}"));

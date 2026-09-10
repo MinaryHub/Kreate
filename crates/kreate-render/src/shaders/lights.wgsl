@@ -98,12 +98,27 @@ fn casts_shadow(light: Light) -> bool {
     return (light.flags & FLAG_SHADOW) != 0u;
 }
 
+/// The scene's lights.
+///
+/// Declared by the library rather than passed in, because WGSL will not take a
+/// storage pointer as a function parameter — the deform shader failed to
+/// compile on exactly that once. So the binding is part of the contract: a pass
+/// composing this file must bind the light array at group 2, binding 1.
+///
+/// Group 2 is shading data by convention: binding 0 is the BRDF's DFG table and
+/// binding 1 is this. Groups 0 and 1 are left to the pass for its camera and
+/// its per-object data.
+@group(2) @binding(1) var<storage, read> lights: array<Light>;
+
 // --- the probe pass --------------------------------------------------------
 //
 // Exists for the device test: it evaluates `illuminance_at` at a list of points
 // and writes the answers, so the two implementations can be compared without a
 // material, a camera or a triangle in the way. A shading pass that disagreed
 // with the CPU would otherwise have to be debugged through a picture.
+//
+// Everything below this marker is stripped when the file is composed into
+// another shader. See `lights::library_source`.
 
 struct Probe {
     /// How many points to evaluate.
@@ -114,10 +129,9 @@ struct Probe {
     _pad: vec2<u32>,
 }
 
-@group(0) @binding(0) var<storage, read> lights: array<Light>;
-@group(0) @binding(1) var<storage, read> points: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> answers: array<vec4<f32>>;
-@group(0) @binding(3) var<uniform> probe: Probe;
+@group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> answers: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> probe: Probe;
 
 @compute @workgroup_size(64)
 fn probe_illuminance(@builtin(global_invocation_id) id: vec3<u32>) {

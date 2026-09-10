@@ -19,6 +19,7 @@ pub mod motion;
 pub mod palette;
 pub mod picking;
 pub mod region_select;
+pub mod shading;
 pub mod viewport;
 
 pub use camera::{Camera, OrbitStyle, Projection, ViewAxis};

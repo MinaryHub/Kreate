@@ -40,7 +40,15 @@ const PI: f32 = 3.14159265359;
 const INV_PI: f32 = 0.31830988618;
 
 /// The DFG table, then its per-roughness averages. See the header.
-@group(0) @binding(0) var<storage, read> dfg: array<vec2<f32>>;
+///
+/// Declared by the library rather than passed in, because WGSL will not take a
+/// storage pointer as a function parameter. So the binding is part of the
+/// contract: a pass composing this file must bind the table at group 2,
+/// binding 0.
+///
+/// Group 2 is shading data by convention: binding 0 is this and binding 1 is
+/// the light array. Groups 0 and 1 are left to the pass.
+@group(2) @binding(0) var<storage, read> dfg: array<vec2<f32>>;
 
 struct Surface {
     /// A reflectance, bounded by one. The diffuse albedo of a dielectric or the
@@ -233,6 +241,9 @@ fn brdf_shade(
 // samples and writes both lobes, so the two implementations can be compared
 // without a light, a camera or a triangle in the way. A shading pass that
 // disagreed with the CPU would otherwise have to be debugged through a picture.
+//
+// Everything below this marker is stripped when the file is composed into
+// another shader. See `brdf::library_source`.
 
 struct Sample {
     /// rgb: base colour. w: metallic.
@@ -256,9 +267,9 @@ struct Probe {
     _pad2: u32,
 }
 
-@group(0) @binding(1) var<storage, read> samples: array<Sample>;
-@group(0) @binding(2) var<storage, read_write> answers: array<vec4<f32>>;
-@group(0) @binding(3) var<uniform> probe: Probe;
+@group(0) @binding(0) var<storage, read> samples: array<Sample>;
+@group(0) @binding(1) var<storage, read_write> answers: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> probe: Probe;
 
 @compute @workgroup_size(64)
 fn probe_brdf(@builtin(global_invocation_id) id: vec3<u32>) {

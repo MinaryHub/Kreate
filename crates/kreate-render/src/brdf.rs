@@ -591,6 +591,34 @@ pub fn shader_source() -> &'static str {
     include_str!("shaders/brdf.wgsl")
 }
 
+/// Where this library expects the DFG table to be bound.
+pub const DFG_GROUP: u32 = 2;
+pub const DFG_BINDING: u32 = 0;
+
+/// Where the probe pass begins.
+///
+/// Everything after it is for the device test and is stripped when this file is
+/// composed into another shader: the probe declares bindings a forward pass
+/// does not have, so leaving them in would make the pass demand buffers nobody
+/// binds.
+const PROBE_MARKER: &str = "// --- the probe pass";
+
+/// The part of the shader another shader can include.
+///
+/// # Panics
+///
+/// If the marker is gone. Returning the whole file instead would compose the
+/// probe's bindings into a forward pass, and the failure would arrive as a
+/// pipeline validation error a long way from the edit that caused it.
+pub fn library_source() -> &'static str {
+    let source = shader_source();
+    match source.split_once(PROBE_MARKER) {
+        Some((library, _)) => library,
+        None => panic!("the probe marker is gone from this shader"),
+    }
+}
+
+
 /// How many `vec2` entries the shader's buffer holds.
 ///
 /// The table, then its per-roughness averages. One buffer rather than two,

@@ -139,10 +139,9 @@ fn on_gpu(
             label: Some("lights probe"),
             entries: &[
                 storage(0, true),
-                storage(1, true),
-                storage(2, false),
+                storage(1, false),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -153,11 +152,28 @@ fn on_gpu(
                 },
             ],
         });
+    // The library owns group 2; the probe's own buffers are group 0. Groups
+    // between are unused, which the layout says with `None`.
+    let shading = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lights shading"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: kreate_render::lights::LIGHTS_BINDING,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
     let pipeline_layout = gpu
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lights probe"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), None, Some(&shading)],
             immediate_size: 0,
         });
     let pipeline = gpu
@@ -176,21 +192,25 @@ fn on_gpu(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: buffer.buffer().as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
                 resource: points_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 2,
+                binding: 1,
                 resource: answers.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 2,
                 resource: probe.as_entire_binding(),
             },
         ],
+    });
+    let shading_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lights shading"),
+        layout: &shading,
+        entries: &[wgpu::BindGroupEntry {
+            binding: kreate_render::lights::LIGHTS_BINDING,
+            resource: buffer.buffer().as_entire_binding(),
+        }],
     });
 
     let mut encoder = gpu
@@ -203,6 +223,7 @@ fn on_gpu(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(kreate_render::lights::LIGHTS_GROUP, &shading_bind, &[]);
         pass.dispatch_workgroups((points.len() as u32).div_ceil(64), 1, 1);
     }
 
