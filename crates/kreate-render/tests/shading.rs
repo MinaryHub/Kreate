@@ -189,11 +189,64 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
             label: Some("shading probe"),
             entries: &[storage(0, true), storage(1, false), uniform(2)],
         });
+    // Group 2 is the shading data the libraries declare, and it now carries
+    // the shadows. These tests are about the lamps, so the entries are present
+    // and empty: one shadow per light with `enabled` at zero, and a one-texel
+    // depth array nothing samples.
+    //
+    // Present rather than absent because a bind group layout is all or
+    // nothing — and because a probe that dropped them would stop compiling the
+    // same shader the viewport runs, which is the whole point of the probe.
+    let shadows = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shadows"),
+            contents: bytemuck::cast_slice(&vec![
+                kreate_render::shadow::GpuShadow::NONE;
+                lights.len().max(1)
+            ]),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let shadow_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("no shadows"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+
     let shared = gpu
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shading data"),
-            entries: &[storage(0, true), storage(1, true), uniform(2)],
+            entries: &[
+                storage(0, true),
+                storage(1, true),
+                uniform(2),
+                storage(3, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
     let pipeline_layout = gpu
         .device
@@ -245,6 +298,14 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: shading_globals.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadows.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&shadow_view),
             },
         ],
     });

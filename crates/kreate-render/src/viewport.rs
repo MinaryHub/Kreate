@@ -1084,6 +1084,13 @@ pub struct Viewport {
     dfg_buf: wgpu::Buffer,
     shading_globals_buf: wgpu::Buffer,
     lights: crate::lights::Lights,
+    /// The depth maps, and the per-light entries that name them.
+    shadows: crate::shadow::ShadowMaps,
+    shadow_buf: wgpu::Buffer,
+    /// What each light's shadow is, parallel to the light buffer.
+    shadow_entries: Vec<crate::shadow::GpuShadow>,
+    /// The frames this frame's shadow passes were built with, in layer order.
+    shadow_views: Vec<crate::shadow::ShadowView>,
     /// The linear image the rendered pass shades into, and the pass that turns
     /// it into a picture.
     hdr: crate::display::HdrTarget,
@@ -1096,6 +1103,12 @@ pub struct Viewport {
     screen_bind: wgpu::BindGroup,
     /// The world's radiance, linear. See [`Viewport::set_world`].
     world: [f32; 3],
+    /// What the shadows are fitted to, in eye-relative metres.
+    ///
+    /// Set beside the lights, because a frustum fitted to the wrong bounds
+    /// either crops the shadow or wastes its resolution — and the caller is
+    /// the only one that knows what is in the scene.
+    scene_bounds: kreate_math::Aabb,
     /// How the picture is looked at. See `kreate_math::DisplayTransform`.
     ///
     /// Private because the uniform behind it has to be written when it
@@ -1521,6 +1534,26 @@ impl Viewport {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let dfg_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -1540,24 +1573,22 @@ impl Viewport {
             mapped_at_creation: false,
         });
         let lights = crate::lights::Lights::new(device, 8);
-        let shading_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shading data"),
-            layout: &shading_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: dfg_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: lights.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: shading_globals_buf.as_entire_binding(),
-                },
-            ],
+        let shadows_0 = crate::shadow::ShadowMaps::new(device);
+        let shadow_buf_0 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow entries"),
+            size: (std::mem::size_of::<crate::shadow::GpuShadow>() * 8) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        let shading_bind = shading_bind_group(
+            device,
+            &shading_layout,
+            &dfg_buf,
+            lights.buffer(),
+            &shading_globals_buf,
+            &shadow_buf_0,
+            shadows_0.array_view(),
+        );
         let rendered_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rendered"),
             source: wgpu::ShaderSource::Wgsl(crate::shading::rendered_source().into()),
@@ -1881,12 +1912,17 @@ impl Viewport {
             dfg_buf,
             shading_globals_buf,
             lights,
+            shadows: shadows_0,
+            shadow_buf: shadow_buf_0,
+            shadow_entries: Vec::new(),
+            shadow_views: Vec::new(),
             screen_params: screen_params_buf,
             screen_bind: screen_bind_0,
             hdr: hdr_0,
             screen: screen_0,
             // Black: a document with no world is lit only by its lamps.
             world: [0.0; 3],
+            scene_bounds: kreate_math::Aabb::EMPTY,
             display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
                 device,
@@ -2170,6 +2206,7 @@ impl Viewport {
         let count = draws.len() as u32;
         self.objects
             .ensure(device, &self.object_layout, OBJECT_SIZE, count, "objects");
+        self.shadows.reserve(device, count);
         self.rendered_objects.ensure(
             device,
             &self.rendered_object_layout,
@@ -2210,6 +2247,9 @@ impl Viewport {
                     base_color: draw.mesh.color.to_array(),
                 }),
             );
+            // The shadow pass draws the same geometry from a different
+            // camera, so it needs the same model matrix and nothing else.
+            self.shadows.set_object(queue, i, &m);
             queue.write_buffer(
                 &self.rendered_objects.buffer,
                 self.rendered_objects.offset(i) as u64,
@@ -2294,6 +2334,13 @@ impl Viewport {
         self.world = radiance;
     }
 
+    /// What the shadows are fitted to, in eye-relative metres.
+    ///
+    /// Empty means no shadows, which is what a scene with no geometry has.
+    pub fn set_scene_bounds(&mut self, bounds: kreate_math::Aabb) {
+        self.scene_bounds = bounds;
+    }
+
     pub fn set_lights(
         &mut self,
         device: &wgpu::Device,
@@ -2308,24 +2355,58 @@ impl Viewport {
         // only in the branch that replaces the buffer — and rebuilding only
         // then keeps a bind group per frame out of the common case.
         if self.lights.capacity() != before {
-            self.shading_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("shading data"),
-                layout: &self.shading_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.dfg_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.lights.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.shading_globals_buf.as_entire_binding(),
-                    },
-                ],
+            // The shadow buffer has to keep pace: it is parallel to the lights
+            // and the shader indexes both with the same number.
+            self.shadow_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("shadow entries"),
+                size: (std::mem::size_of::<crate::shadow::GpuShadow>()
+                    * self.lights.capacity().max(1) as usize) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+            self.shading_bind = shading_bind_group(
+                device,
+                &self.shading_layout,
+                &self.dfg_buf,
+                self.lights.buffer(),
+                &self.shading_globals_buf,
+                &self.shadow_buf,
+                self.shadows.array_view(),
+            );
+        }
+
+        // Every light starts casting nothing. `prepare_shadows` fills in the
+        // ones that do, and a light whose frustum sees nothing keeps this
+        // entry — which is what stops a stale matrix from an earlier frame
+        // shadowing the scene.
+        self.shadow_entries.clear();
+        self.shadow_entries
+            .resize(lights.len(), crate::shadow::GpuShadow::NONE);
+        self.shadow_views.clear();
+        for (index, light) in lights.iter().enumerate() {
+            if !light.cast_shadow || self.shadow_views.len() >= crate::shadow::MAX_SHADOWS {
+                continue;
+            }
+            let packed = crate::lights::GpuLight::pack(light, eye);
+            let Some(view) = crate::shadow::shadow_view(&packed, self.scene_bounds) else {
+                continue;
+            };
+            let layer = self.shadow_views.len();
+            self.shadow_entries[index] = crate::shadow::GpuShadow::pack(
+                &view,
+                layer as u32,
+                crate::shadow::SHADOW_RESOLUTION,
+                crate::shadow::DEPTH_BIAS,
+            );
+            self.shadows.set_view(queue, layer, &view);
+            self.shadow_views.push(view);
+        }
+        if !self.shadow_entries.is_empty() {
+            queue.write_buffer(
+                &self.shadow_buf,
+                0,
+                bytemuck::cast_slice(&self.shadow_entries),
+            );
         }
         queue.write_buffer(
             &self.shading_globals_buf,
@@ -3061,6 +3142,32 @@ impl Viewport {
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
+        // The shadow maps first: the geometry pass samples them, so they have
+        // to be finished before it starts. Separate passes rather than one
+        // with several attachments, because each is a different camera.
+        for layer in 0..self.shadow_views.len() {
+            self.shadows.encode(
+                encoder,
+                layer,
+                draws.iter().enumerate().filter_map(|(i, draw)| {
+                    // Detail is deliberately ignored: an object simplified out
+                    // of the picture still casts a shadow onto what is left,
+                    // and an object that stopped casting when it got small
+                    // would have its shadow blink out as the camera pulled
+                    // back.
+                    if draw.mesh.counts.triangles == 0 {
+                        return None;
+                    }
+                    Some((
+                        i as u32,
+                        &draw.mesh.positions,
+                        &draw.mesh.indices,
+                        draw.mesh.counts.triangles,
+                    ))
+                }),
+            );
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport rendered"),
@@ -3134,6 +3241,49 @@ impl ClampTo for (u32, u32) {
     fn clamp_to(self, bounds: Self) -> Self {
         (self.0.min(bounds.0).max(1), self.1.min(bounds.1).max(1))
     }
+}
+
+/// The shading bind group: group 2, in the order the libraries declare.
+///
+/// One function rather than two identical blocks, because the group is built
+/// once at startup and again whenever the light buffer grows — and two copies
+/// of a binding list is how a rebuild ends up pointing at a stale buffer.
+#[allow(clippy::too_many_arguments)]
+fn shading_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    dfg: &wgpu::Buffer,
+    lights: &wgpu::Buffer,
+    globals: &wgpu::Buffer,
+    shadows: &wgpu::Buffer,
+    maps: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shading data"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: dfg.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: lights.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: globals.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: shadows.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(maps),
+            },
+        ],
+    })
 }
 
 /// Inverse transpose of a matrix's linear part.

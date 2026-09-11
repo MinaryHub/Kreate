@@ -237,6 +237,384 @@ pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<Sha
     })
 }
 
+/// The frame a packed light should render its shadow from.
+///
+/// Dispatches on what the light is, and the light says so in the two fields it
+/// already has: the falloff distinguishes a parallel light — which has no
+/// position and gets the orthographic box — and the cone's outer cosine
+/// distinguishes a spot from a bare point light, because a light with no cone
+/// packs that at -1.
+///
+/// Read off the packed form rather than passed a kind, so the shadow frame and
+/// the shading cannot disagree about what a light is.
+///
+/// `None` when the light has nothing to shadow: an empty scene, a spot aimed
+/// away from everything, a point light with the scene behind the face.
+///
+/// # A point light gets one face, for now
+///
+/// Six would be correct and is what `point_view` is shaped for. One is what
+/// this renders, so a bare point light shadows correctly in a sixth of the
+/// scene and not at all in the rest. That is worse than nothing if it is not
+/// said out loud, so it is said here, in the plan, and in a test.
+pub fn shadow_view(light: &crate::lights::GpuLight, bounds: Aabb) -> Option<ShadowView> {
+    let position = glam::Vec3::from_slice(&light.position[..3]);
+    let direction = glam::Vec3::from_slice(&light.direction[..3]);
+    if light.falloff == PARALLEL_FALLOFF {
+        return sun_view(direction, bounds);
+    }
+    if light.cone[0] > -1.0 {
+        // The stored outer cosine back to a full angle.
+        let cone = light.cone[0].clamp(-1.0, 1.0).acos() * 2.0;
+        return spot_view(position, direction, cone, bounds);
+    }
+    point_view(position, 0, bounds)
+}
+
+/// The falloff id a parallel light packs. See `lights::Falloff`.
+const PARALLEL_FALLOFF: u32 = 1;
+
+/// One shadow, as the shading shader reads it.
+///
+/// Parallel to the light buffer: entry `i` belongs to light `i`, and a light
+/// that casts nothing has `enabled` at zero. Parallel rather than indexed,
+/// because an index would be a second thing to keep in step with a light
+/// buffer that is already grown and rewritten every frame — and most scenes
+/// have few enough lights that the empty entries cost nothing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuShadow {
+    /// Eye-relative world to the light's clip space, reversed-Z.
+    pub view_proj: [[f32; 4]; 4],
+    /// x: which layer of the array. y: one texel, in clip units. z: the depth
+    /// bias. w: nonzero if this light casts.
+    pub params: [f32; 4],
+}
+
+impl GpuShadow {
+    /// A light that casts nothing.
+    pub const NONE: Self = Self {
+        view_proj: [[0.0; 4]; 4],
+        params: [0.0; 4],
+    };
+
+    pub fn pack(view: &ShadowView, layer: u32, resolution: u32, bias: f32) -> Self {
+        Self {
+            view_proj: view.view_proj.to_cols_array_2d(),
+            params: [
+                layer as f32,
+                // One texel as a fraction of the map, which is what a PCF tap
+                // steps by. In clip units rather than pixels so the shader
+                // does not need the resolution as well.
+                2.0 / resolution.max(1) as f32,
+                bias,
+                1.0,
+            ],
+        }
+    }
+}
+
+/// How much to move a comparison toward the light before making it.
+///
+/// A surface lit at a glancing angle spans more depth across one shadow texel
+/// than it does head-on, so a fixed bias either leaves acne at grazing angles
+/// or detaches contact shadows head-on. This is the head-on part; the shader
+/// scales it by the slope, which is the half that cannot be precomputed.
+///
+/// In reversed-Z the bias moves depth *up*, toward the light.
+pub const DEPTH_BIAS: f32 = 2.0e-4;
+
+/// The side of one shadow map, in texels.
+///
+/// A kilobyte square per light at `Depth32Float` is four megabytes a light,
+/// which is affordable for the handful of shadow casters a viewport shows and
+/// is the resolution below which a contact shadow starts to look like stairs.
+pub const SHADOW_RESOLUTION: u32 = 1024;
+
+/// The depth maps, and the pass that fills them.
+pub struct ShadowMaps {
+    depth: wgpu::Texture,
+    /// One view per layer, to render into.
+    layers: Vec<wgpu::TextureView>,
+    /// The whole array, to sample.
+    array: wgpu::TextureView,
+    pipeline: wgpu::RenderPipeline,
+    object_layout: wgpu::BindGroupLayout,
+    /// One globals buffer per layer, written before that layer's pass.
+    globals: Vec<wgpu::Buffer>,
+    globals_binds: Vec<wgpu::BindGroup>,
+    objects: wgpu::Buffer,
+    object_bind: wgpu::BindGroup,
+    object_stride: u32,
+    object_capacity: u32,
+}
+
+/// The most shadow-casting lights a frame will draw.
+///
+/// A cap rather than a growing array, because each one is a full pass over the
+/// scene's geometry — the cost is in the draws, not the memory, and a scene
+/// that wants a hundred shadowed lights wants the clustered path and a budget
+/// rather than a hundred passes.
+pub const MAX_SHADOWS: usize = 8;
+
+impl ShadowMaps {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow maps"),
+            size: wgpu::Extent3d {
+                width: SHADOW_RESOLUTION,
+                height: SHADOW_RESOLUTION,
+                depth_or_array_layers: MAX_SHADOWS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::gpu::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let layers = (0..MAX_SHADOWS)
+            .map(|i| {
+                depth.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("shadow layer"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let array = depth.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let uniform = |label: &str, dynamic: bool, size: u64| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: dynamic,
+                        min_binding_size: wgpu::BufferSize::new(size),
+                    },
+                    count: None,
+                }],
+            })
+        };
+        let globals_layout = uniform("shadow globals", false, 64);
+        let object_layout = uniform("shadow object", true, 64);
+
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&object_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            // None: a shadow map is a depth buffer. See the shader's header.
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(crate::gpu::depth_write_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let stride = Self::stride(device);
+        let (objects, object_bind) = Self::make_objects(device, &object_layout, stride, 8);
+        let globals: Vec<wgpu::Buffer> = (0..MAX_SHADOWS)
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shadow globals"),
+                    size: 64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        let globals_binds = globals
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow globals"),
+                    layout: &globals_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
+            })
+            .collect();
+
+        Self {
+            depth,
+            layers,
+            array,
+            pipeline,
+            object_layout,
+            globals,
+            globals_binds,
+            objects,
+            object_bind,
+            object_stride: stride,
+            object_capacity: 8,
+        }
+    }
+
+    /// The distance between per-draw uniform slots.
+    ///
+    /// The device's minimum dynamic offset alignment, which is 256 on most
+    /// hardware and is not a number to assume.
+    fn stride(device: &wgpu::Device) -> u32 {
+        let align = device.limits().min_uniform_buffer_offset_alignment.max(1);
+        64u32.div_ceil(align) * align
+    }
+
+    fn make_objects(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        stride: u32,
+        capacity: u32,
+    ) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow objects"),
+            size: (stride as u64) * capacity.max(1) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow objects"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(64),
+                }),
+            }],
+        });
+        (buffer, bind)
+    }
+
+    /// The array, for the shading pass to sample.
+    pub fn array_view(&self) -> &wgpu::TextureView {
+        &self.array
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.depth
+    }
+
+    /// Makes room for `count` draws.
+    pub fn reserve(&mut self, device: &wgpu::Device, count: u32) {
+        if count <= self.object_capacity {
+            return;
+        }
+        let capacity = count.next_power_of_two();
+        let (buffer, bind) =
+            Self::make_objects(device, &self.object_layout, self.object_stride, capacity);
+        self.objects = buffer;
+        self.object_bind = bind;
+        self.object_capacity = capacity;
+    }
+
+    /// Writes one draw's model matrix.
+    pub fn set_object(&self, queue: &wgpu::Queue, index: u32, model: &glam::Mat4) {
+        queue.write_buffer(
+            &self.objects,
+            (self.object_stride * index) as u64,
+            bytemuck::cast_slice(&model.to_cols_array()),
+        );
+    }
+
+    /// Writes the light's view-projection for one layer.
+    pub fn set_view(&self, queue: &wgpu::Queue, layer: usize, view: &ShadowView) {
+        if let Some(buffer) = self.globals.get(layer) {
+            queue.write_buffer(
+                buffer,
+                0,
+                bytemuck::cast_slice(&view.view_proj.to_cols_array()),
+            );
+        }
+    }
+
+    /// Renders one layer's depth.
+    ///
+    /// `draws` yields `(index, positions, indices, triangles)` — the index is
+    /// the slot [`ShadowMaps::set_object`] wrote, so the two cannot disagree
+    /// about which matrix belongs to which draw.
+    pub fn encode<'a>(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        layer: usize,
+        draws: impl IntoIterator<Item = (u32, &'a wgpu::Buffer, &'a wgpu::Buffer, u32)>,
+    ) {
+        let Some(view) = self.layers.get(layer) else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("shadow"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    // Reversed-Z clears to zero: nothing has been drawn, so
+                    // everything is infinitely far from the light.
+                    load: wgpu::LoadOp::Clear(crate::gpu::DEPTH_CLEAR as f32),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        let Some(globals) = self.globals_binds.get(layer) else {
+            return;
+        };
+        pass.set_bind_group(0, globals, &[]);
+        for (index, positions, indices, triangles) in draws {
+            if triangles == 0 {
+                continue;
+            }
+            pass.set_bind_group(1, &self.object_bind, &[self.object_stride * index]);
+            pass.set_vertex_buffer(0, positions.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..triangles * 3, 0, 0..1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +634,67 @@ mod tests {
 
     fn inside(p: glam::Vec3) -> bool {
         p.x.abs() <= 1.0001 && p.y.abs() <= 1.0001 && (-0.0001..=1.0001).contains(&p.z)
+    }
+
+    use crate::lights::{Falloff, GpuLight, PlacedLight};
+
+    fn packed(light: PlacedLight) -> GpuLight {
+        GpuLight::pack(&light, glam::DVec3::ZERO)
+    }
+
+    #[test]
+    fn a_lights_own_fields_say_which_frame_it_wants() {
+        // Read off the packed form rather than passed a kind, so the shadow
+        // frame and the shading cannot disagree about what a light is.
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::NEG_Z,
+            ..PlacedLight::default()
+        });
+        let spot = packed(PlacedLight {
+            position: glam::DVec3::new(0.0, 0.0, 8.0),
+            direction: glam::Vec3::NEG_Z,
+            cone: Some((60f32.to_radians(), 0.2)),
+            ..PlacedLight::default()
+        });
+        let point = packed(PlacedLight {
+            position: glam::DVec3::new(0.0, 0.0, 8.0),
+            ..PlacedLight::default()
+        });
+
+        // A sun's frame is orthographic: parallel lines stay parallel, so two
+        // points at different depths on the same axis land at the same place.
+        let view = shadow_view(&sun, scene()).expect("a sun");
+        let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
+        let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
+        assert!((near.x - far.x).abs() < 1e-5, "a sun is not orthographic");
+
+        // A spot's is perspective: they do not.
+        let view = shadow_view(&spot, scene()).expect("a spot");
+        let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
+        let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
+        assert!((near.x - far.x).abs() > 1e-3, "a spot is not perspective");
+
+        // And a point light gets a frame at all, which is the part that would
+        // otherwise be silently missing.
+        assert!(shadow_view(&point, scene()).is_some());
+    }
+
+    #[test]
+    fn a_point_light_shadows_one_sixth_of_the_scene() {
+        // Recorded, not hidden. Six faces are what `point_view` is shaped for
+        // and one is what the dispatch renders, so a bare point light shadows
+        // correctly in front of itself and not at all behind. A test that
+        // pinned only the working sixth would let this be forgotten.
+        let light = packed(PlacedLight {
+            position: glam::DVec3::ZERO,
+            ..PlacedLight::default()
+        });
+        let big = Aabb::new(glam::Vec3::splat(-10.0), glam::Vec3::splat(10.0));
+        let view = shadow_view(&light, big).expect("a frame");
+        // Face zero looks along +X.
+        assert!(inside(project(&view, glam::Vec3::new(5.0, 0.0, 0.0))));
+        assert!(!inside(project(&view, glam::Vec3::new(-5.0, 0.0, 0.0))));
     }
 
     #[test]

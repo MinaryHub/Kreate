@@ -31,6 +31,89 @@ struct Shading {
 
 @group(2) @binding(2) var<uniform> shading: Shading;
 
+/// One entry per light, parallel to the light array.
+///
+/// `params` is x: the array layer, y: one texel in clip units, z: the depth
+/// bias, w: nonzero if this light casts. See `kreate_render::shadow::GpuShadow`.
+struct ShadowInfo {
+    view_proj: mat4x4<f32>,
+    params: vec4<f32>,
+}
+
+@group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
+@group(2) @binding(4) var shadow_maps: texture_depth_2d_array;
+
+/// How much of a light reaches `position`, from zero to one.
+///
+/// # No comparison sampler
+///
+/// `textureLoad` and a hand-written filter, not `textureSampleCompare`. Two
+/// reasons, and the second is the one that decided it: a comparison sampler
+/// puts the filtering in fixed-function hardware whose rounding a parity test
+/// cannot see, and the same code then runs unchanged in a compute pass — which
+/// is what §2.5's path tracer will want, and `textureSampleCompare` is not
+/// available there.
+///
+/// # The bias is scaled by the slope
+///
+/// A surface lit at a glancing angle spans more depth across one shadow texel
+/// than one lit head-on, so a fixed bias leaves acne at grazing angles or
+/// detaches contact shadows head-on. Scaling by the tangent of the angle is
+/// the standard fix and costs a divide.
+fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
+    let info = shadows[index];
+    if info.params.w == 0.0 {
+        return 1.0;
+    }
+    let clip = info.view_proj * vec4<f32>(position, 1.0);
+    if clip.w <= 0.0 {
+        // Behind the light's near plane: the map says nothing about it, and
+        // claiming shadow there would put a dark band behind every spot.
+        return 1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z <= 0.0 {
+        // Outside what the light was framed for. Lit rather than shadowed,
+        // because the alternative is a hard black edge at the frustum's border
+        // — which reads as a bug and is one.
+        return 1.0;
+    }
+
+    // Clip to texture coordinates: y flips, because clip space is up and a
+    // texture is down.
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let size = vec2<f32>(textureDimensions(shadow_maps));
+    let texel = vec2<i32>(uv * size);
+    let layer = i32(info.params.x);
+
+    // Slope-scaled, and clamped: at ninety degrees the tangent is infinite and
+    // the bias would push the comparison past the far plane, unshadowing the
+    // whole surface.
+    let cosine = clamp(dot(normal, to_light), 1e-3, 1.0);
+    let slope = min(sqrt(1.0 - cosine * cosine) / cosine, 8.0);
+    let bias = info.params.z * (1.0 + slope);
+
+    // Three by three, unweighted. Wider kernels and Gaussian weights both
+    // exist; at one tap per texel this is the one whose softness matches the
+    // map's resolution rather than inventing a penumbra the light does not
+    // have.
+    var lit = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let at = clamp(
+                texel + vec2<i32>(dx, dy),
+                vec2<i32>(0, 0),
+                vec2<i32>(size) - vec2<i32>(1, 1),
+            );
+            let stored = textureLoad(shadow_maps, at, layer, 0);
+            // Reversed-Z: nearer the light is *greater*. This fragment is lit
+            // if nothing was closer.
+            lit += select(0.0, 1.0, ndc.z + bias >= stored);
+        }
+    }
+    return lit / 9.0;
+}
+
 /// Which way the light is, from `at`.
 ///
 /// A parallel light has only a direction, and it is the direction it *points*,
@@ -85,7 +168,10 @@ fn shade_point(
     for (var i = 0u; i < shading.light_count; i = i + 1u) {
         let light = lights[i];
         let to_light = direction_to(light, position);
-        let illuminance = illuminance_at(light, position);
+        var illuminance = illuminance_at(light, position);
+        if casts_shadow(light) {
+            illuminance *= shadow_factor(i, position, normal, to_light);
+        }
         total += brdf_shade(
             s,
             normal,

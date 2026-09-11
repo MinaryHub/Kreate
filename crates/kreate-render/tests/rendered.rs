@@ -220,6 +220,209 @@ fn summary(pixels: &[[f32; 4]]) -> Shot {
     }
 }
 
+/// A cube hanging over a wide flat plane, lit from above.
+///
+/// The one arrangement where a shadow is unambiguous: the plane under the cube
+/// is the only part of the picture that should change when shadows are turned
+/// on, and it should get darker.
+fn cube_over_a_floor(gpu: &Gpu, cast_shadow: bool) -> Vec<[f32; 4]> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.set_display(&gpu.queue, FRAMED);
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+
+    let floor_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::plane(16.0));
+    let cube_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_mesh, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_mesh, glam::Vec4::ONE);
+
+    // Looking down at the floor from off to one side, so the shadow is in
+    // frame rather than hidden behind the cube.
+    let camera = Camera {
+        distance: 14.0,
+        ..Camera::default()
+    };
+    let eye = camera.eye();
+    let lifted = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 3.0));
+
+    let mut draws = vec![
+        Draw::new(&floor, glam::DAffine3::IDENTITY).with_surface(grey()),
+        Draw::new(&cube, lifted).with_surface(grey()),
+    ];
+
+    // Straight down, so the shadow lands under the cube.
+    let sun = PlacedLight {
+        falloff: Falloff::Parallel,
+        direction: glam::Vec3::NEG_Z,
+        amount: [20_000.0; 3],
+        cast_shadow,
+        ..PlacedLight::default()
+    };
+    // Eye-relative, like everything the renderer is given.
+    let bounds = kreate_math::Aabb::new(
+        glam::Vec3::new(-9.0, -9.0, -1.0) - eye.as_vec3(),
+        glam::Vec3::new(9.0, 9.0, 5.0) - eye.as_vec3(),
+    );
+    viewport.set_scene_bounds(bounds);
+    viewport.set_world([0.0; 3]);
+    viewport.set_lights(&gpu.device, &gpu.queue, eye, &[sun]);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow shot"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    viewport.render(&mut encoder, &view, &draws);
+
+    let row = (SIZE * 4).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+
+    let mut out = Vec::with_capacity((SIZE * SIZE) as usize);
+    for y in 0..SIZE {
+        let base = (y * row) as usize;
+        let line = &data[base..base + (SIZE * 4) as usize];
+        for x in 0..SIZE as usize {
+            out.push([
+                line[x * 4] as f32 / 255.0,
+                line[x * 4 + 1] as f32 / 255.0,
+                line[x * 4 + 2] as f32 / 255.0,
+                line[x * 4 + 3] as f32 / 255.0,
+            ]);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_cube_casts_a_shadow_on_the_floor() {
+    // The whole point of the two commits, in one measurement: the same scene
+    // with the light's `cast_shadow` on and off, and the difference has to be
+    // darkness somewhere.
+    //
+    // A comparison rather than an absolute, because "is this pixel dark" has
+    // a dozen innocent reasons to be true and "did turning shadows on darken
+    // it" has one.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = cube_over_a_floor(&gpu, false);
+    let shadowed = cube_over_a_floor(&gpu, true);
+    assert_eq!(lit.len(), shadowed.len());
+
+    let darkened = lit
+        .iter()
+        .zip(&shadowed)
+        .filter(|(a, b)| b[0] + 0.02 < a[0])
+        .count();
+    assert!(
+        darkened > 30,
+        "only {darkened} pixels got darker when shadows were turned on"
+    );
+
+    // And nothing got *brighter*, which a bias pushed the wrong way would do.
+    let brightened = lit
+        .iter()
+        .zip(&shadowed)
+        .filter(|(a, b)| b[0] > a[0] + 0.02)
+        .count();
+    assert_eq!(brightened, 0, "{brightened} pixels got brighter");
+}
+
+#[test]
+fn the_lit_parts_of_the_scene_are_not_darkened() {
+    // Shadow acne: a surface shadowing itself because its own depth compares
+    // as nearer than what the map stored. It shows as a dirty stipple over
+    // everything the light touches, and the bias is what prevents it.
+    //
+    // Measured as the fraction of the picture that changed at all. A cube over
+    // a floor puts a small shadow in a large frame, so acne — which covers
+    // every lit surface — is an order of magnitude more pixels than the shadow
+    // itself.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = cube_over_a_floor(&gpu, false);
+    let shadowed = cube_over_a_floor(&gpu, true);
+
+    let changed = lit
+        .iter()
+        .zip(&shadowed)
+        .filter(|(a, b)| (a[0] - b[0]).abs() > 0.02)
+        .count();
+    let visible = lit.iter().filter(|p| p[0] > 0.01).count();
+    assert!(
+        changed * 3 < visible,
+        "{changed} of {visible} lit pixels changed; that is acne, not a shadow"
+    );
+}
+
+#[test]
+fn the_same_scene_renders_the_same_twice() {
+    // Not about shadows as such — it is about the buffers the shadow path
+    // added. Each frame writes the light entries, the shadow matrices and the
+    // per-draw matrices and then reads them back in the same frame, and a
+    // stale one shows as the *previous* frame's shadow: a dark patch that
+    // lags the light by a frame and vanishes if you look for it.
+    //
+    // Two identical frames are what catches that, and the shadow path is
+    // where it became worth checking.
+    //
+    // (That `cast_shadow` reaches the renderer at all is what
+    // `a_cube_casts_a_shadow_on_the_floor` says, by turning it off.)
+    let gpu = gpu_or_skip!(gpu());
+    let a = cube_over_a_floor(&gpu, true);
+    let b = cube_over_a_floor(&gpu, true);
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert_eq!(x, y, "pixel {i} differed between identical frames");
+    }
+}
+
 #[test]
 fn a_lit_scene_comes_out_lit() {
     // The assembly, at its bluntest. Every ingredient was already checked
