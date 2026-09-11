@@ -3740,9 +3740,15 @@ impl App {
             }
             "view.cycle_shading" => {
                 if let Some(gfx) = self.gfx.as_mut() {
+                    // Studio, flat, rendered, round. Rendered last because
+                    // it is the one that needs a scene with lights in it —
+                    // cycling into it from flat on an unlit scene shows
+                    // black, which is correct and is not what somebody
+                    // pressing the key twice was after.
                     gfx.viewport.shading = match gfx.viewport.shading {
                         ShadingMode::Studio => ShadingMode::Flat,
-                        ShadingMode::Flat => ShadingMode::Studio,
+                        ShadingMode::Flat => ShadingMode::Rendered,
+                        ShadingMode::Rendered => ShadingMode::Studio,
                     };
                     self.redraw.set(RedrawReason::SETTINGS);
                 }

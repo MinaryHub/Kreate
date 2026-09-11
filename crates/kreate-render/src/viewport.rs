@@ -24,8 +24,20 @@ use kreate_math::Aabb;
 /// How the solid pass shades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadingMode {
+    /// Three camera-relative lights, baked into `solid.wgsl`.
+    ///
+    /// Kept, and not a legacy path. While modelling, light that shows the
+    /// *shape* is the right light — a scene lit for a render is often a scene
+    /// you cannot model in, and §4.13 judged this correctly the first time.
     Studio,
     Flat,
+    /// The scene's own lights, one BRDF, through the display transform.
+    ///
+    /// Shades into a linear `Rgba16Float` target and resolves it in a
+    /// fullscreen pass, because the transform belongs at the end on a linear
+    /// image — per fragment it would apply before blending, which is the bug
+    /// §2.1 records as compositing seven times too dark.
+    Rendered,
 }
 
 #[repr(C)]
@@ -43,6 +55,36 @@ struct ObjectData {
     normal_col1: [f32; 4],
     normal_col2: [f32; 4],
     base_color: [f32; 4],
+}
+
+/// Per-draw data for the rendered pass. Matches `RenderedObject` in
+/// `rendered.wgsl`.
+///
+/// Separate from [`ObjectData`] rather than widening it, so the studio path is
+/// untouched: its uniform is a hot, per-draw write in every frame of a drag,
+/// and growing it by sixteen bytes for a mode that is off would be a cost paid
+/// by the mode that is on.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct RenderedObject {
+    model: [[f32; 4]; 4],
+    normal_col0: [f32; 4],
+    normal_col1: [f32; 4],
+    normal_col2: [f32; 4],
+    /// rgb: base colour, linear. w: metallic.
+    material: [f32; 4],
+    /// x: roughness.
+    params: [f32; 4],
+}
+
+/// What the rendered pass needs to know about the frame.
+///
+/// Matches `Shading` in `shading.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ShadingGlobals {
+    light_count: u32,
+    _pad: [u32; 3],
 }
 
 #[repr(C)]
@@ -499,6 +541,16 @@ pub struct Draw<'a> {
     /// read from `selected` rather than duplicated here — see
     /// [`Draw::protected`].
     pub editing: bool,
+    /// What this object is made of, for [`ShadingMode::Rendered`].
+    ///
+    /// On the draw rather than looked up, because `kreate-render` cannot see a
+    /// document — the app resolves `Document::material_at` and hands the
+    /// answer over, the same way it hands over the lights.
+    ///
+    /// Defaults to a mid-grey dielectric, which is what an object with no
+    /// material assigned is drawn as. Not an error and not invisible: a fresh
+    /// cube has no materials, and it should still be shaded.
+    pub surface: crate::brdf::Surface,
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -517,12 +569,19 @@ impl<'a> Draw<'a> {
             object_id: 0,
             preview: false,
             editing: false,
+            surface: crate::brdf::Surface::default(),
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
             // failure mode of forgetting to measure is a slow frame, not a
             // missing object.
             detail: Detail::FULL,
         }
+    }
+
+    /// Sets what this object is made of, for the rendered mode.
+    pub fn with_surface(mut self, surface: crate::brdf::Surface) -> Self {
+        self.surface = surface;
+        self
     }
 
     /// Marks this draw as the one being edited, exempting it from every
@@ -1009,6 +1068,35 @@ fn mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 /// Everything needed to draw one viewport.
 pub struct Viewport {
     solid: wgpu::RenderPipeline,
+    /// The scene-lit pass. See [`ShadingMode::Rendered`].
+    rendered: wgpu::RenderPipeline,
+    rendered_object_layout: wgpu::BindGroupLayout,
+    rendered_objects: UniformRing,
+    /// Group 2: the DFG table, the lights, and the frame's shading globals.
+    ///
+    /// The convention the shading libraries declare, because WGSL will not
+    /// take a storage pointer as a function parameter and a library that needs
+    /// a buffer has to declare it.
+    shading_layout: wgpu::BindGroupLayout,
+    shading_bind: wgpu::BindGroup,
+    dfg_buf: wgpu::Buffer,
+    shading_globals_buf: wgpu::Buffer,
+    lights: crate::lights::Lights,
+    /// The linear image the rendered pass shades into, and the pass that turns
+    /// it into a picture.
+    hdr: crate::display::HdrTarget,
+    screen: crate::display::ScreenResolve,
+    /// The resolve's uniform and its bind group.
+    ///
+    /// Owned here so a frame costs a sixteen byte write: the bind group is
+    /// rebuilt when the intermediate is, which is on a resize.
+    screen_params: wgpu::Buffer,
+    screen_bind: wgpu::BindGroup,
+    /// How the picture is looked at. See `kreate_math::DisplayTransform`.
+    ///
+    /// Private because the uniform behind it has to be written when it
+    /// changes; [`Viewport::set_display`] does both.
+    display: crate::display::Display,
     grid: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
@@ -1389,6 +1477,164 @@ impl Viewport {
             cache: None,
         });
 
+        // --- the rendered pass ------------------------------------------
+        //
+        // Built up front rather than on first use: a pipeline compiled the
+        // frame somebody switches mode is a visible hitch, and this one has
+        // three libraries in it.
+        let rendered_object_layout =
+            dynamic_uniform_layout(device, "rendered object", RENDERED_OBJECT_SIZE);
+        let shading_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shading data"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let dfg_buf = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("dfg"),
+                contents: bytemuck::cast_slice(&crate::brdf::dfg_buffer(
+                    crate::brdf::albedo_table(),
+                )),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
+        let shading_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shading globals"),
+            size: std::mem::size_of::<ShadingGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights = crate::lights::Lights::new(device, 8);
+        let shading_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shading data"),
+            layout: &shading_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: dfg_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lights.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: shading_globals_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let rendered_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rendered"),
+            source: wgpu::ShaderSource::Wgsl(crate::shading::rendered_source().into()),
+        });
+        let rendered_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rendered layout"),
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&rendered_object_layout),
+                Some(&shading_layout),
+            ],
+            immediate_size: 0,
+        });
+        let rendered = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rendered"),
+            layout: Some(&rendered_pl),
+            vertex: wgpu::VertexState {
+                module: &rendered_shader,
+                entry_point: Some("vs_rendered"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: 12,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: 4,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 0,
+                            shader_location: 1,
+                        }],
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rendered_shader,
+                entry_point: Some("fs_rendered"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    // The linear intermediate, not the window: this pass
+                    // writes light and the resolve writes a picture.
+                    format: crate::display::HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Not culled, for the reason the solid pass is not: a
+                // modeller has open and inconsistently wound geometry
+                // mid-edit, and the fragment shader flips the normal instead.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu::depth_write_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let hdr_0 = crate::display::HdrTarget::new(device, width.max(1), height.max(1));
+        let screen_0 = crate::display::ScreenResolve::new(device, color_format);
+        let screen_params_buf = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("display screen params"),
+                contents: &crate::display::ScreenResolve::params_of(
+                    crate::display::Display::default(),
+                ),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            },
+        );
+        let screen_bind_0 = screen_0.bind_group(device, hdr_0.view(), &screen_params_buf);
+
         let solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("solid"),
             layout: Some(&solid_pl),
@@ -1617,6 +1863,25 @@ impl Viewport {
             ),
             id_object_layout,
             objects: UniformRing::new(device, &object_layout, OBJECT_SIZE, 8, "objects"),
+            rendered_objects: UniformRing::new(
+                device,
+                &rendered_object_layout,
+                RENDERED_OBJECT_SIZE,
+                8,
+                "rendered objects",
+            ),
+            rendered,
+            rendered_object_layout,
+            shading_layout,
+            shading_bind,
+            dfg_buf,
+            shading_globals_buf,
+            lights,
+            screen_params: screen_params_buf,
+            screen_bind: screen_bind_0,
+            hdr: hdr_0,
+            screen: screen_0,
+            display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
                 device,
                 &edge_object_layout,
@@ -1664,6 +1929,14 @@ impl Viewport {
         if size != self.size {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
+            // The linear intermediate is the same size as the depth it shares
+            // a pass with. Remade only on a real change, because a texture
+            // reallocated every frame is a stall — and the bind group holds
+            // the old view, so it is remade with it.
+            self.hdr.resize(device, size.0, size.1);
+            self.screen_bind =
+                self.screen
+                    .bind_group(device, self.hdr.view(), &self.screen_params);
         }
         self.render_size = self.render_size.clamp_to(size);
     }
@@ -1891,6 +2164,13 @@ impl Viewport {
         let count = draws.len() as u32;
         self.objects
             .ensure(device, &self.object_layout, OBJECT_SIZE, count, "objects");
+        self.rendered_objects.ensure(
+            device,
+            &self.rendered_object_layout,
+            RENDERED_OBJECT_SIZE,
+            count,
+            "rendered objects",
+        );
         self.element_objects.ensure(
             device,
             &self.element_object_layout,
@@ -1922,6 +2202,21 @@ impl Viewport {
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
                     base_color: draw.mesh.color.to_array(),
+                }),
+            );
+            queue.write_buffer(
+                &self.rendered_objects.buffer,
+                self.rendered_objects.offset(i) as u64,
+                bytemuck::bytes_of(&RenderedObject {
+                    model: m.to_cols_array_2d(),
+                    normal_col0: normal.x_axis.extend(0.0).to_array(),
+                    normal_col1: normal.y_axis.extend(0.0).to_array(),
+                    normal_col2: normal.z_axis.extend(0.0).to_array(),
+                    material: {
+                        let [r, g, b] = draw.surface.base_color.to_array();
+                        [r, g, b, draw.surface.metallic]
+                    },
+                    params: [draw.surface.roughness, 0.0, 0.0, 0.0],
                 }),
             );
             queue.write_buffer(
@@ -1974,6 +2269,80 @@ impl Viewport {
     /// Must be called every frame the overlays are drawn, active or not. A
     /// pipeline with a bind group in its layout needs one bound, and leaving a
     /// stale one in place would keep highlighting the previous drag.
+    /// Hands the scene's lights to the rendered pass.
+    ///
+    /// Per frame, because every position is rebased onto the camera: a light
+    /// two metres from a camera parked a thousand million units out is `2.0`
+    /// that way and `0.0` through absolute single precision. The eye moves, so
+    /// the packing has to be redone.
+    ///
+    /// Taken as [`crate::lights::PlacedLight`] rather than read from a
+    /// document, because this crate cannot see one. The app does the joining
+    /// and the unit conversion, which is where `Light::axial_candela` lives.
+    pub fn set_lights(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        eye: glam::DVec3,
+        lights: &[crate::lights::PlacedLight],
+    ) {
+        let before = self.lights.capacity();
+        let count = self.lights.upload(device, queue, eye, lights);
+        // The light buffer grows by being replaced, and this bind group holds
+        // the old one. The capacity is what says that happened — it changes
+        // only in the branch that replaces the buffer — and rebuilding only
+        // then keeps a bind group per frame out of the common case.
+        if self.lights.capacity() != before {
+            self.shading_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shading data"),
+                layout: &self.shading_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.dfg_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.lights.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.shading_globals_buf.as_entire_binding(),
+                    },
+                ],
+            });
+        }
+        queue.write_buffer(
+            &self.shading_globals_buf,
+            0,
+            bytemuck::bytes_of(&ShadingGlobals {
+                // The count and not the buffer's length: the buffer is grown
+                // and never shrunk, so the slots past this hold an earlier
+                // frame's lights.
+                light_count: count,
+                _pad: [0; 3],
+            }),
+        );
+    }
+
+    /// How the picture is looked at: the view transform and the exposure.
+    ///
+    /// Writes the uniform too, so the two cannot disagree — a field the
+    /// caller could set without the buffer following would show as a slider
+    /// that does nothing.
+    pub fn set_display(&mut self, queue: &wgpu::Queue, display: crate::display::Display) {
+        self.display = display;
+        queue.write_buffer(
+            &self.screen_params,
+            0,
+            &crate::display::ScreenResolve::params_of(display),
+        );
+    }
+
+    pub fn display(&self) -> crate::display::Display {
+        self.display
+    }
+
     pub fn prepare_preview(
         &mut self,
         device: &wgpu::Device,
@@ -2644,10 +3013,94 @@ impl Viewport {
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
+        if self.shading == ShadingMode::Rendered {
+            self.render_lit(encoder, target, draws);
+            return;
+        }
         let mut pass = self.begin_pass(encoder, target, true);
         // Opaque geometry first, so the grid can be depth-tested against it.
         self.encode_solid(&mut pass, draws, Pass::First);
         self.encode_overlays(&mut pass, draws);
+    }
+
+    /// The rendered mode, in three passes.
+    ///
+    /// 1. Geometry into the linear intermediate, with depth.
+    /// 2. The display transform, onto the target.
+    /// 3. Overlays onto the target, testing the depth the first pass wrote.
+    ///
+    /// The overlays come *after* the resolve, and that is the whole reason
+    /// the order is this and not something simpler. They are display-referred
+    /// interface — a wireframe, a vertex point, a gizmo — drawn in the palette
+    /// the rest of the application uses. Putting them through the display
+    /// transform would tone-map the interface, and a selection highlight that
+    /// dims when the scene gets bright is not a highlight.
+    ///
+    /// The depth buffer is shared across the first and third, which is what
+    /// lets an overlay hide behind geometry it is behind. The resolve writes
+    /// no depth and tests none.
+    fn render_lit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[Draw],
+    ) {
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport rendered"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.hdr.view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Cleared to nothing, because nothing is what an
+                        // unlit direction contributes. The world's background
+                        // is a light (§2.2) and not a clear colour — clearing
+                        // to the interface's grey would put display-referred
+                        // paint into a linear image.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        // Reversed-Z clears to 0: nothing has been drawn.
+                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.rendered);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(2, &self.shading_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                    continue;
+                }
+                pass.set_bind_group(
+                    1,
+                    &self.rendered_objects.bind,
+                    &[self.rendered_objects.offset(i as u32)],
+                );
+                pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+            }
+        }
+
+        self.screen.draw_with(encoder, &self.screen_bind, target);
+
+        {
+            let mut pass = self.begin_pass(encoder, target, false);
+            self.encode_overlays(&mut pass, draws);
+        }
     }
 }
 
@@ -2674,6 +3127,7 @@ fn normal_matrix(model: &Mat4) -> Mat3 {
 /// Sizes of the per-draw uniform blocks, used both to allocate the rings and to
 /// declare `min_binding_size` on their layouts.
 const OBJECT_SIZE: u64 = std::mem::size_of::<ObjectData>() as u64;
+const RENDERED_OBJECT_SIZE: u64 = std::mem::size_of::<RenderedObject>() as u64;
 const EDGE_OBJECT_SIZE: u64 = std::mem::size_of::<EdgeObject>() as u64;
 
 /// Relative depth nudge for the wireframe, as a fraction of the fragment's own

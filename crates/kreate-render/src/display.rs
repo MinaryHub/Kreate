@@ -409,7 +409,54 @@ impl ScreenResolve {
         Self { layout, pipeline }
     }
 
+    /// The uniform this pass reads, as bytes.
+    ///
+    /// Written by a caller that owns the buffer, so a frame costs a sixteen
+    /// byte write rather than an allocation.
+    pub fn params_of(display: Display) -> [u8; 16] {
+        let params = Params {
+            exposure: display.exposure,
+            view: view_id(display.view),
+            // Unused by the screen pass, which covers whatever it is given.
+            count: 0,
+            _pad: 0,
+        };
+        let mut out = [0u8; 16];
+        out.copy_from_slice(bytemuck::bytes_of(&params));
+        out
+    }
+
+    /// A bind group for one source texture and one params buffer.
+    ///
+    /// Held by the caller and rebuilt when the source is remade — which is
+    /// when the viewport is resized, and not every frame.
+    pub fn bind_group(
+        &self,
+        device: &wgpu::Device,
+        source: &wgpu::TextureView,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("display screen"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+            ],
+        })
+    }
+
     /// Draws `source` through the display transform onto `target`.
+    ///
+    /// Allocates the uniform and the bind group, which is right for a one-off
+    /// and wrong for a frame. A viewport holds both and calls
+    /// [`ScreenResolve::draw_with`].
     pub fn draw(
         &self,
         device: &wgpu::Device,
@@ -418,36 +465,25 @@ impl ScreenResolve {
         target: &wgpu::TextureView,
         display: Display,
     ) {
-        let params = Params {
-            exposure: display.exposure,
-            view: view_id(display.view),
-            // Unused by the screen pass, which covers whatever it is given.
-            count: 0,
-            _pad: 0,
-        };
         let uniform = wgpu::util::DeviceExt::create_buffer_init(
             device,
             &wgpu::util::BufferInitDescriptor {
                 label: Some("display screen params"),
-                contents: bytemuck::bytes_of(&params),
+                contents: &Self::params_of(display),
                 usage: wgpu::BufferUsages::UNIFORM,
             },
         );
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("display screen"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(source),
-                },
-            ],
-        });
+        let bind = self.bind_group(device, source, &uniform);
+        self.draw_with(encoder, &bind, target);
+    }
 
+    /// The pass itself, against a bind group the caller owns.
+    pub fn draw_with(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bind: &wgpu::BindGroup,
+        target: &wgpu::TextureView,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("display screen"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -468,7 +504,7 @@ impl ScreenResolve {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(0, bind, &[]);
         // Three vertices, one triangle, no buffers.
         pass.draw(0..3, 0..1);
     }
