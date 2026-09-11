@@ -76,6 +76,11 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
         // The composition, not the fragment. See the note above.
         ("shading", kreate_render::shading::probe_source().into()),
+        // Also a fragment, and also checked as what a device receives.
+        (
+            "rendered",
+            kreate_render::shading::rendered_source().into(),
+        ),
     ]
 }
 

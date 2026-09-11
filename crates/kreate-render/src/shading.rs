@@ -138,6 +138,15 @@ pub fn shader_source() -> String {
     )
 }
 
+/// The shader the rendered viewport draws with.
+///
+/// The library composition plus a vertex and a fragment stage. Nothing in
+/// `rendered.wgsl` shades: every light and every lobe is `shade_point`, so
+/// what the viewport runs is the function the device tests measure.
+pub fn rendered_source() -> String {
+    format!("{}\n{}", shader_source(), include_str!("shaders/rendered.wgsl"))
+}
+
 /// The same, with this module's probe entry point on the end.
 ///
 /// For the device test, which needs something to dispatch. Kept apart from
@@ -368,6 +377,24 @@ mod tests {
         // what a drawing pass appends its own entry points to.
         naga::front::wgsl::parse_str(&shader_source()).expect("the library composition parses");
         naga::front::wgsl::parse_str(&probe_source()).expect("the probe composition parses");
+    }
+
+    #[test]
+    fn the_drawing_composition_parses_and_shades_through_the_library() {
+        // The viewport's shader is the same three libraries with a vertex and
+        // a fragment stage on the end. If it ever grew a second copy of the
+        // shading, the device tests would still pass and the picture would
+        // still be plausible — which is exactly the drift §5 warns about.
+        let source = rendered_source();
+        naga::front::wgsl::parse_str(&source).expect("the drawing composition parses");
+        assert!(source.contains("fn vs_rendered"));
+        assert!(source.contains("fn fs_rendered"));
+        // One `shade_point`, and the fragment stage calls it rather than
+        // reimplementing it.
+        assert_eq!(source.matches("fn shade_point").count(), 1);
+        assert!(source.contains("shade_point(surface, in.world, normal, view)"));
+        // And no probe: those declare buffers a drawing pass does not bind.
+        assert!(!source.contains("fn probe_shading"));
     }
 
     #[test]

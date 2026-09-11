@@ -1068,4 +1068,48 @@ mod tests {
         assert_eq!(r.bytes_per_vertex(), 0.0);
         assert!(r.indices.is_empty());
     }
+
+    /// Where the decoder starts, in both shaders that carry a copy.
+    ///
+    /// The studio pass and the rendered one are not in a composition with each
+    /// other — `solid.wgsl` predates that machinery and stands alone — so the
+    /// duplication cannot be removed. The drift can be.
+    const OCT_DECODE_WGSL: &str = "fn unpack_snorm16(v: u32) -> f32 {";
+
+    #[test]
+    fn the_two_shader_copies_of_the_decode_agree() {
+        // `solid.wgsl` and `rendered.wgsl` each carry the decoder, because
+        // they are separate shaders and WGSL has no include in this build. A
+        // copy that drifted would make one pass shade differently from the
+        // other — the viewport disagreeing with itself, which is §5's second
+        // risk at closer range than usual.
+        //
+        // Character for character, from the marker to the end of the
+        // function, so a change to either has to be made to both.
+        let extract = |source: &str, name: &str| -> String {
+            // Line endings normalised first: the files are checked out with
+            // CRLF here and the claim is about the code, not about which
+            // bytes separate its lines.
+            let source = &source.replace("\r\n", "\n");
+            let start = source
+                .find(OCT_DECODE_WGSL)
+                .unwrap_or_else(|| panic!("{name} has no copy of the decoder"));
+            let rest = &source[start..];
+            let end = rest
+                .find("\nfn oct_decode")
+                .and_then(|at| rest[at + 1..].find("\n}\n").map(|e| at + 1 + e + 3))
+                .unwrap_or_else(|| panic!("{name}'s decoder has no end"));
+            rest[..end].to_string()
+        };
+
+        let solid = extract(include_str!("shaders/solid.wgsl"), "solid.wgsl");
+        let rendered = extract(include_str!("shaders/rendered.wgsl"), "rendered.wgsl");
+        assert_eq!(
+            solid, rendered,
+            "the two shader copies of the octahedral decode have drifted"
+        );
+        // And the extraction found something, or this compares two empties.
+        assert!(solid.contains("fn oct_decode"), "{solid}");
+        assert!(solid.len() > 300, "the extraction is too short: {solid}");
+    }
 }
