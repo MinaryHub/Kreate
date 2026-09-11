@@ -13,8 +13,8 @@ pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MeshId, Object,
-    ObjectData, ObjectId, ReparentError, Selection, WorldId,
+    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialOverrides,
+    MeshId, Object, ObjectData, ObjectId, ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};
 pub use image::{ColorSpace, Image, PixelFormat, Source, Tile, TILE};

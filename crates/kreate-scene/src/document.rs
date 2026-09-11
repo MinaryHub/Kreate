@@ -137,6 +137,10 @@ pub struct Object {
     pub visible: bool,
     pub selectable: bool,
     pub linkage: Linkage,
+    /// Per-slot materials that win over the mesh's. Usually empty.
+    ///
+    /// See [`MaterialOverrides`] and [`Document::material_at`].
+    pub material_overrides: MaterialOverrides,
     /// This object's identity, for as long as the document exists and across
     /// saves.
     ///
@@ -168,6 +172,8 @@ impl Object {
             visible: true,
             selectable: true,
             linkage: Linkage::Local,
+            // Empty: the mesh's slots answer unless something overrides one.
+            material_overrides: MaterialOverrides::new(),
             uid: Uid::NONE,
             modifiers: Vec::new(),
         }
@@ -181,6 +187,18 @@ impl Object {
     }
 }
 
+/// What an object overrides about its mesh's materials.
+///
+/// Empty for almost every object, which is why it is a `Vec` and not a map:
+/// the common case costs a pointer and no allocation, and the uncommon one is
+/// a handful of slots.
+///
+/// Modelled now rather than later because the alternative is auditing every
+/// material lookup afterwards. Blender has exactly this — a slot links either
+/// to the data or to the object — and the case it exists for is ordinary: two
+/// linked copies of a chair, one of them upholstered differently.
+pub type MaterialOverrides = Vec<Option<MaterialId>>;
+
 /// A material, deliberately a "standard surface" and nothing more.
 ///
 /// Its parameters map near-1:1 onto both glTF metal-rough and
@@ -189,20 +207,38 @@ impl Object {
 #[derive(Clone, Debug)]
 pub struct Material {
     pub name: String,
-    pub base_color: [f32; 4],
+    /// The base colour: a reflectance, bounded by one.
+    ///
+    /// Typed rather than `[f32; 4]`, which is what this was before §2.1's
+    /// colour work: a bare array says nothing about which space it is in, and
+    /// the two colour bugs that discipline was introduced after were both a
+    /// value in the wrong one. For a dielectric this is the diffuse albedo and
+    /// for a metal the specular colour — `metallic` says which, which is the
+    /// whole trick of the metal-roughness parameterisation.
+    ///
+    /// glTF's `baseColorFactor` is linear too, so the boundary is a copy and
+    /// not a decode.
+    pub base_color: kreate_math::SceneRgb,
+    /// Opacity. Separate from the colour because it is not one: a transfer
+    /// function applies to the three and never to this.
+    pub alpha: f32,
     pub metallic: f32,
     pub roughness: f32,
     pub linkage: Linkage,
+    /// Assigned by the document. See [`Uid`].
+    pub uid: Uid,
 }
 
 impl Default for Material {
     fn default() -> Self {
         Self {
             name: "Material".into(),
-            base_color: [0.8, 0.8, 0.8, 1.0],
+            base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+            alpha: 1.0,
             metallic: 0.0,
             roughness: 0.5,
             linkage: Linkage::Local,
+            uid: Uid::NONE,
         }
     }
 }
@@ -313,6 +349,23 @@ pub struct Document {
 struct MeshEntry {
     uid: Uid,
     data: Arc<MeshData>,
+    /// The material slots this mesh's faces index into.
+    ///
+    /// A face's `material_index` attribute is a slot number, not a document
+    /// id, and this is the list it numbers. Two reasons it has to be that way
+    /// round: a `MeshData` has to be transferable between documents, where an
+    /// arena id means nothing; and `edit::join` already offsets each part's
+    /// indices as it merges, which is only coherent against a per-mesh list.
+    ///
+    /// On the *mesh* rather than the object because a linked copy shares the
+    /// mesh (§1.4), so it shares the slots — assigning a material to one copy
+    /// assigns it to all of them, which is what an artist means by "the
+    /// material of this chair". [`Object::material_overrides`] is how one copy
+    /// differs.
+    ///
+    /// `None` in a slot is a slot nothing is assigned to, which is the state
+    /// of every freshly added cube.
+    slots: Vec<Option<MaterialId>>,
 }
 
 /// The last identity issued for each kind.
@@ -328,6 +381,7 @@ struct UidCounters {
     image: Uid,
     light: Uid,
     world: Uid,
+    material: Uid,
 }
 
 impl Document {
@@ -413,6 +467,7 @@ impl Document {
             DatablockKind::Mesh => &mut self.uids.mesh,
             DatablockKind::Camera => &mut self.uids.camera,
             DatablockKind::Image => &mut self.uids.image,
+            DatablockKind::Material => &mut self.uids.material,
             DatablockKind::Light => &mut self.uids.light,
             DatablockKind::World => &mut self.uids.world,
             // Nothing else is a datablock in this document yet. Reaching here
@@ -679,6 +734,9 @@ impl Document {
         self.meshes.insert(MeshEntry {
             uid,
             data: Arc::new(mesh),
+            // A mesh arrives with no material slots. A freshly added cube has
+            // no materials, which is a state and not an omission.
+            slots: Vec::new(),
         })
     }
 
@@ -693,6 +751,9 @@ impl Document {
         self.meshes.insert(MeshEntry {
             uid,
             data: Arc::new(mesh),
+            // A mesh arrives with no material slots. A freshly added cube has
+            // no materials, which is a state and not an omission.
+            slots: Vec::new(),
         })
     }
 
@@ -1027,12 +1088,109 @@ impl Document {
     // --- materials ----------------------------------------------------------
 
     pub fn add_material(&mut self, material: Material) -> MaterialId {
+        let uid = self.issue(DatablockKind::Material);
         self.touch();
-        self.materials.insert(Arc::new(material))
+        self.materials.insert(Arc::new(Material { uid, ..material }))
+    }
+
+    /// Adds a material with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_material(&mut self, material: Material, uid: Uid) -> MaterialId {
+        if uid.is_none() {
+            return self.add_material(material);
+        }
+        self.uids.material = self.uids.material.max(uid);
+        self.touch();
+        self.materials.insert(Arc::new(Material { uid, ..material }))
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
         self.materials.get(id).map(|m| m.as_ref())
+    }
+
+    /// Copy-on-write access to a material.
+    pub fn material_mut(&mut self, id: MaterialId) -> Option<&mut Material> {
+        self.touch();
+        self.materials.get_mut(id).map(Arc::make_mut)
+    }
+
+    pub fn materials(&self) -> impl Iterator<Item = (MaterialId, &Material)> {
+        self.materials.iter().map(|(id, m)| (id, m.as_ref()))
+    }
+
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    pub fn material_uid(&self, id: MaterialId) -> Option<Uid> {
+        self.materials.get(id).map(|m| m.uid)
+    }
+
+    pub fn material_by_uid(&self, uid: Uid) -> Option<MaterialId> {
+        self.materials
+            .iter()
+            .find(|(_, m)| m.uid == uid)
+            .map(|(id, _)| id)
+    }
+
+    // --- material slots -----------------------------------------------------
+
+    /// The material slots a mesh's faces index into.
+    pub fn mesh_slots(&self, mesh: MeshId) -> &[Option<MaterialId>] {
+        self.meshes.get(mesh).map(|m| &m.slots[..]).unwrap_or(&[])
+    }
+
+    /// Replaces a mesh's slot list.
+    pub fn set_mesh_slots(&mut self, mesh: MeshId, slots: Vec<Option<MaterialId>>) -> bool {
+        let Some(entry) = self.meshes.get_mut(mesh) else {
+            return false;
+        };
+        entry.slots = slots;
+        self.touch();
+        true
+    }
+
+    /// Puts `material` in slot `slot`, growing the list if it is short.
+    ///
+    /// Growing rather than refusing, because a mesh imported with a face
+    /// pointing at slot three is exactly the case this has to cope with, and
+    /// refusing would lose the assignment rather than the index.
+    pub fn set_mesh_slot(
+        &mut self,
+        mesh: MeshId,
+        slot: usize,
+        material: Option<MaterialId>,
+    ) -> bool {
+        let Some(entry) = self.meshes.get_mut(mesh) else {
+            return false;
+        };
+        if entry.slots.len() <= slot {
+            entry.slots.resize(slot + 1, None);
+        }
+        entry.slots[slot] = material;
+        self.touch();
+        true
+    }
+
+    /// The material an object shows in `slot`.
+    ///
+    /// The one place the override rule lives: the object's list wins where it
+    /// has an entry, the mesh's answers otherwise. A second copy of this rule
+    /// anywhere is a place for the two to disagree about which chair is
+    /// upholstered.
+    ///
+    /// `None` for a slot nothing is assigned to, for an index past the end,
+    /// and for an object with no mesh. None of those is an error: a freshly
+    /// added cube has no materials at all, and the renderer draws it with a
+    /// default surface rather than refusing.
+    pub fn material_at(&self, object: ObjectId, slot: usize) -> Option<&Material> {
+        let object = self.objects.get(object)?;
+        if let Some(Some(overridden)) = object.material_overrides.get(slot) {
+            return self.material(*overridden);
+        }
+        let mesh = object.mesh()?;
+        let id = (*self.meshes.get(mesh)?.slots.get(slot)?)?;
+        self.material(id)
     }
 
     pub fn add_collection(&mut self, collection: Collection) -> CollectionId {

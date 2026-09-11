@@ -62,7 +62,14 @@ pub const VERSION_MAJOR: u32 = 1;
 /// light — the object comes back as an empty and the light records travel in
 /// its `extra` map — which is the honest limit of forwards compatibility for
 /// something that changes what an object *is*. Nothing is discarded.
-pub const VERSION_MINOR: u32 = 2;
+///
+/// 3: materials (`SceneFile::materials`, `SceneFile::mesh_slots`,
+/// `ObjectRecord::material_overrides`). An older reader keeps all three in its
+/// `extra` maps and writes them back, so a scene round-tripped through one
+/// keeps its materials — unlike a light, a material does not change what an
+/// object *is*, so nothing about the object record has to be understood for
+/// the link to survive.
+pub const VERSION_MINOR: u32 = 3;
 
 const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
@@ -164,6 +171,14 @@ pub struct ObjectRecord {
     /// Index into [`SceneFile::lights`], for an object that is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<usize>,
+    /// Per-slot materials that win over the mesh's, as indices into
+    /// [`SceneFile::materials`].
+    ///
+    /// `null` in a position means "as the mesh says" and not "no material" —
+    /// the list is positional, so overriding slot one needs an entry for slot
+    /// zero and that entry must not erase it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_overrides: Vec<Option<usize>>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -303,6 +318,27 @@ pub struct WorldRecord {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// A material datablock.
+///
+/// The base colour is linear, like a light's tint and like glTF's own
+/// `baseColorFactor`, so crossing this boundary is a copy rather than a
+/// conversion. Alpha is beside it rather than in it, because a transfer
+/// function applies to three channels and never to the fourth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialRecord {
+    pub name: String,
+    /// The datablock's identity, which outlives this file.
+    #[serde(default)]
+    pub uid: u64,
+    /// Linear, bounded by one.
+    pub base_color: [f32; 3],
+    pub alpha: f32,
+    pub metallic: f32,
+    pub roughness: f32,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SceneFile {
     pub objects: Vec<ObjectRecord>,
@@ -333,6 +369,17 @@ pub struct SceneFile {
     /// mean deleting one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worlds: Vec<WorldRecord>,
+    /// Material datablocks, in the order the document holds them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<MaterialRecord>,
+    /// Each mesh's material slots, by the key the archive files the mesh
+    /// under, as indices into `materials`.
+    ///
+    /// Beside the meshes rather than inside them, for the same reason their
+    /// identities are: a slot list belongs to a mesh, and a mesh is not owned
+    /// by an object.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mesh_slots: BTreeMap<String, Vec<Option<usize>>>,
     /// Index into `worlds`: which one is lighting the scene.
     ///
     /// `None` is a scene lit by nothing but its own lights, which is a real
@@ -618,6 +665,43 @@ pub fn write(
             })
             .collect();
 
+        let material_index: BTreeMap<kreate_scene::MaterialId, usize> = document
+            .materials()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        scene.materials = document
+            .materials()
+            .map(|(_, m)| {
+                let [r, g, b] = m.base_color.to_array();
+                MaterialRecord {
+                    name: m.name.clone(),
+                    uid: m.uid.raw(),
+                    base_color: [r, g, b],
+                    alpha: m.alpha,
+                    metallic: m.metallic,
+                    roughness: m.roughness,
+                    extra: BTreeMap::new(),
+                }
+            })
+            .collect();
+        scene.mesh_slots = keys
+            .iter()
+            .filter_map(|(id, key)| {
+                let slots = document.mesh_slots(*id);
+                if slots.is_empty() {
+                    return None;
+                }
+                Some((
+                    key.clone(),
+                    slots
+                        .iter()
+                        .map(|s| s.and_then(|m| material_index.get(&m).copied()))
+                        .collect(),
+                ))
+            })
+            .collect();
+
         let light_index: BTreeMap<kreate_scene::LightId, usize> = document
             .lights()
             .enumerate()
@@ -667,6 +751,11 @@ pub fn write(
                 mesh,
                 camera,
                 light,
+                material_overrides: object
+                    .material_overrides
+                    .iter()
+                    .map(|s| s.and_then(|m| material_index.get(&m).copied()))
+                    .collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -810,6 +899,39 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         camera_ids.push(document.restore_camera(camera, kreate_scene::Uid::from_raw(record.uid)));
     }
 
+    let mut material_ids: Vec<kreate_scene::MaterialId> =
+        Vec::with_capacity(scene.materials.len());
+    for record in &scene.materials {
+        let material = kreate_scene::Material {
+            name: record.name.clone(),
+            base_color: kreate_math::SceneRgb::new(
+                record.base_color[0],
+                record.base_color[1],
+                record.base_color[2],
+            ),
+            alpha: record.alpha,
+            metallic: record.metallic,
+            roughness: record.roughness,
+            linkage: Linkage::Local,
+            uid: kreate_scene::Uid::NONE,
+        };
+        material_ids
+            .push(document.restore_material(material, kreate_scene::Uid::from_raw(record.uid)));
+    }
+    // An index naming a material that is not in the file leaves the slot
+    // empty, which is the same as an unassigned slot and is what the renderer
+    // already draws.
+    for (key, slots) in &scene.mesh_slots {
+        let Some(mesh) = mesh_ids.get(key) else {
+            continue;
+        };
+        let resolved: Vec<Option<kreate_scene::MaterialId>> = slots
+            .iter()
+            .map(|s| s.and_then(|i| material_ids.get(i).copied()))
+            .collect();
+        document.set_mesh_slots(*mesh, resolved);
+    }
+
     let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());
     for record in &scene.lights {
         let light = light_from_record(record);
@@ -862,6 +984,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.parent_inverse = affine_from_array(&record.parent_inverse);
         object.visible = record.visible;
         object.selectable = record.selectable;
+        object.material_overrides = record
+            .material_overrides
+            .iter()
+            .map(|s| s.and_then(|i| material_ids.get(i).copied()))
+            .collect();
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {
