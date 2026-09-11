@@ -52,6 +52,9 @@ macro_rules! gpu_or_skip {
     };
 }
 
+/// A scene lit only by its lamps. See `shading::shade`.
+const NO_WORLD: [f32; 3] = [0.0; 3];
+
 const RELATIVE: f32 = 2e-3;
 const ABSOLUTE: f32 = 1e-4;
 
@@ -86,6 +89,7 @@ fn sample_of(point: &Point) -> Sample {
 struct Shading {
     light_count: u32,
     pad: [u32; 3],
+    world: [f32; 4],
 }
 
 /// Runs the composed probe over `points` against `lights`.
@@ -117,6 +121,8 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
             contents: bytemuck::bytes_of(&Shading {
                 light_count: count.unwrap_or(live),
                 pad: [0; 3],
+                // These tests are about the lamps; the world has its own.
+                world: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -367,7 +373,7 @@ fn the_gpu_shades_the_way_the_cpu_does() {
     assert_eq!(got.len(), points.len());
 
     for (point, lit) in points.iter().zip(&got) {
-        let want = shading::shade(point, &packed);
+        let want = shading::shade(point, &packed, NO_WORLD);
         for c in 0..3 {
             assert!(lit[c].is_finite(), "{point:?} gave {lit:?}");
             assert!(
@@ -416,7 +422,7 @@ fn the_lit_result_is_not_clamped_on_the_device_either() {
     assert!(lit[0] > 100.0, "the sun was clamped away: {lit:?}");
 
     let packed = [GpuLight::pack(&noon[0], glam::DVec3::ZERO)];
-    assert!(close(lit[0], shading::shade(&point, &packed)[0]));
+    assert!(close(lit[0], shading::shade(&point, &packed, NO_WORLD)[0]));
 }
 
 #[test]
@@ -447,7 +453,7 @@ fn the_device_reads_the_count_and_not_the_buffers_length() {
         .take(2)
         .map(|l| GpuLight::pack(l, glam::DVec3::ZERO))
         .collect();
-    assert!(close(first_two, shading::shade(&point, &packed)[0]));
+    assert!(close(first_two, shading::shade(&point, &packed, NO_WORLD)[0]));
 }
 
 #[test]

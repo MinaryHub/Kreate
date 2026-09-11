@@ -63,13 +63,38 @@ impl Point {
     }
 }
 
+/// What a uniform environment contributes to a point.
+///
+/// Exact for a flat world, which is worth saying because an ambient term
+/// usually is not. Under an environment the same in every direction the
+/// prefiltered radiance is that colour whatever the roughness, so the
+/// split-sum specular is the DFG table straight out; and the diffuse half
+/// integrates to `albedo × radiance`, coupled by the share the direct path
+/// uses. A white surface under `L` returns `L`, and a furnace test says so.
+///
+/// An *image* background is the IBL step and needs a prefiltered cube map,
+/// which needs the archive's `images/` layout first. This is the half that
+/// costs a lookup.
+pub fn ambient(surface: &Surface, normal: glam::Vec3, view: glam::Vec3, radiance: [f32; 3]) -> [f32; 3] {
+    let nov = normal.dot(view).clamp(1e-4, 1.0);
+    let roughness = surface.roughness.clamp(0.0, 1.0);
+    let share = brdf::specular_share(surface.f0(), nov, roughness);
+    let albedo = surface.diffuse_albedo();
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        out[c] = radiance[c] * (share[c] + albedo[c] * (1.0 - share[c]));
+    }
+    out
+}
+
 /// The light leaving `point` toward its viewer, in the working space.
 ///
 /// Scene-linear and unbounded: a surface under a sun is in the thousands, and
 /// the display transform is what turns that into a picture. Clamping here would
 /// be the bug §2.1 records — twice.
-pub fn shade(point: &Point, lights: &[GpuLight]) -> [f32; 3] {
-    let mut total = [0.0f32; 3];
+pub fn shade(point: &Point, lights: &[GpuLight], world: [f32; 3]) -> [f32; 3] {
+    // The world first, because it is the light that is always there.
+    let mut total = ambient(&point.surface, point.normal, point.view, world);
     for light in lights {
         let to_light = direction_to(light, point.position);
         let illuminance = light.illuminance_at(point.position);
@@ -164,6 +189,13 @@ pub fn probe_source() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scene lit only by its lamps.
+    ///
+    /// Spelled out at every call rather than defaulted, because "no world" is
+    /// a state a scene is deliberately in and not an omission — and a default
+    /// would let a test forget which it was measuring.
+    const NO_WORLD: [f32; 3] = [0.0; 3];
     use crate::lights::{Falloff, PlacedLight, FLAG_DIFFUSE, FLAG_SHADOW, FLAG_SPECULAR};
     use kreate_math::SceneRgb;
 
@@ -203,6 +235,174 @@ mod tests {
     }
 
     #[test]
+    fn a_white_surface_under_a_uniform_environment_returns_it() {
+        // The furnace test, at the scene level. If the light arriving from
+        // every direction is `L` and the surface reflects everything, the
+        // light leaving is `L` — whatever the material, whatever the angle.
+        //
+        // This is the strongest statement available about an ambient term, and
+        // most renderers cannot make it: an ambient that is `albedo × L` plus a
+        // specular term reflects more than arrives, and one that ignores the
+        // specular reflects less. The share is what makes the two add to one.
+        // Zero and one, which are the two materials that exist. See the test
+        // below for why the values between them are not held to this.
+        let environment = [3.0f32, 3.0, 3.0];
+        for metallic in [0.0f32, 1.0] {
+            for roughness in [0.05f32, 0.3, 0.7, 1.0] {
+                let surface = Surface {
+                    base_color: SceneRgb::WHITE,
+                    metallic,
+                    roughness,
+                };
+                for angle in [0.0f32, 0.7, 1.4] {
+                    let normal = glam::Vec3::Z;
+                    let view = glam::Vec3::new(angle.sin(), 0.0, angle.cos());
+                    let out = ambient(&surface, normal, view, environment);
+                    assert!(
+                        (out[0] - environment[0]).abs() < environment[0] * 0.02,
+                        "metallic {metallic} roughness {roughness} at {angle} \
+                         returned {} of {}",
+                        out[0],
+                        environment[0]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_half_metal_loses_energy_and_that_is_the_parameterisation() {
+        // Recorded rather than fixed, because it is not a defect in the
+        // shading: metal-roughness blends the *parameters* and not the
+        // results, so at metallic one half the reflectance has moved most of
+        // the way to a metal's while the diffuse albedo has only halved, and
+        // the two no longer add to one.
+        //
+        // Values between zero and one are not a material. They are what a
+        // texture does while crossing from one to the other — which is the
+        // only reason the parameter is continuous at all, and `Material::
+        // metallic` says so.
+        //
+        // What is asserted is that nothing *gains* energy, which would show as
+        // a surface that glows, and that the loss is where it is expected.
+        let environment = [1.0f32; 3];
+        let mut worst = 1.0f32;
+        for metallic in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let surface = Surface {
+                base_color: SceneRgb::WHITE,
+                metallic,
+                roughness: 0.3,
+            };
+            let out = ambient(&surface, glam::Vec3::Z, glam::Vec3::Z, environment)[0];
+            assert!(out <= 1.02, "metallic {metallic} returned {out}");
+            worst = worst.min(out);
+        }
+        // The dip is real and is in the middle, not at either end.
+        assert!(worst < 0.9, "the blend lost nothing: {worst}");
+        let ends = [0.0f32, 1.0].map(|metallic| {
+            ambient(
+                &Surface {
+                    base_color: SceneRgb::WHITE,
+                    metallic,
+                    roughness: 0.3,
+                },
+                glam::Vec3::Z,
+                glam::Vec3::Z,
+                environment,
+            )[0]
+        });
+        for end in ends {
+            assert!(end > 0.97, "an end lost energy: {end}");
+        }
+    }
+
+    #[test]
+    fn a_darker_surface_returns_less_and_never_more() {
+        // The other half: conservation is a bound, not an identity. A black
+        // surface under an environment still shows its specular reflection,
+        // and nothing shows more than arrived.
+        let environment = [1.0f32; 3];
+        for albedo in [0.0f32, 0.25, 0.5, 0.8, 1.0] {
+            let surface = Surface {
+                base_color: SceneRgb::new(albedo, albedo, albedo),
+                metallic: 0.0,
+                roughness: 0.4,
+            };
+            let out = ambient(&surface, glam::Vec3::Z, glam::Vec3::Z, environment)[0];
+            assert!(out <= environment[0] * 1.02, "{albedo} returned {out}");
+            assert!(out > 0.0, "even black has a reflection: {albedo}");
+        }
+
+        // And brighter albedo returns more, or the parameter means nothing.
+        let dark = ambient(
+            &Surface {
+                base_color: SceneRgb::new(0.1, 0.1, 0.1),
+                metallic: 0.0,
+                roughness: 0.4,
+            },
+            glam::Vec3::Z,
+            glam::Vec3::Z,
+            environment,
+        )[0];
+        let light = ambient(
+            &Surface {
+                base_color: SceneRgb::new(0.9, 0.9, 0.9),
+                metallic: 0.0,
+                roughness: 0.4,
+            },
+            glam::Vec3::Z,
+            glam::Vec3::Z,
+            environment,
+        )[0];
+        assert!(light > dark * 3.0, "{dark} against {light}");
+    }
+
+    #[test]
+    fn a_black_world_contributes_nothing() {
+        // Which is what a scene with no world is, and it has to cost nothing
+        // rather than a small grey.
+        let point = grey_point(glam::Vec3::Z);
+        assert_eq!(
+            ambient(&point.surface, point.normal, point.view, NO_WORLD),
+            [0.0; 3]
+        );
+        assert_eq!(shade(&point, &[], NO_WORLD), [0.0; 3]);
+    }
+
+    #[test]
+    fn the_world_lights_a_scene_with_no_lamps_in_it() {
+        // An environment is a light, and the commonest one. A renderer that
+        // only summed the lamps would show a black object against a coloured
+        // background, which reads as the object being broken.
+        let mut point = grey_point(glam::Vec3::Z);
+        point.view = glam::Vec3::Z;
+        let lit = shade(&point, &[], [0.5, 0.25, 0.125]);
+        assert!(lit[0] > 0.0 && lit[1] > 0.0 && lit[2] > 0.0, "{lit:?}");
+        // And it carries the world's colour rather than greying it.
+        assert!(lit[0] > lit[1] && lit[1] > lit[2], "{lit:?}");
+    }
+
+    #[test]
+    fn the_world_and_the_lamps_add() {
+        // Two lights, and one of them is everywhere. Nothing about the sum is
+        // special, which is the point — an ambient that replaced the direct
+        // light, or that was multiplied into it, would look plausible in a
+        // scene with one of the two.
+        let mut point = grey_point(glam::Vec3::Z);
+        point.view = glam::Vec3::Z;
+        let lamp = bulb(glam::Vec3::new(0.0, 0.0, 2.0), 400.0);
+
+        let only_world = shade(&point, &[], [0.4; 3])[0];
+        let only_lamp = shade(&point, &[lamp], NO_WORLD)[0];
+        let both = shade(&point, &[lamp], [0.4; 3])[0];
+        assert!(only_world > 0.0 && only_lamp > 0.0);
+        assert!(
+            (both - (only_world + only_lamp)).abs() < both * 1e-5,
+            "{only_world} + {only_lamp} against {both}"
+        );
+    }
+
+    #[test]
     fn lights_add() {
         // The arithmetic of light is addition. A renderer taking the largest,
         // or averaging, would look plausible under one lamp and wrong under
@@ -214,9 +414,9 @@ mod tests {
         let a = bulb(glam::Vec3::new(0.0, 0.0, 2.0), 400.0);
         let b = bulb(glam::Vec3::new(1.0, 0.0, 2.0), 400.0);
 
-        let only_a = shade(&point, std::slice::from_ref(&a))[0];
-        let only_b = shade(&point, std::slice::from_ref(&b))[0];
-        let both = shade(&point, &[a, b])[0];
+        let only_a = shade(&point, std::slice::from_ref(&a), NO_WORLD)[0];
+        let only_b = shade(&point, std::slice::from_ref(&b), NO_WORLD)[0];
+        let both = shade(&point, &[a, b], NO_WORLD)[0];
 
         assert!(only_a > 0.0 && only_b > 0.0);
         assert!((both - (only_a + only_b)).abs() < both * 1e-5, "{both}");
@@ -228,7 +428,7 @@ mod tests {
         // nobody asked for, and it would make every light the user adds look
         // like it did less than it did.
         let point = grey_point(glam::Vec3::Z);
-        assert_eq!(shade(&point, &[]), [0.0; 3]);
+        assert_eq!(shade(&point, &[], NO_WORLD), [0.0; 3]);
     }
 
     #[test]
@@ -238,7 +438,7 @@ mod tests {
         let mut point = grey_point(glam::Vec3::Z);
         point.view = glam::Vec3::Z;
         let behind = bulb(glam::Vec3::new(0.0, 0.0, -2.0), 1000.0);
-        assert_eq!(shade(&point, &[behind]), [0.0; 3]);
+        assert_eq!(shade(&point, &[behind], NO_WORLD), [0.0; 3]);
     }
 
     #[test]
@@ -252,11 +452,11 @@ mod tests {
 
         let mut up = grey_point(glam::Vec3::Z);
         up.view = glam::Vec3::Z;
-        assert!(shade(&up, &[overhead])[0] > 0.0, "the ground is unlit");
+        assert!(shade(&up, &[overhead], NO_WORLD)[0] > 0.0, "the ground is unlit");
 
         let mut down = grey_point(glam::Vec3::NEG_Z);
         down.view = glam::Vec3::NEG_Z;
-        assert_eq!(shade(&down, &[overhead]), [0.0; 3], "the underside is lit");
+        assert_eq!(shade(&down, &[overhead], NO_WORLD), [0.0; 3], "the underside is lit");
     }
 
     #[test]
@@ -297,9 +497,9 @@ mod tests {
         );
 
         assert_eq!(both.flags, FLAG_SHADOW | FLAG_DIFFUSE | FLAG_SPECULAR);
-        let all = shade(&point, &[both])[0];
-        let d = shade(&point, &[diffuse_only])[0];
-        let s = shade(&point, &[specular_only])[0];
+        let all = shade(&point, &[both], NO_WORLD)[0];
+        let d = shade(&point, &[diffuse_only], NO_WORLD)[0];
+        let s = shade(&point, &[specular_only], NO_WORLD)[0];
         assert!(d > 0.0 && s > 0.0);
         assert!((d + s - all).abs() < all * 1e-5, "{d} + {s} against {all}");
     }
@@ -312,7 +512,7 @@ mod tests {
         let mut point = grey_point(glam::Vec3::Z);
         point.view = glam::Vec3::Z;
         let noon = sun(glam::Vec3::NEG_Z, 100_000.0);
-        let lit = shade(&point, &[noon])[0];
+        let lit = shade(&point, &[noon], NO_WORLD)[0];
         assert!(lit > 100.0, "the sun was clamped away: {lit}");
     }
 
@@ -322,8 +522,8 @@ mod tests {
         // exposure controls behave. A tone curve applied here would break it.
         let mut point = grey_point(glam::Vec3::Z);
         point.view = glam::Vec3::Z;
-        let one = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 100.0)])[0];
-        let ten = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 1000.0)])[0];
+        let one = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 100.0)], NO_WORLD)[0];
+        let ten = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 1000.0)], NO_WORLD)[0];
         assert!((ten - one * 10.0).abs() < one * 1e-4, "{one} then {ten}");
     }
 
@@ -338,7 +538,7 @@ mod tests {
             Surface::default(),
         );
         assert!(point.view.is_finite());
-        let lit = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 500.0)]);
+        let lit = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 500.0)], NO_WORLD);
         assert!(lit.iter().all(|c| c.is_finite()), "{lit:?}");
     }
 

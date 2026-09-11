@@ -30,6 +30,21 @@ pub fn placed_lights(doc: &Document) -> Vec<PlacedLight> {
         .collect()
 }
 
+/// The world's radiance, or black.
+///
+/// Black for a document with no world, and for one whose background is an
+/// image: sampling a cube map is the IBL step and needs the archive's
+/// `images/` layout first. Black rather than a stand-in colour, because a
+/// scene lit only by its lamps is a real thing to want and an invented ambient
+/// is one the user cannot turn off.
+pub fn world_radiance(doc: &Document) -> [f32; 3] {
+    doc.active_world()
+        .and_then(|id| doc.world(id))
+        .and_then(|world| world.flat_radiance())
+        .map(|c| c.to_array())
+        .unwrap_or([0.0; 3])
+}
+
 /// The exposure the shot is taken at, in stops.
 ///
 /// The bridge between §2.2's photometric lights and §2.1's display transform.
@@ -138,6 +153,55 @@ mod tests {
         let placed = placed_lights(&doc);
         assert_eq!(placed.len(), 1);
         (doc, placed[0])
+    }
+
+    #[test]
+    fn a_scene_with_no_world_is_lit_only_by_its_lamps() {
+        // Black, and not an invented ambient. A stand-in the user cannot turn
+        // off is worse than a dark scene they can light.
+        let doc = Document::new();
+        assert_eq!(world_radiance(&doc), [0.0; 3]);
+    }
+
+    #[test]
+    fn the_active_world_lights_the_scene_and_its_strength_is_applied() {
+        let mut doc = Document::new();
+        let id = doc.add_world(kreate_scene::World {
+            background: kreate_scene::Background::Flat(kreate_math::SceneRgb::new(
+                0.1, 0.2, 0.4,
+            )),
+            strength: 2.0,
+            ..kreate_scene::World::new("Studio")
+        });
+        // Present but not active: a document can hold a day setup and a night
+        // one, and only the active one lights anything.
+        assert_eq!(world_radiance(&doc), [0.0; 3]);
+
+        doc.set_active_world(Some(id));
+        let lit = world_radiance(&doc);
+        assert!((lit[0] - 0.2).abs() < 1e-6, "{lit:?}");
+        assert!((lit[2] - 0.8).abs() < 1e-6, "{lit:?}");
+    }
+
+    #[test]
+    fn an_image_background_lights_nothing_yet() {
+        // Sampling one is the IBL step, and it needs the archive's `images/`
+        // layout first. Black is the honest answer until then — a flat colour
+        // standing in for an HDRI would be a background that is the wrong
+        // colour everywhere rather than an obviously missing one.
+        let mut doc = Document::new();
+        let image = doc.add_image(kreate_scene::Image::new(
+            "sky",
+            64,
+            32,
+            kreate_scene::PixelFormat::Rgba16F,
+        ));
+        let id = doc.add_world(kreate_scene::World {
+            background: kreate_scene::Background::Image(image),
+            ..kreate_scene::World::new("Sky")
+        });
+        doc.set_active_world(Some(id));
+        assert_eq!(world_radiance(&doc), [0.0; 3]);
     }
 
     #[test]

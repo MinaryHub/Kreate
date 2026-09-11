@@ -21,6 +21,12 @@ struct Shading {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    /// rgb: the world's radiance, linear. w: unused.
+    ///
+    /// One colour in every direction, which is what §2.2's flat background is.
+    /// An image background is the IBL step and needs a prefiltered cube map;
+    /// this is the half that costs a lookup.
+    world: vec4<f32>,
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;
@@ -43,6 +49,26 @@ fn direction_to(light: Light, at: vec3<f32>) -> vec3<f32> {
     return normalize(offset);
 }
 
+/// What a uniform environment of `radiance` contributes.
+///
+/// Exact rather than approximate, which is worth saying because ambient terms
+/// usually are not. Under an environment that is the same in every direction,
+/// the prefiltered radiance is that colour whatever the roughness, so the
+/// split-sum specular is `radiance × (F0·a + b)` — the DFG table straight out,
+/// with no cube map. And the diffuse half integrates to `albedo × radiance`
+/// against the cosine, coupled by the same share the direct path uses.
+///
+/// Which makes the whole thing conserve by construction: a white surface under
+/// an environment of `L` returns `L × (share + 1 - share)`, and a furnace test
+/// says so.
+fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let share = specular_share(surface_f0(s), nov, roughness);
+    let diffuse = surface_diffuse_albedo(s) * (vec3<f32>(1.0) - share);
+    return radiance * (share + diffuse);
+}
+
 /// The light leaving `position` toward `view`, in the working space.
 ///
 /// Scene-linear and unbounded. Nothing is clamped: a surface under a sun is in
@@ -54,7 +80,8 @@ fn shade_point(
     normal: vec3<f32>,
     view: vec3<f32>,
 ) -> vec3<f32> {
-    var total = vec3<f32>(0.0);
+    // The world first, because it is the light that is always there.
+    var total = ambient(s, normal, view, shading.world.rgb);
     for (var i = 0u; i < shading.light_count; i = i + 1u) {
         let light = lights[i];
         let to_light = direction_to(light, position);

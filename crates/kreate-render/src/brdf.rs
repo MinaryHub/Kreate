@@ -456,7 +456,7 @@ fn energy_compensation(f0: [f32; 3], nov: f32, roughness: f32) -> [f32; 3] {
 /// `F0·a + b` from the table, times the multiple-scattering compensation — so
 /// it accounts for the light that bounces more than once, which is the whole
 /// point of the compensation. What is left is what the diffuse lobe may have.
-fn specular_share(f0: [f32; 3], nov: f32, roughness: f32) -> [f32; 3] {
+pub fn specular_share(f0: [f32; 3], nov: f32, roughness: f32) -> [f32; 3] {
     let (a, b) = albedo_table().lookup(nov, roughness);
     let e = (a + b).clamp(1e-2, 1.0);
     let mut out = [0.0f32; 3];

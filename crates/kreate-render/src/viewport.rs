@@ -85,6 +85,8 @@ struct RenderedObject {
 struct ShadingGlobals {
     light_count: u32,
     _pad: [u32; 3],
+    /// The world's radiance, linear. See `shading.wgsl`.
+    world: [f32; 4],
 }
 
 #[repr(C)]
@@ -1092,6 +1094,8 @@ pub struct Viewport {
     /// rebuilt when the intermediate is, which is on a resize.
     screen_params: wgpu::Buffer,
     screen_bind: wgpu::BindGroup,
+    /// The world's radiance, linear. See [`Viewport::set_world`].
+    world: [f32; 3],
     /// How the picture is looked at. See `kreate_math::DisplayTransform`.
     ///
     /// Private because the uniform behind it has to be written when it
@@ -1881,6 +1885,8 @@ impl Viewport {
             screen_bind: screen_bind_0,
             hdr: hdr_0,
             screen: screen_0,
+            // Black: a document with no world is lit only by its lamps.
+            world: [0.0; 3],
             display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
                 device,
@@ -2279,6 +2285,15 @@ impl Viewport {
     /// Taken as [`crate::lights::PlacedLight`] rather than read from a
     /// document, because this crate cannot see one. The app does the joining
     /// and the unit conversion, which is where `Light::axial_candela` lives.
+    /// The world's radiance: one colour in every direction.
+    ///
+    /// Set beside the lights because it is one, and the brightest one in most
+    /// scenes. Black is a scene lit only by its lamps, which is a real thing
+    /// to want and is what a document with no world means.
+    pub fn set_world(&mut self, radiance: [f32; 3]) {
+        self.world = radiance;
+    }
+
     pub fn set_lights(
         &mut self,
         device: &wgpu::Device,
@@ -2321,6 +2336,7 @@ impl Viewport {
                 // frame's lights.
                 light_count: count,
                 _pad: [0; 3],
+                world: [self.world[0], self.world[1], self.world[2], 0.0],
             }),
         );
     }
@@ -3053,12 +3069,17 @@ impl Viewport {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Cleared to nothing, because nothing is what an
-                        // unlit direction contributes. The world's background
-                        // is a light (§2.2) and not a clear colour — clearing
-                        // to the interface's grey would put display-referred
-                        // paint into a linear image.
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        // The world's own radiance, which is what a direction
+                        // with no geometry in it delivers. Linear, because
+                        // this is a linear image — clearing to the interface's
+                        // grey would put display-referred paint into it, and
+                        // that is the mistake §2.1 records.
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: self.world[0] as f64,
+                            g: self.world[1] as f64,
+                            b: self.world[2] as f64,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

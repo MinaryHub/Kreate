@@ -3251,6 +3251,8 @@ impl App {
         // a scene with three hundred lamps should not pay for them while the
         // user is modelling under the studio lights.
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
+            gfx.viewport
+                .set_world(scenelights::world_radiance(&self.doc));
             let lights = scenelights::placed_lights(&self.doc);
             gfx.viewport.set_lights(
                 &gfx.gpu.device,
