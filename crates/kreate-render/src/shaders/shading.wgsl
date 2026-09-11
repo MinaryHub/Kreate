@@ -33,12 +33,22 @@ struct Shading {
 
 /// One entry per light, parallel to the light array.
 ///
-/// `params` is x: the array layer, y: one texel in clip units, z: the depth
-/// bias, w: nonzero if this light casts. See `kreate_render::shadow::GpuShadow`.
+/// `params` is x: the array layer, y: one texel in metres per unit clip `w`,
+/// z: the depth bias, w: nonzero if this light casts. See
+/// `kreate_render::shadow::GpuShadow`.
 struct ShadowInfo {
     view_proj: mat4x4<f32>,
     params: vec4<f32>,
 }
+
+/// How far off the surface to move a lookup, in shadow texels.
+///
+/// Enough to clear the texel the surface itself wrote, with room for the 3×3
+/// filter's neighbours. Larger detaches a shadow from thin geometry — a leaf
+/// or a sheet thinner than this stops shadowing itself, which is the price and
+/// is the right way round: an unshadowed crease is a picture, and acne is a
+/// fault.
+const NORMAL_OFFSET_TEXELS: f32 = 2.0;
 
 @group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
 @group(2) @binding(4) var shadow_maps: texture_depth_2d_array;
@@ -54,18 +64,40 @@ struct ShadowInfo {
 /// is what §2.5's path tracer will want, and `textureSampleCompare` is not
 /// available there.
 ///
-/// # The bias is scaled by the slope
+/// # The acne fix is two halves, and the larger one is lateral
 ///
 /// A surface lit at a glancing angle spans more depth across one shadow texel
-/// than one lit head-on, so a fixed bias leaves acne at grazing angles or
-/// detaches contact shadows head-on. Scaling by the tangent of the angle is
-/// the standard fix and costs a divide.
+/// than one lit head-on, so the depth bias is scaled by the tangent of the
+/// angle. That alone is not enough and assuming it was is a bug this file
+/// shipped with: a depth bias is in clip units, and how many metres one unit
+/// of depth covers depends on how large a scene the frustum was fitted to.
+///
+/// So the sample point is first moved off the surface along its normal, by a
+/// multiple of one shadow texel's width *in metres*. That is a lateral move
+/// rather than a move in depth, which is why it costs almost nothing at a
+/// contact: the offset slides the lookup to a neighbouring texel instead of
+/// pushing the comparison toward the light, so a shadow stays attached to what
+/// casts it. It is measured in texels, so it scales with the scene by
+/// construction — which is exactly what the depth bias cannot do.
 fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
     let info = shadows[index];
+    // A light with no frame this frame. Redundant with the zero matrix such a
+    // light carries — `w` comes out zero and the test below catches it — and
+    // kept because the intent should be stated rather than implied. See
+    // `GpuShadow::NONE`.
     if info.params.w == 0.0 {
         return 1.0;
     }
-    let clip = info.view_proj * vec4<f32>(position, 1.0);
+    // One texel in metres, here: for an orthographic frustum `w` is one and
+    // the size is constant; for a perspective one `w` is the distance along the
+    // light's axis and a texel grows with it.
+    let first = info.view_proj * vec4<f32>(position, 1.0);
+    let texel_world = info.params.y * max(first.w, 1.0);
+    // More offset at a glancing angle, where one texel spans more surface.
+    let incidence = clamp(dot(normal, to_light), 1e-3, 1.0);
+    let lateral = sqrt(1.0 - incidence * incidence);
+    let offset = texel_world * (1.0 + 2.0 * lateral) * NORMAL_OFFSET_TEXELS;
+    let clip = info.view_proj * vec4<f32>(position + normal * offset, 1.0);
     if clip.w <= 0.0 {
         // Behind the light's near plane: the map says nothing about it, and
         // claiming shadow there would put a dark band behind every spot.
@@ -89,8 +121,7 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     // Slope-scaled, and clamped: at ninety degrees the tangent is infinite and
     // the bias would push the comparison past the far plane, unshadowing the
     // whole surface.
-    let cosine = clamp(dot(normal, to_light), 1e-3, 1.0);
-    let slope = min(sqrt(1.0 - cosine * cosine) / cosine, 8.0);
+    let slope = min(lateral / incidence, 8.0);
     let bias = info.params.z * (1.0 + slope);
 
     // Three by three, unweighted. Wider kernels and Gaussian weights both

@@ -44,6 +44,17 @@ pub struct ShadowView {
     /// place for the numbers to live.
     pub near: f32,
     pub far: f32,
+    /// How wide one shadow texel is in metres, per unit of clip `w`.
+    ///
+    /// The number the acne fix is built on, and the one thing about the map
+    /// the sampling shader cannot work out for itself: it can ask the texture
+    /// how many texels there are, but not how much world each one covers.
+    ///
+    /// Per unit `w` so that one field covers both projections. An orthographic
+    /// clip `w` is 1 and the texel is the same size everywhere; a perspective
+    /// one is the distance along the light's axis, and a texel grows with it
+    /// in exact proportion.
+    pub texel_world: f32,
 }
 
 /// A little room around the fitted box.
@@ -164,6 +175,10 @@ pub fn sun_view(direction: glam::Vec3, bounds: Aabb) -> Option<ShadowView> {
         view_proj: ortho_reversed(half, near, far) * recentre * view,
         near,
         far,
+        // The box is `half` either side, so it spans `2 * half` across the
+        // map's width. The wider of the two axes, because the bias has to
+        // cover the worst texel and not the average one.
+        texel_world: half.x.max(half.y) * 2.0 / SHADOW_RESOLUTION as f32,
     })
 }
 
@@ -201,6 +216,7 @@ pub fn spot_view(
         view_proj: perspective_reversed(fov, near) * view,
         near,
         far: far + MARGIN,
+        texel_world: perspective_texel(fov),
     })
 }
 
@@ -234,6 +250,7 @@ pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<Sha
         view_proj: perspective_reversed(std::f32::consts::FRAC_PI_2, near) * view,
         near,
         far: far + MARGIN,
+        texel_world: perspective_texel(std::f32::consts::FRAC_PI_2),
     })
 }
 
@@ -271,6 +288,15 @@ pub fn shadow_view(light: &crate::lights::GpuLight, bounds: Aabb) -> Option<Shad
     point_view(position, 0, bounds)
 }
 
+/// One texel's width in metres at unit distance, for a perspective frustum.
+///
+/// The frustum spans `2 * tan(fov / 2)` across the map at a distance of one,
+/// and proportionally more further out — which is what the shader's multiply
+/// by clip `w` supplies.
+fn perspective_texel(fov: f32) -> f32 {
+    2.0 * (fov * 0.5).tan() / SHADOW_RESOLUTION as f32
+}
+
 /// The falloff id a parallel light packs. See `lights::Falloff`.
 const PARALLEL_FALLOFF: u32 = 1;
 
@@ -286,42 +312,73 @@ const PARALLEL_FALLOFF: u32 = 1;
 pub struct GpuShadow {
     /// Eye-relative world to the light's clip space, reversed-Z.
     pub view_proj: [[f32; 4]; 4],
-    /// x: which layer of the array. y: one texel, in clip units. z: the depth
-    /// bias. w: nonzero if this light casts.
+    /// x: which layer of the array. y: one texel in metres per unit clip `w`,
+    /// see [`ShadowView::texel_world`]. z: the depth bias. w: nonzero if this
+    /// light casts.
     pub params: [f32; 4],
 }
 
 impl GpuShadow {
     /// A light that casts nothing.
+    ///
+    /// Zero twice over, and the second is redundant on purpose. The matrix is
+    /// zero, so a position through it comes out with `w` at zero and the
+    /// sampler's own near-plane test already returns "lit" — and a sweep that
+    /// turned the flag on, or deleted the shader's check for it, changed no
+    /// picture anywhere. It stays because "this light casts nothing" is what is
+    /// meant, and leaning on a zero matrix to imply it makes the next entry
+    /// somebody adds depend on a coincidence.
     pub const NONE: Self = Self {
         view_proj: [[0.0; 4]; 4],
         params: [0.0; 4],
     };
 
-    pub fn pack(view: &ShadowView, layer: u32, resolution: u32, bias: f32) -> Self {
+    pub fn pack(view: &ShadowView, layer: u32, bias: f32) -> Self {
         Self {
             view_proj: view.view_proj.to_cols_array_2d(),
-            params: [
-                layer as f32,
-                // One texel as a fraction of the map, which is what a PCF tap
-                // steps by. In clip units rather than pixels so the shader
-                // does not need the resolution as well.
-                2.0 / resolution.max(1) as f32,
-                bias,
-                1.0,
-            ],
+            params: [layer as f32, view.texel_world, bias, 1.0],
         }
     }
 }
 
 /// How much to move a comparison toward the light before making it.
 ///
-/// A surface lit at a glancing angle spans more depth across one shadow texel
-/// than it does head-on, so a fixed bias either leaves acne at grazing angles
-/// or detaches contact shadows head-on. This is the head-on part; the shader
-/// scales it by the slope, which is the half that cannot be precomputed.
+/// The smaller half of the acne fix and the one that works in depth. A surface
+/// lit at a glancing angle spans more depth across one shadow texel than it
+/// does head-on, so the shader scales this by the slope.
+///
+/// It cannot be the whole fix, and the first version of this file assumed it
+/// was. A depth bias is in clip units, and how much depth one texel spans is a
+/// property of the *scene* — a frustum around a large scene puts more metres
+/// behind each unit of depth, so the number that was ample around a small one
+/// leaves the large one crawling with acne. A falsification sweep did not find
+/// that, because the fixture lit a floor square-on, where a stored depth and
+/// the depth compared against it are equal and reversed-Z's `>=` passes. A
+/// fixture with a tilted sun found it in one run.
+///
+/// The larger half is the normal offset the shader applies, which is measured
+/// in texels and so scales with the scene by construction. See
+/// [`ShadowView::texel_world`].
 ///
 /// In reversed-Z the bias moves depth *up*, toward the light.
+///
+/// # The two halves cover for each other, and that is measured
+///
+/// Setting this to zero changes no test's result. Neither does removing the
+/// slope scaling, nor its clamp. But setting this to zero *and* the offset to
+/// zero together puts acne over 5,842 of 5,845 lit pixels — so the pair is
+/// necessary and neither one is, in any scene there is a test for.
+///
+/// The reason is that they dominate on different projections. A sun's
+/// orthographic depth is linear across the scene, so a texel's worth of depth
+/// is tiny in clip units and the lateral offset is what saves it. A spot's is
+/// `near / w`, which compresses a distant scene into almost no depth at all, so
+/// this constant is enormous out there and covers the acne by itself.
+///
+/// Both stay. Leaving one out would work today and fail on the first scene that
+/// mixes the two kinds of lamp at a distance neither test uses — and a test
+/// that passes whether or not a line is present is not worth adding, which is
+/// what any test aimed at one half alone would be.
 pub const DEPTH_BIAS: f32 = 2.0e-4;
 
 /// The side of one shadow map, in texels.
@@ -698,6 +755,65 @@ mod tests {
     }
 
     #[test]
+    fn a_texel_is_measured_across_the_wider_axis() {
+        // The map is square and the box it covers is not, so one texel is wider
+        // on one axis than the other. The normal offset has to clear the texel
+        // the surface itself wrote, so the number that matters is the worst of
+        // the two and not the average or the better one.
+        //
+        // A square scene cannot tell the two apart, and the device tests use
+        // one: a sweep that swapped `max` for `min` walked through all of them.
+        let long = Aabb::new(
+            glam::Vec3::new(-50.0, -1.0, 0.0),
+            glam::Vec3::new(50.0, 1.0, 1.0),
+        );
+        let view = sun_view(glam::Vec3::NEG_Z, long).expect("a scene");
+        // A hundred metres across a thousand texels.
+        let expected = 100.0 / SHADOW_RESOLUTION as f32;
+        assert!(
+            (view.texel_world - expected).abs() < expected * 0.05,
+            "texel is {} across a 100 x 2 scene",
+            view.texel_world
+        );
+    }
+
+    #[test]
+    fn a_perspective_texel_grows_with_the_cone_and_with_distance() {
+        // Per unit of clip `w`, which for a perspective projection is the
+        // distance along the light's axis — so one field covers both the
+        // widening of the frustum and the sampler's multiply by `w`.
+        //
+        // A wider cone spreads the same thousand texels over more world, so
+        // each one covers more of it.
+        let narrow = spot_view(
+            glam::Vec3::new(0.0, 0.0, 8.0),
+            glam::Vec3::NEG_Z,
+            20f32.to_radians(),
+            scene(),
+        )
+        .expect("a scene");
+        let wide = spot_view(
+            glam::Vec3::new(0.0, 0.0, 8.0),
+            glam::Vec3::NEG_Z,
+            100f32.to_radians(),
+            scene(),
+        )
+        .expect("a scene");
+        assert!(
+            wide.texel_world > narrow.texel_world * 4.0,
+            "{} against {}",
+            wide.texel_world,
+            narrow.texel_world
+        );
+
+        // And an orthographic one does not: a parallel light's texel is the
+        // same size everywhere, which is why the field is "per unit `w`" and
+        // an orthographic `w` is one.
+        let sun = sun_view(glam::Vec3::NEG_Z, scene()).expect("a scene");
+        assert!(sun.texel_world > 0.0);
+    }
+
+    #[test]
     fn a_suns_box_contains_the_whole_scene() {
         // A frustum too small crops the shadow at its edge, and the symptom is
         // a shadow that ends in mid-air.
@@ -870,7 +986,12 @@ mod tests {
             scene(),
         )
         .expect("a scene");
-        assert!(view.near >= MIN_NEAR * 0.99, "near is {}", view.near);
+        // A literal and not `MIN_NEAR`: the claim is about a physical
+        // magnitude, and an assertion written against the constant is
+        // satisfied by whatever the constant happens to be — which is no
+        // assertion at all. A sweep that set it to a millimetre survived
+        // this test until the number was written out.
+        assert!(view.near >= 0.099, "near is {}", view.near);
         assert!(view.far > view.near);
     }
 

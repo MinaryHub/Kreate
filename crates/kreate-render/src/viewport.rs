@@ -1091,6 +1091,12 @@ pub struct Viewport {
     shadow_entries: Vec<crate::shadow::GpuShadow>,
     /// The frames this frame's shadow passes were built with, in layer order.
     shadow_views: Vec<crate::shadow::ShadowView>,
+    /// This frame's lights, packed once.
+    ///
+    /// Kept because the shadow frames are fitted in `prepare` — which is where
+    /// the scene's extent is known — and packing them a second time there
+    /// would be a second place for a light to mean something.
+    packed_lights: Vec<crate::lights::GpuLight>,
     /// The linear image the rendered pass shades into, and the pass that turns
     /// it into a picture.
     hdr: crate::display::HdrTarget,
@@ -1103,12 +1109,12 @@ pub struct Viewport {
     screen_bind: wgpu::BindGroup,
     /// The world's radiance, linear. See [`Viewport::set_world`].
     world: [f32; 3],
-    /// What the shadows are fitted to, in eye-relative metres.
+    /// Casters the draw list does not contain, in eye-relative metres.
     ///
-    /// Set beside the lights, because a frustum fitted to the wrong bounds
-    /// either crops the shadow or wastes its resolution — and the caller is
-    /// the only one that knows what is in the scene.
-    scene_bounds: kreate_math::Aabb,
+    /// Normally empty. What the shadows are fitted to is what is *drawn*, which
+    /// [`Viewport::prepare`] works out for itself — see `set_extra_bounds` for
+    /// why this exists at all.
+    extra_bounds: kreate_math::Aabb,
     /// How the picture is looked at. See `kreate_math::DisplayTransform`.
     ///
     /// Private because the uniform behind it has to be written when it
@@ -1916,13 +1922,14 @@ impl Viewport {
             shadow_buf: shadow_buf_0,
             shadow_entries: Vec::new(),
             shadow_views: Vec::new(),
+            packed_lights: Vec::new(),
             screen_params: screen_params_buf,
             screen_bind: screen_bind_0,
             hdr: hdr_0,
             screen: screen_0,
             // Black: a document with no world is lit only by its lamps.
             world: [0.0; 3],
-            scene_bounds: kreate_math::Aabb::EMPTY,
+            extra_bounds: kreate_math::Aabb::EMPTY,
             display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
                 device,
@@ -2229,6 +2236,10 @@ impl Viewport {
             "edge objects",
         );
 
+        // What the shadows will be fitted to, accumulated as the draws are
+        // written rather than in a pass of its own.
+        let mut drawn = self.extra_bounds;
+
         // One slot per draw, not per mesh. Two linked duplicates share a single
         // datablock and differ only here, so a buffer owned by the mesh would let
         // the second draw overwrite the first and both would land in one place.
@@ -2250,6 +2261,7 @@ impl Viewport {
             // The shadow pass draws the same geometry from a different
             // camera, so it needs the same model matrix and nothing else.
             self.shadows.set_object(queue, i, &m);
+            drawn = drawn.union(transformed_bounds(&m, draw.mesh.bounds));
             queue.write_buffer(
                 &self.rendered_objects.buffer,
                 self.rendered_objects.offset(i) as u64,
@@ -2303,6 +2315,54 @@ impl Viewport {
                 }),
             );
         }
+
+        self.fit_shadows(queue, drawn);
+    }
+
+    /// Fits each casting light's shadow frame to what is being drawn.
+    ///
+    /// Here rather than beside [`Viewport::set_lights`] because a frustum is
+    /// fitted to geometry, and this is the call that has it. That ordering was
+    /// the other way round once and the cost was the whole feature: the
+    /// application never told the renderer what the scene contained, so every
+    /// frustum came back `None` and no shadow was ever drawn — while the
+    /// renderer's own tests, which did tell it, passed.
+    fn fit_shadows(&mut self, queue: &wgpu::Queue, bounds: kreate_math::Aabb) {
+        // Every light starts casting nothing, and a light whose frustum sees
+        // nothing keeps that entry — which is what stops a matrix from an
+        // earlier frame shadowing this one.
+        self.shadow_entries.clear();
+        self.shadow_views.clear();
+        if self.shading != ShadingMode::Rendered {
+            // The other modes light themselves. Fitting frames for lights
+            // nothing reads would be a pass per lamp for no picture at all.
+            return;
+        }
+        self.shadow_entries
+            .resize(self.packed_lights.len(), crate::shadow::GpuShadow::NONE);
+        for index in 0..self.packed_lights.len() {
+            let light = self.packed_lights[index];
+            if light.flags & crate::lights::FLAG_SHADOW == 0
+                || self.shadow_views.len() >= crate::shadow::MAX_SHADOWS
+            {
+                continue;
+            }
+            let Some(view) = crate::shadow::shadow_view(&light, bounds) else {
+                continue;
+            };
+            let layer = self.shadow_views.len();
+            self.shadow_entries[index] =
+                crate::shadow::GpuShadow::pack(&view, layer as u32, crate::shadow::DEPTH_BIAS);
+            self.shadows.set_view(queue, layer, &view);
+            self.shadow_views.push(view);
+        }
+        if !self.shadow_entries.is_empty() {
+            queue.write_buffer(
+                &self.shadow_buf,
+                0,
+                bytemuck::cast_slice(&self.shadow_entries),
+            );
+        }
     }
 
     /// Points the overlays at what a rubber-band drag would select.
@@ -2334,11 +2394,30 @@ impl Viewport {
         self.world = radiance;
     }
 
-    /// What the shadows are fitted to, in eye-relative metres.
+    /// Widens what the shadows are fitted to, in eye-relative metres.
     ///
-    /// Empty means no shadows, which is what a scene with no geometry has.
-    pub fn set_scene_bounds(&mut self, bounds: kreate_math::Aabb) {
-        self.scene_bounds = bounds;
+    /// Not normally needed and empty by default. The shadow frames are fitted
+    /// to the draws [`Viewport::prepare`] is given, because those are the scene
+    /// as far as this pass is concerned: something absent from the list is not
+    /// drawn, so it has nothing to cast onto and nothing to cast from.
+    ///
+    /// This is for the case that breaks that rule — a caster deliberately kept
+    /// out of the draw list, or a frustum a caller wants larger than the
+    /// geometry for its own reasons. It was a required call once, and that was
+    /// wrong in the way a required call always is: the application forgot it and
+    /// every shadow silently vanished, while the renderer's own tests passed.
+    pub fn set_extra_bounds(&mut self, bounds: kreate_math::Aabb) {
+        self.extra_bounds = bounds;
+    }
+
+    /// How many shadow maps this frame renders.
+    ///
+    /// Exposed because the cost is invisible in the picture: a light that casts
+    /// nothing is skipped by the shader as well, so a renderer that gave every
+    /// light a map would draw the scene an extra time per lamp and look
+    /// identical. Only a count can see that.
+    pub fn shadow_pass_count(&self) -> usize {
+        self.shadow_views.len()
     }
 
     pub fn set_lights(
@@ -2375,39 +2454,11 @@ impl Viewport {
             );
         }
 
-        // Every light starts casting nothing. `prepare_shadows` fills in the
-        // ones that do, and a light whose frustum sees nothing keeps this
-        // entry — which is what stops a stale matrix from an earlier frame
-        // shadowing the scene.
-        self.shadow_entries.clear();
-        self.shadow_entries
-            .resize(lights.len(), crate::shadow::GpuShadow::NONE);
-        self.shadow_views.clear();
-        for (index, light) in lights.iter().enumerate() {
-            if !light.cast_shadow || self.shadow_views.len() >= crate::shadow::MAX_SHADOWS {
-                continue;
-            }
-            let packed = crate::lights::GpuLight::pack(light, eye);
-            let Some(view) = crate::shadow::shadow_view(&packed, self.scene_bounds) else {
-                continue;
-            };
-            let layer = self.shadow_views.len();
-            self.shadow_entries[index] = crate::shadow::GpuShadow::pack(
-                &view,
-                layer as u32,
-                crate::shadow::SHADOW_RESOLUTION,
-                crate::shadow::DEPTH_BIAS,
-            );
-            self.shadows.set_view(queue, layer, &view);
-            self.shadow_views.push(view);
-        }
-        if !self.shadow_entries.is_empty() {
-            queue.write_buffer(
-                &self.shadow_buf,
-                0,
-                bytemuck::cast_slice(&self.shadow_entries),
-            );
-        }
+        // Kept for `prepare`, which fits the shadow frames: it is the call
+        // that sees the geometry, and a frustum is fitted to geometry.
+        self.packed_lights.clear();
+        self.packed_lights
+            .extend(lights.iter().map(|light| crate::lights::GpuLight::pack(light, eye)));
         queue.write_buffer(
             &self.shading_globals_buf,
             0,
@@ -3284,6 +3335,67 @@ fn shading_bind_group(
             },
         ],
     })
+}
+
+/// A box around a transformed box.
+///
+/// The centre through the matrix and the extent through its absolute value,
+/// which is exact for an axis-aligned box and is one transform rather than
+/// eight. The result is the tightest axis-aligned box containing the
+/// transformed one, which is all a shadow frustum needs.
+fn transformed_bounds(m: &glam::Mat4, b: kreate_math::Aabb) -> kreate_math::Aabb {
+    if b.is_empty() {
+        return kreate_math::Aabb::EMPTY;
+    }
+    let centre = m.transform_point3(b.center());
+    let half = b.size() * 0.5;
+    let extent = glam::Vec3::new(
+        m.x_axis.x.abs() * half.x + m.y_axis.x.abs() * half.y + m.z_axis.x.abs() * half.z,
+        m.x_axis.y.abs() * half.x + m.y_axis.y.abs() * half.y + m.z_axis.y.abs() * half.z,
+        m.x_axis.z.abs() * half.x + m.y_axis.z.abs() * half.y + m.z_axis.z.abs() * half.z,
+    );
+    kreate_math::Aabb::new(centre - extent, centre + extent)
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+
+    #[test]
+    fn a_rotated_box_needs_a_bigger_box() {
+        // The whole reason the fitting takes a matrix. A scene of translations
+        // never asks this — and a sweep that dropped the rotation entirely
+        // walked through every device test, because the floor is larger than
+        // anything standing on it and sets the bounds by itself.
+        let unit = kreate_math::Aabb::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5));
+        let turned = glam::Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let fitted = transformed_bounds(&turned, unit);
+        // A unit square turned forty-five degrees is as wide as its diagonal.
+        let root_two = std::f32::consts::SQRT_2;
+        assert!(
+            (fitted.size().x - root_two).abs() < 1e-5,
+            "a turned box came out {} wide",
+            fitted.size().x
+        );
+        // And the axis it was turned about is unchanged.
+        assert!((fitted.size().z - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_moved_box_moves_and_a_scaled_one_grows() {
+        let unit = kreate_math::Aabb::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5));
+        let moved = transformed_bounds(&glam::Mat4::from_translation(glam::Vec3::new(3.0, 0.0, 0.0)), unit);
+        assert!((moved.center().x - 3.0).abs() < 1e-6);
+        assert!((moved.size().x - 1.0).abs() < 1e-6);
+
+        let scaled = transformed_bounds(&glam::Mat4::from_scale(glam::Vec3::new(4.0, 1.0, 1.0)), unit);
+        assert!((scaled.size().x - 4.0).abs() < 1e-6);
+
+        // Nothing is not somewhere: an empty box through any matrix stays
+        // empty, or a scene with one invisible object gets a frustum fitted to
+        // the origin.
+        assert!(transformed_bounds(&glam::Mat4::IDENTITY, kreate_math::Aabb::EMPTY).is_empty());
+    }
 }
 
 /// Inverse transpose of a matrix's linear part.
