@@ -237,6 +237,243 @@ impl DisplayResolve {
     }
 }
 
+/// The linear image a viewport shades into.
+///
+/// `Rgba16Float`, which is renderable and blendable in the WebGPU core and
+/// holds the range scene-linear light needs: a surface under a sun is in the
+/// thousands and an `Rgba8` target would have clipped it before the display
+/// transform ever saw it.
+///
+/// Half precision rather than full: sixteen bits of float have about three
+/// decimal digits of mantissa, which is far more than a display can show, and
+/// the target is read once per pixel per frame so the bandwidth is the cost
+/// that matters.
+pub struct HdrTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+/// What a viewport shades into before the display transform.
+pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+impl HdrTarget {
+    /// The size a request actually gets.
+    ///
+    /// One is the floor. Separated so the rule is checkable without a device,
+    /// which is what makes it a test rather than a comment.
+    pub fn floor(width: u32, height: u32) -> (u32, u32) {
+        (width.max(1), height.max(1))
+    }
+
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        // A viewport is briefly zero-sized while a window is being laid out,
+        // and a zero-sized texture cannot be created.
+        let size = Self::floor(width, height);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport hdr"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            // Rendered into, read by the resolve, copied out for a saved
+            // frame — and writable, because putting pixels into a linear
+            // image is part of being one: a test seeds it today and a
+            // resumed accumulation (§2.5) would seed it tomorrow. Usage
+            // flags cost nothing but the validation they enable.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            texture,
+            view,
+            size,
+        }
+    }
+
+    /// Remakes the texture if the size changed, and says whether it did.
+    ///
+    /// Compared rather than remade unconditionally, because a texture
+    /// reallocated every frame is a stall and a viewport is resized rarely.
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) -> bool {
+        let wanted = Self::floor(width, height);
+        if wanted == self.size {
+            return false;
+        }
+        *self = Self::new(device, wanted.0, wanted.1);
+        true
+    }
+
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+}
+
+/// The fullscreen pass that turns the linear image into a picture.
+///
+/// Separate from [`DisplayResolve`], which resolves a *buffer* for §2.5's
+/// progressive accumulation. The two share the shader and therefore the
+/// transform; what differs is where the pixels come from, and a viewport's come
+/// from a texture it just rendered into.
+pub struct ScreenResolve {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl ScreenResolve {
+    /// `format` is the window's, and the pipeline is built for it.
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("agx screen"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/agx.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("display screen"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("display screen"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("display screen"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("resolve_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("resolve_fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // No blending: this pass replaces the target. Blending a
+                    // display-referred result into whatever was there is the
+                    // mistake §2.1 records as compositing in the wrong space.
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            // No depth: a fullscreen pass has nothing to test against.
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { layout, pipeline }
+    }
+
+    /// Draws `source` through the display transform onto `target`.
+    pub fn draw(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        display: Display,
+    ) {
+        let params = Params {
+            exposure: display.exposure,
+            view: view_id(display.view),
+            // Unused by the screen pass, which covers whatever it is given.
+            count: 0,
+            _pad: 0,
+        };
+        let uniform = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("display screen params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("display screen"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("display screen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Cleared and then covered: the triangle writes every
+                    // pixel, and a load would be a read of memory nothing
+                    // reads.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        // Three vertices, one triangle, no buffers.
+        pass.draw(0..3, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +513,24 @@ mod tests {
             "MAX_EV differs from {}",
             kreate_math::AGX_MAX_EV
         );
+    }
+
+    #[test]
+    fn an_hdr_target_is_never_zero_sized() {
+        // A viewport is briefly zero-sized while a window is laid out, and a
+        // zero-sized texture cannot be created.
+        assert_eq!(HdrTarget::floor(0, 0), (1, 1));
+        assert_eq!(HdrTarget::floor(1920, 0), (1920, 1));
+        assert_eq!(HdrTarget::floor(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn the_hdr_format_holds_more_than_a_display_can() {
+        // The whole reason for an intermediate: a surface under a sun is in
+        // the thousands, and an eight-bit target would clip it before the
+        // display transform saw it — which is the same mistake as clamping in
+        // the shader, one pass later.
+        assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
     }
 
     #[test]

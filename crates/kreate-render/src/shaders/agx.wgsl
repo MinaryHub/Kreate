@@ -166,6 +166,38 @@ fn display_transform(color: vec3<f32>, params: Display) -> vec3<f32> {
 @group(0) @binding(1) var<storage, read_write> shown: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: Display;
 
+// --- the screen pass -------------------------------------------------------
+//
+// The same transform, from a linear HDR texture to whatever the window wants.
+// This is what a viewport runs: shade into `Rgba16Float`, then one fullscreen
+// pass turns the light into a picture.
+//
+// `textureLoad` and no sampler. The source is the same size as the target, so
+// there is nothing to filter — and a sampler would put the interpolation in
+// fixed-function hardware whose rounding the parity test cannot see.
+
+@group(0) @binding(3) var scene_texture: texture_2d<f32>;
+
+/// A triangle that covers the viewport.
+///
+/// Three vertices and no buffers: the positions come from the vertex index.
+/// One oversized triangle rather than two triangles, because the diagonal seam
+/// of a quad is a place where two invocations of the same fragment can round
+/// differently.
+@vertex
+fn resolve_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(index) / 2) * 4.0 - 1.0;
+    let y = f32(i32(index) & 1) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn resolve_fragment(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {
+    let source = textureLoad(scene_texture, vec2<i32>(coord.xy), 0);
+    // Alpha carried through untouched: it is coverage, not light.
+    return vec4<f32>(display_transform(source.rgb, params), source.a);
+}
+
 @compute @workgroup_size(64)
 fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;

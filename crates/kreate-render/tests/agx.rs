@@ -192,6 +192,280 @@ fn compare(gpu: &Gpu, display: Display) {
     }
 }
 
+/// A single-precision value as half-precision bits.
+///
+/// Written out rather than pulled in, because the tests below only ever feed
+/// it values that are *exactly* representable in half precision — and
+/// [`exactly_representable`] is what holds them to that. With no rounding to
+/// do, the conversion is a re-lay of the exponent and a truncation of a
+/// mantissa that is already zero in its low bits, and the comparison that
+/// follows measures the transform rather than the texture format.
+fn to_half(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mantissa = bits & 0x007f_ffff;
+    if exponent <= 0 {
+        // Zero and anything that would be subnormal. The tests use neither
+        // except for zero itself.
+        return sign;
+    }
+    if exponent >= 0x1f {
+        return sign | 0x7c00;
+    }
+    sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+}
+
+/// Whether half precision holds this value without losing anything.
+fn exactly_representable(v: f32) -> bool {
+    if v == 0.0 {
+        return true;
+    }
+    let bits = v.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    // The thirteen mantissa bits half precision does not have must be zero,
+    // and the exponent must fit.
+    (1..0x1f).contains(&exponent) && bits & 0x1fff == 0
+}
+
+/// Writes `pixels` into an HDR target, resolves it to `format`, and reads back.
+///
+/// The whole path a viewport runs, minus the geometry: shade into a linear
+/// texture, one fullscreen pass, a picture.
+fn through_the_screen(
+    gpu: &Gpu,
+    pixels: &[[f32; 4]],
+    width: u32,
+    display: Display,
+) -> Vec<[f32; 4]> {
+    use kreate_render::display::{HdrTarget, ScreenResolve, HDR_FORMAT};
+
+    let height = pixels.len() as u32 / width;
+    let hdr = HdrTarget::new(&gpu.device, width, height);
+
+    // Half floats, because that is what the target holds.
+    let halves: Vec<u16> = pixels
+        .iter()
+        .flat_map(|p| p.iter().map(|c| to_half(*c)))
+        .collect();
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: hdr.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&halves),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 8),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
+
+    // A float target for the readback, so the comparison is not quantised by
+    // the screen before it is made.
+    let format = wgpu::TextureFormat::Rgba32Float;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("resolved"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let resolve = ScreenResolve::new(&gpu.device, format);
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    resolve.draw(&gpu.device, &mut encoder, hdr.view(), &target_view, display);
+
+    // 256-byte row alignment, which a copy to a buffer requires.
+    let row = (width * 16).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+
+    let mut out = Vec::with_capacity(pixels.len());
+    for y in 0..height {
+        let base = (y * row) as usize;
+        let line: &[f32] = bytemuck::cast_slice(&data[base..base + (width * 16) as usize]);
+        for x in 0..width as usize {
+            out.push([
+                line[x * 4],
+                line[x * 4 + 1],
+                line[x * 4 + 2],
+                line[x * 4 + 3],
+            ]);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_screen_pass_is_the_same_transform_as_the_buffer_one() {
+    // Two entry points, one function. A viewport resolves a texture and §2.5's
+    // accumulation resolves a buffer, and if those ever disagreed the render
+    // and the viewport would too — which is §5's second risk wearing a
+    // different hat.
+    let gpu = gpu_or_skip!(gpu());
+    let display = Display {
+        view: ViewTransform::AgX,
+        exposure: 0.0,
+    };
+    // A row of increasing magnitudes, which is where a transform differs most
+    // — all of them exactly representable in half precision, so the texture
+    // rounds nothing and what is compared is the transform. The halving and
+    // quartering keep that, being powers of two.
+    let pixels: Vec<[f32; 4]> = [0.0f32, 0.031_25, 0.1875, 0.5, 1.0, 4.0, 40.0, 400.0]
+        .iter()
+        .map(|v| [*v, *v * 0.5, *v * 0.25, 1.0])
+        .collect();
+    for pixel in &pixels {
+        for c in pixel {
+            assert!(
+                exactly_representable(*c),
+                "{c} would be rounded by the texture, so this would measure the \
+                 format rather than the transform"
+            );
+        }
+    }
+    let width = pixels.len() as u32;
+
+    let shown = through_the_screen(&gpu, &pixels, width, display);
+    let cpu = display.on_cpu();
+    for (input, got) in pixels.iter().zip(&shown) {
+        let want = cpu
+            .apply(SceneRgb::new(input[0], input[1], input[2]))
+            .to_array();
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() <= TOLERANCE,
+                "{input:?} channel {c}: screen {} against CPU {}",
+                got[c],
+                want[c]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_screen_pass_covers_every_pixel() {
+    // One oversized triangle rather than two, and the thing that would go
+    // wrong is a row or a column left at the clear colour. A target cleared to
+    // black and a source that is nowhere black is what makes that visible.
+    let gpu = gpu_or_skip!(gpu());
+    let width = 7;
+    let height = 5;
+    let pixels: Vec<[f32; 4]> =
+        (0..width * height).map(|_| [0.1875, 0.1875, 0.1875, 1.0]).collect();
+    let shown = through_the_screen(
+        &gpu,
+        &pixels,
+        width as u32,
+        Display {
+            view: ViewTransform::AgX,
+            exposure: 0.0,
+        },
+    );
+    assert_eq!(shown.len(), width * height);
+    for (i, pixel) in shown.iter().enumerate() {
+        assert!(
+            pixel[0] > 0.1,
+            "pixel {i} was left at the clear colour: {pixel:?}"
+        );
+    }
+}
+
+#[test]
+fn the_screen_pass_reads_the_exposure_too() {
+    // The uniform reaches the fragment shader. A pass that ignored it would
+    // look right at the default and do nothing when the slider moved.
+    let gpu = gpu_or_skip!(gpu());
+    let pixels = vec![[0.1875f32, 0.1875, 0.1875, 1.0]];
+    let flat = through_the_screen(
+        &gpu,
+        &pixels,
+        1,
+        Display {
+            view: ViewTransform::AgX,
+            exposure: 0.0,
+        },
+    )[0];
+    let raised = through_the_screen(
+        &gpu,
+        &pixels,
+        1,
+        Display {
+            view: ViewTransform::AgX,
+            exposure: 2.0,
+        },
+    )[0];
+    assert!(raised[0] > flat[0] * 1.2, "{flat:?} then {raised:?}");
+}
+
+#[test]
+fn an_hdr_target_only_reallocates_when_the_size_changes() {
+    // A texture remade every frame is a stall, and a viewport is resized
+    // rarely. The answer says which happened so a caller can rebuild what
+    // depended on the view.
+    let gpu = gpu_or_skip!(gpu());
+    let mut target =
+        kreate_render::display::HdrTarget::new(&gpu.device, 640, 480);
+    assert_eq!(target.size(), (640, 480));
+    assert!(!target.resize(&gpu.device, 640, 480), "it reallocated");
+    assert!(target.resize(&gpu.device, 800, 600));
+    assert_eq!(target.size(), (800, 600));
+    // And a window being laid out does not ask for an impossible texture.
+    assert!(target.resize(&gpu.device, 0, 0));
+    assert_eq!(target.size(), (1, 1));
+}
+
 #[test]
 fn agx_on_the_gpu_is_agx_on_the_cpu() {
     // The test the whole module rests on.
