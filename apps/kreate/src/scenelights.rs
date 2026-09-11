@@ -30,6 +30,27 @@ pub fn placed_lights(doc: &Document) -> Vec<PlacedLight> {
         .collect()
 }
 
+/// The exposure the shot is taken at, in stops.
+///
+/// The bridge between §2.2's photometric lights and §2.1's display transform.
+/// A sun is twenty thousand lux and AgX expects scene-linear values where 0.18
+/// is mid grey, so without this a physically correct scene saturates every
+/// pixel — which is what the rendered viewport's first tests measured.
+///
+/// From the *scene* camera and not the viewport's orbit camera. The exposure
+/// is a property of the shot: looking around should not change how bright the
+/// room is, any more than turning your head does.
+///
+/// The first camera in the document, and a default one when there is none.
+/// Not an error: a scene being modelled usually has no camera yet, and it
+/// still has to be lookable-at.
+pub fn shot_exposure(doc: &Document, rate: f64) -> f64 {
+    doc.cameras()
+        .next()
+        .map(|(_, camera)| camera.display_exposure(rate))
+        .unwrap_or_else(|| kreate_scene::Camera::new("").display_exposure(rate))
+}
+
 /// One light, placed by the transform of the object carrying it.
 fn place(light: &kreate_scene::Light, world: &kreate_math::DAffine3) -> PlacedLight {
     // A light points down its object's -Z: glTF's convention and Blender's.
@@ -117,6 +138,50 @@ mod tests {
         let placed = placed_lights(&doc);
         assert_eq!(placed.len(), 1);
         (doc, placed[0])
+    }
+
+    #[test]
+    fn a_scene_with_no_camera_still_has_an_exposure() {
+        // A scene being modelled usually has no camera yet, and it still has
+        // to be lookable-at. Zero stops would be the wrong answer — that is
+        // the default the photometric lights saturate at.
+        let doc = Document::new();
+        let exposure = shot_exposure(&doc, 24.0);
+        assert!(exposure.is_finite());
+        assert!(exposure < -5.0, "a default scene exposed at {exposure}");
+    }
+
+    #[test]
+    fn the_scene_camera_sets_the_exposure() {
+        // A property of the shot. Turning the aperture down two stops has to
+        // darken the picture by two stops.
+        let mut doc = Document::new();
+        let id = doc.add_camera(kreate_scene::Camera {
+            f_stop: Some(2.8),
+            ..kreate_scene::Camera::new("Shot")
+        });
+        doc.add_object(Object::new("Shot", ObjectData::Camera(id)));
+        let open = shot_exposure(&doc, 24.0);
+
+        doc.camera_mut(id).expect("camera").f_stop = Some(5.6);
+        let stopped_down = shot_exposure(&doc, 24.0);
+        assert!(
+            (open - stopped_down - 2.0).abs() < 1e-6,
+            "{open} then {stopped_down}"
+        );
+    }
+
+    #[test]
+    fn the_rate_reaches_the_exposure() {
+        // The shutter is stored as a fraction of a frame, so the same camera
+        // is a different exposure at a different rate — which is correct, and
+        // is why the rate has to be passed rather than assumed.
+        let mut doc = Document::new();
+        let id = doc.add_camera(kreate_scene::Camera::new("Shot"));
+        doc.add_object(Object::new("Shot", ObjectData::Camera(id)));
+        let slow = shot_exposure(&doc, 24.0);
+        let fast = shot_exposure(&doc, 48.0);
+        assert!((slow - fast - 1.0).abs() < 1e-6, "{slow} then {fast}");
     }
 
     #[test]

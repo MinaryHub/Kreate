@@ -147,7 +147,34 @@ pub struct Camera {
     ///
     /// Zero is an instant — no motion blur, and no cost.
     pub shutter: f64,
+
+    /// Sensitivity, as an ISO number. 100 is a slow film and a base sensor.
+    ///
+    /// The third leg of the exposure triangle, and the one that had no
+    /// representation until the renderer needed a picture: the aperture and
+    /// the shutter were here for depth of field and motion blur, which are
+    /// what a modeller sets them for, and neither of those needs to know how
+    /// sensitive the sensor is.
+    pub iso: f64,
+    /// The ±EV dial, in stops.
+    ///
+    /// Every camera has one, and it is the control a person actually reaches
+    /// for: the triangle sets the look — how much is in focus, how much is
+    /// blurred — and this sets the brightness without disturbing either.
+    pub exposure_compensation: f64,
 }
+
+/// The aperture the exposure assumes when depth of field is off.
+///
+/// [`Camera::f_stop`] of `None` means "do not simulate depth of field", which
+/// is a rendering choice and not a claim that no light enters. Something has
+/// to stand in, and f/5.6 is the middle of every lens.
+pub const DEFAULT_EXPOSURE_F_STOP: f64 = 5.6;
+
+/// The shutter the exposure assumes when motion blur is off.
+///
+/// Same argument: zero shutter means no blur, not a closed camera.
+pub const DEFAULT_EXPOSURE_SHUTTER_SECONDS: f64 = 1.0 / 60.0;
 
 impl Default for Camera {
     /// A 50mm lens on a full 35mm frame, wide open at nothing.
@@ -171,6 +198,8 @@ impl Default for Camera {
             f_stop: None,
             focus_distance: 10.0,
             shutter: 0.5,
+            iso: 100.0,
+            exposure_compensation: 0.0,
         }
     }
 }
@@ -263,6 +292,48 @@ impl Camera {
             return None;
         }
         Some(self.shutter / rate)
+    }
+
+    /// The exposure value at ISO 100: `log2(N²/t)`, corrected for sensitivity.
+    ///
+    /// The standard photographic quantity, and the bridge §2.2's photometric
+    /// lights were missing. A sun is twenty thousand lux and the display
+    /// transform expects scene-linear values where 0.18 is mid grey; without
+    /// this, a physically correct scene saturates every pixel at the default
+    /// exposure, which is exactly what the rendered viewport's first tests
+    /// measured.
+    ///
+    /// `rate` is the scene's, because the shutter is stored as a fraction of a
+    /// frame (see [`Camera::shutter`]) and an exposure needs a duration.
+    pub fn ev100(&self, rate: f64) -> f64 {
+        let n = self.f_stop.filter(|f| *f > 0.0).unwrap_or(DEFAULT_EXPOSURE_F_STOP);
+        let t = self
+            .shutter_seconds(rate)
+            .filter(|t| *t > 0.0)
+            .unwrap_or(DEFAULT_EXPOSURE_SHUTTER_SECONDS);
+        let iso = self.iso.max(1.0);
+        (n * n / t).log2() - (iso / 100.0).log2()
+    }
+
+    /// What a scene-linear luminance is multiplied by to become a display
+    /// value.
+    ///
+    /// The Saturation Based Sensitivity form, `1 / (1.2·2^EV)`. The 1.2 is the
+    /// constant that puts an 18% grey card at 0.18 when the exposure is
+    /// correct — which is the whole calibration, and why sunny sixteen lands
+    /// where a photographer expects.
+    pub fn exposure_scale(&self, rate: f64) -> f64 {
+        let ev = self.ev100(rate) - self.exposure_compensation;
+        1.0 / (1.2 * 2f64.powf(ev))
+    }
+
+    /// The same, in stops, which is what the display transform takes.
+    ///
+    /// A separate accessor rather than leaving the logarithm to the caller,
+    /// because the two forms are easy to confuse and one of them silently
+    /// produces a picture.
+    pub fn display_exposure(&self, rate: f64) -> f64 {
+        self.exposure_scale(rate).log2()
     }
 
     /// Whether this camera needs depth of field sampled at all.

@@ -218,8 +218,23 @@ pub struct CameraRecord {
     pub focus_distance: f64,
     /// A fraction of one frame's interval, not a duration.
     pub shutter: f64,
+    /// Sensitivity, as an ISO number.
+    ///
+    /// Defaulted rather than required, so a scene written before the exposure
+    /// existed loads at the base sensitivity instead of at zero — which would
+    /// be a black frame.
+    #[serde(default = "default_iso")]
+    pub iso: f64,
+    /// The ±EV dial, in stops.
+    #[serde(default)]
+    pub exposure_compensation: f64,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// What a camera from before the exposure existed is read as.
+fn default_iso() -> f64 {
+    100.0
 }
 
 /// A light datablock.
@@ -661,6 +676,8 @@ pub fn write(
                 f_stop: camera.f_stop,
                 focus_distance: camera.focus_distance,
                 shutter: camera.shutter,
+                iso: camera.iso,
+                exposure_compensation: camera.exposure_compensation,
                 extra: BTreeMap::new(),
             })
             .collect();
@@ -895,6 +912,8 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             f_stop: record.f_stop,
             focus_distance: record.focus_distance,
             shutter: record.shutter,
+            iso: record.iso,
+            exposure_compensation: record.exposure_compensation,
         };
         camera_ids.push(document.restore_camera(camera, kreate_scene::Uid::from_raw(record.uid)));
     }

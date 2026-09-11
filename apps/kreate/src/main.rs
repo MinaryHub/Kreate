@@ -12,7 +12,7 @@
 
 // The shell lives in this package's library target so tests can drive it.
 use kreate::docfile::{self, DocumentFile};
-use kreate::{dragpreview, gpu_sync, shell};
+use kreate::{dragpreview, gpu_sync, scenelights, shell};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -3179,6 +3179,14 @@ impl App {
                 // selection, which is the only thing the user is looking at.
                 draws.push(
                     Draw::new(gpu_mesh, self.doc.world_transform(*id))
+                        // Slot zero, which is every object that has not been
+                        // given per-face materials. Per-face slots need the
+                        // draw split by slot, and that is a change to how a
+                        // mesh is uploaded rather than to what is handed over
+                        // here — so the whole object takes its first material
+                        // until then, and an object with none takes the
+                        // default surface.
+                        .with_surface(surface_of(&self.doc, *id))
                         .selected(
                             self.op_ctx.mode == OpMode::Object
                                 && self.doc.selection.contains(*id),
@@ -3235,6 +3243,34 @@ impl App {
             gfx.region.generation(),
             preview,
         );
+
+        // The scene's lights, repacked every frame because every position
+        // is rebased onto the camera and the camera moves.
+        //
+        // Only in the mode that reads them: packing is cheap but not free, and
+        // a scene with three hundred lamps should not pay for them while the
+        // user is modelling under the studio lights.
+        if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
+            let lights = scenelights::placed_lights(&self.doc);
+            gfx.viewport.set_lights(
+                &gfx.gpu.device,
+                &gfx.gpu.queue,
+                self.camera.eye(),
+                &lights,
+            );
+            // The bridge between §2.2's photometric lights and §2.1's display
+            // transform: without it a sunlit scene saturates every pixel. The
+            // scene camera's, not the viewport camera's — the exposure is a
+            // property of the shot and not of how the user is looking around.
+            gfx.viewport.set_display(
+                &gfx.gpu.queue,
+                kreate_render::display::Display {
+                    view: kreate_math::ViewTransform::AgX,
+                    exposure: scenelights::shot_exposure(&self.doc, self.time.rate())
+                        as f32,
+                },
+            );
+        }
 
         // 3D into the offscreen target...
         gfx.viewport
@@ -4282,6 +4318,22 @@ fn load_document(path: Option<&str>) -> Document {
         }
     }
     doc
+}
+
+/// What an object is made of, for the rendered mode.
+///
+/// Slot zero. An object with no material takes the default surface, which is
+/// what `Document::material_at` answering `None` means — a freshly added cube
+/// has no materials and should still be shaded.
+fn surface_of(doc: &kreate_scene::Document, id: kreate_scene::ObjectId) -> kreate_render::brdf::Surface {
+    match doc.material_at(id, 0) {
+        Some(material) => kreate_render::brdf::Surface {
+            base_color: material.base_color,
+            metallic: material.metallic,
+            roughness: material.roughness,
+        },
+        None => kreate_render::brdf::Surface::default(),
+    }
 }
 
 fn main() {
