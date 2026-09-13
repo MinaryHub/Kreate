@@ -119,6 +119,13 @@ fn place(light: &kreate_scene::Light, world: &kreate_math::DAffine3) -> PlacedLi
         cast_shadow: light.cast_shadow,
         affect_diffuse: light.affect_diffuse,
         affect_specular: light.affect_specular,
+        // No end. Inverse square does not have one, and the distance past
+        // which a lamp cannot change a pixel depends on the display it is being
+        // looked at through — which the document does not know and this
+        // function does not have. The renderer fills it in for the pass that
+        // culls against it; when the datablock grows an artist-set distance, as
+        // Blender's has, it arrives here instead.
+        range: None,
     }
 }
 

@@ -188,6 +188,43 @@ impl DisplayTransform {
         }
     }
 
+    /// The brightest scene-linear radiance that still comes out as black.
+    ///
+    /// Every value at or below this maps to the same output as zero, so a
+    /// renderer that stops computing light there changes no pixel. That makes
+    /// it the honest place to put a cutoff — the question "is this worth
+    /// computing" is a question about the display, and the light does not know
+    /// the answer.
+    ///
+    /// Exact rather than a guess, and different for the two transforms. AgX
+    /// log-encodes over `[MIN_EV, MAX_EV]` and clamps below, so everything
+    /// under `2^MIN_EV` enters the curve at the same place and leaves it as
+    /// black. `Standard` only clamps, so the bound is the display's own step:
+    /// the linear value that *encodes* to half a code value.
+    ///
+    /// That distinction is the whole of the second case and it is easy to get
+    /// backwards. A code value is a number in the encoded picture, and what
+    /// this returns is linear light — so it goes through the transfer
+    /// function's toe, which is a factor of 12.92 steeper than the identity.
+    /// Writing the step directly gives a value that shows up as code value six.
+    ///
+    /// A *quarter* of a step and not a half, which is where the boundary
+    /// actually is. Exactly half is the point at which rounding decides, and
+    /// which way it decides is a property of the rounding mode — a GPU's and
+    /// Rust's need not agree, and this file exists partly because that class of
+    /// disagreement is real. The bound sits where no rounding mode has an
+    /// opinion.
+    ///
+    /// Both are then divided by the exposure, because `apply` multiplies by it:
+    /// a picture opened up by six stops shows light six stops dimmer.
+    pub fn black_radiance(&self) -> f32 {
+        let floor = match self.view {
+            ViewTransform::AgX => exp2(MIN_EV),
+            ViewTransform::Standard => 0.25 / 255.0 / SRGB_TOE_SLOPE,
+        };
+        floor / exp2(self.exposure)
+    }
+
     /// Turns scene-linear light into a display-referred colour.
     ///
     /// The result is in the display's range in every channel, for every finite
@@ -273,6 +310,13 @@ fn contrast(x: f32) -> f32 {
         - 0.002_32
 }
 
+/// The slope of the sRGB transfer function at zero.
+///
+/// The straight segment the curve starts with, so that the encoding has a
+/// finite derivative at black. Used to turn a step in the encoded picture into
+/// a step in linear light — see `DisplayTransform::black_radiance`.
+const SRGB_TOE_SLOPE: f32 = 12.92;
+
 /// The transform proper, on non-negative Rec.709 linear light.
 fn agx(color: [f32; 3]) -> [f32; 3] {
     let mut c = transform(&REC709_TO_REC2020, color);
@@ -301,6 +345,9 @@ fn agx(color: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    // The black point is checked against the picture rather than against the
+    // formula that produced it. See `the_black_point_is_the_last_value_that_is_black`.
+
     use super::*;
     use crate::color::Srgb;
 
@@ -531,6 +578,52 @@ mod tests {
         }
         assert!(contrast(0.0).abs() < 0.01, "{}", contrast(0.0));
         assert!((contrast(1.0) - 1.0).abs() < 0.01, "{}", contrast(1.0));
+    }
+
+    #[test]
+    fn the_black_point_is_the_last_value_that_is_black() {
+        // The claim the cutoff rests on, checked as bytes and not as algebra:
+        // at the black point the picture is the picture of nothing, and a
+        // little above it is not.
+        for view in [ViewTransform::AgX, ViewTransform::Standard] {
+            for exposure in [-12.0f32, -6.0, 0.0, 3.0] {
+                let display = DisplayTransform { view, exposure };
+                let byte = |v: f32| {
+                    let c = display.apply(SceneRgb::new(v, v, v)).encode();
+                    (c.r * 255.0).round() as u8
+                };
+                let black = byte(0.0);
+                let point = display.black_radiance();
+                assert_eq!(
+                    byte(point),
+                    black,
+                    "{view:?} at {exposure} stops: {point} is not black"
+                );
+
+                // And it is the *last* one: an order of magnitude above it has
+                // to show, or the bound is loose enough to throw away light
+                // somebody would see.
+                let above = point * 10.0;
+                assert_ne!(
+                    byte(above),
+                    black,
+                    "{view:?} at {exposure} stops: {above} is black too"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opening_the_exposure_lowers_the_black_point() {
+        // Six stops of exposure is six stops of dimmer light made visible, so
+        // the cutoff has to follow the dial. A fixed floor would throw away
+        // light the moment the picture was opened up.
+        let closed = DisplayTransform::agx(0.0).black_radiance();
+        let open = DisplayTransform::agx(6.0).black_radiance();
+        assert!(
+            (closed / open - 64.0).abs() < 1e-3,
+            "{closed} against {open}"
+        );
     }
 
     #[test]

@@ -35,7 +35,8 @@ struct Light {
     position: vec4<f32>,
     /// xyz: unit direction the light points. w: angular radius in radians.
     direction: vec4<f32>,
-    /// rgb: candela or lux, per `falloff`. w: unused.
+    /// rgb: candela or lux, per `falloff`. w: one over the square of the
+    /// range in metres, or zero for a light that never runs out.
     amount: vec4<f32>,
     /// cos of the outer half-angle, then of the inner. -1 for no cone.
     cone: vec2<f32>,
@@ -60,7 +61,14 @@ fn illuminance_at(light: Light, at: vec3<f32>) -> vec3<f32> {
             // no direction to be lit from either.
             return vec3<f32>(0.0);
         }
-        attenuation = 1.0 / distance_squared;
+        // The window brings the falloff to exactly zero at the light's
+        // range, so that culling the light past it leaves no step in the
+        // picture. Squared twice, which leaves both ends flat: a linear taper
+        // reaches zero too, with a corner at each end, and a corner in a
+        // falloff is a ring on a floor.
+        let t = min(distance_squared * light.amount.w, 1.0);
+        let w = 1.0 - t * t;
+        attenuation = (w * w) / distance_squared;
         to_light = offset * inverseSqrt(distance_squared);
     }
 

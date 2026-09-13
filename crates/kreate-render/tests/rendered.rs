@@ -261,6 +261,27 @@ struct ShadowScene {
     /// The entries are parallel to the lights, so an entry written by layer
     /// rather than by light would land on this one.
     idle: bool,
+    /// Ranges so long the window never bites, which is the same arithmetic as
+    /// no cutoff at all.
+    ///
+    /// The control for `ending_a_light_where_it_goes_black_changes_no_pixel`:
+    /// the two pictures have to be identical, so the difference between them
+    /// has to be the cutoff and nothing else.
+    enormous_range: bool,
+    /// The end the display says each lamp deserves.
+    ///
+    /// What a viewport will fill in once something culls against it. Applied
+    /// here rather than there because nothing culls yet, and a wire with
+    /// nothing on the other end of it is a wire no test can pull.
+    derived_range: bool,
+    /// A range shorter than the scene, which very much does change the picture.
+    ///
+    /// There so the test above cannot pass by measuring nothing. A lamp's
+    /// derived range is far beyond a viewport scene — see the note in
+    /// `ending_a_light_where_it_goes_black_changes_no_pixel` — so "the picture
+    /// did not move" needs a demonstration that this rig would have noticed if
+    /// it had.
+    short_range: bool,
     /// And that front light starting to cast.
     ///
     /// Which pushes everything after it one place down the queue for the eight
@@ -302,7 +323,7 @@ struct ShadowShot {
 const SHADOW_SIZE: u32 = 128;
 
 fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
-    let mut lights = Vec::new();
+    let mut lights: Vec<PlacedLight> = Vec::new();
     if scene.idle {
         lights.push(PlacedLight {
             falloff: Falloff::Parallel,
@@ -369,6 +390,27 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
                 cast_shadow: true,
                 ..PlacedLight::default()
             });
+        }
+    }
+    if scene.derived_range {
+        let black = FRAMED.on_cpu().black_radiance();
+        for light in &mut lights {
+            let brightest = light.amount.iter().copied().fold(0.0f32, f32::max);
+            light.range = Some(kreate_render::lights::cull_range(brightest, black));
+        }
+    }
+    if scene.short_range {
+        for light in &mut lights {
+            light.range = Some(8.0);
+        }
+    }
+    if scene.enormous_range {
+        // Further than the scene is wide by a wide margin, so the window is one
+        // everywhere the geometry is. Set rather than left as `None`, because
+        // `None` is what the viewport fills in — the control has to be a range
+        // that does nothing, not the absence of one.
+        for light in &mut lights {
+            light.range = Some(1.0e6);
         }
     }
     lights
@@ -1000,6 +1042,79 @@ fn a_point_light_overhead_casts_nothing_and_blacks_nothing_out() {
         (darker, brighter),
         (0, 0),
         "the overhead point light changed {darker} + {brighter} pixels"
+    );
+}
+
+#[test]
+fn ending_a_light_where_it_goes_black_changes_no_pixel() {
+    // The claim the culling will rest on, checked where it matters — in the
+    // picture, byte for byte.
+    //
+    // Every lamp now carries a distance past which it is not computed, chosen
+    // from this viewport's own display: the point below which a value comes out
+    // as black whatever else is going on. A window brings the falloff to
+    // exactly zero there, so nothing is dropped abruptly. If any of that is off
+    // — the range too short, the window biting too early, the black point
+    // measured before the transfer function instead of after — a pixel moves,
+    // and this notices.
+    //
+    // Rendered twice: once with the ranges the viewport works out, and once
+    // with ranges so large the window cannot reach the scene at all, which is
+    // the same arithmetic as having no cutoff.
+    // The spot, because a sun does not diverge and so has no end to be given:
+    // in a scene lit only by parallel light this would be comparing two
+    // identical arrangements and proving nothing.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = ShadowScene {
+        spot: true,
+        cast: true,
+        ..ShadowScene::default()
+    };
+    let cut = shadow_shot(
+        &gpu,
+        ShadowScene {
+            derived_range: true,
+            ..lit
+        },
+    );
+    let uncut = shadow_shot(
+        &gpu,
+        ShadowScene {
+            enormous_range: true,
+            ..lit
+        },
+    );
+
+    let moved = cut
+        .pixels
+        .iter()
+        .zip(&uncut.pixels)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(moved, 0, "{moved} pixels moved when the lights were given ends");
+
+    // And this rig can see a range when one bites, which is the half that
+    // stops the assertion above from being satisfied by measuring nothing. It
+    // needs saying: a lamp's derived range is the distance past which it cannot
+    // change a pixel, and for a bright lamp under a shot exposure that is
+    // hundreds of metres — far outside a scene this size. The cutoff is exact
+    // and it is also, at viewport scale, rarely reached.
+    let cropped = shadow_shot(
+        &gpu,
+        ShadowScene {
+            short_range: true,
+            ..lit
+        },
+    );
+    let changed = cropped
+        .pixels
+        .iter()
+        .zip(&uncut.pixels)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        changed > 100,
+        "a range shorter than the scene changed {changed} pixels; this rig          cannot see a cutoff at all"
     );
 }
 

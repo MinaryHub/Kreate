@@ -384,6 +384,19 @@ fn a_rig() -> Vec<PlacedLight> {
             affect_specular: false,
             ..PlacedLight::default()
         },
+        // A lamp with an end, at a range the probe points are inside of — so
+        // the window is somewhere in the middle of its curve rather than at
+        // either flat end, which is where the two copies of it can disagree.
+        //
+        // Short on purpose. A range worked out from the display is hundreds of
+        // metres, and at that distance the window is one everywhere a test
+        // could sample it: the shader's copy would go unchecked.
+        PlacedLight {
+            position: glam::DVec3::new(-1.0, 1.5, 2.5),
+            amount: [1500.0; 3],
+            range: Some(4.0),
+            ..PlacedLight::default()
+        },
     ]
 }
 

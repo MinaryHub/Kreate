@@ -112,7 +112,66 @@ pub struct PlacedLight {
     pub cast_shadow: bool,
     pub affect_diffuse: bool,
     pub affect_specular: bool,
+    /// How far this light reaches, in metres. `None` is everywhere.
+    ///
+    /// Inverse square never reaches zero, so without this a lamp on one side of
+    /// a city touches every pixel on the other and no culling is possible at
+    /// all. What makes a cutoff honest rather than a fudge is choosing it where
+    /// the light stops being visible: [`cull_range`] takes the display's black
+    /// point and answers with the distance beyond which a white surface facing
+    /// the lamp cannot change a pixel.
+    ///
+    /// `None` for a parallel light, which does not diverge and so has no
+    /// distance to run out at. `None` is also the default, which keeps every
+    /// caller that has not thought about it computing every light exactly as
+    /// before.
+    ///
+    /// On the placed light rather than worked out during packing, because it is
+    /// the caller that knows the display — and because when the datablock grows
+    /// an artist-set distance, as Blender's has, it lands here.
+    pub range: Option<f32>,
 }
+
+/// How far a light of `candela` reaches before it stops being visible.
+///
+/// `black_radiance` is the display's, from [`kreate_math::DisplayTransform`]:
+/// the brightest scene-linear value that still comes out as black. A Lambertian
+/// surface of albedo at most one, facing the light square on, returns
+/// `illuminance / π` — so the light cannot change a pixel once its
+/// illuminance falls below `π × black_radiance`, and inverse square says where
+/// that is.
+///
+/// # What this bound does not cover
+///
+/// Specular. A surface at [`crate::brdf::MIN_ROUGHNESS`] concentrates a lobe
+/// about a hundred thousand times tighter than a diffuse one, so a mirror can
+/// show a lamp from roughly three hundred times further away than this — which
+/// is why you can see a streetlight in a car's paint from down the road. The
+/// bound that covered it would be three hundred times larger and would cull
+/// nothing at all, which is the reason it is not the bound used.
+///
+/// So the cost is stated rather than hidden: a near-mirror surface can lose a
+/// highlight from a lamp beyond its range. It is measured in
+/// `a_mirror_is_what_the_cutoff_costs` rather than guessed at, and the escape
+/// is the same one every renderer has — an artist sets the distance.
+pub fn cull_range(candela: f32, black_radiance: f32) -> f32 {
+    let cutoff = std::f32::consts::PI * black_radiance.max(f32::MIN_POSITIVE);
+    WINDOW_MARGIN * (candela.max(0.0) / cutoff).sqrt()
+}
+
+/// How much further than the bare cutoff a windowed light has to reach.
+///
+/// The window does not only remove light at the range; it starts taking some
+/// before then, and the most it ever takes is not at either end. With
+/// `u = d²/r²`, what the window removes is `I/(r²u) · (1 - (1-u²)²)`, whose
+/// `u` part is `2u - u³` — largest at `u = √(2/3)`, where it is `1.0887`.
+///
+/// So a range chosen to put the light's *own* value under the black point
+/// still removes nearly nine per cent more than that somewhere in the middle.
+/// Stretching the range by the square root of the same factor puts the worst
+/// case back under, exactly rather than approximately: the test measures the
+/// worst removal over the whole run and compares it with the black point.
+const WINDOW_MARGIN: f32 = 1.043_408_1;
 
 impl Default for PlacedLight {
     fn default() -> Self {
@@ -127,6 +186,10 @@ impl Default for PlacedLight {
             cast_shadow: true,
             affect_diffuse: true,
             affect_specular: true,
+            // No end, which is what inverse square actually is. A caller that
+            // wants culling says so, and every test written before there was
+            // such a thing goes on measuring the light it was measuring.
+            range: None,
         }
     }
 }
@@ -151,7 +214,13 @@ pub struct GpuLight {
     pub position: [f32; 4],
     /// xyz: unit direction the light points. w: angular radius in radians.
     pub direction: [f32; 4],
-    /// rgb: candela or lux, per [`GpuLight::falloff`]. w: unused.
+    /// rgb: candela or lux, per [`GpuLight::falloff`]. w: one over the square
+    /// of the range in metres, or zero for a light that never runs out.
+    ///
+    /// Reciprocal and squared so the shader's window costs a multiply rather
+    /// than a divide and a square root, and so that "no cutoff" is zero rather
+    /// than an infinity — which multiplies to nothing and compares cleanly on
+    /// every driver.
     pub amount: [f32; 4],
     /// cos of the outer half-angle, then of the inner. `-1` for no cone.
     pub cone: [f32; 2],
@@ -214,7 +283,23 @@ impl GpuLight {
                 direction.z,
                 light.angular_radius.max(0.0),
             ],
-            amount: [light.amount[0], light.amount[1], light.amount[2], 0.0],
+            amount: [
+                light.amount[0],
+                light.amount[1],
+                light.amount[2],
+                // Zero for no cutoff, which is what a parallel light gets
+                // whatever it was given: it does not diverge, so there is no
+                // distance at which it runs out. A range at or below zero is
+                // also no cutoff rather than a light that is off everywhere,
+                // because the second reading turns a nonsense number into an
+                // unlit scene and the first into a slow one.
+                match light.range {
+                    Some(r) if r > 0.0 && light.falloff != Falloff::Parallel => {
+                        1.0 / (r * r)
+                    }
+                    _ => 0.0,
+                },
+            ],
             cone: [outer, inner],
             falloff: light.falloff.id(),
             flags,
@@ -247,7 +332,20 @@ impl GpuLight {
                     // there has no direction to be lit from either.
                     return [0.0; 3];
                 }
-                (1.0 / distance_squared, offset / distance_squared.sqrt())
+                // The window. Inverse square alone never reaches zero, so a
+                // light with a range would still leave a step in the picture
+                // where the culling dropped it; this brings the contribution to
+                // *exactly* zero at the range and smoothly, so what is culled
+                // is by then nothing at all.
+                //
+                // The fourth-power form: one at the light, zero at the range,
+                // and flat at both ends so neither the middle nor the edge
+                // shows a crease.
+                let window = window(distance_squared, self.amount[3]);
+                (
+                    window / distance_squared,
+                    offset / distance_squared.sqrt(),
+                )
             }
         };
 
@@ -369,6 +467,20 @@ impl Lights {
 
 /// The shader source, for a pass that shades with these lights.
 ///
+/// The smooth end of a light, from one at the source to zero at its range.
+///
+/// `inv_range_squared` is the packed `amount.w`: zero means no end, and the
+/// window is one everywhere.
+///
+/// Squared twice rather than once so the curve leaves both ends flat. A linear
+/// taper reaches zero as well, but with a corner at each end — and a corner in
+/// a falloff is a ring on a floor that an artist will file as a bug.
+pub fn window(distance_squared: f32, inv_range_squared: f32) -> f32 {
+    let t = (distance_squared * inv_range_squared).min(1.0);
+    let w = 1.0 - t * t;
+    w * w
+}
+
 /// There is no `#import` in this build, so a shader needing `illuminance_at`
 /// takes the text. A function exposed rather than the file copied, because a
 /// copy is the drift the device test exists to prevent.
@@ -407,6 +519,167 @@ pub fn library_source() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lamp of `candela`, given the range the display says it deserves.
+    fn ranged(candela: f32, display: kreate_math::DisplayTransform) -> PlacedLight {
+        PlacedLight {
+            amount: [candela; 3],
+            range: Some(cull_range(candela, display.black_radiance())),
+            ..PlacedLight::default()
+        }
+    }
+
+    #[test]
+    fn a_light_ends_exactly_at_its_range_and_not_before() {
+        // What makes the cutoff safe to cull against. If the falloff merely got
+        // small at the range, dropping the light there would leave a step in
+        // the picture; it has to arrive at zero, and arrive flat.
+        let display = kreate_math::DisplayTransform::agx(-12.0);
+        let light = ranged(1000.0, display);
+        let range = light.range.expect("a range");
+        let packed = GpuLight::pack(&light, glam::DVec3::ZERO);
+
+        let at = |d: f32| packed.illuminance_at(glam::Vec3::new(0.0, 0.0, -d))[0];
+        assert_eq!(at(range), 0.0, "the light does not end at {range} m");
+        assert_eq!(at(range * 2.0), 0.0);
+
+        // And it is still a light before then: a window that reached zero early
+        // would be a cutoff dressed up as a falloff.
+        assert!(at(range * 0.5) > 0.0);
+        assert!(at(range * 0.9) > 0.0);
+        // Monotone all the way out, so the taper never brightens anything.
+        let mut previous = f32::INFINITY;
+        for i in 1..=64 {
+            let here = at(range * i as f32 / 64.0);
+            assert!(here <= previous, "brighter at {i}/64 of the range");
+            previous = here;
+        }
+    }
+
+    #[test]
+    fn what_the_window_removes_is_already_black() {
+        // The claim the whole cutoff rests on, measured against the display
+        // rather than asserted: at every distance, the light the window takes
+        // away is less than the display's black point, so no pixel can move.
+        //
+        // A white Lambertian surface facing the lamp square on is the worst
+        // case — it returns illuminance over pi, and nothing diffuse returns
+        // more.
+        let display = kreate_math::DisplayTransform::agx(-12.0);
+        let black = display.black_radiance();
+        let candela = 1000.0f32;
+        let light = ranged(candela, display);
+        let range = light.range.expect("a range");
+        let packed = GpuLight::pack(&light, glam::DVec3::ZERO);
+
+        let mut worst = 0.0f32;
+        for i in 1..=200 {
+            let d = range * i as f32 / 200.0;
+            let bare = candela / (d * d);
+            let windowed = packed.illuminance_at(glam::Vec3::new(0.0, 0.0, -d))[0];
+            worst = worst.max((bare - windowed) / std::f32::consts::PI);
+        }
+        assert!(
+            worst <= black,
+            "the window removes {worst} of radiance, and black is {black}"
+        );
+    }
+
+    #[test]
+    fn a_mirror_is_what_the_cutoff_costs() {
+        // Recorded, not hidden. The range is derived from what a *diffuse*
+        // surface would show, and a near-mirror concentrates far more tightly —
+        // so past its range a lamp's highlight is gone from polished metal
+        // while a matt floor there was already black.
+        //
+        // The number is measured so it is known rather than guessed: this is
+        // how many times further away a mirror can still show the lamp.
+        let display = kreate_math::DisplayTransform::agx(-12.0);
+        let black = display.black_radiance();
+
+        // The peak of the specular lobe at the smallest roughness the model
+        // allows, head-on: D(0) is 1/(pi a^2) and the height-correlated
+        // visibility term is a half there.
+        let alpha = (crate::brdf::MIN_ROUGHNESS * crate::brdf::MIN_ROUGHNESS) as f64;
+        let peak = 1.0 / (2.0 * std::f64::consts::PI * alpha * alpha);
+        // A diffuse surface returns 1/pi of the illuminance.
+        let ratio = (peak * std::f64::consts::PI).sqrt() as f32;
+
+        let candela = 1000.0f32;
+        let diffuse_range = cull_range(candela, black);
+        let mirror_range = diffuse_range * ratio;
+        assert!(
+            (300.0..700.0).contains(&ratio),
+            "a mirror reaches {ratio} times further; the recorded figure was \
+             about three hundred and the comment says so"
+        );
+        // Which is why the bound is the diffuse one: the other culls nothing.
+        assert!(mirror_range > 5_000.0, "{mirror_range} m");
+    }
+
+    #[test]
+    fn a_parallel_light_has_no_range_to_run_out_at() {
+        // A sun does not diverge, so there is no distance at which it stops.
+        // Handing one a range is a caller's mistake and it has to be ignored
+        // rather than obeyed — obeying it puts a horizon in the middle of the
+        // scene.
+        let sun = PlacedLight {
+            falloff: Falloff::Parallel,
+            amount: [20_000.0; 3],
+            range: Some(1.0),
+            ..PlacedLight::default()
+        };
+        let packed = GpuLight::pack(&sun, glam::DVec3::ZERO);
+        assert_eq!(packed.amount[3], 0.0, "a sun was given an end");
+        let near = packed.illuminance_at(glam::Vec3::new(0.0, 0.0, -0.5))[0];
+        let far = packed.illuminance_at(glam::Vec3::new(0.0, 0.0, -1000.0))[0];
+        assert_eq!(near, far);
+        assert!(near > 0.0);
+    }
+
+    #[test]
+    fn no_range_is_the_light_that_was_there_before() {
+        // The default, and the thing that keeps every caller that has not asked
+        // for culling computing exactly what it computed before.
+        let plain = PlacedLight {
+            amount: [1000.0; 3],
+            ..PlacedLight::default()
+        };
+        assert_eq!(plain.range, None);
+        let packed = GpuLight::pack(&plain, glam::DVec3::ZERO);
+        assert_eq!(packed.amount[3], 0.0);
+        for d in [1.0f32, 10.0, 1_000.0, 100_000.0] {
+            let got = packed.illuminance_at(glam::Vec3::new(0.0, 0.0, -d))[0];
+            assert!((got - 1000.0 / (d * d)).abs() <= got * 1e-6, "at {d} m");
+        }
+
+        // A range of zero or less is the same: nonsense in, the light nobody
+        // asked to cull. The other reading turns a bad number into a scene with
+        // no lamps in it, which is far harder to diagnose than a slow one.
+        for bad in [0.0f32, -1.0] {
+            let odd = PlacedLight {
+                range: Some(bad),
+                ..plain
+            };
+            assert_eq!(GpuLight::pack(&odd, glam::DVec3::ZERO).amount[3], 0.0);
+        }
+    }
+
+    #[test]
+    fn a_brighter_lamp_reaches_further_and_a_deeper_black_reaches_further_still() {
+        // The two things the range depends on, each in the direction it must
+        // go. Four times the candela is twice the distance, because inverse
+        // square; and opening the exposure lowers the black point, which is a
+        // dimmer light made visible and so a longer reach.
+        let display = kreate_math::DisplayTransform::agx(-12.0);
+        let black = display.black_radiance();
+        let dim = cull_range(1000.0, black);
+        let bright = cull_range(4000.0, black);
+        assert!((bright / dim - 2.0).abs() < 1e-3, "{bright} against {dim}");
+
+        let opened = cull_range(1000.0, kreate_math::DisplayTransform::agx(-6.0).black_radiance());
+        assert!(opened > dim * 7.0, "{opened} against {dim}");
+    }
 
     #[test]
     fn the_struct_is_what_the_shader_expects() {
