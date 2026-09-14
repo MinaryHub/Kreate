@@ -2316,7 +2316,20 @@ impl Viewport {
             );
         }
 
-        self.fit_shadows(queue, drawn);
+        // The camera as well as the geometry: a parallel light splits its map
+        // along the view, so where the resolution goes depends on where the
+        // user is looking.
+        let aspect = self.render_size.0 as f32 / self.render_size.1.max(1) as f32;
+        self.fit_shadows(
+            queue,
+            drawn,
+            crate::shadow::CameraFrustum {
+                rotation: camera.rotation.as_quat(),
+                fov_y: camera.fov_y as f32,
+                aspect,
+                near: camera.near() as f32,
+            },
+        );
     }
 
     /// Fits each casting light's shadow frame to what is being drawn.
@@ -2327,7 +2340,12 @@ impl Viewport {
     /// application never told the renderer what the scene contained, so every
     /// frustum came back `None` and no shadow was ever drawn — while the
     /// renderer's own tests, which did tell it, passed.
-    fn fit_shadows(&mut self, queue: &wgpu::Queue, bounds: kreate_math::Aabb) {
+    fn fit_shadows(
+        &mut self,
+        queue: &wgpu::Queue,
+        bounds: kreate_math::Aabb,
+        camera: crate::shadow::CameraFrustum,
+    ) {
         // Every light starts casting nothing, and a light whose frustum sees
         // nothing keeps that entry — which is what stops a matrix from an
         // earlier frame shadowing this one.
@@ -2350,7 +2368,7 @@ impl Viewport {
             // through, so what comes back is a list. The budget is in layers
             // and not in lights: one lamp in a room is six of them.
             frames.clear();
-            for (face, view) in crate::shadow::shadow_views(&light, bounds) {
+            for (face, view) in crate::shadow::shadow_views(&light, bounds, Some(camera)) {
                 if self.shadow_views.len() >= crate::shadow::MAX_SHADOWS {
                     // Out of layers. The faces already taken still shadow, and
                     // the rest of this light does not — which is the same

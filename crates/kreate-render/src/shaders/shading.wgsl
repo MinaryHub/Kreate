@@ -38,12 +38,14 @@ struct Shading {
 /// the slot the sampler looks in.
 ///
 /// `layers` says which layer of the depth array each face landed in, or -1 for
-/// a face with nothing in it. `params` is y: one texel in metres per unit clip
-/// `w`, z: the depth bias, w: nonzero if this light casts. See
-/// `kreate_render::shadow::GpuShadow`.
+/// a face with nothing in it, and `texels` how much world one texel of that
+/// face covers. `params` is z: the depth bias, w: nonzero if this light casts.
+/// See `kreate_render::shadow::GpuShadow`.
 struct ShadowInfo {
     view_proj: array<mat4x4<f32>, 6>,
     layers: array<i32, 8>,
+    /// One texel in metres per unit clip `w`, per face.
+    texels: array<f32, 8>,
     params: vec4<f32>,
 }
 
@@ -112,27 +114,67 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
         return 1.0;
     }
 
-    // Which of the light's frames covers this fragment. `to_light` points at
-    // the lamp, so the way the light is looking is the other way; for a light
-    // with one frustum every direction lands on face zero because that is the
-    // only face it was given.
+    // Which of the light's frames covers this fragment.
+    //
+    // Three kinds of answer, and the slot is the same slot: a point light's
+    // frames are the faces of a cube and the direction picks one; a parallel
+    // light's are slices of the view and the *first that contains the point* is
+    // the tightest, because the slices are nested; and everything else has one
+    // frame in slot zero.
+    //
+    // Searching rather than comparing against stored split distances. A split
+    // is a number this file and the one that fitted the frames would both have
+    // to agree about, and asking the frame itself cannot disagree with it.
+    let light = lights[index];
     var face = 0;
-    if is_cube(lights[index]) {
+    if is_cube(light) {
         face = cube_face(-to_light);
-    }
-    let layer = info.layers[face];
-    if layer < 0 {
-        // A face this light was not given — either nothing is in it, or the
-        // frame budget ran out before this face. Lit, for the same reason as
-        // outside a frustum: the map says nothing about it.
+        if info.layers[face] < 0 {
+            // A face this light was not given — either nothing is in it, or
+            // the frame budget ran out before it. Lit, for the same reason as
+            // outside a frustum: the map says nothing about it.
+            return 1.0;
+        }
+    } else if light.falloff == FALLOFF_PARALLEL {
+        var found = -1;
+        for (var i = 0; i < 6; i = i + 1) {
+            if info.layers[i] < 0 {
+                continue;
+            }
+            let c = info.view_proj[i] * vec4<f32>(position, 1.0);
+            let n = c.xyz / c.w;
+            if c.w > 0.0 && abs(n.x) <= 1.0 && abs(n.y) <= 1.0 && n.z > 0.0 {
+                found = i;
+                break;
+            }
+        }
+        if found < 0 {
+            // Past the last cascade, which is where a sun stops shadowing.
+            // Lit, not black: the far distance is where a shadow is a few
+            // pixels wide and a hard edge across the picture would be the
+            // loudest thing in it.
+            //
+            // No test reaches this line, and that is recorded rather than
+            // worked around. A viewport camera looks *down* at what it is
+            // framing, so the ground it shows runs out well before the three
+            // hundred metres the cascades cover — even over a floor a mile
+            // wide. Turning this into `0.0` changes no pixel of any fixture
+            // here. It becomes reachable the first time somebody puts the
+            // camera near the ground and looks along it, which is a framing
+            // worth a fixture of its own rather than a contortion of these.
+            return 1.0;
+        }
+        face = found;
+    } else if info.layers[0] < 0 {
         return 1.0;
     }
+    let layer = info.layers[face];
     let frame = info.view_proj[face];
     // One texel in metres, here: for an orthographic frustum `w` is one and
     // the size is constant; for a perspective one `w` is the distance along the
     // light's axis and a texel grows with it.
     let first = frame * vec4<f32>(position, 1.0);
-    let texel_world = info.params.y * max(first.w, 1.0);
+    let texel_world = info.texels[face] * max(first.w, 1.0);
     // More offset at a glancing angle, where one texel spans more surface.
     let incidence = clamp(dot(normal, to_light), 1e-3, 1.0);
     let lateral = sqrt(1.0 - incidence * incidence);

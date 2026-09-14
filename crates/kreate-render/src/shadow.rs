@@ -141,17 +141,61 @@ fn look_along(forward: glam::Vec3) -> glam::Mat4 {
 /// and nothing to catch, and a pass that ran anyway would render a map nothing
 /// samples.
 pub fn sun_view(direction: glam::Vec3, bounds: Aabb) -> Option<ShadowView> {
-    if bounds.is_empty() {
+    sun_view_of(direction, &bounds.corners(), bounds)
+}
+
+/// The same, fitted across `wanted` rather than across the whole scene.
+///
+/// `wanted` is what the map has to *cover* — for a cascade, the corners of a
+/// slice of the view frustum. `scene` is what exists, and it bounds the fit in
+/// two different ways:
+///
+/// - **Across the map**, it is an intersection. A slice of the frustum reaching
+///   a kilometre past the last object would spend the map's resolution on empty
+///   space, which is the whole thing cascades exist to stop.
+/// - **In depth**, it is a replacement. The near plane has to reach back to the
+///   light past everything in the scene, or an object between the lamp and the
+///   slice is clipped out of the map and stops casting into it — a wall's
+///   shadow disappearing because the wall itself is behind the camera.
+pub fn sun_view_of(
+    direction: glam::Vec3,
+    wanted: &[glam::Vec3],
+    scene: Aabb,
+) -> Option<ShadowView> {
+    if scene.is_empty() || wanted.is_empty() {
         return None;
     }
     let view = look_along(direction);
-    let mut min = glam::Vec3::splat(f32::INFINITY);
-    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
-    for corner in bounds.corners() {
-        let p = view.transform_point3(corner);
+    let (mut min, mut max) = (
+        glam::Vec3::splat(f32::INFINITY),
+        glam::Vec3::splat(f32::NEG_INFINITY),
+    );
+    for corner in wanted {
+        let p = view.transform_point3(*corner);
         min = min.min(p);
         max = max.max(p);
     }
+    let (mut scene_min, mut scene_max) = (
+        glam::Vec3::splat(f32::INFINITY),
+        glam::Vec3::splat(f32::NEG_INFINITY),
+    );
+    for corner in scene.corners() {
+        let p = view.transform_point3(corner);
+        scene_min = scene_min.min(p);
+        scene_max = scene_max.max(p);
+    }
+    // Across the map: the part of what was asked for that has anything in it.
+    min = min.max(scene_min);
+    max = max.min(scene_max);
+    if min.x > max.x || min.y > max.y {
+        // The slice is outside the scene entirely. Not an error — a cascade
+        // covering distance the scene does not reach has nothing to draw.
+        return None;
+    }
+    // In depth: the scene's, so that casters outside the slice still cast into
+    // it.
+    min.z = scene_min.z;
+    max.z = scene_max.z;
     // The camera looks down -Z, so in front is negative and *nearer* is the
     // larger z. The distances the projection wants are the negated extents.
     //
@@ -283,13 +327,49 @@ pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<Sha
 pub fn shadow_views(
     light: &crate::lights::GpuLight,
     bounds: Aabb,
+    camera: Option<CameraFrustum>,
 ) -> Vec<(usize, ShadowView)> {
     let position = glam::Vec3::from_slice(&light.position[..3]);
     let direction = glam::Vec3::from_slice(&light.direction[..3]);
     if light.falloff == PARALLEL_FALLOFF {
-        return sun_view(direction, bounds)
-            .map(|v| vec![(0, v)])
-            .unwrap_or_default();
+        let Some(camera) = camera else {
+            // No camera to split against — a probe, or a test asking what a
+            // sun's frame is. One slice over the whole scene, which is what
+            // this did before cascades and is still the right answer when
+            // there is no view to spend resolution along.
+            return sun_view(direction, bounds)
+                .map(|v| vec![(0, v)])
+                .unwrap_or_default();
+        };
+        // How far the slices have to go: to the far end of the scene, which
+        // is a *distance from the eye* and not the scene's own size. Sizing it
+        // by the extent was the first attempt and it gives a small scene two
+        // hundred metres away no shadow at all — the slices stop a few metres
+        // in front of the camera, where there is nothing.
+        let reach = CASCADE_REACH.min(
+            bounds
+                .corners()
+                .iter()
+                .fold(camera.near * 4.0, |acc, c| acc.max(c.length())),
+        );
+        let mut out = Vec::with_capacity(CASCADES);
+        let mut near = camera.near;
+        for (index, fraction) in SPLITS.iter().enumerate() {
+            let far = reach * fraction;
+            if far <= near {
+                continue;
+            }
+            let slice = frustum_slice(camera.rotation, camera.fov_y, camera.aspect, near, far);
+            if let Some(view) = sun_view_of(direction, &slice, bounds) {
+                out.push((index, view));
+            }
+            // The next slice starts where this one ended, whether or not this
+            // one framed anything: a gap would be a band of the view with no
+            // shadow in it, and a slice that found nothing is a slice with
+            // nothing in that band anyway.
+            near = far;
+        }
+        return out;
     }
     if light.cone[0] > -1.0 {
         // The stored outer cosine back to a full angle.
@@ -301,6 +381,66 @@ pub fn shadow_views(
     (0..6)
         .filter_map(|face| point_view(position, face, bounds).map(|v| (face, v)))
         .collect()
+}
+
+/// How many slices a parallel light's shadow is split into.
+///
+/// One frustum over a whole scene spends its resolution evenly, and a camera
+/// does not look evenly: what is near fills the screen and what is far does
+/// not. Four slices put four times the texels where the pixels are.
+///
+/// Four rather than three because the last one is nearly free — it covers the
+/// distance where a shadow is a few pixels wide — and rather than five because
+/// each is a pass over the scene's geometry and a sun with five is as expensive
+/// as five lamps.
+pub const CASCADES: usize = 4;
+
+/// Where the slices meet, as fractions of the shadowed distance.
+///
+/// A blend of the two schemes everybody uses. Splitting by equal distance gives
+/// the near slices too little and splitting logarithmically gives the far ones
+/// too little; the halfway mix is the practical scheme, and these are what it
+/// produces for four slices over a range of a thousand.
+///
+/// Written out rather than computed, because they are a decision about how the
+/// resolution is spent and not a formula anybody should have to re-derive to
+/// change it.
+const SPLITS: [f32; CASCADES] = [0.06, 0.18, 0.45, 1.0];
+
+/// How far a parallel light's cascades reach, in metres.
+///
+/// Past this a sun casts no shadow at all. A cap rather than the scene's own
+/// extent, because a scene can be a city and the last slice would then be a
+/// kilometre of map at a metre a texel — which is not a shadow, it is a stain.
+const CASCADE_REACH: f32 = 300.0;
+
+/// The corners of the slice of `camera`'s frustum between two distances.
+///
+/// Eye-relative, like everything the shadow pass works in — so the eye is the
+/// origin and only the rotation matters.
+pub fn frustum_slice(
+    rotation: glam::Quat,
+    fov_y: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+) -> [glam::Vec3; 8] {
+    let t = (fov_y * 0.5).tan();
+    let mut out = [glam::Vec3::ZERO; 8];
+    for (i, d) in [near, far].into_iter().enumerate() {
+        let h = d * t;
+        let w = h * aspect;
+        for (j, (sx, sy)) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            // The camera looks down its own -Z, which is why the distance is
+            // negated here and nowhere else.
+            let local = glam::Vec3::new(sx * w, sy * h, -d);
+            out[i * 4 + j] = rotation * local;
+        }
+    }
+    out
 }
 
 /// Whether a packed light needs a cube's worth of frames.
@@ -319,6 +459,22 @@ pub fn is_cube(light: &crate::lights::GpuLight) -> bool {
 /// by clip `w` supplies.
 fn perspective_texel(fov: f32) -> f32 {
     2.0 * (fov * 0.5).tan() / SHADOW_RESOLUTION as f32
+}
+
+/// What a shadow pass needs to know about the view it is shadowing.
+///
+/// Only a parallel light uses it, and only to decide where to spend its
+/// resolution. Passed rather than taken from a `Camera` because this module
+/// deliberately does not depend on one — a cascade split is geometry, and the
+/// path tracer will want the same function with a frustum it made up.
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFrustum {
+    /// Eye-relative, so there is no position: the eye is the origin.
+    pub rotation: glam::Quat,
+    pub fov_y: f32,
+    /// Width over height.
+    pub aspect: f32,
+    pub near: f32,
 }
 
 /// The falloff id a parallel light packs. See `lights::Falloff`.
@@ -357,6 +513,15 @@ pub struct GpuShadow {
     /// alignment and eight `i32` is how that is reached without a separate pad
     /// field to explain.
     pub layers: [i32; 8],
+    /// One texel in metres per unit clip `w`, per face. See
+    /// [`ShadowView::texel_world`].
+    ///
+    /// Per face and not per light, which the cube did not need and the cascades
+    /// do: the six faces of a cube share a projection and so share a texel,
+    /// while the nearest slice of a view covers a tenth of the world the
+    /// farthest does. One value for all of them gives the far slices an offset
+    /// sized for the near one, which is acne everywhere except close up.
+    pub texels: [f32; 8],
     /// x: unused. y: one texel in metres per unit clip `w`, see
     /// [`ShadowView::texel_world`]. z: the depth bias. w: nonzero if this light
     /// casts.
@@ -380,6 +545,7 @@ impl GpuShadow {
         // Every face empty, which is what the sampler tests before it does
         // anything else.
         layers: [-1; 8],
+        texels: [0.0; 8],
         params: [0.0; 4],
     };
 
@@ -398,11 +564,9 @@ impl GpuShadow {
             let face = face.min(&5);
             out.view_proj[*face] = view.view_proj.to_cols_array_2d();
             out.layers[*face] = *layer as i32;
+            out.texels[*face] = view.texel_world;
         }
-        // One texel size for the light, from the first frame it has. The six
-        // faces of a cube share a projection, so they share a texel; a sun and
-        // a spot have one frame and one texel either way.
-        out.params = [0.0, frames[0].1.texel_world, bias, 1.0];
+        out.params = [0.0, 0.0, bias, 1.0];
         out
     }
 }
@@ -799,20 +963,20 @@ mod tests {
 
         // A sun's frame is orthographic: parallel lines stay parallel, so two
         // points at different depths on the same axis land at the same place.
-        let view = only(shadow_views(&sun, scene()));
+        let view = only(shadow_views(&sun, scene(), None));
         let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
         let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
         assert!((near.x - far.x).abs() < 1e-5, "a sun is not orthographic");
 
         // A spot's is perspective: they do not.
-        let view = only(shadow_views(&spot, scene()));
+        let view = only(shadow_views(&spot, scene(), None));
         let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
         let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
         assert!((near.x - far.x).abs() > 1e-3, "a spot is not perspective");
 
         // And a point light gets several — one per face with anything in it,
         // which is what a single frustum could never cover.
-        let faces = shadow_views(&point, scene());
+        let faces = shadow_views(&point, scene(), None);
         assert!(faces.len() > 1, "a point light got {} frames", faces.len());
         assert!(is_cube(&point) && !is_cube(&sun) && !is_cube(&spot));
     }
@@ -827,7 +991,7 @@ mod tests {
             ..PlacedLight::default()
         });
         let big = Aabb::new(glam::Vec3::splat(-10.0), glam::Vec3::splat(10.0));
-        let frames = shadow_views(&light, big);
+        let frames = shadow_views(&light, big, None);
         assert_eq!(frames.len(), 6, "a lamp in a room needs every face");
 
         // Each probe lands inside the face a cube map would send it to.
@@ -859,7 +1023,7 @@ mod tests {
             glam::Vec3::new(-8.0, -8.0, -0.1),
             glam::Vec3::new(8.0, 8.0, 0.1),
         );
-        let frames = shadow_views(&light, floor);
+        let frames = shadow_views(&light, floor, None);
         assert!(
             frames.len() < 6,
             "a lamp over a floor paid for {} faces",
@@ -926,6 +1090,249 @@ mod tests {
         // an orthographic `w` is one.
         let sun = sun_view(glam::Vec3::NEG_Z, scene()).expect("a scene");
         assert!(sun.texel_world > 0.0);
+    }
+
+    /// A camera looking out across the ground rather than down at it.
+    ///
+    /// A camera turns its own -Z toward what it is looking at, and in this
+    /// Z-up world an unrotated one is therefore pointing at the floor — the
+    /// view leaves the scene within a metre and every slice past the first has
+    /// nothing in it. Which is correct, and measures nothing.
+    fn a_camera(near: f32) -> CameraFrustum {
+        CameraFrustum {
+            // Ninety degrees about X sends local -Z to world +Y.
+            rotation: glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            fov_y: 45f32.to_radians(),
+            aspect: 16.0 / 9.0,
+            near,
+        }
+    }
+
+    /// Ground stretching away in front of `a_camera`, with room above it.
+    fn a_landscape() -> Aabb {
+        Aabb::new(
+            glam::Vec3::new(-150.0, 0.0, -2.0),
+            glam::Vec3::new(150.0, 300.0, 20.0),
+        )
+    }
+
+    #[test]
+    fn a_sun_spends_its_resolution_where_the_pixels_are() {
+        // The whole of why cascades exist, as a number. One frustum over a
+        // large scene gives every metre the same share of a map, and a camera
+        // does not look that way: what is near fills the screen.
+        //
+        // Measured as the width each slice covers. The near one has to be much
+        // smaller than the whole scene, or the resolution has not moved.
+        let big = a_landscape();
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::new(0.3, 0.4, -0.87).normalize(),
+            ..PlacedLight::default()
+        });
+        let cascades = shadow_views(&sun, big, Some(a_camera(0.1)));
+        assert!(
+            cascades.len() >= 3,
+            "a large scene got {} cascades",
+            cascades.len()
+        );
+
+        // Each covers less world than the next, which is what "nested" means
+        // and what makes searching for the first that contains a point find the
+        // tightest.
+        let widths: Vec<f32> = cascades
+            .iter()
+            .map(|(_, v)| 1.0 / v.view_proj.x_axis.length())
+            .collect();
+        for pair in widths.windows(2) {
+            assert!(pair[0] < pair[1], "cascades are not nested: {widths:?}");
+        }
+        // And the nearest is a small fraction of the whole, or nothing was
+        // gained: one frustum over this scene is three hundred metres across.
+        assert!(
+            widths[0] * 10.0 < widths[widths.len() - 1],
+            "the near cascade is {} against {}",
+            widths[0],
+            widths[widths.len() - 1]
+        );
+    }
+
+    #[test]
+    fn the_near_cascade_has_far_finer_texels_than_one_frustum_would() {
+        // The number cascades exist to move, measured in the unit that matters:
+        // how much world one texel of the map covers. Pixel comparisons cannot
+        // see this — a coarser map still puts the shadow in the right place, it
+        // just puts it there in steps — so it is measured where it is exact.
+        let big = a_landscape();
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::new(0.3, 0.4, -0.87).normalize(),
+            ..PlacedLight::default()
+        });
+        let one = sun_view(glam::Vec3::new(0.3, 0.4, -0.87).normalize(), big)
+            .expect("one frustum");
+        let cascades = shadow_views(&sun, big, Some(a_camera(0.1)));
+        let near = cascades.first().expect("a near cascade").1;
+
+        assert!(
+            near.texel_world * 10.0 < one.texel_world,
+            "the near cascade's texel is {} against one frustum's {}",
+            near.texel_world,
+            one.texel_world
+        );
+
+        // And each slice carries its own, because they differ by that much: one
+        // texel size for the whole light gives the far slices an offset sized
+        // for the near one, which is acne everywhere but close up.
+        let packed_shadow = GpuShadow::pack(
+            &cascades
+                .iter()
+                .enumerate()
+                .map(|(i, (face, view))| (*face, *view, i as u32))
+                .collect::<Vec<_>>(),
+            DEPTH_BIAS,
+        );
+        let used: Vec<f32> = cascades
+            .iter()
+            .map(|(face, _)| packed_shadow.texels[*face])
+            .collect();
+        assert!(
+            used[0] * 5.0 < used[used.len() - 1],
+            "every slice was packed the same texel: {used:?}"
+        );
+    }
+
+    #[test]
+    fn each_cascade_covers_its_own_band_and_not_all_of_them() {
+        // Slices that all started at the camera would cover correctly and waste
+        // most of what cascades buy: the second would span everything the first
+        // does plus its own band, and the third everything again.
+        //
+        // The test for "its own band" is a point the *first* slice covers: the
+        // ones after it must not. Asking about the eye instead does not work,
+        // because every slice starts at the camera's near plane and so none of
+        // them contains it either way.
+        let big = a_landscape();
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            // Across the view: along it, every slice projects onto the same
+            // patch of the map and the eye is inside all of them, correctly.
+            direction: glam::Vec3::X,
+            ..PlacedLight::default()
+        });
+        let cascades = shadow_views(&sun, big, Some(a_camera(0.1)));
+        assert!(cascades.len() >= 3);
+        // Five metres in front of the camera, which is well inside the first
+        // slice and well short of the second.
+        let near_probe = glam::Vec3::new(0.0, 5.0, 0.0);
+        assert!(
+            inside(project(&cascades[0].1, near_probe)),
+            "the first cascade does not cover its own band"
+        );
+        for (index, view) in cascades.iter().skip(1) {
+            assert!(
+                !inside(project(view, near_probe)),
+                "cascade {index} reaches back over the first one's band"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_scene_far_away_still_gets_a_cascade() {
+        // How far the slices reach is a distance from the eye, not the scene's
+        // own size. Sizing it by the extent leaves a two-metre object two
+        // hundred metres away with no shadow at all, because the slices stop a
+        // few metres in front of the camera where there is nothing.
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::X,
+            ..PlacedLight::default()
+        });
+        let far_away = Aabb::new(
+            glam::Vec3::new(-1.0, 198.0, -1.0),
+            glam::Vec3::new(1.0, 200.0, 1.0),
+        );
+        let frames = shadow_views(&sun, far_away, Some(a_camera(0.1)));
+        assert!(!frames.is_empty(), "a distant scene got no cascade at all");
+        for corner in far_away.corners() {
+            let covered = frames
+                .iter()
+                .any(|(_, v)| inside(project(v, corner)));
+            assert!(covered, "no cascade covers {corner}");
+        }
+    }
+
+    #[test]
+    fn a_cascade_reaches_back_to_the_light_past_the_whole_scene() {
+        // A slice of the view is a box in the middle of the air, and a wall
+        // between it and the sun is *outside* the slice. If the near plane were
+        // fitted to the slice, that wall would be clipped out of the map and
+        // its shadow would vanish — which is the failure people describe as
+        // "shadows disappear when I look away from the thing casting them".
+        let scene = Aabb::new(
+            glam::Vec3::new(-40.0, 0.0, -1.0),
+            glam::Vec3::new(40.0, 80.0, 30.0),
+        );
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::NEG_Z,
+            ..PlacedLight::default()
+        });
+        let cascades = shadow_views(&sun, scene, Some(a_camera(0.1)));
+        let near = cascades.first().expect("a cascade").1;
+        // Something at the very top of the scene, far above any near slice, is
+        // still inside the map's depth range.
+        let high = glam::Vec3::new(0.0, 4.0, 29.5);
+        let p = project(&near, high);
+        assert!(
+            (-0.0001..=1.0001).contains(&p.z),
+            "a caster at the top of the scene is outside the near cascade's              depth at {p}"
+        );
+    }
+
+    #[test]
+    fn without_a_camera_a_sun_gets_one_frustum_over_everything() {
+        // A probe, or anything asking what a sun's frame is with no view to
+        // split along. One slice over the whole scene, which is what this did
+        // before cascades and is still the only answer available.
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::NEG_Z,
+            ..PlacedLight::default()
+        });
+        let frames = shadow_views(&sun, scene(), None);
+        assert_eq!(frames.len(), 1);
+        for corner in scene().corners() {
+            assert!(inside(project(&frames[0].1, corner)));
+        }
+    }
+
+    #[test]
+    fn a_slice_outside_the_scene_is_no_cascade_at_all() {
+        // A camera a long way from a small scene: the near slices are in empty
+        // air. They are skipped rather than drawn, because a pass over the
+        // geometry that frames none of it is a pass for nothing — and the
+        // slices that follow still line up, because each starts where the last
+        // ended whether or not it framed anything.
+        // Across the view rather than along it: a sun looking the same way the
+        // camera does projects every slice onto the same patch of its map, so
+        // they all overlap the scene and none is skipped. That is correct and
+        // it is not what this is measuring.
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::X,
+            ..PlacedLight::default()
+        });
+        let far_away = Aabb::new(
+            glam::Vec3::new(-1.0, 198.0, -1.0),
+            glam::Vec3::new(1.0, 200.0, 1.0),
+        );
+        let frames = shadow_views(&sun, far_away, Some(a_camera(0.1)));
+        assert!(
+            frames.len() < CASCADES,
+            "every slice framed something: {}",
+            frames.len()
+        );
     }
 
     #[test]

@@ -292,6 +292,14 @@ struct ShadowScene {
     idle_casts: bool,
     /// Enough casting lights to run past `MAX_SHADOWS`.
     crowd: bool,
+    /// A floor stretching past where a sun's cascades reach.
+    ///
+    /// The one arrangement in which a fragment can be lit by a sun and outside
+    /// every one of its frames: cascades stop at `CASCADE_REACH`, and anything
+    /// further is a distance where a shadow is a few pixels wide and the map
+    /// would be a stain. What happens there is the same decision as outside any
+    /// frustum — lit rather than black — and this is where it is reachable.
+    long_floor: bool,
     /// A point light down among the boxes rather than above them.
     ///
     /// The only arrangement that puts fragments on more than one face of the
@@ -355,10 +363,19 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
         // directly under the lamp, and blacking them out moved six pixels.
         for i in 0..15 {
             let a = i as f32 * 0.7;
+            // Spots rather than suns, because a spot is exactly one frame and
+            // a sun is as many cascades as the view reaches. What this crowd is
+            // for is filling the layer budget to a known depth, and a light
+            // whose cost depends on the camera cannot do that.
             lights.push(PlacedLight {
-                falloff: Falloff::Parallel,
-                direction: glam::Vec3::new(a.cos() * 0.5, a.sin() * 0.5, -0.85).normalize(),
-                amount: [500.0; 3],
+                position: glam::DVec3::new(
+                    (a.cos() * 9.0) as f64,
+                    (a.sin() * 9.0) as f64,
+                    7.0,
+                ),
+                direction: glam::Vec3::new(-a.cos() * 0.5, -a.sin() * 0.5, -0.85).normalize(),
+                cone: Some((80f32.to_radians(), 0.3)),
+                amount: [60_000.0; 3],
                 cast_shadow: true,
                 ..PlacedLight::default()
             });
@@ -458,7 +475,12 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     viewport.show_grid = false;
     viewport.show_wireframe = false;
 
-    let floor_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::plane(16.0));
+    // The geometry is built once for every frame this call renders, so the
+    // floor's size comes from the first: a pair of frames that disagreed about
+    // how big the world is would be comparing two scenes.
+    let long = scenes.first().is_some_and(|s| s.long_floor);
+    let floor_mesh =
+        RenderMeshCpu::extract(&kreate_mesh::primitives::plane(if long { 1600.0 } else { 16.0 }));
     let box_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.6));
     // A sphere for the angles a box does not have. Every incidence from
     // head-on to grazing appears on one, and the band where it turns away from
@@ -746,8 +768,12 @@ fn two_casting_lights_shadow_two_different_places() {
             ..ShadowScene::default()
         },
     );
-    assert_eq!(both.passes, 2, "two casting lights, {} maps", both.passes);
-    assert_eq!(key_only.passes, 1);
+    assert!(
+        both.passes > key_only.passes,
+        "the second caster added no maps: {} against {}",
+        both.passes,
+        key_only.passes
+    );
 
     let key = shadow_mask(&neither, &key_only);
     let fill = shadow_mask(&neither, &fill_only);
@@ -805,7 +831,10 @@ fn a_light_that_casts_nothing_costs_no_shadow_map() {
             ..ShadowScene::default()
         },
     );
-    assert_eq!(one.passes, 1, "{} maps for one caster", one.passes);
+    // More than none, and not a fixed number: a sun is split into as many
+    // cascades as the view reaches, so what is being checked is the switch and
+    // not the count.
+    assert!(one.passes > 0, "a caster drew no map");
 }
 
 #[test]
@@ -870,6 +899,47 @@ fn a_light_that_stops_casting_leaves_no_shadow_behind() {
         (darker, brighter),
         (0, 0),
         "the turned-off light left {darker} shadowed pixels behind"
+    );
+}
+
+#[test]
+fn past_the_cascades_a_sun_stops_shadowing_rather_than_going_black() {
+    // A floor stretching a kilometre away. The sun's slices cover the first
+    // three hundred metres of it and the rest has no map at all — which is a
+    // decision, not an oversight: out there a shadow is a few pixels across and
+    // a map fitted to cover it would be a metre a texel.
+    //
+    // What must not happen is the far floor going black at the boundary. That
+    // is the same call the sampler makes outside any frustum, and this is the
+    // one scene in the file that reaches it: everywhere else the frames are
+    // fitted to the scene, so nothing lit is ever outside them.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = shadow_shot(
+        &gpu,
+        ShadowScene {
+            long_floor: true,
+            ..ShadowScene::default()
+        },
+    );
+    let shadowed = shadow_shot(
+        &gpu,
+        ShadowScene {
+            long_floor: true,
+            cast: true,
+            ..ShadowScene::default()
+        },
+    );
+
+    let (darker, brighter) = difference(&lit, &shadowed);
+    assert!(darker > 100, "nothing near the camera is shadowed: {darker}");
+    assert_eq!(brighter, 0, "{brighter} pixels got brighter");
+
+    // The far floor is most of the frame at this framing, so treating it as
+    // shadowed would be most of the picture rather than a corner of it.
+    let visible = lit.pixels.iter().filter(|p| p[0] > 0.01).count();
+    assert!(
+        darker * 4 < visible,
+        "{darker} of {visible} lit pixels went dark; past the last cascade was          treated as shadowed rather than lit"
     );
 }
 
