@@ -2340,21 +2340,33 @@ impl Viewport {
         }
         self.shadow_entries
             .resize(self.packed_lights.len(), crate::shadow::GpuShadow::NONE);
+        let mut frames: Vec<(usize, crate::shadow::ShadowView, u32)> = Vec::new();
         for index in 0..self.packed_lights.len() {
             let light = self.packed_lights[index];
-            if light.flags & crate::lights::FLAG_SHADOW == 0
-                || self.shadow_views.len() >= crate::shadow::MAX_SHADOWS
-            {
+            if light.flags & crate::lights::FLAG_SHADOW == 0 {
                 continue;
             }
-            let Some(view) = crate::shadow::shadow_view(&light, bounds) else {
-                continue;
-            };
-            let layer = self.shadow_views.len();
-            self.shadow_entries[index] =
-                crate::shadow::GpuShadow::pack(&view, layer as u32, crate::shadow::DEPTH_BIAS);
-            self.shadows.set_view(queue, layer, &view);
-            self.shadow_views.push(view);
+            // A point light wants a frame per cube face it can see anything
+            // through, so what comes back is a list. The budget is in layers
+            // and not in lights: one lamp in a room is six of them.
+            frames.clear();
+            for (face, view) in crate::shadow::shadow_views(&light, bounds) {
+                if self.shadow_views.len() >= crate::shadow::MAX_SHADOWS {
+                    // Out of layers. The faces already taken still shadow, and
+                    // the rest of this light does not — which is the same
+                    // partial answer a light past the cap gets, and better than
+                    // dropping the faces that were affordable.
+                    break;
+                }
+                let layer = self.shadow_views.len();
+                self.shadows.set_view(queue, layer, &view);
+                self.shadow_views.push(view);
+                frames.push((face, view, layer as u32));
+            }
+            if !frames.is_empty() {
+                self.shadow_entries[index] =
+                    crate::shadow::GpuShadow::pack(&frames, crate::shadow::DEPTH_BIAS);
+            }
         }
         if !self.shadow_entries.is_empty() {
             queue.write_buffer(

@@ -292,6 +292,14 @@ struct ShadowScene {
     idle_casts: bool,
     /// Enough casting lights to run past `MAX_SHADOWS`.
     crowd: bool,
+    /// A point light down among the boxes rather than above them.
+    ///
+    /// The only arrangement that puts fragments on more than one face of the
+    /// cube. A lamp hung overhead has nearly the whole floor on its downward
+    /// face, so picking the wrong face for a direction moves a handful of
+    /// corner pixels and nothing notices — a sweep that reversed the ±X faces
+    /// walked straight through the overhead test.
+    point_inside: bool,
     /// A point light overhead instead of the key sun.
     ///
     /// A bare point light gets one of its six faces, which is a documented
@@ -333,6 +341,29 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             ..PlacedLight::default()
         });
     }
+    if scene.crowd {
+        // Before the key light, so that *it* is the one the layer budget runs
+        // out on. The cap is first-come, and a bright lamp losing faces is what
+        // makes the denied-face decision visible — a dim fill losing one is
+        // not.
+        //
+        // Fifteen, which leaves exactly one layer for whatever asks next. A
+        // point light then gets one face of its six, and the other five are
+        // denied — which is what makes the decision about a face with no map
+        // cover enough of the picture for a test to see it. Twelve left four
+        // faces granted, the two denied ones happened to face sky and floor
+        // directly under the lamp, and blacking them out moved six pixels.
+        for i in 0..15 {
+            let a = i as f32 * 0.7;
+            lights.push(PlacedLight {
+                falloff: Falloff::Parallel,
+                direction: glam::Vec3::new(a.cos() * 0.5, a.sin() * 0.5, -0.85).normalize(),
+                amount: [500.0; 3],
+                cast_shadow: true,
+                ..PlacedLight::default()
+            });
+        }
+    }
     lights.push(if scene.spot || scene.spot_away {
         PlacedLight {
             // Off to one side and well tilted, for the same reason the sun
@@ -350,6 +381,15 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             // frustum is not a sun in disguise.
             cone: Some((70f32.to_radians(), 0.25)),
             amount: [2_600_000.0; 3],
+            cast_shadow: scene.cast,
+            ..PlacedLight::default()
+        }
+    } else if scene.point_inside {
+        PlacedLight {
+            // Between the boxes and at their height, so the scene wraps around
+            // it and every face of the cube has something in it.
+            position: glam::DVec3::new(2.25, 2.25, 0.8),
+            amount: [60_000.0; 3],
             cast_shadow: scene.cast,
             ..PlacedLight::default()
         }
@@ -379,18 +419,6 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             cast_shadow: scene.second_casts,
             ..PlacedLight::default()
         });
-    }
-    if scene.crowd {
-        for i in 0..9 {
-            let a = i as f32 * 0.7;
-            lights.push(PlacedLight {
-                falloff: Falloff::Parallel,
-                direction: glam::Vec3::new(a.cos() * 0.5, a.sin() * 0.5, -0.85).normalize(),
-                amount: [500.0; 3],
-                cast_shadow: true,
-                ..PlacedLight::default()
-            });
-        }
     }
     if scene.derived_range {
         let black = FRAMED.on_cpu().black_radiance();
@@ -792,13 +820,16 @@ fn more_casters_than_layers_are_dropped_and_not_wrapped() {
         ShadowScene {
             cast: true,
             crowd: true,
+            // The cube is what takes the count past the cap: twelve suns and
+            // six faces is eighteen frames for sixteen layers.
+            point_inside: true,
             ..ShadowScene::default()
         },
     );
     assert_eq!(
         crowd.passes,
         kreate_render::shadow::MAX_SHADOWS,
-        "{} maps for eleven casters",
+        "{} maps for eighteen frames",
         crowd.passes
     );
     // And the scene is still lit by all of them: a light denied a map is not a
@@ -1001,23 +1032,16 @@ fn only_the_rendered_mode_pays_for_shadows() {
 }
 
 #[test]
-fn a_point_light_overhead_casts_nothing_and_blacks_nothing_out() {
-    // Two things at once, and the first is a limitation stated at the level a
-    // user meets it.
+fn a_point_light_overhead_casts_a_shadow() {
+    // A lamp hung over a model, which is where anybody puts the first one they
+    // add. It used to cast nothing at all: a point light was given one of its
+    // six faces and that face looks along +X, so a lamp above a scene pointed
+    // its only map sideways and caught nothing. The pass was drawn and the
+    // picture was identical.
     //
-    // A bare point light renders one of its six faces — face zero, which looks
-    // along +X. A lamp hanging *above* a scene therefore points its one map
-    // sideways and catches nothing at all, so the pass is drawn and the picture
-    // is identical. `shadow::shadow_view` says a point light shadows a sixth of
-    // the scene; this is what that sixth is worth when it is the wrong sixth.
-    //
-    // The second is the decision the sampler makes outside a frustum, and this
-    // is the only arrangement in the file that can reach it: a sun's box is
-    // fitted to what is drawn and a spot's square frustum contains its own cone,
-    // so under either of those nothing lit is ever outside. Here almost
-    // everything lit is. Treating outside as shadowed would put a hard black
-    // edge at the frustum's border, and here that means blacking out the scene
-    // — so an unchanged picture is the whole assertion.
+    // Six faces now, and only the ones with anything in them — a lamp over a
+    // floor pays for the four or five that see it and not for the one aimed at
+    // empty sky.
     let gpu = gpu_or_skip!(gpu());
     let lit = shadow_shot(
         &gpu,
@@ -1034,14 +1058,118 @@ fn a_point_light_overhead_casts_nothing_and_blacks_nothing_out() {
             ..ShadowScene::default()
         },
     );
-    // A map is rendered, and it is wasted. Recorded rather than hidden: it is
-    // the cost of the missing five faces.
-    assert_eq!(shadowed.passes, 1);
+    assert!(
+        shadowed.passes > 1,
+        "a point light drew {} maps; a cube is more than one",
+        shadowed.passes
+    );
+
     let (darker, brighter) = difference(&lit, &shadowed);
+    assert!(darker > 200, "the lamp overhead casts nothing: {darker} pixels");
+    assert_eq!(brighter, 0, "{brighter} pixels got brighter");
+
+    // And not acne: a cube's faces meet at right angles and a bias that worked
+    // on one of them has to work on all six.
+    let visible = lit.pixels.iter().filter(|p| p[0] > 0.01).count();
+    assert!(
+        darker * 3 < visible,
+        "{darker} of {visible} lit pixels went dark; that is acne, not a shadow"
+    );
+}
+
+#[test]
+fn a_lamp_among_the_boxes_shadows_in_every_direction() {
+    // The cube proper. A lamp between the boxes and at their height has scene
+    // on every side of it, so its six frames are all used and the sampler has
+    // to pick the right one per fragment — which a lamp hung overhead never
+    // asks, because nearly everything it lights is on one face.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = shadow_shot(
+        &gpu,
+        ShadowScene {
+            point_inside: true,
+            ..ShadowScene::default()
+        },
+    );
+    let shadowed = shadow_shot(
+        &gpu,
+        ShadowScene {
+            point_inside: true,
+            cast: true,
+            ..ShadowScene::default()
+        },
+    );
     assert_eq!(
-        (darker, brighter),
-        (0, 0),
-        "the overhead point light changed {darker} + {brighter} pixels"
+        shadowed.passes, 6,
+        "a lamp surrounded by scene used {} faces",
+        shadowed.passes
+    );
+
+    let (darker, brighter) = difference(&lit, &shadowed);
+    assert!(darker > 300, "the lamp casts almost nothing: {darker} pixels");
+    assert_eq!(brighter, 0, "{brighter} pixels got brighter");
+
+    // A face picked wrongly compares a fragment against a map drawn from
+    // somewhere else, which darkens far more of the picture than a shadow
+    // does. The same bound acne is caught by, and it catches this for the same
+    // reason: both are "most of what is lit went dark".
+    let visible = lit.pixels.iter().filter(|p| p[0] > 0.01).count();
+    assert!(
+        darker * 3 < visible,
+        "{darker} of {visible} lit pixels went dark; that is a face picked          wrongly, not a shadow"
+    );
+}
+
+#[test]
+fn a_light_denied_a_face_is_lit_where_it_has_none() {
+    // The decision the sampler makes for a face with no frame, and the one
+    // arrangement that still reaches it now that a point light gets a cube: the
+    // layer budget running out part way through one. The faces that were
+    // afforded still shadow; the rest are lit rather than black, for the same
+    // reason as outside a frustum — the map says nothing about them, and a hard
+    // black edge where the budget ran out would read as a bug and be one.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = shadow_shot(
+        &gpu,
+        ShadowScene {
+            point_inside: true,
+            crowd: true,
+            ..ShadowScene::default()
+        },
+    );
+    let shadowed = shadow_shot(
+        &gpu,
+        ShadowScene {
+            point_inside: true,
+            cast: true,
+            crowd: true,
+            ..ShadowScene::default()
+        },
+    );
+    // Fifteen suns took their layer each before the lamp asked, so one face of
+    // its cube is drawn and five are denied. That is the arrangement, and it is
+    // worth pinning because it is the only one that reaches the decision below
+    // across enough of the picture to be measurable.
+    assert_eq!(shadowed.passes, kreate_render::shadow::MAX_SHADOWS);
+
+    // The one face it was given points away from most of the scene, so it casts
+    // almost nothing — and that is the point rather than a disappointment: five
+    // sixths of what this lamp lights has no map behind it, which is exactly
+    // the region the decision below governs.
+
+    // So the property, stated directly: a lamp with almost no map darkens
+    // almost nothing. Treating a denied face as shadowed instead removes this
+    // lamp's whole contribution over five sixths of what it lights — a quarter
+    // of the light there, across a thousand-odd pixels.
+    //
+    // A count rather than a fraction of the frame, because a fraction is the
+    // bound that let this through: a third of the picture is a lot of room for
+    // a hard black edge to hide in.
+    let (darker, brighter) = difference(&lit, &shadowed);
+    assert_eq!(brighter, 0, "{brighter} pixels got brighter");
+    assert!(
+        darker < 100,
+        "{darker} pixels went dark; the faces that were denied a map were          treated as shadowed rather than lit"
     );
 }
 

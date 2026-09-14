@@ -44,6 +44,16 @@ struct Light {
     flags: u32,
 }
 
+/// Whether this light sees in every direction.
+///
+/// A point light with no cone, which is the one kind a single shadow frustum
+/// cannot cover. The same two fields `kreate_render::shadow::is_cube` reads,
+/// and here because the sampler needs the answer too — a device test holds the
+/// two copies together.
+fn is_cube(light: Light) -> bool {
+    return light.falloff != FALLOFF_PARALLEL && light.cone.x <= -1.0;
+}
+
 /// How much light arrives at `at`, in lux per channel.
 ///
 /// `at` is eye-relative, like the packed position.

@@ -265,27 +265,51 @@ pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<Sha
 /// Read off the packed form rather than passed a kind, so the shadow frame and
 /// the shading cannot disagree about what a light is.
 ///
-/// `None` when the light has nothing to shadow: an empty scene, a spot aimed
-/// away from everything, a point light with the scene behind the face.
+/// Empty when the light has nothing to shadow: an empty scene, a spot aimed
+/// away from everything, a point light with the scene entirely behind it.
 ///
-/// # A point light gets one face, for now
+/// # Why a list
 ///
-/// Six would be correct and is what `point_view` is shaped for. One is what
-/// this renders, so a bare point light shadows correctly in a sixth of the
-/// scene and not at all in the rest. That is worse than nothing if it is not
-/// said out loud, so it is said here, in the plan, and in a test.
-pub fn shadow_view(light: &crate::lights::GpuLight, bounds: Aabb) -> Option<ShadowView> {
+/// A point light sees in every direction and one frustum cannot. It gets the
+/// faces of a cube — but only the ones with anything in them, because
+/// [`point_view`] answers `None` for a face that frames nothing. A lamp hung
+/// over a model spends one or two; a lamp in the middle of a room spends six.
+/// The cost follows the scene rather than the kind, which is what makes six
+/// faces affordable at all.
+///
+/// The index in each pair is the cube face, in the order `+X -X +Y -Y +Z -Z`.
+/// A light with a single frustum returns face zero, which is not a direction
+/// for it — it is the slot the sampler looks in when the light is not a cube.
+pub fn shadow_views(
+    light: &crate::lights::GpuLight,
+    bounds: Aabb,
+) -> Vec<(usize, ShadowView)> {
     let position = glam::Vec3::from_slice(&light.position[..3]);
     let direction = glam::Vec3::from_slice(&light.direction[..3]);
     if light.falloff == PARALLEL_FALLOFF {
-        return sun_view(direction, bounds);
+        return sun_view(direction, bounds)
+            .map(|v| vec![(0, v)])
+            .unwrap_or_default();
     }
     if light.cone[0] > -1.0 {
         // The stored outer cosine back to a full angle.
         let cone = light.cone[0].clamp(-1.0, 1.0).acos() * 2.0;
-        return spot_view(position, direction, cone, bounds);
+        return spot_view(position, direction, cone, bounds)
+            .map(|v| vec![(0, v)])
+            .unwrap_or_default();
     }
-    point_view(position, 0, bounds)
+    (0..6)
+        .filter_map(|face| point_view(position, face, bounds).map(|v| (face, v)))
+        .collect()
+}
+
+/// Whether a packed light needs a cube's worth of frames.
+///
+/// The same two fields [`shadow_views`] dispatches on, asked separately because
+/// the sampler needs to know as well: a light with one frustum uses face zero
+/// whatever direction the fragment is in, and a cube picks the face.
+pub fn is_cube(light: &crate::lights::GpuLight) -> bool {
+    light.falloff != PARALLEL_FALLOFF && light.cone[0] <= -1.0
 }
 
 /// One texel's width in metres at unit distance, for a perspective frustum.
@@ -310,11 +334,34 @@ const PARALLEL_FALLOFF: u32 = 1;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuShadow {
-    /// Eye-relative world to the light's clip space, reversed-Z.
-    pub view_proj: [[f32; 4]; 4],
-    /// x: which layer of the array. y: one texel in metres per unit clip `w`,
-    /// see [`ShadowView::texel_world`]. z: the depth bias. w: nonzero if this
-    /// light casts.
+    /// Eye-relative world to the light's clip space, reversed-Z, per cube face.
+    ///
+    /// Six because a point light sees in every direction. Everything else uses
+    /// the first and leaves the rest at zero, which costs three hundred and
+    /// twenty bytes a light — a hundred kilobytes at the largest light count
+    /// this renderer draws, and the price of the sampler indexing a frame
+    /// instead of deriving one.
+    ///
+    /// Deriving it was the alternative and it is the more tempting one: the six
+    /// frames differ only by a rotation, so a shader could build the right one
+    /// from the direction. That puts the same construction in two languages,
+    /// and the two must agree about which axis is up on each face — which is
+    /// exactly the kind of duplication this renderer keeps buying parity tests
+    /// to guard. Here the storage is cheap enough that there is nothing to
+    /// guard.
+    pub view_proj: [[[f32; 4]; 4]; 6],
+    /// Which layer of the depth array each face landed in, or -1 for a face
+    /// with nothing in it.
+    ///
+    /// Six used and two of padding, because a storage buffer wants sixteen-byte
+    /// alignment and eight `i32` is how that is reached without a separate pad
+    /// field to explain.
+    pub layers: [i32; 8],
+    /// x: unused. y: one texel in metres per unit clip `w`, see
+    /// [`ShadowView::texel_world`]. z: the depth bias. w: nonzero if this light
+    /// casts.
+    ///
+    /// The layer used to live in `x` and now lives per face in `layers`.
     pub params: [f32; 4],
 }
 
@@ -329,15 +376,34 @@ impl GpuShadow {
     /// meant, and leaning on a zero matrix to imply it makes the next entry
     /// somebody adds depend on a coincidence.
     pub const NONE: Self = Self {
-        view_proj: [[0.0; 4]; 4],
+        view_proj: [[[0.0; 4]; 4]; 6],
+        // Every face empty, which is what the sampler tests before it does
+        // anything else.
+        layers: [-1; 8],
         params: [0.0; 4],
     };
 
-    pub fn pack(view: &ShadowView, layer: u32, bias: f32) -> Self {
-        Self {
-            view_proj: view.view_proj.to_cols_array_2d(),
-            params: [layer as f32, view.texel_world, bias, 1.0],
+    /// Packs the frames a light was given, each with the layer it was drawn
+    /// into.
+    ///
+    /// `frames` is what [`shadow_views`] returned, paired with the layer each
+    /// went to. An empty list is [`GpuShadow::NONE`]: a light that casts but
+    /// framed nothing.
+    pub fn pack(frames: &[(usize, ShadowView, u32)], bias: f32) -> Self {
+        let mut out = Self::NONE;
+        if frames.is_empty() {
+            return out;
         }
+        for (face, view, layer) in frames {
+            let face = face.min(&5);
+            out.view_proj[*face] = view.view_proj.to_cols_array_2d();
+            out.layers[*face] = *layer as i32;
+        }
+        // One texel size for the light, from the first frame it has. The six
+        // faces of a cube share a projection, so they share a texel; a sun and
+        // a spot have one frame and one texel either way.
+        out.params = [0.0, frames[0].1.texel_world, bias, 1.0];
+        out
     }
 }
 
@@ -406,13 +472,18 @@ pub struct ShadowMaps {
     object_capacity: u32,
 }
 
-/// The most shadow-casting lights a frame will draw.
+/// The most shadow maps a frame will draw.
 ///
-/// A cap rather than a growing array, because each one is a full pass over the
-/// scene's geometry — the cost is in the draws, not the memory, and a scene
-/// that wants a hundred shadowed lights wants the clustered path and a budget
-/// rather than a hundred passes.
-pub const MAX_SHADOWS: usize = 8;
+/// Layers, not lights: a point light in the middle of a room spends six of
+/// these and a sun spends one. A cap rather than a growing array, because each
+/// layer is a full pass over the scene's geometry — the cost is in the draws,
+/// and a scene that wants a hundred shadowed lights wants the clustered path
+/// and a budget rather than a hundred passes.
+///
+/// Sixteen at `Depth32Float` and a kilobyte square is sixty-four megabytes,
+/// which is the real reason this is not larger. Eight was enough while a point
+/// light took one layer and is not enough for a single lamp in a room.
+pub const MAX_SHADOWS: usize = 16;
 
 impl ShadowMaps {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -719,39 +790,83 @@ mod tests {
             ..PlacedLight::default()
         });
 
+        /// The one frame a light with a single frustum gets.
+        fn only(frames: Vec<(usize, ShadowView)>) -> ShadowView {
+            assert_eq!(frames.len(), 1, "expected a single frustum");
+            assert_eq!(frames[0].0, 0, "a single frustum belongs in face zero");
+            frames[0].1
+        }
+
         // A sun's frame is orthographic: parallel lines stay parallel, so two
         // points at different depths on the same axis land at the same place.
-        let view = shadow_view(&sun, scene()).expect("a sun");
+        let view = only(shadow_views(&sun, scene()));
         let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
         let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
         assert!((near.x - far.x).abs() < 1e-5, "a sun is not orthographic");
 
         // A spot's is perspective: they do not.
-        let view = shadow_view(&spot, scene()).expect("a spot");
+        let view = only(shadow_views(&spot, scene()));
         let near = project(&view, glam::Vec3::new(1.0, 1.0, 2.0));
         let far = project(&view, glam::Vec3::new(1.0, 1.0, 0.0));
         assert!((near.x - far.x).abs() > 1e-3, "a spot is not perspective");
 
-        // And a point light gets a frame at all, which is the part that would
-        // otherwise be silently missing.
-        assert!(shadow_view(&point, scene()).is_some());
+        // And a point light gets several — one per face with anything in it,
+        // which is what a single frustum could never cover.
+        let faces = shadow_views(&point, scene());
+        assert!(faces.len() > 1, "a point light got {} frames", faces.len());
+        assert!(is_cube(&point) && !is_cube(&sun) && !is_cube(&spot));
     }
 
     #[test]
-    fn a_point_light_shadows_one_sixth_of_the_scene() {
-        // Recorded, not hidden. Six faces are what `point_view` is shaped for
-        // and one is what the dispatch renders, so a bare point light shadows
-        // correctly in front of itself and not at all behind. A test that
-        // pinned only the working sixth would let this be forgotten.
+    fn a_point_light_in_the_middle_of_a_scene_gets_all_six_faces() {
+        // A lamp with scene on every side of it. Six frames, and between them
+        // they cover every direction — which is the whole difference between
+        // this and the one face the dispatch used to hand back.
         let light = packed(PlacedLight {
             position: glam::DVec3::ZERO,
             ..PlacedLight::default()
         });
         let big = Aabb::new(glam::Vec3::splat(-10.0), glam::Vec3::splat(10.0));
-        let view = shadow_view(&light, big).expect("a frame");
-        // Face zero looks along +X.
-        assert!(inside(project(&view, glam::Vec3::new(5.0, 0.0, 0.0))));
-        assert!(!inside(project(&view, glam::Vec3::new(-5.0, 0.0, 0.0))));
+        let frames = shadow_views(&light, big);
+        assert_eq!(frames.len(), 6, "a lamp in a room needs every face");
+
+        // Each probe lands inside the face a cube map would send it to.
+        for (probe, face) in [
+            (glam::Vec3::new(5.0, 0.0, 0.0), 0),
+            (glam::Vec3::new(-5.0, 0.0, 0.0), 1),
+            (glam::Vec3::new(0.0, 5.0, 0.0), 2),
+            (glam::Vec3::new(0.0, -5.0, 0.0), 3),
+            (glam::Vec3::new(0.0, 0.0, 5.0), 4),
+            (glam::Vec3::new(0.0, 0.0, -5.0), 5),
+        ] {
+            let view = frames.iter().find(|(f, _)| *f == face).expect("the face").1;
+            assert!(inside(project(&view, probe)), "face {face} missed {probe}");
+        }
+    }
+
+    #[test]
+    fn a_lamp_over_a_model_pays_for_the_faces_it_uses() {
+        // The reason six faces are affordable: `point_view` answers nothing for
+        // a face that frames nothing, so the cost follows the scene rather than
+        // the kind. A lamp hung over a model looks down at it and the faces
+        // pointing at empty sky cost nothing.
+        let light = packed(PlacedLight {
+            position: glam::DVec3::new(0.0, 0.0, 9.0),
+            ..PlacedLight::default()
+        });
+        // A floor, well below the lamp.
+        let floor = Aabb::new(
+            glam::Vec3::new(-8.0, -8.0, -0.1),
+            glam::Vec3::new(8.0, 8.0, 0.1),
+        );
+        let frames = shadow_views(&light, floor);
+        assert!(
+            frames.len() < 6,
+            "a lamp over a floor paid for {} faces",
+            frames.len()
+        );
+        // And the one looking down is among them, or it shadows nothing at all.
+        assert!(frames.iter().any(|(face, _)| *face == 5), "no downward face");
     }
 
     #[test]

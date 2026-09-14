@@ -33,12 +33,35 @@ struct Shading {
 
 /// One entry per light, parallel to the light array.
 ///
-/// `params` is x: the array layer, y: one texel in metres per unit clip `w`,
-/// z: the depth bias, w: nonzero if this light casts. See
+/// Six frames, because a point light sees in every direction and one frustum
+/// cannot. Everything else uses face zero — which for it is not a direction but
+/// the slot the sampler looks in.
+///
+/// `layers` says which layer of the depth array each face landed in, or -1 for
+/// a face with nothing in it. `params` is y: one texel in metres per unit clip
+/// `w`, z: the depth bias, w: nonzero if this light casts. See
 /// `kreate_render::shadow::GpuShadow`.
 struct ShadowInfo {
-    view_proj: mat4x4<f32>,
+    view_proj: array<mat4x4<f32>, 6>,
+    layers: array<i32, 8>,
     params: vec4<f32>,
+}
+
+/// Which face of a cube a direction points through.
+///
+/// The largest component decides, which is what a cube map means. The order is
+/// `+X -X +Y -Y +Z -Z`, matching `kreate_render::shadow::point_view` — the one
+/// thing this file and that one have to agree about, and the reason the frames
+/// themselves are stored rather than rebuilt here.
+fn cube_face(d: vec3<f32>) -> i32 {
+    let a = abs(d);
+    if a.x >= a.y && a.x >= a.z {
+        return select(1, 0, d.x > 0.0);
+    }
+    if a.y >= a.z {
+        return select(3, 2, d.y > 0.0);
+    }
+    return select(5, 4, d.z > 0.0);
 }
 
 /// How far off the surface to move a lookup, in shadow texels.
@@ -81,23 +104,40 @@ const NORMAL_OFFSET_TEXELS: f32 = 2.0;
 /// construction — which is exactly what the depth bias cannot do.
 fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
     let info = shadows[index];
-    // A light with no frame this frame. Redundant with the zero matrix such a
-    // light carries — `w` comes out zero and the test below catches it — and
+    // A light with no frame this frame. Redundant with the empty faces such a
+    // light carries — every layer is -1 and the test below catches it — and
     // kept because the intent should be stated rather than implied. See
     // `GpuShadow::NONE`.
     if info.params.w == 0.0 {
         return 1.0;
     }
+
+    // Which of the light's frames covers this fragment. `to_light` points at
+    // the lamp, so the way the light is looking is the other way; for a light
+    // with one frustum every direction lands on face zero because that is the
+    // only face it was given.
+    var face = 0;
+    if is_cube(lights[index]) {
+        face = cube_face(-to_light);
+    }
+    let layer = info.layers[face];
+    if layer < 0 {
+        // A face this light was not given — either nothing is in it, or the
+        // frame budget ran out before this face. Lit, for the same reason as
+        // outside a frustum: the map says nothing about it.
+        return 1.0;
+    }
+    let frame = info.view_proj[face];
     // One texel in metres, here: for an orthographic frustum `w` is one and
     // the size is constant; for a perspective one `w` is the distance along the
     // light's axis and a texel grows with it.
-    let first = info.view_proj * vec4<f32>(position, 1.0);
+    let first = frame * vec4<f32>(position, 1.0);
     let texel_world = info.params.y * max(first.w, 1.0);
     // More offset at a glancing angle, where one texel spans more surface.
     let incidence = clamp(dot(normal, to_light), 1e-3, 1.0);
     let lateral = sqrt(1.0 - incidence * incidence);
     let offset = texel_world * (1.0 + 2.0 * lateral) * NORMAL_OFFSET_TEXELS;
-    let clip = info.view_proj * vec4<f32>(position + normal * offset, 1.0);
+    let clip = frame * vec4<f32>(position + normal * offset, 1.0);
     if clip.w <= 0.0 {
         // Behind the light's near plane: the map says nothing about it, and
         // claiming shadow there would put a dark band behind every spot.
@@ -116,7 +156,6 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let size = vec2<f32>(textureDimensions(shadow_maps));
     let texel = vec2<i32>(uv * size);
-    let layer = i32(info.params.x);
 
     // Slope-scaled, and clamped: at ninety degrees the tangent is infinite and
     // the bias would push the comparison past the far plane, unshadowing the
