@@ -59,11 +59,56 @@ pub fn world_radiance(doc: &Document) -> [f32; 3] {
 /// The first camera in the document, and a default one when there is none.
 /// Not an error: a scene being modelled usually has no camera yet, and it
 /// still has to be lookable-at.
-pub fn shot_exposure(doc: &Document, rate: f64) -> f64 {
-    doc.cameras()
-        .next()
-        .map(|(_, camera)| camera.display_exposure(rate))
-        .unwrap_or_else(|| kreate_scene::Camera::new("").display_exposure(rate))
+pub fn shot_exposure(doc: &Document, rate: f64, subject: kreate_math::DVec3) -> f64 {
+    let metered = metered_illuminance(doc, subject);
+    match doc.cameras().next() {
+        Some((_, camera)) => camera.metered_exposure(metered, rate),
+        // A document with no camera object still has a picture to expose, and
+        // the defaults are the ones a new document gets.
+        None => kreate_scene::Camera::new("").metered_exposure(metered, rate),
+    }
+}
+
+/// What a light meter at `subject` would read, in lux.
+///
+/// The sum of every light reaching the point, plus the world. A flat number and
+/// not a direction, because that is what an incident meter reads and what the
+/// grey-card calibration is stated against — the alternative is a normal, and
+/// the subject has not been chosen yet when the exposure is.
+///
+/// `None` when nothing reaches it. An unlit scene has no exposure that helps,
+/// and pretending otherwise would send the dial to infinity the moment the last
+/// lamp was switched off.
+///
+/// # Why at a point rather than over the picture
+///
+/// Averaging the frame is the other way to meter and it is the one that makes a
+/// viewport flicker: an object moving through shot changes the average, so the
+/// walls change brightness as the camera turns. A spot reading at what the user
+/// is looking at is steady, and it is what a photographer does.
+pub fn metered_illuminance(doc: &Document, subject: kreate_math::DVec3) -> Option<f64> {
+    let mut total = 0.0f64;
+    for placed in placed_lights(doc) {
+        let packed = kreate_render::lights::GpuLight::pack(&placed, subject);
+        // At the subject itself, which is the origin of the eye-relative space
+        // the packing just put the light into.
+        let lux = packed.illuminance_at(kreate_math::glam::Vec3::ZERO);
+        total += luminous(lux);
+    }
+    // The world arrives as a radiance in every direction; what a meter facing
+    // any of them reads from a full hemisphere is π times it.
+    let world = world_radiance(doc);
+    total += std::f64::consts::PI * luminous(world);
+    (total > 0.0).then_some(total)
+}
+
+/// One number from three channels, weighted the way brightness is seen.
+///
+/// Rec.709 luminance. A meter reads light, not colour, and summing the channels
+/// instead would make a blue lamp meter as bright as a green one of the same
+/// power — which is not what either of them looks like.
+fn luminous(rgb: [f32; 3]) -> f64 {
+    0.2126 * rgb[0] as f64 + 0.7152 * rgb[1] as f64 + 0.0722 * rgb[2] as f64
 }
 
 /// One light, placed by the transform of the object carrying it.
@@ -217,7 +262,7 @@ mod tests {
         // to be lookable-at. Zero stops would be the wrong answer — that is
         // the default the photometric lights saturate at.
         let doc = Document::new();
-        let exposure = shot_exposure(&doc, 24.0);
+        let exposure = shot_exposure(&doc, 24.0, kreate_math::DVec3::ZERO);
         assert!(exposure.is_finite());
         assert!(exposure < -5.0, "a default scene exposed at {exposure}");
     }
@@ -232,10 +277,10 @@ mod tests {
             ..kreate_scene::Camera::new("Shot")
         });
         doc.add_object(Object::new("Shot", ObjectData::Camera(id)));
-        let open = shot_exposure(&doc, 24.0);
+        let open = shot_exposure(&doc, 24.0, kreate_math::DVec3::ZERO);
 
         doc.camera_mut(id).expect("camera").f_stop = Some(5.6);
-        let stopped_down = shot_exposure(&doc, 24.0);
+        let stopped_down = shot_exposure(&doc, 24.0, kreate_math::DVec3::ZERO);
         assert!(
             (open - stopped_down - 2.0).abs() < 1e-6,
             "{open} then {stopped_down}"
@@ -250,8 +295,8 @@ mod tests {
         let mut doc = Document::new();
         let id = doc.add_camera(kreate_scene::Camera::new("Shot"));
         doc.add_object(Object::new("Shot", ObjectData::Camera(id)));
-        let slow = shot_exposure(&doc, 24.0);
-        let fast = shot_exposure(&doc, 48.0);
+        let slow = shot_exposure(&doc, 24.0, kreate_math::DVec3::ZERO);
+        let fast = shot_exposure(&doc, 48.0, kreate_math::DVec3::ZERO);
         assert!((slow - fast - 1.0).abs() < 1e-6, "{slow} then {fast}");
     }
 

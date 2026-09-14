@@ -134,6 +134,20 @@ pub struct ShellState {
     pub select_band_deselect: bool,
     /// The right-click menu: what it offers and whether it is open.
     pub context_menu: ContextMenu,
+    /// Which tab each properties area is on.
+    property_tabs: std::collections::HashMap<kreate_ui::AreaId, PropertiesTab>,
+    /// The operator a panel is in the middle of dragging a value for.
+    ///
+    /// A slider changes on every frame it moves, and dispatching each change
+    /// puts one undo step on the stack per frame — which makes undo useless in
+    /// exactly the place people reach for it. So the first change of a gesture
+    /// dispatches and the rest adjust the step it made, which is what
+    /// `History::adjust_last` is for.
+    ///
+    /// Cleared when the pointer comes up, because that is what ends a gesture.
+    /// Typing into a field and pressing return is one change and one step,
+    /// which is also right.
+    live_edit: Option<String>,
     /// Every command in the top row, with its shortcut and description.
     ///
     /// Keyed by operator id. Built by the application because resolving a
@@ -308,6 +322,19 @@ impl ShellState {
         }
     }
 
+    /// Which tab each properties area is showing.
+    ///
+    /// Per area rather than one setting, because two properties editors side by
+    /// side — one on the material, one on the modifiers — is a layout somebody
+    /// will build the day after this ships.
+    pub fn properties_tab(&self, area: kreate_ui::AreaId) -> PropertiesTab {
+        self.property_tabs.get(&area).copied().unwrap_or_default()
+    }
+
+    pub fn set_properties_tab(&mut self, area: kreate_ui::AreaId, tab: PropertiesTab) {
+        self.property_tabs.insert(area, tab);
+    }
+
     /// Whether a viewport area is showing its sidebar.
     pub fn sidebar_open(&self, area: kreate_ui::AreaId) -> bool {
         self.sidebars.contains(&area)
@@ -411,6 +438,8 @@ impl Default for ShellState {
             select_band: None,
             select_band_deselect: false,
             context_menu: ContextMenu::default(),
+            property_tabs: std::collections::HashMap::new(),
+            live_edit: None,
             command_info: std::collections::BTreeMap::new(),
             status: None,
             recoverable: Vec::new(),
@@ -672,6 +701,77 @@ pub struct ViewportImage {
     pub uv: (f32, f32),
 }
 
+/// What a properties editor is showing.
+///
+/// A column of these down the left, as §2.6 settled: the shape has to hold
+/// render, output, scene, world, object, modifiers, physics, constraints, data
+/// and material before it is finished, and a list of headings stops being
+/// readable several entries before that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PropertiesTab {
+    /// The last operation's parameters. Blender's F9, docked.
+    #[default]
+    Tool,
+    /// Where the active object is.
+    Object,
+    /// What the active object *is*: its datablock.
+    Data,
+    /// The modifier stack.
+    Modifiers,
+}
+
+impl PropertiesTab {
+    /// The glyph in the column.
+    ///
+    /// Geometric shapes, the same block the outliner takes its kinds from — so
+    /// a light is a `◇` in both places, which is most of what an icon set is
+    /// for. Real icons replace these; the tab column does not change when they
+    /// do.
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Tool => "▤",
+            Self::Object => "▣",
+            Self::Data => "◇",
+            Self::Modifiers => "◈",
+        }
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Tool => "tab-tool",
+            Self::Object => "tab-object",
+            Self::Data => "tab-data",
+            Self::Modifiers => "tab-modifiers",
+        }
+    }
+}
+
+/// Sends a panel's edit, as a new step or as an adjustment to the last one.
+///
+/// The whole of the rule in one place, because getting it wrong is invisible
+/// until somebody presses ctrl-Z and finds three hundred steps of a slider they
+/// dragged once. See `ShellState::live_edit`.
+fn send_edit(state: &mut ShellState, op_id: &str, params: PropertyMap, continuing: bool) {
+    if continuing && state.live_edit.as_deref() == Some(op_id) {
+        state.queue.push(Command::AdjustLast { params });
+    } else {
+        state.queue.run(op_id, params);
+        state.live_edit = Some(op_id.to_string());
+    }
+}
+
+/// Ends a gesture, so the next edit starts a step of its own.
+///
+/// Called once a frame with whether the pointer is still down. Without it the
+/// *second* drag of the same slider would go on adjusting the first one's step,
+/// and the first drag would become impossible to undo — which is the same bug
+/// as the one `send_edit` exists to prevent, arriving from the other side.
+pub fn end_gesture(state: &mut ShellState, pointer_down: bool) {
+    if !pointer_down {
+        state.live_edit = None;
+    }
+}
+
 /// Panel and menu labels, resolved once per frame.
 struct Labels {
     file_new: String,
@@ -682,6 +782,12 @@ struct Labels {
     recover_discard: String,
     recover_discard_all: String,
     add_cube: String,
+    add_menu: String,
+    add_light_point: String,
+    add_light_sun: String,
+    add_light_spot: String,
+    add_light_area: String,
+    tab_data_light: String,
     duplicate: String,
     delete: String,
     undo: String,
@@ -729,6 +835,12 @@ impl Labels {
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
             add_cube: t("menu-add-cube"),
+            add_menu: t("menu-add"),
+            add_light_point: t("menu-add-light-point"),
+            add_light_sun: t("menu-add-light-sun"),
+            add_light_spot: t("menu-add-light-spot"),
+            add_light_area: t("menu-add-light-area"),
+            tab_data_light: t("tab-data-light"),
             duplicate: t("menu-duplicate"),
             delete: t("menu-delete"),
             undo: t("menu-undo"),
@@ -788,6 +900,10 @@ pub fn draw(
     // rather than by each drawer, so an overlay that stops being drawn stops
     // blocking the pointer on the very next frame.
     state.viewport_blockers.clear();
+    // A gesture lasts as long as the pointer is down. Ended here, at the top of
+    // the frame, so that a panel changing a value knows whether it is
+    // continuing one — see `send_edit`.
+    end_gesture(state, ui.ctx().input(|i| i.pointer.any_down()));
     let status = state.catalog.format(
         "status-counts",
         TextKind::Ui,
@@ -866,11 +982,31 @@ pub fn draw(
                 state.queue.push(Command::SaveDocumentAs);
             }
             ui.separator();
-            if command_tool(ui, state, "object.add_primitive", &l.add_cube) {
-                let mut p = PropertyMap::new();
-                p.set("shape", kreate_reflect::PropertyValue::Enum(1));
-                state.queue.run("object.add_primitive", p);
-            }
+            // A menu rather than a button, because what can be added stopped
+            // being one thing the moment lights arrived — and a row of buttons
+            // per kind is how a header becomes unreadable.
+            ui.menu_button(&l.add_menu, |ui| {
+                if ui.button(&l.add_cube).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("shape", kreate_reflect::PropertyValue::Enum(1));
+                    state.queue.run("object.add_primitive", p);
+                    ui.close();
+                }
+                ui.separator();
+                for (kind, label) in [
+                    (0u32, &l.add_light_point),
+                    (1, &l.add_light_sun),
+                    (2, &l.add_light_spot),
+                    (3, &l.add_light_area),
+                ] {
+                    if ui.button(label).clicked() {
+                        let mut p = PropertyMap::new();
+                        p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
+                        state.queue.run("object.add_light", p);
+                        ui.close();
+                    }
+                }
+            });
             if command_tool(ui, state, "object.duplicate", &l.duplicate) {
                 let mut p = PropertyMap::new();
                 p.set("linked", kreate_reflect::PropertyValue::Bool(true));
@@ -1204,10 +1340,16 @@ fn draw_area(
                     state.outliner = order;
                 }
                 "properties" => {
-                    draw_adjust_panel(ui, state, registry, history);
-                    ui.separator();
-                    ui.heading(&l.modifiers);
-                    draw_modifier_stack(ui, state, modifier_rows);
+                    draw_properties(
+                        ui,
+                        state,
+                        doc,
+                        registry,
+                        history,
+                        modifier_rows,
+                        area.id,
+                        l,
+                    );
                 }
                 "uv" => {
                     draw_uv_editor(ui, state, area.id, l);
@@ -1967,6 +2109,211 @@ fn draw_adjust_panel(
     }
 }
 
+/// The properties editor: a column of tabs, and the one that is chosen.
+///
+/// Which tabs exist depends on what is active, and that is the point of asking
+/// rather than drawing them all: an object with no datablock worth editing has
+/// no Data tab, the way an operator with nothing to act on does not offer
+/// itself. Without it every context grows an empty panel, and §2.6 predicted
+/// that would be the thing that made the editor unreadable.
+#[allow(clippy::too_many_arguments)]
+fn draw_properties(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    history: &History,
+    modifier_rows: &mut [kreate_ui::ModifierRow],
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
+    let tabs = available_tabs(doc);
+    let mut current = chosen_tab(state.properties_tab(area), &tabs);
+
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for tab in &tabs {
+                let name = state.catalog.get(tab.label_key());
+                // The glyph is the button and the name is the tooltip, which is
+                // what keeps the column narrow enough to be a column.
+                if ui
+                    .selectable_label(*tab == current, tab.glyph())
+                    .on_hover_text(&name)
+                    .clicked()
+                {
+                    current = *tab;
+                    state.set_properties_tab(area, *tab);
+                }
+            }
+        });
+        ui.separator();
+        ui.vertical(|ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match current {
+                    PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
+                    PropertiesTab::Object => draw_object_tab(ui, state, doc, registry),
+                    PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
+                    PropertiesTab::Modifiers => {
+                        ui.heading(&l.modifiers);
+                        draw_modifier_stack(ui, state, modifier_rows);
+                    }
+                });
+        });
+    });
+}
+
+/// Which tabs this document's active object has.
+///
+/// A function of the document alone, so the rule can be checked without a
+/// window. Every entry is a `poll` in all but name, and it is the same argument
+/// operators make: a context that cannot use a thing should not be offered it,
+/// or every context grows an empty panel.
+pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
+    let active = doc.selection.active.and_then(|id| doc.object(id));
+    let has_data = matches!(
+        active.map(|o| &o.data),
+        Some(kreate_scene::document::ObjectData::Light(_))
+    );
+    [
+        PropertiesTab::Tool,
+        PropertiesTab::Object,
+        PropertiesTab::Data,
+        PropertiesTab::Modifiers,
+    ]
+    .into_iter()
+    .filter(|tab| match tab {
+        PropertiesTab::Object => active.is_some(),
+        PropertiesTab::Data => has_data,
+        // The stack is per object, but an empty one is worth showing: it is
+        // where a modifier gets added from.
+        PropertiesTab::Modifiers => active.is_some(),
+        PropertiesTab::Tool => true,
+    })
+    .collect()
+}
+
+/// The tab to actually draw, given the one that was remembered.
+///
+/// The remembered one may have just gone away — a light was deselected, say.
+/// Falling back rather than drawing nothing, because a panel that empties as
+/// the selection changes reads as the editor breaking.
+pub fn chosen_tab(remembered: PropertiesTab, available: &[PropertiesTab]) -> PropertiesTab {
+    if available.contains(&remembered) {
+        remembered
+    } else {
+        PropertiesTab::Tool
+    }
+}
+
+/// The Object tab: where the active object is.
+///
+/// The same operator the viewport's sidebar drives, and deliberately the same
+/// values — two panels that computed a rotation differently would disagree
+/// about what the object is doing.
+fn draw_object_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+) {
+    let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
+        return;
+    };
+    // i18n-exempt: an object's name is the user's own text
+    ui.label(&active.name);
+    ui.separator();
+    let Some(info) = registry.get("object.set_transform") else {
+        return;
+    };
+    let t = active.transform;
+    let (rx, ry, rz) = t.rotation.to_euler(kreate_math::glam::EulerRot::XYZ);
+    let mut params = kreate_reflect::PropertyMap::new();
+    params.set(
+        "location",
+        kreate_reflect::PropertyValue::Vec3(t.translation.to_array()),
+    );
+    params.set("rotation", kreate_reflect::PropertyValue::Vec3([rx, ry, rz]));
+    params.set("scale", kreate_reflect::PropertyValue::Vec3(t.scale.to_array()));
+    if kreate_ui::property_editor::property_editor(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+    ) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "object.set_transform", params, dragging);
+    }
+}
+
+/// The Data tab: what the active object *is*.
+///
+/// One tab and one operator per kind of datablock, and today there is one kind
+/// with a panel. The shape is the point: a light's fields are not written out
+/// here, they are the operator's schema drawn by the same reflection widget
+/// that draws every other operator — which is §2.6's rule and the reason the
+/// material and world tabs will be a `match` arm each rather than a week each.
+fn draw_data_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+) {
+    let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
+        return;
+    };
+    let kreate_scene::document::ObjectData::Light(id) = active.data else {
+        return;
+    };
+    let Some(light) = doc.light(id) else {
+        return;
+    };
+    let Some(info) = registry.get("light.set_properties") else {
+        return;
+    };
+
+    ui.heading(&l.tab_data_light);
+    // Said out loud, because it is the behaviour people are surprised by and
+    // it is deliberate: the datablock is shared, so this edits every copy.
+    // How many objects share this bulb. Counted here rather than stored,
+    // because it is a question the panel asks once a frame and an answer that
+    // would otherwise have to be kept in step with every add and delete.
+    let users = doc
+        .objects()
+        .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Light(l) if l == id))
+        .count();
+    if users > 1 {
+        let count = users.to_string();
+        ui.weak(
+            state
+                .catalog
+                .get_args("light-shared", &[("count", count.as_str())]),
+        );
+    }
+    ui.separator();
+
+    // The values that would leave the light exactly as it is. One function, in
+    // the operator's own crate, so the panel and the operator cannot come to
+    // disagree about what a field means — and a test says the round trip is an
+    // identity.
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::light_params(
+        light,
+    ));
+    if kreate_ui::property_editor::property_editor(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+    ) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "light.set_properties", params, dragging);
+    }
+}
+
 /// Draws the modifier stack for the active object.
 fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_ui::ModifierRow]) {
     let text = kreate_ui::modifier_stack::ModifierText::resolve(&state.catalog, KIND_KEYS);
@@ -2059,6 +2406,17 @@ outliner-kind-camera = Camera
 outliner-kind-light = Light
 outliner-shared-mesh = Shared by { $count } objects
 outliner-mesh-summary = { $name }: { $verts } verts, { $faces } faces
+tab-tool = Tool
+tab-object = Object
+tab-data = Data
+tab-modifiers = Modifiers
+tab-data-light = Light
+light-shared = Shared by { $count } objects — editing this changes all of them
+menu-add = Add
+menu-add-light-point = Point Light
+menu-add-light-sun = Sun
+menu-add-light-spot = Spot Light
+menu-add-light-area = Area Light
 panel-modifiers = Modifiers
 modifier-none = No modifiers
 modifier-add = Add Modifier
@@ -2240,6 +2598,17 @@ outliner-kind-camera = 카메라
 outliner-kind-light = 조명
 outliner-shared-mesh = 오브젝트 { $count }개가 공유
 outliner-mesh-summary = { $name }: 정점 { $verts }, 면 { $faces }
+tab-tool = 도구
+tab-object = 오브젝트
+tab-data = 데이터
+tab-modifiers = 모디파이어
+tab-data-light = 라이트
+light-shared = { $count }개의 오브젝트가 공유 — 여기서 고치면 전부 바뀍니다
+menu-add = 추가
+menu-add-light-point = 점광원
+menu-add-light-sun = 태양
+menu-add-light-spot = 스포트라이트
+menu-add-light-area = 면광원
 panel-modifiers = 모디파이어
 modifier-none = 모디파이어 없음
 modifier-add = 모디파이어 추가
@@ -2728,6 +3097,127 @@ mod tests {
         let only = state.screen().areas()[0].0;
         state.toggle_sidebar();
         assert!(!state.sidebar_open(only));
+    }
+
+    /// A document whose active object is a light.
+    fn a_light_document() -> (Document, kreate_scene::document::ObjectId) {
+        let mut doc = Document::new();
+        let id = doc.add_light(kreate_scene::Light::of_kind(
+            "Lamp",
+            kreate_scene::LightKind::SUN,
+        ));
+        let object = doc.add_object(kreate_scene::document::Object::new(
+            "Lamp",
+            kreate_scene::document::ObjectData::Light(id),
+        ));
+        doc.selection.add(object);
+        (doc, object)
+    }
+
+    #[test]
+    fn a_light_gets_a_data_tab_and_a_cube_does_not() {
+        // What makes the tab column readable when there are ten of them rather
+        // than four: a context that has nothing to put in a tab does not get
+        // the tab. The same argument an operator's `poll` makes.
+        let (doc, _) = a_light_document();
+        assert!(available_tabs(&doc).contains(&PropertiesTab::Data));
+
+        let mut plain = Document::new();
+        let cube = plain.add_object(kreate_scene::document::Object::new(
+            "Cube",
+            kreate_scene::document::ObjectData::Empty,
+        ));
+        plain.selection.add(cube);
+        assert!(!available_tabs(&plain).contains(&PropertiesTab::Data));
+        // And the object's own tabs are there, because something is active.
+        assert!(available_tabs(&plain).contains(&PropertiesTab::Object));
+    }
+
+    #[test]
+    fn with_nothing_active_only_the_tool_tab_remains() {
+        // An empty document still has a properties editor, and it still has to
+        // show something. The last operation is the one thing that does not
+        // need a selection.
+        let doc = Document::new();
+        assert_eq!(available_tabs(&doc), vec![PropertiesTab::Tool]);
+    }
+
+    #[test]
+    fn a_tab_that_went_away_falls_back_rather_than_blanking() {
+        // Deselecting a light while the Data tab is open. Keeping the tab and
+        // drawing nothing is what reads as the editor breaking.
+        let doc = Document::new();
+        let tabs = available_tabs(&doc);
+        assert_eq!(
+            chosen_tab(PropertiesTab::Data, &tabs),
+            PropertiesTab::Tool
+        );
+        // And one that is still there is kept, or the panel would jump back to
+        // Tool every time the selection changed at all.
+        let (lit, _) = a_light_document();
+        let tabs = available_tabs(&lit);
+        assert_eq!(
+            chosen_tab(PropertiesTab::Data, &tabs),
+            PropertiesTab::Data
+        );
+    }
+
+    #[test]
+    fn a_drag_sends_one_run_and_then_adjustments() {
+        // The rule that keeps a slider from putting one undo step on the stack
+        // per frame. The first change of a gesture runs the operator; the rest
+        // adjust the step it made.
+        let mut state = ShellState::default();
+        for (i, value) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
+            let mut p = PropertyMap::new();
+            p.set("intensity", kreate_reflect::PropertyValue::Float(value));
+            // `continuing` is "the pointer is still down", which is what a drag
+            // is.
+            send_edit(&mut state, "light.set_properties", p, i > 0);
+        }
+        let sent = state.queue.drain();
+        assert_eq!(sent.len(), 3);
+        assert!(
+            matches!(&sent[0], Command::RunOperator { op_id, .. } if op_id == "light.set_properties"),
+            "the first change did not start a step"
+        );
+        assert!(matches!(&sent[1], Command::AdjustLast { .. }));
+        assert!(matches!(&sent[2], Command::AdjustLast { .. }));
+    }
+
+    #[test]
+    fn letting_go_starts_a_new_step() {
+        // The other half, and the one that is easy to leave out: without it the
+        // second drag of the same slider goes on adjusting the first one's
+        // step, and the first drag becomes impossible to undo.
+        let mut state = ShellState::default();
+        send_edit(&mut state, "light.set_properties", PropertyMap::new(), false);
+        end_gesture(&mut state, true);
+        send_edit(&mut state, "light.set_properties", PropertyMap::new(), true);
+        // Pointer up: the gesture is over.
+        end_gesture(&mut state, false);
+        send_edit(&mut state, "light.set_properties", PropertyMap::new(), true);
+
+        let sent = state.queue.drain();
+        assert!(matches!(&sent[0], Command::RunOperator { .. }));
+        assert!(matches!(&sent[1], Command::AdjustLast { .. }));
+        assert!(
+            matches!(&sent[2], Command::RunOperator { .. }),
+            "a second drag adjusted the first one's step"
+        );
+    }
+
+    #[test]
+    fn a_different_panel_starts_its_own_step() {
+        // Dragging a light's slider and then an object's, without letting go in
+        // between — which a tablet or a stray click can produce. Adjusting the
+        // light's step with a transform's parameters would be an operator run
+        // with somebody else's arguments.
+        let mut state = ShellState::default();
+        send_edit(&mut state, "light.set_properties", PropertyMap::new(), false);
+        send_edit(&mut state, "object.set_transform", PropertyMap::new(), true);
+        let sent = state.queue.drain();
+        assert!(matches!(&sent[1], Command::RunOperator { op_id, .. } if op_id == "object.set_transform"));
     }
 
     #[test]

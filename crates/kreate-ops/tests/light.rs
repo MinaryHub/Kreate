@@ -55,6 +55,204 @@ fn only_light(doc: &Document) -> &Light {
     doc.light(id).expect("its datablock")
 }
 
+/// Adds a light of `kind` and leaves it active.
+fn a_light(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+    kind: u32,
+) {
+    run(
+        registry,
+        history,
+        doc,
+        ctx,
+        "object.add_light",
+        &[("kind", PropertyValue::Enum(kind))],
+    );
+}
+
+#[test]
+fn showing_a_light_and_sending_it_straight_back_changes_nothing() {
+    // The panel's whole contract in one line. An absolute operator needs the
+    // current values to start from, and if reading them and writing them back
+    // is not an identity then opening a panel edits the light — which shows up
+    // as a lamp that drifts every time it is looked at.
+    //
+    // Every kind, because the kinds do not share their numbers: a spot's cone
+    // read off a sun would be a default arriving as though it were the light's.
+    let (registry, mut history, mut doc, ctx) = setup();
+    for kind in 0..4u32 {
+        let mut doc = Document::new();
+        let mut history = History::new();
+        a_light(&registry, &mut history, &mut doc, &ctx, kind);
+        let before = only_light(&doc).clone();
+
+        let map = kreate_reflect::OpParams::to_map(
+            &kreate_ops::ops::object::light_params(&before),
+        );
+        history
+            .dispatch(&registry, &mut doc, &ctx, "light.set_properties", &map)
+            .expect("dispatch");
+
+        let after = only_light(&doc);
+        assert_eq!(&before, after, "kind {kind} drifted when shown and stored");
+    }
+    let _ = (&mut history, &mut doc);
+}
+
+#[test]
+fn the_panel_edits_the_datablock_and_every_copy_sees_it() {
+    // §2.2's argument, from the user's side: a hundred linked copies of a lamp
+    // share one bulb, so turning this one down turns all of them down. That is
+    // the intent and not a bug, and it is the reason the datablock is not a
+    // field on the object.
+    let (registry, mut history, mut doc, ctx) = setup();
+    a_light(&registry, &mut history, &mut doc, &ctx, 0);
+    let id = doc
+        .objects()
+        .filter_map(|(_, o)| match o.data {
+            ObjectData::Light(id) => Some(id),
+            _ => None,
+        })
+        .next()
+        .expect("a light");
+    // A second object on the same datablock.
+    let twin = doc.add_object(Object::new("Twin", ObjectData::Light(id)));
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "light.set_properties",
+        &[("intensity", PropertyValue::Float(42.0))],
+    );
+    let ObjectData::Light(twins) = doc.object(twin).expect("the twin").data else {
+        panic!("the twin stopped being a light");
+    };
+    assert_eq!(doc.light(twins).expect("its bulb").intensity, 42.0);
+}
+
+#[test]
+fn the_panel_does_not_offer_itself_for_a_cube() {
+    // `poll`, which is what stops a Data tab appearing over a mesh with a
+    // light's fields in it. Without it the operator would have to decide what
+    // setting the light of a cube means, and there is no answer.
+    let (registry, mut history, mut doc, ctx) = setup();
+    let info = registry.get("light.set_properties").expect("registered");
+    assert!(!info.poll(&ctx, &doc), "offered with nothing selected");
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &[],
+    );
+    assert!(!info.poll(&ctx, &doc), "offered for a mesh");
+
+    a_light(&registry, &mut history, &mut doc, &ctx, 0);
+    assert!(info.poll(&ctx, &doc), "not offered for a light");
+}
+
+#[test]
+fn turning_a_light_all_the_way_down_leaves_it_down() {
+    // The one place this operator deliberately disagrees with the add
+    // operator: there, zero intensity means "the kind's own default", because
+    // nobody adds a lamp of no brightness on purpose. Here zero means zero,
+    // because turning one down to nothing is something people do all the time
+    // and a panel that snapped it back would be unusable.
+    let (registry, mut history, mut doc, ctx) = setup();
+    a_light(&registry, &mut history, &mut doc, &ctx, 0);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "light.set_properties",
+        &[("intensity", PropertyValue::Float(0.0))],
+    );
+    assert_eq!(only_light(&doc).intensity, 0.0);
+}
+
+#[test]
+fn changing_the_kind_keeps_the_numbers_that_kind_has() {
+    // A point light's radius is a spot's radius, so switching between them
+    // keeps it. A sun's angular diameter is nobody else's, so switching to a
+    // sun brings its own.
+    let (registry, mut history, mut doc, ctx) = setup();
+    a_light(&registry, &mut history, &mut doc, &ctx, 0);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "light.set_properties",
+        &[
+            ("kind", PropertyValue::Enum(2)),
+            ("radius", PropertyValue::Float(0.25)),
+            ("cone_angle", PropertyValue::Float(1.0)),
+            ("blend", PropertyValue::Float(0.5)),
+        ],
+    );
+    match only_light(&doc).kind {
+        LightKind::Spot {
+            radius,
+            cone_angle,
+            blend,
+        } => {
+            assert!((radius - 0.25).abs() < 1e-9);
+            assert!((cone_angle - 1.0).abs() < 1e-9);
+            assert!((blend - 0.5).abs() < 1e-9);
+        }
+        other => panic!("asked for a spot and got {other:?}"),
+    }
+}
+
+#[test]
+fn a_slider_drag_collapses_into_one_undo_step() {
+    // A drag across a slider changes the value on every frame it moves, and one
+    // undo step per frame makes undo useless in exactly the place people reach
+    // for it most.
+    //
+    // The mechanism already exists and this is the rule for using it: the first
+    // change dispatches, and every change that continues the same gesture goes
+    // through `adjust_last`, which restores the step and re-runs the operator
+    // in its place. Stated here, in the operator's own tests, because it is the
+    // panel's obligation and a panel that forgets it looks fine until somebody
+    // presses ctrl-Z.
+    let (registry, mut history, mut doc, ctx) = setup();
+    a_light(&registry, &mut history, &mut doc, &ctx, 0);
+    let before = only_light(&doc).intensity;
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "light.set_properties",
+        &[("intensity", PropertyValue::Float(100.0))],
+    );
+    for v in [200.0f64, 300.0] {
+        let mut params = PropertyMap::new();
+        params.set("intensity", PropertyValue::Float(v));
+        history
+            .adjust_last(&registry, &mut doc, &ctx, &params)
+            .expect("adjust");
+    }
+    assert_eq!(only_light(&doc).intensity, 300.0);
+
+    assert!(history.undo(&mut doc), "nothing to undo");
+    assert_eq!(
+        only_light(&doc).intensity,
+        before,
+        "the drag left more than one step behind"
+    );
+}
+
 #[test]
 fn adding_a_light_makes_an_object_and_a_datablock() {
     // The distinction is the point: `ObjectData::Light` was a bare tag, which

@@ -234,6 +234,27 @@ impl SceneRgb {
         g: 0.0,
         b: 0.0,
     };
+
+    /// Back to the swatch a colour picker holds.
+    ///
+    /// The inverse of [`Srgb::as_reflectance`], and it exists for the same one
+    /// reason: a panel that shows a stored reflectance has to hand the picker
+    /// the numbers the picker works in. Doing it at the call site is where a
+    /// widget and the value behind it start disagreeing about which space they
+    /// are in — which is the bug §2.1 records twice.
+    ///
+    /// A reflectance is bounded by one, so nothing is lost on the way back.
+    /// Feeding this an amount of *light* instead is the misuse `as_reflectance`
+    /// warns about from the other side, and the clamp is what stops a lamp's
+    /// thousand candela coming back as white.
+    pub fn as_swatch(self) -> Srgb {
+        DisplayRgb {
+            r: self.r.clamp(0.0, 1.0),
+            g: self.g.clamp(0.0, 1.0),
+            b: self.b.clamp(0.0, 1.0),
+        }
+        .encode()
+    }
     /// The scene's reference white: the amount of light a display's white means.
     pub const WHITE: Self = Self {
         r: 1.0,
@@ -278,6 +299,37 @@ impl SceneRgb {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_swatch_survives_the_trip_to_light_and_back() {
+        // The two halves of one conversion, so a panel can show what was stored
+        // and store what was shown without the value creeping each time it is
+        // opened.
+        for swatch in [
+            Srgb::new(0.0, 0.0, 0.0),
+            Srgb::new(1.0, 1.0, 1.0),
+            Srgb::new(0.8, 0.35, 0.1),
+            Srgb::new(0.002, 0.5, 0.999),
+        ] {
+            let back = swatch.as_reflectance().as_swatch();
+            for (a, b) in swatch.to_array().iter().zip(back.to_array().iter()) {
+                assert!((a - b).abs() < 1e-5, "{swatch:?} came back as {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_amount_of_light_is_not_a_swatch() {
+        // Stated because the type does not stop it: a lamp's radiance is
+        // unbounded and a swatch is not, so the way back has to clamp. What it
+        // must not do is wrap, or come back black.
+        let bright = SceneRgb::new(1200.0, 900.0, 40.0);
+        let swatch = bright.as_swatch();
+        for v in swatch.to_array() {
+            assert!((0.0..=1.0).contains(&v), "{swatch:?}");
+        }
+        assert!(swatch.r > 0.99 && swatch.g > 0.99 && swatch.b > 0.99);
+    }
+
     use super::*;
 
     #[test]

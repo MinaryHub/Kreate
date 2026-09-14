@@ -128,6 +128,25 @@ pub struct Camera {
     pub clip_near: f64,
     pub clip_far: f64,
 
+    /// Whether the exposure is metered off the scene rather than dialled in.
+    ///
+    /// On by default, and it has to be. The lights are photometric and the
+    /// exposure is photographic, so the two have independent defaults that must
+    /// somehow agree — and no single pair agrees for both an indoor lamp and
+    /// the sun. The shipped defaults were a bright-overcast exposure and a
+    /// thousand-candela bulb, eleven stops apart: adding a lamp from the menu
+    /// produced a black screen, and adding a sun produced a picture. Three of
+    /// the four kinds were unusable.
+    ///
+    /// This is what a real camera does about the same problem, and what its
+    /// light meter is for. `exposure_compensation` still applies on top, so the
+    /// ±EV dial means what it means on a camera: a deliberate departure from
+    /// what the meter said.
+    ///
+    /// Turning it off hands the picture back to `f_stop`, `shutter` and `iso` —
+    /// which is what a shot being matched to a plate needs, and why those
+    /// fields are not merely decorative.
+    pub auto_exposure: bool,
     /// The f-number: focal length divided by the aperture diameter.
     ///
     /// `None` is a pinhole — everything in focus, no depth of field, and no
@@ -199,6 +218,7 @@ impl Default for Camera {
             focus_distance: 10.0,
             shutter: 0.5,
             iso: 100.0,
+            auto_exposure: true,
             exposure_compensation: 0.0,
         }
     }
@@ -334,6 +354,31 @@ impl Camera {
     /// produces a picture.
     pub fn display_exposure(&self, rate: f64) -> f64 {
         self.exposure_scale(rate).log2()
+    }
+
+    /// The exposure to use, given what a light meter read at the subject.
+    ///
+    /// `metered` is the illuminance in lux arriving where the picture is about,
+    /// and `None` is a meter that found nothing — an unlit scene, where there
+    /// is no exposure that helps and the dialled-in one is as good an answer as
+    /// any.
+    ///
+    /// The calibration is the grey card: a surface of 18% albedo under
+    /// `E` lux returns `0.18 · E / π`, and the exposure that puts that at 0.18
+    /// is `π / E`. No 1.2 here, unlike [`Camera::exposure_scale`] — that
+    /// constant belongs to the photographic form, where it relates a scene
+    /// luminance to a sensor's saturation. This form is a direct statement
+    /// about a grey card and needs nothing on top of it.
+    ///
+    /// `exposure_compensation` still applies, because it is what a photographer
+    /// means by it: a deliberate departure from what the meter said.
+    pub fn metered_exposure(&self, metered: Option<f64>, rate: f64) -> f64 {
+        match metered.filter(|e| *e > 0.0) {
+            Some(lux) if self.auto_exposure => {
+                (std::f64::consts::PI / lux).log2() + self.exposure_compensation
+            }
+            _ => self.display_exposure(rate),
+        }
     }
 
     /// Whether this camera needs depth of field sampled at all.

@@ -228,6 +228,14 @@ pub struct CameraRecord {
     /// The ±EV dial, in stops.
     #[serde(default)]
     pub exposure_compensation: f64,
+    /// Whether the exposure is metered off the scene.
+    ///
+    /// Defaulted to *on*, which is what a file written before this existed
+    /// should get: those files were saved under a fixed exposure that suited
+    /// whatever lit them, and a metered one lands in the same place for the
+    /// scenes where it did while fixing the ones where it did not.
+    #[serde(default = "default_auto_exposure")]
+    pub auto_exposure: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -235,6 +243,11 @@ pub struct CameraRecord {
 /// What a camera from before the exposure existed is read as.
 fn default_iso() -> f64 {
     100.0
+}
+
+/// And what one from before the meter existed is read as. See the field.
+fn default_auto_exposure() -> bool {
+    true
 }
 
 /// A light datablock.
@@ -678,6 +691,7 @@ pub fn write(
                 shutter: camera.shutter,
                 iso: camera.iso,
                 exposure_compensation: camera.exposure_compensation,
+                auto_exposure: camera.auto_exposure,
                 extra: BTreeMap::new(),
             })
             .collect();
@@ -902,6 +916,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 "orthographic" => kreate_scene::Projection::Orthographic,
                 _ => kreate_scene::Projection::Perspective,
             },
+            auto_exposure: record.auto_exposure,
             focal_length_mm: record.focal_length_mm,
             sensor_width_mm: record.sensor_width_mm,
             sensor_height_mm: record.sensor_height_mm,

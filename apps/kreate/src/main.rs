@@ -3268,7 +3268,16 @@ impl App {
                 &gfx.gpu.queue,
                 kreate_render::display::Display {
                     view: kreate_math::ViewTransform::AgX,
-                    exposure: scenelights::shot_exposure(&self.doc, self.time.rate())
+                    exposure: scenelights::shot_exposure(
+                            &self.doc,
+                            self.time.rate(),
+                            // What the user is looking at. A spot
+                            // reading on the subject, which is what a
+                            // photographer takes and what keeps the
+                            // walls from changing brightness as the
+                            // camera turns.
+                            self.camera.pivot,
+                        )
                         as f32,
                 },
             );

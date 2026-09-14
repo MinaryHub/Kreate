@@ -247,6 +247,226 @@ impl Default for AddLightParams {
     }
 }
 
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetLightParams {
+    /// What kind of light.
+    ///
+    /// Indices are part of the scripting and keymap surface, so entries are
+    /// only ever appended. The same order as `AddLightParams::kind`, because
+    /// two orders for one enum is a script that adds a sun and edits a spot.
+    #[param(variants("point", "sun", "spot", "area"))]
+    pub kind: u32,
+    /// The light's tint, as the colour picker holds it: sRGB, bounded by one.
+    ///
+    /// Not an amount of light. See `AddLightParams::color`.
+    pub color: [f64; 3],
+    /// How much light, in the unit the chosen kind uses \u2014 candela for a point
+    /// or a spot, lux for a sun, nits for an area light.
+    ///
+    /// Unlike the add operator, zero here means zero. Adding a light of no
+    /// brightness is a thing nobody does on purpose; turning one down to
+    /// nothing is a thing people do all the time, and a panel that snapped it
+    /// back to a default would be unusable.
+    #[param(min = 0.0, soft_max = 100_000.0)]
+    pub intensity: f64,
+    /// Stops on top of `intensity`.
+    ///
+    /// The dial an artist actually reaches for, and the one `UsdLux` keeps
+    /// separately \u2014 see \u00a77.1 on why the two are not collapsed into one number.
+    #[param(soft_min = -10.0, soft_max = 10.0)]
+    pub exposure: f64,
+    /// How big the source is, in metres: what makes a shadow soft.
+    ///
+    /// A point's or a spot's. Ignored by the other two kinds, which have their
+    /// own shapes \u2014 carried in the same parameter block rather than split into
+    /// an operator per kind, because changing the kind is one of the edits and
+    /// an operator that could not do it would leave the panel switching between
+    /// operators mid-gesture.
+    #[param(min = 0.0, soft_max = 2.0, unit = "length")]
+    pub radius: f64,
+    /// How wide a sun appears, in radians. The sun's own is 0.526\u00b0.
+    #[param(min = 0.0, soft_max = 0.2, unit = "angle")]
+    pub angular_diameter: f64,
+    /// A spot's full cone angle, in radians.
+    ///
+    /// The soft maximum is a hair under a half turn: a cone of exactly pi is a
+    /// hemisphere, which is a point light with extra arithmetic, and the dial
+    /// should stop where the shape stops meaning anything.
+    #[param(min = 0.0, soft_max = 3.1, unit = "angle")]
+    pub cone_angle: f64,
+    /// How much of that cone fades, from a hard edge at zero.
+    #[param(min = 0.0, max = 1.0)]
+    pub blend: f64,
+    /// Whether the light casts a shadow.
+    pub cast_shadow: bool,
+    /// Whether it lights the diffuse response. \u00a72.2's lighting cheat.
+    pub affect_diffuse: bool,
+    /// And the specular one.
+    pub affect_specular: bool,
+}
+
+impl Default for SetLightParams {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            color: [1.0, 1.0, 1.0],
+            intensity: 1000.0,
+            exposure: 0.0,
+            radius: 0.1,
+            angular_diameter: kreate_scene::LightKind::SUN_ANGULAR_DIAMETER,
+            cone_angle: std::f64::consts::FRAC_PI_4,
+            blend: 0.15,
+            cast_shadow: true,
+            affect_diffuse: true,
+            affect_specular: true,
+        }
+    }
+}
+
+/// Sets the active object's light exactly.
+///
+/// Absolute, for the reason `SetTransform` is: these are numbers a person
+/// types into a panel, and expressing a typed number as a delta means the
+/// interface computing `wanted - current` and sending the difference.
+///
+/// # The datablock, not the object
+///
+/// Where the lamp *is* belongs to the object and goes through `SetTransform`;
+/// a sun's direction and a spot's aim are its rotation. What kind of lamp it is
+/// and how bright belong to the datablock, which a hundred linked copies share
+/// \u2014 \u00a72.2's argument, and the reason editing one of them changes all of them.
+/// That is the intent, and it is the whole reason the datablock is not a field
+/// on the object.
+pub struct SetLight;
+
+impl Operator for SetLight {
+    type Params = SetLightParams;
+
+    fn id() -> &'static str {
+        "light.set_properties"
+    }
+    fn label() -> &'static str {
+        "Set Light"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        // Only when there is a light to set. Without this the panel would offer
+        // itself for a mesh, and the operator would have to decide what "set the
+        // light of a cube" means.
+        active_light(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = active_light(doc.document()) else {
+            // Polled, but a keymap or a script can call anything at any time.
+            return Ok(OpResult::Cancelled);
+        };
+
+        // Clamped rather than refused, as the add operator does: a stale script
+        // naming a kind this build does not have asked for a light, and the
+        // worst honest answer is the first kind rather than nothing.
+        let index = (params.kind as usize).min(kreate_scene::LightKind::ALL.len() - 1);
+        let kind = match kreate_scene::LightKind::ALL[index] {
+            kreate_scene::LightKind::Point { .. } => kreate_scene::LightKind::Point {
+                radius: params.radius.max(0.0),
+            },
+            kreate_scene::LightKind::Sun { .. } => kreate_scene::LightKind::Sun {
+                angular_diameter: params.angular_diameter.max(0.0),
+            },
+            kreate_scene::LightKind::Spot { .. } => kreate_scene::LightKind::Spot {
+                radius: params.radius.max(0.0),
+                cone_angle: params.cone_angle.max(0.0),
+                blend: params.blend.clamp(0.0, 1.0),
+            },
+            kreate_scene::LightKind::Area { shape, spread } => {
+                // The one kind whose own shape this operator does not carry.
+                // An area light's rectangle or disc is two more numbers and a
+                // second enum, and a panel for it wants its own row; until
+                // there is one, changing to an area light keeps whatever shape
+                // it had rather than flattening it to a default.
+                kreate_scene::LightKind::Area { shape, spread }
+            }
+        };
+
+        let d = doc.document_mut();
+        let Some(light) = d.light_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        light.kind = kind;
+        light.intensity = params.intensity.max(0.0);
+        light.exposure = params.exposure;
+        light.color = kreate_math::Srgb::new(
+            params.color[0] as f32,
+            params.color[1] as f32,
+            params.color[2] as f32,
+        )
+        .as_reflectance();
+        light.cast_shadow = params.cast_shadow;
+        light.affect_diffuse = params.affect_diffuse;
+        light.affect_specular = params.affect_specular;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The light datablock the active object points at, if it points at one.
+fn active_light(doc: &Document) -> Option<kreate_scene::LightId> {
+    let object = doc.object(doc.selection.active?)?;
+    match object.data {
+        kreate_scene::document::ObjectData::Light(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// The parameters that would leave a light exactly as it is.
+///
+/// The panel's other half: an absolute operator needs the current values to
+/// start from, and working them out at the call site is where a panel and an
+/// operator drift apart about what a field means. One function, so the round
+/// trip through `SetLight` is an identity and a test can say so.
+pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
+    let mut p = SetLightParams {
+        kind: kreate_scene::LightKind::ALL
+            .iter()
+            .position(|k| std::mem::discriminant(k) == std::mem::discriminant(&light.kind))
+            .unwrap_or(0) as u32,
+        color: {
+            let c = light.color.as_swatch();
+            [c.r as f64, c.g as f64, c.b as f64]
+        },
+        intensity: light.intensity,
+        exposure: light.exposure,
+        cast_shadow: light.cast_shadow,
+        affect_diffuse: light.affect_diffuse,
+        affect_specular: light.affect_specular,
+        ..SetLightParams::default()
+    };
+    // The kind's own numbers, and only the ones this kind has: a spot's cone
+    // read off a sun would be the default showing up as though it were the
+    // light's, which is the panel telling a small lie every time the kind
+    // changes.
+    match light.kind {
+        kreate_scene::LightKind::Point { radius } => p.radius = radius,
+        kreate_scene::LightKind::Sun { angular_diameter } => {
+            p.angular_diameter = angular_diameter
+        }
+        kreate_scene::LightKind::Spot {
+            radius,
+            cone_angle,
+            blend,
+        } => {
+            p.radius = radius;
+            p.cone_angle = cone_angle;
+            p.blend = blend;
+        }
+        kreate_scene::LightKind::Area { .. } => {}
+    }
+    p
+}
+
 /// Adds a light object and the datablock behind it.
 ///
 /// Two things, as with a camera, and §2.2 is explicit about why: a hundred
@@ -965,6 +1185,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
     registry.register::<AddCamera>();
     registry.register::<AddLight>();
+    registry.register::<SetLight>();
     registry.register::<Delete>();
     registry.register::<Duplicate>();
     registry.register::<Translate>();
