@@ -467,6 +467,321 @@ pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
     p
 }
 
+
+// --- the world -------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetWorldParams {
+    /// The background's colour, as the picker holds it: sRGB, bounded by one.
+    ///
+    /// A reflectance-shaped number for something that is an *emission*, which
+    /// is the compromise a colour picker forces: a swatch cannot express a
+    /// hundred nits. `strength` is the amount, and the two multiply.
+    pub color: [f64; 3],
+    /// How much light the background gives, linear.
+    ///
+    /// Zero is a scene lit only by its lamps, which is a real thing to want and
+    /// is what a document with no world means \u2014 so it is reachable from the
+    /// panel rather than only by deleting the world.
+    #[param(min = 0.0, soft_max = 10.0)]
+    pub strength: f64,
+    /// Radians about the up axis.
+    #[param(unit = "angle")]
+    pub rotation: f64,
+}
+
+impl Default for SetWorldParams {
+    fn default() -> Self {
+        Self {
+            color: [0.05, 0.05, 0.06],
+            strength: 1.0,
+            rotation: 0.0,
+        }
+    }
+}
+
+/// Sets the active world exactly.
+///
+/// The *active* one, which is the document's pointer and not a selection: a
+/// world is not an object and cannot be clicked on. A file with a day setup and
+/// a night one has two, and switching between them is `Document::set_active_world`
+/// rather than an edit to either.
+pub struct SetWorld;
+
+impl Operator for SetWorld {
+    type Params = SetWorldParams;
+
+    fn id() -> &'static str {
+        "world.set_properties"
+    }
+    fn label() -> &'static str {
+        "Set World"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.active_world().is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = doc.document().active_world() else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document_mut();
+        let Some(world) = d.world_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // An image background keeps its image: the panel offers a colour, and
+        // a colour typed into a panel is not a reason to throw away an HDRI
+        // somebody loaded. Changing *which* it is belongs to the control that
+        // picks the image.
+        if let kreate_scene::Background::Flat(_) = world.background {
+            world.background = kreate_scene::Background::Flat(
+                kreate_math::Srgb::new(
+                    params.color[0] as f32,
+                    params.color[1] as f32,
+                    params.color[2] as f32,
+                )
+                .as_reflectance(),
+            );
+        }
+        world.strength = params.strength.max(0.0);
+        world.rotation = params.rotation;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The parameters that would leave the active world exactly as it is.
+pub fn world_params(world: &kreate_scene::World) -> SetWorldParams {
+    SetWorldParams {
+        color: match world.background {
+            kreate_scene::Background::Flat(c) => {
+                let s = c.as_swatch();
+                [s.r as f64, s.g as f64, s.b as f64]
+            }
+            // An image has no one colour. White, so that a panel showing it does
+            // not claim the picture is tinted.
+            kreate_scene::Background::Image(_) => [1.0, 1.0, 1.0],
+        },
+        strength: world.strength,
+        rotation: world.rotation,
+    }
+}
+
+// --- a material ------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetMaterialParams {
+    /// The base colour: a reflectance, bounded by one.
+    ///
+    /// For a dielectric this is the diffuse albedo and for a metal the specular
+    /// colour. `metallic` says which, which is the whole trick of the
+    /// metal-roughness parameterisation.
+    pub color: [f64; 3],
+    #[param(min = 0.0, max = 1.0)]
+    pub metallic: f64,
+    #[param(min = 0.0, max = 1.0)]
+    pub roughness: f64,
+    #[param(min = 0.0, max = 1.0)]
+    pub alpha: f64,
+}
+
+impl Default for SetMaterialParams {
+    fn default() -> Self {
+        Self {
+            color: [0.8, 0.8, 0.8],
+            metallic: 0.0,
+            roughness: 0.5,
+            alpha: 1.0,
+        }
+    }
+}
+
+/// Sets the active object's first material slot.
+///
+/// The first slot, because that is the one the raster pass draws \u2014 see \u00a77.5 on
+/// why per-face slots wait for the draws to be split. A panel that offered the
+/// others would be editing materials nothing shows.
+pub struct SetMaterial;
+
+impl Operator for SetMaterial {
+    type Params = SetMaterialParams;
+
+    fn id() -> &'static str {
+        "material.set_properties"
+    }
+    fn label() -> &'static str {
+        "Set Material"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_material(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = active_material(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document_mut();
+        let Some(material) = d.material_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // Linear on both sides: glTF's `baseColorFactor` is linear too, and a
+        // material's base colour is a reflectance rather than a swatch \u2014 so
+        // unlike a light's tint there is no transfer function in the way.
+        material.base_color = kreate_math::Srgb::new(
+            params.color[0] as f32,
+            params.color[1] as f32,
+            params.color[2] as f32,
+        )
+        .as_reflectance();
+        material.metallic = params.metallic.clamp(0.0, 1.0) as f32;
+        material.roughness = params.roughness.clamp(0.0, 1.0) as f32;
+        material.alpha = params.alpha.clamp(0.0, 1.0) as f32;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The material the active object draws with, if it has one.
+pub fn active_material(doc: &Document) -> Option<kreate_scene::MaterialId> {
+    let object = doc.selection.active?;
+    // Through `material_at`, which is the one place the override rule lives:
+    // slots belong to the mesh and overrides to the object, and a panel that
+    // resolved them itself would be a second opinion about which wins.
+    doc.material_id_at(object, 0)
+}
+
+/// The parameters that would leave a material exactly as it is.
+pub fn material_params(material: &kreate_scene::Material) -> SetMaterialParams {
+    let c = material.base_color.as_swatch();
+    SetMaterialParams {
+        color: [c.r as f64, c.g as f64, c.b as f64],
+        metallic: material.metallic as f64,
+        roughness: material.roughness as f64,
+        alpha: material.alpha as f64,
+    }
+}
+
+
+
+// --- a camera --------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetCameraParams {
+    /// Focal length in millimetres. What a lens is labelled with.
+    #[param(min = 1.0, soft_max = 300.0)]
+    pub focal_length_mm: f64,
+    /// Sensor width in millimetres. 36 is a full 35mm frame.
+    #[param(min = 1.0, soft_max = 100.0)]
+    pub sensor_width_mm: f64,
+    /// Whether the exposure is metered off the scene.
+    ///
+    /// On by default and the reason a lamp added from the menu is visible at
+    /// all: the lights are photometric and the dials below are photographic, so
+    /// no fixed pair of defaults suits both a bulb and the sun.
+    pub auto_exposure: bool,
+    /// The f-number. Zero is a pinhole: everything in focus, and no cost.
+    #[param(min = 0.0, soft_max = 22.0)]
+    pub f_stop: f64,
+    /// How far away the plane of focus is, in metres.
+    #[param(min = 0.0, soft_max = 100.0, unit = "length")]
+    pub focus_distance: f64,
+    /// Sensitivity. Doubling it is one stop.
+    #[param(min = 1.0, soft_max = 12_800.0)]
+    pub iso: f64,
+    /// The \u00b1EV dial, in stops.
+    ///
+    /// Applies whether or not the meter is on, which is what it means on a
+    /// camera: a deliberate departure from what the meter said.
+    #[param(soft_min = -5.0, soft_max = 5.0)]
+    pub exposure_compensation: f64,
+}
+
+impl Default for SetCameraParams {
+    fn default() -> Self {
+        let c = kreate_scene::Camera::new("");
+        Self {
+            focal_length_mm: c.focal_length_mm,
+            sensor_width_mm: c.sensor_width_mm,
+            auto_exposure: c.auto_exposure,
+            f_stop: c.f_stop.unwrap_or(0.0),
+            focus_distance: c.focus_distance,
+            iso: c.iso,
+            exposure_compensation: c.exposure_compensation,
+        }
+    }
+}
+
+/// Sets the active object's camera exactly.
+pub struct SetCamera;
+
+impl Operator for SetCamera {
+    type Params = SetCameraParams;
+
+    fn id() -> &'static str {
+        "camera.set_properties"
+    }
+    fn label() -> &'static str {
+        "Set Camera"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_camera(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = active_camera(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document_mut();
+        let Some(camera) = d.camera_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        camera.focal_length_mm = params.focal_length_mm.max(1.0);
+        camera.sensor_width_mm = params.sensor_width_mm.max(1.0);
+        camera.auto_exposure = params.auto_exposure;
+        // Zero is a pinhole and `None` is how that is spelled, because "off"
+        // and "f/1000" want different code paths: one skips the depth of field
+        // sampling entirely rather than sampling a lens that is nearly a point.
+        camera.f_stop = (params.f_stop > 0.0).then_some(params.f_stop);
+        camera.focus_distance = params.focus_distance.max(0.0);
+        camera.iso = params.iso.max(1.0);
+        camera.exposure_compensation = params.exposure_compensation;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The camera datablock the active object points at, if it points at one.
+pub fn active_camera(doc: &Document) -> Option<kreate_scene::document::CameraId> {
+    let object = doc.object(doc.selection.active?)?;
+    match object.data {
+        kreate_scene::document::ObjectData::Camera(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// The parameters that would leave a camera exactly as it is.
+pub fn camera_params(camera: &kreate_scene::Camera) -> SetCameraParams {
+    SetCameraParams {
+        focal_length_mm: camera.focal_length_mm,
+        sensor_width_mm: camera.sensor_width_mm,
+        auto_exposure: camera.auto_exposure,
+        f_stop: camera.f_stop.unwrap_or(0.0),
+        focus_distance: camera.focus_distance,
+        iso: camera.iso,
+        exposure_compensation: camera.exposure_compensation,
+    }
+}
+
+
 /// Adds a light object and the datablock behind it.
 ///
 /// Two things, as with a camera, and §2.2 is explicit about why: a hundred
@@ -1186,6 +1501,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddCamera>();
     registry.register::<AddLight>();
     registry.register::<SetLight>();
+    registry.register::<SetWorld>();
+    registry.register::<SetMaterial>();
+    registry.register::<SetCamera>();
     registry.register::<Delete>();
     registry.register::<Duplicate>();
     registry.register::<Translate>();

@@ -134,6 +134,13 @@ pub struct ShellState {
     pub select_band_deselect: bool,
     /// The right-click menu: what it offers and whether it is open.
     pub context_menu: ContextMenu,
+    /// What the viewport is currently doing, for the header to report.
+    ///
+    /// Pushed in by the application each frame rather than read out of the
+    /// viewport, because the shell cannot see one — and because the exposure is
+    /// not a viewport setting at all but something worked out from the document
+    /// and the camera together.
+    pub view_status: ViewStatus,
     /// Which tab each properties area is on.
     property_tabs: std::collections::HashMap<kreate_ui::AreaId, PropertiesTab>,
     /// The operator a panel is in the middle of dragging a value for.
@@ -438,6 +445,7 @@ impl Default for ShellState {
             select_band: None,
             select_band_deselect: false,
             context_menu: ContextMenu::default(),
+            view_status: ViewStatus::default(),
             property_tabs: std::collections::HashMap::new(),
             live_edit: None,
             command_info: std::collections::BTreeMap::new(),
@@ -701,6 +709,32 @@ pub struct ViewportImage {
     pub uv: (f32, f32),
 }
 
+/// What the header says about the picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewStatus {
+    pub shading: kreate_render::ShadingMode,
+    /// The exposure the picture is being made at, in stops.
+    pub exposure: f32,
+    /// Whether that came from the light meter or from the camera's dials.
+    ///
+    /// Worth saying on screen, because the two behave differently in a way that
+    /// otherwise reads as a fault: with the meter on, turning a lamp down
+    /// changes nothing — the exposure opens by exactly as much. A number that
+    /// visibly moves when the lamp does is the difference between that being
+    /// explicable and being a bug report.
+    pub metered: bool,
+}
+
+impl Default for ViewStatus {
+    fn default() -> Self {
+        Self {
+            shading: kreate_render::ShadingMode::Studio,
+            exposure: 0.0,
+            metered: false,
+        }
+    }
+}
+
 /// What a properties editor is showing.
 ///
 /// A column of these down the left, as §2.6 settled: the shape has to hold
@@ -716,6 +750,10 @@ pub enum PropertiesTab {
     Object,
     /// What the active object *is*: its datablock.
     Data,
+    /// What it is made of.
+    Material,
+    /// The light arriving from no object in particular.
+    World,
     /// The modifier stack.
     Modifiers,
 }
@@ -732,6 +770,8 @@ impl PropertiesTab {
             Self::Tool => "▤",
             Self::Object => "▣",
             Self::Data => "◇",
+            Self::Material => "●",
+            Self::World => "○",
             Self::Modifiers => "◈",
         }
     }
@@ -741,6 +781,8 @@ impl PropertiesTab {
             Self::Tool => "tab-tool",
             Self::Object => "tab-object",
             Self::Data => "tab-data",
+            Self::Material => "tab-material",
+            Self::World => "tab-world",
             Self::Modifiers => "tab-modifiers",
         }
     }
@@ -782,12 +824,22 @@ struct Labels {
     recover_discard: String,
     recover_discard_all: String,
     add_cube: String,
+    shading_studio: String,
+    shading_flat: String,
+    shading_rendered: String,
+    shading_hint: String,
+    exposure: String,
+    exposure_metered: String,
+    exposure_manual: String,
     add_menu: String,
     add_light_point: String,
     add_light_sun: String,
     add_light_spot: String,
     add_light_area: String,
     tab_data_light: String,
+    tab_data_camera: String,
+    tab_world: String,
+    world_image: String,
     duplicate: String,
     delete: String,
     undo: String,
@@ -835,12 +887,22 @@ impl Labels {
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
             add_cube: t("menu-add-cube"),
+            shading_studio: t("shading-studio"),
+            shading_flat: t("shading-flat"),
+            shading_rendered: t("shading-rendered"),
+            shading_hint: t("shading-hint"),
+            exposure: t("exposure"),
+            exposure_metered: t("exposure-metered"),
+            exposure_manual: t("exposure-manual"),
             add_menu: t("menu-add"),
             add_light_point: t("menu-add-light-point"),
             add_light_sun: t("menu-add-light-sun"),
             add_light_spot: t("menu-add-light-spot"),
             add_light_area: t("menu-add-light-area"),
             tab_data_light: t("tab-data-light"),
+            tab_data_camera: t("tab-data-camera"),
+            tab_world: t("tab-world"),
+            world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
             delete: t("menu-delete"),
             undo: t("menu-undo"),
@@ -1033,6 +1095,10 @@ pub fn draw(
             // does, so it has to be readable at a glance — and it has to still
             // read as one thing when there are seven of them.
             draw_mode_menu(ui, state, doc, mode);
+
+            ui.separator();
+            draw_shading_menu(ui, state, &l);
+            draw_exposure(ui, state, &l);
 
             if mode.shows_elements() {
                 ui.separator();
@@ -2109,6 +2175,66 @@ fn draw_adjust_panel(
     }
 }
 
+/// How the viewport shades, and a way to change it.
+///
+/// `Z` cycled through the three and nothing said which one was current, so the
+/// only way to find out was to press it and look. A mode that governs what the
+/// picture *means* — studio light, flat colour, or the scene's own lamps — has
+/// to be readable without changing it.
+fn draw_shading_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let current = state.view_status.shading;
+    let name = shading_label(current, l);
+    ui.menu_button(name, |ui| {
+        for mode in [
+            kreate_render::ShadingMode::Studio,
+            kreate_render::ShadingMode::Flat,
+            kreate_render::ShadingMode::Rendered,
+        ] {
+            if ui
+                .selectable_label(mode == current, shading_label(mode, l))
+                .clicked()
+            {
+                state.queue.push(Command::SetShading(mode));
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text(&l.shading_hint);
+}
+
+fn shading_label(mode: kreate_render::ShadingMode, l: &Labels) -> &str {
+    match mode {
+        kreate_render::ShadingMode::Studio => &l.shading_studio,
+        kreate_render::ShadingMode::Flat => &l.shading_flat,
+        kreate_render::ShadingMode::Rendered => &l.shading_rendered,
+    }
+}
+
+/// The exposure the picture is being made at.
+///
+/// Only in the mode that has one. Studio and flat shading light themselves, so
+/// an exposure there would be a number that does nothing — which is worse than
+/// no number at all.
+///
+/// It is a readout and not a dial, deliberately, and the dial is the camera's
+/// ±EV. What this is for is explaining the picture: with the meter on, turning
+/// a lamp down moves this and leaves the picture alone, and seeing it move is
+/// the difference between "exposure is doing its job" and "the slider is
+/// broken".
+fn draw_exposure(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    if state.view_status.shading != kreate_render::ShadingMode::Rendered {
+        return;
+    }
+    let text = format!("{} {:+.1}", l.exposure, state.view_status.exposure);
+    let hint = if state.view_status.metered {
+        &l.exposure_metered
+    } else {
+        &l.exposure_manual
+    };
+    ui.label(text).on_hover_text(hint);
+}
+
 /// The properties editor: a column of tabs, and the one that is chosen.
 ///
 /// Which tabs exist depends on what is active, and that is the point of asking
@@ -2155,6 +2281,8 @@ fn draw_properties(
                     PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
                     PropertiesTab::Object => draw_object_tab(ui, state, doc, registry),
                     PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
+                    PropertiesTab::Material => draw_material_tab(ui, state, doc, registry),
+                    PropertiesTab::World => draw_world_tab(ui, state, doc, registry, l),
                     PropertiesTab::Modifiers => {
                         ui.heading(&l.modifiers);
                         draw_modifier_stack(ui, state, modifier_rows);
@@ -2175,17 +2303,30 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
     let has_data = matches!(
         active.map(|o| &o.data),
         Some(kreate_scene::document::ObjectData::Light(_))
+            | Some(kreate_scene::document::ObjectData::Camera(_))
     );
     [
         PropertiesTab::Tool,
         PropertiesTab::Object,
         PropertiesTab::Data,
+        PropertiesTab::Material,
+        PropertiesTab::World,
         PropertiesTab::Modifiers,
     ]
     .into_iter()
     .filter(|tab| match tab {
         PropertiesTab::Object => active.is_some(),
         PropertiesTab::Data => has_data,
+        PropertiesTab::Material => doc
+            .selection
+            .active
+            .and_then(|id| doc.material_id_at(id, 0))
+            .is_some(),
+        // The world is the document's, not a selection's — so it is offered
+        // whenever there is one, including with nothing selected at all. That
+        // is the tab somebody reaches for to turn the background down, and
+        // needing to click an object first would be a puzzle.
+        PropertiesTab::World => doc.active_world().is_some(),
         // The stack is per object, but an empty one is worth showing: it is
         // where a modifier gets added from.
         PropertiesTab::Modifiers => active.is_some(),
@@ -2248,6 +2389,121 @@ fn draw_object_tab(
     }
 }
 
+/// The camera half of the Data tab.
+fn draw_camera_data(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    id: kreate_scene::document::CameraId,
+) {
+    let Some(camera) = doc.camera(id) else {
+        return;
+    };
+    let Some(info) = registry.get("camera.set_properties") else {
+        return;
+    };
+    ui.heading(&l.tab_data_camera);
+    ui.separator();
+    let mut params = kreate_reflect::OpParams::to_map(
+        &kreate_ops::ops::object::camera_params(camera),
+    );
+    if kreate_ui::property_editor::property_editor(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+    ) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "camera.set_properties", params, dragging);
+    }
+}
+
+/// The Material tab: what the active object is made of.
+///
+/// The first slot, because that is the one the raster pass draws. A panel over
+/// the others would be editing materials nothing shows — see §7.5 on why the
+/// per-face slots wait for the draws to be split.
+fn draw_material_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+) {
+    let Some(object) = doc.selection.active else {
+        return;
+    };
+    let Some(material) = doc.material_at(object, 0) else {
+        return;
+    };
+    let Some(info) = registry.get("material.set_properties") else {
+        return;
+    };
+    // i18n-exempt: a material's name is the user's own text
+    ui.label(&material.name);
+    ui.separator();
+    let mut params = kreate_reflect::OpParams::to_map(
+        &kreate_ops::ops::object::material_params(material),
+    );
+    if kreate_ui::property_editor::property_editor(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+    ) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "material.set_properties", params, dragging);
+    }
+}
+
+/// The World tab: the light arriving from no object in particular.
+///
+/// The document's, not a selection's, which is why it is a tab of its own
+/// rather than an arm of the Data tab: there is no object to click on, and
+/// making somebody select one first to turn the background down would be a
+/// puzzle rather than an interface.
+fn draw_world_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+) {
+    let Some(id) = doc.active_world() else {
+        return;
+    };
+    let Some(world) = doc.world(id) else {
+        return;
+    };
+    let Some(info) = registry.get("world.set_properties") else {
+        return;
+    };
+    ui.heading(&l.tab_world);
+    if matches!(world.background, kreate_scene::Background::Image(_)) {
+        // The colour below does nothing for an image background, and a control
+        // that does nothing is worse than one that is missing. Said rather than
+        // hidden, because the strength and the rotation *do* apply and the tab
+        // is still the place for them.
+        ui.weak(&l.world_image);
+    }
+    ui.separator();
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::world_params(world));
+    if kreate_ui::property_editor::property_editor(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+    ) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "world.set_properties", params, dragging);
+    }
+}
+
 /// The Data tab: what the active object *is*.
 ///
 /// One tab and one operator per kind of datablock, and today there is one kind
@@ -2265,9 +2521,28 @@ fn draw_data_tab(
     let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
         return;
     };
-    let kreate_scene::document::ObjectData::Light(id) = active.data else {
-        return;
-    };
+    // One arm per kind of datablock, which is what the panel being generated
+    // rather than written buys: each is a heading, a lookup, and the operator's
+    // own schema.
+    match active.data {
+        kreate_scene::document::ObjectData::Light(id) => {
+            draw_light_data(ui, state, doc, registry, l, id)
+        }
+        kreate_scene::document::ObjectData::Camera(id) => {
+            draw_camera_data(ui, state, doc, registry, l, id)
+        }
+        _ => {}
+    }
+}
+
+fn draw_light_data(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    id: kreate_scene::LightId,
+) {
     let Some(light) = doc.light(id) else {
         return;
     };
@@ -2406,11 +2681,22 @@ outliner-kind-camera = Camera
 outliner-kind-light = Light
 outliner-shared-mesh = Shared by { $count } objects
 outliner-mesh-summary = { $name }: { $verts } verts, { $faces } faces
+shading-studio = Studio
+shading-flat = Flat
+shading-rendered = Rendered
+shading-hint = How the viewport shades (Z)
+exposure = EV
+exposure-metered = Metered off the scene. Turning a lamp down moves this and leaves the picture where it was — which is what exposure means. Turn it off on the camera to set it by hand.
+exposure-manual = From the camera's f-stop, shutter and ISO.
 tab-tool = Tool
 tab-object = Object
 tab-data = Data
 tab-modifiers = Modifiers
 tab-data-light = Light
+tab-data-camera = Camera
+tab-material = Material
+tab-world = World
+world-image = The background is an image; the colour below does not apply to it.
 light-shared = Shared by { $count } objects — editing this changes all of them
 menu-add = Add
 menu-add-light-point = Point Light
@@ -2598,11 +2884,22 @@ outliner-kind-camera = 카메라
 outliner-kind-light = 조명
 outliner-shared-mesh = 오브젝트 { $count }개가 공유
 outliner-mesh-summary = { $name }: 정점 { $verts }, 면 { $faces }
+shading-studio = 스튜디오
+shading-flat = 플랫
+shading-rendered = 렌더
+shading-hint = 뷰포트 셌이딩 방식 (Z)
+exposure = EV
+exposure-metered = 씨을 측광해 정합니다. 램프를 줄이면 이 숫자가 움직이고 그림은 그대로입니다 — 그것이 노출의 뜻입니다. 카메라에서 끄면 직접 정합니다.
+exposure-manual = 카메라의 조리개·셔터·ISO에서 나온 값입니다.
 tab-tool = 도구
 tab-object = 오브젝트
 tab-data = 데이터
 tab-modifiers = 모디파이어
 tab-data-light = 라이트
+tab-data-camera = 카메라
+tab-material = 재질
+tab-world = 월드
+world-image = 배경이 이미지입니다. 아래 색은 적용되지 않습니다.
 light-shared = { $count }개의 오브젝트가 공유 — 여기서 고치면 전부 바뀍니다
 menu-add = 추가
 menu-add-light-point = 점광원
@@ -3131,6 +3428,53 @@ mod tests {
         assert!(!available_tabs(&plain).contains(&PropertiesTab::Data));
         // And the object's own tabs are there, because something is active.
         assert!(available_tabs(&plain).contains(&PropertiesTab::Object));
+    }
+
+    #[test]
+    fn the_world_tab_is_there_with_nothing_selected() {
+        // The world is the document's, not a selection's. Needing to click an
+        // object before the background could be turned down would be a puzzle
+        // rather than an interface, so this tab is the one that does not ask
+        // what is active.
+        let mut doc = Document::new();
+        assert!(!available_tabs(&doc).contains(&PropertiesTab::World));
+        let id = doc.add_world(kreate_scene::World::new("World"));
+        doc.set_active_world(Some(id));
+        assert!(available_tabs(&doc).contains(&PropertiesTab::World));
+        assert_eq!(doc.selection.active, None, "nothing had to be selected");
+    }
+
+    #[test]
+    fn a_material_tab_needs_a_material_and_not_just_a_mesh() {
+        // A mesh with an empty slot has nothing to edit, and a panel over it
+        // would be offering fields with no datablock behind them.
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let object = doc.add_object(kreate_scene::document::Object::new(
+            "Cube",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        doc.selection.add(object);
+        assert!(!available_tabs(&doc).contains(&PropertiesTab::Material));
+
+        let material = doc.add_material(kreate_scene::Material::default());
+        doc.set_mesh_slots(mesh, vec![Some(material)]);
+        assert!(available_tabs(&doc).contains(&PropertiesTab::Material));
+    }
+
+    #[test]
+    fn a_camera_gets_the_same_data_tab_a_light_does() {
+        // One tab, one arm per kind of datablock. The tab exists because the
+        // object *has* one, not because of what kind it is — which is what
+        // keeps adding the next kind to a `match` rather than to the tab list.
+        let mut doc = Document::new();
+        let id = doc.add_camera(kreate_scene::Camera::new("Camera"));
+        let object = doc.add_object(kreate_scene::document::Object::new(
+            "Camera",
+            kreate_scene::document::ObjectData::Camera(id),
+        ));
+        doc.selection.add(object);
+        assert!(available_tabs(&doc).contains(&PropertiesTab::Data));
     }
 
     #[test]

@@ -51,6 +51,13 @@ pub enum Command {
     SetMode(String),
     /// Chooses which element type edit-mode selection acts on.
     SetSelectMode(u32),
+    /// Choose how the viewport shades.
+    ///
+    /// Carries the mode rather than a tag, unlike [`Command::SetMode`]: the
+    /// interface can see `kreate_render` — it draws a navigation gizmo out of a
+    /// camera — and what it cannot see is the operator crate. The two look alike
+    /// and the reason they differ is which dependency exists.
+    SetShading(kreate_render::ShadingMode),
     /// Snap the view to look along a world axis.
     ///
     /// Carries the axis rather than a camera, so the application decides how to

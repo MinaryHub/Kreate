@@ -60,12 +60,42 @@ pub fn world_radiance(doc: &Document) -> [f32; 3] {
 /// Not an error: a scene being modelled usually has no camera yet, and it
 /// still has to be lookable-at.
 pub fn shot_exposure(doc: &Document, rate: f64, subject: kreate_math::DVec3) -> f64 {
-    let metered = metered_illuminance(doc, subject);
-    match doc.cameras().next() {
-        Some((_, camera)) => camera.metered_exposure(metered, rate),
-        // A document with no camera object still has a picture to expose, and
-        // the defaults are the ones a new document gets.
-        None => kreate_scene::Camera::new("").metered_exposure(metered, rate),
+    shot(doc, rate, subject).exposure
+}
+
+/// How the picture is being exposed, and where the number came from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shot {
+    /// Stops, for the display transform.
+    pub exposure: f64,
+    /// Whether the meter produced it, rather than the camera's dials.
+    ///
+    /// Both answers come from here together, because they are one decision: a
+    /// caller that asked for the exposure and then asked separately whether it
+    /// was metered would have two chances to get a different answer, and the
+    /// header would end up explaining a number it was not showing.
+    pub metered: bool,
+}
+
+/// The exposure for this document's picture, and how it was arrived at.
+pub fn shot(doc: &Document, rate: f64, subject: kreate_math::DVec3) -> Shot {
+    let reading = metered_illuminance(doc, subject);
+    // A document with no camera object still has a picture to expose, and the
+    // defaults are the ones a new document gets.
+    let fallback;
+    let camera = match doc.cameras().next() {
+        Some((_, camera)) => camera,
+        None => {
+            fallback = kreate_scene::Camera::new("");
+            &fallback
+        }
+    };
+    Shot {
+        exposure: camera.metered_exposure(reading, rate),
+        // The same condition `Camera::metered_exposure` applies, and the reason
+        // it is spelled twice rather than returned from there: that function is
+        // about a number, and this is about what to tell the user.
+        metered: camera.auto_exposure && reading.is_some_and(|lux| lux > 0.0),
     }
 }
 

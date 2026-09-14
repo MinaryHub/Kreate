@@ -1940,6 +1940,12 @@ impl App {
                         Err(e) => println!("  adjust failed: {e}"),
                     }
                 }
+                Command::SetShading(mode) => {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        gfx.viewport.shading = mode;
+                        self.redraw.set(RedrawReason::SETTINGS);
+                    }
+                }
                 Command::Undo => self.undo(),
                 Command::Redo => self.redo(),
                 Command::SetSelection { objects, active } => {
@@ -3264,23 +3270,31 @@ impl App {
             // transform: without it a sunlit scene saturates every pixel. The
             // scene camera's, not the viewport camera's — the exposure is a
             // property of the shot and not of how the user is looking around.
+            // What the user is looking at. A spot reading on the subject,
+            // which is what a photographer takes and what keeps the walls from
+            // changing brightness as the camera turns.
+            let shot = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot);
             gfx.viewport.set_display(
                 &gfx.gpu.queue,
                 kreate_render::display::Display {
                     view: kreate_math::ViewTransform::AgX,
-                    exposure: scenelights::shot_exposure(
-                            &self.doc,
-                            self.time.rate(),
-                            // What the user is looking at. A spot
-                            // reading on the subject, which is what a
-                            // photographer takes and what keeps the
-                            // walls from changing brightness as the
-                            // camera turns.
-                            self.camera.pivot,
-                        )
-                        as f32,
+                    exposure: shot.exposure as f32,
                 },
             );
+            // What the header reports, from the same answer the picture was
+            // made with.
+            self.ui.view_status = kreate::shell::ViewStatus {
+                shading: gfx.viewport.shading,
+                exposure: shot.exposure as f32,
+                metered: shot.metered,
+            };
+        } else {
+            // The other modes light themselves, so there is no exposure to
+            // report and the header says nothing rather than a stale number.
+            self.ui.view_status = kreate::shell::ViewStatus {
+                shading: gfx.viewport.shading,
+                ..Default::default()
+            };
         }
 
         // 3D into the offscreen target...

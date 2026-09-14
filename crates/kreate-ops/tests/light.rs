@@ -254,6 +254,180 @@ fn a_slider_drag_collapses_into_one_undo_step() {
 }
 
 #[test]
+fn every_datablock_panel_shows_what_it_would_store() {
+    // The contract every one of these panels rests on, and the one that is
+    // invisible when it breaks: an absolute operator needs the current values
+    // to start from, so reading them and writing them straight back has to be
+    // an identity. If it is not, opening a panel edits the thing it is
+    // describing — which shows up as a value that creeps every time somebody
+    // looks at it.
+    //
+    // One test over all of them rather than one each, because it is one rule.
+    let (registry, mut history, mut doc, ctx) = setup();
+
+    // A world, a material and a camera, each reachable from its own panel.
+    let world = doc.add_world(kreate_scene::World::new("World"));
+    doc.set_active_world(Some(world));
+    run(&registry, &mut history, &mut doc, &ctx, "object.add_primitive", &[]);
+    let material = doc.add_material(kreate_scene::Material {
+        name: "Paint".into(),
+        base_color: kreate_math::SceneRgb::new(0.2, 0.55, 0.9),
+        metallic: 0.3,
+        roughness: 0.7,
+        alpha: 0.9,
+        ..Default::default()
+    });
+    let object = doc.selection.active.expect("the cube");
+    if let Some(mesh) = doc.object(object).and_then(|o| o.mesh()) {
+        doc.set_mesh_slots(mesh, vec![Some(material)]);
+    }
+
+    // The world.
+    let before = doc.world(world).expect("a world").clone();
+    let map = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::world_params(&before));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "world.set_properties", &map)
+        .expect("dispatch");
+    let after = doc.world(world).expect("still there");
+    assert_eq!(after.strength, before.strength);
+    assert_eq!(after.rotation, before.rotation);
+    // The colour to a tolerance and the rest exactly, because a colour goes
+    // through the picker's space and back. A value that never came *from* a
+    // picker — a default written as 0.05 — is not the image of any exact
+    // swatch, so it lands a few parts in ten million away. A light's survives
+    // exactly, and only because its colour was made by the same conversion in
+    // the first place.
+    let (kreate_scene::Background::Flat(a), kreate_scene::Background::Flat(b)) =
+        (&after.background, &before.background)
+    else {
+        panic!("the background stopped being a colour");
+    };
+    for (x, y) in a.to_array().iter().zip(b.to_array().iter()) {
+        assert!((x - y).abs() < 1e-6, "the world's colour drifted");
+    }
+
+    // The material.
+    let before = doc.material(material).expect("a material").clone();
+    let map =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::material_params(&before));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &map)
+        .expect("dispatch");
+    let after = doc.material(material).expect("still there");
+    assert!(
+        (after.metallic - before.metallic).abs() < 1e-6
+            && (after.roughness - before.roughness).abs() < 1e-6
+            && (after.alpha - before.alpha).abs() < 1e-6,
+        "the material drifted"
+    );
+    for (a, b) in after
+        .base_color
+        .to_array()
+        .iter()
+        .zip(before.base_color.to_array().iter())
+    {
+        assert!((a - b).abs() < 1e-5, "the material's colour drifted");
+    }
+
+    // The camera.
+    run(&registry, &mut history, &mut doc, &ctx, "object.add_camera", &[]);
+    let id = doc
+        .objects()
+        .filter_map(|(_, o)| match o.data {
+            kreate_scene::document::ObjectData::Camera(id) => Some(id),
+            _ => None,
+        })
+        .next()
+        .expect("a camera");
+    let before = doc.camera(id).expect("a camera").clone();
+    let map =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::camera_params(&before));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "camera.set_properties", &map)
+        .expect("dispatch");
+    let after = doc.camera(id).expect("still there");
+    assert_eq!(after.focal_length_mm, before.focal_length_mm);
+    assert_eq!(after.auto_exposure, before.auto_exposure);
+    assert_eq!(after.f_stop, before.f_stop, "a pinhole stopped being one");
+    assert_eq!(after.iso, before.iso);
+}
+
+#[test]
+fn a_pinhole_is_off_and_not_a_very_small_aperture() {
+    // `f_stop` is an `Option` because "off" and "f/1000" want different code
+    // paths: one skips the depth-of-field sampling entirely. A panel has one
+    // number to offer, so zero is how off is spelled — and it has to survive
+    // the trip.
+    let (registry, mut history, mut doc, ctx) = setup();
+    run(&registry, &mut history, &mut doc, &ctx, "object.add_camera", &[]);
+    let id = doc
+        .objects()
+        .filter_map(|(_, o)| match o.data {
+            kreate_scene::document::ObjectData::Camera(id) => Some(id),
+            _ => None,
+        })
+        .next()
+        .expect("a camera");
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "camera.set_properties",
+        &[("f_stop", PropertyValue::Float(2.8))],
+    );
+    assert_eq!(doc.camera(id).expect("a camera").f_stop, Some(2.8));
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "camera.set_properties",
+        &[("f_stop", PropertyValue::Float(0.0))],
+    );
+    assert_eq!(doc.camera(id).expect("a camera").f_stop, None);
+}
+
+#[test]
+fn a_colour_typed_into_the_world_panel_does_not_discard_an_image() {
+    // The panel offers a colour because a colour is what a picker gives, and an
+    // image background has none. Writing one anyway would throw away an HDRI
+    // somebody loaded, which is not what typing in a field means — changing
+    // *which* kind of background it is belongs to the control that picks the
+    // image.
+    let (registry, mut history, mut doc, ctx) = setup();
+    let mut world = kreate_scene::World::new("World");
+    // An image that is not in the document. What matters here is that the
+    // background stays the *kind* it is, and an id nothing resolves is the
+    // cheapest way to say "an image was chosen".
+    let image = doc.add_image(kreate_scene::Image::new("HDRI", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    world.background = kreate_scene::Background::Image(image);
+    let id = doc.add_world(world);
+    doc.set_active_world(Some(id));
+
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "world.set_properties",
+        &[
+            ("color", PropertyValue::Vec3([1.0, 0.0, 0.0])),
+            ("strength", PropertyValue::Float(2.0)),
+        ],
+    );
+    let world = doc.world(id).expect("a world");
+    assert!(
+        matches!(world.background, kreate_scene::Background::Image(_)),
+        "the image was replaced by a colour"
+    );
+    // And the numbers that *do* apply to an image still went through.
+    assert_eq!(world.strength, 2.0);
+}
+
+#[test]
 fn adding_a_light_makes_an_object_and_a_datablock() {
     // The distinction is the point: `ObjectData::Light` was a bare tag, which
     // said an object was a light and nothing about the light.

@@ -1184,13 +1184,22 @@ impl Document {
     /// added cube has no materials at all, and the renderer draws it with a
     /// default surface rather than refusing.
     pub fn material_at(&self, object: ObjectId, slot: usize) -> Option<&Material> {
+        self.material(self.material_id_at(object, slot)?)
+    }
+
+    /// Which material a slot resolves to, rather than the material itself.
+    ///
+    /// The same rule, and the reason it is the one with the body: editing a
+    /// material needs the id, and a caller that worked it out separately would
+    /// be a second opinion about whether the object's override or the mesh's
+    /// slot wins.
+    pub fn material_id_at(&self, object: ObjectId, slot: usize) -> Option<MaterialId> {
         let object = self.objects.get(object)?;
         if let Some(Some(overridden)) = object.material_overrides.get(slot) {
-            return self.material(*overridden);
+            return Some(*overridden);
         }
         let mesh = object.mesh()?;
-        let id = (*self.meshes.get(mesh)?.slots.get(slot)?)?;
-        self.material(id)
+        *self.meshes.get(mesh)?.slots.get(slot)?
     }
 
     pub fn add_collection(&mut self, collection: Collection) -> CollectionId {
