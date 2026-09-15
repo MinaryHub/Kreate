@@ -2006,6 +2006,7 @@ impl App {
         }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kreate document", &["kreate"])
+            .add_filter("Scene", &["gltf", "glb", "obj", "stl"])
             .set_title("Open")
             .pick_file()
         else {
@@ -2015,6 +2016,36 @@ impl App {
     }
 
     fn load_from(&mut self, path: &std::path::Path) {
+        // A scene file rather than a document: read through the IR and built
+        // into a fresh document, placement and lights and all. It keeps no
+        // path, because saving back over a glTF would be saving a document as
+        // something that cannot hold one.
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
+        {
+            match import_scene(path) {
+                Ok((document, notes)) => {
+                    self.adopt(document);
+                    self.file = DocumentFile::new();
+                    let lost = notes.len();
+                    for note in &notes {
+                        tracing::info!(?note, "import note");
+                    }
+                    self.status(&format!(
+                        "imported {}{}",
+                        path.display(),
+                        if lost > 0 {
+                            format!(" ({lost} notes)")
+                        } else {
+                            String::new()
+                        }
+                    ));
+                }
+                Err(e) => self.status(&format!("cannot import {}: {e}", path.display())),
+            }
+            return;
+        }
         match DocumentFile::open(path) {
             Ok((document, file)) => {
                 self.adopt(document);
@@ -4344,6 +4375,46 @@ fn load_document(path: Option<&str>) -> Document {
 }
 
 
+
+/// Reads a scene file into a fresh document, through the IR.
+///
+/// Every format lands here, which is the point: what a file said and what the
+/// document holds is one conversion in one place, and §5.7's fidelity contract
+/// is written against it.
+fn import_scene(
+    path: &std::path::Path,
+) -> Result<(Document, Vec<kreate_io::build::BuildNote>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
+    let lower = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let scene = match lower.as_str() {
+        "gltf" | "glb" => kreate_io::gltf_import::parse_gltf(
+            &bytes,
+            // glTF declares its own units and orientation, so there is nothing
+            // for an option to override: second-guessing the one format that
+            // bothers to say would be the wrong kind of helpful.
+            &kreate_io::gltf_import::GltfOptions::default(),
+        )
+        .map_err(|e| e.to_string())?,
+        "stl" => kreate_io::stl::parse_stl(&bytes, &kreate_io::stl::StlOptions::default())
+            .map_err(|e| e.to_string())?,
+        _ => {
+            let text = String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
+            parse_obj(&text, ObjOptions::default()).map_err(|e| e.to_string())?
+        }
+    };
+    for note in &scene.source.notes {
+        tracing::info!(?note, "import note");
+    }
+    let mut doc = Document::new();
+    let (made, notes) = kreate_io::build::build_into(&scene, &mut doc);
+    if let Some(first) = made.first() {
+        doc.selection.add(*first);
+    }
+    Ok((doc, notes))
+}
 
 /// What an object is made of, for the rendered mode.
 ///

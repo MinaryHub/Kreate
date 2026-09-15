@@ -9,6 +9,7 @@
 pub mod container;
 pub mod gltf_export;
 pub mod gltf_import;
+pub mod build;
 pub mod ir;
 pub mod kmesh;
 pub mod library;

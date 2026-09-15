@@ -59,7 +59,10 @@
 //! and adding them is additive once there is anything to do with them.
 
 use crate::gltf_export::NGON_EXTENSION;
-use crate::ir::{ImportMaterial, ImportMesh, ImportScene, LossyNote, SourceMetadata, UvOrigin};
+use crate::ir::{
+    ImportCamera, ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode,
+    ImportNodeData, ImportScene, ImportTransform, LossyNote, SourceMetadata, UvOrigin,
+};
 use glam::{Vec2, Vec3};
 use kreate_math::AxisConvention;
 
@@ -119,6 +122,7 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
     source.generator = document.as_json().asset.generator.clone();
 
     let mut scene = ImportScene::new(source);
+    read_nodes(&document, &mut scene);
 
     for material in document.materials() {
         let pbr = material.pbr_metallic_roughness();
@@ -292,6 +296,115 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 /// then uses the triangles, which are always present and always correct. That is
 /// the point of putting this in an optional extension: a file with a damaged
 /// record is a file that loses its quads, not a file that fails to open.
+/// Reads the file's hierarchy, and the lights and cameras hanging off it.
+///
+/// Until this existed the importer walked `document.meshes()` and threw the
+/// node tree away, so every mesh arrived at the origin and a light had nowhere
+/// to be. That was survivable while everything imported had its transform baked
+/// in, and stopped being survivable the moment a light was worth importing: a
+/// light *is* a placement and a datablock, with nothing else to it.
+///
+/// `mesh_of` maps a glTF mesh index onto the index the IR gave it, because the
+/// two need not agree \u2014 they do today, and relying on that would be a rule
+/// nobody wrote down.
+fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
+    // `lights()` answers nothing at all when the file does not declare the
+    // extension, which is not the same as declaring it with no lights — and
+    // flattening the two here is right, because the IR's answer to both is an
+    // empty list.
+    for light in document.lights().into_iter().flatten() {
+        let kind = match light.kind() {
+            gltf::khr_lights_punctual::Kind::Directional => ImportLightKind::Directional,
+            gltf::khr_lights_punctual::Kind::Point => ImportLightKind::Point,
+            gltf::khr_lights_punctual::Kind::Spot {
+                inner_cone_angle,
+                outer_cone_angle,
+            } => ImportLightKind::Spot {
+                inner: inner_cone_angle,
+                outer: outer_cone_angle,
+            },
+        };
+        scene.lights.push(ImportLight {
+            name: light
+                .name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("light{}", light.index())),
+            kind,
+            color: light.color(),
+            // Candela for a point or a spot and lux for a directional light,
+            // which is what the datablock stores. \u00a72.2 chose these units so
+            // that this line is a copy.
+            intensity: light.intensity(),
+            range: light.range(),
+        });
+    }
+
+    for camera in document.cameras() {
+        let (fov_y, ortho_width, near, far) = match camera.projection() {
+            gltf::camera::Projection::Perspective(p) => {
+                (Some(p.yfov()), None, p.znear(), p.zfar())
+            }
+            gltf::camera::Projection::Orthographic(o) => {
+                // glTF writes half-widths; the IR wants the whole width, which
+                // is what an orthographic scale means everywhere else.
+                (None, Some(o.xmag() * 2.0), o.znear(), Some(o.zfar()))
+            }
+        };
+        scene.cameras.push(ImportCamera {
+            name: camera
+                .name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("camera{}", camera.index())),
+            fov_y,
+            ortho_width,
+            clip_near: near,
+            clip_far: far,
+        });
+    }
+
+    // glTF node indices are dense and the IR's are too, so one pass fills the
+    // nodes and a second wires the parents \u2014 a child can be written before its
+    // parent and an index into a half-built list would be wrong.
+    let count = document.nodes().count();
+    scene.nodes = document
+        .nodes()
+        .map(|node| {
+            let (translation, rotation, scale) = node.transform().decomposed();
+            let mut out = ImportNode::new(
+                node.name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("node{}", node.index())),
+            );
+            out.transform = ImportTransform {
+                translation: Vec3::from_array(translation),
+                rotation: glam::Quat::from_array(rotation),
+                scale: Vec3::from_array(scale),
+            };
+            out.data = if let Some(mesh) = node.mesh() {
+                ImportNodeData::Mesh(mesh.index())
+            } else if let Some(light) = node.light() {
+                ImportNodeData::Light(light.index())
+            } else if let Some(camera) = node.camera() {
+                ImportNodeData::Camera(camera.index())
+            } else {
+                // An empty, and kept. A file's hierarchy is mostly empties that
+                // group and get animated; dropping them flattens a rig into a
+                // pile of parts.
+                ImportNodeData::Empty
+            };
+            out
+        })
+        .collect();
+
+    for node in document.nodes() {
+        for child in node.children() {
+            if child.index() < count {
+                scene.nodes[child.index()].parent = Some(node.index());
+            }
+        }
+    }
+}
+
 fn ngon_faces(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],

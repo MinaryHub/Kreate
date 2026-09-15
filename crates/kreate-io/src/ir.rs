@@ -14,7 +14,7 @@
 //! primvars all collapse into one representation instead of four special cases.
 
 use ahash::AHashMap;
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use kreate_math::{AxisConvention, Mat3};
 use kreate_mesh::attribute::{names, AttrData, Domain};
 use kreate_mesh::MeshData;
@@ -386,11 +386,166 @@ fn retain_corners<T: Copy>(corners: &mut Option<Vec<T>>, keep: &[bool]) {
     values.retain(|_| *it.next().unwrap_or(&false));
 }
 
+/// Where a node is, as the source file wrote it.
+///
+/// Kept as translation, rotation and scale rather than as a matrix, because
+/// that is what every format writes and what the document stores \u2014 and because
+/// decomposing a matrix back into the three is lossy in exactly the cases
+/// (mirrored and sheared transforms) where somebody would notice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImportTransform {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+impl Default for ImportTransform {
+    fn default() -> Self {
+        Self {
+            translation: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+}
+
+impl ImportTransform {
+    /// The same placement, in Kreate space.
+    ///
+    /// The axis change is a *conjugation* of the linear part and a plain
+    /// multiplication of the translation, which is the whole of the subtlety
+    /// here. Rotating a Y-up rotation by the Y-up-to-Z-up matrix once gives a
+    /// rotation about the wrong axis; it has to be undone on the other side as
+    /// well, or a turntable animation spins about the floor.
+    ///
+    /// The unit scale cancels out of the conjugation, which is correct: metres
+    /// per unit changes where a thing is, not how it is turned. It applies to
+    /// the translation exactly once.
+    pub fn to_kreate(&self, source: &SourceMetadata) -> kreate_math::DAffine3 {
+        let axis = source.axis.to_kreate();
+        let inverse = axis.transpose();
+        let linear = axis
+            * Mat3::from_quat(self.rotation)
+            * Mat3::from_diagonal(self.scale)
+            * inverse;
+        let translation = axis * (self.translation * source.unit_scale);
+        kreate_math::DAffine3::from_mat3_translation(
+            linear.as_dmat3(),
+            translation.as_dvec3(),
+        )
+    }
+}
+
+/// What a node carries.
+///
+/// A node with nothing is not a mistake: a file's hierarchy is mostly empties
+/// that exist to group and to be animated, and dropping them would flatten a
+/// rig into a pile of parts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ImportNodeData {
+    #[default]
+    Empty,
+    /// Index into [`ImportScene::meshes`].
+    Mesh(usize),
+    /// Index into [`ImportScene::lights`].
+    Light(usize),
+    /// Index into [`ImportScene::cameras`].
+    Camera(usize),
+}
+
+/// One node of the source file's hierarchy.
+///
+/// The thing the IR did not have, and the reason a light could not be imported
+/// at all: a light is a placement and a datablock, and there was nowhere to put
+/// the placement. Meshes came through as `(name, MeshData)` pairs with their
+/// position silently dropped \u2014 which was survivable only because everything
+/// exported so far had its transform baked in.
+#[derive(Clone, Debug)]
+pub struct ImportNode {
+    pub name: String,
+    /// Index into [`ImportScene::nodes`], or `None` for a root.
+    ///
+    /// An index and not a child list, because a cycle is then not expressible
+    /// in the common direction \u2014 a node can only name one parent \u2014 and because
+    /// the document stores parents the same way.
+    pub parent: Option<usize>,
+    pub transform: ImportTransform,
+    pub data: ImportNodeData,
+}
+
+impl ImportNode {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parent: None,
+            transform: ImportTransform::default(),
+            data: ImportNodeData::Empty,
+        }
+    }
+}
+
+/// What kind of light, in the units the format writes.
+///
+/// glTF's `KHR_lights_punctual` exactly, because \u00a72.2 chose those units for the
+/// datablock for this reason: the boundary is a copy rather than a conversion,
+/// and a conversion is where rounding accumulates across a round trip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImportLightKind {
+    /// Candela.
+    Point,
+    /// Lux.
+    Directional,
+    /// Candela, with a cone in radians: the inner and outer half-angles.
+    Spot { inner: f32, outer: f32 },
+}
+
+/// A light as described by an interchange format.
+#[derive(Clone, Debug)]
+pub struct ImportLight {
+    pub name: String,
+    pub kind: ImportLightKind,
+    /// Linear, bounded by one. A tint and not an amount of light.
+    pub color: [f32; 3],
+    /// Candela or lux, per [`ImportLight::kind`].
+    pub intensity: f32,
+    /// Metres past which the format says the light stops. `None` is the usual
+    /// case and means "it does not".
+    pub range: Option<f32>,
+}
+
+/// A camera as described by an interchange format.
+///
+/// glTF writes a vertical field of view and an aspect; the datablock stores a
+/// focal length and a sensor. The conversion happens at the boundary rather
+/// than in the document, because a file that says "forty degrees" is not saying
+/// anything about a sensor size and inventing one silently would make the
+/// export write back a different number.
+#[derive(Clone, Debug)]
+pub struct ImportCamera {
+    pub name: String,
+    /// Radians. `None` for an orthographic camera.
+    pub fov_y: Option<f32>,
+    /// The width of an orthographic view, in source units.
+    pub ortho_width: Option<f32>,
+    pub clip_near: f32,
+    pub clip_far: Option<f32>,
+}
+
 /// A scene as read from a file, before it becomes a document.
 #[derive(Clone, Debug)]
 pub struct ImportScene {
     pub meshes: Vec<ImportMesh>,
     pub materials: Vec<ImportMaterial>,
+    pub lights: Vec<ImportLight>,
+    pub cameras: Vec<ImportCamera>,
+    /// The file's hierarchy, parents before children is *not* guaranteed — a
+    /// node's parent is an index and may point either way.
+    ///
+    /// Empty for a format that has no hierarchy at all, which OBJ and STL do
+    /// not: their meshes are placed at the origin because that is where the
+    /// file puts them, and inventing a node for each would claim a structure
+    /// the file does not have.
+    pub nodes: Vec<ImportNode>,
     pub source: SourceMetadata,
 }
 
@@ -399,8 +554,33 @@ impl ImportScene {
         Self {
             meshes: Vec::new(),
             materials: Vec::new(),
+            lights: Vec::new(),
+            cameras: Vec::new(),
+            nodes: Vec::new(),
             source,
         }
+    }
+
+    /// Where a node ends up, with its parents applied.
+    ///
+    /// `None` when the chain is broken or loops — a file can say anything, and
+    /// a loop here would be an infinite one. A broken chain is reported rather
+    /// than guessed at, because the honest answer is "this file's hierarchy is
+    /// not one" and the caller can place the node at the root and say so.
+    pub fn world_transform(&self, node: usize) -> Option<kreate_math::DAffine3> {
+        let mut out = kreate_math::DAffine3::IDENTITY;
+        let mut at = node;
+        // Bounded by the node count: a chain longer than that has revisited
+        // something, which is the loop.
+        for _ in 0..=self.nodes.len() {
+            let n = self.nodes.get(at)?;
+            out = n.transform.to_kreate(&self.source) * out;
+            match n.parent {
+                Some(p) => at = p,
+                None => return Some(out),
+            }
+        }
+        None
     }
 
     /// Converts every mesh into Kreate space, consuming the scene.
