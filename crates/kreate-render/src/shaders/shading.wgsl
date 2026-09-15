@@ -17,10 +17,12 @@
 /// a pass looping to the array's length would light the scene from lamps the
 /// user deleted.
 struct Shading {
-    light_count: u32,
+    /// How many tiles across the target is. See `kreate_render::tiles`.
+    tiles_across: u32,
+    /// How many light indices one tile's list can hold.
+    tile_capacity: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
     /// rgb: the world's radiance, linear. w: unused.
     ///
     /// One colour in every direction, which is what §2.2's flat background is.
@@ -130,6 +132,12 @@ fn average_blocker(
     }
     return select(-1.0, total / found, found > 0.0);
 }
+
+/// Per tile: a count, then that many light indices.
+///
+/// The shading loop walks this rather than every light, which is the whole of
+/// what the cull pass buys. See `kreate_render::tiles`.
+@group(2) @binding(5) var<storage, read> tile_lights: array<u32>;
 
 @group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
 @group(2) @binding(4) var shadow_maps: texture_depth_2d_array;
@@ -346,15 +354,44 @@ fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) 
 /// Scene-linear and unbounded. Nothing is clamped: a surface under a sun is in
 /// the thousands, and clamping before the display transform is the mistake
 /// §2.1 records twice.
+/// Which tile a pixel is in.
+///
+/// Taken from the fragment's own position rather than passed down, because
+/// every caller would otherwise compute it the same way and one of them would
+/// eventually compute it differently.
+/// A sweep that flips the x or changes the tile size is caught; one that
+/// returns zero for every pixel is not, because in the fixture that reaches
+/// this the corner tile happens to hold both lamps. Recorded rather than
+/// contorted around — the arithmetic here is what the other two exercise, and a
+/// scene built so that the corner excludes a lamp is a fixture of its own.
+fn tile_of(pixel: vec2<u32>) -> u32 {
+    let across = max(shading.tiles_across, 1u);
+    let x = min(pixel.x / TILE_SIZE, across - 1u);
+    let y = pixel.y / TILE_SIZE;
+    return y * across + x;
+}
+
+/// The side of a tile in pixels. See `kreate_render::tiles::TILE_SIZE`.
+const TILE_SIZE: u32 = 16u;
+
 fn shade_point(
     s: Surface,
     position: vec3<f32>,
     normal: vec3<f32>,
     view: vec3<f32>,
+    pixel: vec2<u32>,
 ) -> vec3<f32> {
     // The world first, because it is the light that is always there.
     var total = ambient(s, normal, view, shading.world.rgb);
-    for (var i = 0u; i < shading.light_count; i = i + 1u) {
+
+    // This tile's short list rather than every light in the scene. A tile holds
+    // a count and then that many indices; a light not in the list does not
+    // reach this square of the screen, which is a claim about its range and the
+    // reason the range had to exist before this pass could.
+    let base = tile_of(pixel) * (shading.tile_capacity + 1u);
+    let here = min(tile_lights[base], shading.tile_capacity);
+    for (var slot = 0u; slot < here; slot = slot + 1u) {
+        let i = tile_lights[base + 1u + slot];
         let light = lights[i];
         let to_light = direction_to(light, position);
         var illuminance = illuminance_at(light, position);
@@ -413,11 +450,17 @@ fn probe_shading(@builtin(global_invocation_id) id: vec3<u32>) {
     s.metallic = sample.material.w;
     s.roughness = sample.params.x;
 
+    // Tile zero, and the fixture puts every light in it. The probe is about
+    // the shading arithmetic and not about which lights reach which square of a
+    // screen it does not have — but it goes through the same `shade_point`,
+    // because a probe that took a different path would stop being evidence
+    // about the one the picture uses.
     let lit = shade_point(
         s,
         sample.position.xyz,
         sample.normal.xyz,
         sample.view.xyz,
+        vec2<u32>(0u, 0u),
     );
     answers[i] = vec4<f32>(lit, 0.0);
 }

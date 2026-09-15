@@ -303,6 +303,15 @@ struct ShadowScene {
     /// The control for the contact test: the same scene with the only
     /// difference being how far a caster is from what it falls on.
     lifted: bool,
+    /// Two dim lamps lighting their own pools of floor and nothing else.
+    ///
+    /// The only arrangement in the file where one tile's light list differs
+    /// from another's. Everything else here is lit by suns and by lamps bright
+    /// enough that their range covers the whole scene — so every tile holds
+    /// every light, and a shading pass reading the wrong tile gets the right
+    /// answer by accident. A sweep that made it read tile zero for every
+    /// fragment walked through the lot.
+    pools: bool,
     /// A floor stretching past where a sun's cascades reach.
     ///
     /// The one arrangement in which a fragment can be lit by a sun and outside
@@ -351,6 +360,29 @@ const SHADOW_SIZE: u32 = 128;
 
 fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
     let mut lights: Vec<PlacedLight> = Vec::new();
+    if scene.pools {
+        // Fifty candela apiece, which at this exposure is invisible beyond
+        // about five metres — `cull_range` says so, and the range below is that
+        // number. So the window takes away only light already under the black
+        // point, and what is left is two separate pools with a dark gap.
+        for x in [-6.0f64, 6.0] {
+            lights.push(PlacedLight {
+                position: glam::DVec3::new(x, 0.0, 2.0),
+                // Bright enough to photograph, and stopped short by hand. Not
+                // the distance `cull_range` derives: that is where a lamp stops
+                // being *visible*, and AgX shows twelve and a half stops of
+                // shadow, so for anything bright enough to see it comes out at
+                // tens of metres and covers the whole scene. An artist-set
+                // distance is what makes a tile's list short — which is the
+                // same conclusion the plan reaches from the other direction.
+                amount: [2_000.0; 3],
+                cast_shadow: false,
+                range: Some(5.0),
+                ..PlacedLight::default()
+            });
+        }
+        return lights;
+    }
     if scene.idle {
         lights.push(PlacedLight {
             falloff: Falloff::Parallel,
@@ -523,8 +555,15 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     let balls =
         kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &ball_mesh, glam::Vec4::ONE);
 
+    // Closer for the pools, which are a couple of metres across: at the
+    // framing the rest of the file uses they are nine pixels, and nine pixels
+    // is not a measurement.
     let camera = Camera {
-        distance: 22.0,
+        distance: if scenes.first().is_some_and(|s| s.pools) {
+            14.0
+        } else {
+            22.0
+        },
         ..Camera::default()
     };
 
@@ -1091,6 +1130,48 @@ fn past_the_cascades_a_sun_stops_shadowing_rather_than_going_black() {
         darker * 4 < visible,
         "{darker} of {visible} lit pixels went dark; past the last cascade was          treated as shadowed rather than lit"
     );
+}
+
+#[test]
+fn a_lamp_in_a_tile_that_is_not_the_first_still_lights_it() {
+    // What a picture can say about the tiled path, which is less than it looks.
+    //
+    // The list is a pure optimisation: the falloff's window already takes a
+    // lamp to zero past its range, so a lamp wrongly *in* a tile costs time and
+    // changes nothing. Only a lamp wrongly *left out* shows, and whether the
+    // cull leaves the right ones out is checked directly in `tests/tiles.rs` by
+    // reading the lists back.
+    //
+    // What is left for a render to check is the other end: that the shading
+    // pass looks up the tile the fragment is actually in. Two lamps in separate
+    // pools, neither of them in the corner tile — so a pass that read one
+    // tile's list for every fragment loses them and the picture goes dark.
+    let gpu = gpu_or_skip!(gpu());
+    let shot = shadow_shot(
+        &gpu,
+        ShadowScene {
+            pools: true,
+            ..ShadowScene::default()
+        },
+    );
+
+    let lit = shot.pixels.iter().filter(|p| p[0] > 0.02).count();
+    let dark = shot.pixels.iter().filter(|p| p[0] <= 0.02).count();
+    assert!(lit > 100, "the pools lit nothing: {lit}");
+    assert!(dark > 100, "the pools lit everything: {dark} dark pixels");
+
+    // And on both sides of the frame, which is the part a single tile's list
+    // cannot satisfy: whichever tile it were, one of the two lamps would be
+    // missing from it.
+    let half = SHADOW_SIZE as usize / 2;
+    let left = shot
+        .pixels
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| (*i % (SHADOW_SIZE as usize)) < half && p[0] > 0.02)
+        .count();
+    let right = lit - left;
+    assert!(left > 30 && right > 30, "lit {left} left and {right} right");
 }
 
 #[test]

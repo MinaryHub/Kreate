@@ -83,8 +83,16 @@ struct RenderedObject {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ShadingGlobals {
-    light_count: u32,
-    _pad: [u32; 3],
+    /// How many tiles across the target is, and how long one tile's list can
+    /// be. See `crate::tiles`.
+    ///
+    /// The light *count* used to live here and does not any more: the shading
+    /// loop reads a tile's list, and how long that list is the cull pass's
+    /// answer. A count here would be a second opinion about the same question,
+    /// written every frame and read by nobody.
+    tiles_across: u32,
+    tile_capacity: u32,
+    _pad: [u32; 2],
     /// The world's radiance, linear. See `shading.wgsl`.
     world: [f32; 4],
 }
@@ -1091,6 +1099,8 @@ pub struct Viewport {
     shadow_entries: Vec<crate::shadow::GpuShadow>,
     /// The frames this frame's shadow passes were built with, in layer order.
     shadow_views: Vec<crate::shadow::ShadowView>,
+    /// Which lights reach which square of the screen.
+    tiles: crate::tiles::Tiles,
     /// This frame's lights, packed once.
     ///
     /// Kept because the shadow frames are fitted in `prepare` — which is where
@@ -1560,6 +1570,16 @@ impl Viewport {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let dfg_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -1579,6 +1599,7 @@ impl Viewport {
             mapped_at_creation: false,
         });
         let lights = crate::lights::Lights::new(device, 8);
+        let tiles_0 = crate::tiles::Tiles::new(device);
         let shadows_0 = crate::shadow::ShadowMaps::new(device);
         let shadow_buf_0 = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow entries"),
@@ -1594,6 +1615,7 @@ impl Viewport {
             &shading_globals_buf,
             &shadow_buf_0,
             shadows_0.array_view(),
+            tiles_0.buffer(),
         );
         let rendered_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rendered"),
@@ -1923,6 +1945,7 @@ impl Viewport {
             shadow_entries: Vec::new(),
             shadow_views: Vec::new(),
             packed_lights: Vec::new(),
+            tiles: tiles_0,
             screen_params: screen_params_buf,
             screen_bind: screen_bind_0,
             hdr: hdr_0,
@@ -2320,6 +2343,7 @@ impl Viewport {
         // along the view, so where the resolution goes depends on where the
         // user is looking.
         let aspect = self.render_size.0 as f32 / self.render_size.1.max(1) as f32;
+        self.fit_tiles(device, queue, camera);
         self.fit_shadows(
             queue,
             drawn,
@@ -2330,6 +2354,61 @@ impl Viewport {
                 near: camera.near() as f32,
             },
         );
+    }
+
+    /// Works out which lights reach which square of the screen.
+    ///
+    /// Before the shadow frames and long before the geometry, because the
+    /// shading pass reads its result and a compute pass has to be recorded
+    /// ahead of the pass that consumes it.
+    ///
+    /// Only in the mode that shades with the scene's lights. The others light
+    /// themselves, and culling for them would be a compute pass whose output
+    /// nothing reads.
+    fn fit_tiles(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera: &Camera) {
+        if self.shading != ShadingMode::Rendered {
+            return;
+        }
+        let (w, h) = self.render_size;
+        if self.tiles.resize(device, w, h) {
+            // The lists moved, so the bind group over them is stale.
+            self.shading_bind = shading_bind_group(
+                device,
+                &self.shading_layout,
+                &self.dfg_buf,
+                self.lights.buffer(),
+                &self.shading_globals_buf,
+                &self.shadow_buf,
+                self.shadows.array_view(),
+                self.tiles.buffer(),
+            );
+            // The globals carry how many tiles across the grid is, and it has
+            // just changed.
+            queue.write_buffer(
+                &self.shading_globals_buf,
+                0,
+                bytemuck::bytes_of(&ShadingGlobals {
+                    tiles_across: self.tiles.across(),
+                    tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
+                    _pad: [0; 2],
+                    world: [self.world[0], self.world[1], self.world[2], 0.0],
+                }),
+            );
+        }
+        let aspect = w as f32 / h.max(1) as f32;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tile cull"),
+        });
+        self.tiles.cull(
+            device,
+            queue,
+            &mut encoder,
+            self.lights.buffer(),
+            self.lights.count(),
+            camera,
+            aspect,
+        );
+        queue.submit([encoder.finish()]);
     }
 
     /// Fits each casting light's shadow frame to what is being drawn.
@@ -2458,7 +2537,9 @@ impl Viewport {
         lights: &[crate::lights::PlacedLight],
     ) {
         let before = self.lights.capacity();
-        let count = self.lights.upload(device, queue, eye, lights);
+        // The count is kept by `Lights` and read by the cull pass, which is
+        // now the only thing that needs to know how many of the buffer is live.
+        self.lights.upload(device, queue, eye, lights);
         // The light buffer grows by being replaced, and this bind group holds
         // the old one. The capacity is what says that happened — it changes
         // only in the branch that replaces the buffer — and rebuilding only
@@ -2481,7 +2562,10 @@ impl Viewport {
                 &self.shading_globals_buf,
                 &self.shadow_buf,
                 self.shadows.array_view(),
+                self.tiles.buffer(),
             );
+            // The cull pass holds the light buffer too, and it has just moved.
+            self.tiles.forget_bindings();
         }
 
         // Kept for `prepare`, which fits the shadow frames: it is the call
@@ -2493,11 +2577,9 @@ impl Viewport {
             &self.shading_globals_buf,
             0,
             bytemuck::bytes_of(&ShadingGlobals {
-                // The count and not the buffer's length: the buffer is grown
-                // and never shrunk, so the slots past this hold an earlier
-                // frame's lights.
-                light_count: count,
-                _pad: [0; 3],
+                tiles_across: self.tiles.across(),
+                tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
+                _pad: [0; 2],
                 world: [self.world[0], self.world[1], self.world[2], 0.0],
             }),
         );
@@ -3338,6 +3420,7 @@ fn shading_bind_group(
     globals: &wgpu::Buffer,
     shadows: &wgpu::Buffer,
     maps: &wgpu::TextureView,
+    tiles: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shading data"),
@@ -3362,6 +3445,10 @@ fn shading_bind_group(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(maps),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: tiles.as_entire_binding(),
             },
         ],
     })

@@ -47,6 +47,15 @@ fn gpu() -> Option<Gpu> {
 /// what the clock measured; what is in question here is the cost of the
 /// *shading* loop, which is the thing a tiled path replaces.
 fn lamps(count: usize) -> Vec<PlacedLight> {
+    lamps_reaching(count, None)
+}
+
+/// The same, each reaching `range` metres.
+///
+/// `None` is a light with no end, which is in every tile by construction — the
+/// arrangement the cull pass cannot help with, and the one the measurement
+/// below compares against.
+fn lamps_reaching(count: usize, range: Option<f32>) -> Vec<PlacedLight> {
     (0..count)
         .map(|i| {
             let a = i as f32 * 2.399_963; // the golden angle, so they spread
@@ -60,6 +69,7 @@ fn lamps(count: usize) -> Vec<PlacedLight> {
                 ),
                 amount: [20_000.0 / count.max(1) as f32; 3],
                 cast_shadow: false,
+                range,
                 ..PlacedLight::default()
             }
         })
@@ -68,6 +78,10 @@ fn lamps(count: usize) -> Vec<PlacedLight> {
 
 /// Milliseconds a frame, averaged, for a scene lit by `count` lamps.
 fn measure(gpu: &Gpu, count: usize) -> f64 {
+    measure_lights(gpu, &lamps(count))
+}
+
+fn measure_lights(gpu: &Gpu, lights: &[PlacedLight]) -> f64 {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.show_grid = false;
@@ -82,7 +96,7 @@ fn measure(gpu: &Gpu, count: usize) -> f64 {
     let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY)];
 
     viewport.set_world([0.0; 3]);
-    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lamps(count));
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), lights);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("light cost"),
@@ -126,7 +140,11 @@ fn measure(gpu: &Gpu, count: usize) -> f64 {
 }
 
 #[test]
-fn what_a_light_costs_in_the_shading_loop() {
+fn what_lights_cost_and_what_culling_saves() {
+    // One test rather than two, because cargo runs test functions in parallel
+    // and two of these would be timing each other's work as much as their own:
+    // the first version reported one light at 3.1 ms and two hundred and
+    // fifty-six at 3.4, which is not a measurement of anything.
     let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter; skipping");
         return;
@@ -140,16 +158,29 @@ fn what_a_light_costs_in_the_shading_loop() {
         eprintln!("{count:>4} lights: {ms:.3} ms a frame at {SIZE}x{SIZE}");
     }
     let per_light = (times[times.len() - 1] - times[0]) / (counts[counts.len() - 1] - 1) as f64;
-    eprintln!("about {:.4} ms a light at this resolution", per_light);
+    eprintln!("about {per_light:.4} ms a light at this resolution");
 
-    // The only assertion, and it is about the shape rather than the speed: more
-    // lights have to cost more. If they did not, the loop would not be running
-    // and every measurement above would be of something else.
+    // What the cull pass is for: the same lamps, once reaching everywhere and
+    // once reaching four metres apiece.
+    let everywhere = measure_lights(&gpu, &lamps_reaching(256, None));
+    let local = measure_lights(&gpu, &lamps_reaching(256, Some(4.0)));
+    eprintln!(
+        "256 lights: {everywhere:.3} ms with no end, {local:.3} ms reaching four          metres ({:.1}x)",
+        everywhere / local.max(1e-6)
+    );
+
+    // Two assertions, both about the shape rather than the speed. More lights
+    // have to cost more, or the shading loop is not running and every number
+    // above is of something else. And culling must not be *slower*, which is
+    // the one outcome that would make the pass not worth having.
     assert!(
         times[times.len() - 1] > times[0],
-        "256 lights cost {:.3} ms and one cost {:.3}; the shading loop is not \
-         running",
+        "256 lights cost {:.3} ms and one cost {:.3}; the shading loop is not          running",
         times[times.len() - 1],
         times[0]
+    );
+    assert!(
+        local <= everywhere * 1.05,
+        "culling made it slower: {local:.3} ms against {everywhere:.3}"
     );
 }

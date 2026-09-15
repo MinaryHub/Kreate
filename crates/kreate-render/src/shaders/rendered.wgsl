@@ -125,7 +125,10 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
     surface.metallic = object.material.w;
     surface.roughness = object.params.x;
 
-    let lit = shade_point(surface, in.world, normal, view);
+    // `in.clip` is the fragment's position in pixels here — the same builtin
+    // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that
+    // is decides which lights this fragment sees.
+    let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy));
     // Linear and unbounded. The display transform is a later pass.
     return vec4<f32>(lit, 1.0);
 }

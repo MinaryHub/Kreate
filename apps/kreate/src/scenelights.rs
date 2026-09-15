@@ -99,6 +99,59 @@ pub fn shot(doc: &Document, rate: f64, subject: kreate_math::DVec3) -> Shot {
     }
 }
 
+/// How far below the scene's own light a lamp has to fall before it is dropped.
+///
+/// A thousandth, which is about ten stops under whatever the shot is exposed
+/// for. Near mid grey a thousandth of the scene's light is under one code
+/// value, so a lamp culled at this threshold cannot move a pixel there; in the
+/// shadows the local level is lower and the same fraction is a larger share of
+/// it, which is the error and is stated rather than hidden.
+///
+/// It is a *quality* cutoff and not the exact one. The exact one — the distance
+/// past which a lamp cannot change a pixel at all — is
+/// `kreate_render::lights::cull_range` against the display's black point, and
+/// it comes out in the hundreds of metres for any lamp bright enough to matter.
+/// Correct, and correct at a scale no viewport reaches: with it, `light_cost`'s
+/// two hundred and fifty-six lamps are all in every tile and nothing is culled.
+///
+/// The honest summary is that culling needs a threshold somebody chose, and
+/// this is the choice.
+const CULL_FRACTION: f64 = 1.0 / 1000.0;
+
+/// The lights of the scene, each with the distance past which it is not worth
+/// computing.
+///
+/// The range comes from the same meter the exposure does, which is what makes
+/// it scene-relative rather than absolute: a lamp is worth computing while it
+/// is within a thousandth of what else is lighting the place. One reading, two
+/// uses, and no second opinion about how bright the scene is.
+///
+/// `subject` is what the picture is about — the same point the exposure is
+/// metered at.
+pub fn culled_lights(doc: &Document, subject: kreate_math::DVec3) -> Vec<PlacedLight> {
+    let mut lights = placed_lights(doc);
+    let Some(reading) = metered_illuminance(doc, subject) else {
+        // Nothing lighting anything. There is no scene level to be a thousandth
+        // of, and a range worked out from zero is not a number — so nothing is
+        // culled, which costs a loop over a light list that is about to produce
+        // a black picture anyway.
+        return lights;
+    };
+    let cutoff = reading * CULL_FRACTION;
+    for light in &mut lights {
+        if light.range.is_some() {
+            // Already decided — by an artist, when the datablock grows the
+            // field, or by a caller that knows something this does not.
+            continue;
+        }
+        let brightest = light.amount.iter().copied().fold(0.0f32, f32::max) as f64;
+        // Inverse square: the distance at which this lamp's own illuminance
+        // falls to the cutoff.
+        light.range = Some((brightest / cutoff.max(f64::MIN_POSITIVE)).sqrt() as f32);
+    }
+    lights
+}
+
 /// What a light meter at `subject` would read, in lux.
 ///
 /// The sum of every light reaching the point, plus the world. A flat number and

@@ -592,7 +592,7 @@ mod tests {
         // One `shade_point`, and the fragment stage calls it rather than
         // reimplementing it.
         assert_eq!(source.matches("fn shade_point").count(), 1);
-        assert!(source.contains("shade_point(surface, in.world, normal, view)"));
+        assert!(source.contains("shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy))"));
         // And no probe: those declare buffers a drawing pass does not bind.
         assert!(!source.contains("fn probe_shading"));
     }

@@ -87,8 +87,10 @@ fn sample_of(point: &Point) -> Sample {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Shading {
-    light_count: u32,
-    pad: [u32; 3],
+    /// One tile, holding every light. See the list built in `on_gpu`.
+    tiles_across: u32,
+    tile_capacity: u32,
+    pad: [u32; 2],
     world: [f32; 4],
 }
 
@@ -119,8 +121,9 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shading globals"),
             contents: bytemuck::bytes_of(&Shading {
-                light_count: count.unwrap_or(live),
-                pad: [0; 3],
+                tiles_across: 1,
+                tile_capacity: kreate_render::tiles::MAX_LIGHTS_PER_TILE,
+                pad: [0; 2],
                 // These tests are about the lamps; the world has its own.
                 world: [0.0; 4],
             }),
@@ -227,6 +230,30 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
         ..Default::default()
     });
 
+    // One tile holding every light, which is what the probe means by "shade
+    // this point": it has no screen and no camera, so there is nothing for a
+    // tile to cull against. Present rather than absent because the probe has to
+    // compile the same shader the viewport runs — which is the whole point of
+    // it — and that shader reads this.
+    // As many as the caller says are live, not as many as the buffer holds.
+    // The buffer is grown and never shrunk, so the slots past the count still
+    // carry an earlier frame's lights — and in the running renderer it is the
+    // cull pass that respects the count, which is what
+    // `a_cull_never_lists_a_light_past_the_count` holds it to.
+    let live_count = count.unwrap_or(live);
+    let mut list: Vec<u32> = vec![live_count];
+    list.extend(0..live_count);
+    // The shading loop clamps the count to the capacity, so the buffer has to
+    // be as long as it claims.
+    list.resize(kreate_render::tiles::MAX_LIGHTS_PER_TILE as usize + 1, 0);
+    let tile_lights = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tile lights"),
+            contents: bytemuck::cast_slice(&list),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
     let shared = gpu
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -246,6 +273,7 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
                     },
                     count: None,
                 },
+                storage(5, true),
             ],
         });
     let pipeline_layout = gpu
@@ -306,6 +334,10 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(&shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: tile_lights.as_entire_binding(),
             },
         ],
     });

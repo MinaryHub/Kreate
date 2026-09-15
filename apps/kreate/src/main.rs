@@ -3259,7 +3259,9 @@ impl App {
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
                 .set_world(scenelights::world_radiance(&self.doc));
-            let lights = scenelights::placed_lights(&self.doc);
+            // With the distance each lamp is worth computing to, which is
+            // what the tile pass culls against.
+            let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);
             gfx.viewport.set_lights(
                 &gfx.gpu.device,
                 &gfx.gpu.queue,
