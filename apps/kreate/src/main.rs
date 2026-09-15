@@ -29,7 +29,7 @@ use kreate_ops::{
     Context as OpContext, History, Mode as OpMode, OperatorRegistry, PropertyMap, PropertyValue,
 };
 use kreate_render::{Camera, Draw, GpuMesh, GpuOptions, RenderMeshCpu, ShadingMode, Viewport};
-use kreate_scene::document::{Object, ObjectData, ObjectId};
+use kreate_scene::document::ObjectId;
 use kreate_scene::Document;
 use kreate_ui::Command;
 use winit::application::ApplicationHandler;
@@ -4336,14 +4336,12 @@ fn load_document(path: Option<&str>) -> Document {
                 doc.add_mesh_object(name, mesh);
             }
         }
-        None => {
-            let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
-            let id = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
-            doc.selection.add(id);
-        }
+        None => kreate::startup::starting_scene(&mut doc),
     }
     doc
 }
+
+
 
 /// What an object is made of, for the rendered mode.
 ///

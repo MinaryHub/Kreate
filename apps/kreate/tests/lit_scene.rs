@@ -221,6 +221,55 @@ macro_rules! gpu_or_skip {
 }
 
 #[test]
+fn a_new_document_renders_a_picture_with_nothing_added() {
+    // The end of a long thread, as one assertion: open the application, press
+    // `Z`, see something.
+    //
+    // A new document used to contain a cube and nothing else, so the rendered
+    // mode was correctly and uselessly black — nothing was lighting anything,
+    // and until the Add menu shipped there was no way to change that. The fix
+    // is not for the renderer to invent light, which §2.1 is emphatic about,
+    // but for a new document to be a scene with some in it.
+    let gpu = gpu_or_skip!(gpu());
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+
+    let pixels = shoot(&gpu, &doc);
+    let brightest = pixels.iter().fold(0.0f32, |acc, p| acc.max(p[0]));
+    assert!(
+        brightest > 0.1,
+        "a new document rendered black: brightest {brightest}"
+    );
+    let saturated = pixels.iter().filter(|p| p[0] >= 0.99).count();
+    let lit = pixels.iter().filter(|p| p[0] > 0.01).count();
+    assert!(
+        saturated * 2 < lit.max(1),
+        "a new document blew out: {saturated} of {lit} lit pixels clipped"
+    );
+
+    // And every panel the properties editor offers has something behind it. A
+    // world nobody can reach is a tab that never appears; a camera nobody can
+    // reach is an exposure nobody can set.
+    assert!(doc.active_world().is_some(), "a new document has no world");
+    assert!(doc.cameras().next().is_some(), "a new document has no camera");
+    assert!(
+        doc.objects()
+            .any(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Light(_))),
+        "a new document has no lamp"
+    );
+    // The cube is what is selected, because it is what somebody opening the
+    // application is going to do something to.
+    let active = doc.selection.active.and_then(|id| doc.object(id));
+    assert!(
+        matches!(
+            active.map(|o| &o.data),
+            Some(kreate_scene::document::ObjectData::Mesh(_))
+        ),
+        "a new document does not start on the cube"
+    );
+}
+
+#[test]
 fn adding_a_lamp_from_the_menu_lights_the_scene() {
     // The whole complaint in one test. Every kind, because the four have
     // different units and different defaults, and "1000" is a bright room in
