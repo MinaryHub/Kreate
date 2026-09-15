@@ -46,6 +46,9 @@ struct ShadowInfo {
     layers: array<i32, 8>,
     /// One texel in metres per unit clip `w`, per face.
     texels: array<f32, 8>,
+    /// Texels of penumbra per unit of stored-depth difference, per face.
+    /// Zero for a source with no size. See `kreate_render::shadow::GpuShadow`.
+    penumbra: array<f32, 8>,
     params: vec4<f32>,
 }
 
@@ -74,6 +77,59 @@ fn cube_face(d: vec3<f32>) -> i32 {
 /// is the right way round: an unshadowed crease is a picture, and acne is a
 /// fault.
 const NORMAL_OFFSET_TEXELS: f32 = 2.0;
+
+/// How far out to look for something casting, in texels.
+///
+/// The blocker search has to cover the widest penumbra it could produce, or a
+/// shadow softer than this is found only near its own edge and hardens in the
+/// middle. It also cannot be unbounded: every texel of it is a tap.
+///
+/// Six is about a metre of penumbra on a sun's near cascade, which is a sharp
+/// enough limit that nothing in a viewport reaches it and a cheap enough one
+/// that the search is sixteen taps rather than a hundred.
+const BLOCKER_SEARCH_TEXELS: f32 = 6.0;
+
+/// The widest the filter will spread, in texels.
+///
+/// The taps are a fixed grid, so spreading them further does not soften the
+/// shadow — it separates them, and the shadow bands. This is where that starts,
+/// and a penumbra that wants to be wider is drawn at this width instead: a
+/// shadow slightly too sharp reads as a shadow, and a banded one reads as a
+/// fault.
+const MAX_PENUMBRA_TEXELS: f32 = 8.0;
+
+/// How much of the map is worth searching before giving up on softness.
+///
+/// A hard source needs none of this: the search finds nothing to average and
+/// the filter is the three-by-three it always was, at the cost it always had.
+/// Only a light with a size pays for the rest.
+fn average_blocker(
+    layer: i32,
+    centre: vec2<i32>,
+    size: vec2<f32>,
+    depth: f32,
+) -> f32 {
+    var total = 0.0;
+    var found = 0.0;
+    let step = max(i32(BLOCKER_SEARCH_TEXELS / 1.5), 1);
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let at = clamp(
+                centre + vec2<i32>(dx * step, dy * step),
+                vec2<i32>(0, 0),
+                vec2<i32>(size) - vec2<i32>(1, 1),
+            );
+            let stored = textureLoad(shadow_maps, at, layer, 0);
+            // Reversed-Z: a blocker is *nearer the light*, so its depth is the
+            // greater one.
+            if stored > depth {
+                total = total + stored;
+                found = found + 1.0;
+            }
+        }
+    }
+    return select(-1.0, total / found, found > 0.0);
+}
 
 @group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
 @group(2) @binding(4) var shadow_maps: texture_depth_2d_array;
@@ -205,15 +261,36 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     let slope = min(lateral / incidence, 8.0);
     let bias = info.params.z * (1.0 + slope);
 
-    // Three by three, unweighted. Wider kernels and Gaussian weights both
-    // exist; at one tap per texel this is the one whose softness matches the
-    // map's resolution rather than inventing a penumbra the light does not
-    // have.
+    // How wide to filter. A source with size casts a penumbra that grows with
+    // how far the thing casting it is from the thing it falls on — which is why
+    // a box sitting on a floor has a sharp shadow at its base and a soft one
+    // further out, with no separate rule for either.
+    //
+    // One texel is the floor and not zero: below that the filter is narrower
+    // than the map can express, and a shadow cannot be sharper than its own
+    // resolution however small the source is.
+    var radius = 1.0;
+    let scale = info.penumbra[face];
+    if scale > 0.0 {
+        let blocker = average_blocker(layer, texel, size, ndc.z + bias);
+        if blocker < 0.0 {
+            // Nothing between this point and the light, anywhere the search
+            // looked. Fully lit, and the filter below is skipped entirely —
+            // which is most of the picture and most of the saving.
+            return 1.0;
+        }
+        radius = clamp(scale * (blocker - ndc.z), 1.0, MAX_PENUMBRA_TEXELS);
+    }
+
+    // A fixed grid spread over that radius. Five by five rather than three,
+    // because the taps are what the softness is made of: nine of them across
+    // eight texels is a shadow with steps in it.
     var lit = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
+    let spacing = radius * 0.5;
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
             let at = clamp(
-                texel + vec2<i32>(dx, dy),
+                texel + vec2<i32>(vec2<f32>(f32(dx), f32(dy)) * spacing),
                 vec2<i32>(0, 0),
                 vec2<i32>(size) - vec2<i32>(1, 1),
             );
@@ -223,7 +300,7 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
             lit += select(0.0, 1.0, ndc.z + bias >= stored);
         }
     }
-    return lit / 9.0;
+    return lit / 25.0;
 }
 
 /// Which way the light is, from `at`.

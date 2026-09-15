@@ -292,6 +292,17 @@ struct ShadowScene {
     idle_casts: bool,
     /// Enough casting lights to run past `MAX_SHADOWS`.
     crowd: bool,
+    /// How big the key light's source is, as a multiple of the sun's own.
+    ///
+    /// Zero is the hard light nothing real is. One is the sun at its own
+    /// half-degree; larger is the overcast sky, and what it should produce is a
+    /// wider soft edge rather than a blurrier picture.
+    source: f32,
+    /// The boxes hovering well above the floor rather than standing on it.
+    ///
+    /// The control for the contact test: the same scene with the only
+    /// difference being how far a caster is from what it falls on.
+    lifted: bool,
     /// A floor stretching past where a sun's cascades reach.
     ///
     /// The one arrangement in which a fragment can be lit by a sun and outside
@@ -399,6 +410,14 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             cone: Some((70f32.to_radians(), 0.25)),
             amount: [2_600_000.0; 3],
             cast_shadow: scene.cast,
+            // A lamp with a bulb rather than a point. The perspective half of
+            // the penumbra arithmetic runs nowhere else — a sun is orthographic
+            // and uses the other branch entirely.
+            //
+            // Small enough that the filter does not reach its widest setting:
+            // at the clamp every scale looks the same, so a test up there
+            // cannot tell a right one from a wrong one.
+            radius: 0.05 * scene.source,
             ..PlacedLight::default()
         }
     } else if scene.point_inside {
@@ -408,6 +427,7 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             position: glam::DVec3::new(2.25, 2.25, 0.8),
             amount: [60_000.0; 3],
             cast_shadow: scene.cast,
+            radius: 0.05 * scene.source,
             ..PlacedLight::default()
         }
     } else if scene.point {
@@ -425,6 +445,8 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             direction: glam::Vec3::new(-0.50, -0.35, -0.79).normalize(),
             amount: [18_000.0; 3],
             cast_shadow: scene.cast,
+            // Half of 0.526°, which is the sun's own apparent radius.
+            angular_radius: 0.0046 * scene.source,
             ..PlacedLight::default()
         }
     });
@@ -479,6 +501,14 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     // floor's size comes from the first: a pair of frames that disagreed about
     // how big the world is would be comparing two scenes.
     let long = scenes.first().is_some_and(|s| s.long_floor);
+    // Standing on the floor, or well above it. Like the floor's size, taken
+    // from the first frame: the geometry is built once and a pair of frames
+    // that disagreed about where the boxes are would be comparing two scenes.
+    let height = if scenes.first().is_some_and(|s| s.lifted) {
+        5.0
+    } else {
+        0.8
+    };
     let floor_mesh =
         RenderMeshCpu::extract(&kreate_mesh::primitives::plane(if long { 1600.0 } else { 16.0 }));
     let box_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.6));
@@ -512,7 +542,7 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
             let n = row * 3 + col;
             let x = -4.5 + col as f64 * 4.5;
             let y = -4.5 + row as f64 * 4.5;
-            let at = glam::DVec3::new(x, y, 0.8);
+            let at = glam::DVec3::new(x, y, height);
             let draw = match n % 3 {
                 // Standing on the floor, not hovering over it: half the cube's
                 // height up puts its underside at zero.
@@ -902,6 +932,126 @@ fn a_light_that_stops_casting_leaves_no_shadow_behind() {
     );
 }
 
+/// How many pixels are neither fully lit nor fully dark, between two shots.
+///
+/// The width of a shadow's edge, counted. A hard edge is a step from one to the
+/// other across a texel and leaves almost none of these; a soft one is made of
+/// them.
+fn edge_pixels(lit: &ShadowShot, shadowed: &ShadowShot) -> usize {
+    lit.pixels
+        .iter()
+        .zip(&shadowed.pixels)
+        .filter(|(a, b)| {
+            let drop = a[0] - b[0];
+            // Changed, but not all the way: the part of the shadow that is
+            // partly in and partly out.
+            drop > 0.02 && drop < a[0] * 0.8
+        })
+        .count()
+}
+
+#[test]
+fn a_bigger_source_casts_a_softer_shadow() {
+    // What `radius` and `angular_radius` are for, and what they did until now:
+    // nothing. Both were packed and no shader read either, so the light panel
+    // offered a control labelled "what makes a shadow soft" that made no
+    // difference to any picture.
+    //
+    // Counted as the width of the edge rather than as blur, because those are
+    // different things and only one of them is a penumbra: a blurrier shadow
+    // is softer everywhere, and a bigger source is softer only where the
+    // caster is far from what it falls on.
+    let gpu = gpu_or_skip!(gpu());
+    let lit = shadow_shot(&gpu, ShadowScene::default());
+
+    let hard = shadow_shot(
+        &gpu,
+        ShadowScene {
+            cast: true,
+            source: 0.0,
+            ..ShadowScene::default()
+        },
+    );
+    let soft = shadow_shot(
+        &gpu,
+        ShadowScene {
+            cast: true,
+            // A source thirty times the sun's, which is roughly a bright
+            // overcast sky and casts the shadow everybody recognises as soft.
+            source: 30.0,
+            ..ShadowScene::default()
+        },
+    );
+
+    let hard_edge = edge_pixels(&lit, &hard);
+    let soft_edge = edge_pixels(&lit, &soft);
+    assert!(
+        soft_edge > hard_edge * 2,
+        "a source thirty times wider gave {soft_edge} edge pixels against          {hard_edge}"
+    );
+
+    // And it is still a shadow: a filter wide enough to wash it out would pass
+    // the test above and fail the eye.
+    let (darker, brighter) = difference(&lit, &soft);
+    assert!(darker > 300, "the soft shadow faded away: {darker}");
+    assert_eq!(brighter, 0, "{brighter} pixels got brighter");
+}
+
+#[test]
+fn a_shadow_is_sharp_where_it_touches_and_soft_where_it_does_not() {
+    // The property that makes this a penumbra rather than a blur, and the only
+    // one that tells the two apart. A box standing on a floor has its shadow
+    // *at its base* however large the source is — there is no gap for the
+    // source's size to spread across — and the further the shadow falls from
+    // the box, the wider its edge.
+    //
+    // Lifting the boxes changes more than that, though: the shadow moves, and
+    // with a tilted sun it can move onto a different part of the floor or
+    // behind another box. Counting the edge alone would be measuring that as
+    // much as the penumbra.
+    //
+    // So the same change is made twice, once with a source that has size and
+    // once with one that has none, and it is the *difference between the two
+    // differences* that is the penumbra. Everything geometric cancels: the hard
+    // pair moves exactly as far, onto exactly the same floor.
+    let gpu = gpu_or_skip!(gpu());
+    let edge_at = |source: f32, lifted: bool| {
+        let base = ShadowScene {
+            source,
+            lifted,
+            ..ShadowScene::default()
+        };
+        let lit = shadow_shot(&gpu, base);
+        let shadowed = shadow_shot(
+            &gpu,
+            ShadowScene {
+                cast: true,
+                ..base
+            },
+        );
+        let (darker, _) = difference(&lit, &shadowed);
+        assert!(darker > 100, "nothing to measure at {source}/{lifted}");
+        edge_pixels(&lit, &shadowed) as f32
+    };
+
+    // As a ratio and not a difference. A hard shadow's edge grows when the
+    // casters are lifted too — the shadow is further away and covers more of
+    // the frame — and that growth is pure geometry. Anything a soft one does
+    // *above* it is the penumbra.
+    //
+    // A difference would not do: pinning the filter at its widest makes the
+    // touching shadow already as soft as it can be, so it has less room to grow
+    // and the difference comes out *smaller* than the correct one rather than
+    // larger. The ratio falls below the hard shadow's, which is the shape of
+    // the failure and what this compares.
+    let hard = edge_at(0.0, true) / edge_at(0.0, false);
+    let soft = edge_at(30.0, true) / edge_at(30.0, false);
+    assert!(
+        soft > hard * 1.05,
+        "lifting the casters grew a soft shadow's edge {soft}-fold and a hard          one's {hard}-fold; the penumbra does not grow with distance"
+    );
+}
+
 #[test]
 fn past_the_cascades_a_sun_stops_shadowing_rather_than_going_black() {
     // A floor stretching a kilometre away. The sun's slices cover the first
@@ -1145,6 +1295,14 @@ fn a_point_light_overhead_casts_a_shadow() {
         darker * 3 < visible,
         "{darker} of {visible} lit pixels went dark; that is acne, not a shadow"
     );
+
+    // The perspective half of the penumbra arithmetic is *not* measured here,
+    // and that is recorded rather than faked. A picture test for it was
+    // written, passed with the filter forced to one texel, and was therefore
+    // measuring something other than the penumbra — so it went, rather than
+    // staying as a test that agrees with whatever the code does. The arithmetic
+    // is a closed form and is checked exactly in `shadow::tests`, which is the
+    // better place for it; a picture test wants a fixture built for it.
 }
 
 #[test]

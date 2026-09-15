@@ -44,6 +44,13 @@ pub struct ShadowView {
     /// place for the numbers to live.
     pub near: f32,
     pub far: f32,
+    /// How many texels of penumbra one unit of stored-depth difference makes.
+    ///
+    /// See [`GpuShadow::penumbra`]. Here because it needs the projection's near
+    /// and far planes, which exist only while the frame is being fitted —
+    /// packing them for the sampler instead would be two more numbers to keep
+    /// in step for a value that never changes once the frame is built.
+    pub penumbra: f32,
     /// How wide one shadow texel is in metres, per unit of clip `w`.
     ///
     /// The number the acne fix is built on, and the one thing about the map
@@ -141,7 +148,7 @@ fn look_along(forward: glam::Vec3) -> glam::Mat4 {
 /// and nothing to catch, and a pass that ran anyway would render a map nothing
 /// samples.
 pub fn sun_view(direction: glam::Vec3, bounds: Aabb) -> Option<ShadowView> {
-    sun_view_of(direction, &bounds.corners(), bounds)
+    sun_view_of(direction, &bounds.corners(), bounds, SourceSize::Angular(0.0))
 }
 
 /// The same, fitted across `wanted` rather than across the whole scene.
@@ -161,6 +168,7 @@ pub fn sun_view_of(
     direction: glam::Vec3,
     wanted: &[glam::Vec3],
     scene: Aabb,
+    source: SourceSize,
 ) -> Option<ShadowView> {
     if scene.is_empty() || wanted.is_empty() {
         return None;
@@ -211,6 +219,7 @@ pub fn sun_view_of(
         (max.y - min.y).max(1e-4) * 0.5 + MARGIN,
         0.0,
     );
+    let texel = half.x.max(half.y) * 2.0 / SHADOW_RESOLUTION as f32;
     // Centred on the scene, which is what stops the box wasting half its width
     // when the scene is off to one side.
     let centre = glam::Vec3::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5, 0.0);
@@ -222,7 +231,8 @@ pub fn sun_view_of(
         // The box is `half` either side, so it spans `2 * half` across the
         // map's width. The wider of the two axes, because the bias has to
         // cover the worst texel and not the average one.
-        texel_world: half.x.max(half.y) * 2.0 / SHADOW_RESOLUTION as f32,
+        texel_world: texel,
+        penumbra: penumbra_scale(source, near, far, texel),
     })
 }
 
@@ -237,6 +247,7 @@ pub fn spot_view(
     direction: glam::Vec3,
     cone_angle: f32,
     bounds: Aabb,
+    source: SourceSize,
 ) -> Option<ShadowView> {
     if bounds.is_empty() {
         return None;
@@ -261,6 +272,7 @@ pub fn spot_view(
         near,
         far: far + MARGIN,
         texel_world: perspective_texel(fov),
+        penumbra: penumbra_scale(source, near, far + MARGIN, perspective_texel(fov)),
     })
 }
 
@@ -268,7 +280,12 @@ pub fn spot_view(
 ///
 /// Six 90° frustums. `face` is 0 to 5 in the order `+X -X +Y -Y +Z -Z`, which
 /// is the order a cube texture's layers are.
-pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<ShadowView> {
+pub fn point_view(
+    position: glam::Vec3,
+    face: usize,
+    bounds: Aabb,
+    source: SourceSize,
+) -> Option<ShadowView> {
     if bounds.is_empty() {
         return None;
     }
@@ -295,6 +312,12 @@ pub fn point_view(position: glam::Vec3, face: usize, bounds: Aabb) -> Option<Sha
         near,
         far: far + MARGIN,
         texel_world: perspective_texel(std::f32::consts::FRAC_PI_2),
+        penumbra: penumbra_scale(
+            source,
+            near,
+            far + MARGIN,
+            perspective_texel(std::f32::consts::FRAC_PI_2),
+        ),
     })
 }
 
@@ -331,13 +354,20 @@ pub fn shadow_views(
 ) -> Vec<(usize, ShadowView)> {
     let position = glam::Vec3::from_slice(&light.position[..3]);
     let direction = glam::Vec3::from_slice(&light.direction[..3]);
+    // The two sizes a light can have, each in the unit its own projection
+    // works in. See `SourceSize`.
+    let source = if light.falloff == PARALLEL_FALLOFF {
+        SourceSize::Angular(light.direction[3])
+    } else {
+        SourceSize::Radius(light.position[3])
+    };
     if light.falloff == PARALLEL_FALLOFF {
         let Some(camera) = camera else {
             // No camera to split against — a probe, or a test asking what a
             // sun's frame is. One slice over the whole scene, which is what
             // this did before cascades and is still the right answer when
             // there is no view to spend resolution along.
-            return sun_view(direction, bounds)
+            return sun_view_of(direction, &bounds.corners(), bounds, source)
                 .map(|v| vec![(0, v)])
                 .unwrap_or_default();
         };
@@ -360,7 +390,7 @@ pub fn shadow_views(
                 continue;
             }
             let slice = frustum_slice(camera.rotation, camera.fov_y, camera.aspect, near, far);
-            if let Some(view) = sun_view_of(direction, &slice, bounds) {
+            if let Some(view) = sun_view_of(direction, &slice, bounds, source) {
                 out.push((index, view));
             }
             // The next slice starts where this one ended, whether or not this
@@ -374,12 +404,12 @@ pub fn shadow_views(
     if light.cone[0] > -1.0 {
         // The stored outer cosine back to a full angle.
         let cone = light.cone[0].clamp(-1.0, 1.0).acos() * 2.0;
-        return spot_view(position, direction, cone, bounds)
+        return spot_view(position, direction, cone, bounds, source)
             .map(|v| vec![(0, v)])
             .unwrap_or_default();
     }
     (0..6)
-        .filter_map(|face| point_view(position, face, bounds).map(|v| (face, v)))
+        .filter_map(|face| point_view(position, face, bounds, source).map(|v| (face, v)))
         .collect()
 }
 
@@ -452,6 +482,56 @@ pub fn is_cube(light: &crate::lights::GpuLight) -> bool {
     light.falloff != PARALLEL_FALLOFF && light.cone[0] <= -1.0
 }
 
+/// How many texels of penumbra one unit of stored-depth difference makes.
+///
+/// A source with size casts a penumbra whose width grows with how far the
+/// blocker is from what it shadows. Both projections reduce to the same shape
+/// — a constant times the difference in stored depth — and the constants come
+/// from different algebra.
+///
+/// **Orthographic.** Depth is linear in distance, so a depth difference `Δd` is
+/// a distance difference `Δd · (far - near)`. A source of angular radius `θ`
+/// spreads that into a penumbra `Δdist · tan θ` wide. Divided by a texel, which
+/// for an orthographic frame is one size everywhere.
+///
+/// **Perspective.** Depth is `near / w`, so a blocker at `w_b` and a receiver at
+/// `w_r` put a source of radius `r` into a penumbra `r · (w_r - w_b) / w_b`
+/// wide at the receiver. Measured in texels there — which are `texel · w_r`
+/// across — the `w`s cancel exactly and what is left is
+/// `r / (near · texel) · (d_b - d_r)`.
+///
+/// Exact in both cases, which is worth saying because the usual presentation of
+/// this is a similar-triangles sketch and an approximation.
+fn penumbra_scale(source: SourceSize, near: f32, far: f32, texel_world: f32) -> f32 {
+    if texel_world <= 0.0 {
+        return 0.0;
+    }
+    match source {
+        SourceSize::Angular(theta) if theta > 0.0 => {
+            (far - near).max(0.0) * theta.tan() / texel_world
+        }
+        SourceSize::Radius(r) if r > 0.0 && near > 0.0 => r / (near * texel_world),
+        // No size. A hard shadow, which nothing real casts and which is exactly
+        // what a radius of nothing asks for.
+        _ => 0.0,
+    }
+}
+
+/// How big a light's source is, in the unit its projection can use.
+///
+/// Two units and not one, because they are different quantities: a sun is
+/// infinitely far away and has an apparent size, and a lamp is somewhere and
+/// has a physical one. Converting between them needs a distance, and a sun does
+/// not have one — which is the same argument `PlacedLight` makes for keeping
+/// `radius` and `angular_radius` apart.
+#[derive(Clone, Copy, Debug)]
+pub enum SourceSize {
+    /// Half the apparent size, in radians. A sun's own is 0.0046.
+    Angular(f32),
+    /// Metres.
+    Radius(f32),
+}
+
 /// One texel's width in metres at unit distance, for a perspective frustum.
 ///
 /// The frustum spans `2 * tan(fov / 2)` across the map at a distance of one,
@@ -522,6 +602,21 @@ pub struct GpuShadow {
     /// farthest does. One value for all of them gives the far slices an offset
     /// sized for the near one, which is acne everywhere except close up.
     pub texels: [f32; 8],
+    /// How many texels of penumbra one unit of stored-depth difference makes,
+    /// per face.
+    ///
+    /// The whole of what a source's size does to a shadow, in one number per
+    /// frame. Multiply it by how much nearer the blocker is than the receiver
+    /// and the answer is how wide to filter — which is why a contact is sharp
+    /// and a shadow cast from far away is not, with no separate rule for
+    /// either.
+    ///
+    /// Exact for both projections rather than fitted, and they arrive at the
+    /// same shape from different algebra. See [`penumbra_scale`].
+    ///
+    /// Zero is a hard shadow: the source has no size, nothing real does, and it
+    /// is what a file asks for by leaving the radius at nothing.
+    pub penumbra: [f32; 8],
     /// x: unused. y: one texel in metres per unit clip `w`, see
     /// [`ShadowView::texel_world`]. z: the depth bias. w: nonzero if this light
     /// casts.
@@ -546,6 +641,7 @@ impl GpuShadow {
         // anything else.
         layers: [-1; 8],
         texels: [0.0; 8],
+        penumbra: [0.0; 8],
         params: [0.0; 4],
     };
 
@@ -565,6 +661,7 @@ impl GpuShadow {
             out.view_proj[*face] = view.view_proj.to_cols_array_2d();
             out.layers[*face] = *layer as i32;
             out.texels[*face] = view.texel_world;
+            out.penumbra[*face] = view.penumbra;
         }
         out.params = [0.0, 0.0, bias, 1.0];
         out
@@ -1034,6 +1131,105 @@ mod tests {
     }
 
     #[test]
+    fn a_penumbra_is_the_source_size_carried_to_the_receiver() {
+        // Both halves of `penumbra_scale`, against numbers worked out by hand.
+        // A closed form deserves an exact test, and the two halves arrive at
+        // the same shape from different algebra — which is exactly the sort of
+        // pair where one can be quietly wrong.
+        let texel = 0.01;
+
+        // Orthographic. A depth difference of one spans the whole range, so a
+        // source of angular radius θ spreads it into `(far - near) · tan θ`
+        // of world, and that many texels.
+        let theta = 0.05f32;
+        let ortho = penumbra_scale(SourceSize::Angular(theta), 1.0, 51.0, texel);
+        let expected = 50.0 * theta.tan() / texel;
+        assert!(
+            (ortho - expected).abs() < expected * 1e-4,
+            "{ortho} against {expected}"
+        );
+        // Twice the range is twice the penumbra, and so is twice the angle at
+        // this size — tan is very nearly linear here.
+        let wider = penumbra_scale(SourceSize::Angular(theta), 1.0, 101.0, texel);
+        assert!((wider / ortho - 2.0).abs() < 0.01);
+
+        // Perspective. The `w`s cancel and what is left is `r / (near · texel)`
+        // — no far plane in it at all, which is the part that is easy to get
+        // wrong by writing the orthographic form twice.
+        let perspective = penumbra_scale(SourceSize::Radius(0.5), 0.1, 40.0, texel);
+        let expected = 0.5 / (0.1 * texel);
+        assert!(
+            (perspective - expected).abs() < expected * 1e-4,
+            "{perspective} against {expected}"
+        );
+        // Changing the far plane changes nothing.
+        assert_eq!(
+            perspective,
+            penumbra_scale(SourceSize::Radius(0.5), 0.1, 400.0, texel)
+        );
+        // A bulb twice as wide is twice the penumbra; a near plane twice as
+        // far is half of it.
+        assert!(
+            (penumbra_scale(SourceSize::Radius(1.0), 0.1, 40.0, texel) / perspective - 2.0)
+                .abs()
+                < 1e-4
+        );
+        assert!(
+            (penumbra_scale(SourceSize::Radius(0.5), 0.2, 40.0, texel) / perspective - 0.5)
+                .abs()
+                < 1e-4
+        );
+
+        // And no size is a hard shadow, whichever unit the nothing is in.
+        assert_eq!(penumbra_scale(SourceSize::Angular(0.0), 1.0, 51.0, texel), 0.0);
+        assert_eq!(penumbra_scale(SourceSize::Radius(0.0), 0.1, 40.0, texel), 0.0);
+    }
+
+    #[test]
+    fn each_kind_of_light_reads_its_size_from_its_own_field() {
+        // A sun has an apparent size and a lamp has a physical one, and they
+        // are not interchangeable: converting between them needs a distance and
+        // a sun does not have one. So each projection reads the field that is
+        // in its own unit, and a value in the other one has to be ignored
+        // rather than used.
+        let scene = Aabb::new(glam::Vec3::splat(-5.0), glam::Vec3::splat(5.0));
+        let sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::NEG_Z,
+            angular_radius: 0.05,
+            // A metre-wide bulb on a sun is a caller's mistake, not a size.
+            radius: 1.0,
+            ..PlacedLight::default()
+        });
+        let soft = shadow_views(&sun, scene, None);
+        assert!(soft[0].1.penumbra > 0.0);
+
+        let hard_sun = packed(PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::NEG_Z,
+            angular_radius: 0.0,
+            radius: 1.0,
+            ..PlacedLight::default()
+        });
+        assert_eq!(
+            shadow_views(&hard_sun, scene, None)[0].1.penumbra,
+            0.0,
+            "a sun took its size from a bulb"
+        );
+
+        let lamp = packed(PlacedLight {
+            position: glam::DVec3::new(0.0, 0.0, 8.0),
+            radius: 0.0,
+            // And an apparent size on a lamp is the same mistake reversed.
+            angular_radius: 0.05,
+            ..PlacedLight::default()
+        });
+        for (_, view) in shadow_views(&lamp, scene, None) {
+            assert_eq!(view.penumbra, 0.0, "a lamp took its size from an angle");
+        }
+    }
+
+    #[test]
     fn a_texel_is_measured_across_the_wider_axis() {
         // The map is square and the box it covers is not, so one texel is wider
         // on one axis than the other. The normal offset has to clear the texel
@@ -1069,6 +1265,7 @@ mod tests {
             glam::Vec3::NEG_Z,
             20f32.to_radians(),
             scene(),
+            SourceSize::Radius(0.0),
         )
         .expect("a scene");
         let wide = spot_view(
@@ -1076,6 +1273,7 @@ mod tests {
             glam::Vec3::NEG_Z,
             100f32.to_radians(),
             scene(),
+            SourceSize::Radius(0.0),
         )
         .expect("a scene");
         assert!(
@@ -1421,15 +1619,15 @@ mod tests {
         // Nothing to cast and nothing to catch. A pass that ran anyway would
         // render a map nothing samples, every frame.
         assert!(sun_view(glam::Vec3::NEG_Z, Aabb::EMPTY).is_none());
-        assert!(spot_view(glam::Vec3::ZERO, glam::Vec3::NEG_Z, 1.0, Aabb::EMPTY).is_none());
-        assert!(point_view(glam::Vec3::ZERO, 0, Aabb::EMPTY).is_none());
+        assert!(spot_view(glam::Vec3::ZERO, glam::Vec3::NEG_Z, 1.0, Aabb::EMPTY, SourceSize::Radius(0.0)).is_none());
+        assert!(point_view(glam::Vec3::ZERO, 0, Aabb::EMPTY, SourceSize::Radius(0.0)).is_none());
     }
 
     #[test]
     fn a_spot_frames_what_is_in_front_of_it() {
         // On the axis at any distance the scene reaches, and not behind.
         let position = glam::Vec3::new(0.0, 0.0, 8.0);
-        let view = spot_view(position, glam::Vec3::NEG_Z, 60f32.to_radians(), scene())
+        let view = spot_view(position, glam::Vec3::NEG_Z, 60f32.to_radians(), scene(), SourceSize::Radius(0.0))
             .expect("a scene");
         for z in [6.0f32, 4.0, 1.0] {
             let p = project(&view, glam::Vec3::new(0.0, 0.0, z));
@@ -1450,6 +1648,7 @@ mod tests {
             glam::Vec3::Z,
             1.0,
             scene(),
+            SourceSize::Radius(0.0),
         );
         assert!(view.is_none());
     }
@@ -1461,9 +1660,9 @@ mod tests {
         // the resolution being wasted where it is most visible.
         let position = glam::Vec3::new(0.0, 0.0, 8.0);
         let off_axis = glam::Vec3::new(2.0, 0.0, 4.0);
-        let narrow = spot_view(position, glam::Vec3::NEG_Z, 20f32.to_radians(), scene())
+        let narrow = spot_view(position, glam::Vec3::NEG_Z, 20f32.to_radians(), scene(), SourceSize::Radius(0.0))
             .expect("a scene");
-        let wide = spot_view(position, glam::Vec3::NEG_Z, 100f32.to_radians(), scene())
+        let wide = spot_view(position, glam::Vec3::NEG_Z, 100f32.to_radians(), scene(), SourceSize::Radius(0.0))
             .expect("a scene");
         let n = project(&narrow, off_axis).x.abs();
         let w = project(&wide, off_axis).x.abs();
@@ -1488,7 +1687,7 @@ mod tests {
         }
         for probe in probes {
             let seen = (0..6).any(|face| {
-                point_view(position, face, big)
+                point_view(position, face, big, SourceSize::Radius(0.0))
                     .map(|view| inside(project(&view, probe)))
                     .unwrap_or(false)
             });
@@ -1506,6 +1705,7 @@ mod tests {
             glam::Vec3::NEG_Z,
             1.0,
             scene(),
+            SourceSize::Radius(0.0),
         )
         .expect("a scene");
         // A literal and not `MIN_NEAR`: the claim is about a physical
