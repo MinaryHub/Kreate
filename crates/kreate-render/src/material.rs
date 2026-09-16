@@ -1,10 +1,15 @@
 //! What a compiled material needs on the device.
 //!
-//! [`kreate_shader`] turns a graph into WGSL and a block of numbers; this is
-//! the other side of that contract — the bind group the generated code names,
-//! and the pipeline cache that makes "one graph, one compiler" affordable.
+//! `kreate-shader` turns a graph into WGSL and a block of numbers; this is the
+//! other side of that contract — the bind group the generated code names, and
+//! the pipeline cache that makes "one graph, one compiler" affordable.
 //!
-//! [`kreate_shader`]: https://docs.rs/kreate-shader
+//! **This crate does not depend on that one**, and the reason is the seam §0
+//! draws: `kreate-render` never sees a `Document`, and a compiled material
+//! carries image *identities*, which are the document's. So what arrives here
+//! is what arrives everywhere else — text, numbers and pixels — and the
+//! application does the joining. A dependency the other way would have been one
+//! line and would have quietly given the renderer the whole scene model.
 //!
 //! # The shape of the graph is the cache key
 //!
@@ -30,11 +35,25 @@
 //! dropped. A real packer puts several images on one layer and changes nothing
 //! about the shader, because the rectangle is already how an image is found.
 
-use kreate_shader::Compiled;
+/// The bind group a material's own data arrives in.
+///
+/// Mirrors `kreate_shader::MATERIAL_GROUP`. Two constants rather than one
+/// because the crates do not see each other; they are held together by the
+/// contract test that composes a compiled material against this library.
+pub const MATERIAL_GROUP: u32 = 3;
 
-/// The bind group a material's own data arrives in. Mirrors
-/// [`kreate_shader::MATERIAL_GROUP`].
-pub const MATERIAL_GROUP: u32 = kreate_shader::MATERIAL_GROUP;
+/// What a compiled material brings with it, as plain data.
+///
+/// The compiler's `Compiled` without the parts that belong to a document — its
+/// image identities stay on the application's side of the seam, and what
+/// reaches here is the pixels they resolve to.
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialData<'a> {
+    /// One `vec4` per slot, in the order the generated code indexes them.
+    pub constants: &'a [[f32; 4]],
+    /// Which slot each image's rectangle goes in, parallel to the images.
+    pub image_slots: &'a [usize],
+}
 
 /// One image, as the atlas holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -117,7 +136,7 @@ impl Material {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
-        compiled: &Compiled,
+        data: MaterialData<'_>,
         images: &[SourceImage<'_>],
     ) -> Self {
         let (atlas, placed) = pack(device, queue, images);
@@ -142,8 +161,8 @@ impl Material {
 
         // The rectangles go in beside the compiler's constants, in the slots it
         // left for them. See `Compiled::constants`.
-        let mut values = compiled.constants.clone();
-        for (slot, rect) in compiled.image_slots.iter().zip(&placed) {
+        let mut values = data.constants.to_vec();
+        for (slot, rect) in data.image_slots.iter().zip(&placed) {
             if let Some(v) = values.get_mut(*slot) {
                 *v = rect.rect;
             }
@@ -201,9 +220,9 @@ impl Material {
     ///
     /// What a colour slider costs: one buffer write. The whole reason the
     /// compiler keeps constants out of the text.
-    pub fn set_constants(&self, queue: &wgpu::Queue, compiled: &Compiled) {
-        let mut values = compiled.constants.clone();
-        for (slot, rect) in compiled.image_slots.iter().zip(&self.placed) {
+    pub fn set_constants(&self, queue: &wgpu::Queue, data: MaterialData<'_>) {
+        let mut values = data.constants.to_vec();
+        for (slot, rect) in data.image_slots.iter().zip(&self.placed) {
             if let Some(v) = values.get_mut(*slot) {
                 *v = rect.rect;
             }
@@ -295,14 +314,21 @@ fn pack(
 /// the text is what a pipeline *is* — two materials of the same shape share
 /// one, and the same material recompiled after a colour change does not make a
 /// second.
-#[derive(Default)]
 pub struct PipelineCache {
     by_source: ahash::AHashMap<String, wgpu::RenderPipeline>,
 }
 
+impl Default for PipelineCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PipelineCache {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            by_source: ahash::AHashMap::new(),
+        }
     }
 
     /// The pipeline for this code, built by `make` if it is new.

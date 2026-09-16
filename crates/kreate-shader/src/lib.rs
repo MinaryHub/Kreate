@@ -126,7 +126,13 @@ pub fn compile(graph: &ShaderGraph) -> Result<Compiled, CompileError> {
     let surface_slot = out.emitted[output].expect("the surface was emitted");
 
     let mut wgsl = String::new();
-    let _ = writeln!(wgsl, "// Compiled from the shading graph {:?}.", graph.name);
+    // **Nothing here names the material**, and the omission is load-bearing.
+    // A header comment saying which graph this came from is the obvious
+    // courtesy, and it is the one thing that must not be written: the text is
+    // the pipeline cache's key, so a name in it makes every material its own
+    // pipeline and a scene of tinted plastics compiles a shader apiece. The
+    // name belongs on the pipeline's *label*, where a debugger reads it and a
+    // cache does not.
     let _ = writeln!(
         wgsl,
         "struct MaterialConstants {{ values: array<vec4<f32>, {}> }}",
@@ -315,6 +321,22 @@ mod tests {
         ShaderGraph::standard("Grey", SceneRgb::new(0.8, 0.7, 0.6), 0.25, 0.4)
     }
 
+    /// An image identity, which only a document can hand out.
+    ///
+    /// A real one rather than a placeholder, because a node with no image takes
+    /// the white fallback and never samples anything — which is how the first
+    /// version of the sampling test asked its question of a branch that does
+    /// not sample.
+    fn an_image() -> kreate_scene::document::ImageId {
+        let mut doc = kreate_scene::Document::new();
+        doc.add_image(kreate_scene::Image::new(
+            "Albedo",
+            16,
+            16,
+            kreate_scene::PixelFormat::Rgba8,
+        ))
+    }
+
     /// Parses the emitted function against a stand-in for the real `Surface`.
     ///
     /// A stand-in and not the real library, because that lives in
@@ -357,20 +379,20 @@ mod tests {
             0.9,
         ))
         .expect("compiles");
-        assert_eq!(
-            strip_comments(&a.wgsl),
-            strip_comments(&b.wgsl),
-            "the same graph shape produced different code"
-        );
+        // Compared whole, not with the comments stripped. The first version of
+        // this stripped them, and that hid what the generator was doing: it was
+        // writing the graph's *name* into a header comment, so every material
+        // was its own pipeline — and the test meant to say otherwise had
+        // removed the evidence. A test that filters what it compares has
+        // decided in advance what could be wrong.
+        //
+        // Found by the renderer's cache test, which counted a hundred
+        // pipelines for a hundred tinted plastics.
+        assert_eq!(a.wgsl, b.wgsl, "the same graph shape produced different code");
         assert_ne!(a.constants, b.constants, "the numbers did not travel");
-    }
-
-    /// The generated code without its header comment, which names the graph.
-    fn strip_comments(wgsl: &str) -> String {
-        wgsl.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        // And the two graphs really were named differently, or the claim above
+        // is about nothing.
+        assert_ne!(flat().name, "Other");
     }
 
     #[test]
@@ -442,7 +464,12 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let image = graph
-            .add_node(Node::new("Albedo", NodeKind::Image { image: None }))
+            .add_node(Node::new(
+                "Albedo",
+                NodeKind::Image {
+                    image: Some(an_image()),
+                },
+            ))
             .expect("added");
         graph
             .link(Link {
@@ -462,6 +489,8 @@ mod tests {
             .expect("connects");
 
         let compiled = compile(&graph).expect("compiles");
+        assert_eq!(compiled.images.len(), 1);
+        assert_eq!(compiled.image_slots.len(), 1);
         parses(&compiled);
         assert_eq!(compiled.wgsl.matches("textureSample(").count(), 1);
         assert!(compiled.wgsl.contains(&format!("s.base_color = n{image}_rgba.rgb;")));

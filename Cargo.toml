@@ -8,6 +8,7 @@ members = [
     "crates/kreate-ops-derive",
     "crates/kreate-input",
     "crates/kreate-render",
+    "crates/kreate-shader",
     "crates/kreate-io",
     "crates/kreate-ui",
     "crates/kreate-testkit",
@@ -35,6 +36,7 @@ kreate-ops        = { path = "crates/kreate-ops" }
 kreate-ops-derive = { path = "crates/kreate-ops-derive" }
 kreate-input      = { path = "crates/kreate-input" }
 kreate-render     = { path = "crates/kreate-render" }
+kreate-shader     = { path = "crates/kreate-shader" }
 kreate-io         = { path = "crates/kreate-io" }
 kreate-ui         = { path = "crates/kreate-ui" }
 kreate-testkit    = { path = "crates/kreate-testkit" }

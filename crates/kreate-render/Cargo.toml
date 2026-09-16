@@ -21,6 +21,11 @@ thiserror.workspace = true
 half = "2"
 
 [dev-dependencies]
+# The compiler, for the contract test only. A *dev* dependency deliberately:
+# depending on it for real would give this crate `kreate-scene` through the
+# back door, and the seam §0 draws is that the renderer never sees a document.
+kreate-shader.workspace = true
+kreate-scene.workspace = true
 pollster.workspace = true
 kreate-testkit.workspace = true
 # Golden images for the visual regression harness. PNG only: the goldens are

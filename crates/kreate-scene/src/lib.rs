@@ -7,6 +7,7 @@ pub mod camera;
 pub mod document;
 pub mod edit_session;
 pub mod image;
+pub mod shader;
 pub mod light;
 pub mod modifier;
 pub mod undo;

@@ -14,6 +14,7 @@ pub mod environment;
 pub mod gpu;
 pub mod hiz;
 pub mod lights;
+pub mod material;
 pub mod lod;
 pub mod mesh_gpu;
 pub mod motion;
