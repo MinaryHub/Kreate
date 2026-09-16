@@ -782,3 +782,79 @@ fn a_light_and_a_world_have_separate_identity_counters() {
     assert_eq!(doc.light_by_uid(doc.light_uid(light).unwrap()), Some(light));
     assert_eq!(doc.world_by_uid(doc.world_uid(world).unwrap()), Some(world));
 }
+
+// --- what a kind actually has ---------------------------------------------
+
+use kreate_ops::ops::object::light_param_applies;
+
+/// The kind indices, by name, so the assertions below read as claims about
+/// lights rather than about integers.
+const POINT: u32 = 0;
+const SUN: u32 = 1;
+const SPOT: u32 = 2;
+const AREA: u32 = 3;
+
+#[test]
+fn each_kind_offers_only_the_numbers_it_has() {
+    // The panel draws every parameter the schema lists, and all four kinds
+    // share one block — so a point light was offering a cone angle and an
+    // angular diameter that did nothing at all. `light_params` already
+    // declined to *read* another kind's numbers; this is the other half.
+    assert!(light_param_applies(POINT, "radius"));
+    assert!(!light_param_applies(POINT, "cone_angle"));
+    assert!(!light_param_applies(POINT, "angular_diameter"));
+
+    assert!(light_param_applies(SUN, "angular_diameter"));
+    assert!(!light_param_applies(SUN, "radius"), "a sun has no source size");
+    assert!(!light_param_applies(SUN, "cone_angle"));
+
+    // A spot is a point with a cone, so it keeps the radius.
+    assert!(light_param_applies(SPOT, "radius"));
+    assert!(light_param_applies(SPOT, "cone_angle"));
+    assert!(light_param_applies(SPOT, "blend"));
+
+    // An area light has its own shape rather than a radius, and no cone.
+    assert!(!light_param_applies(AREA, "radius"));
+    assert!(!light_param_applies(AREA, "cone_angle"));
+    assert!(!light_param_applies(AREA, "angular_diameter"));
+}
+
+#[test]
+fn what_every_light_has_is_offered_by_every_kind() {
+    // The default arm. A parameter nobody listed must be shown rather than
+    // hidden: a new field added to the block and forgotten here should appear
+    // in the panel, not silently vanish from it.
+    for kind in [POINT, SUN, SPOT, AREA] {
+        for param in [
+            "kind",
+            "color",
+            "intensity",
+            "exposure",
+            "cast_shadow",
+            "affect_diffuse",
+            "affect_specular",
+            "a_field_nobody_has_added_yet",
+        ] {
+            assert!(
+                light_param_applies(kind, param),
+                "kind {kind} hides `{param}`, which every light has"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_parameter_the_schema_lists_is_offered_by_some_kind() {
+    // A parameter no kind admits to is a field nobody can ever edit — which is
+    // what a typo in `light_param_applies` would produce, silently.
+    use kreate_reflect::OpParams;
+    for desc in kreate_ops::ops::object::SetLightParams::schema() {
+        assert!(
+            [POINT, SUN, SPOT, AREA]
+                .iter()
+                .any(|k| light_param_applies(*k, desc.name)),
+            "`{}` is hidden from every kind of light",
+            desc.name
+        );
+    }
+}

@@ -470,6 +470,37 @@ pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
 }
 
 
+/// Whether a parameter means anything for a light of this kind.
+///
+/// **Why the panel needs this and the operator does not.** Every kind's
+/// numbers ride in one parameter block, deliberately: changing the kind is one
+/// of the edits, and an operator that could not do it would leave the panel
+/// switching between operators mid-gesture. `light_params` already declines to
+/// read another kind's numbers off a light that has none — the comment there
+/// calls showing them "a small lie" — but the *fields* were drawn regardless,
+/// so a point light's panel offered a cone angle and an angular diameter that
+/// did nothing at all.
+///
+/// Here rather than in the shell, for the reason `light_params` is here: two
+/// places deciding what a kind has is how they come to disagree.
+pub fn light_param_applies(kind: u32, param: &str) -> bool {
+    // Indices are the ones `LightKind::ALL` is in, which is the order the
+    // enum's variants are listed and the order a script sends.
+    let point = kind == 0;
+    let sun = kind == 1;
+    let spot = kind == 2;
+    match param {
+        // The size of the source, which is what makes a shadow soft. An area
+        // light has its own shape instead.
+        "radius" => point || spot,
+        "angular_diameter" => sun,
+        "cone_angle" | "blend" => spot,
+        // Everything else is every light's: what kind it is, its colour, how
+        // much of it there is, and what it touches.
+        _ => true,
+    }
+}
+
 // --- the world -------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, OpParams)]

@@ -1599,3 +1599,42 @@ fn shot_menu_row() {
         shot.dump(&format!("menu-{label}"));
     }
 }
+
+/// A picture of each properties tab against a realistic document.
+#[test]
+fn shot_every_tab() {
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    let lamp = doc
+        .objects()
+        .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Light(_)))
+        .map(|(id, _)| id);
+    let cube = doc
+        .objects()
+        .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
+        .map(|(id, _)| id);
+
+    for (label, tab, active) in [
+        ("object", kreate::shell::PropertiesTab::Object, cube),
+        ("data-light", kreate::shell::PropertiesTab::Data, lamp),
+        ("world", kreate::shell::PropertiesTab::World, cube),
+        ("modifiers", kreate::shell::PropertiesTab::Modifiers, cube),
+        ("tool", kreate::shell::PropertiesTab::Tool, cube),
+    ] {
+        let mut doc = doc.clone();
+        doc.selection.clear();
+        if let Some(id) = active {
+            doc.selection.add(id);
+        }
+        let Some(shot) = composite_with(&doc, "en", false, |state| {
+            let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+            for area in areas {
+                state.set_properties_tab(area, tab);
+            }
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("tab-{label}"));
+    }
+}

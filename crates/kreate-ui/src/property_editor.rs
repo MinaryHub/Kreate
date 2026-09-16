@@ -119,12 +119,35 @@ pub fn property_editor(
     schema: &[PropertyDesc],
     values: &mut PropertyMap,
 ) -> bool {
+    property_editor_where(ui, catalog, op_id, schema, values, |_| true)
+}
+
+/// The same, drawing only the parameters `keep` accepts.
+///
+/// **For a parameter block that covers several shapes of the same thing.** A
+/// light's cone angle, angular diameter and source radius all ride in one
+/// block, because changing the *kind* is one of the edits and splitting them
+/// per kind would leave the panel switching operators mid-gesture. That is
+/// right for the operator and wrong for the panel: a point light was offering
+/// a cone angle that did nothing, which is a control that lies.
+///
+/// The predicate takes the parameter's name rather than the panel filtering
+/// the schema itself, so that what a kind *has* stays written down once, next
+/// to the operator that reads it.
+pub fn property_editor_where(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    op_id: &str,
+    schema: &[PropertyDesc],
+    values: &mut PropertyMap,
+    keep: impl Fn(&str) -> bool,
+) -> bool {
     let mut changed = false;
     egui::Grid::new(("props", op_id))
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            for desc in schema {
+            for desc in schema.iter().filter(|d| keep(d.name)) {
                 let (name, tip) = labels(catalog, op_id, desc);
                 let label = ui.label(name);
                 if !tip.is_empty() {
@@ -170,20 +193,27 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
         }
 
         (PropertyKind::Vec3, Some(PropertyValue::Vec3(v))) => {
+            // **Stacked, not in a row.** Three labelled fields want about 240
+            // points and the properties column is nearer 180, so the row ran
+            // off the right edge and Z was simply not on screen — a location
+            // you cannot read in the panel whose job is to show it. Blender
+            // stacks these for the same reason, in both its properties editor
+            // and its sidebar, and the axis markers make the column scan as
+            // fast as a row did.
             let mut out = v;
-            ui.horizontal(|ui| {
-                // X/Y/Z rather than three unlabelled boxes: in a modeller the
-                // axis is the first thing you need to know.
+            ui.vertical(|ui| {
                 for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-                    // i18n-exempt: axis letters are conventionally untranslated
-                    ui.label(*axis);
-                    let mut component = out[i];
-                    let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
-                    axis_marker(ui, field.response.rect, i);
-                    if field.inner {
-                        out[i] = component;
-                        changed = true;
-                    }
+                    ui.horizontal(|ui| {
+                        // i18n-exempt: axis letters are conventionally untranslated
+                        ui.label(*axis);
+                        let mut component = out[i];
+                        let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
+                        axis_marker(ui, field.response.rect, i);
+                        if field.inner {
+                            out[i] = component;
+                            changed = true;
+                        }
+                    });
                 }
             });
             if changed {

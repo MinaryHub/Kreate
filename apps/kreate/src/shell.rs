@@ -2772,12 +2772,22 @@ fn draw_light_data(
     let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::light_params(
         light,
     ));
-    if kreate_ui::property_editor::property_editor(
+    // Only the numbers this kind has. All four kinds' parameters ride in one
+    // block on purpose — changing the kind is one of the edits — but a point
+    // light drawing a cone angle and an angular diameter was offering two
+    // dials that did nothing. What a kind has is written down beside the
+    // operator, so the panel and the operator cannot come to disagree.
+    let kind = match params.get("kind") {
+        Some(kreate_reflect::PropertyValue::Enum(k)) => *k,
+        _ => 0,
+    };
+    if kreate_ui::property_editor::property_editor_where(
         ui,
         &state.catalog,
         info.id,
         info.schema,
         &mut params,
+        |name| kreate_ops::ops::object::light_param_applies(kind, name),
     ) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "light.set_properties", params, dragging);
