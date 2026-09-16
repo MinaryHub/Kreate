@@ -46,6 +46,14 @@ struct FieldAttrs {
     unit: Option<String>,
     /// For enum-typed fields: the variant names shown in the UI.
     variants: Option<Vec<String>>,
+    /// Whether a three-component field is a colour rather than a direction.
+    ///
+    /// Only the *kind* changes; the value stays three numbers, so scripting,
+    /// keymaps, undo and every file already written see exactly what they saw
+    /// before. What changes is that the editor stops labelling the components
+    /// X, Y and Z — a base colour is not a direction, and calling red "X" is
+    /// the interface asserting something untrue about the value.
+    color: bool,
 }
 
 struct Field {
@@ -219,6 +227,13 @@ fn parse_param_attr(args: &Group, out: &mut FieldAttrs) -> Result<(), String> {
             return Err("`variants` must be followed by a parenthesised list".into());
         }
 
+        // `color`, a flag with no value
+        if key == "color" {
+            out.color = true;
+            i += 1;
+            continue;
+        }
+
         // `key = value`
         if !matches!(tokens.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=') {
             i += 1;
@@ -246,13 +261,22 @@ fn parse_param_attr(args: &Group, out: &mut FieldAttrs) -> Result<(), String> {
             other => {
                 return Err(format!(
                     "unknown #[param] key `{other}`; expected one of min, max, \
-                     soft_min, soft_max, step, unit, variants"
+                     soft_min, soft_max, step, unit, variants, color"
                 ))
             }
         }
         i = j + 1;
     }
     Ok(())
+}
+
+/// Whether three numbers are a colour or a direction.
+fn three_kind(field: &Field) -> String {
+    if field.attrs.color {
+        "PropertyKind::Color".into()
+    } else {
+        "PropertyKind::Vec3".into()
+    }
 }
 
 /// Maps a Rust type to the reflected kind and the conversion code.
@@ -299,12 +323,12 @@ fn type_info(field: &Field) -> Result<TypeInfo, String> {
             from_value: "v.as_text().map(|s| s.to_string())",
         },
         "[f64;3]" => TypeInfo {
-            kind: "PropertyKind::Vec3".into(),
+            kind: three_kind(field),
             to_value: "PropertyValue::Vec3(self.FIELD)",
             from_value: "v.as_vec3()",
         },
         "[f32;3]" => TypeInfo {
-            kind: "PropertyKind::Vec3".into(),
+            kind: three_kind(field),
             to_value: "PropertyValue::Vec3([self.FIELD[0] as f64, self.FIELD[1] as f64, self.FIELD[2] as f64])",
             from_value: "v.as_vec3().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32])",
         },

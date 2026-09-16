@@ -17,3 +17,4 @@ kreate-input.workspace = true
 kreate-math.workspace = true
 kreate-render.workspace = true
 egui.workspace = true
+ab_glyph.workspace = true

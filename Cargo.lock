@@ -1712,6 +1712,7 @@ dependencies = [
 name = "kreate-ui"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "egui",
  "kreate-i18n",
  "kreate-input",

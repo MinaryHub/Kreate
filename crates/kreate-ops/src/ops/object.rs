@@ -216,6 +216,7 @@ pub struct AddLightParams {
     /// Not an amount of light — that is `intensity`, in physical units. The
     /// operator decodes it into the working space on the way in, which is the
     /// one place a colour conversion belongs.
+    #[param(color)]
     pub color: [f64; 3],
     /// How much light, in the unit the chosen kind uses — candela for a point
     /// or a spot, lux for a sun, nits for an area light.
@@ -260,6 +261,7 @@ pub struct SetLightParams {
     /// The light's tint, as the colour picker holds it: sRGB, bounded by one.
     ///
     /// Not an amount of light. See `AddLightParams::color`.
+    #[param(color)]
     pub color: [f64; 3],
     /// How much light, in the unit the chosen kind uses \u2014 candela for a point
     /// or a spot, lux for a sun, nits for an area light.
@@ -477,6 +479,7 @@ pub struct SetWorldParams {
     /// A reflectance-shaped number for something that is an *emission*, which
     /// is the compromise a colour picker forces: a swatch cannot express a
     /// hundred nits. `strength` is the amount, and the two multiply.
+    #[param(color)]
     pub color: [f64; 3],
     /// How much light the background gives, linear.
     ///
@@ -677,6 +680,7 @@ pub struct SetMaterialParams {
     /// For a dielectric this is the diffuse albedo and for a metal the specular
     /// colour. `metallic` says which, which is the whole trick of the
     /// metal-roughness parameterisation.
+    #[param(color)]
     pub color: [f64; 3],
     #[param(min = 0.0, max = 1.0)]
     pub metallic: f64,
@@ -820,6 +824,82 @@ impl Operator for SetMaterialImage {
         };
         material.base_color_image = image;
         Ok(OpResult::Finished)
+    }
+}
+
+/// Gives the active object a material, so that there is one to edit.
+///
+/// **Why this has to exist at all.** A mesh starts with no material and an
+/// empty slot list, which is the honest state — §1.4 is deliberate that a face
+/// index means nothing until a slot fills it. But nothing else creates one, so
+/// every material control in the application was unreachable: the Material tab
+/// is offered only when there is a material, and there was no way to get the
+/// first one. The colour, the metallic and roughness dials and the base colour
+/// texture were all finished and none of them was a feature anybody had.
+///
+/// **On the mesh's slot, not the object's override.** The slot is what a face
+/// index points at and what a linked copy shares, so this is "the material of
+/// this chair" rather than "the material of this one copy of it". The override
+/// stays what it is for — making one copy differ.
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct NewMaterialParams {}
+
+pub struct NewMaterial;
+
+impl Operator for NewMaterial {
+    type Params = NewMaterialParams;
+
+    fn id() -> &'static str {
+        "material.new"
+    }
+    fn label() -> &'static str {
+        "New Material"
+    }
+    /// Only a mesh, and only one that has no material yet.
+    ///
+    /// **Why not "make another one", which is what Blender's button does.**
+    /// Blender's Material tab carries a slot *list*, so a second material is
+    /// visible the moment it exists and the first is one click away. There is
+    /// no list here yet, and the panel shows this button only while the slot
+    /// is empty — so a second material would be created, assigned, and leave
+    /// the first with nothing pointing at it and no way back to it. Refusing
+    /// is the honest answer until there is a list to pick from.
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_mesh(doc).is_some() && active_material(doc).is_none()
+    }
+
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // Checked again rather than trusted: `poll` gates the button, and a
+        // script or a replayed step reaches `execute` without it.
+        if active_material(doc.document()).is_some() {
+            return Ok(OpResult::Cancelled);
+        }
+        // Blender's defaults, and not an accident: a mid grey at 0.5 roughness
+        // is the surface a modeller can read form from. Pure white blows out
+        // under any light worth having and a mirror shows the room instead of
+        // the model.
+        let d = doc.document_mut();
+        let material = d.add_material(kreate_scene::Material {
+            name: "Material".into(),
+            ..Default::default()
+        });
+        d.set_mesh_slot(mesh, 0, Some(material));
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The mesh the active object draws, if it draws one.
+pub fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
+    match doc.object(doc.selection.active?)?.data {
+        kreate_scene::document::ObjectData::Mesh(mesh) => Some(mesh),
+        _ => None,
     }
 }
 
@@ -1684,6 +1764,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetLight>();
     registry.register::<SetWorld>();
     registry.register::<SetWorldImage>();
+    registry.register::<NewMaterial>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();

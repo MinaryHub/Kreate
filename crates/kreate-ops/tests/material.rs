@@ -418,3 +418,104 @@ fn the_parameters_that_read_a_material_back_leave_it_alone() {
     set_image(&registry, &mut history, &mut doc, &ctx, &read.uid);
     assert_eq!(doc.material(material).unwrap().base_color_image, Some(image));
 }
+
+// --- getting the first material -------------------------------------------
+
+fn new_material(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+) {
+    history
+        .dispatch(registry, doc, ctx, "material.new", &PropertyMap::new())
+        .expect("the operator ran");
+}
+
+/// The same, for the cases where the operator is expected to decline.
+fn new_material_refused(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+) {
+    // A refusal arrives as a failed poll rather than an error: the operator
+    // does not apply here, which is the same thing that greys the button out.
+    assert!(
+        history
+            .dispatch(registry, doc, ctx, "material.new", &PropertyMap::new())
+            .is_err(),
+        "the operator ran where it should have declined"
+    );
+}
+
+#[test]
+fn a_mesh_with_no_material_can_be_given_one() {
+    // The gap that made every material control unreachable: a mesh starts with
+    // no material, and until this operator existed nothing created one.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (mesh, object) = cube(&mut doc);
+    doc.selection.add(object);
+    assert!(doc.material_at(object, 0).is_none(), "it starts with none");
+
+    new_material(&registry, &mut history, &mut doc, &ctx);
+    let material = doc.material_at(object, 0).expect("it has one now");
+    assert_eq!(material.name, "Material");
+    // On the *mesh's* slot, which is what a face index points at and what a
+    // linked copy shares. An object override would make it the material of
+    // this one copy rather than of the thing being modelled.
+    assert!(doc.mesh_slots(mesh).first().copied().flatten().is_some());
+}
+
+#[test]
+fn undoing_takes_the_material_back_off() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (_, object) = cube(&mut doc);
+    doc.selection.add(object);
+    new_material(&registry, &mut history, &mut doc, &ctx);
+    assert!(history.undo(&mut doc), "there was nothing to undo");
+    assert!(
+        doc.material_at(object, 0).is_none(),
+        "undo left the material assigned"
+    );
+}
+
+#[test]
+fn a_second_press_does_not_replace_the_material_that_is_there() {
+    // Blender's button says "New" and makes another one; this refuses instead,
+    // because with no material *list* in the panel a second material would be
+    // created, assigned, and leave the first unreachable with no way back to
+    // it. Refusing is the honest answer until there is a list to pick from.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (_, object) = cube(&mut doc);
+    doc.selection.add(object);
+    new_material(&registry, &mut history, &mut doc, &ctx);
+    let first = doc.material_id_at(object, 0).expect("one material");
+
+    new_material_refused(&registry, &mut history, &mut doc, &ctx);
+    assert_eq!(
+        doc.material_id_at(object, 0),
+        Some(first),
+        "a second press replaced the material that was already there"
+    );
+    assert_eq!(doc.material_count(), 1, "a material was left with nothing using it");
+}
+
+#[test]
+fn a_lamp_is_refused_rather_than_given_a_material() {
+    // Nothing to put one on: a light has no slots. The Material tab is not
+    // offered for one either, so this is the operator agreeing with the panel
+    // rather than a second opinion about it.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let light = doc.add_light(kreate_scene::Light::of_kind(
+        "Bulb",
+        kreate_scene::LightKind::BULB,
+    ));
+    let object = doc.add_object(Object::new("Lamp", ObjectData::Light(light)));
+    doc.selection.add(object);
+
+    let depth = history.entries().len();
+    new_material_refused(&registry, &mut history, &mut doc, &ctx);
+    assert_eq!(doc.material_count(), 0, "a lamp was given a material");
+    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+}

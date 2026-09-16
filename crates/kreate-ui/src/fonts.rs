@@ -278,3 +278,59 @@ mod tests {
         prewarm(&ctx);
     }
 }
+
+/// The characters in `text` that the bundled font cannot draw.
+///
+/// **Why this is public rather than a detail of a test.** The font is a subset
+/// and the application has no system-font fallback, so a character outside the
+/// subset is not a substituted glyph — it is a blank box. That is invisible to
+/// every other kind of test: the layout is right, the click works, the string
+/// is correct, and the button is empty. Four symbols in the application's own
+/// chrome were tofu this way, including one added the same week it was found.
+///
+/// Each crate that hardcodes a symbol tests its own with this, because the
+/// symbols are where they are used and a central list would drift.
+pub fn missing_glyphs(text: &str) -> Vec<char> {
+    use ab_glyph::Font as _;
+    let font = ab_glyph::FontRef::try_from_slice(PRETENDARD).expect("the bundled font parses");
+    let mut missing: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && font.glyph_id(*c).0 == 0)
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    missing
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    use super::*;
+
+    #[test]
+    fn the_font_really_does_report_a_hole() {
+        // The check itself, checked. A coverage test that answered "nothing is
+        // missing" for every input would pass on a font with nothing in it.
+        // U+2715 is the multiplication X that a close button wants and this
+        // subset does not carry — the specific character that started this.
+        assert_eq!(missing_glyphs("\u{2715}"), vec!['\u{2715}']);
+        assert!(missing_glyphs("Kreate 재질 \u{00D7} \u{25CF}").is_empty());
+    }
+
+    #[test]
+    fn every_symbol_this_crate_draws_is_in_the_font() {
+        // The symbols this crate hardcodes, gathered here because a test that
+        // walked the source would be a parser. When a new one is added to a
+        // widget it goes in this string too — the list is short and the
+        // failure it prevents is an empty button.
+        let drawn = concat!(
+            "\u{2190}", // keymap_editor: reset a binding
+            "\u{25B6}\u{25BC}", // collapsing headers
+        );
+        assert_eq!(
+            missing_glyphs(drawn),
+            Vec::<char>::new(),
+            "the interface draws a character the bundled subset has no glyph for, \
+             which is a blank box on screen and not a fallback"
+        );
+    }
+}

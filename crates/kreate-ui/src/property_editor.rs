@@ -191,6 +191,39 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
             }
         }
 
+        (PropertyKind::Color, Some(PropertyValue::Vec3(v))) => {
+            // A bar that opens a picker, and nothing else on the row.
+            //
+            // The three numbers *are* worth having — a base colour is often a
+            // measured reflectance somebody needs to type exactly — but they
+            // belong in the picker, which already carries R/G/B, H/S/V and a
+            // hex field. Beside the swatch they did not fit: the properties
+            // column is a column, and three float fields ran off the right
+            // edge of it with the last one cut in half. A value you cannot
+            // read is worse than one behind a click.
+            //
+            // The values are display-referred already: `as_swatch` encodes,
+            // which is why a default base colour of 0.8 scene-linear reads
+            // 0.906. So they go to the picker as they are. Handing it
+            // scene-linear numbers would put the wheel's midpoint where the
+            // eye finds nothing.
+            let mut rgb = [v[0] as f32, v[1] as f32, v[2] as f32];
+            let response = ui
+                .scope(|ui| {
+                    // A wide bar rather than a small square, so that the
+                    // colour is legible as a colour.
+                    let width = ui.available_width().clamp(48.0, 160.0);
+                    ui.spacing_mut().interact_size.x = width;
+                    egui::widgets::color_picker::color_edit_button_rgb(ui, &mut rgb)
+                })
+                .inner;
+            if response.changed() {
+                let out = [rgb[0] as f64, rgb[1] as f64, rgb[2] as f64];
+                values.set(desc.name, desc.clamp(PropertyValue::Vec3(out)));
+                changed = true;
+            }
+        }
+
         (PropertyKind::Text, Some(PropertyValue::Text(v))) => {
             let mut text = v;
             if ui.text_edit_singleline(&mut text).changed() {

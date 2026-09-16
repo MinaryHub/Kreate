@@ -127,6 +127,15 @@ pub enum PropertyKind {
     Int,
     Float,
     Vec3,
+    /// Three numbers that are a colour rather than a direction.
+    ///
+    /// Carried as a [`PropertyValue::Vec3`], so nothing about storage,
+    /// scripting, undo or any file already written changes. What changes is
+    /// the widget: a swatch that opens a picker, instead of three spinners
+    /// labelled X, Y and Z. The labels were not merely unhelpful — a base
+    /// colour has no axes, and the axis colours the editor paints down the
+    /// side of each field meant something about direction.
+    Color,
     Text,
     Enum {
         variants: &'static [&'static str],

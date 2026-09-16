@@ -765,14 +765,23 @@ impl PropertiesTab {
     /// a light is a `◇` in both places, which is most of what an icon set is
     /// for. Real icons replace these; the tab column does not change when they
     /// do.
+    /// The glyph on the tab's button in the column.
+    ///
+    /// **Every one of these has to be in the bundled font**, which is a
+    /// subset. Three of them were not, and drew as tofu boxes in the
+    /// application's own chrome. There is no system-font fallback, so a glyph
+    /// the subset lacks is not a degraded icon, it is a blank square. The
+    /// test in `kreate_ui::fonts` now checks this rather than trusting it.
     fn glyph(self) -> &'static str {
         match self {
-            Self::Tool => "▤",
-            Self::Object => "▣",
+            // Solid for a thing and hollow for the space around it; the
+            // sphere is the material, which is what every renderer uses.
+            Self::Tool => "▢",
+            Self::Object => "■",
             Self::Data => "◇",
             Self::Material => "●",
             Self::World => "○",
-            Self::Modifiers => "◈",
+            Self::Modifiers => "◆",
         }
     }
 
@@ -825,6 +834,10 @@ struct Labels {
     world_clear_image: String,
     material_pick_image: String,
     material_clear_image: String,
+    tab_material: String,
+    material_new: String,
+    material_none: String,
+    material_base_colour: String,
     recover_open: String,
     recover_discard: String,
     recover_discard_all: String,
@@ -893,6 +906,10 @@ impl Labels {
             world_clear_image: t("world-clear-image"),
             material_pick_image: t("material-pick-image"),
             material_clear_image: t("material-clear-image"),
+            tab_material: t("tab-material"),
+            material_new: t("material-new"),
+            material_none: t("material-none"),
+            material_base_colour: t("material-base-colour"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
@@ -2330,11 +2347,16 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
     .filter(|tab| match tab {
         PropertiesTab::Object => active.is_some(),
         PropertiesTab::Data => has_data,
-        PropertiesTab::Material => doc
-            .selection
-            .active
-            .and_then(|id| doc.material_id_at(id, 0))
-            .is_some(),
+        // Whenever the active object is a *mesh*, not whenever it already has
+        // a material. Offering the tab only once a material exists made the
+        // whole material system unreachable: nothing else creates one, so a
+        // new document's cube had no way to get its first. The tab is where
+        // that happens, which is why it has to be there before there is
+        // anything in it, the same way the Modifiers tab shows an empty stack.
+        PropertiesTab::Material => matches!(
+            active.map(|o| &o.data),
+            Some(kreate_scene::document::ObjectData::Mesh(_))
+        ),
         // The world is the document's, not a selection's — so it is offered
         // whenever there is one, including with nothing selected at all. That
         // is the tab somebody reaches for to turn the background down, and
@@ -2439,6 +2461,11 @@ fn draw_camera_data(
 /// The first slot, because that is the one the raster pass draws. A panel over
 /// the others would be editing materials nothing shows — see §7.5 on why the
 /// per-face slots wait for the draws to be split.
+/// The cross on a slot that holds something. A glyph rather than the word
+/// "Clear", because it sits beside a name that needs the width.
+// i18n-exempt: a symbol, not a word
+const CLEAR_GLYPH: &str = "×";
+
 fn draw_material_tab(
     ui: &mut Ui,
     state: &mut ShellState,
@@ -2449,7 +2476,18 @@ fn draw_material_tab(
     let Some(object) = doc.selection.active else {
         return;
     };
+    ui.heading(&l.tab_material);
+    // The empty state is a state, and it is the one a new document is in. A
+    // panel that drew nothing here was the reason every material control in
+    // the application was unreachable: nothing else creates the first
+    // material, so there was no way to get one.
     let Some(material) = doc.material_at(object, 0) else {
+        ui.add_space(4.0);
+        ui.weak(&l.material_none);
+        ui.add_space(4.0);
+        if ui.button(&l.material_new).clicked() {
+            state.queue.push(Command::NewMaterial);
+        }
         return;
     };
     let Some(info) = registry.get("material.set_properties") else {
@@ -2457,17 +2495,41 @@ fn draw_material_tab(
     };
     // i18n-exempt: a material's name is the user's own text
     ui.label(&material.name);
-    // §7.7's gate again, one layer up: the image node, the compiler's layer
-    // assignment, the texture array and now the surface coordinates all stand,
-    // and until there is a control here none of it is a feature anybody has.
+    ui.separator();
+
+    // The base colour texture. The image node, the compiler's layer
+    // assignment, the texture array and the surface coordinates all stand, and
+    // until there is a control here none of it is a feature anybody has.
+    //
+    // The slot says what is in it. A button alone could not be read: with a
+    // texture assigned and a white colour the panel looked exactly like a
+    // panel with no texture, so the one question somebody opens this tab to
+    // answer had no answer on screen.
+    ui.label(&l.material_base_colour);
     ui.horizontal(|ui| {
-        if ui.button(&l.material_pick_image).clicked() {
-            state.queue.push(Command::PickMaterialImage);
-        }
-        if material.base_color_image.is_some()
-            && ui.button(&l.material_clear_image).clicked()
-        {
-            state.queue.push(Command::ClearMaterialImage);
+        let assigned = material
+            .base_color_image
+            .and_then(|id| doc.image(id))
+            .map(|image| image.name.clone());
+        match &assigned {
+            // i18n-exempt: an image's name is the user's own text
+            Some(name) => {
+                if ui.button(name).on_hover_text(&l.material_pick_image).clicked() {
+                    state.queue.push(Command::PickMaterialImage);
+                }
+                if ui
+                    .button(CLEAR_GLYPH)
+                    .on_hover_text(&l.material_clear_image)
+                    .clicked()
+                {
+                    state.queue.push(Command::ClearMaterialImage);
+                }
+            }
+            None => {
+                if ui.button(&l.material_pick_image).clicked() {
+                    state.queue.push(Command::PickMaterialImage);
+                }
+            }
         }
     });
     ui.separator();
@@ -2653,8 +2715,11 @@ menu-file-save-as = Save As...
 menu-file-export = Export...
 world-pick-image = Environment...
 world-clear-image = Clear
-material-pick-image = Base Colour...
+material-pick-image = Open Image...
 material-clear-image = Clear
+material-new = New Material
+material-none = This object has no material.
+material-base-colour = Base Colour
 recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
@@ -2861,8 +2926,11 @@ menu-file-save-as = 다른 이름으로 저장...
 menu-file-export = 내보내기...
 world-pick-image = 환경 이미지...
 world-clear-image = 지우기
-material-pick-image = 베이스 컬러...
+material-pick-image = 이미지 열기...
 material-clear-image = 지우기
+material-new = 새 재질
+material-none = 이 물체에는 재질이 없습니다.
+material-base-colour = 베이스 컬러
 recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
@@ -3495,9 +3563,16 @@ mod tests {
     }
 
     #[test]
-    fn a_material_tab_needs_a_material_and_not_just_a_mesh() {
-        // A mesh with an empty slot has nothing to edit, and a panel over it
-        // would be offering fields with no datablock behind them.
+    fn a_mesh_gets_a_material_tab_before_it_has_a_material() {
+        // **This test used to assert the opposite**, on the reasoning that a
+        // mesh with an empty slot has nothing to edit and a panel over it
+        // would offer fields with no datablock behind them. The fields part
+        // was right and the conclusion was wrong, because it left nowhere to
+        // *make* the first material: nothing else in the application creates
+        // one, so a new document's cube could never get one and every material
+        // control — the colour, the dials, the base colour texture — was
+        // unreachable. The tab now shows a button instead of fields, which is
+        // what an empty slot deserves.
         let mut doc = Document::new();
         let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
         let object = doc.add_object(kreate_scene::document::Object::new(
@@ -3505,11 +3580,29 @@ mod tests {
             kreate_scene::document::ObjectData::Mesh(mesh),
         ));
         doc.selection.add(object);
-        assert!(!available_tabs(&doc).contains(&PropertiesTab::Material));
+        assert!(available_tabs(&doc).contains(&PropertiesTab::Material));
 
         let material = doc.add_material(kreate_scene::Material::default());
         doc.set_mesh_slots(mesh, vec![Some(material)]);
         assert!(available_tabs(&doc).contains(&PropertiesTab::Material));
+    }
+
+    #[test]
+    fn something_that_is_not_a_mesh_gets_no_material_tab() {
+        // The half of the old rule that still holds. A lamp has no slots to
+        // put a material in, so the tab would be a button that did nothing —
+        // and `material.new` refuses for the same reason.
+        let mut doc = Document::new();
+        let light = doc.add_light(kreate_scene::Light::of_kind(
+            "Bulb",
+            kreate_scene::LightKind::BULB,
+        ));
+        let object = doc.add_object(kreate_scene::document::Object::new(
+            "Lamp",
+            kreate_scene::document::ObjectData::Light(light),
+        ));
+        doc.selection.add(object);
+        assert!(!available_tabs(&doc).contains(&PropertiesTab::Material));
     }
 
     #[test]
@@ -3752,6 +3845,9 @@ mod tests {
             "menu-file-save",
             "menu-file-save-as",
             "menu-file-export",
+            "material-new",
+            "material-none",
+            "material-base-colour",
             "world-pick-image",
             "world-clear-image",
             "material-pick-image",
@@ -3793,5 +3889,45 @@ mod tests {
         ] {
             assert!(catalog.has(key), "`{key}` is missing from the catalog");
         }
+    }
+
+    // --- what the chrome can actually draw -------------------------------
+
+    /// Every tab, so that a new one cannot be added without a glyph.
+    const ALL_TABS: [PropertiesTab; 6] = [
+        PropertiesTab::Tool,
+        PropertiesTab::Object,
+        PropertiesTab::Data,
+        PropertiesTab::Material,
+        PropertiesTab::World,
+        PropertiesTab::Modifiers,
+    ];
+
+    #[test]
+    fn every_glyph_the_chrome_draws_is_in_the_bundled_font() {
+        // The font is a subset and there is no system fallback, so a symbol
+        // outside it is a blank box rather than a substituted icon. Three of
+        // the six tab glyphs were exactly that, in the application's own
+        // chrome, and no test could see it: the layout was right, the click
+        // worked, the tooltip was correct and the button was empty.
+        let mut drawn: String = ALL_TABS.iter().map(|t| t.glyph()).collect();
+        drawn.push_str(CLEAR_GLYPH);
+        assert_eq!(
+            kreate_ui::fonts::missing_glyphs(&drawn),
+            Vec::<char>::new(),
+            "the properties column draws a character the font has no glyph for"
+        );
+    }
+
+    #[test]
+    fn no_two_tabs_wear_the_same_glyph() {
+        // The glyph *is* the button — the name is only a tooltip — so two tabs
+        // sharing one are two buttons a user cannot tell apart without
+        // hovering both.
+        let mut seen: Vec<&str> = ALL_TABS.iter().map(|t| t.glyph()).collect();
+        seen.sort_unstable();
+        let count = seen.len();
+        seen.dedup();
+        assert_eq!(count, seen.len(), "two property tabs share a glyph");
     }
 }

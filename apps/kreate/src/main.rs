@@ -1990,6 +1990,9 @@ impl App {
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage => self.pick_material_image(),
                 Command::ClearMaterialImage => self.clear_material_image(),
+                Command::NewMaterial => {
+                    self.run_op("material.new", kreate_ops::PropertyMap::new())
+                }
                 Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
                     self.load_from(&path);

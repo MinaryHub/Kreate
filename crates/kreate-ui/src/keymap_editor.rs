@@ -203,9 +203,11 @@ fn row(
         ui.label(label);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // i18n-exempt: a reset arrow is a symbol, not prose
+            // i18n-exempt: a symbol, not prose. A left arrow rather than the
+            // turning arrow this wants: the bundled subset has no U+21BA and
+            // drew it as a tofu box.
             if ui
-                .add_enabled(changed, egui::Button::new("↺"))
+                .add_enabled(changed, egui::Button::new("←"))
                 .on_hover_text(crate::text::wrap_tooltip(ui, &text.reset_hint))
                 .clicked()
             {

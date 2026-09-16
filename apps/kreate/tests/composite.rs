@@ -1526,3 +1526,49 @@ fn a_menu_row_shows_its_shortcut() {
         "the row looks the same with and without a shortcut ({differing} pixels)"
     );
 }
+
+/// A picture of the Material tab, for looking at rather than asserting on.
+#[test]
+fn shot_material_tab() {
+    // Two documents side by side: the cube a new document gives you, and the
+    // same cube with a material on it. The tab is the same tab.
+    let bare = doc_with_cube();
+    let mut dressed = doc_with_cube();
+    {
+        let mesh = dressed.meshes().next().map(|(id, _)| id).expect("a mesh");
+        let material = dressed.add_material(kreate_scene::Material {
+            name: "Material".into(),
+            base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+            ..Default::default()
+        });
+        dressed.set_mesh_slot(mesh, 0, Some(material));
+    }
+    let mut textured = doc_with_cube();
+    {
+        let mesh = textured.meshes().next().map(|(id, _)| id).expect("a mesh");
+        let image = textured.add_image(kreate_scene::Image::new(
+            "bricks.png",
+            512,
+            512,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let material = textured.add_material(kreate_scene::Material {
+            name: "Brick".into(),
+            base_color_image: Some(image),
+            ..Default::default()
+        });
+        textured.set_mesh_slot(mesh, 0, Some(material));
+    }
+    for (label, doc) in [("bare", &bare), ("dressed", &dressed), ("textured", &textured)] {
+        let Some(shot) = composite_with(doc, "en", false, |state| {
+            let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+            for area in areas {
+                state.set_properties_tab(area, kreate::shell::PropertiesTab::Material);
+            }
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("material-{label}"));
+    }
+}

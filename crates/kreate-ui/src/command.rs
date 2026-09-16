@@ -100,6 +100,12 @@ pub enum Command {
     PickMaterialImage,
     /// Take the base colour map off the active material.
     ClearMaterialImage,
+    /// Give the active object a material, so that there is one to edit.
+    ///
+    /// A command rather than a menu entry wired straight to the operator
+    /// because the button that runs it lives in the Material tab, which is the
+    /// only place somebody looks when they want one.
+    NewMaterial,
     /// Ask for a path and write the scene to an interchange format.
     ///
     /// Separate from saving, because it is not saving: an export goes through

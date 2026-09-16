@@ -47,6 +47,9 @@ kreate-reflect    = { path = "crates/kreate-reflect" }
 wgpu       = "=29.0.4"
 winit      = "=0.30.13"
 egui       = "=0.35.0"
+# Reading the bundled font's glyph coverage. Already in the tree as egui's
+# own rasteriser, so this costs no build time.
+ab_glyph   = "0.2"
 egui-wgpu  = "=0.35.0"
 egui-winit = "=0.35.0"
 
