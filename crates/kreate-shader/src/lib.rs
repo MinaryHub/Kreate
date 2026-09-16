@@ -269,6 +269,18 @@ impl Emitter<'_> {
                     }
                 }
             }
+            NodeKind::Multiply => {
+                // A slot it does not read, for the reason the image node takes
+                // one: the constant layout is the graph's *shape*, so swapping
+                // a kind for another must not move everything after it.
+                self.constants.push([0.0; 4]);
+                // White on both sides, so an unwired factor is the identity
+                // rather than black — a node that darkens to nothing while it
+                // is being built reads as a broken material.
+                let a = self.input_expr(node, 0, "vec3<f32>(1.0)")?;
+                let b = self.input_expr(node, 1, "vec3<f32>(1.0)")?;
+                let _ = writeln!(self.body, "    let n{node} = {a} * {b};");
+            }
             NodeKind::Surface { base_color, metallic, roughness } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
@@ -569,5 +581,89 @@ mod tests {
             to_socket: 0,
         });
         assert_eq!(compile(&graph), Err(CompileError::BrokenLink));
+    }
+}
+
+#[cfg(test)]
+mod multiply_tests {
+    use super::*;
+    use kreate_math::SceneRgb;
+    use kreate_scene::shader::{Link, Node};
+
+    /// The graph a textured material compiles to: image and colour, multiplied.
+    fn tinted() -> (ShaderGraph, kreate_scene::document::ImageId) {
+        let mut doc = kreate_scene::Document::new();
+        let image = doc.add_image(kreate_scene::Image::new(
+            "Bricks",
+            4,
+            4,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let material = kreate_scene::Material {
+            base_color: SceneRgb::new(0.5, 0.25, 0.125),
+            base_color_image: Some(image),
+            ..Default::default()
+        };
+        (ShaderGraph::for_material(&material), image)
+    }
+
+    #[test]
+    fn a_tinted_texture_samples_once_and_multiplies() {
+        let (graph, image) = tinted();
+        let compiled = compile(&graph).expect("it compiles");
+        assert_eq!(compiled.images, vec![image], "the texture is not uploaded");
+        assert_eq!(
+            compiled.wgsl.matches("textureSample").count(),
+            1,
+            "a tint should not cost a second tap"
+        );
+        assert!(
+            compiled.wgsl.contains(" * "),
+            "nothing is multiplied:\n{}",
+            compiled.wgsl
+        );
+    }
+
+    #[test]
+    fn an_unwired_factor_is_white_rather_than_black() {
+        // A node being built has one side connected and the other not. Zero
+        // would make the surface black, which reads as a broken material rather
+        // than an unfinished one — the same judgement the empty image node's
+        // white fallback makes.
+        let mut graph = ShaderGraph::standard("M", SceneRgb::new(0.8, 0.8, 0.8), 0.0, 0.5);
+        let node = graph
+            .add_node(Node::new("Multiply", kreate_scene::shader::NodeKind::Multiply))
+            .expect("not a surface");
+        graph
+            .link(Link { from_node: node, from_socket: 0, to_node: 0, to_socket: 0 })
+            .expect("a colour into a base colour");
+        let compiled = compile(&graph).expect("it compiles");
+        assert!(
+            compiled.wgsl.contains("vec3<f32>(1.0) * vec3<f32>(1.0)"),
+            "an unwired multiply is not the identity:\n{}",
+            compiled.wgsl
+        );
+    }
+
+    #[test]
+    fn two_materials_that_differ_only_in_their_numbers_share_a_pipeline() {
+        // The claim the whole design rests on, now that a graph has more than
+        // one shape. Two textured materials with different colours and
+        // different *images* must compile to the same text: the image is a
+        // layer index and the colour is a constant, and neither is code.
+        let mut doc = kreate_scene::Document::new();
+        let one = doc.add_image(kreate_scene::Image::new("A", 4, 4, kreate_scene::PixelFormat::Rgba8));
+        let two = doc.add_image(kreate_scene::Image::new("B", 8, 8, kreate_scene::PixelFormat::Rgba8));
+        let graph_of = |image, color| {
+            ShaderGraph::for_material(&kreate_scene::Material {
+                base_color: color,
+                base_color_image: Some(image),
+                ..Default::default()
+            })
+        };
+        let a = compile(&graph_of(one, SceneRgb::new(1.0, 0.0, 0.0))).expect("compiles");
+        let b = compile(&graph_of(two, SceneRgb::new(0.0, 0.0, 1.0))).expect("compiles");
+        assert_eq!(a.wgsl, b.wgsl, "a texture swap became a pipeline");
+        assert_ne!(a.constants, b.constants, "the colours did not reach the numbers");
     }
 }

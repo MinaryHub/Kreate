@@ -754,6 +754,89 @@ pub fn active_material(doc: &Document) -> Option<kreate_scene::MaterialId> {
     doc.material_id_at(object, 0)
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetMaterialImageParams {
+    /// The image datablock's identity, in decimal. Empty takes the texture off.
+    ///
+    /// Text and an identity for the two reasons [`SetWorldImageParams::uid`]
+    /// gives: a position says where the image sits today, and a `Uid` does not
+    /// survive the property system's signed integer.
+    pub uid: String,
+}
+
+/// Points the active object's material at a base colour texture, or takes it off.
+///
+/// The same division of labour as [`SetWorldImage`], and for the same reason:
+/// the application opens the file and adds the datablock, and this makes the
+/// *link*. An operator that read a file could not be replayed.
+///
+/// **The texture tints rather than replaces.** glTF's base colour is
+/// `baseColorTexture * baseColorFactor`, and
+/// [`ShaderGraph::for_material`](kreate_scene::shader::ShaderGraph::for_material)
+/// builds exactly that — so the colour in the panel goes on meaning something
+/// once a texture is assigned, which is what a person adjusting it expects.
+pub struct SetMaterialImage;
+
+impl Operator for SetMaterialImage {
+    type Params = SetMaterialImageParams;
+
+    fn id() -> &'static str {
+        "material.set_image"
+    }
+    fn label() -> &'static str {
+        "Set Material Image"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_material(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = active_material(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // Resolved against the document before anything is borrowed mutably,
+        // and refused rather than trusted: a uid naming an image that is not
+        // here is a parameter from a script or a stale redo, and a material
+        // pointing at nothing is worse than one that declined to change.
+        let image = match params.uid.trim() {
+            "" => None,
+            text => {
+                let Ok(raw) = text.parse::<u64>() else {
+                    return Ok(OpResult::Cancelled);
+                };
+                match doc.document().image_by_uid(kreate_scene::Uid::from_raw(raw)) {
+                    Some(image) => Some(image),
+                    None => return Ok(OpResult::Cancelled),
+                }
+            }
+        };
+        let d = doc.document_mut();
+        let Some(material) = d.material_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        material.base_color_image = image;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The parameters that would leave a material's texture exactly as it is.
+pub fn material_image_params(
+    doc: &Document,
+    material: &kreate_scene::Material,
+) -> SetMaterialImageParams {
+    SetMaterialImageParams {
+        uid: material
+            .base_color_image
+            .and_then(|id| doc.image_uid(id))
+            .map(|uid| uid.raw().to_string())
+            .unwrap_or_default(),
+    }
+}
+
 /// The parameters that would leave a material exactly as it is.
 pub fn material_params(material: &kreate_scene::Material) -> SetMaterialParams {
     let c = material.base_color.as_swatch();
@@ -1601,6 +1684,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetLight>();
     registry.register::<SetWorld>();
     registry.register::<SetWorldImage>();
+    registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();
     registry.register::<Delete>();

@@ -1988,6 +1988,8 @@ impl App {
                 Command::SaveDocumentAs => self.save_document(true),
                 Command::ExportScene => self.export_scene(),
                 Command::PickWorldImage => self.pick_world_image(),
+                Command::PickMaterialImage => self.pick_material_image(),
+                Command::ClearMaterialImage => self.clear_material_image(),
                 Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
                     self.load_from(&path);
@@ -2243,6 +2245,46 @@ impl App {
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("world.set_image", params);
         self.status(&format!("environment: {name}"));
+    }
+
+    /// Loads an image and makes it the active material's base colour texture.
+    ///
+    /// The same division as `pick_world_image`, and the same consequence for
+    /// undo: the datablock is added outside the history, so undoing the link
+    /// leaves the image in the document with nothing pointing at it.
+    fn pick_material_image(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg", "hdr"])
+            .set_title("Base Colour")
+            .pick_file()
+        else {
+            return;
+        };
+        // sRGB, and this one is not a guess either: a base colour is a
+        // reflectance an artist chose by looking at it, which is what an
+        // eight-bit file in this slot always holds. It is also what the atlas
+        // assumes — see the note on `SourceImage::pixels`. A float file ignores
+        // the declaration, because it has no transfer function to undo.
+        let image = match kreate_io::load_image_file(&path, kreate_scene::ColorSpace::Srgb) {
+            Ok(image) => image,
+            Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
+        };
+        let name = image.name.clone();
+        let id = self.doc.add_image(image);
+        let Some(uid) = self.doc.image_uid(id) else {
+            return self.status("the image has no identity");
+        };
+        let mut params = PropertyMap::new();
+        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        self.run_op("material.set_image", params);
+        self.status(&format!("base colour: {name}"));
+    }
+
+    /// Takes the base colour texture off the active material.
+    fn clear_material_image(&mut self) {
+        let mut params = PropertyMap::new();
+        params.set("uid", kreate_reflect::PropertyValue::Text(String::new()));
+        self.run_op("material.set_image", params);
     }
 
     /// Puts the world's background back to a colour.
@@ -3509,17 +3551,36 @@ impl App {
                     );
                 }
             } else {
+                // The pixels first and the borrows after, because a material
+                // source borrows them — untiling into a temporary inside the
+                // map would hand over a reference to something dropped at the
+                // end of the closure.
+                let pixels: Vec<Vec<kreate::materials::TextureImage>> = materials
+                    .compiled
+                    .iter()
+                    .map(|c| kreate::materials::pixels_for(&self.doc, c))
+                    .collect();
+                let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
+                    .iter()
+                    .map(|set| {
+                        set.iter()
+                            .map(|i| kreate_render::material::SourceImage {
+                                width: i.width,
+                                height: i.height,
+                                pixels: &i.pixels,
+                            })
+                            .collect()
+                    })
+                    .collect();
                 let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
                     .compiled
                     .iter()
-                    .map(|c| kreate_render::viewport::MaterialSource {
+                    .zip(&images)
+                    .map(|(c, images)| kreate_render::viewport::MaterialSource {
                         wgsl: &c.wgsl,
                         constants: &c.constants,
                         image_slots: &c.image_slots,
-                        // No images yet: the render mesh carries no UVs, so a
-                        // texture would sample one texel. See the note in
-                        // `rendered.wgsl` where the surface coordinate is zero.
-                        images: &[],
+                        images,
                     })
                     .collect();
                 gfx.viewport

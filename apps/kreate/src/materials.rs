@@ -48,14 +48,11 @@ impl Materials {
             index.insert(id, compiled.len() as u32);
             // The flat fields as the graph they are. A material will carry its
             // own graph when there is an editor to build one in; until then
-            // this is the same model reached by a shorter route, which is what
-            // `ShaderGraph::standard` exists to make checkable.
-            compiled.push(compile_one(&ShaderGraph::standard(
-                material.name.clone(),
-                material.base_color,
-                material.metallic,
-                material.roughness,
-            )));
+            // this is the same model reached by a shorter route, and the route
+            // lives beside the fields rather than here — one answer to "what is
+            // a standard surface", which is what keeps a field added to the
+            // material from having to be added twice.
+            compiled.push(compile_one(&ShaderGraph::for_material(material)));
         }
         Self { compiled, index }
     }
@@ -84,6 +81,100 @@ impl Materials {
                 .iter()
                 .zip(&other.compiled)
                 .all(|(a, b)| a.wgsl == b.wgsl)
+    }
+}
+
+/// The pixels one compiled material's images resolve to, in layer order.
+///
+/// §0's seam: the compiler hands back image *identities*, which belong to the
+/// document, and `kreate-render` is given what they resolve to. This is the
+/// joining, and it is the whole of what the application does here.
+///
+/// **Encoded, not decoded.** The atlas is an sRGB format and the sampler
+/// applies the transfer function, so what goes over is the file's own bytes —
+/// see `kreate_render::material::SourceImage::pixels` for why decoding here
+/// would cost the darks.
+pub fn pixels_for(doc: &Document, compiled: &kreate_shader::Compiled) -> Vec<TextureImage> {
+    compiled
+        .images
+        .iter()
+        .filter_map(|id| doc.image(*id))
+        .map(|image| TextureImage {
+            width: image.width(),
+            height: image.height(),
+            pixels: encoded_rgba(image),
+        })
+        .collect()
+}
+
+/// One image's bytes, untiled into a row-major `Rgba8` block.
+pub struct TextureImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// Walks the tiling back out into the rows a texture upload wants.
+///
+/// A tile that is not resident leaves its rows at zero, which is transparent
+/// black — the same answer the environment's walk gives, and for the same
+/// reason: a partly loaded image is a real state (§3.6) and half a texture
+/// beats a failure.
+fn encoded_rgba(image: &kreate_scene::Image) -> Vec<u8> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let mut out = vec![0u8; width * height * 4];
+    let (across, down) = image.tile_counts();
+    let stride = image.format.bytes_per_pixel();
+    let tile = kreate_scene::image::TILE as usize;
+    for ty in 0..down {
+        for tx in 0..across {
+            let Some(held) = image.tile(tx, ty) else {
+                continue;
+            };
+            let bytes = held.bytes();
+            for row in 0..tile {
+                let y = ty as usize * tile + row;
+                if y >= height {
+                    break;
+                }
+                for column in 0..tile {
+                    let x = tx as usize * tile + column;
+                    if x >= width {
+                        break;
+                    }
+                    let at = (row * tile + column) * stride;
+                    let to = (y * width + x) * 4;
+                    out[to..to + 4].copy_from_slice(&texel(image, &bytes[at..at + stride]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One texel as four sRGB-encoded bytes.
+fn texel(image: &kreate_scene::Image, bytes: &[u8]) -> [u8; 4] {
+    use kreate_scene::PixelFormat;
+    match image.format {
+        // Already what the atlas holds, whatever the datablock says it means —
+        // the application only assigns colours to a material today, and the
+        // note on `SourceImage::pixels` is where that stops being enough.
+        PixelFormat::Rgba8 => [bytes[0], bytes[1], bytes[2], bytes[3]],
+        // A mask or a height, replicated. Opaque, because one channel carries
+        // no transparency and a zero alpha would make it disappear.
+        PixelFormat::R8 => [bytes[0], bytes[0], bytes[0], 255],
+        // Float and linear, so it has to be encoded on the way in — an HDRI
+        // assigned as a base colour, which is unusual and not an error. Above
+        // one is clipped, because the atlas is eight bits and a reflectance
+        // above one is not a colour anyway.
+        PixelFormat::Rgba16F => {
+            let channel = |i: usize| {
+                let v = half::f16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]).to_f32();
+                (kreate_math::linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
+            };
+            [channel(0), channel(1), channel(2), 255]
+        }
     }
 }
 
@@ -182,5 +273,115 @@ mod tests {
         let doc = doc_with_materials(4);
         let after = Materials::compile(&doc);
         assert!(!before.same_code_as(&after));
+    }
+}
+
+#[cfg(test)]
+mod texture_tests {
+    use super::*;
+    use kreate_scene::document::Material;
+    use kreate_scene::{Image, PixelFormat};
+
+    /// An image whose every texel says where it is, so a walk that loses the
+    /// tiling shows up as a value in the wrong place rather than as a wash.
+    fn numbered(width: u32, height: u32) -> Image {
+        let mut image = Image::new("N", width, height, PixelFormat::Rgba8);
+        let (across, down) = image.tile_counts();
+        let tile = kreate_scene::image::TILE;
+        for ty in 0..down {
+            for tx in 0..across {
+                let Some(held) = image.tile_mut(tx, ty) else {
+                    continue;
+                };
+                let bytes = held.bytes_mut();
+                for row in 0..tile {
+                    for column in 0..tile {
+                        let (x, y) = (tx * tile + column, ty * tile + row);
+                        let at = (row * tile + column) as usize * 4;
+                        bytes[at] = (x % 256) as u8;
+                        bytes[at + 1] = (y % 256) as u8;
+                        bytes[at + 2] = 7;
+                        bytes[at + 3] = 255;
+                    }
+                }
+            }
+        }
+        image
+    }
+
+    fn doc_with_texture(image: Image) -> (Document, kreate_scene::MaterialId) {
+        let mut doc = Document::new();
+        let id = doc.add_image(image);
+        let material = doc.add_material(Material {
+            name: "Textured".into(),
+            base_color_image: Some(id),
+            ..Default::default()
+        });
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+        doc.set_mesh_slots(mesh, vec![Some(material)]);
+        doc.add_object(kreate_scene::document::Object::new(
+            "Cube",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        (doc, material)
+    }
+
+    #[test]
+    fn the_tiling_comes_back_out_as_rows() {
+        // A size that is not a multiple of the tile, so the walk has to stop at
+        // the image's edge on both axes rather than at the tile's. §7.9 found
+        // exactly this: the right edge had a test and the bottom did not.
+        let (doc, _) = doc_with_texture(numbered(200, 150));
+        let materials = Materials::compile(&doc);
+        let sets = pixels_for(&doc, &materials.compiled[1]);
+        assert_eq!(sets.len(), 1, "the texture did not reach the upload");
+        let image = &sets[0];
+        assert_eq!((image.width, image.height), (200, 150));
+        assert_eq!(image.pixels.len(), 200 * 150 * 4);
+        for (x, y) in [(0u32, 0u32), (199, 0), (0, 149), (199, 149), (130, 130)] {
+            let at = (y as usize * 200 + x as usize) * 4;
+            assert_eq!(
+                &image.pixels[at..at + 4],
+                &[(x % 256) as u8, (y % 256) as u8, 7, 255],
+                "the texel at {x},{y} came from somewhere else"
+            );
+        }
+    }
+
+    #[test]
+    fn eight_bit_pixels_go_over_as_they_were_written() {
+        // **Encoded, not decoded.** The atlas is an sRGB format, so a byte of
+        // 128 has to arrive as 128 and be turned into light by the sampler.
+        // Decoding here would send 55 and the picture would be dark — and every
+        // test that compares two halves of a frame would still pass.
+        let mut image = Image::new("Grey", 4, 4, PixelFormat::Rgba8);
+        image.tile_mut(0, 0).expect("one tile").bytes_mut()[..4]
+            .copy_from_slice(&[128, 64, 32, 255]);
+        let (doc, _) = doc_with_texture(image);
+        let materials = Materials::compile(&doc);
+        let sets = pixels_for(&doc, &materials.compiled[1]);
+        assert_eq!(&sets[0].pixels[..4], &[128, 64, 32, 255]);
+    }
+
+    #[test]
+    fn a_material_with_no_texture_asks_for_no_pixels() {
+        let mut doc = Document::new();
+        doc.add_material(Material::default());
+        let materials = Materials::compile(&doc);
+        assert!(pixels_for(&doc, &materials.compiled[1]).is_empty());
+        // And the default at zero never had one either.
+        assert!(pixels_for(&doc, &materials.compiled[0]).is_empty());
+    }
+
+    #[test]
+    fn a_single_channel_image_arrives_opaque() {
+        // A mask replicated across three channels. A zero alpha would make it
+        // vanish, which is the failure that looks like the texture not loading.
+        let mut image = Image::new("Mask", 4, 4, PixelFormat::R8);
+        image.tile_mut(0, 0).expect("one tile").bytes_mut()[0] = 90;
+        let (doc, _) = doc_with_texture(image);
+        let materials = Materials::compile(&doc);
+        let sets = pixels_for(&doc, &materials.compiled[1]);
+        assert_eq!(&sets[0].pixels[..4], &[90, 90, 90, 255]);
     }
 }

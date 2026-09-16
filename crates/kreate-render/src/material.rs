@@ -27,6 +27,14 @@
 //! on how many images a material happens to use — or one array binding with a
 //! layer per image. The array wins for exactly that reason.
 //!
+//! # The atlas is sRGB, and holds colours
+//!
+//! The format is `Rgba8UnormSrgb` and what is uploaded is the file's own bytes.
+//! The alternative — decode on the way in and upload linear eight-bit — loses
+//! the darks: sRGB spends twenty code values where linear spends two, and
+//! that difference is the whole reason the encoding exists. See
+//! [`SourceImage::pixels`] for what follows from it.
+//!
 //! An array's layers are all one size, and a material's images are not. So each
 //! image carries a rectangle in the constants and the generated code scales its
 //! UV by it. Today the packer is trivial: **one image per layer, at the size of
@@ -72,7 +80,21 @@ pub struct Placed {
 pub struct SourceImage<'a> {
     pub width: u32,
     pub height: u32,
-    /// `Rgba8Unorm`, already decoded into the working space by the caller.
+    /// The image's own bytes, sRGB-encoded, four to a pixel.
+    ///
+    /// **Not decoded**, and that is the point: the atlas is an sRGB format, so
+    /// the sampler applies the transfer function on every tap and does it in
+    /// the filter's precision. Handing over linear eight-bit instead would
+    /// crush the darks — sRGB's twenty darkest code values land inside the
+    /// first two of a linear byte, which is the banding the encoding exists to
+    /// prevent.
+    ///
+    /// It follows that everything in the atlas is a *colour*. A roughness or
+    /// normal map is not, and would come back through the transfer function
+    /// wrongly; today nothing can wire one, because the only texture a material
+    /// has is its base colour and the application loads it as sRGB. When one
+    /// can, it needs a second array or a decode the generated code applies —
+    /// it does not need this one to lie about what it holds.
     pub pixels: &'a [u8],
 }
 
@@ -257,7 +279,7 @@ fn pack(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

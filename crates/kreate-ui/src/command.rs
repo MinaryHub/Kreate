@@ -93,6 +93,13 @@ pub enum Command {
     PickWorldImage,
     /// Put the world's background back to a colour.
     ClearWorldImage,
+    /// Ask for an image file and make it the active material's base colour map.
+    ///
+    /// A command for the same reason `PickWorldImage` is one: the file read
+    /// cannot live in an operator. `material.set_image` makes the link.
+    PickMaterialImage,
+    /// Take the base colour map off the active material.
+    ClearMaterialImage,
     /// Ask for a path and write the scene to an interchange format.
     ///
     /// Separate from saving, because it is not saving: an export goes through

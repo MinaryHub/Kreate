@@ -289,3 +289,132 @@ fn setting_slots_on_a_mesh_that_is_gone_is_refused_rather_than_ignored() {
     assert!(!doc.set_mesh_slots(stranger, vec![None]));
     assert!(!doc.set_mesh_slot(stranger, 0, None));
 }
+
+// --- the base colour texture ----------------------------------------------
+//
+// The application opens the file and adds the datablock; the operator makes the
+// *link*. Everything below is about the link, because that is the part an undo
+// step holds and the part a script can get wrong.
+
+use kreate_ops::operator::Context;
+use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+
+fn wired() -> (OperatorRegistry, History, Document, Context) {
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    (registry, History::new(), Document::new(), Context::default())
+}
+
+/// A cube whose first slot holds a material, selected and active.
+fn a_cube_with_a_material(doc: &mut Document) -> kreate_scene::MaterialId {
+    let (mesh, object) = cube(doc);
+    let material = red(doc);
+    doc.set_mesh_slot(mesh, 0, Some(material));
+    doc.selection.add(object);
+    material
+}
+
+fn an_image(doc: &mut Document) -> kreate_scene::document::ImageId {
+    doc.add_image(kreate_scene::Image::new(
+        "Bricks",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ))
+}
+
+fn set_image(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+    uid: &str,
+) {
+    let mut params = PropertyMap::new();
+    params.set("uid", PropertyValue::Text(uid.to_string()));
+    history
+        .dispatch(registry, doc, ctx, "material.set_image", &params)
+        .expect("the operator ran");
+}
+
+#[test]
+fn a_texture_arrives_and_can_be_taken_off_again() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let image = an_image(&mut doc);
+    let uid = doc.image_uid(image).expect("an identity").raw().to_string();
+
+    set_image(&registry, &mut history, &mut doc, &ctx, &uid);
+    assert_eq!(doc.material(material).unwrap().base_color_image, Some(image));
+
+    // Empty rather than a second operator, the same way a world goes back to a
+    // colour: one thing to undo and one place the rule lives.
+    set_image(&registry, &mut history, &mut doc, &ctx, "");
+    assert_eq!(doc.material(material).unwrap().base_color_image, None);
+}
+
+#[test]
+fn undoing_gives_the_material_back_the_texture_it_had() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let image = an_image(&mut doc);
+    let uid = doc.image_uid(image).expect("an identity").raw().to_string();
+
+    set_image(&registry, &mut history, &mut doc, &ctx, &uid);
+    set_image(&registry, &mut history, &mut doc, &ctx, "");
+    assert!(history.undo(&mut doc), "there was nothing to undo");
+    assert_eq!(
+        doc.material(material).unwrap().base_color_image,
+        Some(image),
+        "undo did not give the texture back"
+    );
+    // And the datablock is still there either way — undoing a link must not
+    // delete an image another material may have started using.
+    assert!(doc.image(image).is_some());
+}
+
+#[test]
+fn a_uid_naming_an_image_that_is_not_here_is_refused() {
+    // A parameter from a script or a stale redo. A material pointing at nothing
+    // is worse than one that declined to change: the first draws a hole and the
+    // second draws what it drew before.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let image = an_image(&mut doc);
+    let uid = doc.image_uid(image).expect("an identity").raw().to_string();
+    set_image(&registry, &mut history, &mut doc, &ctx, &uid);
+
+    let depth = history.entries().len();
+    set_image(&registry, &mut history, &mut doc, &ctx, "999999");
+    set_image(&registry, &mut history, &mut doc, &ctx, "not a number");
+    assert_eq!(
+        doc.material(material).unwrap().base_color_image,
+        Some(image),
+        "a refused uid changed the material"
+    );
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a refused uid left a step to undo"
+    );
+}
+
+#[test]
+fn the_parameters_that_read_a_material_back_leave_it_alone() {
+    // The panel writes what it read. If the two disagree, opening the tab
+    // changes the document — which is how a value drifts with nobody touching
+    // it.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let image = an_image(&mut doc);
+    let uid = doc.image_uid(image).expect("an identity").raw().to_string();
+    set_image(&registry, &mut history, &mut doc, &ctx, &uid);
+
+    let read = kreate_ops::ops::object::material_image_params(
+        &doc,
+        doc.material(material).expect("a material"),
+    );
+    assert_eq!(read.uid, uid);
+    set_image(&registry, &mut history, &mut doc, &ctx, &read.uid);
+    assert_eq!(doc.material(material).unwrap().base_color_image, Some(image));
+}

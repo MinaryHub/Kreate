@@ -377,6 +377,15 @@ pub struct MaterialRecord {
     pub alpha: f32,
     pub metallic: f32,
     pub roughness: f32,
+    /// The base colour texture's identity, if one is assigned.
+    ///
+    /// A uid and not an index, for the reason [`WorldRecord::image_uid`] is
+    /// one: a position says where the image sits in today's file and an
+    /// identity says which image it is. And absent rather than zero when there
+    /// is none, so that a file written before this field existed reads as "no
+    /// texture" rather than as "the image whose uid is zero".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_uid: Option<u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -778,6 +787,10 @@ pub fn write(
                     alpha: m.alpha,
                     metallic: m.metallic,
                     roughness: m.roughness,
+                    image_uid: m
+                        .base_color_image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
                     extra: BTreeMap::new(),
                 }
             })
@@ -1042,42 +1055,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         camera_ids.push(document.restore_camera(camera, kreate_scene::Uid::from_raw(record.uid)));
     }
 
-    let mut material_ids: Vec<kreate_scene::MaterialId> =
-        Vec::with_capacity(scene.materials.len());
-    for record in &scene.materials {
-        let material = kreate_scene::Material {
-            name: record.name.clone(),
-            base_color: kreate_math::SceneRgb::new(
-                record.base_color[0],
-                record.base_color[1],
-                record.base_color[2],
-            ),
-            alpha: record.alpha,
-            metallic: record.metallic,
-            roughness: record.roughness,
-            linkage: Linkage::Local,
-            uid: kreate_scene::Uid::NONE,
-        };
-        material_ids
-            .push(document.restore_material(material, kreate_scene::Uid::from_raw(record.uid)));
-    }
-    // An index naming a material that is not in the file leaves the slot
-    // empty, which is the same as an unassigned slot and is what the renderer
-    // already draws.
-    for (key, slots) in &scene.mesh_slots {
-        let Some(mesh) = mesh_ids.get(key) else {
-            continue;
-        };
-        let resolved: Vec<Option<kreate_scene::MaterialId>> = slots
-            .iter()
-            .map(|s| s.and_then(|i| material_ids.get(i).copied()))
-            .collect();
-        document.set_mesh_slots(*mesh, resolved);
-    }
-
-    // Before the worlds, so that a background naming an image by uid finds it.
-    // That resolution has been written since minor 2 and has never resolved,
-    // because there was nothing to resolve to.
+    // Before anything that can name an image: a world's background and now a
+    // material's base colour both resolve a uid against the document, and a
+    // resolution that runs first finds nothing and silently falls back. The
+    // world's has been written since minor 2 and did not resolve until minor 4,
+    // because until then there was nothing to resolve to.
     for (slot, record) in scene.images.iter().enumerate() {
         let key = mesh_key(slot);
         let mut image = match image_tiles.get(&key) {
@@ -1115,6 +1097,47 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         };
         document.restore_image(image, kreate_scene::Uid::from_raw(record.uid));
     }
+
+    let mut material_ids: Vec<kreate_scene::MaterialId> =
+        Vec::with_capacity(scene.materials.len());
+    for record in &scene.materials {
+        let material = kreate_scene::Material {
+            name: record.name.clone(),
+            base_color: kreate_math::SceneRgb::new(
+                record.base_color[0],
+                record.base_color[1],
+                record.base_color[2],
+            ),
+            alpha: record.alpha,
+            metallic: record.metallic,
+            roughness: record.roughness,
+            // A uid naming an image the file does not carry leaves the texture
+            // off rather than failing the load — the same judgement the world's
+            // background makes, and for the same reason: a missing texture
+            // should read as a missing texture.
+            base_color_image: record
+                .image_uid
+                .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            linkage: Linkage::Local,
+            uid: kreate_scene::Uid::NONE,
+        };
+        material_ids
+            .push(document.restore_material(material, kreate_scene::Uid::from_raw(record.uid)));
+    }
+    // An index naming a material that is not in the file leaves the slot
+    // empty, which is the same as an unassigned slot and is what the renderer
+    // already draws.
+    for (key, slots) in &scene.mesh_slots {
+        let Some(mesh) = mesh_ids.get(key) else {
+            continue;
+        };
+        let resolved: Vec<Option<kreate_scene::MaterialId>> = slots
+            .iter()
+            .map(|s| s.and_then(|i| material_ids.get(i).copied()))
+            .collect();
+        document.set_mesh_slots(*mesh, resolved);
+    }
+
 
     let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());
     for record in &scene.lights {

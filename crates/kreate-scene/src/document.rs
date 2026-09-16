@@ -224,6 +224,16 @@ pub struct Material {
     pub alpha: f32,
     pub metallic: f32,
     pub roughness: f32,
+    /// A texture multiplying the base colour, if one is assigned.
+    ///
+    /// A field beside the numbers rather than a node the user wired, for the
+    /// reason v1 §5.6 gave the standard surface a fast path: the graph is the
+    /// canonical form and these are a shorter route to the same model, which is
+    /// what [`crate::shader::ShaderGraph::for_material`] exists to make
+    /// checkable. When there is a node editor to build one in, a material will
+    /// carry its own graph and this becomes the thing that graph is built from
+    /// on the way in.
+    pub base_color_image: Option<ImageId>,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
@@ -237,6 +247,7 @@ impl Default for Material {
             alpha: 1.0,
             metallic: 0.0,
             roughness: 0.5,
+            base_color_image: None,
             linkage: Linkage::Local,
             uid: Uid::NONE,
         }

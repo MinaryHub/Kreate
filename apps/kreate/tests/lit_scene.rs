@@ -117,14 +117,32 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     // would be a second `material_surface` for §3's fifth decision to have
     // ruled out.
     let materials = kreate::materials::Materials::compile(doc);
+    let pixels: Vec<Vec<kreate::materials::TextureImage>> = materials
+        .compiled
+        .iter()
+        .map(|c| kreate::materials::pixels_for(doc, c))
+        .collect();
+    let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
+        .iter()
+        .map(|set| {
+            set.iter()
+                .map(|i| kreate_render::material::SourceImage {
+                    width: i.width,
+                    height: i.height,
+                    pixels: &i.pixels,
+                })
+                .collect()
+        })
+        .collect();
     let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
         .compiled
         .iter()
-        .map(|c| kreate_render::viewport::MaterialSource {
+        .zip(&images)
+        .map(|(c, images)| kreate_render::viewport::MaterialSource {
             wgsl: &c.wgsl,
             constants: &c.constants,
             image_slots: &c.image_slots,
-            images: &[],
+            images,
         })
         .collect();
     viewport.set_materials(&gpu.device, &gpu.queue, &sources);
@@ -154,15 +172,22 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     let meshes: Vec<_> = doc
         .objects()
         .filter_map(|(id, o)| match o.data {
-            kreate_scene::document::ObjectData::Mesh(mesh) => {
-                Some((doc.mesh(mesh)?, doc.world_transform(id)))
-            }
+            kreate_scene::document::ObjectData::Mesh(mesh) => Some((
+                doc.mesh(mesh)?,
+                doc.world_transform(id),
+                // Which compiled material this object wears. The harness drew
+                // everything with index zero until a texture made the
+                // difference visible — and index zero is the *default* grey, so
+                // every material the document held was being ignored while
+                // every test here passed.
+                materials.index_of(doc, id),
+            )),
             _ => None,
         })
         .collect();
     let uploaded: Vec<_> = meshes
         .iter()
-        .map(|(mesh, transform)| {
+        .map(|(mesh, transform, material)| {
             let cpu = RenderMeshCpu::extract(mesh);
             (
                 kreate_render::GpuMesh::upload(
@@ -172,12 +197,15 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
                     glam::Vec4::ONE,
                 ),
                 *transform,
+                *material,
             )
         })
         .collect();
     let mut draws: Vec<Draw> = uploaded
         .iter()
-        .map(|(mesh, transform)| Draw::new(mesh, *transform))
+        .map(|(mesh, transform, material)| {
+            Draw::new(mesh, *transform).with_material(*material)
+        })
         .collect();
 
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
@@ -740,5 +768,101 @@ fn the_worlds_strength_dims_the_sky_as_well_as_the_scene() {
         "a tenth of the strength gave {} against {}",
         mean(&dark),
         mean(&bright)
+    );
+}
+
+#[test]
+fn a_texture_assigned_from_the_panel_reaches_the_picture() {
+    // **§7.7's gate, for the material's texture.** The image node, the
+    // compiler's layer assignment, the atlas, the surface coordinates and the
+    // operator all have their own tests and all pass. This is the only one that
+    // asks whether a person who picks a file sees anything change.
+    //
+    // The document is built by the operator the panel's button runs, and the
+    // frame is taken by the harness that does what the frame loop does. Between
+    // them there is nowhere for a picture to go missing without this noticing.
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+
+    // The cube the starter document comes with, and a material on it — the
+    // panel needs one to point at, which is why the tab does not appear
+    // without one.
+    let (mesh, object) = doc
+        .objects()
+        .find_map(|(id, o)| match o.data {
+            kreate_scene::document::ObjectData::Mesh(mesh) => Some((mesh, id)),
+            _ => None,
+        })
+        .expect("the starter document has a cube");
+    let material = doc.add_material(kreate_scene::Material {
+        name: "Painted".into(),
+        base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+        ..Default::default()
+    });
+    doc.set_mesh_slot(mesh, 0, Some(material));
+    doc.selection.add(object);
+
+    let before = shoot(&gpu, &doc);
+
+    // Half red and half blue, which no shading can produce on its own — a
+    // brightness change would also follow from the material simply existing.
+    let mut image = kreate_scene::Image::new("Bricks", 64, 64, kreate_scene::PixelFormat::Rgba8);
+    {
+        let tile = image.tile_mut(0, 0).expect("one tile");
+        let bytes = tile.bytes_mut();
+        let side = kreate_scene::image::TILE as usize;
+        for row in 0..side {
+            for column in 0..side {
+                let at = (row * side + column) * 4;
+                let left = column < 32;
+                bytes[at..at + 4].copy_from_slice(if left {
+                    &[255u8, 0, 0, 255]
+                } else {
+                    &[0u8, 0, 255, 255]
+                });
+            }
+        }
+    }
+    let id = doc.add_image(image);
+    let uid = doc.image_uid(id).expect("an identity").raw().to_string();
+    menu(
+        &registry,
+        &mut history,
+        &mut doc,
+        "material.set_image",
+        &[("uid", PropertyValue::Text(uid))],
+    );
+    assert_eq!(
+        doc.material(material).expect("still there").base_color_image,
+        Some(id),
+        "the operator did not make the link"
+    );
+
+    let after = shoot(&gpu, &doc);
+    let changed = before
+        .iter()
+        .zip(&after)
+        .filter(|(a, b)| (a[0] - b[0]).abs() + (a[2] - b[2]).abs() > 0.02)
+        .count();
+    assert!(
+        changed > 200,
+        "assigning a texture changed {changed} pixels, which is not a picture"
+    );
+
+    // And it is the texture and not a tint: the frame now holds both a reddish
+    // pixel and a bluish one, which one colour cannot do.
+    let reddish = after.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = after.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 50 && bluish > 50,
+        "the frame has {reddish} red pixels and {bluish} blue ones, \
+         so the image is not on the surface"
     );
 }

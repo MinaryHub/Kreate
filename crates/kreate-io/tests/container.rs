@@ -687,3 +687,114 @@ fn a_mesh_that_really_has_a_layer_called_uv_map_keeps_it() {
         glam::Vec2::new(0.25, 0.75)
     );
 }
+
+// ---------------------------------------------------------------------------
+// A material's base colour texture.
+
+#[test]
+fn a_material_keeps_the_texture_it_points_at() {
+    // The link is a uid, so what has to survive is a *resolution*: the image
+    // comes back with the identity the file gave it, and the material's
+    // pointer finds it again. An index would have survived this test and failed
+    // the moment anything was added before it.
+    let mut doc = Document::new();
+    let mut image = kreate_scene::Image::new("Bricks", 4, 4, kreate_scene::PixelFormat::Rgba8);
+    image.tile_mut(0, 0).expect("one tile").bytes_mut()[0] = 200;
+    let image = doc.add_image(image);
+    // Two materials, because one would let an off-by-one resolution pass: the
+    // wrong material would still hold the only image in the file.
+    let plain = doc.add_material(kreate_scene::Material {
+        name: "Plain".into(),
+        ..Default::default()
+    });
+    let textured = doc.add_material(kreate_scene::Material {
+        name: "Textured".into(),
+        base_color_image: Some(image),
+        ..Default::default()
+    });
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    doc.set_mesh_slots(mesh, vec![Some(plain), Some(textured)]);
+    doc.add_object(kreate_scene::document::Object::new(
+        "Cube",
+        kreate_scene::document::ObjectData::Mesh(mesh),
+    ));
+
+    let after = round_trip(&doc).document;
+    let named = |name: &str| {
+        after
+            .materials()
+            .find(|(_, m)| m.name == name)
+            .map(|(_, m)| m.base_color_image)
+            .expect("the material came back")
+    };
+    assert_eq!(named("Plain"), None, "a texture arrived from nowhere");
+    let carried = named("Textured").expect("the texture did not survive");
+    assert_eq!(
+        after.image(carried).map(|i| i.name.as_str()),
+        Some("Bricks"),
+        "the material points at the wrong image"
+    );
+}
+
+#[test]
+fn a_texture_the_file_does_not_carry_comes_back_as_no_texture() {
+    // The branch a hand-edited or truncated file reaches. A missing texture
+    // should read as a missing texture — the same judgement the world's
+    // background makes, and the alternative is a document that will not open.
+    let mut doc = Document::new();
+    doc.add_material(kreate_scene::Material {
+        name: "Textured".into(),
+        ..Default::default()
+    });
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+
+    // Reach into the scene JSON and name an image that is not there. Editing
+    // the file rather than the document, because the document cannot hold this
+    // state: `base_color_image` is an id the arena issued.
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("opens");
+    let mut scene = String::new();
+    {
+        use std::io::Read;
+        zip.by_name("scene.json")
+            .expect("a scene")
+            .read_to_string(&mut scene)
+            .expect("reads");
+    }
+    let scene = scene.replace(
+        "\"roughness\": 0.5",
+        "\"roughness\": 0.5,\n      \"image_uid\": 4242",
+    );
+    assert!(scene.contains("4242"), "the anchor moved: {scene}");
+
+    let mut out = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i).expect("an entry");
+            let name = entry.name().to_string();
+            writer
+                .start_file(
+                    &name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .expect("starts");
+            use std::io::{Read, Write};
+            if name == "scene.json" {
+                writer.write_all(scene.as_bytes()).expect("writes");
+            } else {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf).expect("reads");
+                writer.write_all(&buf).expect("writes");
+            }
+        }
+        writer.finish().expect("finishes");
+    }
+
+    let after = container::read(Cursor::new(out)).expect("reads").document;
+    assert_eq!(
+        after.materials().next().expect("a material").1.base_color_image,
+        None,
+        "a uid naming nothing resolved to something"
+    );
+}

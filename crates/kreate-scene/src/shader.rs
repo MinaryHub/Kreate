@@ -72,6 +72,15 @@ pub enum NodeKind {
     /// to compile, for the same reason a world with a missing image lands on a
     /// colour.
     Image { image: Option<ImageId> },
+    /// Two colours, multiplied.
+    ///
+    /// Here because a texture has to *tint* rather than replace: glTF's base
+    /// colour is `baseColorTexture * baseColorFactor`, and a material whose
+    /// colour stopped meaning anything the moment a texture was assigned would
+    /// be a surprise once and a round-trip loss every time after. Giving the
+    /// image node a factor of its own would have been the same rule written
+    /// where only one node can reach it.
+    Multiply,
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -89,6 +98,7 @@ impl NodeKind {
     pub fn inputs(&self) -> &'static [Socket] {
         match self {
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
+            NodeKind::Multiply => &[Socket::Color, Socket::Color],
             NodeKind::Surface { .. } => &[Socket::Color, Socket::Scalar, Socket::Scalar],
         }
     }
@@ -102,6 +112,7 @@ impl NodeKind {
             // an image's alpha is not a colour and wiring it into one is the
             // mistake the type system is here to refuse.
             NodeKind::Image { .. } => &[Socket::Color, Socket::Scalar],
+            NodeKind::Multiply => &[Socket::Color],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -117,6 +128,7 @@ impl NodeKind {
             NodeKind::Color(_) => "color",
             NodeKind::Value(_) => "value",
             NodeKind::Image { .. } => "image",
+            NodeKind::Multiply => "multiply",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -216,6 +228,45 @@ impl ShaderGraph {
         self.nodes
             .iter()
             .position(|n| matches!(n.kind, NodeKind::Surface { .. }))
+    }
+
+    /// A material's flat fields as the graph they are.
+    ///
+    /// **One definition of what a standard surface means**, and it lives beside
+    /// the fields rather than in whatever is compiling today — a second caller
+    /// that built the same graph by hand would be a second answer to "what is a
+    /// material", and the two would part company at the first field added.
+    /// This is the field that was added.
+    pub fn for_material(material: &crate::document::Material) -> Self {
+        let mut graph = Self::standard(
+            material.name.clone(),
+            material.base_color,
+            material.metallic,
+            material.roughness,
+        );
+        if let Some(image) = material.base_color_image {
+            // `standard` puts the surface at zero and adds nothing else, so the
+            // links below reach nodes that are certainly there.
+            let mut add = |name: &str, kind| {
+                graph
+                    .add_node(Node::new(name, kind))
+                    .expect("only the surface can be refused")
+            };
+            let texture = add("Base Colour", NodeKind::Image { image: Some(image) });
+            let factor = add("Tint", NodeKind::Color(material.base_color));
+            let product = add("Base Colour x Tint", NodeKind::Multiply);
+            let mut wire = |from_node, to_socket| {
+                graph
+                    .link(Link { from_node, from_socket: 0, to_node: product, to_socket })
+                    .expect("two colours");
+            };
+            wire(texture, 0);
+            wire(factor, 1);
+            graph
+                .link(Link { from_node: product, from_socket: 0, to_node: 0, to_socket: 0 })
+                .expect("a colour into a base colour");
+        }
+        graph
     }
 
     /// Adds a node, or refuses a second surface.
@@ -585,5 +636,80 @@ mod tests {
             NodeKind::Color(SceneRgb::new(0.0, 0.0, 0.0)).tag(),
             "color"
         );
+    }
+
+    // --- a material as a graph -----------------------------------------
+
+    /// An image identity, which only a document can hand out.
+    fn an_image(doc: &mut crate::Document) -> crate::document::ImageId {
+        doc.add_image(crate::Image::new("Bricks", 4, 4, crate::PixelFormat::Rgba8))
+    }
+
+    #[test]
+    fn a_material_without_a_texture_is_the_flat_graph() {
+        let material = crate::document::Material {
+            name: "Plastic".into(),
+            base_color: SceneRgb::new(0.2, 0.4, 0.6),
+            metallic: 0.25,
+            roughness: 0.75,
+            ..Default::default()
+        };
+        assert_eq!(
+            ShaderGraph::for_material(&material),
+            ShaderGraph::standard("Plastic", SceneRgb::new(0.2, 0.4, 0.6), 0.25, 0.75),
+            "the shorter route stopped reaching the same model"
+        );
+    }
+
+    #[test]
+    fn a_texture_tints_the_colour_rather_than_replacing_it() {
+        // **glTF's rule**: base colour is `baseColorTexture * baseColorFactor`.
+        // A graph that wired the image straight into the surface would compile,
+        // draw, and quietly stop the colour in the panel meaning anything — and
+        // fixing that later would change the look of every material anybody had
+        // already assigned a texture to.
+        let mut doc = crate::Document::new();
+        let image = an_image(&mut doc);
+        let material = crate::document::Material {
+            base_color: SceneRgb::new(0.5, 0.5, 0.5),
+            base_color_image: Some(image),
+            ..Default::default()
+        };
+        let graph = ShaderGraph::for_material(&material);
+        let surface = graph.output().expect("a surface");
+        let into_base = graph.incoming(surface, 0).expect("the base colour is wired");
+        let product = &graph.nodes[into_base.from_node];
+        assert_eq!(product.kind, NodeKind::Multiply, "a texture replaced the colour");
+
+        // And both factors are there: the image on one side and the colour on
+        // the other, in some order.
+        let feeding: Vec<&NodeKind> = (0..2)
+            .filter_map(|socket| graph.incoming(into_base.from_node, socket))
+            .map(|l| &graph.nodes[l.from_node].kind)
+            .collect();
+        assert_eq!(feeding.len(), 2, "a factor is unwired");
+        assert!(
+            feeding.contains(&&NodeKind::Image { image: Some(image) }),
+            "the texture is not a factor"
+        );
+        assert!(
+            feeding.contains(&&NodeKind::Color(SceneRgb::new(0.5, 0.5, 0.5))),
+            "the colour is not a factor"
+        );
+    }
+
+    #[test]
+    fn the_texture_a_material_names_is_the_one_the_graph_asks_for() {
+        // The join the application makes: the compiler hands back identities
+        // and the application resolves them. An identity that did not reach
+        // `images()` would be a texture nobody uploaded and a surface sampling
+        // whatever was in that layer.
+        let mut doc = crate::Document::new();
+        let image = an_image(&mut doc);
+        let material = crate::document::Material {
+            base_color_image: Some(image),
+            ..Default::default()
+        };
+        assert_eq!(ShaderGraph::for_material(&material).images(), vec![image]);
     }
 }

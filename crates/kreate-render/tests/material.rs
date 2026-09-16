@@ -720,3 +720,66 @@ fn a_material_with_no_texture_is_the_colour_its_constants_say() {
     // And it is the colour that was asked for: more red than blue.
     assert!(left[0] > left[2] + 0.1, "the frame is {left:?}");
 }
+
+#[test]
+fn the_atlas_decodes_srgb_rather_than_taking_bytes_as_light() {
+    // **The one claim that distinguishes a correct texture from a washed-out
+    // one**, and no picture test above can see it: every assertion so far is a
+    // comparison between two halves of a frame, and a missing transfer function
+    // moves both halves the same way.
+    //
+    // A mid-grey byte is 128. What it *means* is 0.216 of the light a white
+    // surface reflects, not 0.502 — the encoding spends its code values where
+    // the eye does. Taking the byte as the value makes everything textured too
+    // bright, most of all in the shadows, and it looks like a lighting problem.
+    // The atlas is an sRGB format so the sampler does this, exactly and in the
+    // filter's own precision.
+    //
+    // **What the frame is, and why three greys.** A pixel here is not the
+    // texel: it is `gain * texel + rest`, where the gain is the lighting and
+    // the `rest` is the specular lobe, which does not scale with base colour.
+    // Two attempts got a wrong answer from a right renderer before this one —
+    // a ratio against white clips at the top of `Standard`'s range, and a ratio
+    // between two greys is thrown off by `rest`. Evenly spaced code values
+    // remove both: differencing cancels `rest`, and a ratio of differences
+    // cancels the gain, leaving nothing but the shape of the transfer function.
+    //
+    // Three bytes a quarter apart. sRGB bends upward, so the upper step is
+    // nearly twice the lower one. Bytes taken as light are a straight line and
+    // the two steps are equal — and no lighting, exposure or clip can turn one
+    // of those numbers into the other.
+    let gpu = gpu_or_skip!(gpu());
+    let (graph, _doc) = textured();
+    let grey = |value: u8| {
+        let pixels = [value, value, value, 255].repeat(16 * 16);
+        let frame = shoot(
+            &gpu,
+            &graph,
+            &[kreate_render::material::SourceImage {
+                width: 16,
+                height: 16,
+                pixels: &pixels,
+            }],
+        );
+        let size = 48usize;
+        frame[size / 2 * size + size / 2]
+    };
+    let (low, mid, high) = (grey(64), grey(128), grey(192));
+
+    let linear = |byte: f32| kreate_math::srgb_to_linear(byte / 255.0);
+    let want = (linear(192.0) - linear(128.0)) / (linear(128.0) - linear(64.0));
+    for c in 0..3 {
+        assert!(
+            low[c] > 1e-4 && high[c] < 0.99,
+            "channel {c} is against a clip ({} and {}), so the steps say nothing",
+            low[c],
+            high[c]
+        );
+        let steps = (high[c] - mid[c]) / (mid[c] - low[c]);
+        assert!(
+            (steps - want).abs() < 0.3,
+            "channel {c}: the upper quarter of the range is {steps:.2} times the \
+             lower one; sRGB says {want:.2} and bytes taken as light would say 1.00"
+        );
+    }
+}

@@ -823,6 +823,8 @@ struct Labels {
     file_export: String,
     world_pick_image: String,
     world_clear_image: String,
+    material_pick_image: String,
+    material_clear_image: String,
     recover_open: String,
     recover_discard: String,
     recover_discard_all: String,
@@ -889,6 +891,8 @@ impl Labels {
             file_export: t("menu-file-export"),
             world_pick_image: t("world-pick-image"),
             world_clear_image: t("world-clear-image"),
+            material_pick_image: t("material-pick-image"),
+            material_clear_image: t("material-clear-image"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
@@ -2290,7 +2294,7 @@ fn draw_properties(
                     PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
                     PropertiesTab::Object => draw_object_tab(ui, state, doc, registry),
                     PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
-                    PropertiesTab::Material => draw_material_tab(ui, state, doc, registry),
+                    PropertiesTab::Material => draw_material_tab(ui, state, doc, registry, l),
                     PropertiesTab::World => draw_world_tab(ui, state, doc, registry, l),
                     PropertiesTab::Modifiers => {
                         ui.heading(&l.modifiers);
@@ -2440,6 +2444,7 @@ fn draw_material_tab(
     state: &mut ShellState,
     doc: &Document,
     registry: &OperatorRegistry,
+    l: &Labels,
 ) {
     let Some(object) = doc.selection.active else {
         return;
@@ -2452,6 +2457,19 @@ fn draw_material_tab(
     };
     // i18n-exempt: a material's name is the user's own text
     ui.label(&material.name);
+    // §7.7's gate again, one layer up: the image node, the compiler's layer
+    // assignment, the texture array and now the surface coordinates all stand,
+    // and until there is a control here none of it is a feature anybody has.
+    ui.horizontal(|ui| {
+        if ui.button(&l.material_pick_image).clicked() {
+            state.queue.push(Command::PickMaterialImage);
+        }
+        if material.base_color_image.is_some()
+            && ui.button(&l.material_clear_image).clicked()
+        {
+            state.queue.push(Command::ClearMaterialImage);
+        }
+    });
     ui.separator();
     let mut params = kreate_reflect::OpParams::to_map(
         &kreate_ops::ops::object::material_params(material),
@@ -2635,6 +2653,8 @@ menu-file-save-as = Save As...
 menu-file-export = Export...
 world-pick-image = Environment...
 world-clear-image = Clear
+material-pick-image = Base Colour...
+material-clear-image = Clear
 recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
@@ -2841,6 +2861,8 @@ menu-file-save-as = 다른 이름으로 저장...
 menu-file-export = 내보내기...
 world-pick-image = 환경 이미지...
 world-clear-image = 지우기
+material-pick-image = 베이스 컬러...
+material-clear-image = 지우기
 recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
@@ -3732,6 +3754,8 @@ mod tests {
             "menu-file-export",
             "world-pick-image",
             "world-clear-image",
+            "material-pick-image",
+            "material-clear-image",
             "recover-count",
             "recover-open",
             "recover-discard",
