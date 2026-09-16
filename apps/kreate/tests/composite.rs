@@ -915,7 +915,7 @@ fn the_viewport_follows_the_layout_it_is_given() {
     // The point of the layout being data: the shell has to draw where the tree
     // says, not where a `Panel::left` call happens to put things. Checked as
     // the *reported viewport rect*, because that is what the application sizes
-    // its render target from \u2014 a shell that ignored the tree would hand the
+    // its render target from — a shell that ignored the tree would hand the
     // renderer the wrong rectangle and the image would be stretched.
     //
     // Two arrangements that put the viewport on opposite sides, so a shell that

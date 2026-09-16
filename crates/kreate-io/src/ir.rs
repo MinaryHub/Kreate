@@ -389,7 +389,7 @@ fn retain_corners<T: Copy>(corners: &mut Option<Vec<T>>, keep: &[bool]) {
 /// Where a node is, as the source file wrote it.
 ///
 /// Kept as translation, rotation and scale rather than as a matrix, because
-/// that is what every format writes and what the document stores \u2014 and because
+/// that is what every format writes and what the document stores — and because
 /// decomposing a matrix back into the three is lossy in exactly the cases
 /// (mirrored and sheared transforms) where somebody would notice.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -497,7 +497,7 @@ pub enum ImportNodeData {
 /// The thing the IR did not have, and the reason a light could not be imported
 /// at all: a light is a placement and a datablock, and there was nowhere to put
 /// the placement. Meshes came through as `(name, MeshData)` pairs with their
-/// position silently dropped \u2014 which was survivable only because everything
+/// position silently dropped — which was survivable only because everything
 /// exported so far had its transform baked in.
 #[derive(Clone, Debug)]
 pub struct ImportNode {
@@ -505,7 +505,7 @@ pub struct ImportNode {
     /// Index into [`ImportScene::nodes`], or `None` for a root.
     ///
     /// An index and not a child list, because a cycle is then not expressible
-    /// in the common direction \u2014 a node can only name one parent \u2014 and because
+    /// in the common direction — a node can only name one parent — and because
     /// the document stores parents the same way.
     pub parent: Option<usize>,
     pub transform: ImportTransform,
@@ -525,7 +525,7 @@ impl ImportNode {
 
 /// What kind of light, in the units the format writes.
 ///
-/// glTF's `KHR_lights_punctual` exactly, because \u00a72.2 chose those units for the
+/// glTF's `KHR_lights_punctual` exactly, because §2.2 chose those units for the
 /// datablock for this reason: the boundary is a copy rather than a conversion,
 /// and a conversion is where rounding accumulates across a round trip.
 #[derive(Clone, Copy, Debug, PartialEq)]

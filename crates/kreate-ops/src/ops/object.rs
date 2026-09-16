@@ -263,7 +263,7 @@ pub struct SetLightParams {
     /// Not an amount of light. See `AddLightParams::color`.
     #[param(color)]
     pub color: [f64; 3],
-    /// How much light, in the unit the chosen kind uses \u2014 candela for a point
+    /// How much light, in the unit the chosen kind uses — candela for a point
     /// or a spot, lux for a sun, nits for an area light.
     ///
     /// Unlike the add operator, zero here means zero. Adding a light of no
@@ -275,19 +275,19 @@ pub struct SetLightParams {
     /// Stops on top of `intensity`.
     ///
     /// The dial an artist actually reaches for, and the one `UsdLux` keeps
-    /// separately \u2014 see \u00a77.1 on why the two are not collapsed into one number.
+    /// separately — see §7.1 on why the two are not collapsed into one number.
     #[param(soft_min = -10.0, soft_max = 10.0)]
     pub exposure: f64,
     /// How big the source is, in metres: what makes a shadow soft.
     ///
     /// A point's or a spot's. Ignored by the other two kinds, which have their
-    /// own shapes \u2014 carried in the same parameter block rather than split into
+    /// own shapes — carried in the same parameter block rather than split into
     /// an operator per kind, because changing the kind is one of the edits and
     /// an operator that could not do it would leave the panel switching between
     /// operators mid-gesture.
     #[param(min = 0.0, soft_max = 2.0, unit = "length")]
     pub radius: f64,
-    /// How wide a sun appears, in radians. The sun's own is 0.526\u00b0.
+    /// How wide a sun appears, in radians. The sun's own is 0.526°.
     #[param(min = 0.0, soft_max = 0.2, unit = "angle")]
     pub angular_diameter: f64,
     /// A spot's full cone angle, in radians.
@@ -302,7 +302,7 @@ pub struct SetLightParams {
     pub blend: f64,
     /// Whether the light casts a shadow.
     pub cast_shadow: bool,
-    /// Whether it lights the diffuse response. \u00a72.2's lighting cheat.
+    /// Whether it lights the diffuse response. §2.2's lighting cheat.
     pub affect_diffuse: bool,
     /// And the specular one.
     pub affect_specular: bool,
@@ -337,7 +337,7 @@ impl Default for SetLightParams {
 /// Where the lamp *is* belongs to the object and goes through `SetTransform`;
 /// a sun's direction and a spot's aim are its rotation. What kind of lamp it is
 /// and how bright belong to the datablock, which a hundred linked copies share
-/// \u2014 \u00a72.2's argument, and the reason editing one of them changes all of them.
+/// — §2.2's argument, and the reason editing one of them changes all of them.
 /// That is the intent, and it is the whole reason the datablock is not a field
 /// on the object.
 pub struct SetLight;
@@ -515,7 +515,7 @@ pub struct SetWorldParams {
     /// How much light the background gives, linear.
     ///
     /// Zero is a scene lit only by its lamps, which is a real thing to want and
-    /// is what a document with no world means \u2014 so it is reachable from the
+    /// is what a document with no world means — so it is reachable from the
     /// panel rather than only by deleting the world.
     #[param(min = 0.0, soft_max = 10.0)]
     pub strength: f64,
@@ -777,7 +777,7 @@ impl Operator for SetMaterial {
             return Ok(OpResult::Cancelled);
         };
         // Linear on both sides: glTF's `baseColorFactor` is linear too, and a
-        // material's base colour is a reflectance rather than a swatch \u2014 so
+        // material's base colour is a reflectance rather than a swatch — so
         // unlike a light's tint there is no transfer function in the way.
         material.base_color = kreate_math::Srgb::new(
             params.color[0] as f32,
@@ -1122,7 +1122,7 @@ pub struct SetCameraParams {
     /// Sensitivity. Doubling it is one stop.
     #[param(min = 1.0, soft_max = 12_800.0)]
     pub iso: f64,
-    /// The \u00b1EV dial, in stops.
+    /// The ±EV dial, in stops.
     ///
     /// Applies whether or not the meter is on, which is what it means on a
     /// camera: a deliberate departure from what the meter said.

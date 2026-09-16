@@ -305,7 +305,7 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 /// light *is* a placement and a datablock, with nothing else to it.
 ///
 /// `mesh_of` maps a glTF mesh index onto the index the IR gave it, because the
-/// two need not agree \u2014 they do today, and relying on that would be a rule
+/// two need not agree — they do today, and relying on that would be a rule
 /// nobody wrote down.
 fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
     // `lights()` answers nothing at all when the file does not declare the
@@ -332,7 +332,7 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
             kind,
             color: light.color(),
             // Candela for a point or a spot and lux for a directional light,
-            // which is what the datablock stores. \u00a72.2 chose these units so
+            // which is what the datablock stores. §2.2 chose these units so
             // that this line is a copy.
             intensity: light.intensity(),
             range: light.range(),
@@ -363,7 +363,7 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
     }
 
     // glTF node indices are dense and the IR's are too, so one pass fills the
-    // nodes and a second wires the parents \u2014 a child can be written before its
+    // nodes and a second wires the parents — a child can be written before its
     // parent and an index into a half-built list would be wrong.
     let count = document.nodes().count();
     scene.nodes = document
