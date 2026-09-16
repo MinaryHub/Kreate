@@ -10,6 +10,7 @@ pub mod area;
 pub mod command;
 pub mod command_info;
 pub mod context_menu;
+pub mod element_icon;
 pub mod fonts;
 pub mod keymap_editor;
 pub mod modifier_stack;

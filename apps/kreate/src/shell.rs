@@ -849,6 +849,12 @@ struct Labels {
     exposure: String,
     exposure_metered: String,
     exposure_manual: String,
+    menu_file: String,
+    menu_edit: String,
+    menu_object: String,
+    menu_mesh: String,
+    menu_edge: String,
+    menu_face: String,
     add_menu: String,
     add_light_point: String,
     add_light_sun: String,
@@ -888,9 +894,6 @@ struct Labels {
     merge: String,
     weld: String,
     select_loop: String,
-    select_vert: String,
-    select_edge: String,
-    select_face: String,
 }
 
 impl Labels {
@@ -921,6 +924,12 @@ impl Labels {
             exposure: t("exposure"),
             exposure_metered: t("exposure-metered"),
             exposure_manual: t("exposure-manual"),
+            menu_file: t("menu-file"),
+            menu_edit: t("menu-edit"),
+            menu_object: t("menu-object"),
+            menu_mesh: t("menu-mesh"),
+            menu_edge: t("menu-edge"),
+            menu_face: t("menu-face"),
             add_menu: t("menu-add"),
             add_light_point: t("menu-add-light-point"),
             add_light_sun: t("menu-add-light-sun"),
@@ -960,9 +969,6 @@ impl Labels {
             merge: t("menu-merge"),
             weld: t("menu-weld"),
             select_loop: t("menu-select-loop"),
-            select_vert: t("select-mode-vert"),
-            select_edge: t("select-mode-edge"),
-            select_face: t("select-mode-face"),
         }
     }
 }
@@ -1048,35 +1054,72 @@ pub fn draw(
     }
 
     Panel::top("menu").show(ui, |ui| {
-        // Wrapped, not clipped. The edit-mode toolbar is already wide enough to
-        // run off a narrow window, and a clipped row silently hides buttons —
-        // the user concludes the tool does not exist. Wrapping costs a little
-        // height and loses nothing.
+        // **Menus, not a row of buttons.** In edit mode this row carried
+        // fifteen flat buttons and wrapped onto three lines on a normal
+        // window; finding "inset" meant reading all fifteen. The grouping
+        // below is Blender's, because Blender's is the one a modeller already
+        // knows: what a command acts *on* is what decides which menu it is in,
+        // so Bevel is under Edge and Inset is under Face even though both are
+        // "make the shape bigger somewhere".
         //
-        // Grouped menus are the real answer and the plan budgets for them; this
-        // is what keeps the row honest until then.
+        // Still wrapped rather than clipped. A clipped row silently hides
+        // entries and the user concludes the command does not exist.
         ui.horizontal_wrapped(|ui| {
-            // First in the row, because that is where every application in this
-            // category puts it and where a user's eye goes for it.
-            if ui.button(&l.file_new).clicked() {
-                state.queue.push(Command::NewDocument);
-            }
-            if ui.button(&l.file_open).clicked() {
-                state.queue.push(Command::OpenDocument);
-            }
-            if ui.button(&l.file_save).clicked() {
-                state.queue.push(Command::SaveDocument);
-            }
-            if ui.button(&l.file_save_as).clicked() {
-                state.queue.push(Command::SaveDocumentAs);
-            }
-            if ui.button(&l.file_export).clicked() {
-                state.queue.push(Command::ExportScene);
-            }
-            ui.separator();
-            // A menu rather than a button, because what can be added stopped
-            // being one thing the moment lights arrived — and a row of buttons
-            // per kind is how a header becomes unreadable.
+            // First, because that is where every application in this category
+            // puts it and where a user's eye goes for it.
+            ui.menu_button(&l.menu_file, |ui| {
+                if ui.button(&l.file_new).clicked() {
+                    state.queue.push(Command::NewDocument);
+                    ui.close();
+                }
+                if ui.button(&l.file_open).clicked() {
+                    state.queue.push(Command::OpenDocument);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(&l.file_save).clicked() {
+                    state.queue.push(Command::SaveDocument);
+                    ui.close();
+                }
+                if ui.button(&l.file_save_as).clicked() {
+                    state.queue.push(Command::SaveDocumentAs);
+                    ui.close();
+                }
+                ui.separator();
+                // Below the fold from saving, and after a separator, because
+                // an export is not a save: the document keeps no path from it
+                // and treating a `.glb` as a working file loses everything the
+                // format cannot hold.
+                if ui.button(&l.file_export).clicked() {
+                    state.queue.push(Command::ExportScene);
+                    ui.close();
+                }
+            });
+
+            // Undo and redo live here rather than as buttons on the row, which
+            // is both Blender's arrangement and the honest one: they are
+            // reached by keystroke a hundred times for every once they are
+            // reached by pointer, and two permanent buttons for that is two
+            // buttons' worth of row taken from commands that have no key.
+            ui.menu_button(&l.menu_edit, |ui| {
+                if ui
+                    .add_enabled(history.can_undo(), egui::Button::new(&l.undo))
+                    .clicked()
+                {
+                    state.queue.push(Command::Undo);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(history.can_redo(), egui::Button::new(&l.redo))
+                    .clicked()
+                {
+                    state.queue.push(Command::Redo);
+                    ui.close();
+                }
+            });
+
+            // A menu since lights arrived: what can be added stopped being one
+            // thing, and a button per kind is how a header becomes unreadable.
             ui.menu_button(&l.add_menu, |ui| {
                 if ui.button(&l.add_cube).clicked() {
                     let mut p = PropertyMap::new();
@@ -1099,25 +1142,26 @@ pub fn draw(
                     }
                 }
             });
-            if command_tool(ui, state, "object.duplicate", &l.duplicate) {
-                let mut p = PropertyMap::new();
-                p.set("linked", kreate_reflect::PropertyValue::Bool(true));
-                state.queue.run("object.duplicate", p);
+
+            // What the menus after Add are depends on the mode, because what
+            // you can act on does. Object mode acts on whole objects; edit
+            // mode acts on the parts of one.
+            if mode.shows_elements() {
+                draw_mesh_menus(ui, state, &l);
+            } else {
+                ui.menu_button(&l.menu_object, |ui| {
+                    if menu_tool(ui, state, "object.duplicate", &l.duplicate) {
+                        let mut p = PropertyMap::new();
+                        p.set("linked", kreate_reflect::PropertyValue::Bool(true));
+                        state.queue.run("object.duplicate", p);
+                    }
+                    ui.separator();
+                    if menu_tool(ui, state, "object.delete", &l.delete) {
+                        state.queue.run("object.delete", PropertyMap::new());
+                    }
+                });
             }
-            if command_tool(ui, state, "object.delete", &l.delete) {
-                state.queue.run("object.delete", PropertyMap::new());
-            }
-            ui.separator();
-            ui.add_enabled_ui(history.can_undo(), |ui| {
-                if ui.button(&l.undo).clicked() {
-                    state.queue.push(Command::Undo);
-                }
-            });
-            ui.add_enabled_ui(history.can_redo(), |ui| {
-                if ui.button(&l.redo).clicked() {
-                    state.queue.push(Command::Redo);
-                }
-            });
+
             ui.separator();
 
             // A dropdown over every mode rather than a button that toggles
@@ -1126,122 +1170,37 @@ pub fn draw(
             // read as one thing when there are seven of them.
             draw_mode_menu(ui, state, doc, mode);
 
-            ui.separator();
-            draw_shading_menu(ui, state, &l);
-            draw_exposure(ui, state, &l);
-
+            // The element buttons stay buttons rather than becoming a menu.
+            // They are a *state* — which one is lit tells you what a click in
+            // the viewport will pick — and a state behind a menu is a state
+            // you cannot see.
+            //
+            // Pictures rather than words, and not for decoration: with Mesh,
+            // Edge and Face menus now in the same row, buttons reading "Edge"
+            // and "Face" sat inches from menus reading "Edge" and "Face" and
+            // meant something else. The name survives as the tooltip.
             if mode.shows_elements() {
                 ui.separator();
-                for (index, text) in [
-                    (0u32, &l.select_vert),
-                    (1, &l.select_edge),
-                    (2, &l.select_face),
-                ] {
-                    if ui
-                        .selectable_label(state.select_mode == index, text)
-                        .clicked()
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for element in kreate_ui::element_icon::Element::ALL {
+                    let index = element.index();
+                    let name = state.catalog.get(element.label_key());
+                    if kreate_ui::element_icon::element_button(
+                        ui,
+                        element,
+                        state.select_mode == index,
+                    )
+                    .on_hover_text(&name)
+                    .clicked()
                     {
                         state.queue.push(Command::SetSelectMode(index));
                     }
                 }
-                ui.separator();
-                if command_tool(ui, state, "mesh.extrude_region", &l.extrude) {
-                    let mut p = PropertyMap::new();
-                    p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
-                    state.queue.run("mesh.extrude_region", p);
-                }
-                if command_tool(ui, state, "mesh.inset", &l.inset) {
-                    let mut p = PropertyMap::new();
-                    p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
-                    state.queue.run("mesh.inset", p);
-                }
-                if command_tool(ui, state, "mesh.bridge", &l.bridge) {
-                    state.queue.run("mesh.bridge", PropertyMap::new());
-                }
-                if command_tool(ui, state, "mesh.loop_cut", &l.loop_cut) {
-                    let mut p = PropertyMap::new();
-                    p.set("cuts", kreate_reflect::PropertyValue::Int(1));
-                    p.set("position", kreate_reflect::PropertyValue::Float(0.5));
-                    state.queue.run("mesh.loop_cut", p);
-                }
-                if command_tool(ui, state, "mesh.bevel", &l.bevel) {
-                    let mut p = PropertyMap::new();
-                    p.set("width", kreate_reflect::PropertyValue::Float(0.1));
-                    state.queue.run("mesh.bevel", p);
-                }
-                if command_tool(ui, state, "mesh.subdivide", &l.subdivide) {
-                    let mut p = PropertyMap::new();
-                    p.set("iterations", kreate_reflect::PropertyValue::Int(1));
-                    state.queue.run("mesh.subdivide", p);
-                }
-                // Delete and dissolve both act on whatever the current element
-                // mode is, so the button carries it rather than asking again.
-                if command_tool(ui, state, "mesh.dissolve", &l.dissolve) {
-                    let mut p = PropertyMap::new();
-                    p.set(
-                        "mode",
-                        kreate_reflect::PropertyValue::Enum(state.select_mode),
-                    );
-                    state.queue.run("mesh.dissolve", p);
-                }
-                if command_tool(ui, state, "mesh.delete", &l.delete) {
-                    let mut p = PropertyMap::new();
-                    p.set(
-                        "mode",
-                        kreate_reflect::PropertyValue::Enum(state.select_mode),
-                    );
-                    state.queue.run("mesh.delete", p);
-                }
-                ui.separator();
-                if command_tool(ui, state, "mesh.merge", &l.merge) {
-                    let mut p = PropertyMap::new();
-                    p.set("target", kreate_reflect::PropertyValue::Enum(0));
-                    state.queue.run("mesh.merge", p);
-                }
-                if command_tool(ui, state, "mesh.merge", &l.weld) {
-                    let mut p = PropertyMap::new();
-                    p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
-                    state.queue.run("mesh.merge", p);
-                }
-                if command_tool(ui, state, "mesh.select", &l.select_loop) {
-                    let mut p = PropertyMap::new();
-                    p.set("action", kreate_reflect::PropertyValue::Enum(3));
-                    state.queue.run("mesh.select", p);
-                }
-                ui.separator();
-                if command_tool(ui, state, "mesh.shade", &l.shade_smooth) {
-                    let mut p = PropertyMap::new();
-                    p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
-                    state.queue.run("mesh.shade", p);
-                }
-                if command_tool(ui, state, "mesh.shade", &l.shade_flat) {
-                    let mut p = PropertyMap::new();
-                    p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
-                    state.queue.run("mesh.shade", p);
-                }
-                if ui.button(&l.mark_sharp).clicked() {
-                    // By angle rather than by selection: a user reaching for
-                    // this on a freshly imported model has nothing selected, and
-                    // thirty degrees is the answer they want.
-                    let mut p = PropertyMap::new();
-                    p.set(
-                        "angle",
-                        kreate_reflect::PropertyValue::Float(30f64.to_radians()),
-                    );
-                    state.queue.run("mesh.mark_sharp", p);
-                }
-                if command_tool(ui, state, "mesh.fill", &l.fill) {
-                    state.queue.run("mesh.fill", PropertyMap::new());
-                }
-                if command_tool(ui, state, "mesh.spin", &l.spin) {
-                    state.queue.run("mesh.spin", PropertyMap::new());
-                }
-                if command_tool(ui, state, "mesh.normals", &l.recalc_normals) {
-                    let mut p = PropertyMap::new();
-                    p.set("action", kreate_reflect::PropertyValue::Enum(0));
-                    state.queue.run("mesh.normals", p);
-                }
             }
+
+            ui.separator();
+            draw_shading_menu(ui, state, &l);
+            draw_exposure(ui, state, &l);
 
             ui.separator();
             draw_workspace_tabs(ui, state);
@@ -1831,6 +1790,140 @@ fn command_tool(ui: &mut egui::Ui, state: &ShellState, op_id: &str, label: &str)
         Some(info) if info.has_tooltip() => response.on_hover_text(info.tooltip()).clicked(),
         _ => response.clicked(),
     }
+}
+
+/// The same as [`command_tool`], for an entry inside a menu.
+///
+/// Closes the menu on a click, which a menu entry has to do and a toolbar
+/// button must not: leaving it open after running a command hides the very
+/// thing the command changed.
+fn menu_tool(ui: &mut egui::Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
+    if command_tool(ui, state, op_id, label) {
+        ui.close();
+        true
+    } else {
+        false
+    }
+}
+
+/// The edit-mode menus: Mesh, Edge and Face.
+///
+/// **Blender's grouping, on purpose.** What a command acts *on* decides which
+/// menu it is in — Bevel under Edge, Inset under Face — which is why two
+/// commands that both "make the shape bigger somewhere" are filed apart. A
+/// modeller already knows this arrangement, and the alternative on offer was
+/// the fifteen flat buttons this replaces.
+///
+/// There is no Vertex menu, which Blender does have. Nothing here is
+/// vertex-specific: Merge and Weld read the element mode rather than assuming
+/// one, so they belong under Mesh. An empty menu would be a promise the
+/// application does not keep.
+fn draw_mesh_menus(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.menu_mesh, |ui| {
+        // Merge and dissolve both act on whatever the element mode is, so the
+        // entry carries it rather than asking again.
+        if menu_tool(ui, state, "mesh.merge", &l.merge) {
+            let mut p = PropertyMap::new();
+            p.set("target", kreate_reflect::PropertyValue::Enum(0));
+            state.queue.run("mesh.merge", p);
+        }
+        if menu_tool(ui, state, "mesh.merge", &l.weld) {
+            let mut p = PropertyMap::new();
+            p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
+            state.queue.run("mesh.merge", p);
+        }
+        ui.separator();
+        if menu_tool(ui, state, "mesh.dissolve", &l.dissolve) {
+            let mut p = PropertyMap::new();
+            p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
+            state.queue.run("mesh.dissolve", p);
+        }
+        if menu_tool(ui, state, "mesh.delete", &l.delete) {
+            let mut p = PropertyMap::new();
+            p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
+            state.queue.run("mesh.delete", p);
+        }
+        ui.separator();
+        if menu_tool(ui, state, "mesh.spin", &l.spin) {
+            state.queue.run("mesh.spin", PropertyMap::new());
+        }
+        ui.separator();
+        // Shading is a property of the mesh rather than of a selection, which
+        // is why it is here and not under Face.
+        if menu_tool(ui, state, "mesh.shade", &l.shade_smooth) {
+            let mut p = PropertyMap::new();
+            p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
+            state.queue.run("mesh.shade", p);
+        }
+        if menu_tool(ui, state, "mesh.shade", &l.shade_flat) {
+            let mut p = PropertyMap::new();
+            p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
+            state.queue.run("mesh.shade", p);
+        }
+        if menu_tool(ui, state, "mesh.normals", &l.recalc_normals) {
+            let mut p = PropertyMap::new();
+            p.set("action", kreate_reflect::PropertyValue::Enum(0));
+            state.queue.run("mesh.normals", p);
+        }
+    });
+
+    ui.menu_button(&l.menu_edge, |ui| {
+        if menu_tool(ui, state, "mesh.bevel", &l.bevel) {
+            let mut p = PropertyMap::new();
+            p.set("width", kreate_reflect::PropertyValue::Float(0.1));
+            state.queue.run("mesh.bevel", p);
+        }
+        if menu_tool(ui, state, "mesh.loop_cut", &l.loop_cut) {
+            let mut p = PropertyMap::new();
+            p.set("cuts", kreate_reflect::PropertyValue::Int(1));
+            p.set("position", kreate_reflect::PropertyValue::Float(0.5));
+            state.queue.run("mesh.loop_cut", p);
+        }
+        if menu_tool(ui, state, "mesh.subdivide", &l.subdivide) {
+            let mut p = PropertyMap::new();
+            p.set("iterations", kreate_reflect::PropertyValue::Int(1));
+            state.queue.run("mesh.subdivide", p);
+        }
+        if menu_tool(ui, state, "mesh.bridge", &l.bridge) {
+            state.queue.run("mesh.bridge", PropertyMap::new());
+        }
+        ui.separator();
+        if menu_tool(ui, state, "mesh.select", &l.select_loop) {
+            let mut p = PropertyMap::new();
+            p.set("action", kreate_reflect::PropertyValue::Enum(3));
+            state.queue.run("mesh.select", p);
+        }
+        ui.separator();
+        if ui.button(&l.mark_sharp).clicked() {
+            // By angle rather than by selection: somebody reaching for this on
+            // a freshly imported model has nothing selected, and thirty
+            // degrees is the answer they want.
+            let mut p = PropertyMap::new();
+            p.set(
+                "angle",
+                kreate_reflect::PropertyValue::Float(30f64.to_radians()),
+            );
+            state.queue.run("mesh.mark_sharp", p);
+            ui.close();
+        }
+    });
+
+    ui.menu_button(&l.menu_face, |ui| {
+        if menu_tool(ui, state, "mesh.extrude_region", &l.extrude) {
+            let mut p = PropertyMap::new();
+            p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
+            state.queue.run("mesh.extrude_region", p);
+        }
+        if menu_tool(ui, state, "mesh.inset", &l.inset) {
+            let mut p = PropertyMap::new();
+            p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
+            state.queue.run("mesh.inset", p);
+        }
+        ui.separator();
+        if menu_tool(ui, state, "mesh.fill", &l.fill) {
+            state.queue.run("mesh.fill", PropertyMap::new());
+        }
+    });
 }
 
 /// How wide the right-click menu is, in interface points.
@@ -2808,6 +2901,12 @@ tab-material = Material
 tab-world = World
 world-image = The background is an image; the colour below does not apply to it.
 light-shared = Shared by { $count } objects — editing this changes all of them
+menu-file = File
+menu-edit = Edit
+menu-object = Object
+menu-mesh = Mesh
+menu-edge = Edge
+menu-face = Face
 menu-add = Add
 menu-add-light-point = Point Light
 menu-add-light-sun = Sun
@@ -3019,6 +3118,12 @@ tab-material = 재질
 tab-world = 월드
 world-image = 배경이 이미지입니다. 아래 색은 적용되지 않습니다.
 light-shared = { $count }개의 오브젝트가 공유 — 여기서 고치면 전부 바뀍니다
+menu-file = 파일
+menu-edit = 편집
+menu-object = 물체
+menu-mesh = 메시
+menu-edge = 모서리
+menu-face = 면
 menu-add = 추가
 menu-add-light-point = 점광원
 menu-add-light-sun = 태양

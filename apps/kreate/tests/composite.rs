@@ -1320,13 +1320,27 @@ fn edit_mode_shows_element_selection_instead_of_the_object_outline() {
     // not enough of a test: the grid's X axis is pure red and contributes
     // several hundred pixels to every frame, which is exactly the sort of
     // baseline that makes a threshold pass for the wrong reason.
+    //
+    // **Counted inside the viewport only.** The claim here is about what the
+    // renderer draws, and the chrome wears the same accent for everything it
+    // marks as selected — the workspace tab, the mode label, the element
+    // buttons. Counting the whole frame made this test fail the day the
+    // element buttons became painted icons instead of words, which changed
+    // nothing about the picture it is asking after.
     let orange = |c: &Composited| {
-        c.pixels
-            .iter()
-            .filter(|p| {
-                i32::from(p[0]) - i32::from(p[2]) > 60 && i32::from(p[1]) - i32::from(p[2]) > 40
-            })
-            .count()
+        let r = c.viewport_rect;
+        let mut n = 0;
+        for y in (r.top().max(0.0) as u32)..(r.bottom().min(H as f32) as u32) {
+            for x in (r.left().max(0.0) as u32)..(r.right().min(W as f32) as u32) {
+                let p = c.at(x, y);
+                if i32::from(p[0]) - i32::from(p[2]) > 60
+                    && i32::from(p[1]) - i32::from(p[2]) > 40
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
     };
 
     let object_mode = gpu_or_skip!(composite(&plain, "ko-KR"));
@@ -1570,5 +1584,18 @@ fn shot_material_tab() {
             return;
         };
         shot.dump(&format!("material-{label}"));
+    }
+}
+
+/// A picture of the top row in both modes, for looking at.
+#[test]
+fn shot_menu_row() {
+    let doc = doc_with_cube();
+    for (label, edit) in [("object", false), ("edit", true)] {
+        let Some(shot) = composite_in(&doc, "en", edit) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("menu-{label}"));
     }
 }
