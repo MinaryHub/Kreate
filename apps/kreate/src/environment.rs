@@ -288,4 +288,36 @@ mod tests {
         doc.set_active_world(Some(flat));
         assert_eq!(key_of(&doc), None);
     }
+
+    #[test]
+    fn two_skies_of_the_same_size_are_not_the_same_sky() {
+        // The identity in the key, and the reason a fixture with one image
+        // cannot see it: a key that dropped the identity would still change
+        // when the *dimensions* did, and one image is never compared with
+        // another. Two images of the same size and the same residency differ in
+        // nothing else — which is exactly the case a user hits when they try a
+        // second HDRI from the same pack.
+        let mut doc = Document::new();
+        let mut first = Image::new("Dawn", 300, 140, PixelFormat::Rgba16F);
+        first.tile_mut(0, 0).expect("in range");
+        let mut second = Image::new("Dusk", 300, 140, PixelFormat::Rgba16F);
+        second.tile_mut(0, 0).expect("in range");
+        let a = doc.add_image(first);
+        let b = doc.add_image(second);
+
+        let world = doc.add_world(kreate_scene::World {
+            background: kreate_scene::Background::Image(a),
+            ..kreate_scene::World::new("Sky")
+        });
+        doc.set_active_world(Some(world));
+        let with_a = key_of(&doc).expect("an image background");
+
+        doc.world_mut(world).expect("the world").background =
+            kreate_scene::Background::Image(b);
+        let with_b = key_of(&doc).expect("an image background");
+        assert_ne!(
+            with_a, with_b,
+            "swapping the sky for another of the same size changed nothing"
+        );
+    }
 }

@@ -29,6 +29,13 @@ fn background_vertex(@builtin(vertex_index) index: u32) -> Vertex {
     let y = f32(i32(index & 1u) * 4 - 1);
     out.ndc = vec2<f32>(x, y);
     // Reversed-Z: zero is the far plane, which is where a background belongs.
+    //
+    // Nothing reads it today — the pipeline neither writes nor tests depth (see
+    // `gpu::depth_ignore_state`), and a sweep that put the triangle on the near
+    // plane instead changed nothing. It says the right thing anyway, because
+    // the day this pipeline takes a depth state is the day the difference stops
+    // being invisible, and a value that was arbitrary then is one nobody would
+    // think to look at.
     out.clip = vec4<f32>(x, y, 0.0, 1.0);
     return out;
 }

@@ -168,10 +168,16 @@ fn on_gpu_under(
                 // that makes it rather than in every other test's background.
                 environment: {
                     let radians = ROTATION.with(|r| r.get());
-                    // Strength one: these tests are about the arithmetic, and a
-                    // dimmer in the background of all of them would scale every
-                    // expected value for no reason.
-                    [radians.cos(), radians.sin(), environment.roughest(), 1.0]
+                    // Strength one unless a test says otherwise: a dimmer in
+                    // the background of all of them would scale every expected
+                    // value for no reason, and nothing setting it at all is
+                    // how it went untested.
+                    [
+                        radians.cos(),
+                        radians.sin(),
+                        environment.roughest(),
+                        STRENGTH.with(|s| s.get()),
+                    ]
                 },
                 sh9: kreate_render::environment::sh9_bytes(environment.sh9()),
                 inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
@@ -962,4 +968,304 @@ thread_local! {
     /// A thread local rather than an argument, so that the dozen call sites
     /// that have nothing to do with a rotation do not grow one.
     static ROTATION: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// A world bright enough to matter beside the lamps.
+///
+/// Not black, which is what every test here used before and what made the
+/// GPU/CPU comparison blind to the whole ambient path: `ambient_from` could
+/// lose its factor of `π` and both sides would still agree on zero.
+const A_WORLD: [f32; 4] = [0.35, 0.3, 0.25, 0.0];
+
+#[test]
+fn the_gpu_shades_the_way_the_cpu_does_under_a_world_too() {
+    // The same claim as `the_gpu_shades_the_way_the_cpu_does`, with the light
+    // that is always there switched on. Its own test rather than a change to
+    // that one, because "the lamps agree" and "the world agrees" are different
+    // claims and a failure should say which.
+    //
+    // This is the test that was missing. A sweep that removed the `π` from
+    // either side of the ambient arithmetic walked through every device test in
+    // this file, because the only fixtures that lit anything lit it with lamps.
+    let gpu = gpu_or_skip!(gpu());
+    let rig = a_rig();
+    let points = some_points();
+    let packed: Vec<GpuLight> = rig
+        .iter()
+        .map(|l| GpuLight::pack(l, glam::DVec3::ZERO))
+        .collect();
+
+    let got = on_gpu_under(&gpu, &points, &rig, None, A_WORLD, None);
+    let world = [A_WORLD[0], A_WORLD[1], A_WORLD[2]];
+    for (point, lit) in points.iter().zip(&got) {
+        let want = shading::shade(point, &packed, world);
+        for c in 0..3 {
+            assert!(
+                close(lit[c], want[c]),
+                "channel {c} at {:?}: GPU {} against CPU {}",
+                point.position,
+                lit[c],
+                want[c]
+            );
+        }
+    }
+
+    // And the world is doing something: the same points with no world at all
+    // come out darker. Without this the comparison is again two
+    // implementations agreeing on a term neither of them reached.
+    let dark = on_gpu(&gpu, &points, &rig, None);
+    assert!(
+        got.iter().zip(&dark).any(|(a, b)| a[0] > b[0] + 0.01),
+        "the world changed nothing"
+    );
+}
+
+#[test]
+fn the_world_alone_shades_the_way_the_cpu_does() {
+    // No lamps at all, so what is compared is the ambient term by itself.
+    // Sharper than the test above, where a lamp's contribution could hide a
+    // factor in the world's.
+    let gpu = gpu_or_skip!(gpu());
+    let points = some_points();
+    let got = on_gpu_under(&gpu, &points, &[], None, A_WORLD, None);
+    let world = [A_WORLD[0], A_WORLD[1], A_WORLD[2]];
+    for (point, lit) in points.iter().zip(&got) {
+        let want = shading::ambient(&point.surface, point.normal, point.view, world);
+        for c in 0..3 {
+            assert!(
+                close(lit[c], want[c]),
+                "channel {c}: GPU {} against CPU {}",
+                lit[c],
+                want[c]
+            );
+        }
+    }
+    assert!(got.iter().any(|v| v[0] > 0.01), "the world lit nothing");
+}
+
+/// An environment bright on the `+X` side of the horizon and dark elsewhere.
+///
+/// Directional, because a uniform sky cannot tell a reflection from a normal,
+/// a rough mip from a sharp one, or a rotation from no rotation — and those
+/// are three of the things the shading path decides.
+fn a_directional_sky(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((width * height) as usize * 8);
+    for y in 0..height {
+        for x in 0..width {
+            let u = (x as f32 + 0.5) / width as f32;
+            let v = (y as f32 + 0.5) / height as f32;
+            // `u ≈ 0.75` is +X. See `environment::equirect_uv`.
+            let lit = (v - 0.5).abs() < 0.3 && (u - 0.75).abs() < 0.15;
+            let value = half::f16::from_f32(if lit { 30.0 } else { 0.02 }).to_le_bytes();
+            for _ in 0..3 {
+                out.extend_from_slice(&value);
+            }
+            out.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// One surface under a directional environment.
+fn under_sky(
+    gpu: &Gpu,
+    environment: &kreate_render::environment::Environment,
+    normal: glam::Vec3,
+    view: glam::Vec3,
+    roughness: f32,
+    metallic: f32,
+) -> f32 {
+    let point = Point {
+        position: glam::Vec3::ZERO,
+        normal,
+        view,
+        surface: Surface {
+            base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+            metallic,
+            roughness,
+        },
+    };
+    on_gpu_under(
+        gpu,
+        std::slice::from_ref(&point),
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(environment),
+    )[0][0]
+}
+
+#[test]
+fn a_mirror_reflects_what_is_behind_the_viewer_and_not_what_it_faces() {
+    // The reflection direction, which a uniform environment cannot see: every
+    // direction gives the same colour, so reading the cube along the normal
+    // instead of the mirror passes every test built on one.
+    //
+    // A smooth metal facing away from the bright quarter, viewed from the
+    // direction that puts that quarter in its reflection. What it faces is
+    // dark; what it reflects is not.
+    let gpu = gpu_or_skip!(gpu());
+    let sky = a_directional_sky(128, 64);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 128, 64, &sky);
+
+    // Normal along -X: the surface faces away from the bright side. Viewed from
+    // a direction whose mirror about that normal points at +X.
+    let normal = glam::Vec3::NEG_X;
+    let view = glam::Vec3::new(-1.0, 0.0, 0.0);
+    let facing_away = under_sky(&gpu, &environment, normal, view, 0.05, 1.0);
+
+    // And the same surface turned to face the bright side reflects it.
+    let toward = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 0.05, 1.0);
+    assert!(
+        toward > facing_away * 5.0,
+        "a mirror facing the bright quarter returned {toward} and one facing away {facing_away}"
+    );
+}
+
+#[test]
+fn a_rough_metal_reflects_a_blurrier_sky_than_a_smooth_one() {
+    // The roughness-to-mip step. Under a uniform environment every level holds
+    // the same colour, so a shader that always read level zero would pass every
+    // test built on one — and a rough metal would mirror the sky.
+    let gpu = gpu_or_skip!(gpu());
+    let sky = a_directional_sky(128, 64);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 128, 64, &sky);
+
+    // Pointed at the bright quarter, where a blur can only take light away.
+    let smooth = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 0.02, 1.0);
+    let rough = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 1.0, 1.0);
+    assert!(
+        smooth > rough * 2.0,
+        "a smooth metal returned {smooth} and a rough one {rough}"
+    );
+}
+
+#[test]
+fn a_quarter_turn_moves_the_sky_the_way_a_half_turn_cannot_show() {
+    // A half turn makes `+sin` and `-sin` the same number, so the rotation's
+    // *sign* is invisible to it — which is what the first version of this
+    // asked, and what the sweep walked through.
+    let gpu = gpu_or_skip!(gpu());
+    let sky = a_directional_sky(128, 64);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 128, 64, &sky);
+
+    let facing = |radians: f32| {
+        let saved = ROTATION.with(|r| r.replace(radians));
+        let out = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 0.05, 1.0);
+        ROTATION.with(|r| r.set(saved));
+        out
+    };
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let one_way = facing(quarter);
+    let other_way = facing(-quarter);
+    assert!(
+        (one_way - other_way).abs() > (one_way + other_way) * 0.25,
+        "turning the sky a quarter each way gave {one_way} and {other_way}, \
+         which is a rotation with no direction"
+    );
+}
+
+#[test]
+fn the_worlds_strength_dims_both_halves_of_the_answer() {
+    // Nothing set a strength other than one, so a shader that applied it to the
+    // specular lobe and forgot the diffuse — or forgot it entirely — passed.
+    // It is a dimmer on the *environment*, so both lobes have to move together.
+    let gpu = gpu_or_skip!(gpu());
+    let sky = a_directional_sky(128, 64);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 128, 64, &sky);
+
+    let at = |strength: f32, metallic: f32| {
+        let saved = STRENGTH.with(|s| s.replace(strength));
+        let out = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 0.4, metallic);
+        STRENGTH.with(|s| s.set(saved));
+        out
+    };
+    // A metal, which is specular only, and a dielectric, which is mostly
+    // diffuse. Halving the strength has to halve both.
+    for metallic in [0.0f32, 1.0] {
+        let full = at(1.0, metallic);
+        let half = at(0.5, metallic);
+        assert!(full > 0.01, "metallic {metallic} was not lit at all");
+        assert!(
+            (half - full * 0.5).abs() < full * 0.05,
+            "metallic {metallic}: full {full}, half {half}"
+        );
+    }
+}
+
+thread_local! {
+    /// What `on_gpu_under` writes into the globals' strength.
+    static STRENGTH: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+#[test]
+fn a_surface_facing_away_from_a_sun_is_never_darker_than_black() {
+    // A truncated harmonic series undershoots around a small bright source, and
+    // a negative irradiance *darkens* a surface the environment is lighting —
+    // a shadow nothing casts. The CPU has a test for it; the shader's own
+    // `max` did not, and a sweep that removed it walked through everything.
+    //
+    // A sun in an otherwise black sky is the fixture that produces the ringing,
+    // and a dielectric is what shows it: a metal has no diffuse lobe for a
+    // negative irradiance to reach.
+    let gpu = gpu_or_skip!(gpu());
+    let (width, height) = (128u32, 64u32);
+    let mut pixels = Vec::with_capacity((width * height) as usize * 8);
+    for y in 0..height {
+        for x in 0..width {
+            let sun = y == 12 && x == 40;
+            let value = half::f16::from_f32(if sun { 4000.0 } else { 0.0 }).to_le_bytes();
+            for _ in 0..3 {
+                pixels.extend_from_slice(&value);
+            }
+            pixels.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        }
+    }
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, width, height, &pixels);
+
+    // Every direction, because which one rings is a property of where the sun
+    // is and not something worth pinning to a fixture.
+    let points: Vec<Point> = [
+        glam::Vec3::X,
+        glam::Vec3::NEG_X,
+        glam::Vec3::Y,
+        glam::Vec3::NEG_Y,
+        glam::Vec3::Z,
+        glam::Vec3::NEG_Z,
+    ]
+    .iter()
+    .map(|normal| Point {
+        position: glam::Vec3::ZERO,
+        normal: *normal,
+        view: *normal,
+        surface: Surface {
+            base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+            metallic: 0.0,
+            roughness: 0.6,
+        },
+    })
+    .collect();
+
+    let out = on_gpu_under(
+        &gpu,
+        &points,
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(&environment),
+    );
+    for (point, lit) in points.iter().zip(&out) {
+        for c in 0..3 {
+            assert!(
+                lit[c] >= 0.0,
+                "a surface facing {:?} returned {lit:?}",
+                point.normal
+            );
+        }
+    }
 }

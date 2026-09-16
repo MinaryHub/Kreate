@@ -199,9 +199,15 @@ pub fn irradiance_sh9(width: u32, height: u32, pixels: &[u8]) -> [Vec3; 9] {
         }
     }
     // The grid's weights sum to very nearly 4π but not exactly, and the
-    // difference is a constant scale on the answer — which is a scene that is
-    // one percent dark for no reason anybody could find. Normalised so that a
-    // constant environment comes back exactly.
+    // difference is a constant scale on the answer.
+    //
+    // **At this grid size it is a guard rather than a fix, and the sweep says
+    // so**: removing it changed nothing any test could see. The midpoint rule
+    // over 64 rows has an error of about `(π/64)²/24`, which is a part in ten
+    // thousand — so the correction moves the answer by 0.01% and nothing short
+    // of a much coarser grid could notice. It stays because `ROWS` is a number
+    // somebody may lower, and a scene that is quietly a percent dark is the
+    // kind of wrong nobody finds.
     let correction = if total_weight > 0.0 {
         (4.0 * std::f32::consts::PI) / total_weight
     } else {
@@ -918,6 +924,113 @@ mod tests {
             let du = (back.x - u).abs().min(1.0 - (back.x - u).abs());
             assert!(du < 1e-5, "({u}, {v}) came back at {back:?}");
             assert!((back.y - v).abs() < 1e-5, "({u}, {v}) came back at {back:?}");
+        }
+    }
+
+    /// An equirectangular image whose radiance is a function of direction.
+    fn sky_of(width: u32, height: u32, mut radiance: impl FnMut(Vec3) -> f32) -> Vec<u8> {
+        let mut out = Vec::with_capacity((width * height) as usize * 8);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let theta = v * std::f32::consts::PI;
+                let phi = (u - 0.5) * std::f32::consts::TAU;
+                let dir = Vec3::new(
+                    theta.sin() * phi.sin(),
+                    -theta.sin() * phi.cos(),
+                    theta.cos(),
+                );
+                let value = half::f16::from_f32(radiance(dir)).to_le_bytes();
+                for _ in 0..3 {
+                    out.extend_from_slice(&value);
+                }
+                out.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Irradiance by direct integration: `∫ L(ω) max(n·ω, 0) dω`.
+    ///
+    /// The definition, computed the slow way. This is the only thing in the
+    /// file that says what the nine coefficients are *for* — everything else
+    /// compares them to themselves, which is how a wrong band factor and a
+    /// flipped basis sign both survived a sweep.
+    fn numeric_irradiance(normal: Vec3, mut radiance: impl FnMut(Vec3) -> f32) -> f32 {
+        const ROWS: u32 = 256;
+        const COLUMNS: u32 = 512;
+        let mut total = 0.0f32;
+        for row in 0..ROWS {
+            let theta = (row as f32 + 0.5) / ROWS as f32 * std::f32::consts::PI;
+            let weight = theta.sin() * (std::f32::consts::PI / ROWS as f32)
+                * (std::f32::consts::TAU / COLUMNS as f32);
+            for column in 0..COLUMNS {
+                let phi = ((column as f32 + 0.5) / COLUMNS as f32 - 0.5) * std::f32::consts::TAU;
+                let dir = Vec3::new(
+                    theta.sin() * phi.sin(),
+                    -theta.sin() * phi.cos(),
+                    theta.cos(),
+                );
+                total += radiance(dir) * normal.dot(dir).max(0.0) * weight;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn the_coefficients_reproduce_the_integral_they_stand_for() {
+        // **What the nine numbers are for**, checked against the definition
+        // rather than against themselves.
+        //
+        // The sky is a quadratic in the direction, which second-order harmonics
+        // represent *exactly* — so the reconstruction should match the integral
+        // to within the grid's own error, and a wrong band factor or a flipped
+        // basis sign is a large, obvious failure rather than a subtle one.
+        //
+        // Every other test here compares a projection to another projection, or
+        // asks for a ratio. That is how the second band's factor being twice
+        // what it should be, and the sign of its basis term, both survived a
+        // falsification sweep.
+        let axis = Vec3::new(0.3, -0.6, 0.74).normalize();
+        let sky = |d: Vec3| 1.0 + 2.0 * d.dot(axis) + 3.0 * d.dot(axis) * d.dot(axis);
+        let image = sky_of(256, 128, sky);
+        let sh = irradiance_sh9(256, 128, &image);
+
+        for normal in [
+            Vec3::Z,
+            Vec3::NEG_Z,
+            Vec3::X,
+            Vec3::NEG_Y,
+            axis,
+            -axis,
+            Vec3::new(0.5, 0.5, -0.7).normalize(),
+        ] {
+            let got = sh9_irradiance(&sh, normal).x;
+            let want = numeric_irradiance(normal, sky);
+            assert!(
+                (got - want).abs() < want.abs().max(0.05) * 0.04,
+                "{normal:?}: the coefficients say {got} and the integral says {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sky_with_no_second_order_part_is_still_reproduced() {
+        // The first band on its own, so that a failure above can be attributed.
+        // A linear sky is exact in bands zero and one, and if this passes while
+        // the quadratic case fails, what is wrong is the second band.
+        let axis = Vec3::new(-0.5, 0.2, 0.84).normalize();
+        let sky = move |d: Vec3| 2.0 + 1.5 * d.dot(axis);
+        let image = sky_of(256, 128, sky);
+        let sh = irradiance_sh9(256, 128, &image);
+        for normal in [Vec3::Z, Vec3::X, axis, -axis] {
+            let got = sh9_irradiance(&sh, normal).x;
+            let want = numeric_irradiance(normal, sky);
+            assert!(
+                (got - want).abs() < want.abs().max(0.05) * 0.03,
+                "{normal:?}: the coefficients say {got} and the integral says {want}"
+            );
         }
     }
 

@@ -81,12 +81,20 @@ fn a_scene_a_user_would_build(kind: u32) -> Document {
 
 /// Renders the document's meshes under its lights, as the frame loop does.
 fn shoot(gpu: &Gpu, doc: &Document) -> Vec<[f32; 4]> {
+    shoot_from(gpu, doc, Camera::default())
+}
+
+/// The same, from a camera the caller chose.
+///
+/// Its own function because *only* the camera moving is a case worth being able
+/// to render: everything else about a frame is set by a call that also writes
+/// the shading uniform, so a uniform that stopped following the camera would be
+/// invisible to a test that changed anything else at the same time.
+fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.show_grid = false;
     viewport.show_wireframe = false;
-
-    let camera = Camera::default();
 
     // The same three calls `main` makes, in the same order, from the same
     // functions. A test that assembled the lights itself would be checking its
@@ -609,4 +617,109 @@ fn turning_the_sky_off_again_goes_back_to_a_colour() {
     assert_eq!(doc.image_count(), 1);
 }
 
+#[test]
+fn a_world_image_that_is_not_in_the_document_is_refused() {
+    // A uid naming an image that is not here comes from a script, or from a
+    // redo whose datablock has since gone. The honest answer is to refuse
+    // rather than to make a background that points at nothing — and nothing
+    // else asked, because the application only ever passes a uid it has just
+    // been handed.
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    let mut doc = Document::new();
+    let world = doc.add_world(kreate_scene::World::new("Sky"));
+    doc.set_active_world(Some(world));
 
+    let mut params = PropertyMap::new();
+    params.set("uid", PropertyValue::Text("123456".into()));
+    let outcome = history.dispatch(
+        &registry,
+        &mut doc,
+        &Context { mode: Mode::Object },
+        "world.set_image",
+        &params,
+    );
+    // Cancelled, not an error and not a success: the operator ran and decided
+    // there was nothing to do, which is what an unresolvable reference is.
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        matches!(
+            doc.world(world).expect("still there").background,
+            kreate_scene::Background::Flat(_)
+        ),
+        "the world points at an image that is not in the document"
+    );
+
+    // And a uid that is not a number at all, which is what a hand-edited file
+    // or a mistyped script sends.
+    let mut params = PropertyMap::new();
+    params.set("uid", PropertyValue::Text("not a number".into()));
+    assert!(history
+        .dispatch(
+            &registry,
+            &mut doc,
+            &Context { mode: Mode::Object },
+            "world.set_image",
+            &params,
+        )
+        .is_ok());
+    assert!(matches!(
+        doc.world(world).expect("still there").background,
+        kreate_scene::Background::Flat(_)
+    ));
+}
+
+#[test]
+fn the_sky_follows_the_camera() {
+    // The background's rays come from the camera's inverse, which `prepare`
+    // writes every frame. Everything else in that uniform is written by a call
+    // that changes something else as well — so a uniform that stopped following
+    // the camera would be invisible to every other test here, and was.
+    //
+    // Two views of one document, with nothing else different.
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let doc = a_scene_with_a_sky();
+
+    let mut turned = Camera::default();
+    turned.orbit(400.0, 0.0);
+    let one_way = shoot_from(&gpu, &doc, Camera::default());
+    let other_way = shoot_from(&gpu, &doc, turned);
+    assert!(
+        differing(&one_way, &other_way) > (SIZE * SIZE / 8) as usize,
+        "turning the camera changed only {} pixels of {}",
+        differing(&one_way, &other_way),
+        SIZE * SIZE
+    );
+}
+
+#[test]
+fn the_worlds_strength_dims_the_sky_as_well_as_the_scene() {
+    // A dimmer on the environment, so the background moves with it. Nothing set
+    // a strength other than one, which is how the background came to ignore it
+    // and nothing noticed.
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let full = a_scene_with_a_sky();
+    let bright = shoot(&gpu, &full);
+
+    let mut dim = a_scene_with_a_sky();
+    let world = dim.active_world().expect("a world");
+    dim.world_mut(world).expect("it is there").strength = 0.1;
+    let dark = shoot(&gpu, &dim);
+
+    // The frame as a whole is darker, and by enough that an exposure meter
+    // chasing it could not have made up the difference.
+    let mean = |p: &[[f32; 4]]| p.iter().map(|v| v[0]).sum::<f32>() / p.len() as f32;
+    assert!(
+        mean(&bright) > mean(&dark) + 0.05,
+        "a tenth of the strength gave {} against {}",
+        mean(&dark),
+        mean(&bright)
+    );
+}

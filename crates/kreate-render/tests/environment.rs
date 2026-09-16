@@ -307,3 +307,65 @@ fn an_environment_with_no_pixels_is_black_rather_than_whatever_was_there() {
         assert_eq!(*c, glam::Vec3::ZERO);
     }
 }
+
+/// A sky whose radiance is a smooth, distinctive function of direction.
+///
+/// Smooth so that the bilinear tap the projection takes is close to the value
+/// at the centre, and distinctive so that no two directions agree by accident —
+/// which is what a face permutation needs in order to hide.
+fn analytic(dir: glam::Vec3) -> f32 {
+    4.0 + dir.x + 2.0 * dir.y + 3.0 * dir.z + 0.5 * dir.x * dir.y
+}
+
+#[test]
+fn mip_zero_is_what_the_cpu_says_it_should_be_texel_by_texel() {
+    // **The strongest thing this file can say**, and the one it was missing.
+    //
+    // Everything else here asks for a ratio or compares a face to another face,
+    // and a mapping can be self-consistent and wrong: a sky written with the
+    // axes a shader prefers still looks like a sky, and a half-texel offset
+    // looks like nothing at all. Both survived a falsification sweep.
+    //
+    // So this predicts each texel on the CPU — `cube_direction` for where the
+    // texel looks, `equirect_uv` for where that lands in the image — and asks
+    // the GPU for the same texel. The two mappings are written twice, once in
+    // Rust and once in WGSL, and this is the only thing that holds them to each
+    // other.
+    let gpu = gpu_or_skip!(gpu());
+    let (width, height) = (256u32, 128u32);
+    let pixels = image(width, height, |u, v| {
+        let theta = v * std::f32::consts::PI;
+        let phi = (u - 0.5) * std::f32::consts::TAU;
+        let dir = glam::Vec3::new(
+            theta.sin() * phi.sin(),
+            -theta.sin() * phi.cos(),
+            theta.cos(),
+        );
+        [analytic(dir); 3]
+    });
+    let env = Environment::new(&gpu.device, &gpu.queue, width, height, &pixels);
+
+    for layer in 0..6 {
+        let texels = face(&gpu, &env, 0, layer);
+        // A handful per face rather than all sixteen thousand: what is being
+        // checked is a mapping, and a mapping that is right at the centre, the
+        // corners and the edges is right.
+        for (x, y) in [
+            (0u32, 0u32),
+            (FACE - 1, 0),
+            (0, FACE - 1),
+            (FACE - 1, FACE - 1),
+            (FACE / 2, FACE / 2),
+            (FACE / 4, 3 * FACE / 4),
+        ] {
+            let s = (x as f32 + 0.5) / FACE as f32;
+            let t = (y as f32 + 0.5) / FACE as f32;
+            let want = analytic(environment::cube_direction(layer, s, t));
+            let got = texels[(y * FACE + x) as usize][0];
+            assert!(
+                (got - want).abs() < 0.05,
+                "face {layer} texel ({x}, {y}): the device holds {got} and the CPU predicts {want}"
+            );
+        }
+    }
+}

@@ -168,6 +168,18 @@ fn prefilter(@builtin(global_invocation_id) id: vec3<u32>) {
     // That is what makes a constant environment come back as the constant at
     // every roughness — the identity the whole of §7.5's furnace argument rests
     // on, and the one a prefilter gets wrong by dividing by `samples`.
+    //
+    // **The cosine weighting itself has no test, and that is recorded rather
+    // than papered over.** Removing it survived a falsification sweep: a
+    // constant environment is exact either way, and on a directional one it
+    // changes the *shape* of a lobe whose width is what every ratio test here
+    // is already measuring. The cross-check that suggested itself — that at
+    // roughness one this should agree with the irradiance coefficients over
+    // `π` — is not one: a GGX lobe at roughness one is not a cosine lobe, and
+    // the two differ by about a third on a sky with a gradient in it. What
+    // would catch it is a CPU mirror of this loop, which is the arrangement
+    // `brdf::albedo_table` already has for the same importance sampling, and
+    // it is worth building when something else needs one.
     let colour = total / max(weight, 1e-6);
     textureStore(written, vec2<i32>(i32(id.x), i32(id.y)), i32(id.z), vec4<f32>(colour, 1.0));
 }
