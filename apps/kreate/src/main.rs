@@ -3409,31 +3409,46 @@ impl App {
         // document, which is what stops the renderer from being able to draw
         // something the picker cannot hit.
         let preview_target = region_request.as_ref().and(self.doc.selection.active);
+        // One material per mesh slot, per object, built before the draws so
+        // that a draw can borrow it — which is what keeps `Draw` `Copy` and a
+        // frame free of per-object allocation in the usual case. Empty for an
+        // object whose mesh has no slots, which means "every slot takes
+        // `material`".
+        let slot_materials: Vec<Vec<u32>> = self
+            .evaluated
+            .iter()
+            .map(|(id, _)| {
+                self.materials
+                    .as_ref()
+                    .map(|m| m.slots_of(&self.doc, *id))
+                    .unwrap_or_default()
+            })
+            .collect();
         let mut draws: Vec<Draw> = Vec::new();
-        for (id, mesh) in &self.evaluated {
+        for (at, (id, mesh)) in self.evaluated.iter().enumerate() {
             if let Some((_, gpu_mesh)) = gfx.meshes.iter().find(|(m, _)| Arc::ptr_eq(m, mesh)) {
                 // In edit mode the object-level highlight stands down: the
                 // whole wireframe going orange would drown out the element
                 // selection, which is the only thing the user is looking at.
                 draws.push(
                     Draw::new(gpu_mesh, self.doc.world_transform(*id))
-                        // Slot zero, which is every object that has not been
-                        // given per-face materials. Per-face slots need the
-                        // draw split by slot, and that is a change to how a
-                        // mesh is uploaded rather than to what is handed over
-                        // here — so the whole object takes its first material
-                        // until then, and an object with none takes the
-                        // default surface.
-                        // Zero when the materials have not been compiled
-                        // yet, which is the studio mode: that pass does not
-                        // read a material, and the rendered one compiles them
-                        // before it builds any draws.
+                        // The object's first material, which is what every
+                        // slot a mesh does not name falls back to. Zero when
+                        // the materials have not been compiled yet, which is
+                        // the studio mode: that pass does not read a material,
+                        // and the rendered one compiles them before it builds
+                        // any draws.
                         .with_material(
                             self.materials
                                 .as_ref()
                                 .map(|m| m.index_of(&self.doc, *id))
                                 .unwrap_or(0),
                         )
+                        // And one per slot, for a mesh whose faces are not all
+                        // on the same one. `material_index` has reached the
+                        // glTF exporter since it was written and never reached
+                        // the screen; this is the other end of it.
+                        .with_materials(&slot_materials[at])
                         .selected(
                             self.op_ctx.mode == OpMode::Object
                                 && self.doc.selection.contains(*id),

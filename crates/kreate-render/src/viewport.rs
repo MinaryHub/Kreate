@@ -230,6 +230,13 @@ pub struct GpuMesh {
     edge_flags: wgpu::Buffer,
     face_flags: wgpu::Buffer,
     pub counts: MeshCounts,
+    /// The runs of triangles that share a material slot.
+    ///
+    /// Kept on the CPU rather than uploaded: they are draw-call arguments, not
+    /// data a shader reads. One run for almost every mesh, so the rendered
+    /// pass's loop over them costs nothing until a model actually has a second
+    /// material on it.
+    pub submeshes: Vec<crate::mesh_gpu::Submesh>,
     /// Render vertices after the normal split, which is what the position buffer
     /// holds. Distinct from `counts.verts`, which counts *mesh* vertices.
     pub render_verts: u32,
@@ -470,6 +477,7 @@ impl GpuMesh {
             edge_flags,
             face_flags,
             counts: cpu.counts,
+            submeshes: cpu.submeshes.clone(),
             render_verts: cpu.render_verts(),
             color,
             bounds: cpu.bounds,
@@ -576,7 +584,23 @@ pub struct Draw<'a> {
     /// Zero is whatever the app put first, and the app puts a plain grey there
     /// — an object with no material assigned is not an error and not invisible.
     /// A fresh cube has no materials and should still be shaded.
+    ///
+    /// This is the material for slot zero, and for every slot `materials` does
+    /// not name. A mesh whose faces are all on one slot — which is nearly all
+    /// of them — needs nothing else.
     pub material: u32,
+    /// One material per mesh material *slot*, for a mesh with more than one.
+    ///
+    /// **Borrowed rather than owned** so that `Draw` stays `Copy` and a frame
+    /// allocates nothing per object. The caller already holds the mapping: it
+    /// is the object's slot list resolved through the compiled materials, and
+    /// it changes when the document does rather than when the camera moves.
+    ///
+    /// Empty is the ordinary case and means "every slot is `material`". A slot
+    /// past the end of this falls back the same way, so an object wearing
+    /// fewer materials than its mesh has slots draws in the first one instead
+    /// of vanishing.
+    pub materials: &'a [u32],
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -596,6 +620,7 @@ impl<'a> Draw<'a> {
             preview: false,
             editing: false,
             material: 0,
+            materials: &[],
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
             // failure mode of forgetting to measure is a slow frame, not a
@@ -608,6 +633,30 @@ impl<'a> Draw<'a> {
     pub fn with_material(mut self, material: u32) -> Self {
         self.material = material;
         self
+    }
+
+    /// Sets one material per mesh material slot.
+    ///
+    /// For an object whose faces are not all on one slot. The slice outlives
+    /// the draw, which is what keeps a frame free of allocation — see
+    /// [`Draw::materials`].
+    pub fn with_materials(mut self, materials: &'a [u32]) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    /// Which compiled material a mesh slot draws in.
+    ///
+    /// Falls back to [`Draw::material`] for a slot the object does not name,
+    /// so an object wearing fewer materials than its mesh has slots draws
+    /// those faces in its first material rather than not at all. A hole in the
+    /// model is the worse answer: it reads as broken geometry, and the thing
+    /// that is actually missing is an assignment.
+    pub fn material_for(&self, slot: u32) -> u32 {
+        self.materials
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(self.material)
     }
 
     /// Marks this draw as the one being edited, exempting it from every
@@ -3643,21 +3692,6 @@ impl Viewport {
                 if mesh.counts.triangles == 0 || !draw.detail.draw {
                     continue;
                 }
-                // A draw naming a material that was never set draws nothing.
-                // Skipped rather than substituted: a stand-in would be a grey
-                // object where the user put a red one, and a missing object is
-                // the complaint that gets reported.
-                let Some(source) = self.material_pipeline_of.get(draw.material as usize) else {
-                    continue;
-                };
-                if current != Some(source.as_str()) {
-                    let Some(pipeline) = self.material_pipelines.peek(source) else {
-                        continue;
-                    };
-                    pass.set_pipeline(pipeline);
-                    current = Some(source.as_str());
-                }
-                pass.set_bind_group(3, self.materials[draw.material as usize].bind_group(), &[]);
                 pass.set_bind_group(
                     1,
                     &self.rendered_objects.bind,
@@ -3667,7 +3701,32 @@ impl Viewport {
                 pass.set_vertex_buffer(1, mesh.normals.slice(..));
                 pass.set_vertex_buffer(2, mesh.uvs.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+
+                // One call per run of triangles sharing a material slot. Nearly
+                // every mesh has exactly one run, so this is the same single
+                // call it always was — the loop is what lets a mesh whose faces
+                // carry different materials draw in more than one of them,
+                // which until now it could not: `material_index` reached the
+                // glTF exporter and never reached the screen.
+                for run in &mesh.submeshes {
+                    let material = draw.material_for(run.slot);
+                    // A run naming a material that was never set draws nothing.
+                    // Skipped rather than substituted: a stand-in would be a
+                    // grey face where the user put a red one, and a missing
+                    // face is the complaint that gets reported.
+                    let Some(source) = self.material_pipeline_of.get(material as usize) else {
+                        continue;
+                    };
+                    if current != Some(source.as_str()) {
+                        let Some(pipeline) = self.material_pipelines.peek(source) else {
+                            continue;
+                        };
+                        pass.set_pipeline(pipeline);
+                        current = Some(source.as_str());
+                    }
+                    pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
+                    pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
+                }
             }
         }
 

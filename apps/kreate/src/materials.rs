@@ -69,6 +69,34 @@ impl Materials {
             .unwrap_or(0)
     }
 
+    /// One compiled material per mesh slot, in slot order.
+    ///
+    /// **The mapping the renderer's per-slot draws need.** A face names a
+    /// slot, a slot names a material, and the viewport speaks in compiled
+    /// indices — this is that chain resolved once per object per frame, which
+    /// is where it is cheap: it changes when the document does, not when the
+    /// camera moves.
+    ///
+    /// Through `material_id_at`, so the object's override of a slot wins over
+    /// the mesh's own the same way it does everywhere else. A slot with
+    /// nothing in it resolves to the default grey at zero rather than to
+    /// nothing: an unassigned face is not an error, and a hole in the model
+    /// reads as broken geometry when what is missing is an assignment.
+    pub fn slots_of(&self, doc: &Document, object: kreate_scene::ObjectId) -> Vec<u32> {
+        let Some(&kreate_scene::document::ObjectData::Mesh(mesh)) =
+            doc.object(object).map(|o| &o.data)
+        else {
+            return Vec::new();
+        };
+        (0..doc.mesh_slots(mesh).len())
+            .map(|slot| {
+                doc.material_id_at(object, slot)
+                    .and_then(|id| self.index.get(&id).copied())
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
     /// Whether these compiled to the same code as `other`.
     ///
     /// The whole list, because a material inserted in the middle moves every

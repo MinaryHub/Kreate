@@ -181,13 +181,17 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
                 // every material the document held was being ignored while
                 // every test here passed.
                 materials.index_of(doc, id),
+                // And one per mesh slot, the way the frame loop does it, so a
+                // mesh whose faces carry different materials draws in more
+                // than one of them here too.
+                materials.slots_of(doc, id),
             )),
             _ => None,
         })
         .collect();
     let uploaded: Vec<_> = meshes
         .iter()
-        .map(|(mesh, transform, material)| {
+        .map(|(mesh, transform, material, slots)| {
             let cpu = RenderMeshCpu::extract(mesh);
             (
                 kreate_render::GpuMesh::upload(
@@ -198,13 +202,16 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
                 ),
                 *transform,
                 *material,
+                slots.clone(),
             )
         })
         .collect();
     let mut draws: Vec<Draw> = uploaded
         .iter()
-        .map(|(mesh, transform, material)| {
-            Draw::new(mesh, *transform).with_material(*material)
+        .map(|(mesh, transform, material, slots)| {
+            Draw::new(mesh, *transform)
+                .with_material(*material)
+                .with_materials(slots)
         })
         .collect();
 
@@ -864,5 +871,77 @@ fn a_texture_assigned_from_the_panel_reaches_the_picture() {
         reddish > 50 && bluish > 50,
         "the frame has {reddish} red pixels and {bluish} blue ones, \
          so the image is not on the surface"
+    );
+}
+
+#[test]
+fn one_object_can_wear_two_materials_at_once() {
+    // **What the draw split was for.** A face's `material_index` reached the
+    // glTF exporter the day it was written and never reached the screen: the
+    // renderer drew a whole object with one material, so a second slot was a
+    // material nobody could see. Assigning one changed the file and not the
+    // picture.
+    //
+    // A plane split down the middle, red on one half and blue on the other,
+    // seen face on. One object, one mesh, one draw entry — and two colours.
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    for (id, _) in doc
+        .objects()
+        .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
+        .map(|(id, o)| (id, o.name.clone()))
+        .collect::<Vec<_>>()
+    {
+        doc.remove_object(id);
+    }
+
+    // A two-by-two grid, so there are four faces to hand out.
+    let mut plane = kreate_mesh::primitives::grid(2.0, 2, 2);
+    let faces = plane.num_faces() as usize;
+    assert_eq!(faces, 4, "the fixture needs four faces to split");
+    plane.attributes_mut().insert(
+        kreate_mesh::attribute::names::MATERIAL_INDEX,
+        kreate_mesh::attribute::Domain::Face,
+        // The left column on slot 0 and the right on slot 1. `grid` walks rows
+        // then columns, so this is two faces each whichever way round it is.
+        kreate_mesh::attribute::AttrData::I32(vec![0, 1, 0, 1].into()),
+    );
+    let mesh = doc.add_mesh(plane);
+    let red = doc.add_material(kreate_scene::Material {
+        name: "Red".into(),
+        base_color: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
+        ..Default::default()
+    });
+    let blue = doc.add_material(kreate_scene::Material {
+        name: "Blue".into(),
+        base_color: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
+        ..Default::default()
+    });
+    doc.set_mesh_slots(mesh, vec![Some(red), Some(blue)]);
+    let object = doc.add_object(kreate_scene::document::Object::new(
+        "Plane",
+        kreate_scene::document::ObjectData::Mesh(mesh),
+    ));
+    doc.selection.add(object);
+
+    // Looking straight down at the plane, which lies in the XY plane.
+    let frame = shoot_from(
+        &gpu,
+        &doc,
+        Camera {
+            distance: 4.0,
+            ..Camera::default()
+        },
+    );
+    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 300 && bluish > 300,
+        "one object drew {reddish} red pixels and {bluish} blue ones; \
+         both halves have to be there, or the slots are not reaching the draw"
     );
 }

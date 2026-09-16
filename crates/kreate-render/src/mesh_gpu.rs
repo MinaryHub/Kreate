@@ -223,6 +223,28 @@ impl ElementFlags {
     }
 }
 
+/// One run of triangles that share a material slot.
+///
+/// **Why the render mesh carries these and the document does not.** A face's
+/// `material_index` is per face, and a GPU draw call is a *range* — so
+/// somewhere the faces have to be grouped into runs. Doing it here, once per
+/// topology change, is the only place it is cheap: the alternative is a
+/// per-frame sort, or a draw call per face.
+///
+/// A mesh with no `material_index` layer, which is most of them while a model
+/// is being built, gets exactly one of these covering everything at slot zero.
+/// That keeps the render path identical for both cases — the loop over
+/// submeshes is the only loop, rather than a special case beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Submesh {
+    /// The mesh's material slot, which the object resolves to a material.
+    pub slot: u32,
+    /// Where this run starts in `indices`, in indices and not in triangles.
+    pub start: u32,
+    /// How many indices long it is. Always a multiple of three.
+    pub count: u32,
+}
+
 pub struct RenderMeshCpu {
     pub positions: Vec<GpuPosition>,
     /// Octahedral-encoded vertex normals, one per vertex.
@@ -244,7 +266,17 @@ pub struct RenderMeshCpu {
     pub indices: Vec<u32>,
     /// Source face per triangle. What lets id-buffer picking report a face
     /// rather than a triangle, and what an exporter needs to rebuild n-gons.
+    ///
+    /// In the same order as `indices`, which matters now that the triangles
+    /// are grouped by material: the id and overlay passes are non-indexed
+    /// draws whose `vertex_index` counts corners, so they read this at
+    /// `vi / 3` and would report the wrong face if the two ever disagreed.
     pub tri_to_face: Vec<u32>,
+    /// The runs of triangles that share a material slot, in index order.
+    ///
+    /// Covers `indices` exactly: every triangle is in one run and the runs are
+    /// contiguous. A mesh with no material layer has a single run at slot zero.
+    pub submeshes: Vec<Submesh>,
     /// Real mesh edges, n-gon correct. The wireframe is drawn from these as
     /// instanced screen-space quads, never from the triangulation — a quad must
     /// not show its diagonal.
@@ -330,6 +362,72 @@ pub struct RenderMeshCpu {
 /// moderately tessellated curve smooth while leaving anything that reads as a
 /// crease sharp.
 pub const DEFAULT_AUTO_SMOOTH: f32 = std::f32::consts::PI / 6.0;
+
+/// Sorts triangles into one contiguous run per material slot.
+///
+/// Returns the reordered indices, the matching `tri_to_face`, and the runs.
+/// A mesh with no `material_index` layer comes back untouched with a single
+/// run, which is both the common case and the cheap one: the check is one
+/// attribute lookup and the sort is skipped entirely.
+fn group_by_material(
+    mesh: &MeshData,
+    indices: Vec<u32>,
+    tri_to_face: Vec<u32>,
+) -> (Vec<u32>, Vec<u32>, Vec<Submesh>) {
+    let triangles = tri_to_face.len();
+    let whole = |slot: u32, indices: &[u32]| {
+        vec![Submesh {
+            slot,
+            start: 0,
+            count: indices.len() as u32,
+        }]
+    };
+    let Some(face_material) = mesh.attributes().get_i32(names::MATERIAL_INDEX) else {
+        let one = whole(0, &indices);
+        return (indices, tri_to_face, one);
+    };
+
+    // A negative index means "no material", which glTF writes and the exporter
+    // reads back. It resolves to slot zero, the same place a mesh with no
+    // layer at all lands, so that "unassigned" is one state and not two.
+    let slot_of = |t: usize| -> u32 {
+        let face = tri_to_face[t] as usize;
+        face_material
+            .get(face)
+            .map(|m| (*m).max(0) as u32)
+            .unwrap_or(0)
+    };
+
+    // The overwhelmingly common case: every face on one slot. Worth its own
+    // arm because it is every mesh in a scene that has not been given a second
+    // material, and it turns the whole of this into one pass over the faces.
+    let first = if triangles == 0 { 0 } else { slot_of(0) };
+    if (0..triangles).all(|t| slot_of(t) == first) {
+        let one = whole(first, &indices);
+        return (indices, tri_to_face, one);
+    }
+
+    let mut order: Vec<usize> = (0..triangles).collect();
+    order.sort_by_key(|t| slot_of(*t));
+
+    let mut out_indices = Vec::with_capacity(indices.len());
+    let mut out_faces = Vec::with_capacity(triangles);
+    let mut submeshes: Vec<Submesh> = Vec::new();
+    for t in order {
+        let slot = slot_of(t);
+        match submeshes.last_mut() {
+            Some(run) if run.slot == slot => run.count += 3,
+            _ => submeshes.push(Submesh {
+                slot,
+                start: out_indices.len() as u32,
+                count: 3,
+            }),
+        }
+        out_indices.extend_from_slice(&indices[t * 3..t * 3 + 3]);
+        out_faces.push(tri_to_face[t]);
+    }
+    (out_indices, out_faces, submeshes)
+}
 
 impl RenderMeshCpu {
     pub fn extract(mesh: &MeshData) -> Self {
@@ -442,6 +540,21 @@ impl RenderMeshCpu {
             .map(|c| corner_to_render[*c as usize])
             .collect();
 
+        // The triangles regrouped so that each material slot is one run, and
+        // therefore one draw call. A stable sort, so faces keep their authored
+        // order inside a slot: the id buffer resolves ties by depth and not by
+        // draw order, but an exporter walking `tri_to_face` produces a
+        // different file otherwise, and "the same mesh writes the same bytes"
+        // is a property the io tests hold.
+        //
+        // `tri_to_face` moves with the indices. The id and element-overlay
+        // passes are *non-indexed* draws whose `vertex_index` counts corners,
+        // so they read `tri_to_face[vi / 3]` against this ordering — the two
+        // disagreeing would make a click report a different face than the one
+        // under the pointer.
+        let (indices, tri_to_face, submeshes) =
+            group_by_material(mesh, indices, tri.tri_to_face);
+
         // Which face each corner belongs to, for the groups below. One pass,
         // because the CSR walk needs it per corner and `tri_to_face` answers a
         // different question — it is per *triangle*.
@@ -519,7 +632,8 @@ impl RenderMeshCpu {
             normals,
             uvs,
             indices,
-            tri_to_face: tri.tri_to_face,
+            tri_to_face,
+            submeshes,
             edge_verts,
             vert_to_render,
             render_to_vert,
@@ -1217,5 +1331,190 @@ mod tests {
         // And the extraction found something, or this compares two empties.
         assert!(solid.contains("fn oct_decode"), "{solid}");
         assert!(solid.len() > 300, "the extraction is too short: {solid}");
+    }
+}
+
+#[cfg(test)]
+mod submesh_tests {
+    use super::*;
+    use kreate_mesh::attribute::{names, AttrData, Domain};
+    use kreate_mesh::primitives;
+
+    fn with_materials(per_face: Vec<i32>) -> RenderMeshCpu {
+        let mut mesh = primitives::cube(1.0);
+        assert_eq!(mesh.num_faces() as usize, per_face.len());
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(per_face.into()),
+        );
+        RenderMeshCpu::extract(&mesh)
+    }
+
+    /// Every triangle appears exactly once, and each run holds the triangles
+    /// whose face names its slot.
+    fn check_covers(cpu: &RenderMeshCpu, mesh: &kreate_mesh::MeshData) {
+        let expected = cpu.indices.len() as u32;
+        let covered: u32 = cpu.submeshes.iter().map(|s| s.count).sum();
+        assert_eq!(covered, expected, "the runs do not cover the index buffer");
+
+        let mut at = 0u32;
+        for run in &cpu.submeshes {
+            assert_eq!(run.start, at, "the runs are not contiguous");
+            assert_eq!(run.count % 3, 0, "a run is not a whole number of triangles");
+            at += run.count;
+        }
+
+        let face_material = mesh.attributes().get_i32(names::MATERIAL_INDEX);
+        for run in &cpu.submeshes {
+            for t in (run.start / 3)..((run.start + run.count) / 3) {
+                let face = cpu.tri_to_face[t as usize] as usize;
+                let want = face_material
+                    .map(|m| m[face].max(0) as u32)
+                    .unwrap_or(0);
+                assert_eq!(
+                    want, run.slot,
+                    "a triangle of face {face} is in the run for slot {}",
+                    run.slot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mesh_with_no_material_layer_is_one_run() {
+        // The common case, and the one the render loop must not pay for: a
+        // model being built has no material layer at all and has to draw in a
+        // single call.
+        let mesh = primitives::cube(1.0);
+        let cpu = RenderMeshCpu::extract(&mesh);
+        assert_eq!(
+            cpu.submeshes,
+            vec![Submesh {
+                slot: 0,
+                start: 0,
+                count: cpu.indices.len() as u32
+            }]
+        );
+        check_covers(&cpu, &mesh);
+    }
+
+    #[test]
+    fn faces_on_one_slot_stay_one_run_and_keep_their_order() {
+        // A layer that says the same thing everywhere must not cost a sort.
+        // Compared against the no-layer extraction, which is the definition of
+        // "unchanged": the exporter's "the same mesh writes the same bytes"
+        // rests on `tri_to_face` order.
+        let plain = RenderMeshCpu::extract(&primitives::cube(1.0));
+        let cpu = with_materials(vec![0; 6]);
+        assert_eq!(cpu.submeshes.len(), 1);
+        assert_eq!(cpu.indices, plain.indices);
+        assert_eq!(cpu.tri_to_face, plain.tri_to_face);
+    }
+
+    #[test]
+    fn faces_on_two_slots_become_two_runs() {
+        let mut mesh = primitives::cube(1.0);
+        let per_face = vec![1, 0, 1, 0, 1, 0];
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(per_face.clone().into()),
+        );
+        let cpu = RenderMeshCpu::extract(&mesh);
+        assert_eq!(cpu.submeshes.len(), 2, "{:?}", cpu.submeshes);
+        // Sorted, so slot 0 comes first however the faces were authored.
+        assert_eq!(cpu.submeshes[0].slot, 0);
+        assert_eq!(cpu.submeshes[1].slot, 1);
+        check_covers(&cpu, &mesh);
+    }
+
+    #[test]
+    fn faces_of_one_slot_are_gathered_even_when_they_are_scattered() {
+        // The case a draw call range cannot express unless the triangles move.
+        // Three slots interleaved face by face: without the regrouping this
+        // would need six ranges and, drawn as three, would paint two faces in
+        // the wrong material each.
+        let mut mesh = primitives::cube(1.0);
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(vec![0, 1, 2, 0, 1, 2].into()),
+        );
+        let cpu = RenderMeshCpu::extract(&mesh);
+        assert_eq!(
+            cpu.submeshes.iter().map(|s| s.slot).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "one run per slot, not one per face"
+        );
+        check_covers(&cpu, &mesh);
+    }
+
+    #[test]
+    fn a_negative_index_means_no_material_rather_than_a_slot() {
+        // What glTF writes for an unassigned face, and what the importer reads
+        // back. It has to land where a mesh with no layer lands, or
+        // "unassigned" would be two different states that draw differently.
+        let mut mesh = primitives::cube(1.0);
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(vec![-1; 6].into()),
+        );
+        let cpu = RenderMeshCpu::extract(&mesh);
+        assert_eq!(cpu.submeshes.len(), 1);
+        assert_eq!(cpu.submeshes[0].slot, 0);
+    }
+
+    #[test]
+    fn the_triangles_still_name_the_faces_they_came_from() {
+        // The reordering moves `indices` and `tri_to_face` together. If it
+        // ever moved only one, the id pass — a non-indexed draw reading
+        // `tri_to_face[vertex_index / 3]` — would report a different face than
+        // the one under the pointer, and nothing else here would notice.
+        let mut mesh = primitives::cube(1.0);
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(vec![2, 0, 1, 2, 0, 1].into()),
+        );
+        let cpu = RenderMeshCpu::extract(&mesh);
+        let positions = mesh.positions();
+        for (t, face) in cpu.tri_to_face.iter().enumerate() {
+            // Every corner of the triangle sits on a vertex of that face.
+            let of_face: Vec<u32> = mesh
+                .face_corner_range(*face)
+                .map(|c| mesh.corner_verts()[c])
+                .collect();
+            for corner in 0..3 {
+                let render = cpu.indices[t * 3 + corner] as usize;
+                let vert = cpu.render_to_vert[render];
+                assert!(
+                    of_face.contains(&vert),
+                    "triangle {t} claims face {face} but uses vertex {vert} at {:?}",
+                    positions[vert as usize]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_face_is_still_drawn_after_the_regrouping() {
+        // A sort that dropped or duplicated a triangle would leave a hole in
+        // the model, which the run arithmetic above would not catch.
+        let mut mesh = primitives::cube(1.0);
+        mesh.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(vec![1, 0, 1, 0, 1, 0].into()),
+        );
+        let cpu = RenderMeshCpu::extract(&mesh);
+        let plain = RenderMeshCpu::extract(&primitives::cube(1.0));
+        assert_eq!(cpu.indices.len(), plain.indices.len());
+        let mut seen = cpu.tri_to_face.clone();
+        seen.sort_unstable();
+        let mut want = plain.tri_to_face.clone();
+        want.sort_unstable();
+        assert_eq!(seen, want, "a triangle was dropped or duplicated");
     }
 }
