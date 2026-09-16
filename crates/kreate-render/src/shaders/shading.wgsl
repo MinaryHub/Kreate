@@ -388,7 +388,7 @@ const PI_SHADING: f32 = 3.14159265359;
 /// The flat case, spelled as what it is.
 fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
-    return ambient_from(s, nov, radiance * PI_SHADING, radiance);
+    return ambient_from(s, nov, radiance, radiance);
 }
 
 /// The world's rotation, applied to a direction on its way to the cube.
