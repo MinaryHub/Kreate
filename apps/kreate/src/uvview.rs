@@ -74,7 +74,14 @@ mod tests {
 
     #[test]
     fn a_mesh_without_uvs_publishes_nothing() {
-        let mesh = primitives::cube(2.0);
+        // The layer is removed rather than a bare primitive used: primitives
+        // arrive with coordinates now, and a fixture that relied on them not
+        // doing so was relying on a gap rather than on a rule. What is being
+        // checked is that a mesh *without* a layer shows nothing, which is
+        // still a state a mesh can be in — an imported one, or one whose layer
+        // somebody deleted.
+        let mut mesh = primitives::cube(2.0);
+        mesh.attributes_mut().remove(uv_project::DEFAULT_LAYER);
         let bm = BMesh::from_mesh_data(&mesh);
         assert!(from_bmesh(&bm).is_none());
     }

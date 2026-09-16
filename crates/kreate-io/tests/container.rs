@@ -628,6 +628,11 @@ fn a_file_written_with_the_old_uv_name_comes_back_with_the_new_one() {
     let uvs: Vec<glam::Vec2> = (0..corners)
         .map(|c| glam::Vec2::new(c as f32 * 0.01, 0.5))
         .collect();
+    // The primitive's own layer is taken away first: a file from before the
+    // names were joined had `uv_map` and nothing else, and leaving both here
+    // would be testing the *other* rule — that a mesh with both keeps both,
+    // which the test below this one covers.
+    mesh.attributes_mut().remove(names::UV);
     mesh.attributes_mut().insert(
         "uv_map",
         Domain::Corner,

@@ -842,7 +842,11 @@ mod tests {
 
     #[test]
     fn an_empty_selection_writes_nothing() {
-        let mut bm = bmesh(&primitives::cube(2.0));
+        // The claim is that the layer is *created* by the work, so the fixture
+        // has to start without one — and a primitive now arrives with its own.
+        let mut mesh = primitives::cube(2.0);
+        mesh.attributes_mut().remove(LAYER);
+        let mut bm = bmesh(&mesh);
         assert_eq!(
             smart_project(&mut bm, &[], LAYER, DEFAULT_ANGLE, DEFAULT_MARGIN),
             0

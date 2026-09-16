@@ -614,6 +614,18 @@ mod tests {
         )
     }
 
+    /// A cube with its own coordinates taken away.
+    ///
+    /// Primitives arrive with a UV layer, so a test whose claim is that *this*
+    /// operator created one has to start from a mesh that has none. Undo is the
+    /// case it matters for: restoring values and leaving a layer behind looks
+    /// like success, and only a mesh that had no layer can tell the difference.
+    fn cube_without_uvs() -> kreate_mesh::MeshData {
+        let mut mesh = primitives::cube(2.0);
+        mesh.attributes_mut().remove(uv_project::DEFAULT_LAYER);
+        mesh
+    }
+
     fn uvs(doc: &Document, mesh: MeshId, layer: &str) -> Vec<glam::Vec2> {
         doc.mesh(mesh)
             .unwrap()
@@ -692,7 +704,7 @@ mod tests {
         // nobody asked for.
         let r = registry();
         let mut h = History::new();
-        let (mut doc, mesh, ctx) = doc_with(primitives::cube(2.0));
+        let (mut doc, mesh, ctx) = doc_with(cube_without_uvs());
         assert!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER).is_empty());
 
         project(
@@ -1395,7 +1407,7 @@ mod tests {
         // worse than nothing happening.
         let r = registry();
         let mut h = History::new();
-        let (mut doc, _, ctx) = doc_with(primitives::cube(2.0));
+        let (mut doc, _, ctx) = doc_with(cube_without_uvs());
         let depth = h.entries().len();
         h.dispatch(&r, &mut doc, &ctx, "uv.pack", &params(&[]))
             .expect("pack ran");
@@ -1406,7 +1418,7 @@ mod tests {
     fn undo_takes_back_a_smart_project() {
         let r = registry();
         let mut h = History::new();
-        let (mut doc, mesh, ctx) = doc_with(primitives::cube(2.0));
+        let (mut doc, mesh, ctx) = doc_with(cube_without_uvs());
         assert!(uvs(&doc, mesh, uv_project::DEFAULT_LAYER).is_empty());
         h.dispatch(&r, &mut doc, &ctx, "uv.smart_project", &params(&[]))
             .expect("smart project ran");

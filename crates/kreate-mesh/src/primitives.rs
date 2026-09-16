@@ -11,14 +11,57 @@
 
 use std::f32::consts::{PI, TAU};
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
+use crate::attribute::{names, AttrData, Domain};
 use crate::MeshData;
+
+// --- surface coordinates ---------------------------------------------------
+//
+// Every primitive with an obvious parameterisation carries one. Without it a
+// cube added from the menu has no UV layer, and a texture assigned to it
+// samples a single texel — which is the state this was in until the renderer
+// could sample anything at all.
+//
+// The coordinates are per *corner*, not per vertex, and that is what makes a
+// seam expressible: the column where a sphere wraps needs `u = 1` on one side
+// of an edge and `u = 0` on the other, at the same position. A per-vertex layer
+// cannot say that, and the usual workaround — duplicating the column of
+// vertices — puts the seam in the topology the user edits.
+//
+// **Built from the indices that built the geometry**, not recovered from the
+// positions. Recovering means `atan2`, and `atan2` cannot tell the wrap from a
+// face that happens to span it — the first version of this guessed, by calling
+// any face covering more than half the image a seam, and a cylinder's cap is a
+// face that covers all of it on purpose. A ring index is exact and knows
+// nothing about halves.
+
+/// Writes a corner-domain UV layer.
+///
+/// `uvs` is in corner order: every face's corners in turn, in the order the
+/// faces were given.
+fn set_uvs(mesh: &mut MeshData, uvs: Vec<Vec2>) {
+    debug_assert_eq!(uvs.len(), mesh.num_corners() as usize);
+    mesh.attributes_mut()
+        .insert(names::UV, Domain::Corner, AttrData::F32x2(uvs.into()));
+}
+
+/// A disc projection, for a cap.
+///
+/// Segment `s` of `n` around a circle, laid on the image as the circle it is.
+/// A cap cannot use the angle-and-height mapping its sides use: it *is* the
+/// whole turn, so that mapping would run the texture round the rim and leave
+/// the middle undefined.
+fn disc(s: u32, n: u32) -> Vec2 {
+    let a = TAU * s as f32 / n as f32;
+    let (sa, ca) = a.sin_cos();
+    Vec2::new(0.5 + 0.5 * ca, 0.5 + 0.5 * sa)
+}
 
 /// A `size` x `size` quad on the XY plane, centred on the origin, facing +Z.
 pub fn plane(size: f32) -> MeshData {
     let h = size * 0.5;
-    MeshData::from_faces(
+    let mut mesh = MeshData::from_faces(
         vec![
             Vec3::new(-h, -h, 0.0),
             Vec3::new(h, -h, 0.0),
@@ -26,7 +69,17 @@ pub fn plane(size: f32) -> MeshData {
             Vec3::new(-h, h, 0.0),
         ],
         &[vec![0, 1, 2, 3]],
-    )
+    );
+    set_uvs(
+        &mut mesh,
+        vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0),
+        ],
+    );
+    mesh
 }
 
 /// An `x` by `y` grid of quads on the XY plane, centred on the origin.
@@ -47,6 +100,8 @@ pub fn grid(size: f32, x_divs: u32, y_divs: u32) -> MeshData {
     }
     let vid = |i: u32, j: u32| j * (nx + 1) + i;
     let mut faces = Vec::with_capacity((nx * ny) as usize);
+    let mut uvs = Vec::with_capacity((nx * ny * 4) as usize);
+    let (fx, fy) = (1.0 / nx as f32, 1.0 / ny as f32);
     for j in 0..ny {
         for i in 0..nx {
             faces.push(vec![
@@ -55,9 +110,17 @@ pub fn grid(size: f32, x_divs: u32, y_divs: u32) -> MeshData {
                 vid(i + 1, j + 1),
                 vid(i, j + 1),
             ]);
+            uvs.extend_from_slice(&[
+                Vec2::new(i as f32 * fx, j as f32 * fy),
+                Vec2::new((i + 1) as f32 * fx, j as f32 * fy),
+                Vec2::new((i + 1) as f32 * fx, (j + 1) as f32 * fy),
+                Vec2::new(i as f32 * fx, (j + 1) as f32 * fy),
+            ]);
         }
     }
-    MeshData::from_faces(positions, &faces)
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
 }
 
 /// An axis-aligned cube of edge length `size`, as six quads, wound outward.
@@ -81,7 +144,19 @@ pub fn cube(size: f32) -> MeshData {
         vec![1, 2, 6, 5], // +X
         vec![0, 4, 7, 3], // -X
     ];
-    MeshData::from_faces(positions, &faces)
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    // Every face takes the whole square, which is what a checker on a fresh
+    // cube should look like. The alternative — six faces laid out as a cross in
+    // one image — is an unwrap, and an unwrap is a choice the user makes rather
+    // than one a primitive makes for them.
+    let square = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(0.0, 1.0),
+    ];
+    set_uvs(&mut mesh, faces.iter().flat_map(|_| square).collect());
+    mesh
 }
 
 /// A UV sphere with `segments` around the Z axis and `rings` from pole to pole.
@@ -108,6 +183,11 @@ pub fn uv_sphere(radius: f32, segments: u32, rings: u32) -> MeshData {
     // Ring `r` (1-based) starts at this vertex index.
     let ring_start = |r: u32| 1 + (r - 1) * seg;
     let mut faces = Vec::new();
+    // Longitude from the segment index and latitude from the ring index, so the
+    // face that wraps gets `u = 1` on its far side rather than `u = 0`. The top
+    // row of an image is the north pole, the same way up as an environment map.
+    let mut uvs: Vec<Vec2> = Vec::new();
+    let (fu, fv) = (1.0 / seg as f32, 1.0 / ring as f32);
 
     // Winding note: rings run from the north pole downward, so increasing theta
     // is counter-clockwise seen from +Z but clockwise seen from -Z. The two pole
@@ -116,6 +196,13 @@ pub fn uv_sphere(radius: f32, segments: u32, rings: u32) -> MeshData {
         let a = ring_start(1) + s;
         let b = ring_start(1) + (s + 1) % seg;
         faces.push(vec![0, a, b]);
+        // The pole sits between its two neighbours. Left at zero it would reach
+        // back to the left edge of the image and the cap would be a star.
+        uvs.extend_from_slice(&[
+            Vec2::new((s as f32 + 0.5) * fu, 0.0),
+            Vec2::new(s as f32 * fu, fv),
+            Vec2::new((s + 1) as f32 * fu, fv),
+        ]);
     }
     for r in 1..ring - 1 {
         for s in 0..seg {
@@ -126,15 +213,28 @@ pub fn uv_sphere(radius: f32, segments: u32, rings: u32) -> MeshData {
                 ring_start(r + 1) + s1,
                 ring_start(r) + s1,
             ]);
+            uvs.extend_from_slice(&[
+                Vec2::new(s as f32 * fu, r as f32 * fv),
+                Vec2::new(s as f32 * fu, (r + 1) as f32 * fv),
+                Vec2::new((s + 1) as f32 * fu, (r + 1) as f32 * fv),
+                Vec2::new((s + 1) as f32 * fu, r as f32 * fv),
+            ]);
         }
     }
     for s in 0..seg {
         let a = ring_start(ring - 1) + s;
         let b = ring_start(ring - 1) + (s + 1) % seg;
         faces.push(vec![south, b, a]);
+        uvs.extend_from_slice(&[
+            Vec2::new((s as f32 + 0.5) * fu, 1.0),
+            Vec2::new((s + 1) as f32 * fu, 1.0 - fv),
+            Vec2::new(s as f32 * fu, 1.0 - fv),
+        ]);
     }
 
-    MeshData::from_faces(positions, &faces)
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
 }
 
 /// A cylinder along Z, with n-gon caps.
@@ -158,13 +258,28 @@ pub fn cylinder(radius: f32, height: f32, segments: u32) -> MeshData {
     }
 
     let mut faces = Vec::with_capacity((seg + 2) as usize);
+    let mut uvs: Vec<Vec2> = Vec::new();
+    let fu = 1.0 / seg as f32;
     for s in 0..seg {
         let s1 = (s + 1) % seg;
         faces.push(vec![s, s1, seg + s1, seg + s]);
+        uvs.extend_from_slice(&[
+            Vec2::new(s as f32 * fu, 0.0),
+            Vec2::new((s + 1) as f32 * fu, 0.0),
+            Vec2::new((s + 1) as f32 * fu, 1.0),
+            Vec2::new(s as f32 * fu, 1.0),
+        ]);
     }
+    // The caps are discs, not more of the side. A cap is the whole turn, so the
+    // angle-and-height mapping would run the texture round its rim and leave
+    // the middle with nowhere to come from.
     faces.push((0..seg).rev().collect()); // bottom cap, wound outward (-Z)
+    uvs.extend((0..seg).rev().map(|s| disc(s, seg)));
     faces.push((seg..seg * 2).collect()); // top cap (+Z)
-    MeshData::from_faces(positions, &faces)
+    uvs.extend((0..seg).map(|s| disc(s, seg)));
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
 }
 
 /// A cone along Z with an n-gon base, apex at `+height/2`.
@@ -181,8 +296,23 @@ pub fn cone(radius: f32, height: f32, segments: u32) -> MeshData {
     let apex = seg;
 
     let mut faces: Vec<Vec<u32>> = (0..seg).map(|s| vec![s, (s + 1) % seg, apex]).collect();
+    let fu = 1.0 / seg as f32;
+    let mut uvs: Vec<Vec2> = Vec::new();
+    for s in 0..seg {
+        // The apex is on the axis and shared by every side, so it has no
+        // longitude of its own. Each triangle gives it the middle of its own
+        // span, which is what stops the cap fanning across the whole image.
+        uvs.extend_from_slice(&[
+            Vec2::new(s as f32 * fu, 0.0),
+            Vec2::new((s + 1) as f32 * fu, 0.0),
+            Vec2::new((s as f32 + 0.5) * fu, 1.0),
+        ]);
+    }
     faces.push((0..seg).rev().collect()); // base
-    MeshData::from_faces(positions, &faces)
+    uvs.extend((0..seg).rev().map(|s| disc(s, seg)));
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
 }
 
 /// A torus in the XY plane, all quads.
@@ -201,6 +331,11 @@ pub fn torus(major_radius: f32, minor_radius: f32, major_segs: u32, minor_segs: 
     }
     let vid = |i: u32, j: u32| (i % nm) * nn + (j % nn);
     let mut faces = Vec::with_capacity((nm * nn) as usize);
+    let mut uvs: Vec<Vec2> = Vec::with_capacity((nm * nn * 4) as usize);
+    // Both angles wrap, and both come from their own index — so both seams get
+    // `1` on one side and `0` on the other without anything having to work out
+    // which face is the seam.
+    let (fu, fv) = (1.0 / nm as f32, 1.0 / nn as f32);
     for i in 0..nm {
         for j in 0..nn {
             faces.push(vec![
@@ -209,9 +344,17 @@ pub fn torus(major_radius: f32, minor_radius: f32, major_segs: u32, minor_segs: 
                 vid(i + 1, j + 1),
                 vid(i, j + 1),
             ]);
+            uvs.extend_from_slice(&[
+                Vec2::new(i as f32 * fu, j as f32 * fv),
+                Vec2::new((i + 1) as f32 * fu, j as f32 * fv),
+                Vec2::new((i + 1) as f32 * fu, (j + 1) as f32 * fv),
+                Vec2::new(i as f32 * fu, (j + 1) as f32 * fv),
+            ]);
         }
     }
-    MeshData::from_faces(positions, &faces)
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
 }
 
 /// An icosphere: an icosahedron subdivided `subdivisions` times and projected
@@ -435,5 +578,189 @@ mod tests {
             m.assert_valid();
             assert!(m.num_faces() > 0);
         }
+    }
+
+    // --- surface coordinates -------------------------------------------
+
+    /// Every primitive that should carry coordinates, and the one that does not.
+    fn uv_bearing() -> Vec<(&'static str, MeshData)> {
+        vec![
+            ("plane", plane(2.0)),
+            ("grid", grid(2.0, 4, 3)),
+            ("cube", cube(2.0)),
+            ("uv_sphere", uv_sphere(1.0, 16, 8)),
+            ("cylinder", cylinder(1.0, 2.0, 12)),
+            ("cone", cone(1.0, 2.0, 12)),
+            ("torus", torus(1.0, 0.3, 16, 8)),
+        ]
+    }
+
+    #[test]
+    fn a_primitive_arrives_with_somewhere_to_put_a_texture() {
+        // A cube added from the menu had no UV layer at all, so a texture
+        // assigned to it sampled one texel. Found by the renderer's first test
+        // that put a picture on a surface — every test below this line in the
+        // stack passed while it was true.
+        for (name, mesh) in uv_bearing() {
+            let uvs = mesh
+                .attributes()
+                .get_f32x2(names::UV)
+                .unwrap_or_else(|| panic!("{name} has no UV layer"));
+            assert_eq!(
+                uvs.len(),
+                mesh.num_corners() as usize,
+                "{name}: one coordinate per corner"
+            );
+            // And they are not all the same point, which is what a layer of
+            // zeroes would be — the state this is replacing.
+            let first = uvs[0];
+            assert!(
+                uvs.iter().any(|uv| (*uv - first).length() > 1e-4),
+                "{name}: every corner has the same coordinate"
+            );
+        }
+    }
+
+    #[test]
+    fn the_coordinates_stay_inside_the_image() {
+        // Sampling outside zero to one is a repeat, which is a real thing to
+        // want and not what a primitive should arrive doing. The seam unwrap
+        // pushes coordinates up by one on the face that spans the wrap, so its
+        // right edge lands exactly on one rather than past it.
+        for (name, mesh) in uv_bearing() {
+            let uvs = mesh.attributes().get_f32x2(names::UV).expect("a layer");
+            for uv in uvs {
+                assert!(
+                    (-1e-5..=1.0 + 1e-5).contains(&uv.x)
+                        && (-1e-5..=1.0 + 1e-5).contains(&uv.y),
+                    "{name}: {uv:?} is outside the image"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_seam_does_not_run_backwards() {
+        // **The reason coordinates are per corner.** A sphere's wrap needs
+        // `u = 1` on one side of an edge and `u = 0` on the other, at the same
+        // position — and without the unwrap the face there gets `0.98` and
+        // `0.01`, which squeezes the whole texture backwards through one column
+        // of quads. It is a thin stripe on a model, and it looks like a
+        // texture problem rather than a mesh one.
+        for (name, mesh) in [
+            ("uv_sphere", uv_sphere(1.0, 16, 8)),
+            ("cylinder", cylinder(1.0, 2.0, 12)),
+            ("cone", cone(1.0, 2.0, 12)),
+            ("torus", torus(1.0, 0.3, 16, 8)),
+        ] {
+            let uvs = mesh.attributes().get_f32x2(names::UV).expect("a layer");
+            for f in 0..mesh.num_faces() {
+                let range = mesh.face_corner_range(f);
+                // Sides only. A cap is a disc and covers the image on purpose,
+                // which is what this asked of it at first — the claim is about
+                // the faces that use the angle, and those are the quads and
+                // triangles the sides are made of.
+                if range.len() > 4 {
+                    continue;
+                }
+                let mut lo = f32::MAX;
+                let mut hi = f32::MIN;
+                for c in range.clone() {
+                    lo = lo.min(uvs[c].x);
+                    hi = hi.max(uvs[c].x);
+                }
+                // A side spans one segment, so anything near half the image is
+                // the seam running the wrong way.
+                assert!(
+                    hi - lo < 0.5,
+                    "{name}: face {f} spans {:.3} of the image, which is the seam",
+                    hi - lo
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_face_of_a_cube_gets_the_whole_square() {
+        // What a checker on a fresh cube should look like. An unwrap that laid
+        // the six faces out in one image is a choice the user makes; a
+        // primitive making it for them would be a layout they then have to
+        // undo.
+        let mesh = cube(2.0);
+        let uvs = mesh.attributes().get_f32x2(names::UV).expect("a layer");
+        for f in 0..mesh.num_faces() {
+            let corners: Vec<Vec2> = mesh.face_corner_range(f).map(|c| uvs[c]).collect();
+            assert_eq!(corners.len(), 4);
+            for wanted in [
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(0.0, 1.0),
+            ] {
+                assert!(
+                    corners.iter().any(|c| (*c - wanted).length() < 1e-5),
+                    "face {f} is missing the corner {wanted:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_plane_is_the_image_itself() {
+        // The simplest claim there is, and the one a person checks first: a
+        // texture on a plane is that texture, the right way up.
+        let mesh = plane(2.0);
+        let uvs = mesh.attributes().get_f32x2(names::UV).expect("a layer");
+        let positions = mesh.positions();
+        for (c, v) in mesh.corner_verts().iter().enumerate() {
+            let p = positions[*v as usize];
+            let wanted = Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
+            assert!((uvs[c] - wanted).length() < 1e-5, "{:?}", uvs[c]);
+        }
+    }
+
+    #[test]
+    fn a_spheres_poles_do_not_fan_across_the_image() {
+        // A pole is on the axis and has no longitude of its own —
+        // `atan2(0, 0)` is zero, not "the same as its neighbours". Left at
+        // zero, every triangle of the cap would reach back to the left edge of
+        // the image and the top of a sphere would be a star.
+        let mesh = uv_sphere(1.0, 16, 8);
+        let uvs = mesh.attributes().get_f32x2(names::UV).expect("a layer");
+        let positions = mesh.positions();
+        for f in 0..mesh.num_faces() {
+            let range = mesh.face_corner_range(f);
+            for c in range.clone() {
+                let p = positions[mesh.corner_verts()[c] as usize];
+                if (p.x * p.x + p.y * p.y).sqrt() >= 1e-6 {
+                    continue;
+                }
+                // A pole corner. Its `u` sits between its neighbours', and its
+                // `v` is the edge of the image.
+                let others: Vec<f32> = range
+                    .clone()
+                    .filter(|o| *o != c)
+                    .map(|o| uvs[o].x)
+                    .collect();
+                let lo = others.iter().cloned().fold(f32::MAX, f32::min);
+                let hi = others.iter().cloned().fold(f32::MIN, f32::max);
+                assert!(
+                    uvs[c].x >= lo - 1e-5 && uvs[c].x <= hi + 1e-5,
+                    "the pole corner of face {f} is at {:.3}, outside its neighbours {lo:.3}..{hi:.3}",
+                    uvs[c].x
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_icosphere_has_no_coordinates_and_that_is_said_rather_than_faked() {
+        // It has no natural parameterisation — that is the point of it, and the
+        // reason it has no pole singularity. A spherical projection could be
+        // put on one, and it would arrive with a seam and a pinch that somebody
+        // then has to fix, which is worse than arriving with nothing and being
+        // unwrapped on purpose.
+        let mesh = ico_sphere(1.0, 2);
+        assert!(mesh.attributes().get_f32x2(names::UV).is_none());
     }
 }

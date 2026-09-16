@@ -757,7 +757,10 @@ mod tests {
 
     #[test]
     fn an_empty_selection_writes_nothing_and_creates_no_layer() {
-        let mesh = primitives::cube(2.0);
+        // A primitive arrives with coordinates of its own, and this test is
+        // about the layer being created here — so it is taken away first.
+        let mut mesh = primitives::cube(2.0);
+        mesh.attributes_mut().remove(DEFAULT_LAYER);
         let mut bm = bmesh(&mesh);
         assert_eq!(project(&mut bm, &[], Projection::Box, DEFAULT_LAYER), 0);
         assert!(

@@ -283,10 +283,18 @@ pub struct RenderMeshCpu {
     /// Which faces each render vertex averages, as CSR: render vertex `v` owns
     /// `group_faces[group_offsets[v] .. group_offsets[v + 1]]`.
     ///
-    /// Its *smooth group*, not every face at its vertex. A render vertex is a
-    /// (vertex, smooth group) pair by construction — that is what the split is
-    /// for — so this is exactly the set `compute_corner_normals` sums, and a
+    /// Its *smooth group*, not every face at its vertex, and not only the
+    /// corners that resolved to it.
+    ///
+    /// A render vertex is a (vertex, smooth group, surface coordinate) triple:
+    /// it splits where shading breaks *and* where a texture seams. Only the
+    /// first of those is about normals, so the group is the faces sharing the
+    /// normal — which is exactly the set `compute_corner_normals` sums, and a
     /// GPU pass over it produces the same normals the CPU would.
+    ///
+    /// Two render vertices either side of a seam hold the same list. That
+    /// costs a copy of it, and buys a sphere that does not crease along the
+    /// line where its texture wraps when somebody drags it.
     pub group_offsets: Vec<u32>,
     pub group_faces: Vec<u32>,
     /// Which render vertex each mesh corner resolves to.
@@ -444,27 +452,46 @@ impl RenderMeshCpu {
             }
         }
 
-        // Each render vertex's smooth group, by counting sort over the corners
-        // that resolved to it. A face contributes at most one corner to a render
-        // vertex — a face never repeats a vertex, and a render vertex sits at one
-        // — so no face lands in a group twice.
+        // Each render vertex's smooth group: the faces its *normal* averages.
+        //
+        // **Not the corners that resolved to it**, which is what this counted
+        // before surface coordinates joined the split key. A seam splits a
+        // render vertex without splitting its shading, so counting the corners
+        // that landed on it would give each side of the seam half the faces —
+        // and a drag, which recomputes normals from this on the GPU, would
+        // crease a sphere along the line where its texture wraps. The split
+        // exists for two reasons now and only one of them is about normals.
+        //
+        // So a render vertex's group is every corner at its mesh vertex whose
+        // normal matches, whether or not that corner resolved here. Two render
+        // vertices either side of a seam therefore hold the same list, which
+        // costs a copy at a seam and is what makes them shade identically.
         let render_verts = positions.len();
         let mut group_offsets = vec![0u32; render_verts + 1];
-        for r in corner_to_render.iter() {
-            if (*r as usize) < render_verts {
-                group_offsets[*r as usize + 1] += 1;
-            }
+        let corners_of = |r: usize| {
+            let v = render_to_vert[r] as usize;
+            &incident[offsets[v] as usize..offsets[v + 1] as usize]
+        };
+        for r in 0..render_verts {
+            let normal = normals[r];
+            group_offsets[r + 1] = corners_of(r)
+                .iter()
+                .filter(|c| packed[**c as usize] == normal)
+                .count() as u32;
         }
         for r in 0..render_verts {
             group_offsets[r + 1] += group_offsets[r];
         }
-        let mut cursor = group_offsets.clone();
         let mut group_faces = vec![0u32; group_offsets[render_verts] as usize];
-        for (corner, r) in corner_to_render.iter().enumerate() {
-            if (*r as usize) < render_verts {
-                let slot = &mut cursor[*r as usize];
-                group_faces[*slot as usize] = corner_face[corner];
-                *slot += 1;
+        for r in 0..render_verts {
+            let normal = normals[r];
+            let start = group_offsets[r] as usize;
+            for (i, corner) in corners_of(r)
+                .iter()
+                .filter(|c| packed[**c as usize] == normal)
+                .enumerate()
+            {
+                group_faces[start + i] = corner_face[*corner as usize];
             }
         }
 
@@ -711,16 +738,59 @@ mod tests {
     }
 
     #[test]
-    fn a_smooth_mesh_does_not_split_at_all() {
-        // The other direction: a sphere must not pay for a mechanism it does not
-        // need.
-        let m = primitives::uv_sphere(1.0, 32, 16);
+    fn a_smooth_mesh_splits_only_where_its_texture_wraps() {
+        // The other direction from the cube: a sphere has one normal per vertex,
+        // so nothing splits for shading. What does split is the seam — the same
+        // position needs `u = 0` on one side of the wrap and `u = 1` on the
+        // other, and a vertex buffer can only say one of those.
+        //
+        // The count is exact rather than a bound, because the two mechanisms
+        // that could inflate it — a normal that fails to compare equal, a UV
+        // epsilon that lets neighbours merge — both show up here as a number and
+        // nowhere else as a picture.
+        let (seg, ring) = (32, 16);
+        let m = primitives::uv_sphere(1.0, seg, ring);
         let r = RenderMeshCpu::extract(&m);
         assert_eq!(
-            r.render_verts(),
-            m.num_verts(),
-            "a smooth mesh should collapse back to one vertex each"
+            r.render_verts() as u32,
+            m.num_verts() as u32
+                // the seam column, one extra copy each
+                + (ring - 1)
+                // and a pole, which has a different `u` for every face at it
+                + 2 * (seg - 1),
+            "a smooth sphere splits at its seam and nowhere else"
         );
+    }
+
+    #[test]
+    fn the_two_sides_of_a_seam_still_shade_as_one_surface() {
+        // **The group table is the smooth group, not the split.** It is what
+        // `deform.rs` recomputes normals from while somebody drags, so if each
+        // side of the seam only held the faces that resolved to it, a dragged
+        // sphere would crease along the line where its texture wraps — a defect
+        // that appears during the gesture and disappears when the pointer is
+        // released, which is the hardest kind to report.
+        let m = primitives::uv_sphere(1.0, 16, 8);
+        let r = RenderMeshCpu::extract(&m);
+        let mut seams = 0;
+        let n = r.render_verts() as usize;
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if r.positions[a].0 != r.positions[b].0 || r.normals[a] != r.normals[b] {
+                    continue;
+                }
+                // Same place, same normal, two render vertices: a seam pair.
+                seams += 1;
+                let faces = |i: usize| {
+                    let (lo, hi) = (r.group_offsets[i] as usize, r.group_offsets[i + 1] as usize);
+                    let mut v = r.group_faces[lo..hi].to_vec();
+                    v.sort_unstable();
+                    v
+                };
+                assert_eq!(faces(a), faces(b), "the seam pair at {a}/{b} shades apart");
+            }
+        }
+        assert!(seams > 0, "the fixture has no seam to check");
     }
 
     #[test]
