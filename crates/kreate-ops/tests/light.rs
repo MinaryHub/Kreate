@@ -309,7 +309,7 @@ fn every_datablock_panel_shows_what_it_would_store() {
     // The material.
     let before = doc.material(material).expect("a material").clone();
     let map =
-        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::material_params(&before));
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::material_params(&before, 0));
     history
         .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &map)
         .expect("dispatch");

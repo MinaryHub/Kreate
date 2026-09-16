@@ -90,6 +90,15 @@ pub struct ShellState {
     /// Whether the application is in mesh edit mode.
     /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
     pub select_mode: u32,
+    /// Which material slot the Material tab is editing.
+    ///
+    /// **Interface state, not document state.** Blender keeps this on the
+    /// object, which makes it undoable and saved; the operators here take the
+    /// slot as a parameter instead, so the document holds only what a file has
+    /// to. Clamped at draw time rather than kept in step, because the thing
+    /// that shortens the list is a document edit and an undo can lengthen it
+    /// again.
+    pub material_slot: u32,
     /// The camera's rotation, for drawing the navigation gizmo. Interface state
     /// reads the camera; it never writes to it.
     pub camera_rotation: kreate_math::DQuat,
@@ -428,6 +437,7 @@ impl Default for ShellState {
         Self {
             editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
+            material_slot: 0,
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -838,6 +848,10 @@ struct Labels {
     material_new: String,
     material_none: String,
     material_base_colour: String,
+    material_empty_slot: String,
+    material_no_slots: String,
+    material_add_slot: String,
+    material_remove_slot: String,
     recover_open: String,
     recover_discard: String,
     recover_discard_all: String,
@@ -913,6 +927,10 @@ impl Labels {
             material_new: t("material-new"),
             material_none: t("material-none"),
             material_base_colour: t("material-base-colour"),
+            material_empty_slot: t("material-empty-slot"),
+            material_no_slots: t("material-no-slots"),
+            material_add_slot: t("material-add-slot"),
+            material_remove_slot: t("material-remove-slot"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
@@ -2559,6 +2577,18 @@ fn draw_camera_data(
 // i18n-exempt: a symbol, not a word
 const CLEAR_GLYPH: &str = "×";
 
+/// The plus and minus on a list somebody adds rows to.
+///
+/// Both are in the bundled subset, which is not a given: see
+/// [`kreate_ui::fonts::missing_glyphs`], and the test below that holds every
+/// glyph the chrome draws to it.
+// i18n-exempt: symbols, not words
+const ADD_GLYPH: &str = "+";
+// i18n-exempt: a symbol, not a word. An en dash rather than the minus sign
+// U+2212 this wants: the bundled subset has no glyph for that one, and the
+// test below caught it before it reached a screen.
+const REMOVE_GLYPH: &str = "–";
+
 fn draw_material_tab(
     ui: &mut Ui,
     state: &mut ShellState,
@@ -2570,11 +2600,94 @@ fn draw_material_tab(
         return;
     };
     ui.heading(&l.tab_material);
-    // The empty state is a state, and it is the one a new document is in. A
-    // panel that drew nothing here was the reason every material control in
-    // the application was unreachable: nothing else creates the first
-    // material, so there was no way to get one.
-    let Some(material) = doc.material_at(object, 0) else {
+
+    // **The slot list.** A face names a slot and a slot names a material, so
+    // this is where a model says how many parts it has. It could not be here
+    // until the rendered pass drew one call per slot: before that a second
+    // slot was a material nobody could see, and a list of them would have been
+    // a control that did nothing.
+    let slots = doc
+        .object(object)
+        .and_then(|o| match &o.data {
+            kreate_scene::document::ObjectData::Mesh(mesh) => Some(doc.mesh_slots(*mesh)),
+            _ => None,
+        })
+        .unwrap_or(&[]);
+    // Clamped here rather than kept in step: what shortens the list is a
+    // document edit, and an undo can lengthen it again.
+    let slot = state
+        .material_slot
+        .min(slots.len().saturating_sub(1) as u32);
+    state.material_slot = slot;
+
+    ui.horizontal_top(|ui| {
+        // In a frame and full width, so it reads as a list rather than as a
+        // column of chips: the row is the thing being selected, and a
+        // highlight that stops at the end of the word does not say so.
+        let buttons = 34.0;
+        let width = (ui.available_width() - buttons).max(80.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(2, 2))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                // Explicitly vertical: this frame is inside a horizontal
+                // layout, so it inherits one and the rows came out side by
+                // side and running off the panel.
+                ui.vertical(|ui| {
+                    for (at, held) in slots.iter().enumerate() {
+                        let name = match held.and_then(|id| doc.material(id)) {
+                            // i18n-exempt: a material's name is the user's own text
+                            Some(material) => material.name.clone(),
+                            None => l.material_empty_slot.clone(),
+                        };
+                        // `left_text` with an empty body, which is how a
+                        // button's label sits against the left edge: a list
+                        // row's text starts where the row starts, and centred
+                        // names in a column read as a stack of buttons rather
+                        // than as a list.
+                        let row = egui::Button::selectable(at as u32 == slot, "")
+                            .left_text(name);
+                        let height = ui.spacing().interact_size.y;
+                        if ui
+                            .add_sized([ui.available_width(), height], row)
+                            .clicked()
+                        {
+                            state.material_slot = at as u32;
+                        }
+                    }
+                    // An empty frame collapses to nothing, which reads as a
+                    // missing control rather than as an empty list.
+                    if slots.is_empty() {
+                        ui.weak(&l.material_no_slots);
+                    }
+                });
+            });
+        // Blender's plus and minus, and the same division of labour: the plus
+        // adds an *empty* slot and the New button below fills it. Two steps,
+        // because they are two decisions — how many parts this model has, and
+        // what each one is made of.
+        ui.vertical(|ui| {
+            if ui.button(ADD_GLYPH).on_hover_text(&l.material_add_slot).clicked() {
+                state.queue.run("material.add_slot", PropertyMap::new());
+            }
+            if !slots.is_empty()
+                && ui
+                    .button(REMOVE_GLYPH)
+                    .on_hover_text(&l.material_remove_slot)
+                    .clicked()
+            {
+                let mut p = PropertyMap::new();
+                p.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+                state.queue.run("material.remove_slot", p);
+            }
+        });
+    });
+    ui.separator();
+
+    // An empty slot, or no slots at all. Both want the same button, because
+    // both are "there is nothing here to edit yet" — and a panel that drew
+    // nothing was the reason every material control was once unreachable.
+    let Some(material) = doc.material_at(object, slot as usize) else {
         ui.add_space(4.0);
         ui.weak(&l.material_none);
         ui.add_space(4.0);
@@ -2586,9 +2699,6 @@ fn draw_material_tab(
     let Some(info) = registry.get("material.set_properties") else {
         return;
     };
-    // i18n-exempt: a material's name is the user's own text
-    ui.label(&material.name);
-    ui.separator();
 
     // The base colour texture. The image node, the compiler's layer
     // assignment, the texture array and the surface coordinates all stand, and
@@ -2627,14 +2737,18 @@ fn draw_material_tab(
     });
     ui.separator();
     let mut params = kreate_reflect::OpParams::to_map(
-        &kreate_ops::ops::object::material_params(material),
+        &kreate_ops::ops::object::material_params(material, slot),
     );
-    if kreate_ui::property_editor::property_editor(
+    if kreate_ui::property_editor::property_editor_where(
         ui,
         &state.catalog,
         info.id,
         info.schema,
         &mut params,
+        // The slot is *which* material is being edited, not a property of it.
+        // Drawn as a spinner it would be a second, worse copy of the list
+        // above, and one that could point at a slot the list does not show.
+        |name| name != "slot",
     ) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "material.set_properties", params, dragging);
@@ -2823,6 +2937,10 @@ material-clear-image = Clear
 material-new = New Material
 material-none = This object has no material.
 material-base-colour = Base Colour
+material-empty-slot = Empty
+material-no-slots = No slots
+material-add-slot = Add a material slot
+material-remove-slot = Remove this material slot
 recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
@@ -3040,6 +3158,10 @@ material-clear-image = 지우기
 material-new = 새 재질
 material-none = 이 물체에는 재질이 없습니다.
 material-base-colour = 베이스 컬러
+material-empty-slot = 비어 있음
+material-no-slots = 슬롯 없음
+material-add-slot = 재질 슬롯 추가
+material-remove-slot = 이 재질 슬롯 삭제
 recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
@@ -3963,6 +4085,10 @@ mod tests {
             "material-new",
             "material-none",
             "material-base-colour",
+            "material-empty-slot",
+            "material-no-slots",
+            "material-add-slot",
+            "material-remove-slot",
             "world-pick-image",
             "world-clear-image",
             "material-pick-image",
@@ -4027,6 +4153,8 @@ mod tests {
         // worked, the tooltip was correct and the button was empty.
         let mut drawn: String = ALL_TABS.iter().map(|t| t.glyph()).collect();
         drawn.push_str(CLEAR_GLYPH);
+        drawn.push_str(ADD_GLYPH);
+        drawn.push_str(REMOVE_GLYPH);
         assert_eq!(
             kreate_ui::fonts::missing_glyphs(&drawn),
             Vec::<char>::new(),

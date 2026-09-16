@@ -1573,7 +1573,25 @@ fn shot_material_tab() {
         });
         textured.set_mesh_slot(mesh, 0, Some(material));
     }
-    for (label, doc) in [("bare", &bare), ("dressed", &dressed), ("textured", &textured)] {
+    let mut two = doc_with_cube();
+    {
+        let mesh = two.meshes().next().map(|(id, _)| id).expect("a mesh");
+        let body = two.add_material(kreate_scene::Material {
+            name: "Body".into(),
+            ..Default::default()
+        });
+        let trim = two.add_material(kreate_scene::Material {
+            name: "Trim".into(),
+            ..Default::default()
+        });
+        two.set_mesh_slots(mesh, vec![Some(body), Some(trim), None]);
+    }
+    for (label, doc) in [
+        ("bare", &bare),
+        ("dressed", &dressed),
+        ("textured", &textured),
+        ("slots", &two),
+    ] {
         let Some(shot) = composite_with(doc, "en", false, |state| {
             let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
             for area in areas {

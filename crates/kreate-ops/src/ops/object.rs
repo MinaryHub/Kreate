@@ -706,6 +706,16 @@ pub fn world_image_params(world: &kreate_scene::World, doc: &Document) -> SetWor
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct SetMaterialParams {
+    /// Which of the mesh's material slots to edit.
+    ///
+    /// **A parameter rather than document state.** Blender keeps the active
+    /// slot on the object, which makes it undoable and saved; here the panel
+    /// knows which row is selected and says so. That keeps the document to
+    /// what a *file* has to hold, and it makes the operator sayable from a
+    /// script: "set the material of slot 2", rather than "select slot 2, then
+    /// set the material".
+    #[param(min = 0.0)]
+    pub slot: u32,
     /// The base colour: a reflectance, bounded by one.
     ///
     /// For a dielectric this is the diffuse albedo and for a metal the specular
@@ -724,6 +734,7 @@ pub struct SetMaterialParams {
 impl Default for SetMaterialParams {
     fn default() -> Self {
         Self {
+            slot: 0,
             color: [0.8, 0.8, 0.8],
             metallic: 0.0,
             roughness: 0.5,
@@ -732,11 +743,12 @@ impl Default for SetMaterialParams {
     }
 }
 
-/// Sets the active object's first material slot.
+/// Sets the material in one of the active object's slots.
 ///
-/// The first slot, because that is the one the raster pass draws \u2014 see \u00a77.5 on
-/// why per-face slots wait for the draws to be split. A panel that offered the
-/// others would be editing materials nothing shows.
+/// Any slot, now that the rendered pass draws one call per slot. It used to be
+/// the first and only the first, because that was the only one that reached
+/// the screen: a panel offering the others would have been editing materials
+/// nothing showed.
 pub struct SetMaterial;
 
 impl Operator for SetMaterial {
@@ -749,7 +761,7 @@ impl Operator for SetMaterial {
         "Set Material"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        active_material(doc).is_some()
+        active_slot_count(doc) > 0
     }
 
     fn execute(
@@ -757,7 +769,7 @@ impl Operator for SetMaterial {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let Some(id) = active_material(doc.document()) else {
+        let Some(id) = material_in_slot(doc.document(), params.slot) else {
             return Ok(OpResult::Cancelled);
         };
         let d = doc.document_mut();
@@ -780,17 +792,39 @@ impl Operator for SetMaterial {
     }
 }
 
-/// The material the active object draws with, if it has one.
+/// The material the active object draws with in its first slot, if it has one.
 pub fn active_material(doc: &Document) -> Option<kreate_scene::MaterialId> {
-    let object = doc.selection.active?;
-    // Through `material_at`, which is the one place the override rule lives:
-    // slots belong to the mesh and overrides to the object, and a panel that
-    // resolved them itself would be a second opinion about which wins.
-    doc.material_id_at(object, 0)
+    material_in_slot(doc, 0)
+}
+
+/// The material the active object draws with in `slot`.
+///
+/// Through `material_id_at`, which is the one place the override rule lives:
+/// slots belong to the mesh and overrides to the object, and a panel that
+/// resolved them itself would be a second opinion about which chair is
+/// upholstered.
+pub fn material_in_slot(doc: &Document, slot: u32) -> Option<kreate_scene::MaterialId> {
+    doc.material_id_at(doc.selection.active?, slot as usize)
+}
+
+/// How many material slots the active object's mesh has.
+///
+/// Zero for anything that is not a mesh, and for a mesh nobody has assigned a
+/// material to, which is a state and not an error.
+pub fn active_slot_count(doc: &Document) -> usize {
+    match active_mesh(doc) {
+        Some(mesh) => doc.mesh_slots(mesh).len(),
+        None => 0,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct SetMaterialImageParams {
+    /// Which of the mesh's material slots the texture goes on.
+    ///
+    /// See [`SetMaterialParams::slot`] on why the slot travels as a parameter.
+    #[param(min = 0.0)]
+    pub slot: u32,
     /// The image datablock's identity, in decimal. Empty takes the texture off.
     ///
     /// Text and an identity for the two reasons [`SetWorldImageParams::uid`]
@@ -822,7 +856,7 @@ impl Operator for SetMaterialImage {
         "Set Material Image"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        active_material(doc).is_some()
+        active_slot_count(doc) > 0
     }
 
     fn execute(
@@ -830,7 +864,7 @@ impl Operator for SetMaterialImage {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let Some(id) = active_material(doc.document()) else {
+        let Some(id) = material_in_slot(doc.document(), params.slot) else {
             return Ok(OpResult::Cancelled);
         };
         // Resolved against the document before anything is borrowed mutably,
@@ -873,7 +907,11 @@ impl Operator for SetMaterialImage {
 /// this chair" rather than "the material of this one copy of it". The override
 /// stays what it is for — making one copy differ.
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
-pub struct NewMaterialParams {}
+pub struct NewMaterialParams {
+    /// Which slot to fill. See [`SetMaterialParams::slot`].
+    #[param(min = 0.0)]
+    pub slot: u32,
+}
 
 pub struct NewMaterial;
 
@@ -886,30 +924,30 @@ impl Operator for NewMaterial {
     fn label() -> &'static str {
         "New Material"
     }
-    /// Only a mesh, and only one that has no material yet.
+    /// Any mesh. Whether the *slot* is already filled is decided in `execute`,
+    /// because `poll` cannot see the parameter.
     ///
-    /// **Why not "make another one", which is what Blender's button does.**
-    /// Blender's Material tab carries a slot *list*, so a second material is
-    /// visible the moment it exists and the first is one click away. There is
-    /// no list here yet, and the panel shows this button only while the slot
-    /// is empty — so a second material would be created, assigned, and leave
-    /// the first with nothing pointing at it and no way back to it. Refusing
-    /// is the honest answer until there is a list to pick from.
+    /// This used to refuse whenever the object had a material at all, on the
+    /// grounds that a second one would be created, assigned, and left with
+    /// nothing pointing at it — true while the panel had no slot list and the
+    /// renderer drew one material per object. Both of those have changed.
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        active_mesh(doc).is_some() && active_material(doc).is_none()
+        active_mesh(doc).is_some()
     }
 
     fn execute(
-        _params: &Self::Params,
+        params: &Self::Params,
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };
-        // Checked again rather than trusted: `poll` gates the button, and a
-        // script or a replayed step reaches `execute` without it.
-        if active_material(doc.document()).is_some() {
+        // A slot that already holds a material is left alone rather than
+        // overwritten. The button is only offered on an empty slot, so
+        // reaching here means a script or a replayed step — and silently
+        // replacing somebody's material is the worse of the two answers.
+        if material_in_slot(doc.document(), params.slot).is_some() {
             return Ok(OpResult::Cancelled);
         }
         // Blender's defaults, and not an accident: a mid grey at 0.5 roughness
@@ -921,7 +959,99 @@ impl Operator for NewMaterial {
             name: "Material".into(),
             ..Default::default()
         });
-        d.set_mesh_slot(mesh, 0, Some(material));
+        d.set_mesh_slot(mesh, params.slot as usize, Some(material));
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct AddMaterialSlotParams {}
+
+/// Appends an empty material slot to the active object's mesh.
+///
+/// **Empty, not filled.** Blender's `+` adds a slot and leaves it without a
+/// material, and the separate New button fills it — two steps, because they
+/// are two decisions: how many parts this model has, and what each part is
+/// made of. A `+` that also made a material would give somebody who wanted
+/// three slots three materials they then had to delete.
+pub struct AddMaterialSlot;
+
+impl Operator for AddMaterialSlot {
+    type Params = AddMaterialSlotParams;
+
+    fn id() -> &'static str {
+        "material.add_slot"
+    }
+    fn label() -> &'static str {
+        "Add Material Slot"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_mesh(doc).is_some()
+    }
+
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let at = doc.document().mesh_slots(mesh).len();
+        doc.document_mut().set_mesh_slot(mesh, at, None);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RemoveMaterialSlotParams {
+    /// Which slot to take away. See [`SetMaterialParams::slot`].
+    #[param(min = 0.0)]
+    pub slot: u32,
+}
+
+/// Takes a material slot off the active object's mesh.
+///
+/// **The faces that pointed at it are not deleted**, and neither is the
+/// material datablock. A face's `material_index` past the end of the slot list
+/// resolves to the first slot, the same place an unassigned face lands — so
+/// removing a slot changes what those faces are made of and never how many
+/// there are. Deleting geometry from a material panel would be a surprise
+/// nobody could undo by re-adding the slot.
+///
+/// The indices of later slots do shift down, which is the part a face's stored
+/// index notices. Blender renumbers the faces to match; that needs an edit to
+/// the mesh attribute and is left for when the panel can show which faces are
+/// on which slot, because doing it silently is how a model comes back wrong.
+pub struct RemoveMaterialSlot;
+
+impl Operator for RemoveMaterialSlot {
+    type Params = RemoveMaterialSlotParams;
+
+    fn id() -> &'static str {
+        "material.remove_slot"
+    }
+    fn label() -> &'static str {
+        "Remove Material Slot"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_slot_count(doc) > 0
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut slots = doc.document().mesh_slots(mesh).to_vec();
+        if params.slot as usize >= slots.len() {
+            return Ok(OpResult::Cancelled);
+        }
+        slots.remove(params.slot as usize);
+        doc.document_mut().set_mesh_slots(mesh, slots);
         Ok(OpResult::Finished)
     }
 }
@@ -938,8 +1068,10 @@ pub fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
 pub fn material_image_params(
     doc: &Document,
     material: &kreate_scene::Material,
+    slot: u32,
 ) -> SetMaterialImageParams {
     SetMaterialImageParams {
+        slot,
         uid: material
             .base_color_image
             .and_then(|id| doc.image_uid(id))
@@ -948,10 +1080,14 @@ pub fn material_image_params(
     }
 }
 
-/// The parameters that would leave a material exactly as it is.
-pub fn material_params(material: &kreate_scene::Material) -> SetMaterialParams {
+/// The parameters that would leave the material in `slot` exactly as it is.
+pub fn material_params(
+    material: &kreate_scene::Material,
+    slot: u32,
+) -> SetMaterialParams {
     let c = material.base_color.as_swatch();
     SetMaterialParams {
+        slot,
         color: [c.r as f64, c.g as f64, c.b as f64],
         metallic: material.metallic as f64,
         roughness: material.roughness as f64,
@@ -1796,6 +1932,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetWorld>();
     registry.register::<SetWorldImage>();
     registry.register::<NewMaterial>();
+    registry.register::<AddMaterialSlot>();
+    registry.register::<RemoveMaterialSlot>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();

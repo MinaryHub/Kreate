@@ -1991,7 +1991,8 @@ impl App {
                 Command::PickMaterialImage => self.pick_material_image(),
                 Command::ClearMaterialImage => self.clear_material_image(),
                 Command::NewMaterial => {
-                    self.run_op("material.new", kreate_ops::PropertyMap::new())
+                    let params = self.material_slot_param();
+                    self.run_op("material.new", params)
                 }
                 Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
@@ -2277,7 +2278,7 @@ impl App {
         let Some(uid) = self.doc.image_uid(id) else {
             return self.status("the image has no identity");
         };
-        let mut params = PropertyMap::new();
+        let mut params = self.material_slot_param();
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("material.set_image", params);
         self.status(&format!("base colour: {name}"));
@@ -2285,9 +2286,24 @@ impl App {
 
     /// Takes the base colour texture off the active material.
     fn clear_material_image(&mut self) {
-        let mut params = PropertyMap::new();
+        let mut params = self.material_slot_param();
         params.set("uid", kreate_reflect::PropertyValue::Text(String::new()));
         self.run_op("material.set_image", params);
+    }
+
+    /// Parameters naming the slot the Material tab is showing.
+    ///
+    /// Every material operator the panel's buttons run takes one, because the
+    /// slot is interface state and the operators are not allowed to read it —
+    /// see `SetMaterialParams::slot`. One place, so a button added later
+    /// cannot forget and quietly edit slot zero instead.
+    fn material_slot_param(&self) -> PropertyMap {
+        let mut params = PropertyMap::new();
+        params.set(
+            "slot",
+            kreate_reflect::PropertyValue::Int(self.ui.material_slot as i64),
+        );
+        params
     }
 
     /// Puts the world's background back to a colour.

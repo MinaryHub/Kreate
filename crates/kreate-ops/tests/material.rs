@@ -413,6 +413,7 @@ fn the_parameters_that_read_a_material_back_leave_it_alone() {
     let read = kreate_ops::ops::object::material_image_params(
         &doc,
         doc.material(material).expect("a material"),
+        0,
     );
     assert_eq!(read.uid, uid);
     set_image(&registry, &mut history, &mut doc, &ctx, &read.uid);
@@ -482,23 +483,29 @@ fn undoing_takes_the_material_back_off() {
 
 #[test]
 fn a_second_press_does_not_replace_the_material_that_is_there() {
-    // Blender's button says "New" and makes another one; this refuses instead,
-    // because with no material *list* in the panel a second material would be
-    // created, assigned, and leave the first unreachable with no way back to
-    // it. Refusing is the honest answer until there is a list to pick from.
+    // **How the refusal arrives changed with the slot list.** It used to be a
+    // failed poll: the operator did not apply at all once the object had a
+    // material anywhere. Now it applies to a named slot, and `poll` cannot see
+    // a parameter — so a filled slot is refused in `execute`, as a cancel.
+    //
+    // Which is the same answer to the user either way, and that is the part
+    // worth holding: pressing New twice leaves one material, not two, and the
+    // one it leaves is the one that was already there.
     let (registry, mut history, mut doc, ctx) = wired();
     let (_, object) = cube(&mut doc);
     doc.selection.add(object);
     new_material(&registry, &mut history, &mut doc, &ctx);
     let first = doc.material_id_at(object, 0).expect("one material");
 
-    new_material_refused(&registry, &mut history, &mut doc, &ctx);
+    let depth = history.entries().len();
+    new_material(&registry, &mut history, &mut doc, &ctx);
     assert_eq!(
         doc.material_id_at(object, 0),
         Some(first),
         "a second press replaced the material that was already there"
     );
     assert_eq!(doc.material_count(), 1, "a material was left with nothing using it");
+    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
 }
 
 #[test]
@@ -518,4 +525,160 @@ fn a_lamp_is_refused_rather_than_given_a_material() {
     new_material_refused(&registry, &mut history, &mut doc, &ctx);
     assert_eq!(doc.material_count(), 0, "a lamp was given a material");
     assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+}
+
+// --- more than one slot ----------------------------------------------------
+
+fn run_op(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+    op: &str,
+    slot: Option<u32>,
+) -> bool {
+    let mut params = PropertyMap::new();
+    if let Some(slot) = slot {
+        params.set("slot", PropertyValue::Int(slot as i64));
+    }
+    history.dispatch(registry, doc, ctx, op, &params).is_ok()
+}
+
+#[test]
+fn a_slot_is_added_empty_and_the_new_button_fills_it() {
+    // Blender's division, and the reason it is two operators: how many parts a
+    // model has and what each is made of are two decisions. A `+` that also
+    // made a material would give somebody who wanted three slots three
+    // materials to delete.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (mesh, object) = cube(&mut doc);
+    doc.selection.add(object);
+
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+    assert_eq!(doc.mesh_slots(mesh), &[None], "the slot arrived filled");
+    assert_eq!(doc.material_count(), 0, "adding a slot made a material");
+
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
+    assert!(doc.material_at(object, 0).is_some());
+}
+
+#[test]
+fn a_second_slot_gets_its_own_material() {
+    // The whole point of the list. Two slots, two materials, and editing one
+    // must not touch the other.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (mesh, object) = cube(&mut doc);
+    doc.selection.add(object);
+    for slot in 0..2 {
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+    }
+    assert_eq!(doc.mesh_slots(mesh).len(), 2);
+    let first = doc.material_id_at(object, 0).expect("slot 0");
+    let second = doc.material_id_at(object, 1).expect("slot 1");
+    assert_ne!(first, second, "both slots point at one material");
+
+    // Editing slot one leaves slot zero alone.
+    let mut params = PropertyMap::new();
+    params.set("slot", PropertyValue::Int(1));
+    params.set("color", PropertyValue::Vec3([1.0, 0.0, 0.0]));
+    params.set("metallic", PropertyValue::Float(0.0));
+    params.set("roughness", PropertyValue::Float(0.5));
+    params.set("alpha", PropertyValue::Float(1.0));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &params)
+        .expect("it ran");
+    let red = doc.material(second).expect("still there").base_color;
+    let untouched = doc.material(first).expect("still there").base_color;
+    assert_ne!(red, untouched, "editing one slot changed the other");
+}
+
+#[test]
+fn filling_a_slot_that_already_holds_a_material_is_refused() {
+    // Reachable only from a script or a replayed step — the button is offered
+    // on an empty slot alone. Silently replacing somebody's material is the
+    // worse of the two answers.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (_, object) = cube(&mut doc);
+    doc.selection.add(object);
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
+    let first = doc.material_id_at(object, 0);
+
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
+    assert_eq!(doc.material_id_at(object, 0), first, "the material was replaced");
+    assert_eq!(doc.material_count(), 1, "a material was left with nothing using it");
+}
+
+#[test]
+fn removing_a_slot_keeps_the_faces_and_the_datablock() {
+    // A face whose `material_index` is past the end resolves to the first
+    // slot, the same place an unassigned face lands. Deleting geometry from a
+    // material panel would be a surprise nobody could undo by re-adding the
+    // slot — and the datablock may be in use by another object.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (mesh, object) = cube(&mut doc);
+    doc.selection.add(object);
+    for slot in 0..2 {
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+    }
+    let faces = doc.mesh(mesh).expect("a mesh").num_faces();
+    let second = doc.material_id_at(object, 1).expect("slot 1");
+
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(1)));
+    assert_eq!(doc.mesh_slots(mesh).len(), 1);
+    assert_eq!(doc.mesh(mesh).expect("a mesh").num_faces(), faces, "faces were deleted");
+    assert!(doc.material(second).is_some(), "the datablock was deleted with the slot");
+}
+
+#[test]
+fn removing_a_slot_that_is_not_there_is_refused() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (mesh, object) = cube(&mut doc);
+    doc.selection.add(object);
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+
+    let depth = history.entries().len();
+    run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(7));
+    assert_eq!(doc.mesh_slots(mesh).len(), 1, "a slot went missing");
+    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+}
+
+#[test]
+fn undoing_a_slot_removal_puts_the_material_back_where_it_was() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (_, object) = cube(&mut doc);
+    doc.selection.add(object);
+    for slot in 0..2 {
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+    }
+    let before: Vec<_> = (0..2).map(|s| doc.material_id_at(object, s)).collect();
+
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(0)));
+    assert!(history.undo(&mut doc), "there was nothing to undo");
+    let after: Vec<_> = (0..2).map(|s| doc.material_id_at(object, s)).collect();
+    assert_eq!(before, after, "undo did not restore the slot list");
+}
+
+#[test]
+fn an_operator_naming_a_slot_that_is_empty_declines() {
+    // The panel never asks for this — it shows the New button for an empty
+    // slot — but a script can, and a texture assigned to nothing is worse than
+    // a texture that did not arrive.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (_, object) = cube(&mut doc);
+    doc.selection.add(object);
+    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+
+    let mut params = PropertyMap::new();
+    params.set("slot", PropertyValue::Int(0));
+    params.set("uid", PropertyValue::Text(String::new()));
+    // Runs, and cancels: the slot is there, so `poll` passes, and `execute`
+    // finds nothing in it.
+    assert!(history
+        .dispatch(&registry, &mut doc, &ctx, "material.set_image", &params)
+        .is_ok());
+    assert!(doc.material_at(object, 0).is_none());
 }
