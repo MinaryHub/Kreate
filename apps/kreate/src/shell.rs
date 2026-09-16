@@ -820,6 +820,7 @@ struct Labels {
     file_open: String,
     file_save: String,
     file_save_as: String,
+    file_export: String,
     recover_open: String,
     recover_discard: String,
     recover_discard_all: String,
@@ -883,6 +884,7 @@ impl Labels {
             file_open: t("menu-file-open"),
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
+            file_export: t("menu-file-export"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
@@ -1042,6 +1044,9 @@ pub fn draw(
             }
             if ui.button(&l.file_save_as).clicked() {
                 state.queue.push(Command::SaveDocumentAs);
+            }
+            if ui.button(&l.file_export).clicked() {
+                state.queue.push(Command::ExportScene);
             }
             ui.separator();
             // A menu rather than a button, because what can be added stopped
@@ -2610,6 +2615,7 @@ menu-file-new = New
 menu-file-open = Open...
 menu-file-save = Save
 menu-file-save-as = Save As...
+menu-file-export = Export...
 recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
@@ -2813,6 +2819,7 @@ menu-file-new = 새로
 menu-file-open = 열기...
 menu-file-save = 저장
 menu-file-save-as = 다른 이름으로 저장...
+menu-file-export = 내보내기...
 recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
@@ -3701,6 +3708,7 @@ mod tests {
             "menu-file-open",
             "menu-file-save",
             "menu-file-save-as",
+            "menu-file-export",
             "recover-count",
             "recover-open",
             "recover-discard",

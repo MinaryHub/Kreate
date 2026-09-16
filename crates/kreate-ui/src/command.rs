@@ -84,6 +84,14 @@ pub enum Command {
     SaveDocument,
     /// Always ask for a path.
     SaveDocumentAs,
+    /// Ask for a path and write the scene to an interchange format.
+    ///
+    /// Separate from saving, because it is not saving: an export goes through
+    /// the IR and comes out the other side as much of the document as the
+    /// format can hold, and the document keeps no path from it. Calling it
+    /// "save" would invite a user to treat a `.glb` as their working file and
+    /// find out later what it dropped.
+    ExportScene,
     /// Open a recovered autosave, and forget it either way.
     RecoverDocument {
         path: std::path::PathBuf,

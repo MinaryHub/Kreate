@@ -434,6 +434,45 @@ impl ImportTransform {
             translation.as_dvec3(),
         )
     }
+
+    /// The same placement, back in the file's space.
+    ///
+    /// Written as the *inverse* of [`ImportTransform::to_kreate`] rather than as
+    /// a second conversion derived from the same rules. Two independently
+    /// written axis conversions that disagree is the failure this module exists
+    /// to prevent, and a round trip through a file is exactly where the
+    /// disagreement would first show — so the test asserts the identity
+    /// `from_kreate(to_kreate(t)) == t` rather than any particular matrix.
+    ///
+    /// **This is where an export loses something, and it loses it for a real
+    /// reason.** Every interchange format writes a translation, a rotation and a
+    /// scale, so a sheared transform cannot be written at all; it comes out as
+    /// the nearest rotation and scale. Nothing the document can currently
+    /// produce is sheared — a `DTransform` is itself a TRS — but a matrix
+    /// arriving from somewhere else would be, and silently rounding it is worth
+    /// saying out loud.
+    pub fn from_kreate(affine: kreate_math::DAffine3, source: &SourceMetadata) -> Self {
+        let axis = source.axis.to_kreate();
+        let inverse = axis.transpose();
+        // The conjugation undone: `axis⁻¹ · (axis · M · axis⁻¹) · axis` is `M`.
+        let linear = inverse * affine.matrix3.as_mat3() * axis;
+        // A unit scale of zero is not a scale — it collapses the file onto the
+        // origin, and no inverse of that exists. Treated as one rather than
+        // writing infinities into a file that would then open as nothing.
+        let unit = if source.unit_scale.is_normal() {
+            source.unit_scale
+        } else {
+            1.0
+        };
+        let translation = (inverse * affine.translation.as_vec3()) / unit;
+        let (scale, rotation, _) =
+            glam::Affine3A::from_mat3(linear).to_scale_rotation_translation();
+        Self {
+            translation,
+            rotation,
+            scale,
+        }
+    }
 }
 
 /// What a node carries.
@@ -529,6 +568,98 @@ pub struct ImportCamera {
     pub ortho_width: Option<f32>,
     pub clip_near: f32,
     pub clip_far: Option<f32>,
+}
+
+
+/// One node on the way out, in Kreate space.
+///
+/// Its own type rather than a reused [`ImportNode`], and the difference is the
+/// one that matters: an `ImportNode`'s transform is in the *file's* space and
+/// this one's is in the document's. Sharing the type would mean a field whose
+/// meaning depends on which direction the value is travelling, which is the
+/// kind of thing that is right until somebody writes a function taking either.
+///
+/// The axis change therefore happens in the writer, exactly once — which is the
+/// rule this module's own documentation opens with.
+#[derive(Clone, Debug)]
+pub struct ExportNode {
+    pub name: String,
+    /// Index into [`ExportScene::nodes`], or `None` for a root.
+    pub parent: Option<usize>,
+    /// Relative to the parent, in Kreate space.
+    pub transform: kreate_math::DTransform,
+    pub data: ImportNodeData,
+}
+
+impl ExportNode {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parent: None,
+            transform: kreate_math::DTransform::IDENTITY,
+            data: ImportNodeData::Empty,
+        }
+    }
+}
+
+/// A scene on its way into a file.
+///
+/// The other half of [`ImportScene`], and it did not exist: an export took a
+/// list of `(name, &MeshData)` pairs, so a lit scene could be *imported* and
+/// could not be written back. §5.7's fidelity contract was open at one end, and
+/// a contract that only holds in one direction is not one.
+///
+/// Meshes are borrowed because the document already owns them and an export is
+/// a read. Everything else is owned, because it is a conversion of what the
+/// document holds rather than a view of it.
+pub struct ExportScene<'a> {
+    pub meshes: Vec<(String, &'a MeshData)>,
+    pub materials: Vec<ImportMaterial>,
+    /// Which material each mesh's slots refer to, parallel to `meshes`.
+    ///
+    /// A face carries a *slot* index and a slot is per-mesh (§7.5), so slot 1
+    /// of one mesh and slot 1 of another are not the same material. Without
+    /// this table an exporter keyed on the face's own number would quietly give
+    /// the second mesh the first one's materials.
+    ///
+    /// Empty — for the scene as a whole or for one mesh — means the slot number
+    /// *is* the material number, which is what a caller handing over a bare
+    /// mesh list means.
+    pub mesh_slots: Vec<Vec<Option<usize>>>,
+    pub lights: Vec<ImportLight>,
+    pub cameras: Vec<ImportCamera>,
+    /// The hierarchy. Empty means the format should place each mesh at the
+    /// origin, which is what OBJ and STL can say and what a bare mesh list is.
+    pub nodes: Vec<ExportNode>,
+}
+
+impl<'a> ExportScene<'a> {
+    pub fn new(meshes: Vec<(String, &'a MeshData)>) -> Self {
+        Self {
+            meshes,
+            materials: Vec::new(),
+            mesh_slots: Vec::new(),
+            lights: Vec::new(),
+            cameras: Vec::new(),
+            nodes: Vec::new(),
+        }
+    }
+
+    /// Which material a face of `mesh` means by slot `slot`.
+    ///
+    /// `None` for a slot nothing is assigned to, which is ordinary: a mesh can
+    /// have three slots with the middle one empty.
+    pub fn material_of(&self, mesh: usize, slot: i32) -> Option<usize> {
+        if slot < 0 {
+            return None;
+        }
+        match self.mesh_slots.get(mesh) {
+            // No table at all: the face's number is the material's number.
+            None => Some(slot as usize),
+            Some(slots) if slots.is_empty() => Some(slot as usize),
+            Some(slots) => slots.get(slot as usize).copied().flatten(),
+        }
+    }
 }
 
 /// A scene as read from a file, before it becomes a document.
@@ -1307,4 +1438,131 @@ mod tests {
             assert!((origin.from_kreate(origin.to_kreate(uv)) - uv).length() < 1e-6);
         }
     }
+
+    #[test]
+    fn a_transform_comes_back_from_kreate_space_unchanged() {
+        // The whole claim `from_kreate` makes. Written as the identity rather
+        // than against an expected matrix on purpose: an expected matrix is a
+        // second statement of the conversion, and if the two ever disagree the
+        // test says which is "right" by fiat rather than by arithmetic.
+        //
+        // The cases are chosen to break the two ways this goes wrong. A rotation
+        // about an axis that is *not* the up axis catches a conjugation applied
+        // on one side only; a non-uniform scale catches one applied to the wrong
+        // factor, because a uniform scale commutes with everything and hides it.
+        let mut source = SourceMetadata::new("test");
+        source.axis = AxisConvention::GLTF;
+        source.unit_scale = 0.01;
+
+        for original in [
+            ImportTransform::default(),
+            ImportTransform {
+                translation: Vec3::new(1.0, -2.0, 3.5),
+                rotation: Quat::from_rotation_x(0.7),
+                scale: Vec3::new(2.0, 0.5, 1.25),
+            },
+            ImportTransform {
+                translation: Vec3::new(-40.0, 0.25, 0.0),
+                rotation: Quat::from_euler(glam::EulerRot::XYZ, 0.3, -1.1, 2.2),
+                scale: Vec3::splat(3.0),
+            },
+        ] {
+            let there = original.to_kreate(&source);
+            let back = ImportTransform::from_kreate(there, &source);
+            assert!(
+                (back.translation - original.translation).length() < 1e-4,
+                "{:?} came back at {:?}",
+                original.translation,
+                back.translation
+            );
+            assert!(
+                (back.scale - original.scale).length() < 1e-5,
+                "{:?} came back as {:?}",
+                original.scale,
+                back.scale
+            );
+            // Compared by what the rotation *does*: `q` and `-q` are the same
+            // rotation, so comparing the four numbers would fail on a correct
+            // answer half the time.
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                let turned = back.rotation * axis;
+                let wanted = original.rotation * axis;
+                assert!(
+                    (turned - wanted).length() < 1e-5,
+                    "{axis:?} was sent to {turned:?} instead of {wanted:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_kreate_file_is_its_own_space_in_both_directions() {
+        // The convention that is the identity, which is the one a conversion
+        // written backwards still passes — so it is asserted separately and the
+        // case above carries the axis change.
+        let source = SourceMetadata::new("test");
+        let original = ImportTransform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_z(0.4),
+            scale: Vec3::new(1.0, 2.0, 1.0),
+        };
+        let there = original.to_kreate(&source);
+        assert!((there.translation.as_vec3() - original.translation).length() < 1e-6);
+        let back = ImportTransform::from_kreate(there, &source);
+        assert!((back.translation - original.translation).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_mesh_with_no_slot_table_reads_its_faces_number_as_the_material() {
+        // What a bare mesh list means, and the behaviour every existing caller
+        // depends on. The `-1` is "no material", which faces carry when nothing
+        // has been assigned.
+        let mesh = MeshData::empty();
+        let scene = ExportScene::new(vec![("Thing".into(), &mesh)]);
+        assert_eq!(scene.material_of(0, 0), Some(0));
+        assert_eq!(scene.material_of(0, 3), Some(3));
+        assert_eq!(scene.material_of(0, -1), None);
+    }
+
+    #[test]
+    fn two_meshes_do_not_share_a_slot_number() {
+        // The reason the table exists. Slot 0 of one mesh and slot 0 of another
+        // are different materials, and an exporter keyed on the face's own
+        // number would give the second mesh the first one's.
+        let mesh = MeshData::empty();
+        let mut scene = ExportScene::new(vec![("A".into(), &mesh), ("B".into(), &mesh)]);
+        scene.mesh_slots = vec![vec![Some(2)], vec![Some(5), None]];
+        assert_eq!(scene.material_of(0, 0), Some(2));
+        assert_eq!(scene.material_of(1, 0), Some(5));
+        // An empty slot is ordinary: a mesh can have three of them with the
+        // middle one unassigned.
+        assert_eq!(scene.material_of(1, 1), None);
+        // And a face pointing past the table is a face pointing at nothing,
+        // rather than at whatever material happens to be there.
+        assert_eq!(scene.material_of(1, 9), None);
+    }
+
+    #[test]
+    fn a_file_with_no_size_is_read_as_one_metre_per_unit() {
+        // A unit scale of zero collapses every position onto the origin, and no
+        // inverse of that exists. The guard turns it into one rather than
+        // writing infinities into a file that would then open as nothing.
+        //
+        // Nothing in the codebase produces a zero — `SourceMetadata` starts at
+        // one — so this is a claim about a value a *file* can carry, and the
+        // only way to check it is to say it directly.
+        let mut source = SourceMetadata::new("test");
+        source.unit_scale = 0.0;
+        let back = ImportTransform::from_kreate(
+            kreate_math::DAffine3::from_translation(kreate_math::DVec3::new(1.0, 2.0, 3.0)),
+            &source,
+        );
+        assert!(
+            back.translation.is_finite(),
+            "a zero unit scale produced {:?}",
+            back.translation
+        );
+        assert!((back.translation - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+    }
+
 }

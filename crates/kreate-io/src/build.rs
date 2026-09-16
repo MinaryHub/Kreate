@@ -10,8 +10,11 @@
 //! up holding are compared in tests, and a conversion living in the shell could
 //! not be.
 
-use crate::ir::{ImportLightKind, ImportNodeData, ImportScene};
-use kreate_scene::document::{Object, ObjectData, ObjectId};
+use crate::ir::{
+    ExportNode, ExportScene, ImportCamera, ImportLight, ImportLightKind, ImportMaterial,
+    ImportNodeData, ImportScene, LossyNote,
+};
+use kreate_scene::document::{MaterialId, Object, ObjectData, ObjectId};
 use kreate_scene::Document;
 
 /// What was lost or guessed while building the document.
@@ -221,5 +224,278 @@ fn to_transform(affine: kreate_math::DAffine3) -> kreate_math::DTransform {
         translation,
         rotation,
         scale,
+    }
+}
+
+/// Turns a document into a scene an exporter can write.
+///
+/// The inverse of [`build_into`], and the half that did not exist: an export
+/// took a list of `(name, &MeshData)` pairs, so a lit scene could arrive and
+/// could not leave. §5.7's fidelity contract only held in one direction, which
+/// is not a contract — a round trip either closes or it is a one-way door with
+/// a hopeful name.
+///
+/// Notes are [`LossyNote`]s rather than [`BuildNote`]s because this is the
+/// export direction and they are what an exporter already returns: a caller
+/// writing a file gets one list to show, not two.
+pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) {
+    let mut notes = Vec::new();
+
+    // The material table, and where each id landed in it. Every material, not
+    // only the used ones: a document's material list is authored data and a
+    // slot pointing at one nothing happens to use today is still the author's.
+    let mut material_index: std::collections::HashMap<MaterialId, usize> =
+        std::collections::HashMap::new();
+    let mut materials = Vec::new();
+    for (id, material) in doc.materials() {
+        material_index.insert(id, materials.len());
+        materials.push(ImportMaterial {
+            name: material.name.clone(),
+            base_color: [
+                material.base_color.r,
+                material.base_color.g,
+                material.base_color.b,
+                material.alpha,
+            ],
+            metallic: material.metallic,
+            roughness: material.roughness,
+            // Not a field on the datablock yet: §2.3's node graph is where
+            // emission will live, and inventing a value here would make the
+            // file claim one.
+            emissive: glam::Vec3::ZERO,
+            base_color_texture: None,
+        });
+    }
+
+    let mut meshes: Vec<(String, &kreate_mesh::MeshData)> = Vec::new();
+    let mut mesh_slots: Vec<Vec<Option<usize>>> = Vec::new();
+    let mut mesh_index = std::collections::HashMap::new();
+    let mut lights = Vec::new();
+    let mut light_index = std::collections::HashMap::new();
+    let mut cameras = Vec::new();
+    let mut camera_index = std::collections::HashMap::new();
+    let mut nodes: Vec<ExportNode> = Vec::new();
+    let mut node_of = std::collections::HashMap::new();
+
+    for (id, object) in doc.objects() {
+        node_of.insert(id, nodes.len());
+        let data = match object.data {
+            // A mesh id the document no longer has. Resolved here rather than
+            // when the list is handed over, because dropping an entry later
+            // would shift every index after it and hang the wrong geometry on
+            // every node that followed.
+            ObjectData::Mesh(mesh) => match doc.mesh(mesh) {
+                None => {
+                    notes.push(LossyNote::Unsupported {
+                        what: format!("{}: its mesh is not in the document", object.name),
+                    });
+                    ImportNodeData::Empty
+                }
+                // Deduplicated on the id, which is what a linked duplicate is:
+                // two objects and one mesh. glTF says the same thing the same
+                // way — several nodes pointing at one mesh — so the sharing
+                // survives the file rather than becoming two copies.
+                Some(data) => {
+                    let index = *mesh_index.entry(mesh).or_insert_with(|| {
+                        let slots = doc
+                            .mesh_slots(mesh)
+                            .iter()
+                            .map(|slot| slot.and_then(|id| material_index.get(&id).copied()))
+                            .collect();
+                        mesh_slots.push(slots);
+                        meshes.push((object.name.clone(), data));
+                        meshes.len() - 1
+                    });
+                    ImportNodeData::Mesh(index)
+                }
+            },
+            ObjectData::Light(light) => {
+                let index = *light_index.entry(light).or_insert_with(|| {
+                    lights.push(match doc.light(light) {
+                        Some(light) => export_light(light, &mut notes),
+                        None => {
+                            notes.push(LossyNote::Unsupported {
+                                what: format!(
+                                    "{}: its light is not in the document",
+                                    object.name
+                                ),
+                            });
+                            ImportLight {
+                                name: object.name.clone(),
+                                kind: ImportLightKind::Point,
+                                color: [1.0; 3],
+                                intensity: 0.0,
+                                range: None,
+                            }
+                        }
+                    });
+                    lights.len() - 1
+                });
+                ImportNodeData::Light(index)
+            }
+            ObjectData::Camera(camera) => {
+                let index = *camera_index.entry(camera).or_insert_with(|| {
+                    cameras.push(match doc.camera(camera) {
+                        Some(camera) => export_camera(camera),
+                        None => {
+                            notes.push(LossyNote::Unsupported {
+                                what: format!(
+                                    "{}: its camera is not in the document",
+                                    object.name
+                                ),
+                            });
+                            ImportCamera {
+                            name: object.name.clone(),
+                            fov_y: Some(std::f32::consts::FRAC_PI_4),
+                            ortho_width: None,
+                            clip_near: 0.1,
+                            clip_far: None,
+                            }
+                        }
+                    });
+                    cameras.len() - 1
+                });
+                ImportNodeData::Camera(index)
+            }
+            ObjectData::Empty => ImportNodeData::Empty,
+        };
+        nodes.push(ExportNode {
+            name: object.name.clone(),
+            // Filled in below: an object may name a parent that comes after it
+            // in the arena, and an index into a half-built list would be wrong.
+            parent: None,
+            // **Not `object.transform`.** The document composes a world
+            // transform as `parent_world · parent_inverse · local`, where the
+            // inverse is where the parent stood at the moment of parenting —
+            // that is what keeps dragging one object onto another from
+            // teleporting it. A file's child transform is relative to its
+            // parent with nothing in between, so the two have to be folded
+            // together here or every parented object leaves at the wrong place.
+            transform: if object.parent.is_some() {
+                kreate_math::DTransform::from_affine(
+                    object.parent_inverse * object.transform.to_affine(),
+                )
+            } else {
+                object.transform
+            },
+            data,
+        });
+        if !object.visible {
+            // Written anyway. Visibility is a viewport state and not a property
+            // of the model, and a user who hid a wall to work behind it would
+            // not expect the wall to be missing from the file.
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: hidden in the viewport, and written anyway", object.name),
+            });
+        }
+    }
+
+    for (index, (_, object)) in doc.objects().enumerate() {
+        let Some(parent) = object.parent else { continue };
+        nodes[index].parent = node_of.get(&parent).copied();
+        if nodes[index].parent.is_none() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: its parent is not in the document", object.name),
+            });
+        }
+    }
+
+    (
+        ExportScene {
+            meshes,
+            materials,
+            mesh_slots,
+            lights,
+            cameras,
+            nodes,
+        },
+        notes,
+    )
+}
+
+/// One light, in the units an interchange format writes.
+///
+/// §2.2's decision paying off in the direction it was made for: the datablock's
+/// candela and lux go out unconverted, so a file that comes back says the same
+/// numbers it arrived with.
+fn export_light(light: &kreate_scene::Light, notes: &mut Vec<LossyNote>) -> ImportLight {
+    let kind = match light.kind {
+        kreate_scene::LightKind::Point { .. } => ImportLightKind::Point,
+        kreate_scene::LightKind::Sun { .. } => ImportLightKind::Directional,
+        kreate_scene::LightKind::Spot {
+            cone_angle, blend, ..
+        } => {
+            let outer = (cone_angle * 0.5) as f32;
+            ImportLightKind::Spot {
+                // The inverse of what `build_into` does on the way in: a full
+                // cone and a blend fraction become two half-angles. Exact in
+                // both directions, which is why the shape survives even though
+                // the parameterisation does not.
+                inner: outer * (1.0 - blend.clamp(0.0, 1.0) as f32),
+                outer,
+            }
+        }
+        kreate_scene::LightKind::Area { .. } => {
+            // glTF has no area light, and the nearest thing that is not a lie
+            // is the point light §7.3 already reduces it to for the raster
+            // pass: the same axial candela from the same place. What is lost is
+            // the shape, and with it the soft shadow that was the reason to
+            // reach for an area light.
+            notes.push(LossyNote::Unsupported {
+                what: format!(
+                    "{}: an area light was written as a point light of the same axial intensity",
+                    light.name
+                ),
+            });
+            ImportLightKind::Point
+        }
+    };
+    if light.exposure != 0.0 {
+        // glTF has one number where the datablock has two. Folded rather than
+        // dropped — the amount of light is what the file is for — and said,
+        // because a round trip brings back the product with the stops at zero.
+        notes.push(LossyNote::Unsupported {
+            what: format!(
+                "{}: its {:+.2} stops were folded into the intensity",
+                light.name, light.exposure
+            ),
+        });
+    }
+    if light.kind.is_soft() {
+        notes.push(LossyNote::Unsupported {
+            what: format!(
+                "{}: the source's size was dropped; glTF's lights have no size",
+                light.name
+            ),
+        });
+    }
+    ImportLight {
+        name: light.name.clone(),
+        kind,
+        color: [light.color.r, light.color.g, light.color.b],
+        // An area light's nits become candela here, which is the one kind whose
+        // unit changes on the way out — because the kind it is being written as
+        // is a different kind.
+        intensity: light.axial_candela().unwrap_or(light.effective_intensity()) as f32,
+        // No cutoff. The datablock has no artist-set distance yet (§7.8), and
+        // the one the application derives from the display's black point is a
+        // property of how the picture is being shown, not of the lamp.
+        range: None,
+    }
+}
+
+/// One camera, as much of it as glTF holds.
+fn export_camera(camera: &kreate_scene::Camera) -> ImportCamera {
+    // The camera's own sensor is the frame to measure the angle against. Any
+    // other aspect would be the aspect of whatever this session happens to be
+    // rendering, which is not a property of the camera.
+    let aspect = camera.sensor_width_mm / camera.sensor_height_mm;
+    let perspective = matches!(camera.projection, kreate_scene::Projection::Perspective);
+    ImportCamera {
+        name: camera.name.clone(),
+        fov_y: perspective.then(|| camera.fov_y(aspect) as f32),
+        ortho_width: (!perspective).then_some(camera.ortho_scale as f32),
+        clip_near: camera.clip_near as f32,
+        clip_far: Some(camera.clip_far as f32),
     }
 }

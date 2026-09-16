@@ -19,7 +19,12 @@ pub mod stl;
 
 pub use container::{ContainerError, Manifest, UnknownEntry};
 pub use gltf_import::{parse_gltf, GltfError, GltfOptions};
-pub use ir::{ImportMaterial, ImportMesh, ImportScene, LossyNote, SourceMetadata, UvOrigin};
+pub use build::{build_into, scene_from_document, BuildNote};
+pub use gltf_export::{write_gltf, write_gltf_scene, GltfExportOptions};
+pub use ir::{
+    ExportNode, ExportScene, ImportMaterial, ImportMesh, ImportScene, LossyNote, SourceMetadata,
+    UvOrigin,
+};
 pub use kmesh::{KmeshError, UnknownBuffer};
 pub use obj::{parse_obj, write_obj, ObjError, ObjOptions};
 pub use stl::{parse_stl, write_stl, StlError, StlOptions};

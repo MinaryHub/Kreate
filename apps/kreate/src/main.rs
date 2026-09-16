@@ -1971,6 +1971,7 @@ impl App {
                 Command::OpenDocument => self.open_document(),
                 Command::SaveDocument => self.save_document(false),
                 Command::SaveDocumentAs => self.save_document(true),
+                Command::ExportScene => self.export_scene(),
                 Command::RecoverDocument { path } => {
                     self.load_from(&path);
                     // The recovered document deliberately keeps *no* path: it
@@ -2093,6 +2094,98 @@ impl App {
         match self.file.save(&path, &self.doc) {
             Ok(()) => self.status(&format!("saved {}", path.display())),
             Err(e) => self.status(&format!("cannot save {}: {e}", path.display())),
+        }
+    }
+
+
+    /// Writes the scene to an interchange format.
+    ///
+    /// The other half of `load_from`, and until now it did not exist in the
+    /// application at all: a glTF scene could be opened and there was no way to
+    /// write one back. §7.7's gate says a pillar is finished when the feature
+    /// can be reached from the interface, and a round trip that only the
+    /// converter can perform is a round trip the user does not have.
+    fn export_scene(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("glTF binary", &["glb"])
+            .add_filter("glTF", &["gltf"])
+            .add_filter("Wavefront OBJ", &["obj"])
+            .add_filter("STL", &["stl"])
+            .set_title("Export")
+            .set_file_name("untitled.glb")
+            .save_file()
+        else {
+            return;
+        };
+        let (scene, mut notes) = kreate_io::scene_from_document(&self.doc);
+        let lower = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| "glb".to_string());
+        let written = match lower.as_str() {
+            "obj" | "stl" => {
+                // Neither format has a node, a light or a camera, so what
+                // travels is the geometry at the origin. Said out loud: a user
+                // who exports a lit scene to STL and finds one object in it
+                // should find out here rather than in the next program.
+                if !scene.lights.is_empty() || scene.nodes.len() > scene.meshes.len() {
+                    notes.push(kreate_io::LossyNote::Unsupported {
+                        what: format!("{lower} holds no hierarchy, lights or cameras"),
+                    });
+                }
+                let meshes = scene.meshes.clone();
+                if lower == "obj" {
+                    Ok(kreate_io::write_obj(&meshes, ObjOptions::default()).into_bytes())
+                } else if let Some((_, mesh)) = meshes.first() {
+                    if meshes.len() > 1 {
+                        notes.push(kreate_io::LossyNote::Unsupported {
+                            what: format!(
+                                "STL holds one unnamed solid; {} meshes were not written",
+                                meshes.len() - 1
+                            ),
+                        });
+                    }
+                    let (bytes, more) =
+                        kreate_io::stl::write_stl(mesh, &kreate_io::stl::StlOptions::default());
+                    notes.extend(more);
+                    Ok(bytes)
+                } else {
+                    Err("there is no geometry to write".to_string())
+                }
+            }
+            _ => {
+                let options = kreate_io::GltfExportOptions {
+                    // A `.glb` full of JSON is a file no viewer opens, so the
+                    // extension decides rather than a setting.
+                    binary: !lower.eq_ignore_ascii_case("gltf"),
+                    ..kreate_io::GltfExportOptions::default()
+                };
+                let (bytes, more) = kreate_io::write_gltf_scene(&scene, &options);
+                notes.extend(more);
+                Ok(bytes)
+            }
+        };
+        let bytes = match written {
+            Ok(bytes) => bytes,
+            Err(e) => return self.status(&format!("cannot export: {e}")),
+        };
+        for note in &notes {
+            tracing::info!(?note, "export note");
+        }
+        match std::fs::write(&path, bytes) {
+            // The path is deliberately not adopted. An export is not a save,
+            // and a document whose path is a `.glb` would quietly lose
+            // everything the format cannot hold on the next Ctrl+S.
+            Ok(()) => self.status(&format!(
+                "exported {}{}",
+                path.display(),
+                if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({} notes)", notes.len())
+                }
+            )),
+            Err(e) => self.status(&format!("cannot write {}: {e}", path.display())),
         }
     }
 

@@ -46,7 +46,10 @@
 //! unordered set of triangles is a boundary walk that has its own failure cases
 //! on degenerate input. Explicit is worth the third.
 
-use crate::ir::{ImportMaterial, LossyNote, UvOrigin};
+use crate::ir::{
+    ExportScene, ImportLightKind, ImportMaterial, ImportNodeData, ImportTransform, LossyNote,
+    SourceMetadata, UvOrigin,
+};
 use glam::{Vec2, Vec3};
 use gltf::json;
 use json::validation::{Checked, USize64};
@@ -120,6 +123,26 @@ pub fn write_gltf(
     materials: &[ImportMaterial],
     options: &GltfExportOptions,
 ) -> (Vec<u8>, Vec<LossyNote>) {
+    let mut scene = ExportScene::new(meshes.to_vec());
+    scene.materials = materials.to_vec();
+    write_gltf_scene(&scene, options)
+}
+
+/// Writes a glTF 2.0 file: geometry, hierarchy, lights and cameras.
+///
+/// [`write_gltf`] is this with nothing but meshes, which is all a format
+/// without a hierarchy can say and all the converter has to hand.
+///
+/// # The file's convention is the file's
+///
+/// The scene arrives in Kreate space and leaves in glTF's — Y-up, one unit per
+/// metre — and that change happens here and nowhere else, which is the rule
+/// [`crate::ir`] opens with. There is deliberately no option for it: this
+/// writer emits glTF, and a glTF file that is not Y-up is not a glTF file.
+pub fn write_gltf_scene(
+    scene: &ExportScene<'_>,
+    options: &GltfExportOptions,
+) -> (Vec<u8>, Vec<LossyNote>) {
     let mut notes = Vec::new();
     let mut root = json::Root {
         asset: json::Asset {
@@ -130,11 +153,17 @@ pub fn write_gltf(
         ..Default::default()
     };
     let mut bin: Vec<u8> = Vec::new();
-    // Source material index to glTF material index. Only ever looked up and
-    // inserted into, never iterated: the emitted table's order comes from the
-    // order materials are first referenced, which is the face grouping's order
-    // below, which is sorted. That is where the determinism lives.
-    let mut material_map: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
+    // Scene material index to glTF material index. The *scene's*, not the
+    // face's: a face carries a per-mesh slot and the slot table resolves it
+    // before it arrives here, so that two meshes cannot collide on a number
+    // that means something different in each.
+    //
+    // Only ever looked up and inserted into, never iterated: the emitted
+    // table's order comes from the order materials are first referenced, which
+    // is the face grouping's order below, which is sorted. That is where the
+    // determinism lives.
+    let mut material_map: std::collections::BTreeMap<usize, u32> =
+        std::collections::BTreeMap::new();
     let mut used_ngons = false;
 
     // Kreate is Z-up; glTF is Y-up. Applied here and nowhere else. Both are
@@ -143,12 +172,19 @@ pub fn write_gltf(
     // way for an exporter to turn a model inside out.
     let to_gltf = AxisConvention::GLTF.from_kreate();
 
-    for (name, mesh) in meshes {
+    // Which glTF mesh each of the scene's meshes became. Not the same numbering:
+    // a mesh with no faces is skipped, so a node that assumed the two lists ran
+    // in step would hang its name on the next mesh along.
+    let mut mesh_indices: std::collections::BTreeMap<usize, u32> =
+        std::collections::BTreeMap::new();
+
+    for (index, (name, mesh)) in scene.meshes.iter().enumerate() {
         let mesh_index = root.meshes.len() as u32;
         let primitives = write_mesh(
             name,
             mesh,
-            materials,
+            scene,
+            index,
             options,
             to_gltf,
             &mut root,
@@ -170,28 +206,17 @@ pub fn write_gltf(
             extras: Default::default(),
             weights: None,
         });
-        let node = root.nodes.len() as u32;
-        root.nodes.push(json::Node {
-            mesh: Some(json::Index::new(mesh_index)),
-            name: Some(name.clone()),
-            ..Default::default()
-        });
-        if root.scenes.is_empty() {
-            root.scenes.push(json::Scene {
-                nodes: Vec::new(),
-                name: None,
-                extensions: None,
-                extras: Default::default(),
-            });
-            root.scene = Some(json::Index::new(0));
-        }
-        root.scenes[0].nodes.push(json::Index::new(node));
+        mesh_indices.insert(index, mesh_index);
     }
+
+    write_lights(&scene.lights, &mut root);
+    write_cameras(scene, &mut root, &mut notes);
+    write_nodes(scene, &mesh_indices, &mut root, &mut notes);
 
     if used_ngons {
         root.extensions_used.push(NGON_EXTENSION.to_string());
     }
-    note_dropped_attributes(meshes, options, &mut notes);
+    note_dropped_attributes(&scene.meshes, options, &mut notes);
 
     // The buffer is declared even when empty so that a file with no geometry is
     // still a structurally valid glTF rather than one with dangling views.
@@ -223,17 +248,259 @@ pub fn write_gltf(
     (bytes, notes)
 }
 
+
+/// Writes the lights, as `KHR_lights_punctual`.
+///
+/// glTF keeps its lights in a table on the root and a node points at one by
+/// index — the same shape the IR uses, which is not a coincidence: §2.2 chose
+/// this format's units and this format's model so that the boundary is a copy.
+///
+/// Listed in `extensionsUsed` and deliberately not in `extensionsRequired`, for
+/// the reason [`NGON_EXTENSION`] gives: a reader that ignores it still gets the
+/// whole model, and a file nobody else can open is a bad trade for a round trip
+/// with ourselves.
+fn write_lights(lights: &[crate::ir::ImportLight], root: &mut json::Root) {
+    use json::extensions::scene::khr_lights_punctual as khr;
+    if lights.is_empty() {
+        return;
+    }
+    let table: Vec<khr::Light> = lights
+        .iter()
+        .map(|light| {
+            let (kind, spot) = match light.kind {
+                ImportLightKind::Point => (khr::Type::Point, None),
+                ImportLightKind::Directional => (khr::Type::Directional, None),
+                ImportLightKind::Spot { inner, outer } => (
+                    khr::Type::Spot,
+                    Some(khr::Spot {
+                        inner_cone_angle: inner,
+                        outer_cone_angle: outer,
+                    }),
+                ),
+            };
+            khr::Light {
+                color: light.color,
+                extensions: None,
+                extras: Default::default(),
+                intensity: light.intensity,
+                name: Some(light.name.clone()),
+                range: light.range,
+                spot,
+                type_: Checked::Valid(kind),
+            }
+        })
+        .collect();
+    root.extensions
+        .get_or_insert_with(Default::default)
+        .khr_lights_punctual = Some(json::extensions::root::KhrLightsPunctual { lights: table });
+    root.extensions_used.push(LIGHT_EXTENSION.to_string());
+}
+
+/// Writes the cameras, and says what glTF has no room for.
+///
+/// A camera goes out even though it cannot go out whole: the datablock has an
+/// f-stop, a shutter and a sensor and glTF has an angle. Writing the angle and
+/// noting the rest is the honest trade — dropping the camera entirely would
+/// lose the one thing glTF *can* carry, which is where it was pointing.
+fn write_cameras(scene: &ExportScene<'_>, root: &mut json::Root, notes: &mut Vec<LossyNote>) {
+    for camera in &scene.cameras {
+        let (perspective, orthographic, kind) = match (camera.fov_y, camera.ortho_width) {
+            (Some(fov), _) => (
+                Some(json::camera::Perspective {
+                    // Left out on purpose. The aspect belongs to the image being
+                    // rendered, not to the camera, and writing the one this
+                    // session happens to have would make the file claim a frame
+                    // it does not have. glTF's own answer for "unset" is to use
+                    // the viewport's.
+                    aspect_ratio: None,
+                    yfov: fov,
+                    zfar: camera.clip_far,
+                    znear: camera.clip_near,
+                    extensions: None,
+                    extras: Default::default(),
+                }),
+                None,
+                json::camera::Type::Perspective,
+            ),
+            (None, Some(width)) => (
+                None,
+                Some(json::camera::Orthographic {
+                    // glTF writes half-widths, and separately for each axis. The
+                    // IR carries one width because that is what the datablock
+                    // has: an orthographic scale is a single number and the
+                    // height follows from the frame's aspect.
+                    xmag: width * 0.5,
+                    ymag: width * 0.5,
+                    // Not optional here, unlike the perspective form. A file
+                    // with no far plane and an orthographic camera is invalid,
+                    // so an unset one becomes a distance rather than nothing.
+                    zfar: camera.clip_far.unwrap_or(1.0e4),
+                    znear: camera.clip_near,
+                    extensions: None,
+                    extras: Default::default(),
+                }),
+                json::camera::Type::Orthographic,
+            ),
+            (None, None) => {
+                notes.push(LossyNote::Unsupported {
+                    what: format!("{}: the camera has no projection", camera.name),
+                });
+                continue;
+            }
+        };
+        notes.push(LossyNote::Unsupported {
+            what: format!(
+                "{}: the aperture, shutter and sensor were dropped; glTF stores an angle",
+                camera.name
+            ),
+        });
+        root.cameras.push(json::Camera {
+            name: Some(camera.name.clone()),
+            orthographic,
+            perspective,
+            type_: Checked::Valid(kind),
+            extensions: None,
+            extras: Default::default(),
+        });
+    }
+}
+
+/// Writes the hierarchy, with every node's own transform.
+///
+/// An empty node list means the format should place each mesh at the origin,
+/// which is what a bare mesh list says and what this exporter did before it
+/// could say anything else.
+fn write_nodes(
+    scene: &ExportScene<'_>,
+    mesh_indices: &std::collections::BTreeMap<usize, u32>,
+    root: &mut json::Root,
+    notes: &mut Vec<LossyNote>,
+) {
+    if scene.nodes.is_empty() {
+        for index in mesh_indices.values() {
+            let node = root.nodes.len() as u32;
+            root.nodes.push(json::Node {
+                mesh: Some(json::Index::new(*index)),
+                name: root.meshes[*index as usize].name.clone(),
+                ..Default::default()
+            });
+            root_scene(root).nodes.push(json::Index::new(node));
+        }
+        return;
+    }
+
+    // What the file's own metadata would be if this file were being read back:
+    // glTF, Y-up, one unit per metre. Built here so that the conversion is the
+    // same function the importer inverts — see `ImportTransform::from_kreate`.
+    let target = SourceMetadata {
+        axis: AxisConvention::GLTF,
+        ..SourceMetadata::new("gltf")
+    };
+
+    // Children first, because a glTF node lists its children and the IR's nodes
+    // name their parent. A parent index that is out of range is a scene that
+    // does not describe itself, and it is said rather than dropped.
+    let mut children: Vec<Vec<json::Index<json::Node>>> = vec![Vec::new(); scene.nodes.len()];
+    for (index, node) in scene.nodes.iter().enumerate() {
+        let Some(parent) = node.parent else { continue };
+        match children.get_mut(parent) {
+            Some(list) => list.push(json::Index::new(index as u32)),
+            None => notes.push(LossyNote::Unsupported {
+                what: format!("{}: its parent is not in the scene", node.name),
+            }),
+        }
+    }
+
+    for (index, node) in scene.nodes.iter().enumerate() {
+        let out = ImportTransform::from_kreate(node.transform.to_affine(), &target);
+        let mut json_node = json::Node {
+            name: Some(node.name.clone()),
+            translation: Some(out.translation.to_array()),
+            rotation: Some(json::scene::UnitQuaternion(out.rotation.to_array())),
+            scale: Some(out.scale.to_array()),
+            ..Default::default()
+        };
+        if !children[index].is_empty() {
+            json_node.children = Some(children[index].clone());
+        }
+        match node.data {
+            ImportNodeData::Mesh(i) => match mesh_indices.get(&i) {
+                Some(mesh) => json_node.mesh = Some(json::Index::new(*mesh)),
+                // The mesh had no faces and was not written. The node still is:
+                // it may be somebody's parent, and dropping it would move every
+                // child to the root.
+                None => notes.push(LossyNote::Unsupported {
+                    what: format!("{}: its mesh had nothing to write", node.name),
+                }),
+            },
+            ImportNodeData::Light(i) => {
+                if i < scene.lights.len() {
+                    json_node
+                        .extensions
+                        .get_or_insert_with(Default::default)
+                        .khr_lights_punctual =
+                        Some(json::extensions::scene::khr_lights_punctual::KhrLightsPunctual {
+                            light: json::Index::new(i as u32),
+                        });
+                } else {
+                    notes.push(LossyNote::Unsupported {
+                        what: format!("{}: its light is not in the scene", node.name),
+                    });
+                }
+            }
+            ImportNodeData::Camera(i) => {
+                if i < root.cameras.len() {
+                    json_node.camera = Some(json::Index::new(i as u32));
+                } else {
+                    notes.push(LossyNote::Unsupported {
+                        what: format!("{}: its camera is not in the scene", node.name),
+                    });
+                }
+            }
+            ImportNodeData::Empty => {}
+        }
+        root.nodes.push(json_node);
+    }
+
+    // The scene names its roots only; everything else hangs off `children`.
+    // Listing them all would make each child appear twice, which readers
+    // variously ignore, draw twice, or reject.
+    let roots: Vec<_> = scene
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.parent.is_none())
+        .map(|(index, _)| json::Index::new(index as u32))
+        .collect();
+    root_scene(root).nodes.extend(roots);
+}
+
+/// The default scene, made on first use.
+fn root_scene(root: &mut json::Root) -> &mut json::Scene {
+    if root.scenes.is_empty() {
+        root.scenes.push(json::Scene {
+            nodes: Vec::new(),
+            name: None,
+            extensions: None,
+            extras: Default::default(),
+        });
+        root.scene = Some(json::Index::new(0));
+    }
+    &mut root.scenes[0]
+}
+
 /// Builds every primitive of one mesh, appending its buffers to `bin`.
 #[allow(clippy::too_many_arguments)]
 fn write_mesh(
     name: &str,
     mesh: &MeshData,
-    materials: &[ImportMaterial],
+    scene: &ExportScene<'_>,
+    index: usize,
     options: &GltfExportOptions,
     to_gltf: glam::Mat3,
     root: &mut json::Root,
     bin: &mut Vec<u8>,
-    material_map: &mut std::collections::BTreeMap<i32, u32>,
+    material_map: &mut std::collections::BTreeMap<usize, u32>,
     notes: &mut Vec<LossyNote>,
     used_ngons: &mut bool,
 ) -> Vec<json::mesh::Primitive> {
@@ -428,16 +695,15 @@ fn write_mesh(
             extensions,
             extras: Default::default(),
             indices: Some(index_accessor),
-            material: if source_material < 0 {
-                None
-            } else {
-                Some(json::Index::new(emit_material(
-                    root,
-                    materials,
-                    material_map,
-                    source_material,
-                )))
-            },
+            // The face's number is a *slot*, and a slot is per-mesh (§7.5).
+            // Resolved through the scene's table before it reaches the material
+            // map, or the second mesh in a file would be given the first one's
+            // materials — which looks right until a file has two of them.
+            material: scene
+                .material_of(index, source_material)
+                .map(|resolved| {
+                    json::Index::new(emit_material(root, &scene.materials, material_map, resolved))
+                }),
             mode: Checked::Valid(json::mesh::Mode::Triangles),
             targets: None,
         });
@@ -501,14 +767,14 @@ fn ngon_extension(
 fn emit_material(
     root: &mut json::Root,
     materials: &[ImportMaterial],
-    map: &mut std::collections::BTreeMap<i32, u32>,
-    source: i32,
+    map: &mut std::collections::BTreeMap<usize, u32>,
+    source: usize,
 ) -> u32 {
     if let Some(&existing) = map.get(&source) {
         return existing;
     }
     let index = root.materials.len() as u32;
-    let described = materials.get(source as usize);
+    let described = materials.get(source);
     root.materials.push(json::Material {
         name: Some(
             described
@@ -537,6 +803,11 @@ fn emit_material(
     map.insert(source, index);
     index
 }
+
+/// The extension carrying the lights. Part of the specification's own set,
+/// unlike [`NGON_EXTENSION`], so every reader that has heard of lights at all
+/// reads it.
+pub const LIGHT_EXTENSION: &str = "KHR_lights_punctual";
 
 const ARRAY_BUFFER: Option<json::buffer::Target> = Some(json::buffer::Target::ArrayBuffer);
 const ELEMENT_ARRAY_BUFFER: Option<json::buffer::Target> =
