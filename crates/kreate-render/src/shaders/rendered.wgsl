@@ -7,10 +7,14 @@
 //
 // # What this adds and what it does not
 //
-// It adds geometry: a vertex stage, an interpolated position and normal, and
-// the material of the object being drawn. It does not add any shading — every
-// light and every lobe is `shade_point`, which the CPU has its own copy of and
-// a device test holds the two together.
+// It adds geometry: a vertex stage and an interpolated position and normal. It
+// does not add any shading — every light and every lobe is `shade_point`, which
+// the CPU has its own copy of and a device test holds the two together.
+//
+// And it does not decide what a surface is made of. `material_surface` is
+// appended after this, generated from the object's shading graph by
+// `kreate-shader`, so a material is compiled once and this pass calls it. §3's
+// fifth decision: one graph, one compiler, and no hand-written shading mode.
 //
 // # The output is linear and unbounded
 //
@@ -38,10 +42,6 @@ struct RenderedObject {
     normal_col0: vec4<f32>,
     normal_col1: vec4<f32>,
     normal_col2: vec4<f32>,
-    /// rgb: base colour, linear. w: metallic.
-    material: vec4<f32>,
-    /// x: roughness. yzw: unused.
-    params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -120,10 +120,11 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
         normal = -normal;
     }
 
-    var surface: Surface;
-    surface.base_color = object.material.rgb;
-    surface.metallic = object.material.w;
-    surface.roughness = object.params.x;
+    // The compiled material. A surface coordinate of zero for now: the render
+    // mesh has no UVs yet, so a texture would sample one texel. Every material
+    // is currently constants, which do not read it — and the day UVs arrive
+    // this line becomes `in.uv` and nothing else changes.
+    let surface = material_surface(vec2<f32>(0.0));
 
     // `in.clip` is the fragment's position in pixels here — the same builtin
     // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that

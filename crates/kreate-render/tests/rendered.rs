@@ -83,7 +83,8 @@ fn shoot(
         ..Camera::default()
     };
 
-    let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY).with_surface(surface)];
+    one_material(gpu, &mut viewport, surface);
+    let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), lights);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
@@ -180,6 +181,32 @@ const FRAMED: Display = Display {
     view: kreate_math::ViewTransform::AgX,
     exposure: -12.0,
 };
+
+/// Gives the viewport one material, compiled from a surface.
+///
+/// A surface *is* a graph now — `ShaderGraph::standard` with nothing connected
+/// — and the rendered pass calls the function that graph compiles to. These
+/// tests used to hand a `Surface` straight to a draw; that they still produce
+/// the same pictures is the whole claim of the change.
+fn one_material(gpu: &Gpu, viewport: &mut Viewport, surface: Surface) {
+    let graph = kreate_scene::shader::ShaderGraph::standard(
+        "test",
+        surface.base_color,
+        surface.metallic,
+        surface.roughness,
+    );
+    let compiled = kreate_shader::compile(&graph).expect("compiles");
+    viewport.set_materials(
+        &gpu.device,
+        &gpu.queue,
+        &[kreate_render::viewport::MaterialSource {
+            wgsl: &compiled.wgsl,
+            constants: &compiled.constants,
+            image_slots: &compiled.image_slots,
+            images: &[],
+        }],
+    );
+}
 
 fn grey() -> Surface {
     Surface {
@@ -575,7 +602,8 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     // *Rotated* boxes are the only draws whose bounding box is not their mesh's
     // — a scene of translations alone never asks whether the fitting rotates
     // what it fits. Spheres carry every incidence angle at once.
-    let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY).with_surface(grey())];
+    one_material(gpu, &mut viewport, grey());
+    let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY)];
     for row in 0..3 {
         for col in 0..3 {
             let n = row * 3 + col;
@@ -600,7 +628,7 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
                 ),
                 _ => Draw::new(&balls, glam::DAffine3::from_translation(at)),
             };
-            draws.push(draw.with_surface(grey()));
+            draws.push(draw);
         }
     }
 

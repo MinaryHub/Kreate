@@ -1564,6 +1564,7 @@ dependencies = [
  "kreate-reflect",
  "kreate-render",
  "kreate-scene",
+ "kreate-shader",
  "kreate-ui",
  "minidumper",
  "pollster",

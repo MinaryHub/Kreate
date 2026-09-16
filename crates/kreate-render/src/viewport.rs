@@ -71,10 +71,6 @@ struct RenderedObject {
     normal_col0: [f32; 4],
     normal_col1: [f32; 4],
     normal_col2: [f32; 4],
-    /// rgb: base colour, linear. w: metallic.
-    material: [f32; 4],
-    /// x: roughness.
-    params: [f32; 4],
 }
 
 /// What the rendered pass needs to know about the frame.
@@ -558,16 +554,16 @@ pub struct Draw<'a> {
     /// read from `selected` rather than duplicated here — see
     /// [`Draw::protected`].
     pub editing: bool,
-    /// What this object is made of, for [`ShadingMode::Rendered`].
+    /// Which of the viewport's materials this object is made of.
     ///
-    /// On the draw rather than looked up, because `kreate-render` cannot see a
-    /// document — the app resolves `Document::material_at` and hands the
-    /// answer over, the same way it hands over the lights.
+    /// An index, because `kreate-render` cannot see a document: the app
+    /// compiles each material's shading graph and hands the results over with
+    /// [`Viewport::set_materials`], the same way it hands over the lights.
     ///
-    /// Defaults to a mid-grey dielectric, which is what an object with no
-    /// material assigned is drawn as. Not an error and not invisible: a fresh
-    /// cube has no materials, and it should still be shaded.
-    pub surface: crate::brdf::Surface,
+    /// Zero is whatever the app put first, and the app puts a plain grey there
+    /// — an object with no material assigned is not an error and not invisible.
+    /// A fresh cube has no materials and should still be shaded.
+    pub material: u32,
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -586,7 +582,7 @@ impl<'a> Draw<'a> {
             object_id: 0,
             preview: false,
             editing: false,
-            surface: crate::brdf::Surface::default(),
+            material: 0,
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
             // failure mode of forgetting to measure is a slow frame, not a
@@ -595,9 +591,9 @@ impl<'a> Draw<'a> {
         }
     }
 
-    /// Sets what this object is made of, for the rendered mode.
-    pub fn with_surface(mut self, surface: crate::brdf::Surface) -> Self {
-        self.surface = surface;
+    /// Sets which material this object is made of, for the rendered mode.
+    pub fn with_material(mut self, material: u32) -> Self {
+        self.material = material;
         self
     }
 
@@ -1086,7 +1082,24 @@ fn mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 pub struct Viewport {
     solid: wgpu::RenderPipeline,
     /// The scene-lit pass. See [`ShadingMode::Rendered`].
-    rendered: wgpu::RenderPipeline,
+    /// The compiled materials, in the order the application set them.
+    ///
+    /// Empty until [`Viewport::set_materials`] is called, and a rendered pass
+    /// with none draws no geometry — a material is not optional the way a
+    /// light is. The end-to-end test is what says the application supplies
+    /// them; there is no built-in fallback, because a fallback would be a
+    /// second `material_surface` and §3's fifth decision is that there is one.
+    materials: Vec<crate::material::Material>,
+    /// One pipeline per distinct compiled shader, keyed on the text.
+    ///
+    /// The whole reason a material's constants live in a uniform: a hundred
+    /// tinted plastics are one shape and share this.
+    material_pipelines: crate::material::PipelineCache,
+    /// Which pipeline each material uses, parallel to `materials`.
+    material_pipeline_of: Vec<String>,
+    material_layout: wgpu::BindGroupLayout,
+    /// Everything a rendered pipeline needs besides the material's own code.
+    rendered_layout: wgpu::PipelineLayout,
     rendered_object_layout: wgpu::BindGroupLayout,
     rendered_objects: UniformRing,
     /// Group 2: the DFG table, the lights, and the frame's shading globals.
@@ -1668,71 +1681,20 @@ impl Viewport {
             tiles_0.buffer(),
             &environment_0,
         );
-        let rendered_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rendered"),
-            source: wgpu::ShaderSource::Wgsl(crate::shading::rendered_source().into()),
-        });
-        let rendered_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        // The rendered pass has no pipeline of its own any more: a material's
+        // code *is* the fragment stage's second half, so the pipeline is built
+        // when the material is. What is kept here is everything that does not
+        // depend on which material it is.
+        let material_layout = crate::material::layout(device);
+        let rendered_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rendered layout"),
             bind_group_layouts: &[
                 Some(&globals_layout),
                 Some(&rendered_object_layout),
                 Some(&shading_layout),
+                Some(&material_layout),
             ],
             immediate_size: 0,
-        });
-        let rendered = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rendered"),
-            layout: Some(&rendered_pl),
-            vertex: wgpu::VertexState {
-                module: &rendered_shader,
-                entry_point: Some("vs_rendered"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: 12,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        }],
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: 4,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 0,
-                            shader_location: 1,
-                        }],
-                    },
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rendered_shader,
-                entry_point: Some("fs_rendered"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // The linear intermediate, not the window: this pass
-                    // writes light and the resolve writes a picture.
-                    format: crate::display::HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Not culled, for the reason the solid pass is not: a
-                // modeller has open and inconsistently wound geometry
-                // mid-edit, and the fragment shader flips the normal instead.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(gpu::depth_write_state()),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
         });
 
         // The background. The shading library, because it reads the same
@@ -2017,6 +1979,11 @@ impl Viewport {
             ),
             id_object_layout,
             objects: UniformRing::new(device, &object_layout, OBJECT_SIZE, 8, "objects"),
+            materials: Vec::new(),
+            material_pipelines: crate::material::PipelineCache::new(),
+            material_pipeline_of: Vec::new(),
+            material_layout,
+            rendered_layout,
             rendered_objects: UniformRing::new(
                 device,
                 &rendered_object_layout,
@@ -2024,7 +1991,6 @@ impl Viewport {
                 8,
                 "rendered objects",
             ),
-            rendered,
             rendered_object_layout,
             shading_layout,
             shading_bind,
@@ -2412,11 +2378,6 @@ impl Viewport {
                     normal_col0: normal.x_axis.extend(0.0).to_array(),
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
-                    material: {
-                        let [r, g, b] = draw.surface.base_color.to_array();
-                        [r, g, b, draw.surface.metallic]
-                    },
-                    params: [draw.surface.roughness, 0.0, 0.0, 0.0],
                 }),
             );
             queue.write_buffer(
@@ -2766,6 +2727,78 @@ impl Viewport {
             0,
             bytemuck::bytes_of(&self.shading_globals()),
         );
+    }
+
+    /// Replaces the materials a rendered frame can draw with.
+    ///
+    /// Each one arrives compiled: the code its graph produced, the constants
+    /// that go with it, and the pixels of whatever images it samples. The
+    /// application compiles them, because `kreate-render` cannot see a document
+    /// and a shading graph is one of the document's things.
+    ///
+    /// A pipeline is built per distinct *code*, not per material, which is what
+    /// keeps a scene of tinted plastics to one shader — see
+    /// [`crate::material::PipelineCache`].
+    pub fn set_materials(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        materials: &[MaterialSource<'_>],
+    ) {
+        self.materials.clear();
+        self.material_pipeline_of.clear();
+        for source in materials {
+            let layout = &self.rendered_layout;
+            self.material_pipelines
+                .get(source.wgsl, |wgsl| rendered_pipeline(device, layout, wgsl));
+            self.material_pipeline_of.push(source.wgsl.to_string());
+            self.materials.push(crate::material::Material::new(
+                device,
+                queue,
+                &self.material_layout,
+                crate::material::MaterialData {
+                    constants: source.constants,
+                    image_slots: source.image_slots,
+                },
+                source.images,
+            ));
+        }
+    }
+
+    /// Rewrites one material's numbers, leaving its code and textures alone.
+    ///
+    /// What a colour slider costs. The whole reason the compiler keeps
+    /// constants out of the text: this is a buffer write, and the alternative
+    /// is a shader and an atlas per keystroke.
+    pub fn set_material_constants(
+        &self,
+        queue: &wgpu::Queue,
+        index: usize,
+        constants: &[[f32; 4]],
+        image_slots: &[usize],
+    ) {
+        if let Some(material) = self.materials.get(index) {
+            material.set_constants(
+                queue,
+                crate::material::MaterialData {
+                    constants,
+                    image_slots,
+                },
+            );
+        }
+    }
+
+    /// How many materials the viewport is holding.
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    /// How many distinct shaders those materials needed.
+    ///
+    /// For the test that says a hundred tinted plastics are one pipeline, which
+    /// is the claim the whole arrangement rests on.
+    pub fn material_pipeline_count(&self) -> usize {
+        self.material_pipelines.len()
     }
 
     /// Turns the environment about up, and says how much light it gives.
@@ -3584,14 +3617,34 @@ impl Viewport {
             pass.set_bind_group(2, &self.shading_bind, &[]);
             pass.draw(0..3, 0..1);
 
-            pass.set_pipeline(&self.rendered);
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_bind_group(2, &self.shading_bind, &[]);
+            // The pipeline is the material's, so it is set inside the loop.
+            // Redundant switches are avoided by remembering the last one rather
+            // than by sorting: a draw order that follows the material would put
+            // the objects in an order the depth pre-pass and the id buffer do
+            // not share, and those have to agree about what is in front.
+            let mut current: Option<&str> = None;
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
                 if mesh.counts.triangles == 0 || !draw.detail.draw {
                     continue;
                 }
+                // A draw naming a material that was never set draws nothing.
+                // Skipped rather than substituted: a stand-in would be a grey
+                // object where the user put a red one, and a missing object is
+                // the complaint that gets reported.
+                let Some(source) = self.material_pipeline_of.get(draw.material as usize) else {
+                    continue;
+                };
+                if current != Some(source.as_str()) {
+                    let Some(pipeline) = self.material_pipelines.peek(source) else {
+                        continue;
+                    };
+                    pass.set_pipeline(pipeline);
+                    current = Some(source.as_str());
+                }
+                pass.set_bind_group(3, self.materials[draw.material as usize].bind_group(), &[]);
                 pass.set_bind_group(
                     1,
                     &self.rendered_objects.bind,
@@ -3678,6 +3731,85 @@ fn shading_bind_group(
                 resource: wgpu::BindingResource::Sampler(environment.sampler()),
             },
         ],
+    })
+}
+
+/// A compiled material, as the application hands it over.
+///
+/// Text, numbers and pixels — nothing from the document. See
+/// [`Viewport::set_materials`].
+pub struct MaterialSource<'a> {
+    /// The `material_surface` function `kreate-shader` produced.
+    pub wgsl: &'a str,
+    pub constants: &'a [[f32; 4]],
+    pub image_slots: &'a [usize],
+    pub images: &'a [crate::material::SourceImage<'a>],
+}
+
+/// The rendered pass, with one material's code on the end of it.
+fn rendered_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    material: &str,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("rendered"),
+        source: wgpu::ShaderSource::Wgsl(
+            crate::shading::rendered_source_with(material).into(),
+        ),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("rendered"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_rendered"),
+            compilation_options: Default::default(),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: 4,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 0,
+                        shader_location: 1,
+                    }],
+                },
+            ],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_rendered"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                // The linear intermediate, not the window: this pass writes
+                // light and the resolve writes a picture.
+                format: crate::display::HDR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            // Not culled, for the reason the solid pass is not: a modeller has
+            // open and inconsistently wound geometry mid-edit, and the fragment
+            // shader flips the normal instead.
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(gpu::depth_write_state()),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
     })
 }
 

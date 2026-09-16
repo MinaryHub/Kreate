@@ -110,6 +110,25 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     let lights = scenelights::placed_lights(doc);
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
 
+    // The materials, compiled the way the frame loop compiles them. Without
+    // this the rendered pass has nothing to shade with and draws no geometry —
+    // which is what these tests found the moment the viewport stopped carrying
+    // a built-in surface, and is the reason it has no fallback: a fallback
+    // would be a second `material_surface` for §3's fifth decision to have
+    // ruled out.
+    let materials = kreate::materials::Materials::compile(doc);
+    let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
+        .compiled
+        .iter()
+        .map(|c| kreate_render::viewport::MaterialSource {
+            wgsl: &c.wgsl,
+            constants: &c.constants,
+            image_slots: &c.image_slots,
+            images: &[],
+        })
+        .collect();
+    viewport.set_materials(&gpu.device, &gpu.queue, &sources);
+
     // The environment, through the same two calls the frame loop makes. A
     // no-op for a flat world, which is most of the tests here — and present in
     // all of them so that "the frame loop does this" stays true of the harness.

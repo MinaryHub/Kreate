@@ -493,6 +493,13 @@ struct App {
     latency: LatencyStats,
 
     doc: Document,
+    /// The materials the viewport is holding, so a frame can tell a colour
+    /// change from a material being added.
+    ///
+    /// Here rather than in the viewport because it is a fact about the
+    /// *document*, and `kreate-render` does not see one — the same reason the
+    /// environment's key lives here.
+    materials: Option<kreate::materials::Materials>,
     /// Which environment the viewport is holding, so a frame does not rebuild
     /// six faces and their mips to find out that nothing changed.
     ///
@@ -655,6 +662,7 @@ impl App {
             redraw: RedrawReason(RedrawReason::SCENE_CHANGED),
             latency: LatencyStats::default(),
             doc,
+            materials: None,
             environment: None,
             registry,
             history: History::new(),
@@ -3371,7 +3379,16 @@ impl App {
                         // here — so the whole object takes its first material
                         // until then, and an object with none takes the
                         // default surface.
-                        .with_surface(surface_of(&self.doc, *id))
+                        // Zero when the materials have not been compiled
+                        // yet, which is the studio mode: that pass does not
+                        // read a material, and the rendered one compiles them
+                        // before it builds any draws.
+                        .with_material(
+                            self.materials
+                                .as_ref()
+                                .map(|m| m.index_of(&self.doc, *id))
+                                .unwrap_or(0),
+                        )
                         .selected(
                             self.op_ctx.mode == OpMode::Object
                                 && self.doc.selection.contains(*id),
@@ -3471,6 +3488,44 @@ impl App {
                 .unwrap_or((0.0, 1.0));
             gfx.viewport
                 .set_world_shape(&gfx.gpu.queue, rotation, strength);
+
+            // The materials. Compiled every frame because it is string
+            // building; uploaded only when the *code* changed, because that is
+            // a pipeline and an atlas. Dragging a colour writes sixteen bytes
+            // per material and nothing else — which is the whole reason the
+            // compiler keeps constants out of the text.
+            let materials = kreate::materials::Materials::compile(&self.doc);
+            let same = self
+                .materials
+                .as_ref()
+                .is_some_and(|held| held.same_code_as(&materials));
+            if same {
+                for (i, compiled) in materials.compiled.iter().enumerate() {
+                    gfx.viewport.set_material_constants(
+                        &gfx.gpu.queue,
+                        i,
+                        &compiled.constants,
+                        &compiled.image_slots,
+                    );
+                }
+            } else {
+                let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
+                    .compiled
+                    .iter()
+                    .map(|c| kreate_render::viewport::MaterialSource {
+                        wgsl: &c.wgsl,
+                        constants: &c.constants,
+                        image_slots: &c.image_slots,
+                        // No images yet: the render mesh carries no UVs, so a
+                        // texture would sample one texel. See the note in
+                        // `rendered.wgsl` where the surface coordinate is zero.
+                        images: &[],
+                    })
+                    .collect();
+                gfx.viewport
+                    .set_materials(&gfx.gpu.device, &gfx.gpu.queue, &sources);
+            }
+            self.materials = Some(materials);
             // With the distance each lamp is worth computing to, which is
             // what the tile pass culls against.
             let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);
@@ -4597,21 +4652,6 @@ fn import_scene(
     Ok((doc, notes))
 }
 
-/// What an object is made of, for the rendered mode.
-///
-/// Slot zero. An object with no material takes the default surface, which is
-/// what `Document::material_at` answering `None` means — a freshly added cube
-/// has no materials and should still be shaded.
-fn surface_of(doc: &kreate_scene::Document, id: kreate_scene::ObjectId) -> kreate_render::brdf::Surface {
-    match doc.material_at(id, 0) {
-        Some(material) => kreate_render::brdf::Surface {
-            base_color: material.base_color,
-            metallic: material.metallic,
-            roughness: material.roughness,
-        },
-        None => kreate_render::brdf::Surface::default(),
-    }
-}
 
 fn main() {
     tracing_subscriber::fmt()

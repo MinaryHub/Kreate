@@ -189,13 +189,25 @@ pub fn shader_source() -> String {
     )
 }
 
-/// The shader the rendered viewport draws with.
+/// The rendered viewport's shader, **without a material**.
 ///
 /// The library composition plus a vertex and a fragment stage. Nothing in
 /// `rendered.wgsl` shades: every light and every lobe is `shade_point`, so
 /// what the viewport runs is the function the device tests measure.
+///
+/// This does not compile on its own, and that is the point: the fragment stage
+/// calls `material_surface`, which a material's own compiled code provides. A
+/// version of it that worked alone would need a built-in surface, and a
+/// built-in surface is the second implementation §3's fifth decision exists to
+/// prevent. Use [`rendered_source_with`].
 pub fn rendered_source() -> String {
     format!("{}\n{}", shader_source(), include_str!("shaders/rendered.wgsl"))
+}
+
+/// The same with one material's compiled code on the end, which is what a
+/// pipeline is built from.
+pub fn rendered_source_with(material: &str) -> String {
+    format!("{}\n{}", rendered_source(), material)
 }
 
 /// The shader that draws the environment behind the scene.
@@ -625,8 +637,13 @@ mod tests {
         // a fragment stage on the end. If it ever grew a second copy of the
         // shading, the device tests would still pass and the picture would
         // still be plausible — which is exactly the drift §5 warns about.
-        let source = rendered_source();
-        naga::front::wgsl::parse_str(&source).expect("the drawing composition parses");
+        // With a material on the end, because that is what a pipeline is:
+        // the fragment stage calls `material_surface` and a material's own code
+        // is where that comes from. Parsing the library alone would be parsing
+        // something no device is ever given.
+        let source = rendered_source_with(&a_material());
+        naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         assert!(source.contains("fn vs_rendered"));
         assert!(source.contains("fn fs_rendered"));
         // One `shade_point`, and the fragment stage calls it rather than
@@ -635,6 +652,26 @@ mod tests {
         assert!(source.contains("shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy))"));
         // And no probe: those declare buffers a drawing pass does not bind.
         assert!(!source.contains("fn probe_shading"));
+        // One material function, from the material, and the fragment calls it.
+        assert_eq!(source.matches("fn material_surface").count(), 1);
+        assert!(source.contains("material_surface(vec2<f32>(0.0))"));
+    }
+
+    /// A plain grey material, compiled.
+    ///
+    /// Through the real compiler rather than written out here: a hand-written
+    /// stand-in would let this test pass while the thing a pipeline is actually
+    /// given did not compile.
+    fn a_material() -> String {
+        let graph = kreate_scene::shader::ShaderGraph::standard(
+            "test",
+            kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+            0.0,
+            0.5,
+        );
+        kreate_shader::compile(&graph)
+            .expect("a standard surface compiles")
+            .wgsl
     }
 
     #[test]

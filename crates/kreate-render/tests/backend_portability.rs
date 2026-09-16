@@ -82,10 +82,13 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ),
         // The composition, not the fragment. See the note above.
         ("shading", kreate_render::shading::probe_source().into()),
-        // Also a fragment, and also checked as what a device receives.
+        // Also a fragment, and also checked as what a device receives — which
+        // means with a material on the end. The library half does not compile
+        // alone: its fragment stage calls `material_surface`, and that comes
+        // from a material's own compiled code.
         (
             "rendered",
-            kreate_render::shading::rendered_source().into(),
+            kreate_render::shading::rendered_source_with(&a_material()).into(),
         ),
         // A fragment too, and checked as what a device receives: it reads the
         // shading uniform and the environment cube, so the composition is the
@@ -95,6 +98,22 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
             kreate_render::shading::background_source().into(),
         ),
     ]
+}
+
+/// A plain grey material, compiled.
+///
+/// Through the real compiler, so that what is translated to HLSL, Metal and
+/// SPIR-V is what a device is actually handed.
+fn a_material() -> String {
+    let graph = kreate_scene::shader::ShaderGraph::standard(
+        "test",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    );
+    kreate_shader::compile(&graph)
+        .expect("a standard surface compiles")
+        .wgsl
 }
 
 /// Parses and validates, returning what the back ends need.

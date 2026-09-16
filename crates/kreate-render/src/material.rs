@@ -342,6 +342,15 @@ impl PipelineCache {
             .or_insert_with(|| make(wgsl))
     }
 
+    /// The pipeline for this code, if it has been built.
+    ///
+    /// For a draw loop, which cannot build one: it holds the pass and the
+    /// device's encoder, and making a pipeline in the middle of a frame is the
+    /// hitch a cache exists to avoid.
+    pub fn peek(&self, wgsl: &str) -> Option<&wgpu::RenderPipeline> {
+        self.by_source.get(wgsl)
+    }
+
     /// How many distinct pipelines exist.
     ///
     /// For the test that says a hundred materials of one shape are one
