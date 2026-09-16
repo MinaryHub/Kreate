@@ -93,8 +93,13 @@ struct ShadingGlobals {
     tiles_across: u32,
     tile_capacity: u32,
     _pad: [u32; 2],
-    /// The world's radiance, linear. See `shading.wgsl`.
+    /// rgb: the world's radiance, linear. w: nonzero when an environment cube
+    /// is bound. See `shading.wgsl`.
     world: [f32; 4],
+    /// x, y: the cosine and sine of the world's rotation. z: the roughest mip.
+    environment: [f32; 4],
+    /// Irradiance coefficients. See `crate::environment::irradiance_sh9`.
+    sh9: [[f32; 4]; 9],
 }
 
 #[repr(C)]
@@ -1118,7 +1123,19 @@ pub struct Viewport {
     screen_params: wgpu::Buffer,
     screen_bind: wgpu::BindGroup,
     /// The world's radiance, linear. See [`Viewport::set_world`].
+    ///
+    /// What lights the scene when there is no environment, and it is not a
+    /// special case of one: a uniform environment supplies exactly `πL` and
+    /// `L` to the same function. See `shading::ambient_from`.
     world: [f32; 3],
+    /// The prefiltered environment, or a one-texel placeholder.
+    ///
+    /// Always something, because a bind group cannot have a hole in it.
+    /// `has_environment` is what says whether it means anything.
+    environment: crate::environment::Environment,
+    has_environment: bool,
+    /// The environment's turn about up, in radians.
+    world_rotation: f32,
     /// Casters the draw list does not contain, in eye-relative metres.
     ///
     /// Normally empty. What the shadows are fitted to is what is *drawn*, which
@@ -1580,6 +1597,22 @@ impl Viewport {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let dfg_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -1607,6 +1640,7 @@ impl Viewport {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let environment_0 = crate::environment::Environment::placeholder(device);
         let shading_bind = shading_bind_group(
             device,
             &shading_layout,
@@ -1616,6 +1650,7 @@ impl Viewport {
             &shadow_buf_0,
             shadows_0.array_view(),
             tiles_0.buffer(),
+            &environment_0,
         );
         let rendered_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rendered"),
@@ -1952,6 +1987,9 @@ impl Viewport {
             screen: screen_0,
             // Black: a document with no world is lit only by its lamps.
             world: [0.0; 3],
+            environment: environment_0,
+            has_environment: false,
+            world_rotation: 0.0,
             extra_bounds: kreate_math::Aabb::EMPTY,
             display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
@@ -2381,18 +2419,14 @@ impl Viewport {
                 &self.shadow_buf,
                 self.shadows.array_view(),
                 self.tiles.buffer(),
+                &self.environment,
             );
             // The globals carry how many tiles across the grid is, and it has
             // just changed.
             queue.write_buffer(
                 &self.shading_globals_buf,
                 0,
-                bytemuck::bytes_of(&ShadingGlobals {
-                    tiles_across: self.tiles.across(),
-                    tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
-                    _pad: [0; 2],
-                    world: [self.world[0], self.world[1], self.world[2], 0.0],
-                }),
+                bytemuck::bytes_of(&self.shading_globals()),
             );
         }
         let aspect = w as f32 / h.max(1) as f32;
@@ -2563,6 +2597,7 @@ impl Viewport {
                 &self.shadow_buf,
                 self.shadows.array_view(),
                 self.tiles.buffer(),
+                &self.environment,
             );
             // The cull pass holds the light buffer too, and it has just moved.
             self.tiles.forget_bindings();
@@ -2576,12 +2611,102 @@ impl Viewport {
         queue.write_buffer(
             &self.shading_globals_buf,
             0,
-            bytemuck::bytes_of(&ShadingGlobals {
-                tiles_across: self.tiles.across(),
-                tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
-                _pad: [0; 2],
-                world: [self.world[0], self.world[1], self.world[2], 0.0],
-            }),
+            bytemuck::bytes_of(&self.shading_globals()),
+        );
+    }
+
+    /// What the shading pass needs to know about the frame.
+    ///
+    /// One place, because it was already written out twice and the environment
+    /// would have made three — and a uniform assembled differently in three
+    /// places is one that is right in two of them.
+    fn shading_globals(&self) -> ShadingGlobals {
+        ShadingGlobals {
+            tiles_across: self.tiles.across(),
+            tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
+            _pad: [0; 2],
+            world: [
+                self.world[0],
+                self.world[1],
+                self.world[2],
+                // The flag, and it is what stops the flat colour and the cube
+                // both lighting the scene. A world has one background or the
+                // other.
+                if self.has_environment { 1.0 } else { 0.0 },
+            ],
+            environment: [
+                self.world_rotation.cos(),
+                self.world_rotation.sin(),
+                self.environment.roughest(),
+                0.0,
+            ],
+            sh9: crate::environment::sh9_bytes(self.environment.sh9()),
+        }
+    }
+
+    /// Replaces the environment with one built from an equirectangular image.
+    ///
+    /// The pixels are `Rgba16Float`, which is what an environment is: §2.1's
+    /// working space has no upper bound and a sky is mostly above one.
+    ///
+    /// Rebuilding is the *whole* of it — six faces and their mips — so this is
+    /// for when the image changes and not for when the rotation does. Turning
+    /// a sky is [`Viewport::set_world_rotation`], which costs a uniform write.
+    pub fn set_environment(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) {
+        self.environment =
+            crate::environment::Environment::new(device, queue, width, height, pixels);
+        self.has_environment = true;
+        self.rebuild_shading_bind(device);
+        queue.write_buffer(
+            &self.shading_globals_buf,
+            0,
+            bytemuck::bytes_of(&self.shading_globals()),
+        );
+    }
+
+    /// Goes back to a flat world.
+    pub fn clear_environment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if !self.has_environment {
+            return;
+        }
+        self.environment = crate::environment::Environment::placeholder(device);
+        self.has_environment = false;
+        self.rebuild_shading_bind(device);
+        queue.write_buffer(
+            &self.shading_globals_buf,
+            0,
+            bytemuck::bytes_of(&self.shading_globals()),
+        );
+    }
+
+    /// Turns the environment about up, in radians.
+    pub fn set_world_rotation(&mut self, queue: &wgpu::Queue, radians: f32) {
+        self.world_rotation = radians;
+        queue.write_buffer(
+            &self.shading_globals_buf,
+            0,
+            bytemuck::bytes_of(&self.shading_globals()),
+        );
+    }
+
+    fn rebuild_shading_bind(&mut self, device: &wgpu::Device) {
+        self.shading_bind = shading_bind_group(
+            device,
+            &self.shading_layout,
+            &self.dfg_buf,
+            self.lights.buffer(),
+            &self.shading_globals_buf,
+            &self.shadow_buf,
+            self.shadows.array_view(),
+            self.tiles.buffer(),
+            &self.environment,
         );
     }
 
@@ -3421,6 +3546,7 @@ fn shading_bind_group(
     shadows: &wgpu::Buffer,
     maps: &wgpu::TextureView,
     tiles: &wgpu::Buffer,
+    environment: &crate::environment::Environment,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shading data"),
@@ -3449,6 +3575,14 @@ fn shading_bind_group(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: tiles.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(environment.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(environment.sampler()),
             },
         ],
     })

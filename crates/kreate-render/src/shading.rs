@@ -72,17 +72,43 @@ impl Point {
 /// integrates to `albedo × radiance`, coupled by the share the direct path
 /// uses. A white surface under `L` returns `L`, and a furnace test says so.
 ///
-/// An *image* background is the IBL step and needs a prefiltered cube map,
-/// which needs the archive's `images/` layout first. This is the half that
-/// costs a lookup.
+/// An *image* background goes through the same function with a lookup in place
+/// of the constant — see [`ambient_from`] and [`crate::environment`].
 pub fn ambient(surface: &Surface, normal: glam::Vec3, view: glam::Vec3, radiance: [f32; 3]) -> [f32; 3] {
     let nov = normal.dot(view).clamp(1e-4, 1.0);
+    // A uniform environment irradiates every direction with `πL` and
+    // prefilters to `L` at every roughness. Spelled that way rather than
+    // simplified, because it is the same call an *image* environment makes and
+    // a second formula here is the drift §5's risk 2 is about.
+    let irradiance = [
+        radiance[0] * std::f32::consts::PI,
+        radiance[1] * std::f32::consts::PI,
+        radiance[2] * std::f32::consts::PI,
+    ];
+    ambient_from(surface, nov, irradiance, radiance)
+}
+
+/// The environment's contribution, given what it sends and what it reflects.
+///
+/// The one formula, with the two sources as arguments. A flat world supplies
+/// `πL` and `L`; an image supplies [`crate::environment`]'s coefficients and a
+/// cube lookup. Written this way so that "the image path and the flat path
+/// agree" is a property of the *arguments* rather than a claim about two
+/// bodies of arithmetic staying in step.
+pub fn ambient_from(
+    surface: &Surface,
+    nov: f32,
+    irradiance: [f32; 3],
+    prefiltered: [f32; 3],
+) -> [f32; 3] {
     let roughness = surface.roughness.clamp(0.0, 1.0);
     let share = brdf::specular_share(surface.f0(), nov, roughness);
     let albedo = surface.diffuse_albedo();
     let mut out = [0.0f32; 3];
     for c in 0..3 {
-        out[c] = radiance[c] * (share[c] + albedo[c] * (1.0 - share[c]));
+        // Irradiance over `π` is the radiance a Lambertian surface reflects.
+        out[c] = prefiltered[c] * share[c]
+            + albedo[c] * (1.0 - share[c]) * irradiance[c] / std::f32::consts::PI;
     }
     out
 }

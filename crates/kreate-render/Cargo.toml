@@ -16,6 +16,9 @@ meshopt.workspace = true
 wgpu.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+# An environment is `Rgba16Float`, and the projection reads those bytes on the
+# CPU — see `environment::irradiance_sh9` for why it is not a GPU pass.
+half = "2"
 
 [dev-dependencies]
 pollster.workspace = true

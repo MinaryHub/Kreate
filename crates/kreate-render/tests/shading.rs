@@ -91,12 +91,47 @@ struct Shading {
     tiles_across: u32,
     tile_capacity: u32,
     pad: [u32; 2],
+    /// rgb: the flat world. w: nonzero when the cube is what lights the scene.
     world: [f32; 4],
+    /// The world's rotation as a cosine and a sine, and the roughest mip.
+    environment: [f32; 4],
+    sh9: [[f32; 4]; 9],
 }
 
 /// Runs the composed probe over `points` against `lights`.
+///
+/// No world at all, which is a scene lit by its lamps. The tests that are about
+/// an environment go through [`under`] instead.
 fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32>) -> Vec<[f32; 3]> {
+    on_gpu_under(gpu, points, lights, count, [0.0; 4], None)
+}
+
+/// The same, under a world.
+///
+/// `world` carries its own flag in `w`: zero means the colour lights the scene
+/// and nonzero means the cube does. Passing an environment and leaving the flag
+/// down is a thing a caller can do on purpose — it is how "the cube is bound
+/// and ignored" gets checked.
+fn on_gpu_under(
+    gpu: &Gpu,
+    points: &[Point],
+    lights: &[PlacedLight],
+    count: Option<u32>,
+    world: [f32; 4],
+    environment: Option<&kreate_render::environment::Environment>,
+) -> Vec<[f32; 3]> {
     use wgpu::util::DeviceExt as _;
+
+    // Always something, because a bind group cannot have a hole in it — the
+    // same reason the viewport keeps a placeholder.
+    let placeholder;
+    let environment = match environment {
+        Some(e) => e,
+        None => {
+            placeholder = kreate_render::environment::Environment::placeholder(&gpu.device);
+            &placeholder
+        }
+    };
 
     let module = gpu
         .device
@@ -124,8 +159,14 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
                 tiles_across: 1,
                 tile_capacity: kreate_render::tiles::MAX_LIGHTS_PER_TILE,
                 pad: [0; 2],
-                // These tests are about the lamps; the world has its own.
-                world: [0.0; 4],
+                world,
+                // No rotation: a turn is its own claim and belongs in a test
+                // that makes it rather than in every other test's background.
+                environment: {
+                    let radians = ROTATION.with(|r| r.get());
+                    [radians.cos(), radians.sin(), environment.roughest(), 0.0]
+                },
+                sh9: kreate_render::environment::sh9_bytes(environment.sh9()),
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -274,6 +315,22 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
                     count: None,
                 },
                 storage(5, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
     let pipeline_layout = gpu
@@ -338,6 +395,14 @@ fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: tile_lights.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(environment.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(environment.sampler()),
             },
         ],
     });
@@ -635,4 +700,258 @@ fn lights_add_on_the_device() {
         (both - (only_a + only_b)).abs() <= both * RELATIVE,
         "{only_a} + {only_b} against {both}"
     );
+}
+
+/// An equirectangular `Rgba16Float` image of one colour.
+fn uniform_sky(width: u32, height: u32, value: f32) -> Vec<u8> {
+    let half = half::f16::from_f32(value).to_le_bytes();
+    let one = half::f16::from_f32(1.0).to_le_bytes();
+    let mut out = Vec::with_capacity((width * height) as usize * 8);
+    for _ in 0..width * height {
+        for _ in 0..3 {
+            out.extend_from_slice(&half);
+        }
+        out.extend_from_slice(&one);
+    }
+    out
+}
+
+/// Surfaces across the range that tells the two paths apart.
+///
+/// A metal and a dielectric, rough and smooth: the split between the specular
+/// and diffuse halves moves with all four, and a path that had one of them
+/// wrong would agree with the other on a mid-grey plastic.
+fn spread() -> Vec<Point> {
+    let mut out = Vec::new();
+    for metallic in [0.0f32, 1.0] {
+        for roughness in [0.05f32, 0.4, 1.0] {
+            for normal in [glam::Vec3::Z, glam::Vec3::new(0.6, 0.0, 0.8).normalize()] {
+                out.push(Point {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    normal,
+                    view: glam::Vec3::Z,
+                    surface: Surface {
+                        base_color: kreate_math::SceneRgb::new(0.8, 0.6, 0.4),
+                        metallic,
+                        roughness,
+                    },
+                });
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_uniform_environment_lights_a_scene_exactly_as_the_same_flat_colour_does() {
+    // **The identity the image path is built on.** A world that is one colour
+    // in every direction is not a special case of an environment — it is one,
+    // and the shading function takes an irradiance and a prefiltered radiance
+    // so that both arrive the same way.
+    //
+    // If this drifts, picking a plain grey sky lights a scene differently from
+    // typing the same grey as a flat colour, and nobody would attribute that to
+    // the prefilter. It is also the only check that the cube's units and the
+    // coefficients' units agree: the diffuse half divides by `π` and the
+    // coefficients carry the cosine lobe, and an error in either is a constant
+    // factor on half the answer.
+    let gpu = gpu_or_skip!(gpu());
+    let points = spread();
+    const L: f32 = 3.0;
+
+    let flat = on_gpu_under(&gpu, &points, &[], None, [L, L, L, 0.0], None);
+
+    let sky = uniform_sky(64, 32, L);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 64, 32, &sky);
+    let imaged = on_gpu_under(
+        &gpu,
+        &points,
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(&environment),
+    );
+
+    for (i, (a, b)) in flat.iter().zip(&imaged).enumerate() {
+        for c in 0..3 {
+            let scale = a[c].abs().max(0.01);
+            assert!(
+                (a[c] - b[c]).abs() < scale * 0.05,
+                "point {i} channel {c}: flat {} against imaged {}",
+                a[c],
+                b[c]
+            );
+        }
+    }
+
+    // And it is not passing because both are zero.
+    assert!(
+        flat.iter().any(|v| v[0] > 0.1),
+        "the flat world lit nothing, so the comparison says nothing"
+    );
+}
+
+#[test]
+fn a_white_surface_under_an_imaged_furnace_returns_what_it_received() {
+    // The furnace test, moved onto the image path. §7.5 makes this claim of the
+    // flat world and most renderers cannot make it at all; it has to survive
+    // the move or the environment is quietly absorbing energy.
+    let gpu = gpu_or_skip!(gpu());
+    const L: f32 = 2.0;
+    let sky = uniform_sky(64, 32, L);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 64, 32, &sky);
+
+    let points: Vec<Point> = [0.05f32, 0.3, 0.7, 1.0]
+        .iter()
+        .map(|roughness| Point {
+            position: glam::Vec3::ZERO,
+            normal: glam::Vec3::Z,
+            view: glam::Vec3::Z,
+            surface: Surface {
+                base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+                metallic: 1.0,
+                roughness: *roughness,
+            },
+        })
+        .collect();
+
+    let out = on_gpu_under(
+        &gpu,
+        &points,
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(&environment),
+    );
+    for (i, v) in out.iter().enumerate() {
+        assert!(
+            (v[0] - L).abs() < L * 0.05,
+            "a white metal at roughness {} returned {} under {L}",
+            points[i].surface.roughness,
+            v[0]
+        );
+    }
+}
+
+#[test]
+fn a_bound_environment_that_is_switched_off_does_not_light_anything() {
+    // The flag, and what it is for: a world holds one background or the other,
+    // and a cube that is bound but not selected must contribute nothing. The
+    // cube is always bound — a bind group cannot have a hole — so "bound" and
+    // "in use" are different things and only the flag says which.
+    let gpu = gpu_or_skip!(gpu());
+    let sky = uniform_sky(64, 32, 50.0);
+    let environment =
+        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 64, 32, &sky);
+    let points = spread();
+
+    let off = on_gpu_under(
+        &gpu,
+        &points,
+        &[],
+        None,
+        [0.0; 4],
+        Some(&environment),
+    );
+    for (i, v) in off.iter().enumerate() {
+        assert!(
+            v.iter().all(|c| *c < 1e-3),
+            "point {i} received {v:?} from an environment that is switched off"
+        );
+    }
+}
+
+#[test]
+fn turning_the_world_turns_what_a_surface_reflects() {
+    // A rotation nobody applied is a slider that does nothing, which is the
+    // failure §7.7 found four times over. And it has to reach *both* halves:
+    // a diffuse term that turns while the specular stays put is a surface lit
+    // from one side and reflecting another.
+    let gpu = gpu_or_skip!(gpu());
+    // Bright on the +X side of the horizon, dark elsewhere. `u ≈ 0.75` is +X —
+    // see `environment::equirect_uv`.
+    let (width, height) = (128u32, 64u32);
+    let mut pixels = Vec::with_capacity((width * height) as usize * 8);
+    for y in 0..height {
+        for x in 0..width {
+            let u = (x as f32 + 0.5) / width as f32;
+            let v = (y as f32 + 0.5) / height as f32;
+            let lit = (v - 0.5).abs() < 0.25 && (u - 0.75).abs() < 0.12;
+            let value = half::f16::from_f32(if lit { 20.0 } else { 0.0 }).to_le_bytes();
+            for _ in 0..3 {
+                pixels.extend_from_slice(&value);
+            }
+            pixels.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        }
+    }
+    let environment = kreate_render::environment::Environment::new(
+        &gpu.device,
+        &gpu.queue,
+        width,
+        height,
+        &pixels,
+    );
+
+    // A rough white surface facing +X, so what it receives is dominated by the
+    // bright quarter — and a quarter turn should take that away.
+    let point = Point {
+        position: glam::Vec3::ZERO,
+        normal: glam::Vec3::X,
+        view: glam::Vec3::X,
+        surface: Surface {
+            base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+            metallic: 0.0,
+            roughness: 0.8,
+        },
+    };
+    let facing = on_gpu_under(
+        &gpu,
+        std::slice::from_ref(&point),
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(&environment),
+    )[0][0];
+
+    // Half a turn puts the bright quarter behind the surface.
+    let turned = with_rotation(&gpu, &point, &environment, std::f32::consts::PI);
+    assert!(
+        facing > turned * 3.0,
+        "facing the bright side gives {facing} and turned away {turned}"
+    );
+}
+
+/// The probe again, with the world turned by `radians`.
+///
+/// Its own function rather than another argument on `on_gpu_under`, because
+/// every other test would then carry a rotation it does not care about.
+fn with_rotation(
+    gpu: &Gpu,
+    point: &Point,
+    environment: &kreate_render::environment::Environment,
+    radians: f32,
+) -> f32 {
+    // The rotation lives in the uniform, so this is the same call with a
+    // different `environment` vector — spelled by building the globals here.
+    let saved = ROTATION.with(|r| r.replace(radians));
+    let out = on_gpu_under(
+        gpu,
+        std::slice::from_ref(point),
+        &[],
+        None,
+        [0.0, 0.0, 0.0, 1.0],
+        Some(environment),
+    )[0][0];
+    ROTATION.with(|r| r.set(saved));
+    out
+}
+
+thread_local! {
+    /// What `on_gpu_under` writes into the globals' rotation.
+    ///
+    /// A thread local rather than an argument, so that the dozen call sites
+    /// that have nothing to do with a rotation do not grow one.
+    static ROTATION: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }

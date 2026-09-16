@@ -10,6 +10,7 @@ pub mod cluster;
 pub mod cluster_cull;
 pub mod deform;
 pub mod display;
+pub mod environment;
 pub mod gpu;
 pub mod hiz;
 pub mod lights;

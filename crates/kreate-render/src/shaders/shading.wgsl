@@ -23,12 +23,25 @@ struct Shading {
     tile_capacity: u32,
     _pad0: u32,
     _pad1: u32,
-    /// rgb: the world's radiance, linear. w: unused.
+    /// rgb: the world's radiance, linear. w: nonzero when an environment cube
+    /// is bound and this colour is not what lights the scene.
     ///
     /// One colour in every direction, which is what §2.2's flat background is.
-    /// An image background is the IBL step and needs a prefiltered cube map;
-    /// this is the half that costs a lookup.
+    /// It is not a special case of the image path but the *same* one: a uniform
+    /// environment irradiates every direction with `πL` and prefilters to `L`
+    /// at every roughness, so `ambient_from` takes both as arguments and this
+    /// supplies them directly.
     world: vec4<f32>,
+    /// x: `cos` of the world's rotation about up, y: `sin` of it.
+    /// z: the roughest mip of the environment cube. w: unused.
+    ///
+    /// The rotation is applied to the *sampling direction* rather than baked
+    /// into the cube, so that dragging the slider costs a rotation per fragment
+    /// instead of rebuilding six faces and their mips.
+    environment: vec4<f32>,
+    /// Irradiance coefficients, with the cosine-lobe factors already folded in.
+    /// See `kreate_render::environment::irradiance_sh9`.
+    sh9: array<vec4<f32>, 9>,
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;
@@ -138,6 +151,14 @@ fn average_blocker(
 /// The shading loop walks this rather than every light, which is the whole of
 /// what the cull pass buys. See `kreate_render::tiles`.
 @group(2) @binding(5) var<storage, read> tile_lights: array<u32>;
+
+/// The prefiltered environment. Mip `m` is the roughness `m / roughest`.
+///
+/// Always bound, even when there is no environment — a bind group cannot have
+/// a hole in it, so "no environment" is a one-texel black cube and the flag in
+/// `shading.world.w` is what says not to read it.
+@group(2) @binding(6) var environment_cube: texture_cube<f32>;
+@group(2) @binding(7) var environment_sampler: sampler;
 
 @group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
 @group(2) @binding(4) var shadow_maps: texture_depth_2d_array;
@@ -341,12 +362,83 @@ fn direction_to(light: Light, at: vec3<f32>) -> vec3<f32> {
 /// Which makes the whole thing conserve by construction: a white surface under
 /// an environment of `L` returns `L × (share + 1 - share)`, and a furnace test
 /// says so.
-fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
-    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+fn ambient_from(
+    s: Surface,
+    nov: f32,
+    irradiance: vec3<f32>,
+    prefiltered: vec3<f32>,
+) -> vec3<f32> {
     let roughness = clamp(s.roughness, 0.0, 1.0);
     let share = specular_share(surface_f0(s), nov, roughness);
     let diffuse = surface_diffuse_albedo(s) * (vec3<f32>(1.0) - share);
-    return radiance * (share + diffuse);
+    // Irradiance over `π` is the radiance a Lambertian surface reflects, which
+    // is the one place the factor belongs: the coefficients carry it in for the
+    // lookup and it comes back out here.
+    return prefiltered * share + diffuse * irradiance / PI_SHADING;
+}
+
+const PI_SHADING: f32 = 3.14159265359;
+
+/// The flat case, spelled as what it is.
+fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    return ambient_from(s, nov, radiance * PI_SHADING, radiance);
+}
+
+/// The world's rotation, applied to a direction on its way to the cube.
+///
+/// About up, which is what a world rotation is: turning a sky sideways is
+/// framing and turning it end over end is nothing anybody wants.
+fn unrotate(dir: vec3<f32>) -> vec3<f32> {
+    let c = shading.environment.x;
+    let s = shading.environment.y;
+    return vec3<f32>(dir.x * c + dir.y * s, -dir.x * s + dir.y * c, dir.z);
+}
+
+/// The irradiance the environment sends to a surface facing `normal`.
+///
+/// Nine numbers and a dot product. Clamped at zero because a truncated harmonic
+/// series undershoots around a small bright source, and a negative irradiance
+/// darkens a surface the environment is *lighting*.
+fn environment_irradiance(normal: vec3<f32>) -> vec3<f32> {
+    let d = unrotate(normal);
+    var total = shading.sh9[0].rgb * 0.2820948;
+    total += shading.sh9[1].rgb * (0.4886025 * d.y);
+    total += shading.sh9[2].rgb * (0.4886025 * d.z);
+    total += shading.sh9[3].rgb * (0.4886025 * d.x);
+    total += shading.sh9[4].rgb * (1.0925484 * d.x * d.y);
+    total += shading.sh9[5].rgb * (1.0925484 * d.y * d.z);
+    total += shading.sh9[6].rgb * (0.3153916 * (3.0 * d.z * d.z - 1.0));
+    total += shading.sh9[7].rgb * (1.0925484 * d.x * d.z);
+    total += shading.sh9[8].rgb * (0.5462742 * (d.x * d.x - d.y * d.y));
+    return max(total, vec3<f32>(0.0));
+}
+
+/// What the environment contributes at a point.
+///
+/// One branch, and it is on whether an environment is bound rather than on
+/// which formula to use: both arms hand the same function an irradiance and a
+/// prefiltered radiance. A uniform environment makes the two arms agree
+/// exactly, which is what the device test asserts.
+fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    if shading.world.w <= 0.0 {
+        return ambient_from(s, nov, shading.world.rgb * PI_SHADING, shading.world.rgb);
+    }
+    let roughness = clamp(s.roughness, 0.0, 1.0);
+    // The mirror direction, which is what a reflection is about. The prefilter
+    // assumed the normal and the view agreed, so this is where that assumption
+    // is paid for: head on it is exact, and at a grazing angle the highlight
+    // does not stretch.
+    let reflection = reflect(-view, normal);
+    let level = roughness * shading.environment.z;
+    let prefiltered = textureSampleLevel(
+        environment_cube,
+        environment_sampler,
+        unrotate(reflection),
+        level,
+    ).rgb;
+    return ambient_from(s, nov, environment_irradiance(normal), prefiltered);
 }
 
 /// The light leaving `position` toward `view`, in the working space.
@@ -382,7 +474,7 @@ fn shade_point(
     pixel: vec2<u32>,
 ) -> vec3<f32> {
     // The world first, because it is the light that is always there.
-    var total = ambient(s, normal, view, shading.world.rgb);
+    var total = environment_ambient(s, normal, view);
 
     // This tile's short list rather than every light in the scene. A tile holds
     // a count and then that many indices; a light not in the list does not
