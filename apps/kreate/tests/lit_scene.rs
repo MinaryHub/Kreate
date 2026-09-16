@@ -102,6 +102,25 @@ fn shoot(gpu: &Gpu, doc: &Document) -> Vec<[f32; 4]> {
     let lights = scenelights::placed_lights(doc);
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
 
+    // The environment, through the same two calls the frame loop makes. A
+    // no-op for a flat world, which is most of the tests here — and present in
+    // all of them so that "the frame loop does this" stays true of the harness.
+    if let Some(image) = kreate::environment::background_image(doc) {
+        viewport.set_environment(
+            &gpu.device,
+            &gpu.queue,
+            image.width(),
+            image.height(),
+            &kreate::environment::pixels_of(image),
+        );
+    }
+    let (rotation, strength) = doc
+        .active_world()
+        .and_then(|id| doc.world(id))
+        .map(|w| (w.rotation as f32, w.strength as f32))
+        .unwrap_or((0.0, 1.0));
+    viewport.set_world_shape(&gpu.queue, rotation, strength);
+
     // Through `world_transform`, like the frame loop: an object's own
     // transform is its parent's space and a lamp under a rig would be placed
     // wrongly by anything else.
@@ -416,3 +435,178 @@ fn with_two_lamps_turning_one_down_changes_the_balance() {
         "turning one of two lamps down changed {moved} pixels"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The environment.
+//
+// §7.7's gate, applied to the pillar's last piece: an HDRI that can be loaded,
+// saved, prefiltered and shaded is a feature the user does not have until
+// picking one puts a sky on the screen. Everything below the interface has its
+// own tests and all of them passed while there was no way to choose an image.
+
+/// An equirectangular sky: bright on one side of the horizon, dark elsewhere.
+///
+/// Not uniform, deliberately. A uniform sky would make "the environment is
+/// lighting the scene" and "the flat colour is" the same picture, which is the
+/// identity the renderer's tests are *for* — here the point is that a direction
+/// survives all the way to the screen.
+fn a_sky(width: u32, height: u32) -> kreate_scene::Image {
+    let mut image = kreate_scene::Image::new(
+        "Sky",
+        width,
+        height,
+        kreate_scene::PixelFormat::Rgba16F,
+    );
+    image.color_space = kreate_scene::ColorSpace::Raw;
+    let (across, down) = image.tile_counts();
+    for ty in 0..down {
+        for tx in 0..across {
+            let tile = image.tile_mut(tx, ty).expect("in range");
+            for row in 0..kreate_scene::TILE {
+                for column in 0..kreate_scene::TILE {
+                    let x = tx * kreate_scene::TILE + column;
+                    let y = ty * kreate_scene::TILE + row;
+                    if x >= width || y >= height {
+                        continue;
+                    }
+                    let u = (x as f32 + 0.5) / width as f32;
+                    // Bright over one half of the sphere and dark over the
+                    // other. Split by longitude rather than by height, so that
+                    // *which way the camera looks* is not part of the claim —
+                    // the first version of this asked whether the top of the
+                    // frame was brighter than the bottom, and the answer
+                    // depended on where `Camera::default` happens to aim.
+                    //
+                    // Neither half is the flat grey the comparison below uses.
+                    // The first version made the dark half 0.05, which *is*
+                    // that grey — so half the frame matched by construction and
+                    // the test failed for a reason that had nothing to do with
+                    // the renderer.
+                    let value = if u < 0.5 { 8.0 } else { 0.8 };
+                    let bits = half::f16::from_f32(value).to_le_bytes();
+                    let at = (row * kreate_scene::TILE + column) as usize * 8;
+                    for c in 0..3 {
+                        tile.bytes_mut()[at + c * 2..at + c * 2 + 2].copy_from_slice(&bits);
+                    }
+                    tile.bytes_mut()[at + 6..at + 8]
+                        .copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+                }
+            }
+        }
+    }
+    image
+}
+
+/// A new document with a sky chosen, through the operator the panel runs.
+fn a_scene_with_a_sky() -> Document {
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    // The starting scene, because that is what a user has when they open the
+    // world tab: a cube, a lamp, a camera and a world to point at an image.
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+
+    // The application adds the datablock and the operator makes the link —
+    // which is the split `pick_world_image` makes, for the reason an operator
+    // cannot open a file.
+    let id = doc.add_image(a_sky(128, 64));
+    let uid = doc.image_uid(id).expect("assigned on add").raw();
+    menu(
+        &registry,
+        &mut history,
+        &mut doc,
+        "world.set_image",
+        &[("uid", PropertyValue::Text(uid.to_string()))],
+    );
+    doc
+}
+
+#[test]
+fn choosing_a_sky_puts_a_sky_on_the_screen() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let doc = a_scene_with_a_sky();
+    assert!(
+        matches!(
+            doc.world(doc.active_world().expect("a world"))
+                .expect("it is there")
+                .background,
+            kreate_scene::Background::Image(_)
+        ),
+        "the operator did not make the link"
+    );
+
+    let sky = shoot(&gpu, &doc);
+
+    // It is the sky and not the clear colour: the same document with a flat
+    // background renders a different picture.
+    let mut flat = a_scene_with_a_sky();
+    let world = flat.active_world().expect("a world");
+    flat.world_mut(world).expect("it is there").background =
+        kreate_scene::Background::Flat(kreate_math::SceneRgb::new(0.05, 0.05, 0.06));
+    let grey = shoot(&gpu, &flat);
+    assert!(
+        differing(&sky, &grey) > (SIZE * SIZE / 4) as usize,
+        "only {} pixels of {} differ between a sky and a grey world",
+        differing(&sky, &grey),
+        SIZE * SIZE
+    );
+
+    // And it is *oriented*: turning the world half a turn swaps the bright half
+    // of the sphere for the dark one, so the picture has to change.
+    //
+    // Asked this way rather than "the top of the frame is brighter than the
+    // bottom", which is what this was first — that answer depends on where
+    // `Camera::default` happens to aim, and a test that depends on a default
+    // nobody chose for it is a test that breaks for an unrelated reason.
+    let mut turned = a_scene_with_a_sky();
+    let world = turned.active_world().expect("a world");
+    turned.world_mut(world).expect("it is there").rotation = std::f64::consts::PI;
+    let other_way = shoot(&gpu, &turned);
+    assert!(
+        differing(&sky, &other_way) > (SIZE * SIZE / 8) as usize,
+        "turning the world changed only {} pixels of {}",
+        differing(&sky, &other_way),
+        SIZE * SIZE
+    );
+}
+
+/// How many pixels of two shots differ enough to see.
+fn differing(a: &[[f32; 4]], b: &[[f32; 4]]) -> usize {
+    a.iter()
+        .zip(b)
+        .filter(|(p, q)| (p[0] - q[0]).abs() > 0.02)
+        .count()
+}
+
+#[test]
+fn turning_the_sky_off_again_goes_back_to_a_colour() {
+    // The other half of the control, and the one that is easy to leave out: a
+    // user who picks a sky to look at it has to be able to stop.
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    let mut doc = a_scene_with_a_sky();
+
+    menu(
+        &registry,
+        &mut history,
+        &mut doc,
+        "world.set_image",
+        &[("uid", PropertyValue::Text(String::new()))],
+    );
+    assert!(matches!(
+        doc.world(doc.active_world().expect("a world"))
+            .expect("it is there")
+            .background,
+        kreate_scene::Background::Flat(_)
+    ));
+    // The image stays in the document with nothing pointing at it, which is
+    // what an unused datablock is — and what makes undoing the link safe.
+    assert_eq!(doc.image_count(), 1);
+}
+
+

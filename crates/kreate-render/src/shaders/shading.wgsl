@@ -33,7 +33,7 @@ struct Shading {
     /// supplies them directly.
     world: vec4<f32>,
     /// x: `cos` of the world's rotation about up, y: `sin` of it.
-    /// z: the roughest mip of the environment cube. w: unused.
+    /// z: the roughest mip of the environment cube. w: how much light it gives.
     ///
     /// The rotation is applied to the *sampling direction* rather than baked
     /// into the cube, so that dragging the slider costs a rotation per fragment
@@ -42,6 +42,12 @@ struct Shading {
     /// Irradiance coefficients, with the cosine-lobe factors already folded in.
     /// See `kreate_render::environment::irradiance_sh9`.
     sh9: array<vec4<f32>, 9>,
+    /// Turns a clip position back into a world direction, for the background.
+    ///
+    /// Here rather than in a buffer of the background's own, because it changes
+    /// with the camera and so does everything else in this uniform — two
+    /// buffers to keep in step with one camera is one too many.
+    inv_view_proj: mat4x4<f32>,
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;
@@ -432,13 +438,16 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
     // does not stretch.
     let reflection = reflect(-view, normal);
     let level = roughness * shading.environment.z;
+    // The strength multiplies both halves, which is what makes it a dimmer on
+    // the environment rather than on one lobe of it.
+    let strength = shading.environment.w;
     let prefiltered = textureSampleLevel(
         environment_cube,
         environment_sampler,
         unrotate(reflection),
         level,
-    ).rgb;
-    return ambient_from(s, nov, environment_irradiance(normal), prefiltered);
+    ).rgb * strength;
+    return ambient_from(s, nov, environment_irradiance(normal) * strength, prefiltered);
 }
 
 /// The light leaving `position` toward `view`, in the working space.

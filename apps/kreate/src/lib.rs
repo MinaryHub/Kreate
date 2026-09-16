@@ -10,6 +10,7 @@ pub mod breadcrumbs;
 pub mod crashreport;
 pub mod docfile;
 pub mod dragpreview;
+pub mod environment;
 pub mod expr;
 pub mod gpu_sync;
 pub mod modal;

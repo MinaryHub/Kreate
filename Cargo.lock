@@ -1553,6 +1553,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glam",
+ "half",
  "image",
  "kreate-i18n",
  "kreate-input",

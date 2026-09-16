@@ -424,6 +424,14 @@ pub fn depth_read_state() -> wgpu::DepthStencilState {
 /// What makes x-ray picking two lines rather than a second code path: with
 /// `Always` an occluded element still writes its id, so a see-through mode
 /// selects what it shows. The same shader, a different pipeline.
+///
+/// Also what the background draws with, and there for a reason worth writing
+/// down: reversed-Z clears the buffer to zero and the far plane *is* zero, so
+/// a background written at the far plane and compared `Greater` fails against
+/// the clear it was drawn onto — the whole frame comes back black. Found by
+/// the end-to-end test, which is the only one that looks at a picture. Nothing
+/// is lost by not writing, because the background is drawn first and has
+/// nothing behind it.
 pub fn depth_ignore_state() -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,

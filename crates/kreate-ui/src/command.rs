@@ -84,6 +84,15 @@ pub enum Command {
     SaveDocument,
     /// Always ask for a path.
     SaveDocumentAs,
+    /// Ask for an image file and make it the world's background.
+    ///
+    /// A command rather than an operator because the *loading* is a file read,
+    /// and an operator that touched the filesystem could not be replayed. The
+    /// application opens the file and adds the datablock; the link is made by
+    /// `world.set_image`, which is where the undo step belongs.
+    PickWorldImage,
+    /// Put the world's background back to a colour.
+    ClearWorldImage,
     /// Ask for a path and write the scene to an interchange format.
     ///
     /// Separate from saving, because it is not saving: an export goes through

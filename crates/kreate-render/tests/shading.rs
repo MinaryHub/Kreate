@@ -96,6 +96,10 @@ struct Shading {
     /// The world's rotation as a cosine and a sine, and the roughest mip.
     environment: [f32; 4],
     sh9: [[f32; 4]; 9],
+    /// The background's inverse projection. The probe does not draw one, and
+    /// the field still has to be here: a uniform shorter than the struct the
+    /// shader declares is a validation error three frames from the cause.
+    inv_view_proj: [[f32; 4]; 4],
 }
 
 /// Runs the composed probe over `points` against `lights`.
@@ -164,9 +168,13 @@ fn on_gpu_under(
                 // that makes it rather than in every other test's background.
                 environment: {
                     let radians = ROTATION.with(|r| r.get());
-                    [radians.cos(), radians.sin(), environment.roughest(), 0.0]
+                    // Strength one: these tests are about the arithmetic, and a
+                    // dimmer in the background of all of them would scale every
+                    // expected value for no reason.
+                    [radians.cos(), radians.sin(), environment.roughest(), 1.0]
                 },
                 sh9: kreate_render::environment::sh9_bytes(environment.sh9()),
+                inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });

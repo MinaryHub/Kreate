@@ -570,6 +570,104 @@ pub fn world_params(world: &kreate_scene::World) -> SetWorldParams {
     }
 }
 
+
+#[derive(Clone, Debug, PartialEq, Default, OpParams)]
+pub struct SetWorldImageParams {
+    /// The image datablock's identity, in decimal. Empty goes back to a colour.
+    ///
+    /// **An identity and not an index**, for the reason §7.9's archive stores
+    /// one: a position says where the image sits today and a `Uid` says which
+    /// image it is. An undo step holding a position would point at whatever
+    /// moved into that slot.
+    ///
+    /// Text rather than a number because a `Uid` is sixty-four bits and the
+    /// property system's integer is signed — a round trip through it would turn
+    /// half the possible identities negative, and the half it turns is the half
+    /// a long session reaches.
+    pub uid: String,
+}
+
+/// Points the active world's background at an image, or back at its colour.
+///
+/// **The operator does not load anything.** `kreate-ops` cannot read a file and
+/// should not: an operator that touched the filesystem could not be replayed,
+/// and the undo step for "a sky arrived" would have to hold the sky. So the
+/// application opens the file, adds the datablock, and this makes the *link* —
+/// which is the part worth undoing.
+///
+/// Undoing it therefore leaves the image in the document with nothing pointing
+/// at it. That is what Blender does with an unused image and it is the right
+/// answer: the alternative is an undo that deletes a datablock another world,
+/// or a material, may have started using in the meantime.
+pub struct SetWorldImage;
+
+impl Operator for SetWorldImage {
+    type Params = SetWorldImageParams;
+
+    fn id() -> &'static str {
+        "world.set_image"
+    }
+    fn label() -> &'static str {
+        "Set World Image"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.active_world().is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = doc.document().active_world() else {
+            return Ok(OpResult::Cancelled);
+        };
+        // Resolved before the world is borrowed mutably, and resolved against
+        // the *document* rather than trusted: a uid naming an image that is not
+        // here is a parameter from a script or a stale redo, and the honest
+        // answer to it is to refuse rather than to make a background that
+        // points at nothing.
+        let image = match params.uid.trim() {
+            "" => None,
+            text => {
+                let Ok(raw) = text.parse::<u64>() else {
+                    return Ok(OpResult::Cancelled);
+                };
+                match doc.document().image_by_uid(kreate_scene::Uid::from_raw(raw)) {
+                    Some(image) => Some(image),
+                    None => return Ok(OpResult::Cancelled),
+                }
+            }
+        };
+        let d = doc.document_mut();
+        let Some(world) = d.world_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        world.background = match image {
+            Some(image) => kreate_scene::Background::Image(image),
+            // Back to a colour, and to *the* colour a world with no image has.
+            // Not black: a background nobody chose should read as a background
+            // and not as a failure, which is the same judgement the archive's
+            // fallback makes.
+            None => kreate_scene::Background::Flat(kreate_math::SceneRgb::new(0.05, 0.05, 0.06)),
+        };
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The parameters that would leave the world's background as it is.
+pub fn world_image_params(world: &kreate_scene::World, doc: &Document) -> SetWorldImageParams {
+    SetWorldImageParams {
+        uid: match world.background {
+            kreate_scene::Background::Image(id) => doc
+                .image_uid(id)
+                .map(|uid| uid.raw().to_string())
+                .unwrap_or_default(),
+            kreate_scene::Background::Flat(_) => String::new(),
+        },
+    }
+}
+
 // --- a material ------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -1502,6 +1600,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddLight>();
     registry.register::<SetLight>();
     registry.register::<SetWorld>();
+    registry.register::<SetWorldImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();
     registry.register::<Delete>();

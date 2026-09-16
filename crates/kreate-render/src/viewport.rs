@@ -100,6 +100,8 @@ struct ShadingGlobals {
     environment: [f32; 4],
     /// Irradiance coefficients. See `crate::environment::irradiance_sh9`.
     sh9: [[f32; 4]; 9],
+    /// Turns a clip position back into a world direction. See `shading.wgsl`.
+    inv_view_proj: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -1136,6 +1138,20 @@ pub struct Viewport {
     has_environment: bool,
     /// The environment's turn about up, in radians.
     world_rotation: f32,
+    /// Draws the environment where there is no geometry.
+    background_pipeline: wgpu::RenderPipeline,
+    /// The camera's inverse, for the background's rays.
+    ///
+    /// Kept rather than recomputed where it is used, because `prepare` is the
+    /// call that has the camera and the frame has exactly one.
+    inv_view_proj: [[f32; 4]; 4],
+    /// How much light the environment gives.
+    ///
+    /// Folded in at lookup rather than into the cube, for the same reason the
+    /// rotation is: dragging the slider costs a uniform write instead of six
+    /// faces and their mips. A flat world has it folded into the colour
+    /// already, by `World::flat_radiance`.
+    world_strength: f32,
     /// Casters the draw list does not contain, in eye-relative metres.
     ///
     /// Normally empty. What the shadows are fitted to is what is *drawn*, which
@@ -1719,6 +1735,46 @@ impl Viewport {
             cache: None,
         });
 
+        // The background. The shading library, because it reads the same
+        // uniform and the same cube — a second copy of either declaration is
+        // the drift the parity tests exist to prevent.
+        let background_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("background"),
+            source: wgpu::ShaderSource::Wgsl(crate::shading::background_source().into()),
+        });
+        let background_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("background layout"),
+            // Groups zero and one are not bound: a full-screen triangle has no
+            // camera of its own and no object.
+            bind_group_layouts: &[None, None, Some(&shading_layout)],
+            immediate_size: 0,
+        });
+        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("background"),
+            layout: Some(&background_pl),
+            vertex: wgpu::VertexState {
+                module: &background_shader,
+                entry_point: Some("background_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &background_shader,
+                entry_point: Some("background_fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::display::HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(gpu::depth_ignore_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let hdr_0 = crate::display::HdrTarget::new(device, width.max(1), height.max(1));
         let screen_0 = crate::display::ScreenResolve::new(device, color_format);
         let screen_params_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -1988,8 +2044,11 @@ impl Viewport {
             // Black: a document with no world is lit only by its lamps.
             world: [0.0; 3],
             environment: environment_0,
+            background_pipeline,
             has_environment: false,
             world_rotation: 0.0,
+            world_strength: 1.0,
+            inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             extra_bounds: kreate_math::Aabb::EMPTY,
             display: crate::display::Display::default(),
             edge_objects: UniformRing::new(
@@ -2094,6 +2153,28 @@ impl Viewport {
         camera: &Camera,
         draws: &mut [Draw],
     ) {
+        // The camera's inverse, for the background's rays. Written every frame
+        // rather than when the lights change, because an orbit moves the camera
+        // and nothing else — a background that only followed a light edit would
+        // be a sky painted onto the screen.
+        let aspect = self.render_size.0 as f64 / self.render_size.1.max(1) as f64;
+        // Inverted in `f32`, which is what the projection already is: the
+        // camera's matrix is single precision because it is *eye-relative*
+        // (§v1's f64 world, narrowed after the subtraction), and inverting a
+        // widened copy would be a longer way to the same numbers.
+        //
+        // What comes out of it is a direction, so the precision that matters is
+        // angular and a metre at the far plane is nothing.
+        self.inv_view_proj = camera
+            .view_projection(aspect)
+            .inverse()
+            .to_cols_array_2d();
+        queue.write_buffer(
+            &self.shading_globals_buf,
+            0,
+            bytemuck::bytes_of(&self.shading_globals()),
+        );
+
         // Measured first, because the uniforms written below carry the overlay
         // alphas the measurement produces. One place decides, and every pass —
         // including the id pass — reads that decision, so what is drawn and
@@ -2638,9 +2719,10 @@ impl Viewport {
                 self.world_rotation.cos(),
                 self.world_rotation.sin(),
                 self.environment.roughest(),
-                0.0,
+                self.world_strength,
             ],
             sh9: crate::environment::sh9_bytes(self.environment.sh9()),
+            inv_view_proj: self.inv_view_proj,
         }
     }
 
@@ -2686,9 +2768,14 @@ impl Viewport {
         );
     }
 
-    /// Turns the environment about up, in radians.
-    pub fn set_world_rotation(&mut self, queue: &wgpu::Queue, radians: f32) {
+    /// Turns the environment about up, and says how much light it gives.
+    ///
+    /// One call because they arrive together — they are two fields of the same
+    /// datablock, and a caller that set one and forgot the other would have a
+    /// slider that works and one beside it that does not.
+    pub fn set_world_shape(&mut self, queue: &wgpu::Queue, radians: f32, strength: f32) {
         self.world_rotation = radians;
+        self.world_strength = strength.max(0.0);
         queue.write_buffer(
             &self.shading_globals_buf,
             0,
@@ -3491,6 +3578,12 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The background first, at the far plane, so the geometry that
+            // follows tests against it rather than the other way round.
+            pass.set_pipeline(&self.background_pipeline);
+            pass.set_bind_group(2, &self.shading_bind, &[]);
+            pass.draw(0..3, 0..1);
+
             pass.set_pipeline(&self.rendered);
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_bind_group(2, &self.shading_bind, &[]);

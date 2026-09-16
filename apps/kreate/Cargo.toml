@@ -29,6 +29,9 @@ winit.workspace = true
 pollster.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# An environment reaches the renderer as `Rgba16Float`, which is what the
+# datablock holds and what a sky needs. See `environment::pixels_of`.
+half = "2"
 
 [dev-dependencies]
 # Dumps a composited frame to PNG so a layout defect can be looked at rather

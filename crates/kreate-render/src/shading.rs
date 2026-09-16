@@ -198,6 +198,20 @@ pub fn rendered_source() -> String {
     format!("{}\n{}", shader_source(), include_str!("shaders/rendered.wgsl"))
 }
 
+/// The shader that draws the environment behind the scene.
+///
+/// The same library as everything else: it reads `shading`'s uniform and the
+/// same cube, and a second declaration of either is the drift the parity tests
+/// exist to prevent.
+pub fn background_source() -> String {
+    format!(
+        "{}
+{}",
+        shader_source(),
+        include_str!("shaders/background.wgsl")
+    )
+}
+
 /// The same, with this module's probe entry point on the end.
 ///
 /// For the device test, which needs something to dispatch. Kept apart from

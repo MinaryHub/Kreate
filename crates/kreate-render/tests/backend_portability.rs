@@ -87,6 +87,13 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
             "rendered",
             kreate_render::shading::rendered_source().into(),
         ),
+        // A fragment too, and checked as what a device receives: it reads the
+        // shading uniform and the environment cube, so the composition is the
+        // thing that has to translate.
+        (
+            "background",
+            kreate_render::shading::background_source().into(),
+        ),
     ]
 }
 

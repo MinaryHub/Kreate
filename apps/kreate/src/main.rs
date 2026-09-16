@@ -493,6 +493,12 @@ struct App {
     latency: LatencyStats,
 
     doc: Document,
+    /// Which environment the viewport is holding, so a frame does not rebuild
+    /// six faces and their mips to find out that nothing changed.
+    ///
+    /// Here rather than in the viewport because it is a fact about the
+    /// *document*, and `kreate-render` does not see one.
+    environment: Option<kreate::environment::EnvironmentKey>,
     registry: OperatorRegistry,
     history: History,
     op_ctx: OpContext,
@@ -649,6 +655,7 @@ impl App {
             redraw: RedrawReason(RedrawReason::SCENE_CHANGED),
             latency: LatencyStats::default(),
             doc,
+            environment: None,
             registry,
             history: History::new(),
             op_ctx: OpContext::default(),
@@ -1972,6 +1979,8 @@ impl App {
                 Command::SaveDocument => self.save_document(false),
                 Command::SaveDocumentAs => self.save_document(true),
                 Command::ExportScene => self.export_scene(),
+                Command::PickWorldImage => self.pick_world_image(),
+                Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
                     self.load_from(&path);
                     // The recovered document deliberately keeps *no* path: it
@@ -2187,6 +2196,52 @@ impl App {
             )),
             Err(e) => self.status(&format!("cannot write {}: {e}", path.display())),
         }
+    }
+
+
+    /// Loads an image and makes it the world's background.
+    ///
+    /// The file read is here and the document edit is an operator, and the
+    /// split is deliberate: `world.set_image` can be replayed, scripted and
+    /// undone, and a version of it that opened a file could be none of those.
+    ///
+    /// The datablock is added outside the history, so undoing the link leaves
+    /// the image in the document with nothing pointing at it. That is what
+    /// Blender does with an unused image and it is the right answer — the
+    /// alternative is an undo that deletes a datablock a material may have
+    /// started using in the meantime.
+    fn pick_world_image(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Environment", &["hdr", "exr", "png", "jpg", "jpeg"])
+            .set_title("Environment")
+            .pick_file()
+        else {
+            return;
+        };
+        // Raw, and it is not a guess: an environment is an emission and §2.1's
+        // working space has no upper bound, so a float file is already what a
+        // shader should sample. An eight-bit one is almost always sRGB and the
+        // loader only consults this for those.
+        let image = match kreate_io::load_image_file(&path, kreate_scene::ColorSpace::Srgb) {
+            Ok(image) => image,
+            Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
+        };
+        let name = image.name.clone();
+        let id = self.doc.add_image(image);
+        let Some(uid) = self.doc.image_uid(id) else {
+            return self.status("the image has no identity");
+        };
+        let mut params = PropertyMap::new();
+        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        self.run_op("world.set_image", params);
+        self.status(&format!("environment: {name}"));
+    }
+
+    /// Puts the world's background back to a colour.
+    fn clear_world_image(&mut self) {
+        let mut params = PropertyMap::new();
+        params.set("uid", kreate_reflect::PropertyValue::Text(String::new()));
+        self.run_op("world.set_image", params);
     }
 
     /// Asks before throwing away unsaved work. `true` to proceed.
@@ -3383,6 +3438,39 @@ impl App {
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
                 .set_world(scenelights::world_radiance(&self.doc));
+            // The environment, rebuilt only when it is a different one. Six
+            // faces and their mips is not a per-frame cost, and the key is what
+            // tells "the same sky again" from "a sky that finished loading".
+            let want = kreate::environment::key_of(&self.doc);
+            if want != self.environment {
+                match kreate::environment::background_image(&self.doc) {
+                    Some(image) => {
+                        let pixels = kreate::environment::pixels_of(image);
+                        gfx.viewport.set_environment(
+                            &gfx.gpu.device,
+                            &gfx.gpu.queue,
+                            image.width(),
+                            image.height(),
+                            &pixels,
+                        );
+                    }
+                    None => gfx
+                        .viewport
+                        .clear_environment(&gfx.gpu.device, &gfx.gpu.queue),
+                }
+                self.environment = want;
+            }
+            // And its two dials, every frame: they cost a uniform write, and a
+            // slider whose effect waits for something else to change is a
+            // slider that looks broken.
+            let (rotation, strength) = self
+                .doc
+                .active_world()
+                .and_then(|id| self.doc.world(id))
+                .map(|w| (w.rotation as f32, w.strength as f32))
+                .unwrap_or((0.0, 1.0));
+            gfx.viewport
+                .set_world_shape(&gfx.gpu.queue, rotation, strength);
             // With the distance each lamp is worth computing to, which is
             // what the tile pass culls against.
             let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);

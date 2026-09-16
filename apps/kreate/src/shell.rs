@@ -821,6 +821,8 @@ struct Labels {
     file_save: String,
     file_save_as: String,
     file_export: String,
+    world_pick_image: String,
+    world_clear_image: String,
     recover_open: String,
     recover_discard: String,
     recover_discard_all: String,
@@ -885,6 +887,8 @@ impl Labels {
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
             file_export: t("menu-file-export"),
+            world_pick_image: t("world-pick-image"),
+            world_clear_image: t("world-clear-image"),
             recover_open: t("recover-open"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
@@ -2487,6 +2491,19 @@ fn draw_world_tab(
         return;
     };
     ui.heading(&l.tab_world);
+    // The control §7.7 recorded as missing. An environment that can be loaded,
+    // saved and shaded and cannot be *chosen* is a feature the user does not
+    // have — which is the gate that section exists to state.
+    ui.horizontal(|ui| {
+        if ui.button(&l.world_pick_image).clicked() {
+            state.queue.push(Command::PickWorldImage);
+        }
+        if matches!(world.background, kreate_scene::Background::Image(_))
+            && ui.button(&l.world_clear_image).clicked()
+        {
+            state.queue.push(Command::ClearWorldImage);
+        }
+    });
     if matches!(world.background, kreate_scene::Background::Image(_)) {
         // The colour below does nothing for an image background, and a control
         // that does nothing is worse than one that is missing. Said rather than
@@ -2616,6 +2633,8 @@ menu-file-open = Open...
 menu-file-save = Save
 menu-file-save-as = Save As...
 menu-file-export = Export...
+world-pick-image = Environment...
+world-clear-image = Clear
 recover-count = { $count } recovered documents
 recover-open = Open
 recover-discard = Discard
@@ -2820,6 +2839,8 @@ menu-file-open = 열기...
 menu-file-save = 저장
 menu-file-save-as = 다른 이름으로 저장...
 menu-file-export = 내보내기...
+world-pick-image = 환경 이미지...
+world-clear-image = 지우기
 recover-count = 복구된 작업 { $count }개
 recover-open = 열기
 recover-discard = 버리기
@@ -3709,6 +3730,8 @@ mod tests {
             "menu-file-save",
             "menu-file-save-as",
             "menu-file-export",
+            "world-pick-image",
+            "world-clear-image",
             "recover-count",
             "recover-open",
             "recover-discard",
