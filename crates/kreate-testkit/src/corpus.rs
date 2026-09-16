@@ -165,7 +165,7 @@ fn five_uv_sets() -> MeshData {
         ],
         &[vec![0, 1, 2, 3]],
     );
-    for (i, name) in ["uv_map", "uv_lightmap", "uv_detail", "uv_decal", "uv_wear"]
+    for (i, name) in [names::UV, "uv_lightmap", "uv_detail", "uv_decal", "uv_wear"]
         .into_iter()
         .enumerate()
     {

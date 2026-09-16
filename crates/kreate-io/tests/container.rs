@@ -608,3 +608,77 @@ fn a_build_that_has_never_heard_of_images_does_not_destroy_one() {
         "the tile file was discarded by a build that did not understand it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// One name for the UV layer.
+
+#[test]
+fn a_file_written_with_the_old_uv_name_comes_back_with_the_new_one() {
+    // **The two halves never met.** The importers wrote `uv_map` and the UV
+    // editor and the unwrapper read `uv` — so a model imported from glTF had
+    // coordinates the editor could not show, and coordinates unwrapped here did
+    // not export. Every test on either side passed, because each was asking its
+    // own half.
+    //
+    // A file saved before the names were joined still carries the old one, so
+    // the reader renames it.
+    use kreate_mesh::attribute::{names, AttrData, Domain};
+    let mut mesh = kreate_mesh::primitives::cube(1.0);
+    let corners = mesh.num_corners() as usize;
+    let uvs: Vec<glam::Vec2> = (0..corners)
+        .map(|c| glam::Vec2::new(c as f32 * 0.01, 0.5))
+        .collect();
+    mesh.attributes_mut().insert(
+        "uv_map",
+        Domain::Corner,
+        AttrData::F32x2(uvs.clone().into()),
+    );
+
+    let mut doc = Document::new();
+    let id = doc.add_mesh(mesh);
+    doc.add_object(Object::new("Cube", ObjectData::Mesh(id)));
+
+    let loaded = round_trip(&doc);
+    let (_, back) = loaded.document.meshes().next().expect("the mesh");
+    let got = back
+        .attributes()
+        .get_f32x2(names::UV)
+        .expect("the coordinates came back under the name everything reads");
+    assert_eq!(got.len(), corners);
+    assert_eq!(got[3], uvs[3], "the values changed on the way through");
+    assert!(
+        back.attributes().get("uv_map").is_none(),
+        "the old layer was copied rather than renamed"
+    );
+}
+
+#[test]
+fn a_mesh_that_really_has_a_layer_called_uv_map_keeps_it() {
+    // Somebody's own layer, which happens to be spelled the way the old one
+    // was. Taking it away would be worse than leaving it where they put it —
+    // so the rename only fires when there is nothing under the real name.
+    use kreate_mesh::attribute::{names, AttrData, Domain};
+    let mut mesh = kreate_mesh::primitives::cube(1.0);
+    let corners = mesh.num_corners() as usize;
+    let real: Vec<glam::Vec2> = (0..corners).map(|_| glam::Vec2::new(1.0, 1.0)).collect();
+    let theirs: Vec<glam::Vec2> = (0..corners).map(|_| glam::Vec2::new(0.25, 0.75)).collect();
+    mesh.attributes_mut()
+        .insert(names::UV, Domain::Corner, AttrData::F32x2(real.into()));
+    mesh.attributes_mut()
+        .insert("uv_map", Domain::Corner, AttrData::F32x2(theirs.into()));
+
+    let mut doc = Document::new();
+    let id = doc.add_mesh(mesh);
+    doc.add_object(Object::new("Cube", ObjectData::Mesh(id)));
+
+    let loaded = round_trip(&doc);
+    let (_, back) = loaded.document.meshes().next().expect("the mesh");
+    assert_eq!(
+        back.attributes().get_f32x2(names::UV).expect("the real one")[0],
+        glam::Vec2::new(1.0, 1.0)
+    );
+    assert_eq!(
+        back.attributes().get_f32x2("uv_map").expect("and theirs")[0],
+        glam::Vec2::new(0.25, 0.75)
+    );
+}

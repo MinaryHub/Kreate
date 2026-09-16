@@ -203,6 +203,13 @@ struct GridGlobals {
 pub struct GpuMesh {
     positions: wgpu::Buffer,
     normals: wgpu::Buffer,
+    /// Surface coordinates, read only by the rendered pass.
+    ///
+    /// Always present, zeroed for a mesh with no UV layer. A pipeline's vertex
+    /// layout is fixed, so "has UVs or not" would otherwise be two pipelines
+    /// per material — a scene would compile twice the shaders to save eight
+    /// bytes a vertex on the meshes that are not textured.
+    uvs: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Positions as storage, plus the edge list and its flags.
     ///
@@ -283,6 +290,11 @@ impl GpuMesh {
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
+        });
+        let uvs = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh uvs"),
+            contents: bytemuck::cast_slice(&cpu.uvs),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         // STORAGE as well as INDEX: the id pass draws faces *non-indexed* and
         // reads this as an array, because `vertex_index` in an indexed draw is
@@ -447,6 +459,7 @@ impl GpuMesh {
         Self {
             positions,
             normals,
+            uvs,
             indices,
             edge_bind,
             id_bind,
@@ -3652,6 +3665,7 @@ impl Viewport {
                 );
                 pass.set_vertex_buffer(0, mesh.positions.slice(..));
                 pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                pass.set_vertex_buffer(2, mesh.uvs.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
             }
@@ -3782,6 +3796,15 @@ fn rendered_pipeline(
                         format: wgpu::VertexFormat::Uint32,
                         offset: 0,
                         shader_location: 1,
+                    }],
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 2,
                     }],
                 },
             ],

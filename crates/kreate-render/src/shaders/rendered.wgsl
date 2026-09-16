@@ -52,17 +52,22 @@ struct VertexOut {
     /// Eye-relative, in metres: the same space the lights are packed into.
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    /// The surface coordinate, for the material.
+    @location(2) uv: vec2<f32>,
 }
 
 @vertex
 fn vs_rendered(
     @location(0) position: vec3<f32>,
     @location(1) packed_normal: u32,
+    @location(2) uv: vec2<f32>,
 ) -> VertexOut {
     let world = object.model * vec4<f32>(position, 1.0);
     var out: VertexOut;
     out.clip = globals.view_proj * world;
     out.world = world.xyz;
+
+    out.uv = uv;
 
     let n = oct_decode(packed_normal);
     // The inverse transpose, because a non-uniform scale tilts a normal
@@ -120,11 +125,8 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
         normal = -normal;
     }
 
-    // The compiled material. A surface coordinate of zero for now: the render
-    // mesh has no UVs yet, so a texture would sample one texel. Every material
-    // is currently constants, which do not read it — and the day UVs arrive
-    // this line becomes `in.uv` and nothing else changes.
-    let surface = material_surface(vec2<f32>(0.0));
+    // The compiled material, at this fragment's surface coordinate.
+    let surface = material_surface(in.uv);
 
     // `in.clip` is the fragment's position in pixels here — the same builtin
     // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that

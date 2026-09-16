@@ -472,3 +472,251 @@ fn shading_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ],
     })
 }
+
+// ---------------------------------------------------------------------------
+// And the picture.
+//
+// Everything above checks that the pieces fit: the code compiles, the layouts
+// agree, the rectangles line up. None of it would notice a material that is
+// wired correctly and shades nothing — a surface coordinate stuck at zero, an
+// atlas nobody sampled, a texture bound to the wrong layer. Those are questions
+// about a picture, and the only way to ask them is to render one.
+
+/// Renders a quad with one material and reads the frame back.
+///
+/// A quad rather than a cube so that the whole frame is one surface with UVs
+/// running corner to corner, which is what makes "the left half differs from
+/// the right half" a statement about a texture.
+fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::SourceImage<'_>]) -> Vec<[f32; 4]> {
+    use kreate_render::{Camera, Draw, RenderMeshCpu, ShadingMode, Viewport};
+
+    const SIZE: u32 = 48;
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    // A plain white environment, so what reaches the camera is the surface's
+    // own colour rather than a lamp's angle. Every texel of the quad faces the
+    // same way, so a difference across the frame can only come from the
+    // material.
+    viewport.set_world([1.0; 3]);
+    viewport.set_display(
+        &gpu.queue,
+        kreate_render::display::Display {
+            view: kreate_math::ViewTransform::Standard,
+            exposure: 0.0,
+        },
+    );
+
+    let compiled = kreate_shader::compile(graph).expect("compiles");
+    viewport.set_materials(
+        &gpu.device,
+        &gpu.queue,
+        &[kreate_render::viewport::MaterialSource {
+            wgsl: &compiled.wgsl,
+            constants: &compiled.constants,
+            image_slots: &compiled.image_slots,
+            images,
+        }],
+    );
+
+    // A quad with coordinates projected onto it.
+    //
+    // **The primitives carry none**, which this test found: a cube added from
+    // the menu has no UV layer at all, so a texture assigned to it would sample
+    // one texel. That is a gap in the primitives rather than in the renderer,
+    // and it is not papered over here — what is being asked about is the path
+    // from a coordinate to a pixel, so the fixture makes its own coordinates.
+    let mesh = planar_uvs(kreate_mesh::primitives::grid(2.0, 1, 1));
+    let cpu = RenderMeshCpu::extract(&mesh);
+    assert!(
+        cpu.uvs.iter().any(|uv| uv[0] != 0.0 || uv[1] != 0.0),
+        "the fixture has no surface coordinates, so it cannot say anything \
+         about a texture"
+    );
+    let uploaded =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
+
+    // Looking straight down at the grid, which lies in the XY plane.
+    let camera = Camera {
+        distance: 2.2,
+        ..Camera::default()
+    };
+    let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shot"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    viewport.render(&mut encoder, &view, &draws);
+
+    let row = (SIZE * 4).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+
+    let mut out = Vec::with_capacity((SIZE * SIZE) as usize);
+    for y in 0..SIZE {
+        let base = (y * row) as usize;
+        for x in 0..SIZE as usize {
+            let at = base + x * 4;
+            out.push([
+                data[at] as f32 / 255.0,
+                data[at + 1] as f32 / 255.0,
+                data[at + 2] as f32 / 255.0,
+                data[at + 3] as f32 / 255.0,
+            ]);
+        }
+    }
+    out
+}
+
+/// Projects the mesh's own XY onto a UV layer, over a two-metre square.
+///
+/// The simplest projection there is, and enough: what is being checked is that
+/// a coordinate reaches a pixel, not that any particular unwrap is good.
+fn planar_uvs(mut mesh: kreate_mesh::MeshData) -> kreate_mesh::MeshData {
+    use kreate_mesh::attribute::{names, AttrData, Domain};
+    let positions = mesh.positions().to_vec();
+    let uvs: Vec<glam::Vec2> = mesh
+        .corner_verts()
+        .iter()
+        .map(|v| {
+            let p = positions[*v as usize];
+            glam::Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5)
+        })
+        .collect();
+    mesh.attributes_mut()
+        .insert(names::UV, Domain::Corner, AttrData::F32x2(uvs.into()));
+    mesh
+}
+
+/// Half red, half blue, split down the middle.
+fn two_tone(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((width * height) as usize * 4);
+    for _ in 0..height {
+        for x in 0..width {
+            let left = x < width / 2;
+            out.extend_from_slice(if left {
+                &[255u8, 0, 0, 255]
+            } else {
+                &[0u8, 0, 255, 255]
+            });
+        }
+    }
+    out
+}
+
+#[test]
+fn a_texture_reaches_the_picture_and_lands_the_right_way_round() {
+    // **What all of this was for.** A material samples an image, the image
+    // reaches the frame, and the half of it that is red is on the side the
+    // surface coordinates say it is.
+    //
+    // Nothing above would catch a coordinate stuck at zero: the shader compiles,
+    // the layouts agree, the atlas uploads, and every fragment samples the same
+    // texel. The frame comes out one flat colour and every other test passes.
+    let gpu = gpu_or_skip!(gpu());
+    let (graph, _doc) = textured();
+    let pixels = two_tone(16, 16);
+    let frame = shoot(
+        &gpu,
+        &graph,
+        &[kreate_render::material::SourceImage {
+            width: 16,
+            height: 16,
+            pixels: &pixels,
+        }],
+    );
+
+    // The middle row, left quarter against right quarter. A quarter in from
+    // each edge, so the quad's own silhouette is not what is being measured.
+    let size = 48usize;
+    let row = size / 2;
+    let left = frame[row * size + size / 4];
+    let right = frame[row * size + 3 * size / 4];
+    assert!(
+        left[0] > left[2] + 0.1,
+        "the left of the frame is {left:?}, which is not the red half"
+    );
+    assert!(
+        right[2] > right[0] + 0.1,
+        "the right of the frame is {right:?}, which is not the blue half"
+    );
+}
+
+#[test]
+fn a_material_with_no_texture_is_the_colour_its_constants_say() {
+    // The other half of the claim above: a frame that differs across its width
+    // only because a texture is there. Without this, a shader that happened to
+    // vary with position would pass the test above for the wrong reason.
+    let gpu = gpu_or_skip!(gpu());
+    let graph = ShaderGraph::standard(
+        "Flat",
+        kreate_math::SceneRgb::new(0.6, 0.1, 0.1),
+        0.0,
+        0.5,
+    );
+    let frame = shoot(&gpu, &graph, &[]);
+    let size = 48usize;
+    let row = size / 2;
+    let left = frame[row * size + size / 4];
+    let right = frame[row * size + 3 * size / 4];
+    for c in 0..3 {
+        assert!(
+            (left[c] - right[c]).abs() < 0.02,
+            "a flat material is not flat across the frame: {left:?} against {right:?}"
+        );
+    }
+    // And it is the colour that was asked for: more red than blue.
+    assert!(left[0] > left[2] + 0.1, "the frame is {left:?}");
+}

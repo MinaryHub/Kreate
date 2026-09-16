@@ -505,7 +505,7 @@ fn write_mesh(
     used_ngons: &mut bool,
 ) -> Vec<json::mesh::Primitive> {
     let positions = mesh.positions();
-    let uvs = mesh.attributes().get_f32x2("uv_map");
+    let uvs = mesh.attributes().get_f32x2(names::UV);
     // Authored split normals win over computed ones, which is the whole point of
     // storing them: a mesh that carries them has had its shading decided by hand
     // and recomputing would overrule the author.
@@ -911,7 +911,7 @@ fn note_dropped_attributes(
         // saying plainly rather than leaving to be discovered.
         let extra_uvs = attrs
             .iter()
-            .filter(|l| l.name.starts_with("uv") && &*l.name != "uv_map")
+            .filter(|l| l.name.starts_with("uv") && &*l.name != names::UV)
             .count();
         if extra_uvs > 0 {
             notes.push(LossyNote::Unsupported {

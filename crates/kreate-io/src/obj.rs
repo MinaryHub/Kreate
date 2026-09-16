@@ -401,7 +401,7 @@ pub fn write_obj(meshes: &[(String, &MeshData)], opts: ObjOptions) -> String {
             let _ = writeln!(out, "v {} {} {}", fnum(p.x), fnum(p.y), fnum(p.z));
         }
 
-        let uvs = mesh.attributes().get_f32x2("uv_map");
+        let uvs = mesh.attributes().get_f32x2(names::UV);
         if let Some(uvs) = uvs {
             for uv in uvs {
                 let uv = UvOrigin::BottomLeft.from_kreate(*uv);

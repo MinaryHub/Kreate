@@ -762,7 +762,7 @@ fn convert_mesh(m: &ImportMesh, src: &SourceMetadata) -> MeshData {
                 .map(|uv| src.uv_origin.to_kreate(uv))
                 .collect();
             mesh.attributes_mut()
-                .insert("uv_map", Domain::Corner, AttrData::F32x2(Arc::new(vals)));
+                .insert(names::UV, Domain::Corner, AttrData::F32x2(Arc::new(vals)));
         }
     }
     if let Some(ns) = &m.corner_normals {
@@ -1299,7 +1299,7 @@ mod tests {
         ]);
         scene.meshes.push(m);
         let (out, _) = scene.into_mesh_data();
-        let uvs = out[0].1.attributes().get_f32x2("uv_map").unwrap();
+        let uvs = out[0].1.attributes().get_f32x2(names::UV).unwrap();
         assert_eq!(uvs[0], Vec2::new(0.0, 1.0));
         assert_eq!(uvs[2], Vec2::new(1.0, 0.75));
     }
@@ -1311,7 +1311,7 @@ mod tests {
         m.corner_uvs = Some(vec![Vec2::ZERO; 4]);
         scene.meshes.push(m);
         let (out, _) = scene.into_mesh_data();
-        let layer = out[0].1.attributes().get("uv_map").unwrap();
+        let layer = out[0].1.attributes().get(names::UV).unwrap();
         assert_eq!(layer.domain, Domain::Corner);
         out[0].1.assert_valid();
     }
@@ -1370,7 +1370,7 @@ mod tests {
             ..Default::default()
         });
         let (out, _) = scene.into_mesh_data();
-        let uvs = out[0].1.attributes().get_f32x2("uv_map").unwrap();
+        let uvs = out[0].1.attributes().get_f32x2(names::UV).unwrap();
         assert_eq!(uvs.len(), 4);
         assert_eq!(uvs[0], Vec2::ZERO, "the dropped face's UVs must go with it");
         out[0].1.assert_valid();

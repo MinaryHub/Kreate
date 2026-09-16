@@ -977,10 +977,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .strip_prefix(MESH_DIR)
             .and_then(|k| k.strip_suffix(".kmesh"))
         {
-            let loaded = crate::kmesh::read(&bytes).map_err(|source| ContainerError::Mesh {
+            let mut loaded = crate::kmesh::read(&bytes).map_err(|source| ContainerError::Mesh {
                 key: key.to_string(),
                 source,
             })?;
+            rename_legacy_uv(&mut loaded.mesh);
             meshes.insert(key.to_string(), loaded.mesh);
         } else if let Some(key) = name
             .strip_prefix(IMAGE_DIR)
@@ -1221,6 +1222,38 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
 }
 
 /// The archive key for the mesh in a given document slot.
+/// The old name for the UV layer, from before there was one name for it.
+const LEGACY_UV: &str = "uv_map";
+
+/// Renames a mesh's UV layer to the one name it has.
+///
+/// **A file could carry either, and the two never met.** The importers wrote
+/// `uv_map` and the UV editor and the unwrapper read `names::UV`, so a model
+/// imported from glTF had coordinates the editor could not see, and coordinates
+/// unwrapped in Kreate did not export. Both halves worked and neither could
+/// reach the other.
+///
+/// Here rather than in [`crate::migrate`] because that chain rewrites
+/// `scene.json`, and a UV layer lives in the binary mesh beside the positions.
+/// The chain is the right place for a change to the *scene's* shape; this is a
+/// change to a mesh's, and putting a JSON migration in the list that silently
+/// did nothing would be worse than not having one.
+///
+/// Renamed and not merged: a mesh with both is one somebody built with a layer
+/// actually called `uv_map`, and taking theirs away would be worse than leaving
+/// it where they put it.
+fn rename_legacy_uv(mesh: &mut MeshData) {
+    use kreate_mesh::attribute::names;
+    let attrs = mesh.attributes();
+    if attrs.get(names::UV).is_some() || attrs.get(LEGACY_UV).is_none() {
+        return;
+    }
+    if let Some(layer) = mesh.attributes_mut().remove(LEGACY_UV) {
+        mesh.attributes_mut()
+            .insert(names::UV, layer.domain, layer.data);
+    }
+}
+
 fn mesh_key(slot: usize) -> String {
     format!("{slot:06}")
 }

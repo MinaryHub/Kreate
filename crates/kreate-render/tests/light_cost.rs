@@ -97,6 +97,29 @@ fn measure_lights(gpu: &Gpu, lights: &[PlacedLight]) -> f64 {
 
     viewport.set_world([0.0; 3]);
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), lights);
+    // A material, or nothing is drawn and this measures an empty frame.
+    //
+    // It measured one for exactly as long as it took to run: the first result
+    // after the rendered pass started needing a material read "256 lights cost
+    // less than one", which is what a benchmark says when the loop it is
+    // timing never runs. The assertion below is what caught it.
+    let graph = kreate_scene::shader::ShaderGraph::standard(
+        "bench",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    );
+    let compiled = kreate_shader::compile(&graph).expect("compiles");
+    viewport.set_materials(
+        &gpu.device,
+        &gpu.queue,
+        &[kreate_render::viewport::MaterialSource {
+            wgsl: &compiled.wgsl,
+            constants: &compiled.constants,
+            image_slots: &compiled.image_slots,
+            images: &[],
+        }],
+    );
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("light cost"),

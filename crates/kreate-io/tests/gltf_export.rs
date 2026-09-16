@@ -158,7 +158,7 @@ fn uvs_come_back_the_same_way_up() {
         Vec2::new(0.0, 0.75),
     ];
     mesh.attributes_mut().insert(
-        "uv_map",
+        names::UV,
         Domain::Corner,
         AttrData::F32x2(uvs.clone().into()),
     );
@@ -172,7 +172,7 @@ fn uvs_come_back_the_same_way_up() {
     let got = meshes[0]
         .1
         .attributes()
-        .get_f32x2("uv_map")
+        .get_f32x2(names::UV)
         .expect("uvs survived");
     assert_eq!(got.len(), 4);
     for (a, b) in uvs.iter().zip(got) {
@@ -214,7 +214,7 @@ fn a_seam_splits_vertices_on_the_way_out() {
         Vec2::new(0.5, 1.0),
     ];
     mesh.attributes_mut()
-        .insert("uv_map", Domain::Corner, AttrData::F32x2(uvs.into()));
+        .insert(names::UV, Domain::Corner, AttrData::F32x2(uvs.into()));
 
     let options = GltfExportOptions {
         normals: false,

@@ -4,6 +4,7 @@
 //! right — which is why each gets a test that names the exact quantity rather
 //! than checking that something loaded.
 
+use kreate_mesh::attribute::names;
 use kreate_io::gltf_import::{self, GltfOptions};
 use kreate_io::ir::{LossyNote, UvOrigin};
 use serde_json::json;
@@ -191,7 +192,7 @@ fn texture_coordinates_are_flipped_from_the_top_left_origin() {
     // Asserting on `scene.meshes[0].corner_uvs` reads the file's own coordinates,
     // which is what let a duplicate flip in this module go unnoticed.
     let (meshes, source) = scene.into_mesh_data();
-    let got = meshes[0].1.attributes().get_f32x2("uv_map").expect("uvs");
+    let got = meshes[0].1.attributes().get_f32x2(names::UV).expect("uvs");
     // V flipped, U untouched.
     assert_eq!(got[0].to_array(), [0.0, 1.0]);
     assert_eq!(got[1].to_array(), [1.0, 0.75]);

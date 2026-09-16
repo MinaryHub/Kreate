@@ -17,8 +17,23 @@
 use kreate_mesh::primitives;
 use kreate_render::RenderMeshCpu;
 
-/// The plan's per-render-vertex budget, for the direct path.
-const PER_VERTEX: f32 = 100.0;
+/// The per-render-vertex budget for the direct path.
+///
+/// The plan's figure was 100, and a render vertex has since grown a surface
+/// coordinate — eight bytes, without which a material cannot sample anything.
+/// The worst case here went from 96 to 104.
+///
+/// Moved rather than squeezed, for the reason written below for the cluster
+/// path: the figure that decides whether the application runs on an 8 GB card
+/// is the scene-level one, ten million vertices under 2 GB. At 108 that is
+/// 1.01 GB, and the plan's 100 already had roughly twice the headroom it
+/// needed. The ten-million-vertex test is the one holding the line.
+///
+/// Half-precision coordinates would have fitted under 100. They hold a UV to
+/// about one part in two thousand, which is two texels on a 4K map — visible as
+/// a crawl, and worse once texture painting writes through these rather than
+/// only reading them.
+const PER_VERTEX: f32 = 108.0;
 
 /// What the cluster path is allowed instead.
 ///
@@ -39,7 +54,11 @@ const PER_VERTEX: f32 = 100.0;
 /// If the cluster path ever becomes the default, the right fix is not a larger
 /// budget but dropping the direct path index buffer for static meshes, which
 /// removes the duplication entirely.
-const PER_VERTEX_CLUSTERED: f32 = 128.0;
+///
+/// Moved from 128 by the same eight bytes the direct budget moved by, and for
+/// the same reason: a render vertex now carries a surface coordinate. At 136 a
+/// ten-million-vertex clustered scene is 1.27 GB, still comfortably inside 2.
+const PER_VERTEX_CLUSTERED: f32 = 136.0;
 
 /// Meshes with different topologies, because the per-vertex cost depends on how
 /// many triangles and edges a vertex is shared by, and a single shape would only

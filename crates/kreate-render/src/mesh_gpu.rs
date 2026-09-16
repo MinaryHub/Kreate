@@ -227,6 +227,19 @@ pub struct RenderMeshCpu {
     pub positions: Vec<GpuPosition>,
     /// Octahedral-encoded vertex normals, one per vertex.
     pub normals: Vec<u32>,
+    /// Surface coordinates, one per vertex.
+    ///
+    /// Zero for a mesh with no UV layer, which is most of them while a model is
+    /// being built. Present anyway, because the vertex layout belongs to the
+    /// pipeline and a pipeline per "has UVs or not" would double the shaders a
+    /// scene compiles — the same reason a material's textures are one array
+    /// binding rather than one binding each.
+    ///
+    /// Full precision rather than half. Sixteen-bit floats hold a UV to about
+    /// one part in two thousand, which is two texels on a 4K map — visible as a
+    /// slight crawl, and worse once §2.3's texture painting is writing through
+    /// these coordinates rather than only reading.
+    pub uvs: Vec<[f32; 2]>,
     /// Triangle indices, three per triangle.
     pub indices: Vec<u32>,
     /// Source face per triangle. What lets id-buffer picking report a face
@@ -327,6 +340,9 @@ impl RenderMeshCpu {
     pub fn extract_with_auto_smooth(mesh: &MeshData, angle_threshold: f32) -> Self {
         let tri = mesh.triangulate_corners();
         let corner_normals = mesh.compute_corner_normals(angle_threshold);
+        // Per corner, like the normals: a seam is two coordinates at one
+        // position, which is what a seam *is*.
+        let corner_uvs = mesh.attributes().get_f32x2(names::UV);
         let corner_verts = mesh.corner_verts();
         let mesh_positions = mesh.positions();
         let nverts = mesh.num_verts() as usize;
@@ -357,10 +373,19 @@ impl RenderMeshCpu {
             *slot += 1;
         }
 
-        // Deduplicate by (mesh vertex, encoded normal). A smooth mesh collapses
-        // back to one vertex each; a hard-surface one splits only where it must.
+        // Deduplicate by (mesh vertex, encoded normal, surface coordinate). A
+        // smooth mesh collapses back to one vertex each; a hard-surface one
+        // splits where its shading breaks, and a textured one splits again
+        // along its seams.
+        //
+        // The coordinate is compared as bits, not as floats. Exact is what is
+        // wanted: two corners either carry the same coordinate and share a
+        // vertex, or they do not, and an epsilon would weld a seam somebody
+        // placed one texel apart. The same rule the glTF exporter follows for
+        // the same reason.
         let mut positions = Vec::with_capacity(nverts);
         let mut normals = Vec::with_capacity(nverts);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(nverts);
         let mut render_to_vert: Vec<u32> = Vec::with_capacity(nverts);
         let mut corner_to_render = vec![u32::MAX; corner_verts.len()];
         // One representative render vertex per mesh vertex, so the overlay
@@ -369,28 +394,33 @@ impl RenderMeshCpu {
         // The distinct normals of the vertex being worked on. Reused rather than
         // reallocated per vertex, which at a million vertices is a million
         // allocations for a list that never exceeds a vertex's face count.
-        let mut distinct: Vec<(u32, u32)> = Vec::new();
+        let mut distinct: Vec<(u32, [u32; 2], u32)> = Vec::new();
 
         for v in 0..nverts {
             distinct.clear();
             for &corner in &incident[offsets[v] as usize..offsets[v + 1] as usize] {
                 let normal = packed[corner as usize];
-                let index = match distinct.iter().find(|(n, _)| *n == normal) {
-                    Some((_, index)) => *index,
+                let uv = corner_uvs
+                    .map(|u| u[corner as usize])
+                    .unwrap_or(glam::Vec2::ZERO);
+                let key = [uv.x.to_bits(), uv.y.to_bits()];
+                let index = match distinct.iter().find(|(n, k, _)| *n == normal && *k == key) {
+                    Some((_, _, index)) => *index,
                     None => {
                         positions.push(GpuPosition(mesh_positions[v].to_array()));
                         normals.push(normal);
+                        uvs.push([uv.x, uv.y]);
                         render_to_vert.push(v as u32);
                         let index = (positions.len() - 1) as u32;
-                        distinct.push((normal, index));
+                        distinct.push((normal, key, index));
                         index
                     }
                 };
                 corner_to_render[corner as usize] = index;
             }
             // Which of the split copies is named is irrelevant: they differ only
-            // in their normal.
-            if let Some((_, first)) = distinct.first() {
+            // in their normal and their surface coordinate.
+            if let Some((_, _, first)) = distinct.first() {
                 representative[v] = *first;
             }
         }
@@ -460,6 +490,7 @@ impl RenderMeshCpu {
         let mut out = Self {
             positions,
             normals,
+            uvs,
             indices,
             tri_to_face: tri.tri_to_face,
             edge_verts,
@@ -521,6 +552,7 @@ impl RenderMeshCpu {
     pub fn gpu_bytes(&self) -> usize {
         self.positions.len() * 12
             + self.normals.len() * 4
+            + self.uvs.len() * 8
             + self.indices.len() * 4
             + self.tri_to_face.len() * 4
             + self.edge_verts.len() * 8
@@ -541,7 +573,7 @@ impl RenderMeshCpu {
         self
     }
 
-    /// GPU bytes per vertex. The plan's budget is 100.
+    /// GPU bytes per vertex. The budget is 108 — see `tests/vram_budget.rs`.
     /// What a drag on this mesh would cost the GPU on top of its residency.
     ///
     /// Transient and for one mesh at a time: a deform session holds a copy of
@@ -1043,9 +1075,13 @@ mod tests {
 
     #[test]
     fn gpu_memory_stays_within_the_per_vertex_budget() {
-        // The plan's budget is 100 bytes per render vertex. Asserted here so a
-        // regression fails the build rather than being noticed as an out-of-memory
-        // report on an 8 GB card.
+        // A hundred and eight bytes per render vertex, which is the plan's
+        // hundred plus the surface coordinate a material needs to sample
+        // anything. See `tests/vram_budget.rs`, which carries the reasoning and
+        // the scene-level figure that actually holds the line.
+        //
+        // Asserted here as well so a regression fails the build rather than
+        // being noticed as an out-of-memory report on an 8 GB card.
         for (name, mesh) in [
             ("grid", primitives::grid(10.0, 40, 40)),
             ("sphere", primitives::uv_sphere(1.0, 48, 24)),
@@ -1054,8 +1090,8 @@ mod tests {
         ] {
             let r = RenderMeshCpu::extract(&mesh);
             assert!(
-                r.bytes_per_vertex() <= 100.0,
-                "{name}: {:.1} bytes/vertex exceeds the 100 byte budget",
+                r.bytes_per_vertex() <= 108.0,
+                "{name}: {:.1} bytes/vertex exceeds the 108 byte budget",
                 r.bytes_per_vertex()
             );
         }

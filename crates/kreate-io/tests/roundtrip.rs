@@ -361,7 +361,7 @@ fn uvs_survive_with_their_values_where_the_contract_says_they_do() {
     let expected = specimen
         .mesh
         .attributes()
-        .get_f32x2("uv_map")
+        .get_f32x2(names::UV)
         .expect("the specimen has uv_map")
         .to_vec();
 
@@ -403,7 +403,7 @@ fn uvs_survive_with_their_values_where_the_contract_says_they_do() {
             "{format:?} came back with {sets:?}"
         );
         assert_eq!(
-            sets.contains(&"uv_map".to_string()) && sets.len() == 1,
+            sets.contains(&names::UV.to_string()) && sets.len() == 1,
             contract(format).uv_names || sets.len() == 1,
             "{format:?} came back with {sets:?}"
         );
