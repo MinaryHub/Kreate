@@ -219,9 +219,66 @@ impl Image {
     /// cheap to *declare* — the pixels arrive when something loads or paints
     /// them.
     pub fn new(name: impl Into<String>, width: u32, height: u32, format: PixelFormat) -> Self {
-        let across = tiles_for(width);
-        let down = tiles_for(height);
-        Self {
+        let name = name.into();
+        Self::try_new(name.clone(), width, height, format).unwrap_or_else(|| {
+            panic!("an image of {width}×{height} named {name} cannot be addressed or allocated")
+        })
+    }
+
+    /// The same, for a caller whose size came from somewhere it does not
+    /// control.
+    ///
+    /// `None` rather than a panic, and the distinction is the whole reason this
+    /// exists: a size written in Rust that is too big is a bug and should
+    /// abort, and a size read out of a *file* that is too big is an ordinary
+    /// corrupt file that has to be reported.
+    ///
+    /// Two ways it can be too big, and they are different:
+    ///
+    /// - **The grid cannot be indexed.** A tile is addressed as
+    ///   `tile_y * across + tile_x` in `u32`, so a grid with more than
+    ///   [`u32::MAX`] tiles is one this type cannot reach the far end of. That
+    ///   is a fact about the datablock, not a policy.
+    /// - **The grid cannot be allocated.** A declared image costs a pointer per
+    ///   tile whether or not any pixels arrive, so a file claiming a four
+    ///   billion tile image is asking for tens of gigabytes of nothing.
+    ///   [`Vec::try_reserve`] turns that into an answer instead of an abort —
+    ///   and an abort really is the alternative, because a failed allocation
+    ///   ends the process with nothing to catch.
+    ///
+    /// No arbitrary maximum is picked, deliberately. Every number that could go
+    /// here would be a guess about what a document holds, and the two limits
+    /// above are the real ones.
+    pub fn try_new(
+        name: impl Into<String>,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    ) -> Option<Self> {
+        let across = tiles_for(width) as u64;
+        let down = tiles_for(height) as u64;
+        // No overflow to check for: each side is at most `u32::MAX / TILE`,
+        // under 2^25, so the product is under 2^50. A `checked_mul` here was a
+        // guard that could not fire, which is worse than the multiplication it
+        // was guarding — it reads as though the case exists.
+        let count = across * down;
+        // Above this the grid cannot be *indexed*, which is the type's own
+        // limit: a tile is reached as `tile_y * across + tile_x` in `u32`.
+        //
+        // On any machine that exists the reservation below fails first — four
+        // billion tiles is sixty-eight gigabytes of pointers before a single
+        // pixel — so this is the invariant written down rather than a branch
+        // anything reaches. Written down anyway, because the reservation
+        // succeeding on some future machine is the case where it matters and
+        // there would be nothing to read.
+        if count > u32::MAX as u64 {
+            return None;
+        }
+        let count = usize::try_from(count).ok()?;
+        let mut tiles: Vec<Option<Arc<Tile>>> = Vec::new();
+        tiles.try_reserve_exact(count).ok()?;
+        tiles.resize(count, None);
+        Some(Self {
             name: name.into(),
             linkage: crate::document::Linkage::Local,
             uid: Uid::NONE,
@@ -230,8 +287,8 @@ impl Image {
             format,
             color_space: ColorSpace::default(),
             source: Source::Generated,
-            tiles: vec![None; (across * down) as usize],
-        }
+            tiles,
+        })
     }
 
     pub fn width(&self) -> u32 {
@@ -617,5 +674,31 @@ mod tests {
             sparse.memory_bytes(),
             sparse.flat_bytes()
         );
+    }
+
+    #[test]
+    fn a_size_too_large_to_address_is_answered_rather_than_reached() {
+        // Found by the archive's reader, which takes a size out of a file: an
+        // image whose tile grid overflows a `u32` was a multiplication that
+        // panicked in debug and silently made the wrong-sized vector in
+        // release. The grid is indexed as `tile_y * across + tile_x` in `u32`,
+        // so this is the type's own limit and not a taste.
+        assert!(Image::try_new("Absurd", u32::MAX, u32::MAX, PixelFormat::Rgba8).is_none());
+        // And one just inside it is fine, which is what makes the limit a limit
+        // rather than a refusal to try: 16K square is 128×128 tiles.
+        let ok = Image::try_new("Big", 16384, 16384, PixelFormat::Rgba8).expect("addressable");
+        assert_eq!(ok.tile_count(), 128 * 128);
+    }
+
+    #[test]
+    fn a_grid_too_large_to_allocate_is_answered_rather_than_aborting() {
+        // A declared image costs a pointer per tile before any pixels arrive,
+        // so a hostile size asks for tens of gigabytes of nothing. A failed
+        // allocation ends the process — there is no error to report and nothing
+        // to catch — so the reservation is tried rather than made.
+        //
+        // 2^31 pixels square is 2^24 × 2^24 tiles, which is inside `u32::MAX`
+        // pixels per axis and far outside any machine's memory.
+        assert!(Image::try_new("Absurd", 1 << 31, 1 << 31, PixelFormat::Rgba8).is_none());
     }
 }

@@ -18,6 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 ahash.workspace = true
 thiserror.workspace = true
+# png/jpeg for a texture, hdr for an environment. Nothing else is turned on:
+# every extra decoder is parsing surface for a file a user was handed.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+half = "2"
 
 [dev-dependencies]
 kreate-testkit.workspace = true

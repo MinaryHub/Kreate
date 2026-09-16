@@ -393,50 +393,91 @@ fn a_scene_with_no_world_comes_back_with_none() {
     assert_eq!(back.active_world(), None);
 }
 
-#[test]
-fn an_hdri_background_keeps_its_pointer_and_lands_on_a_colour() {
-    // The archive has no `images/` layout yet, so the image itself does not
-    // survive a save. What does survive is the *identity* it pointed at, which
-    // is why the record stores a uid rather than an index into a list that
-    // does not exist — the day images are written this resolves with no change
-    // to the format.
-    //
-    // Meanwhile the world comes back flat rather than pointing at nothing,
-    // because a background that is `Image(missing)` would make every consumer
-    // carry a branch for it.
+/// A world lit by an environment, with pixels in it.
+fn sky_document() -> (Document, kreate_scene::document::ImageId) {
     let mut doc = Document::new();
-    let image = doc.add_image(kreate_scene::Image::new(
-        "sky.exr",
-        64,
-        32,
-        kreate_scene::PixelFormat::Rgba16F,
-    ));
-    let sky = doc.add_world(World {
+    let mut sky = kreate_scene::Image::new("sky", 64, 32, kreate_scene::PixelFormat::Rgba16F);
+    sky.color_space = kreate_scene::ColorSpace::Raw;
+    // One recognisable value, so "the image came back" is a claim about pixels
+    // and not only about a name.
+    sky.tile_mut(0, 0).expect("in range").bytes_mut()[0] = 42;
+    let image = doc.add_image(sky);
+    let world = doc.add_world(World {
         background: Background::Image(image),
         strength: 0.8,
         ..World::new("Sky")
     });
-    doc.set_active_world(Some(sky));
+    doc.set_active_world(Some(world));
+    (doc, image)
+}
+
+#[test]
+fn an_hdri_background_finds_its_image_again() {
+    // The record has stored the background's *identity* rather than an index
+    // since minor 2, against a day when the archive would carry images. This is
+    // that day: the pointer survived three minor versions of not resolving, and
+    // resolves now with no change to the format.
+    let (doc, image) = sky_document();
+    let uid = doc.image_uid(image).expect("an identity").raw();
 
     let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
     let back = container::read(std::io::Cursor::new(bytes.clone()))
         .expect("read")
         .document;
     let world = back.world(back.active_world().expect("active")).expect("world");
-    assert!(
-        matches!(world.background, Background::Flat(_)),
-        "an image that is not in the file must not come back as a pointer"
-    );
+    let Background::Image(id) = world.background else {
+        panic!("the background came back as {:?}", world.background);
+    };
     assert_eq!(world.strength, 0.8, "the rest of the world was lost");
+    let image = back.image(id).expect("and the image it names");
+    assert_eq!(image.name, "sky");
+    assert_eq!(
+        image.tile(0, 0).map(|t| t.bytes()[0]),
+        Some(42),
+        "the background resolved to an image with the wrong pixels"
+    );
 
-    // But the pointer is in the bytes, waiting for the images to follow.
-    let uid = doc.image_uid(image).expect("an identity").raw();
+    // And by identity rather than by position, which is what makes it survive a
+    // save that reorders the arena.
     let scene = scene_json(&bytes);
     assert_eq!(
         scene["worlds"][0]["image_uid"].as_u64(),
         Some(uid),
         "the background's identity was not written"
     );
+}
+
+#[test]
+fn a_background_naming_an_image_that_is_not_there_lands_on_a_colour() {
+    // The fallback, which used to be the ordinary case and is now an error
+    // case: a file whose image was removed, or one from a build that wrote an
+    // image this one dropped. It comes back flat rather than pointing at
+    // nothing, because a background that is `Image(missing)` would make every
+    // consumer carry a branch for it.
+    //
+    // Constructed by editing the identity in the file, which is the only way to
+    // reach the branch now that images are written — and that is the point:
+    // the branch has no other test, and an untested fallback is one that
+    // quietly stops working.
+    let (doc, _) = sky_document();
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+    let broken = replace_in_scene(&bytes, "\"image_uid\":1", "\"image_uid\":9999");
+
+    let back = container::read(std::io::Cursor::new(broken))
+        .expect("read")
+        .document;
+    let world = back.world(back.active_world().expect("active")).expect("world");
+    assert!(
+        matches!(world.background, Background::Flat(_)),
+        "an identity nothing answers to came back as a pointer"
+    );
+    // Grey and not black: a missing environment should read as a missing
+    // environment rather than as a broken file.
+    let Background::Flat(color) = world.background else {
+        unreachable!()
+    };
+    assert!(color.r > 0.0, "the fallback is black");
+    assert_eq!(world.strength, 0.8, "the rest of the world was lost");
 }
 
 #[test]

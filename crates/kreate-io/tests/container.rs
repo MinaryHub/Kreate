@@ -331,3 +331,280 @@ fn a_truncated_archive_is_an_error_and_never_a_panic() {
     }
     assert!(container::read(Cursor::new(bytes)).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Images.
+//
+// `images/` was the entry the archive did not have, and three things were
+// waiting behind it: an environment for §7.8's IBL, Phase 8's textures, and the
+// world tab's background control. A world has been able to *name* its image by
+// identity since minor 2 and that name has never resolved, because there was
+// nothing in the file to resolve it to.
+
+/// An image with a recognisable pixel, and a hole where a tile is not resident.
+///
+/// The hole is the point: an image that is fully resident passes whether the
+/// residency survives or not, and residency is what the tiling exists for.
+fn patchy_image() -> kreate_scene::Image {
+    let mut image = kreate_scene::Image::new(
+        "Sky",
+        400,
+        300,
+        kreate_scene::PixelFormat::Rgba8,
+    );
+    image.color_space = kreate_scene::ColorSpace::Raw;
+    let tile = image.tile_mut(0, 0).expect("in range");
+    tile.bytes_mut()[0..4].copy_from_slice(&[9, 8, 7, 255]);
+    let tile = image.tile_mut(2, 1).expect("in range");
+    tile.bytes_mut()[0..4].copy_from_slice(&[1, 2, 3, 255]);
+    image
+}
+
+#[test]
+fn an_image_survives_a_round_trip_with_its_holes() {
+    let mut doc = Document::new();
+    let id = doc.add_image(patchy_image());
+    let before = doc.image(id).expect("the image").clone();
+
+    let loaded = round_trip(&doc);
+    let (_, after) = loaded
+        .document
+        .images()
+        .next()
+        .expect("the image came back");
+    assert_eq!(after.name, "Sky");
+    assert_eq!(after.width(), 400);
+    assert_eq!(after.height(), 300);
+    assert_eq!(after.format, kreate_scene::PixelFormat::Rgba8);
+    // The space is declared and never guessed (§2.1), so it has to be written
+    // down — and `Raw` is the one that matters, because the default is `Srgb`
+    // and a field that is never written passes a test that checks the default.
+    assert_eq!(after.color_space, kreate_scene::ColorSpace::Raw);
+    assert_eq!(
+        after.resident_tiles(),
+        2,
+        "the image came back with {} of its 2 tiles",
+        after.resident_tiles()
+    );
+    assert_eq!(after.tile_count(), before.tile_count());
+    assert_eq!(
+        after.tile(2, 1).map(|t| t.bytes()[0..4].to_vec()),
+        Some(vec![1, 2, 3, 255])
+    );
+    assert!(after.tile(1, 1).is_none(), "a hole was filled in");
+}
+
+#[test]
+fn a_worlds_background_finds_its_image_again() {
+    // The whole reason the layout is worth having, and the thing
+    // `WorldRecord::image_uid` has been written against for three minor
+    // versions. A background that does not resolve falls back to a flat grey,
+    // which is exactly what this test would see if the images were dropped.
+    let mut doc = Document::new();
+    let image = doc.add_image(patchy_image());
+    let world = doc.add_world(kreate_scene::World {
+        name: "Sky".into(),
+        linkage: kreate_scene::document::Linkage::Local,
+        uid: kreate_scene::Uid::NONE,
+        background: kreate_scene::Background::Image(image),
+        strength: 1.5,
+        rotation: 0.25,
+    });
+    doc.set_active_world(Some(world));
+
+    let loaded = round_trip(&doc);
+    let (_, world) = loaded.document.worlds().next().expect("the world came back");
+    let kreate_scene::Background::Image(id) = world.background else {
+        panic!("the background came back as {:?}", world.background);
+    };
+    let image = loaded.document.image(id).expect("and the image it names");
+    assert_eq!(image.name, "Sky");
+    assert_eq!(
+        image.tile(0, 0).map(|t| t.bytes()[0..4].to_vec()),
+        Some(vec![9, 8, 7, 255]),
+        "the background resolved to an image with the wrong pixels"
+    );
+}
+
+#[test]
+fn image_entries_are_stored_uncompressed_so_they_can_be_mapped() {
+    // The same decision as the meshes, and it has to be made now for the same
+    // reason: a file saved with its tiles deflated stays slow to open forever.
+    let mut doc = Document::new();
+    doc.add_image(patchy_image());
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("opens");
+
+    let mut checked = 0;
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).expect("entry");
+        let name = entry.name().to_string();
+        if name.ends_with(".ktile") {
+            assert_eq!(
+                entry.compression(),
+                zip::CompressionMethod::Stored,
+                "{name} is compressed, so it cannot be memory mapped"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 1, "the archive had {checked} tile files");
+}
+
+#[test]
+fn a_declared_image_with_no_pixels_writes_no_tile_file() {
+    // A 16K texture nobody has painted is a real state and an authored one —
+    // the declaration is the thing, and the pixels arrive later. Writing an
+    // entry for it would put sixteen thousand absences in the archive.
+    let mut doc = Document::new();
+    doc.add_image(kreate_scene::Image::new(
+        "Declared",
+        16384,
+        16384,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+    // Asked of the archive's entries and not of its size. A tile file for an
+    // image with nothing in it is forty-eight bytes of header, so a size test
+    // passes whether the entry is there or not — and the claim is that the
+    // entry is not there.
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("opens");
+    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    assert!(
+        !names.iter().any(|n| n.ends_with(".ktile")),
+        "an image with no pixels wrote a tile file: {names:?}"
+    );
+    let _ = &mut zip;
+
+    let loaded = container::read(Cursor::new(bytes)).expect("reads");
+    let (_, image) = loaded.document.images().next().expect("still declared");
+    assert_eq!(image.width(), 16384);
+    assert_eq!(image.resident_tiles(), 0);
+}
+
+#[test]
+fn an_images_identity_outlives_the_file() {
+    // What a world's background names it by, and what an animation curve will.
+    // An index would be a different thing: it says where the image sits today.
+    //
+    // The identity is given rather than assigned, and that is the whole of what
+    // makes this test work. A document built by `add_image` numbers its images
+    // from one, and so does a document built by a loader that forgot to restore
+    // them — so the two agree by coincidence and the test passes with the
+    // restoration gone. A document that came from a file has whatever numbers
+    // that file had, which is what is being simulated here.
+    let mut doc = Document::new();
+    let id = doc.restore_image(patchy_image(), kreate_scene::Uid::from_raw(77));
+    let uid = doc.image_uid(id).expect("restored");
+    assert_eq!(uid.raw(), 77);
+
+    let loaded = round_trip(&doc);
+    let found = loaded
+        .document
+        .image_by_uid(uid)
+        .expect("the image came back as a different datablock");
+    assert_eq!(
+        loaded.document.image(found).expect("its pixels").name,
+        "Sky"
+    );
+}
+
+#[test]
+fn where_an_image_came_from_survives_even_though_its_pixels_also_do() {
+    // The path is the authored thing. A user who edits `sky.hdr` outside and
+    // reopens expects the new sky, and without it there would be nothing to
+    // reload from — which is also what makes the thrifty version (leave the
+    // pixels out, reload from here) an addition rather than a redesign.
+    let mut doc = Document::new();
+    let mut image = patchy_image();
+    image.source = kreate_scene::Source::File("/textures/sky.hdr".into());
+    doc.add_image(image);
+
+    let loaded = round_trip(&doc);
+    let (_, image) = loaded.document.images().next().expect("came back");
+    match &image.source {
+        kreate_scene::Source::File(path) => {
+            assert_eq!(path.to_string_lossy(), "/textures/sky.hdr")
+        }
+        other => panic!("the path came back as {other:?}"),
+    }
+    // And the pixels are here too, which is what makes a `.kreate` a single
+    // file somebody can send.
+    assert_eq!(image.resident_tiles(), 2);
+}
+
+#[test]
+fn a_decoded_file_survives_the_archive_unchanged() {
+    // Both ends attached: a real PNG through the importer, into a document,
+    // through a save, and back. Each half has its own tests and this is the
+    // only thing that checks they meet.
+    let mut pixels = image::RgbaImage::new(200, 140);
+    for (x, y, p) in pixels.enumerate_pixels_mut() {
+        *p = image::Rgba([(x % 256) as u8, (y % 256) as u8, 42, 255]);
+    }
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encodes");
+
+    let decoded = kreate_io::load_image(
+        &encoded.into_inner(),
+        "Checker",
+        kreate_scene::ColorSpace::Srgb,
+    )
+    .expect("decodes");
+    let mut doc = Document::new();
+    doc.add_image(decoded);
+
+    let loaded = round_trip(&doc);
+    let (_, image) = loaded.document.images().next().expect("came back");
+    assert_eq!((image.width(), image.height()), (200, 140));
+    assert_eq!(image.color_space, kreate_scene::ColorSpace::Srgb);
+    // A pixel from the middle of a tile that is not the first one, so a walk
+    // that lost a tile or shifted one is visible.
+    let tile = image.tile(1, 1).expect("resident");
+    let at = ((10 * kreate_scene::TILE) + 10) as usize * 4;
+    assert_eq!(
+        &tile.bytes()[at..at + 4],
+        &[138, 138, 42, 255],
+        "the pixel at (138, 138) is not the one that belongs there"
+    );
+}
+
+#[test]
+fn a_build_that_has_never_heard_of_images_does_not_destroy_one() {
+    // The forwards-compatibility rule, applied to the addition this is. An
+    // older reader keeps the record in its `extra` map and the tile file as an
+    // unknown entry, and writes both back — so a document with an environment
+    // survives a round trip through a build from before environments.
+    //
+    // Simulated the only way it can be from here: the entry and the field are
+    // handed back exactly as `container::read` produced them, which is what
+    // such a reader would do.
+    let mut doc = Document::new();
+    doc.add_image(patchy_image());
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("opens");
+    let mut carried = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).expect("entry");
+        let name = entry.name().to_string();
+        if name.ends_with(".ktile") {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes).expect("reads");
+            carried.push(UnknownEntry { name, bytes });
+        }
+    }
+    assert_eq!(carried.len(), 1);
+
+    // A document with no images at all, saved with that entry carried through —
+    // which is what an older build holds after opening the file above.
+    let rewritten =
+        container::write(&Document::new(), &Manifest::default(), &carried).expect("writes");
+    let mut zip = zip::ZipArchive::new(Cursor::new(rewritten)).expect("opens");
+    assert!(
+        zip.by_name("images/000000.ktile").is_ok(),
+        "the tile file was discarded by a build that did not understand it"
+    );
+}

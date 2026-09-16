@@ -9,6 +9,7 @@
 //! manifest.json        format, version, generator, units, up axis
 //! scene.json           objects, transforms, hierarchy, references by key
 //! meshes/<key>.kmesh   binary, STORED so it can be memory mapped
+//! images/<key>.ktile   binary, STORED, the resident tiles of one image
 //! (anything else)      preserved verbatim
 //! ```
 //!
@@ -69,11 +70,19 @@ pub const VERSION_MAJOR: u32 = 1;
 /// keeps its materials — unlike a light, a material does not change what an
 /// object *is*, so nothing about the object record has to be understood for
 /// the link to survive.
-pub const VERSION_MINOR: u32 = 3;
+///
+/// 4: images (`SceneFile::images`, `images/<key>.ktile`). An older reader keeps
+/// the records in its `extra` map and the tile files as unknown entries, and
+/// writes both back — so an HDRI survives a round trip through a build that has
+/// never heard of one. What such a reader cannot do is *resolve* a world's
+/// background to it, and that was already true: `WorldRecord::image_uid` has
+/// been written since minor 2 against exactly this day.
+pub const VERSION_MINOR: u32 = 4;
 
 const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
 const MESH_DIR: &str = "meshes/";
+const IMAGE_DIR: &str = "images/";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContainerError {
@@ -94,6 +103,11 @@ pub enum ContainerError {
     Mesh {
         key: String,
         source: crate::kmesh::KmeshError,
+    },
+    #[error("image {key}: {source}")]
+    Image {
+        key: String,
+        source: crate::ktile::KtileError,
     },
     #[error("object {object} references mesh {key}, which the archive does not contain")]
     MissingMesh { object: String, key: String },
@@ -331,11 +345,11 @@ pub struct WorldRecord {
     pub color: [f32; 3],
     /// The background image's *identity*, not its index.
     ///
-    /// An identity because an image is a datablock in its own right and this
-    /// file does not yet carry images — the archive's `images/` layout is still
-    /// to come. Storing the uid now means the pointer survives every save in
-    /// between, and starts resolving the day images are written, with no change
-    /// to this format. An index into a list that does not exist would have had
+    /// An identity because an image is a datablock in its own right, and it was
+    /// written here for three minor versions before the archive could carry an
+    /// image at all. That is the point: the pointer survived every save in
+    /// between and started resolving the day `images/` arrived, with no change
+    /// to this format. An index into a list that did not exist would have had
     /// to be invented and re-invented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_uid: Option<u64>,
@@ -363,6 +377,52 @@ pub struct MaterialRecord {
     pub alpha: f32,
     pub metallic: f32,
     pub roughness: f32,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// An image datablock, as the file describes it.
+///
+/// The pixels are not here: they are in `images/<key>.ktile`, where `<key>` is
+/// this record's position in [`SceneFile::images`]. Everything that is *about*
+/// the image rather than *in* it lives here, so that reading a document's
+/// image list — what it is called, how big, what space its numbers are in —
+/// does not mean opening every tile file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImageRecord {
+    pub name: String,
+    /// The datablock's identity, which outlives this file.
+    ///
+    /// Load bearing here in a way it is not for a mesh: a world's background
+    /// names its image by uid ([`WorldRecord::image_uid`]), and has done since
+    /// before images could be written at all.
+    #[serde(default)]
+    pub uid: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `rgba8`, `rgba16f` or `r8`.
+    pub format: String,
+    /// `srgb` or `raw`. §2.1's rule: never guessed, always written down.
+    pub color_space: String,
+    /// The path this image was loaded from, if it was.
+    ///
+    /// Kept even when the pixels are also in the archive, because it is the
+    /// authored thing — a user who edits `sky.hdr` outside and reopens expects
+    /// the new sky, and without the path there is nothing to reload from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether `images/<key>.ktile` exists for this record.
+    ///
+    /// A statement about the file rather than a preference. Today the writer
+    /// packs every image that has pixels, which is what makes a `.kreate` a
+    /// single file somebody can send: an unpacked document with a texture is a
+    /// document that is broken on any other machine.
+    ///
+    /// The thrifty version — leave a `File` image's pixels out and reload them
+    /// from `path` — is a later addition and needs nothing new here, which is
+    /// why this is a field and not an assumption.
+    #[serde(default)]
+    pub packed: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -400,6 +460,10 @@ pub struct SceneFile {
     /// Material datablocks, in the order the document holds them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materials: Vec<MaterialRecord>,
+    /// Image datablocks, in the order the document holds them. The pixels of
+    /// the k-th are in `images/<k>.ktile` when [`ImageRecord::packed`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageRecord>,
     /// Each mesh's material slots, by the key the archive files the mesh
     /// under, as indices into `materials`.
     ///
@@ -564,10 +628,12 @@ fn world_record(world: &kreate_scene::World, document: &Document) -> WorldRecord
 /// The world a record describes.
 ///
 /// An image background whose image is not in this document comes back as the
-/// flat colour beside it. That is the ordinary case today rather than an error
-/// case: the archive has no `images/` layout yet, so nothing an image
-/// background points at survives a save. The *identity* does, which is why it
-/// is stored — the day images are written this resolves with no change here.
+/// flat colour beside it. Now an error case rather than the ordinary one: since
+/// minor 4 the archive carries images, so a background that does not resolve
+/// means the image was removed or its record is from somewhere else.
+///
+/// The fallback stays, and the reason it is grey rather than black is the same
+/// as it was: a missing texture should read as a missing texture.
 fn world_from_record(record: &WorldRecord, document: &Document) -> kreate_scene::World {
     use kreate_scene::Background;
 
@@ -743,6 +809,29 @@ pub fn write(
             .map(|(_, light)| light_record(light))
             .collect();
 
+        // Before the worlds, because a world's background names an image and
+        // the record has to exist for the name to mean anything. The document's
+        // own order is the archive's, the same rule as every other datablock.
+        scene.images = document
+            .images()
+            .map(|(_, image)| ImageRecord {
+                name: image.name.clone(),
+                uid: image.uid.raw(),
+                width: image.width(),
+                height: image.height(),
+                format: image.format.id().to_string(),
+                color_space: image.color_space.id().to_string(),
+                path: match &image.source {
+                    kreate_scene::Source::File(path) => Some(path.to_string_lossy().into_owned()),
+                    _ => None,
+                },
+                // Every image that holds anything. See `ImageRecord::packed`
+                // for why that and not something cleverer.
+                packed: image.resident_tiles() > 0,
+                extra: BTreeMap::new(),
+            })
+            .collect();
+
         let world_index: BTreeMap<kreate_scene::WorldId, usize> = document
             .worlds()
             .enumerate()
@@ -811,6 +900,17 @@ pub fn write(
             zip.write_all(&crate::kmesh::write(mesh, &[]))?;
         }
 
+        // STORED like the meshes, and for the same reason: a deflated entry
+        // cannot be memory mapped, and a tile being already the shape a sampler
+        // addresses is the whole of what `.ktile` buys.
+        for (slot, (_, image)) in document.images().enumerate() {
+            if image.resident_tiles() == 0 {
+                continue;
+            }
+            zip.start_file(format!("{IMAGE_DIR}{}.ktile", mesh_key(slot)), binary)?;
+            zip.write_all(&crate::ktile::write(image))?;
+        }
+
         // Last, and in the order they arrived, so their presence does not
         // disturb the position of anything else.
         for entry in unknown {
@@ -864,6 +964,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     // Every entry, so unknown ones can be carried through.
     let names: Vec<String> = zip.file_names().map(str::to_string).collect();
     let mut meshes: BTreeMap<String, MeshData> = BTreeMap::new();
+    let mut image_tiles: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut unknown = Vec::new();
     for name in names {
         if name == MANIFEST || name == SCENE {
@@ -881,6 +982,13 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 source,
             })?;
             meshes.insert(key.to_string(), loaded.mesh);
+        } else if let Some(key) = name
+            .strip_prefix(IMAGE_DIR)
+            .and_then(|k| k.strip_suffix(".ktile"))
+        {
+            // Kept as bytes and decoded beside its record, because the record
+            // is what says whose pixels these are.
+            image_tiles.insert(key.to_string(), bytes);
         } else if !name.ends_with('/') {
             // A directory entry carries nothing and is recreated by the writer;
             // anything else is content this build cannot interpret and must not
@@ -964,6 +1072,47 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .map(|s| s.and_then(|i| material_ids.get(i).copied()))
             .collect();
         document.set_mesh_slots(*mesh, resolved);
+    }
+
+    // Before the worlds, so that a background naming an image by uid finds it.
+    // That resolution has been written since minor 2 and has never resolved,
+    // because there was nothing to resolve to.
+    for (slot, record) in scene.images.iter().enumerate() {
+        let key = mesh_key(slot);
+        let mut image = match image_tiles.get(&key) {
+            Some(bytes) => crate::ktile::read(bytes, &record.name)
+                .map_err(|source| ContainerError::Image { key, source })?,
+            // Declared and empty, which is a real state: a 16K texture nobody
+            // has painted costs its dimensions and a vector of absences. Also
+            // what a record whose tile file went missing comes back as — the
+            // image is still in the document and still named, so what breaks is
+            // the picture and not the file.
+            None => kreate_scene::Image::try_new(
+                record.name.clone(),
+                record.width,
+                record.height,
+                kreate_scene::PixelFormat::from_id(&record.format).unwrap_or_default(),
+            )
+            .ok_or(ContainerError::Image {
+                key,
+                source: crate::ktile::KtileError::ImplausibleSize {
+                    width: record.width,
+                    height: record.height,
+                },
+            })?,
+        };
+        // From the record and not from the tile file, which holds neither: an
+        // image's space and where it came from are about the image, not in it.
+        // An unknown space falls back to sRGB rather than failing the load, the
+        // same judgement as an unknown projection — a texture decoded wrongly is
+        // worth opening, a document that will not open is not.
+        image.color_space =
+            kreate_scene::ColorSpace::from_id(&record.color_space).unwrap_or_default();
+        image.source = match &record.path {
+            Some(path) => kreate_scene::Source::File(std::path::PathBuf::from(path)),
+            None => kreate_scene::Source::Generated,
+        };
+        document.restore_image(image, kreate_scene::Uid::from_raw(record.uid));
     }
 
     let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());

@@ -1601,6 +1601,8 @@ dependencies = [
  "bytemuck",
  "glam",
  "gltf",
+ "half",
+ "image",
  "kreate-math",
  "kreate-mesh",
  "kreate-scene",

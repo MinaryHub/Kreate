@@ -160,6 +160,31 @@ fn golden_document() -> Document {
         o.transform.scale = glam::DVec3::splat(1.5);
         o.visible = false;
     }
+
+    // An image and a world that names it, so the archive's `images/` layout is
+    // under the same tripwire as everything else. `R8` because a tile is always
+    // full and this is a file in the repository: one 128×128 byte tile is 16 KB
+    // against the 64 KB an `Rgba8` one would be, and what is being pinned is the
+    // header and index layout rather than the pixels.
+    //
+    // The `.ktile` module has compile-time asserts on its header and index
+    // sizes, and they would not notice two fields of the same width trading
+    // places. This would.
+    let mut image = kreate_scene::Image::new("Mask", 128, 128, kreate_scene::PixelFormat::R8);
+    image.color_space = kreate_scene::ColorSpace::Raw;
+    let tile = image.tile_mut(0, 0).expect("in range");
+    tile.bytes_mut()[0] = 3;
+    tile.bytes_mut()[1] = 5;
+    let image = doc.add_image(image);
+    let world = doc.add_world(kreate_scene::World {
+        name: "Sky".into(),
+        linkage: kreate_scene::document::Linkage::Local,
+        uid: kreate_scene::Uid::NONE,
+        background: kreate_scene::Background::Image(image),
+        strength: 1.0,
+        rotation: 0.0,
+    });
+    doc.set_active_world(Some(world));
     doc
 }
 

@@ -9,9 +9,11 @@
 pub mod container;
 pub mod gltf_export;
 pub mod gltf_import;
+pub mod image_import;
 pub mod build;
 pub mod ir;
 pub mod kmesh;
+pub mod ktile;
 pub mod library;
 pub mod migrate;
 pub mod obj;
@@ -26,5 +28,7 @@ pub use ir::{
     UvOrigin,
 };
 pub use kmesh::{KmeshError, UnknownBuffer};
+pub use image_import::{load_image, load_image_file, ImageError};
+pub use ktile::KtileError;
 pub use obj::{parse_obj, write_obj, ObjError, ObjOptions};
 pub use stl::{parse_stl, write_stl, StlError, StlOptions};
