@@ -12,6 +12,7 @@ pub mod docfile;
 pub mod dragpreview;
 pub mod environment;
 pub mod expr;
+pub mod glyphs;
 pub mod gpu_sync;
 pub mod materials;
 pub mod modal;

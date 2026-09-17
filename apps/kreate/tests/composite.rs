@@ -322,6 +322,9 @@ fn composite_with(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("composite"),
         });
+    // The lamp and camera glyphs, the way the frame loop hands them over.
+    let (marker_lines, marker_points) = kreate::glyphs::markers_for(doc);
+    viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.render(&mut encoder, &vp_view, &draws);
 

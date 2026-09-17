@@ -14,6 +14,8 @@ pub mod environment;
 pub mod gpu;
 pub mod hiz;
 pub mod lights;
+pub mod markers;
+pub use markers::{MarkerShape, OverlayLine, OverlayPoint};
 pub mod material;
 pub mod lod;
 pub mod mesh_gpu;

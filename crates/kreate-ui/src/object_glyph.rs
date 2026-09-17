@@ -1,27 +1,15 @@
-//! The pictures drawn for objects that have no surface: lights and cameras.
+//! Putting a world point on the screen, for the interface's half of the lamp
+//! and camera glyphs.
 //!
-//! A lamp has a position and a direction and no mesh, so until this existed
-//! adding one changed the lighting and nothing else — in the studio shading,
-//! which does not use the scene's lights, it changed nothing at all. A user
-//! who adds a light and sees the viewport unchanged concludes the button is
-//! broken, and they are right to.
-//!
-//! **Blender's glyphs**, because a modeller reads them without being told: a
-//! small circle for a point light with a dashed line dropped to the ground
-//! plane; the same circle with parallel rays for a sun; a circle with a cone
-//! for a spot; a square for an area light; and a pyramid for a camera, with a
-//! triangle on top saying which way is up.
-//!
-//! **Drawn by the interface, not the renderer.** These are display-referred
-//! marks in the interface palette, like the navigation gizmo, and the
-//! interface already owns the layer over the picture. It also keeps them out
-//! of the display transform, which would dim a lamp's glyph when the scene got
-//! bright. The cost is that they do not hide behind geometry, which Blender's
-//! do; that wants the renderer's depth and is left for when picking a lamp by
-//! its glyph needs the renderer anyway.
+//! The glyphs themselves are drawn by the renderer, in its own pass against
+//! its depth, so a lamp behind a wall is behind the wall — see
+//! `kreate_render::markers`. What is left to the interface is the click: the
+//! renderer's id buffer has never heard of a lamp, so a click on one has to be
+//! answered here, by projecting the lamp the same way the renderer did and
+//! asking whether the pointer is on its body.
 
-use egui::{Color32, Painter, Pos2, Rect, Stroke};
-use kreate_math::{DAffine3, DMat4, DQuat, DVec3};
+use egui::{Pos2, Rect};
+use kreate_math::{DMat4, DQuat, DVec3};
 
 /// What the interface knows about the camera, enough to put a world point on
 /// the screen.
@@ -54,18 +42,9 @@ impl Projector {
     }
 }
 
-/// What kind of light a glyph stands for.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum LightGlyph {
-    Point,
-    Sun,
-    /// Full cone angle, in radians.
-    Spot { cone_angle: f64 },
-    Area,
-}
-
-/// The size of a glyph's body on screen, in points: the same whatever the
-/// distance, the way a widget is, so a far lamp is still findable.
+/// The radius of a glyph's body on screen, in points: the same whatever the
+/// distance, the way a widget is, so a far lamp is still findable. Kept equal
+/// to what the renderer draws — see `kreate::glyphs`.
 const BODY: f32 = 7.0;
 
 /// How close a click has to land to a glyph's body to be a click on it.
@@ -88,171 +67,6 @@ pub fn hits(projector: &Projector, world: DVec3, at: Pos2) -> bool {
         Some(centre) => projector.rect.contains(centre) && centre.distance(at) <= HIT_RADIUS,
         None => false,
     }
-}
-
-/// Draws a light at `transform`, lit in the accent when selected.
-pub fn light(
-    painter: &Painter,
-    projector: &Projector,
-    transform: &DAffine3,
-    kind: LightGlyph,
-    ink: Color32,
-) {
-    let origin = transform.translation;
-    let Some(at) = projector.project(origin) else {
-        return;
-    };
-    if !projector.rect.contains(at) {
-        return;
-    }
-    let line = Stroke::new(1.2, ink);
-    let faint = Stroke::new(1.0, ink.gamma_multiply(0.55));
-
-    // The body: a small circle with a dot, for every kind but the area light.
-    match kind {
-        LightGlyph::Area => {
-            painter.rect_stroke(
-                Rect::from_center_size(at, egui::Vec2::splat(BODY * 2.0)),
-                0.0,
-                line,
-                egui::StrokeKind::Middle,
-            );
-        }
-        _ => {
-            painter.circle_stroke(at, BODY, line);
-            painter.circle_filled(at, 1.6, ink);
-        }
-    }
-
-    // The line to the ground: from the light straight down to z = 0, dashed,
-    // which is how the eye reads a height. Only when the light is above or
-    // below the ground rather than on it.
-    if origin.z.abs() > 1e-6 {
-        if let Some(foot) = projector.project(DVec3::new(origin.x, origin.y, 0.0)) {
-            dashed(painter, at, foot, faint);
-            painter.circle_filled(foot, 1.5, ink.gamma_multiply(0.55));
-        }
-    }
-
-    // The direction, for the kinds that have one. A light points down its own
-    // -Z, which is glTF's convention and Blender's.
-    let forward = transform.matrix3 * DVec3::NEG_Z;
-    match kind {
-        LightGlyph::Sun => {
-            // Parallel rays: one from the body along the direction, and a
-            // few short ones beside it.
-            let side = perpendicular(forward);
-            for k in -1..=1 {
-                let offset = side * (k as f64 * 0.25);
-                let (Some(a), Some(b)) = (
-                    projector.project(origin + offset * 0.6),
-                    projector.project(origin + offset * 0.6 + forward * 1.2),
-                ) else {
-                    continue;
-                };
-                painter.line_segment([a, b], if k == 0 { line } else { faint });
-            }
-        }
-        LightGlyph::Spot { cone_angle } => {
-            // The cone: four edges from the light to a circle one unit along
-            // the direction, whose radius is the cone's.
-            let length = 1.5;
-            let radius = (cone_angle * 0.5).tan() * length;
-            let (u, v) = basis(forward);
-            let ring: Vec<Pos2> = (0..24)
-                .filter_map(|i| {
-                    let t = i as f64 / 24.0 * std::f64::consts::TAU;
-                    projector.project(origin + forward * length + (u * t.cos() + v * t.sin()) * radius)
-                })
-                .collect();
-            if ring.len() == 24 {
-                painter.add(egui::Shape::closed_line(ring.clone(), faint));
-                for i in [0usize, 6, 12, 18] {
-                    painter.line_segment([at, ring[i]], faint);
-                }
-            }
-        }
-        LightGlyph::Point | LightGlyph::Area => {}
-    }
-    if kind == LightGlyph::Area {
-        if let Some(tip) = projector.project(origin + forward * 0.8) {
-            painter.line_segment([at, tip], faint);
-        }
-    }
-}
-
-/// Draws a camera at `transform` as a pyramid with its apex at the camera,
-/// opening along -Z, and a triangle on the top edge for "up".
-pub fn camera(
-    painter: &Painter,
-    projector: &Projector,
-    transform: &DAffine3,
-    // Horizontal and vertical half-extents of the frame one unit ahead.
-    half_extents: (f64, f64),
-    ink: Color32,
-) {
-    let origin = transform.translation;
-    let m = transform.matrix3;
-    let forward = m * DVec3::NEG_Z;
-    let right = m * DVec3::X;
-    let up = m * DVec3::Y;
-    let depth = 1.0;
-    let (hw, hh) = half_extents;
-    let centre = origin + forward * depth;
-    let corners = [
-        centre + right * hw + up * hh,
-        centre - right * hw + up * hh,
-        centre - right * hw - up * hh,
-        centre + right * hw - up * hh,
-    ];
-    let Some(apex) = projector.project(origin) else {
-        return;
-    };
-    let projected: Vec<Pos2> = corners.iter().filter_map(|c| projector.project(*c)).collect();
-    if projected.len() != 4 {
-        return;
-    }
-    let line = Stroke::new(1.2, ink);
-    painter.add(egui::Shape::closed_line(projected.clone(), line));
-    for p in &projected {
-        painter.line_segment([apex, *p], Stroke::new(1.0, ink.gamma_multiply(0.7)));
-    }
-    // The up triangle, sitting on the top edge of the frame.
-    let tri = [
-        centre + up * hh + right * hw * 0.5,
-        centre + up * hh - right * hw * 0.5,
-        centre + up * (hh + hh * 0.7),
-    ];
-    let tri: Vec<Pos2> = tri.iter().filter_map(|c| projector.project(*c)).collect();
-    if tri.len() == 3 {
-        painter.add(egui::Shape::convex_polygon(tri, ink, Stroke::NONE));
-    }
-}
-
-fn dashed(painter: &Painter, a: Pos2, b: Pos2, stroke: Stroke) {
-    let len = (b - a).length();
-    if len < 1.0 {
-        return;
-    }
-    let dash = 4.0;
-    let n = (len / (dash * 2.0)).ceil().max(1.0) as usize;
-    for k in 0..n {
-        let t0 = (k as f32 * 2.0 * dash / len).min(1.0);
-        let t1 = ((k as f32 * 2.0 + 1.0) * dash / len).min(1.0);
-        painter.line_segment([a + (b - a) * t0, a + (b - a) * t1], stroke);
-    }
-}
-
-/// A unit vector perpendicular to `v`.
-fn perpendicular(v: DVec3) -> DVec3 {
-    let helper = if v.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
-    v.cross(helper).normalize_or_zero()
-}
-
-/// Two unit vectors perpendicular to `v` and to each other.
-fn basis(v: DVec3) -> (DVec3, DVec3) {
-    let u = perpendicular(v);
-    (u, v.cross(u).normalize_or_zero())
 }
 
 #[cfg(test)]
@@ -302,14 +116,6 @@ mod tests {
     fn a_point_behind_the_camera_is_not_drawn() {
         let p = projector();
         assert_eq!(p.project(DVec3::new(0.0, 0.0, 6.0)), None);
-    }
-
-    #[test]
-    fn the_basis_is_orthonormal() {
-        let v = DVec3::new(0.3, -0.5, 0.8).normalize();
-        let (u, w) = basis(v);
-        assert!(u.dot(v).abs() < 1e-9 && w.dot(v).abs() < 1e-9 && u.dot(w).abs() < 1e-9);
-        assert!((u.length() - 1.0).abs() < 1e-9 && (w.length() - 1.0).abs() < 1e-9);
     }
 
     #[test]

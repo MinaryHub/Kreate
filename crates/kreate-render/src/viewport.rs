@@ -102,6 +102,15 @@ struct ShadingGlobals {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct MarkerGlobals {
+    view_proj: [[f32; 4]; 4],
+    /// xy: viewport size in pixels. z: relative depth offset toward the
+    /// viewer. w: unused.
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct EdgeGlobals {
     view_proj: [[f32; 4]; 4],
     params: [f32; 4],
@@ -1245,6 +1254,15 @@ pub struct Viewport {
     grid_bind: wgpu::BindGroup,
     edges: wgpu::RenderPipeline,
     edge_globals_buf: wgpu::Buffer,
+    /// The markers, lamp and camera glyphs, drawn over the picture against
+    /// its depth. See [`crate::markers`].
+    marker_globals_buf: wgpu::Buffer,
+    marker_globals_bind: wgpu::BindGroup,
+    marker_storage_layout: wgpu::BindGroupLayout,
+    marker_lines: crate::markers::GrowingStorage,
+    marker_points: crate::markers::GrowingStorage,
+    marker_line_pipeline: wgpu::RenderPipeline,
+    marker_point_pipeline: wgpu::RenderPipeline,
     edge_globals_bind: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
     edge_object_layout: wgpu::BindGroupLayout,
@@ -1485,6 +1503,47 @@ impl Viewport {
         let grid_bind = bind(&grid_layout, &grid_buf, "grid bind");
         let edge_globals_bind = bind(&edge_globals_layout, &edge_globals_buf, "edge globals bind");
 
+        // The markers' three groups: one uniform block, and a storage buffer
+        // each for the lines and the rings, grown on demand.
+        let marker_globals_layout = uniform_layout(device, "marker globals layout", false, None);
+        let marker_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("marker globals"),
+            size: std::mem::size_of::<MarkerGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let marker_globals_bind = bind(
+            &marker_globals_layout,
+            &marker_globals_buf,
+            "marker globals bind",
+        );
+        let marker_storage_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("marker storage layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let marker_lines = crate::markers::GrowingStorage::new(
+            device,
+            &marker_storage_layout,
+            "marker lines",
+            std::mem::size_of::<crate::markers::GpuLine>() as u64,
+        );
+        let marker_points = crate::markers::GrowingStorage::new(
+            device,
+            &marker_storage_layout,
+            "marker points",
+            std::mem::size_of::<crate::markers::GpuPoint>() as u64,
+        );
+
         let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("solid"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/solid.wgsl").into()),
@@ -1519,6 +1578,56 @@ impl Viewport {
             ],
             immediate_size: 0,
         });
+        let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("markers"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/markers.wgsl").into()),
+        });
+        let marker_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("marker layout"),
+            bind_group_layouts: &[
+                Some(&marker_globals_layout),
+                Some(&marker_storage_layout),
+                Some(&marker_storage_layout),
+            ],
+            immediate_size: 0,
+        });
+        // The edge overlay's recipe: a quad from the vertex and instance
+        // indices, alpha-blended, tested against the solid pass but not
+        // writing depth.
+        let marker_pipeline = |label: &str, vs: &str, fs: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&marker_pl),
+                vertex: wgpu::VertexState {
+                    module: &marker_shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &marker_shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(gpu::depth_read_state()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let marker_line_pipeline = marker_pipeline("marker lines", "vs_line", "fs_line");
+        let marker_point_pipeline = marker_pipeline("marker points", "vs_point", "fs_point");
+
         let id_pipelines =
             IdPipelines::new(device, &id_globals_layout, &layouts.id, &id_object_layout);
 
@@ -2012,6 +2121,13 @@ impl Viewport {
             edges,
             edge_globals_buf,
             edge_globals_bind,
+            marker_globals_buf,
+            marker_globals_bind,
+            marker_storage_layout,
+            marker_lines,
+            marker_points,
+            marker_line_pipeline,
+            marker_point_pipeline,
             id_pipelines,
             id_globals_buf,
             id_globals_bind,
@@ -2353,6 +2469,21 @@ impl Viewport {
                 non_manifold_color: palette::display_rgba(palette::EDGE_NON_MANIFOLD),
                 seam_color: palette::display_rgba(palette::EDGE_SEAM),
                 sharp_color: palette::display_rgba(palette::EDGE_SHARP),
+            }),
+        );
+        queue.write_buffer(
+            &self.marker_globals_buf,
+            0,
+            bytemuck::bytes_of(&MarkerGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                params: [
+                    self.render_size.0 as f32,
+                    self.render_size.1 as f32,
+                    // The wireframe's layer: a ring sitting on a wall wins the
+                    // tie with the wall, and loses to a wall in front of it.
+                    EDGE_DEPTH_OFFSET,
+                    0.0,
+                ],
             }),
         );
 
@@ -3572,6 +3703,61 @@ impl Viewport {
             pass.set_bind_group(0, &self.grid_bind, &[]);
             pass.draw(0..3, 0..1);
         }
+
+        // The markers last, over the grid, and against the depth the solid
+        // pass wrote: a lamp behind a wall is behind the wall.
+        if self.marker_lines.count > 0 || self.marker_points.count > 0 {
+            pass.set_bind_group(0, &self.marker_globals_bind, &[]);
+            pass.set_bind_group(1, &self.marker_lines.bind, &[]);
+            pass.set_bind_group(2, &self.marker_points.bind, &[]);
+            if self.marker_lines.count > 0 {
+                pass.set_pipeline(&self.marker_line_pipeline);
+                pass.draw(0..4, 0..self.marker_lines.count);
+            }
+            if self.marker_points.count > 0 {
+                pass.set_pipeline(&self.marker_point_pipeline);
+                pass.draw(0..4, 0..self.marker_points.count);
+            }
+        }
+    }
+
+    /// Hands over this frame's markers: the lines and rings that stand for
+    /// objects with no surface. See [`crate::markers`].
+    ///
+    /// `eye` is the camera's, so positions can be rebased before they are
+    /// narrowed to `f32`: the same subtraction every world-space thing in this
+    /// crate makes, and the one that keeps a glyph on its object far from the
+    /// origin.
+    pub fn set_markers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        eye: glam::DVec3,
+        lines: &[crate::markers::OverlayLine],
+        points: &[crate::markers::OverlayPoint],
+    ) {
+        let packed_lines: Vec<crate::markers::GpuLine> = lines
+            .iter()
+            .map(|l| crate::markers::GpuLine::pack(l, eye))
+            .collect();
+        let packed_points: Vec<crate::markers::GpuPoint> = points
+            .iter()
+            .map(|p| crate::markers::GpuPoint::pack(p, eye))
+            .collect();
+        self.marker_lines.upload(
+            device,
+            queue,
+            &self.marker_storage_layout,
+            bytemuck::cast_slice(&packed_lines),
+            packed_lines.len() as u32,
+        );
+        self.marker_points.upload(
+            device,
+            queue,
+            &self.marker_storage_layout,
+            bytemuck::cast_slice(&packed_points),
+            packed_points.len() as u32,
+        );
     }
 
     pub fn render(

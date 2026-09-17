@@ -215,6 +215,9 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
         })
         .collect();
 
+    // The lamp and camera glyphs, the way the frame loop hands them over.
+    let (marker_lines, marker_points) = kreate::glyphs::markers_for(doc);
+    viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {

@@ -3756,6 +3756,19 @@ impl App {
             };
         }
 
+        // The lamps and cameras, as lines and rings for the renderer to draw
+        // against its depth — see `glyphs`. Rebuilt each frame: a handful of
+        // objects, and a copy of their transforms would be one more thing to
+        // keep in step with undo.
+        let (marker_lines, marker_points) = kreate::glyphs::markers_for(&self.doc);
+        gfx.viewport.set_markers(
+            &gfx.gpu.device,
+            &gfx.gpu.queue,
+            self.camera.eye(),
+            &marker_lines,
+            &marker_points,
+        );
+
         // 3D into the offscreen target...
         gfx.viewport
             .prepare(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &mut draws);

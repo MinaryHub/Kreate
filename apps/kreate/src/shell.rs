@@ -1792,77 +1792,12 @@ fn draw_viewport(
             egui::Color32::WHITE,
         );
     }
-    draw_object_glyphs(ui, state, doc, rect);
     let toolbar = draw_toolbar(ui, state, mode, rect);
     draw_view_info(ui, state, doc, mode, l, rect, toolbar);
     draw_select_band(ui, state, rect);
     draw_modal_header(ui, state, rect);
     draw_nav_gizmo(ui, state, rect);
     draw_context_menu(ui, state, rect);
-}
-
-/// The glyphs for objects with no surface: a lamp's circle and ground line, a
-/// camera's pyramid.
-///
-/// Until these existed, adding a light changed the lighting and nothing else —
-/// and in the studio shading, which does not use the scene's lights, it
-/// changed nothing at all. A user who adds a light and sees the viewport
-/// unchanged concludes the button is broken, and is right to.
-///
-/// Drawn from the document each frame rather than kept as state: there are a
-/// handful of lamps in any scene, and a copy of their transforms would be one
-/// more thing to keep in step with undo.
-fn draw_object_glyphs(ui: &mut Ui, state: &ShellState, doc: &Document, viewport: egui::Rect) {
-    use kreate_ui::object_glyph::{self, LightGlyph};
-    let Some(mut projector) = state.projector else {
-        return;
-    };
-    // The picture may have moved or resized since the projector was made; the
-    // rectangle the glyphs are placed in is this frame's.
-    projector.rect = viewport;
-    let theme = kreate_ui::theme::from_ui(ui);
-    let painter = ui.painter().with_clip_rect(viewport);
-    for (id, object) in doc.objects() {
-        if !object.visible {
-            continue;
-        }
-        let ink = if doc.selection.contains(id) {
-            theme.accent
-        } else {
-            theme.text_dim
-        };
-        let transform = doc.world_transform(id);
-        match &object.data {
-            kreate_scene::document::ObjectData::Light(light) => {
-                let Some(light) = doc.light(*light) else {
-                    continue;
-                };
-                let kind = match light.kind {
-                    kreate_scene::LightKind::Point { .. } => LightGlyph::Point,
-                    kreate_scene::LightKind::Sun { .. } => LightGlyph::Sun,
-                    kreate_scene::LightKind::Spot { cone_angle, .. } => {
-                        LightGlyph::Spot { cone_angle }
-                    }
-                    kreate_scene::LightKind::Area { .. } => LightGlyph::Area,
-                };
-                object_glyph::light(&painter, &projector, &transform, kind, ink);
-            }
-            kreate_scene::document::ObjectData::Camera(camera) => {
-                let Some(camera) = doc.camera(*camera) else {
-                    continue;
-                };
-                // The frame one unit ahead, from the lens: half the sensor
-                // over the focal length is the tangent of the half angle.
-                let f = camera.focal_length_mm.max(1.0);
-                let half = (
-                    camera.sensor_width_mm * 0.5 / f,
-                    camera.sensor_height_mm * 0.5 / f,
-                );
-                object_glyph::camera(&painter, &projector, &transform, half, ink);
-            }
-            _ => {}
-        }
-    }
 }
 
 /// What a click on `hit` does to an object selection.
@@ -1903,11 +1838,11 @@ pub fn click_selection(
 
 /// The lamp or camera whose glyph is under `at`, if any.
 ///
-/// **The other half of drawing them.** The glyphs are the interface's, drawn
-/// over the picture, so the renderer's id buffer has never heard of them and a
-/// click on one landed on whatever was behind — which read as "lights cannot be
-/// selected". This asks the same projection the glyphs were drawn with, so
-/// what can be clicked is exactly what is on screen.
+/// **The other half of drawing them.** The glyphs are drawn by the renderer
+/// against its depth, but the renderer's id buffer has never heard of a lamp,
+/// so a click on one landed on whatever was behind — which read as "lights
+/// cannot be selected". This asks the same projection the glyphs were drawn
+/// with, so what can be clicked is exactly what is on screen.
 ///
 /// The nearest wins when two overlap, and a hidden object is never returned:
 /// its glyph is not drawn, so there is nothing to have clicked.

@@ -76,6 +76,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
         ("shadow", include_str!("../src/shaders/shadow.wgsl").into()),
         ("tiles", include_str!("../src/shaders/tiles.wgsl").into()),
+        ("markers", include_str!("../src/shaders/markers.wgsl").into()),
         (
             "environment",
             include_str!("../src/shaders/environment.wgsl").into(),
