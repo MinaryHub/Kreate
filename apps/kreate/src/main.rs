@@ -1915,6 +1915,19 @@ impl App {
                 Command::Dispatch { op_id, params } => {
                     self.dispatch(&Action { op_id, params });
                 }
+                // The outliner's key resolved against the *current* document,
+                // then handed to the operator as the identity it wants — so
+                // the eye is one undo step like any other edit.
+                Command::SetVisible { object, visible } => {
+                    let uid = shell::object_from_key(&self.doc, object)
+                        .and_then(|id| self.doc.object_uid(id));
+                    if let Some(uid) = uid {
+                        let mut params = PropertyMap::new();
+                        params.set("uid", PropertyValue::Text(uid.raw().to_string()));
+                        params.set("visible", PropertyValue::Bool(visible));
+                        self.run_op("object.set_visible", params);
+                    }
+                }
                 Command::ToggleEditMode => self.toggle_edit_mode(),
                 // An unknown tag is ignored, which is what a script or a keymap
                 // written against a later version should get.

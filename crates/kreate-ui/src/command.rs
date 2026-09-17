@@ -106,6 +106,17 @@ pub enum Command {
     /// because the button that runs it lives in the Material tab, which is the
     /// only place somebody looks when they want one.
     NewMaterial,
+    /// Show or hide one object, named by the outliner's opaque key.
+    ///
+    /// From the eye on an outliner row, which acts on *that row* whether or
+    /// not it is selected — a user hides the thing in the way, which is by
+    /// definition not the thing they are working on. The application resolves
+    /// the key to an identity and runs `object.set_visible`, so the edit is
+    /// one undo step like any other.
+    SetVisible {
+        object: u32,
+        visible: bool,
+    },
     /// Run an action the way a key press would.
     ///
     /// **The other door into the application.** `RunOperator` goes through

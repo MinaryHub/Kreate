@@ -1056,6 +1056,62 @@ impl Operator for RemoveMaterialSlot {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetVisibleParams {
+    /// The object's identity, in decimal. See [`SetWorldImageParams::uid`] on
+    /// why an identity and not a position.
+    pub uid: String,
+    pub visible: bool,
+}
+
+/// Shows or hides one object, by identity.
+///
+/// **Not the selection.** The outliner's eye acts on its own row whether or
+/// not that row is selected — a user hides the thing in the way, which is by
+/// definition not the thing they are working on. So the object is named, and
+/// named by the uid a file and a script agree on rather than by an arena slot
+/// that is reused the moment something is deleted.
+///
+/// Setting what is already so is a cancel, not an edit: pressing undo after
+/// clicking the eye of a visible object should bring back the last *change*,
+/// not replay a no-op.
+pub struct SetVisible;
+
+impl Operator for SetVisible {
+    type Params = SetVisibleParams;
+
+    fn id() -> &'static str {
+        "object.set_visible"
+    }
+    fn label() -> &'static str {
+        "Set Visibility"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.object_count() > 0
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Ok(raw) = params.uid.trim().parse::<u64>() else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(id) = doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if doc.document().object(id).map(|o| o.visible) == Some(params.visible) {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(object) = doc.document_mut().object_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        object.visible = params.visible;
+        Ok(OpResult::Finished)
+    }
+}
+
 /// The mesh the active object draws, if it draws one.
 pub fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
     match doc.object(doc.selection.active?)?.data {
@@ -1933,6 +1989,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetWorldImage>();
     registry.register::<NewMaterial>();
     registry.register::<AddMaterialSlot>();
+    registry.register::<SetVisible>();
     registry.register::<RemoveMaterialSlot>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();

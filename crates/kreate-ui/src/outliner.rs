@@ -35,16 +35,6 @@ pub enum RowKind {
 }
 
 impl RowKind {
-    /// A short glyph, chosen from characters the subset font actually contains.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            RowKind::Empty => "\u{25CB}",
-            RowKind::Mesh { .. } => "\u{25B2}",
-            RowKind::Camera => "\u{25B7}",
-            RowKind::Light => "\u{25C7}",
-        }
-    }
-
     pub fn i18n_key(self) -> &'static str {
         match self {
             RowKind::Empty => "outliner-kind-empty",
@@ -190,12 +180,14 @@ fn draw_row(
     ui.horizontal(|ui| {
         ui.add_space(row.depth as f32 * 12.0);
 
-        // i18n-exempt: geometric glyphs standing in for icons
-        ui.label(row.kind.glyph()).on_hover_text(catalog.format(
-            row.kind.i18n_key(),
-            TextKind::Tooltip,
-            &[],
-        ));
+        // A drawn icon for what the object is, the way Blender's tree says
+        // mesh, light or camera before the name does. Painted rather than a
+        // glyph: the bundled font is a subset with no fallback, and the
+        // triangles and diamonds standing in here said nothing anyway.
+        let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        object_icon(ui, row.kind, icon_rect, row.visible);
+        ui.interact(icon_rect, ui.id().with(("kind", row.id)), egui::Sense::hover())
+            .on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
 
         let mut label = egui::RichText::new(&row.name);
         if row.active {
@@ -228,7 +220,133 @@ fn draw_row(
                     &[("count", &row.mesh_users.to_string())],
                 ));
         }
+
+        // The eye, against the right edge where Blender keeps it. On the row
+        // and not on the selection: hiding acts on what is in the way.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (eye, response) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+            eye_icon(ui, eye, row.visible, response.hovered());
+            let response = response.on_hover_text(catalog.format(
+                if row.visible {
+                    "outliner-hide"
+                } else {
+                    "outliner-show"
+                },
+                TextKind::Tooltip,
+                &[],
+            ));
+            if response.clicked() {
+                queue.push(Command::SetVisible {
+                    object: row.id,
+                    visible: !row.visible,
+                });
+            }
+        });
     });
+}
+
+/// The icon for what an object is.
+fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: bool) {
+    let theme = crate::theme::from_ui(ui);
+    let ink = if visible { theme.text_dim } else { theme.text_faint };
+    let p = ui.painter();
+    let c = rect.center();
+    let s = rect.width() * 0.34;
+    let line = egui::Stroke::new(1.2, ink);
+    match kind {
+        // A cube in isometric outline: three visible faces.
+        RowKind::Mesh { .. } => {
+            let top = egui::Pos2::new(c.x, c.y - s);
+            let left = egui::Pos2::new(c.x - s, c.y - s * 0.5);
+            let right = egui::Pos2::new(c.x + s, c.y - s * 0.5);
+            let bottom = egui::Pos2::new(c.x, c.y + s);
+            let bl = egui::Pos2::new(c.x - s, c.y + s * 0.5);
+            let br = egui::Pos2::new(c.x + s, c.y + s * 0.5);
+            p.add(egui::Shape::closed_line(vec![top, right, br, bottom, bl, left], line));
+            p.line_segment([left, c], line);
+            p.line_segment([right, c], line);
+            p.line_segment([c, bottom], line);
+        }
+        // A bulb: a circle on a short base.
+        RowKind::Light => {
+            p.circle_stroke(egui::Pos2::new(c.x, c.y - s * 0.25), s * 0.8, line);
+            p.line_segment(
+                [egui::Pos2::new(c.x - s * 0.35, c.y + s * 0.75), egui::Pos2::new(c.x + s * 0.35, c.y + s * 0.75)],
+                line,
+            );
+            p.line_segment(
+                [egui::Pos2::new(c.x - s * 0.25, c.y + s * 1.05), egui::Pos2::new(c.x + s * 0.25, c.y + s * 1.05)],
+                line,
+            );
+        }
+        // A camera: a body with a lens pointing right.
+        RowKind::Camera => {
+            let body = egui::Rect::from_center_size(egui::Pos2::new(c.x - s * 0.25, c.y), egui::Vec2::new(s * 1.5, s * 1.2));
+            p.rect_stroke(body, 1.0, line, egui::StrokeKind::Middle);
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::Pos2::new(body.max.x, c.y - s * 0.35),
+                    egui::Pos2::new(body.max.x + s * 0.7, c.y - s * 0.7),
+                    egui::Pos2::new(body.max.x + s * 0.7, c.y + s * 0.7),
+                    egui::Pos2::new(body.max.x, c.y + s * 0.35),
+                ],
+                egui::Color32::TRANSPARENT,
+                line,
+            ));
+        }
+        // An empty: three axes from a point.
+        RowKind::Empty => {
+            p.line_segment([egui::Pos2::new(c.x - s, c.y), egui::Pos2::new(c.x + s, c.y)], line);
+            p.line_segment([egui::Pos2::new(c.x, c.y - s), egui::Pos2::new(c.x, c.y + s)], line);
+        }
+    }
+}
+
+/// The eye that says whether an object is shown, open or shut.
+fn eye_icon(ui: &Ui, rect: egui::Rect, open: bool, hovered: bool) {
+    let theme = crate::theme::from_ui(ui);
+    let ink = match (open, hovered) {
+        (true, _) => theme.text_dim,
+        (false, true) => theme.text_dim,
+        (false, false) => theme.text_faint,
+    };
+    let p = ui.painter();
+    let c = rect.center();
+    let w = rect.width() * 0.36;
+    let h = rect.height() * 0.22;
+    let line = egui::Stroke::new(1.2, ink);
+    // The lid: two arcs meeting at the corners.
+    let upper: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let t = i as f32 / 12.0;
+            let x = c.x - w + 2.0 * w * t;
+            let y = c.y - h * (1.0 - (2.0 * t - 1.0).powi(2));
+            egui::Pos2::new(x, y)
+        })
+        .collect();
+    p.add(egui::Shape::line(upper, line));
+    if open {
+        let lower: Vec<egui::Pos2> = (0..=12)
+            .map(|i| {
+                let t = i as f32 / 12.0;
+                let x = c.x - w + 2.0 * w * t;
+                let y = c.y + h * (1.0 - (2.0 * t - 1.0).powi(2));
+                egui::Pos2::new(x, y)
+            })
+            .collect();
+        p.add(egui::Shape::line(lower, line));
+        p.circle_filled(c, h * 0.55, ink);
+    } else {
+        // Shut: the lid alone, with lashes, which is how a closed eye reads
+        // at sixteen pixels.
+        for dx in [-0.6f32, 0.0, 0.6] {
+            let x = c.x + dx * w;
+            p.line_segment(
+                [egui::Pos2::new(x, c.y - h * 0.2), egui::Pos2::new(x + dx * 1.5, c.y + h * 0.9)],
+                line,
+            );
+        }
+    }
 }
 
 /// A one-line summary of a row, for the status bar.

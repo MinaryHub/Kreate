@@ -891,6 +891,9 @@ struct Labels {
     transform_scale: String,
     view_user_perspective: String,
     view_user_orthographic: String,
+    panel_transform: String,
+    panel_surface: String,
+    panel_light: String,
     menu_object: String,
     menu_mesh: String,
     menu_edge: String,
@@ -988,6 +991,9 @@ impl Labels {
             transform_scale: t("transform-scale"),
             view_user_perspective: t("view-user-perspective"),
             view_user_orthographic: t("view-user-orthographic"),
+            panel_transform: t("panel-transform"),
+            panel_surface: t("panel-surface"),
+            panel_light: t("panel-light"),
             menu_object: t("menu-object"),
             menu_mesh: t("menu-mesh"),
             menu_edge: t("menu-edge"),
@@ -1197,9 +1203,7 @@ pub fn draw(
                 // acting on.
                 ui.colored_label(theme.accent, name);
             }
-            ui.separator();
-            ui.label(&status);
-            // The last thing that happened, to the right of the standing counts.
+            // The last thing that happened.
             // A save that reports nothing is a save the user cannot distinguish
             // from one that silently failed.
             if let Some(message) = &state.status {
@@ -1212,6 +1216,12 @@ pub fn draw(
                 // i18n-exempt: a generated script line is API text, not prose
                 ui.monospace(entry.to_script_call());
             }
+            // The standing counts on the right, where Blender keeps its
+            // statistics: what is true of the scene, apart from what just
+            // happened to it.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(&status);
+            });
         });
     });
 
@@ -2801,7 +2811,7 @@ fn draw_properties(
                 .auto_shrink([false, false])
                 .show(ui, |ui| match current {
                     PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
-                    PropertiesTab::Object => draw_object_tab(ui, state, doc, registry),
+                    PropertiesTab::Object => draw_object_tab(ui, state, doc, registry, l),
                     PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
                     PropertiesTab::Material => draw_material_tab(ui, state, doc, registry, l),
                     PropertiesTab::World => draw_world_tab(ui, state, doc, registry, l),
@@ -2885,6 +2895,7 @@ fn draw_object_tab(
     state: &mut ShellState,
     doc: &Document,
     registry: &OperatorRegistry,
+    l: &Labels,
 ) {
     let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
         return;
@@ -2904,16 +2915,21 @@ fn draw_object_tab(
     );
     params.set("rotation", kreate_reflect::PropertyValue::Vec3([rx, ry, rz]));
     params.set("scale", kreate_reflect::PropertyValue::Vec3(t.scale.to_array()));
-    if kreate_ui::property_editor::property_editor(
-        ui,
-        &state.catalog,
-        info.id,
-        info.schema,
-        &mut params,
-    ) {
-        let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        send_edit(state, "object.set_transform", params, dragging);
-    }
+    // In a panel, the way Blender's Object tab is a stack of them. One today;
+    // the shape is what lets the next — relations, visibility — arrive as a
+    // title rather than as more rows.
+    kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
+        if kreate_ui::property_editor::property_editor(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+        ) {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "object.set_transform", params, dragging);
+        }
+    });
 }
 
 /// The camera half of the Data tab.
@@ -3089,6 +3105,7 @@ fn draw_material_tab(
     // texture assigned and a white colour the panel looked exactly like a
     // panel with no texture, so the one question somebody opens this tab to
     // answer had no answer on screen.
+    kreate_ui::panel::section(ui, &l.panel_surface, true, |ui| {
     ui.label(&l.material_base_colour);
     ui.horizontal(|ui| {
         let assigned = material
@@ -3134,6 +3151,7 @@ fn draw_material_tab(
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "material.set_properties", params, dragging);
     }
+    });
 }
 
 /// The World tab: the light arriving from no object in particular.
@@ -3182,16 +3200,18 @@ fn draw_world_tab(
     ui.separator();
     let mut params =
         kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::world_params(world));
-    if kreate_ui::property_editor::property_editor(
-        ui,
-        &state.catalog,
-        info.id,
-        info.schema,
-        &mut params,
-    ) {
-        let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        send_edit(state, "world.set_properties", params, dragging);
-    }
+    kreate_ui::panel::section(ui, &l.panel_surface, true, |ui| {
+        if kreate_ui::property_editor::property_editor(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+        ) {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "world.set_properties", params, dragging);
+        }
+    });
 }
 
 /// The Data tab: what the active object *is*.
@@ -3276,17 +3296,19 @@ fn draw_light_data(
         Some(kreate_reflect::PropertyValue::Enum(k)) => *k,
         _ => 0,
     };
-    if kreate_ui::property_editor::property_editor_where(
-        ui,
-        &state.catalog,
-        info.id,
-        info.schema,
-        &mut params,
-        |name| kreate_ops::ops::object::light_param_applies(kind, name),
-    ) {
-        let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        send_edit(state, "light.set_properties", params, dragging);
-    }
+    kreate_ui::panel::section(ui, &l.panel_light, true, |ui| {
+        if kreate_ui::property_editor::property_editor_where(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            |name| kreate_ops::ops::object::light_param_applies(kind, name),
+        ) {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "light.set_properties", params, dragging);
+        }
+    });
 }
 
 /// Draws the modifier stack for the active object.
@@ -3430,6 +3452,11 @@ transform-rotate = Rotate
 transform-scale = Scale
 view-user-perspective = User Perspective
 view-user-orthographic = User Orthographic
+panel-transform = Transform
+panel-surface = Surface
+panel-light = Light
+outliner-hide = Hide in viewport
+outliner-show = Show in viewport
 tool-select = Select Box
 tool-move = Move
 tool-rotate = Rotate
@@ -3677,6 +3704,11 @@ transform-rotate = 회전
 transform-scale = 크기
 view-user-perspective = 사용자 원근
 view-user-orthographic = 사용자 직교
+panel-transform = 변환
+panel-surface = 표면
+panel-light = 라이트
+outliner-hide = 뷰포트에서 숨기기
+outliner-show = 뷰포트에 보이기
 tool-select = 박스 선택
 tool-move = 이동
 tool-rotate = 회전
@@ -4528,6 +4560,11 @@ mod tests {
             "transform-scale",
             "view-user-perspective",
             "view-user-orthographic",
+            "panel-transform",
+            "panel-surface",
+            "panel-light",
+            "outliner-hide",
+            "outliner-show",
             "tool-select",
             "tool-move",
             "tool-rotate",
