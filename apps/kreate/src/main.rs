@@ -3095,13 +3095,33 @@ impl App {
                 // whatever was behind it, or nothing, and lights could not be
                 // selected in the viewport at all.
                 let glyph = self.glyph_under_cursor();
-                let objects = match (glyph, hit) {
-                    (Some(id), _) => vec![shell::object_key(id)],
-                    (None, Some(hit)) => vec![hit.object],
-                    (None, None) if extend => return true,
-                    (None, None) => Vec::new(),
+                let hit_key = match (glyph, hit) {
+                    (Some(id), _) => Some(shell::object_key(id)),
+                    (None, Some(hit)) => Some(hit.object),
+                    (None, None) => None,
                 };
-                let active = objects.last().copied();
+                let (objects, active) = match hit_key {
+                    // Through one rule for a plain click and a shift-click,
+                    // the same one the outliner applies, so the two ways of
+                    // selecting an object cannot disagree about what
+                    // shift means.
+                    Some(key) => {
+                        let selected: Vec<u32> = self
+                            .doc
+                            .selection
+                            .objects
+                            .iter()
+                            .map(|id| shell::object_key(*id))
+                            .collect();
+                        let active = self.doc.selection.active.map(shell::object_key);
+                        shell::click_selection(&selected, active, key, extend)
+                    }
+                    // Clicking empty space clears the selection — but not when
+                    // extending, where the user is adding to it and a miss
+                    // should leave what they have alone.
+                    None if extend => return true,
+                    None => (Vec::new(), None),
+                };
                 // Queued rather than applied here, so it goes through the same
                 // key resolution the outliner does: a key from a frame where an
                 // object still existed must not act on whatever reused its slot.

@@ -1865,6 +1865,42 @@ fn draw_object_glyphs(ui: &mut Ui, state: &ShellState, doc: &Document, viewport:
     }
 }
 
+/// What a click on `hit` does to an object selection.
+///
+/// **Blender's rule, and the outliner's.** A plain click selects the hit and
+/// nothing else. A shift-click adds it — or, when it is already selected,
+/// takes it out again, because the same gesture on the same thing twice
+/// should undo itself rather than do nothing. The active object becomes the
+/// hit when it was added, and when the hit was removed and was active, falls
+/// to the last thing still selected, so there is always something for the
+/// panels to show while anything is selected.
+///
+/// A pure function so it can be tested without a frame: the viewport's click
+/// arrives in the application and the outliner's in a widget, and both have
+/// to give the same answer to the same gesture.
+pub fn click_selection(
+    selected: &[u32],
+    active: Option<u32>,
+    hit: u32,
+    extend: bool,
+) -> (Vec<u32>, Option<u32>) {
+    if !extend {
+        return (vec![hit], Some(hit));
+    }
+    if selected.contains(&hit) {
+        let remaining: Vec<u32> = selected.iter().copied().filter(|k| *k != hit).collect();
+        let active = if active == Some(hit) {
+            remaining.last().copied()
+        } else {
+            active.filter(|a| remaining.contains(a))
+        };
+        return (remaining, active);
+    }
+    let mut objects = selected.to_vec();
+    objects.push(hit);
+    (objects, Some(hit))
+}
+
 /// The lamp or camera whose glyph is under `at`, if any.
 ///
 /// **The other half of drawing them.** The glyphs are the interface's, drawn
@@ -4889,5 +4925,36 @@ mod tests {
         let p = projector();
         let origin = p.project(kreate_math::DVec3::ZERO).unwrap();
         assert_eq!(glyph_under(&doc, &p, origin), None);
+    }
+
+    // --- what a click does to the selection --------------------------------
+
+    #[test]
+    fn a_plain_click_selects_the_hit_and_nothing_else() {
+        assert_eq!(click_selection(&[1, 2], Some(2), 3, false), (vec![3], Some(3)));
+        assert_eq!(click_selection(&[1, 2], Some(2), 1, false), (vec![1], Some(1)));
+    }
+
+    #[test]
+    fn a_shift_click_adds_the_hit_and_makes_it_active() {
+        // The complaint: shift-click replaced the selection in the viewport
+        // while adding to it in the outliner. One rule now.
+        assert_eq!(click_selection(&[1, 2], Some(2), 3, true), (vec![1, 2, 3], Some(3)));
+        assert_eq!(click_selection(&[], None, 3, true), (vec![3], Some(3)));
+    }
+
+    #[test]
+    fn a_shift_click_on_a_selected_object_takes_it_out_again() {
+        // The same gesture on the same thing twice undoes itself rather than
+        // doing nothing, which is Blender's rule and the one a user expects.
+        assert_eq!(click_selection(&[1, 2, 3], Some(1), 2, true), (vec![1, 3], Some(1)));
+    }
+
+    #[test]
+    fn removing_the_active_object_hands_active_to_the_last_still_selected() {
+        // There should always be something for the panels to show while
+        // anything is selected.
+        assert_eq!(click_selection(&[1, 2, 3], Some(3), 3, true), (vec![1, 2], Some(2)));
+        assert_eq!(click_selection(&[3], Some(3), 3, true), (Vec::<u32>::new(), None));
     }
 }
