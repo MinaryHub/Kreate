@@ -68,6 +68,28 @@ pub enum LightGlyph {
 /// distance, the way a widget is, so a far lamp is still findable.
 const BODY: f32 = 7.0;
 
+/// How close a click has to land to a glyph's body to be a click on it.
+///
+/// A little larger than the body, because a seven-point circle is a small
+/// thing to hit with a pointer and a miss by two points reads as "lamps
+/// cannot be selected" rather than as a miss.
+pub const HIT_RADIUS: f32 = BODY + 4.0;
+
+/// Whether a click at `at` lands on the glyph of an object at `world`.
+///
+/// The same projection the glyph was drawn with, which is what makes the
+/// answer match the picture: the body is drawn at the object's projected
+/// position at a constant screen size, so that is what is tested. The ground
+/// line, the cone and the camera's frame are not part of the target — they
+/// are long and thin, and a click on them is more often a click on whatever
+/// is behind.
+pub fn hits(projector: &Projector, world: DVec3, at: Pos2) -> bool {
+    match projector.project(world) {
+        Some(centre) => projector.rect.contains(centre) && centre.distance(at) <= HIT_RADIUS,
+        None => false,
+    }
+}
+
 /// Draws a light at `transform`, lit in the accent when selected.
 pub fn light(
     painter: &Painter,
@@ -288,5 +310,17 @@ mod tests {
         let (u, w) = basis(v);
         assert!(u.dot(v).abs() < 1e-9 && w.dot(v).abs() < 1e-9 && u.dot(w).abs() < 1e-9);
         assert!((u.length() - 1.0).abs() < 1e-9 && (w.length() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_click_on_the_body_hits_and_one_beside_it_does_not() {
+        let p = projector();
+        let world = DVec3::ZERO;
+        let centre = p.project(world).unwrap();
+        assert!(hits(&p, world, centre));
+        assert!(hits(&p, world, centre + egui::vec2(HIT_RADIUS - 0.5, 0.0)));
+        assert!(!hits(&p, world, centre + egui::vec2(HIT_RADIUS + 1.0, 0.0)));
+        // Behind the camera there is no glyph to hit.
+        assert!(!hits(&p, DVec3::new(0.0, 0.0, 6.0), centre));
     }
 }

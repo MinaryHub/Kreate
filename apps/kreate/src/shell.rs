@@ -1865,6 +1865,48 @@ fn draw_object_glyphs(ui: &mut Ui, state: &ShellState, doc: &Document, viewport:
     }
 }
 
+/// The lamp or camera whose glyph is under `at`, if any.
+///
+/// **The other half of drawing them.** The glyphs are the interface's, drawn
+/// over the picture, so the renderer's id buffer has never heard of them and a
+/// click on one landed on whatever was behind — which read as "lights cannot be
+/// selected". This asks the same projection the glyphs were drawn with, so
+/// what can be clicked is exactly what is on screen.
+///
+/// The nearest wins when two overlap, and a hidden object is never returned:
+/// its glyph is not drawn, so there is nothing to have clicked.
+pub fn glyph_under(
+    doc: &Document,
+    projector: &kreate_ui::object_glyph::Projector,
+    at: egui::Pos2,
+) -> Option<ObjectId> {
+    let mut best: Option<(f32, ObjectId)> = None;
+    for (id, object) in doc.objects() {
+        if !object.visible {
+            continue;
+        }
+        if !matches!(
+            object.data,
+            kreate_scene::document::ObjectData::Light(_)
+                | kreate_scene::document::ObjectData::Camera(_)
+        ) {
+            continue;
+        }
+        let world = doc.world_transform(id).translation;
+        if !kreate_ui::object_glyph::hits(projector, world, at) {
+            continue;
+        }
+        let distance = projector
+            .project(world)
+            .map(|p| p.distance(at))
+            .unwrap_or(f32::MAX);
+        if best.is_none_or(|(d, _)| distance < d) {
+            best = Some((distance, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
 /// The tool column down the left of the viewport. Returns its rectangle so the
 /// view text can start beside it rather than under it.
 ///
@@ -4738,5 +4780,114 @@ mod tests {
         let count = seen.len();
         seen.dedup();
         assert_eq!(count, seen.len(), "two property tabs share a glyph");
+    }
+
+    // --- picking a lamp by its glyph -------------------------------------
+
+    /// A camera at +Z looking down -Z at the origin, over a 400×300 picture.
+    fn projector() -> kreate_ui::object_glyph::Projector {
+        let aspect = 4.0 / 3.0;
+        let f = 1.0 / (std::f64::consts::FRAC_PI_4).tan();
+        let projection = kreate_math::DMat4::from_cols_array(&[
+            f / aspect, 0.0, 0.0, 0.0,
+            0.0, f, 0.0, 0.0,
+            0.0, 0.0, -1.0, -1.0,
+            0.0, 0.0, -0.1, 0.0,
+        ]);
+        kreate_ui::object_glyph::Projector {
+            eye: kreate_math::DVec3::new(0.0, 0.0, 6.0),
+            rotation: kreate_math::DQuat::IDENTITY,
+            projection,
+            rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0)),
+        }
+    }
+
+    fn lamp_at(doc: &mut Document, name: &str, at: kreate_math::DVec3) -> ObjectId {
+        let light = doc.add_light(kreate_scene::Light::of_kind(
+            name,
+            kreate_scene::LightKind::BULB,
+        ));
+        let mut object = kreate_scene::document::Object::new(
+            name,
+            kreate_scene::document::ObjectData::Light(light),
+        );
+        object.transform.translation = at;
+        doc.add_object(object)
+    }
+
+    #[test]
+    fn a_click_on_a_lamps_glyph_finds_the_lamp() {
+        // The complaint: lights could not be selected in the viewport. The id
+        // buffer has never heard of a lamp, so the interface that draws the
+        // glyph is what has to answer the click — with the same projection.
+        let mut doc = Document::new();
+        doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let at = kreate_math::DVec3::new(1.5, 0.5, 0.0);
+        let lamp = lamp_at(&mut doc, "Lamp", at);
+        let p = projector();
+        let on_screen = p.project(at).expect("in front of the camera");
+        assert_eq!(glyph_under(&doc, &p, on_screen), Some(lamp));
+        assert_eq!(
+            glyph_under(&doc, &p, on_screen + egui::vec2(3.0, -2.0)),
+            Some(lamp),
+            "a near miss inside the hit radius should still be the lamp"
+        );
+        assert_eq!(
+            glyph_under(&doc, &p, on_screen + egui::vec2(60.0, 0.0)),
+            None,
+            "a click well away from the glyph is not a click on it"
+        );
+    }
+
+    #[test]
+    fn a_hidden_lamp_cannot_be_clicked() {
+        // Its glyph is not drawn, so there is nothing to have clicked — and
+        // selecting an invisible object from the viewport would be a surprise.
+        let mut doc = Document::new();
+        let at = kreate_math::DVec3::new(0.0, 1.0, 0.0);
+        let lamp = lamp_at(&mut doc, "Lamp", at);
+        doc.object_mut(lamp).unwrap().visible = false;
+        let p = projector();
+        let on_screen = p.project(at).unwrap();
+        assert_eq!(glyph_under(&doc, &p, on_screen), None);
+    }
+
+    #[test]
+    fn the_nearer_of_two_overlapping_glyphs_wins() {
+        let mut doc = Document::new();
+        let a = lamp_at(&mut doc, "A", kreate_math::DVec3::new(0.0, 0.0, 0.0));
+        let b = lamp_at(&mut doc, "B", kreate_math::DVec3::new(0.12, 0.0, 0.0));
+        let p = projector();
+        let at_a = p.project(kreate_math::DVec3::ZERO).unwrap();
+        let at_b = p.project(kreate_math::DVec3::new(0.12, 0.0, 0.0)).unwrap();
+        assert!(at_a.distance(at_b) < kreate_ui::object_glyph::HIT_RADIUS, "the fixture must overlap");
+        assert_eq!(glyph_under(&doc, &p, at_a), Some(a));
+        assert_eq!(glyph_under(&doc, &p, at_b), Some(b));
+    }
+
+    #[test]
+    fn a_camera_object_is_clickable_too() {
+        let mut doc = Document::new();
+        let cam = doc.add_camera(kreate_scene::Camera::new("Camera"));
+        let mut object = kreate_scene::document::Object::new(
+            "Camera",
+            kreate_scene::document::ObjectData::Camera(cam),
+        );
+        let at = kreate_math::DVec3::new(-1.0, -0.5, 0.0);
+        object.transform.translation = at;
+        let id = doc.add_object(object);
+        let p = projector();
+        assert_eq!(glyph_under(&doc, &p, p.project(at).unwrap()), Some(id));
+    }
+
+    #[test]
+    fn a_mesh_is_never_answered_by_the_glyph_test() {
+        // Meshes are the id buffer's business; answering for one here would
+        // shadow the real pick with a guess at the object's origin.
+        let mut doc = Document::new();
+        doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let p = projector();
+        let origin = p.project(kreate_math::DVec3::ZERO).unwrap();
+        assert_eq!(glyph_under(&doc, &p, origin), None);
     }
 }

@@ -3089,10 +3089,17 @@ impl App {
                 }
             }
             _ => {
-                let objects = match hit {
-                    Some(hit) => vec![hit.object],
-                    None if extend => return true,
-                    None => Vec::new(),
+                // A lamp's or camera's glyph first, because it is drawn on
+                // top. The id buffer has never heard of them — they have no
+                // surface — so without this a click on a lamp selected
+                // whatever was behind it, or nothing, and lights could not be
+                // selected in the viewport at all.
+                let glyph = self.glyph_under_cursor();
+                let objects = match (glyph, hit) {
+                    (Some(id), _) => vec![shell::object_key(id)],
+                    (None, Some(hit)) => vec![hit.object],
+                    (None, None) if extend => return true,
+                    (None, None) => Vec::new(),
                 };
                 let active = objects.last().copied();
                 // Queued rather than applied here, so it goes through the same
@@ -3104,6 +3111,19 @@ impl App {
             }
         }
         true
+    }
+
+    /// The lamp or camera whose glyph is under the cursor, if any.
+    ///
+    /// Asked of the shell with the projector it drew the glyphs from, so a hit
+    /// is a hit on what is on screen. `None` when the frame has not yet said
+    /// where the picture is.
+    fn glyph_under_cursor(&self) -> Option<kreate_scene::ObjectId> {
+        let (x, y) = self.input.cursor?;
+        let projector = self.ui.projector?;
+        let ppp = self.egui_ctx.pixels_per_point();
+        let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+        shell::glyph_under(&self.doc, &projector, at)
     }
 
     /// The cursor's position in the viewport, as normalised device coordinates.
