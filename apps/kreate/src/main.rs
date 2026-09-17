@@ -3328,6 +3328,25 @@ impl App {
             texture: g.target.id,
             uv: g.viewport.uv_extent(),
         });
+        // What the interface needs of the camera this frame: the gizmo's
+        // rotation, and enough to project a lamp's position onto the picture.
+        // From last frame's viewport rectangle, which is the one the glyphs
+        // will be drawn into until the layout changes — and the shell replaces
+        // the rectangle with this frame's as it draws.
+        self.ui.camera_rotation = self.camera.rotation;
+        self.ui.projector = self.viewport_px.map(|(x, y, w, h)| {
+            let ppp = self.egui_ctx.pixels_per_point();
+            let aspect = if h > 0.0 { (w / h) as f64 } else { 1.0 };
+            kreate_ui::object_glyph::Projector {
+                eye: self.camera.eye(),
+                rotation: self.camera.rotation,
+                projection: self.camera.projection_matrix(aspect).as_dmat4(),
+                rect: egui::Rect::from_min_size(
+                    egui::pos2(x / ppp, y / ppp),
+                    egui::vec2(w / ppp, h / ppp),
+                ),
+            }
+        });
         let mut viewport_rect = egui::Rect::ZERO;
         let output = {
             let ui_state = &mut self.ui;

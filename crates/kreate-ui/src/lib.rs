@@ -12,6 +12,7 @@ pub mod command_info;
 pub mod context_menu;
 pub mod element_icon;
 pub mod fonts;
+pub mod object_glyph;
 pub mod panel;
 pub mod toolbar;
 pub mod view_icons;

@@ -225,9 +225,25 @@ fn composite_with(
     // by a clock that never moves is caught part way — the first picture of the
     // right-click menu was a translucent ghost with two empty buttons in it, and
     // a test counting changed pixels passed against it.
+    // The camera, before the passes rather than after them: the shell draws
+    // the lamp and camera glyphs from a projector built out of it, so the
+    // frame has to know the camera while it is being drawn. Re-framed each
+    // pass as the viewport's aspect settles, and the same camera then renders
+    // the picture — one camera for both, or the glyphs sit beside their objects.
+    let mut camera = kreate_render::Camera::default();
     for pass in 0..4 {
         let mut raw_input = raw_input.clone();
         raw_input.time = Some(pass as f64 * 0.25);
+        camera.frame_sphere(glam::DVec3::ZERO, 2.0, viewport.aspect());
+        state.camera_rotation = camera.rotation;
+        if viewport_rect.width() > 0.0 {
+            state.projector = Some(kreate_ui::object_glyph::Projector {
+                eye: camera.eye(),
+                rotation: camera.rotation,
+                projection: camera.projection_matrix(viewport.aspect()).as_dmat4(),
+                rect: viewport_rect,
+            });
+        }
         let output = ctx.run_ui(raw_input, |ui| {
             root_rect = ui.max_rect();
             viewport_rect = kreate::shell::draw(
@@ -300,9 +316,6 @@ fn composite_with(
             )
         })
         .collect();
-
-    let mut camera = kreate_render::Camera::default();
-    camera.frame_sphere(glam::DVec3::ZERO, 2.0, viewport.aspect());
 
     let mut encoder = gpu
         .device
@@ -1695,4 +1708,72 @@ fn shot_every_tab() {
         };
         shot.dump(&format!("tab-{label}"));
     }
+}
+
+/// A cube with a point light in frame beside it, shown or hidden.
+fn doc_with_lamp(visible: bool) -> (Document, glam::DVec3) {
+    let mut doc = doc_with_cube();
+    let at = glam::DVec3::new(1.3, -0.9, 1.4);
+    let light = doc.add_light(kreate_scene::Light::of_kind(
+        "Lamp",
+        kreate_scene::LightKind::BULB,
+    ));
+    let mut lamp = Object::new("Lamp", ObjectData::Light(light));
+    lamp.transform.translation = at;
+    lamp.visible = visible;
+    doc.add_object(lamp);
+    (doc, at)
+}
+
+#[test]
+fn a_lamp_is_drawn_where_it_is() {
+    // The complaint this answers: adding a light changed nothing on screen. A
+    // lamp has no surface, so the renderer draws nothing for it; the interface
+    // draws a glyph over the picture at the lamp's projected position. Which
+    // is checked *at that position* — a glyph somewhere else would be a lamp
+    // the user cannot find.
+    let (shown, at) = doc_with_lamp(true);
+    let (hidden, _) = doc_with_lamp(false);
+    let with = gpu_or_skip!(composite(&shown, "en"));
+    let without = gpu_or_skip!(composite(&hidden, "en"));
+    with.dump("lamp");
+
+    let projector = with.state.projector.expect("the frame knew its camera");
+    let centre = projector.project(at).expect("the lamp is in front of the camera");
+    assert!(
+        with.viewport_rect.contains(centre),
+        "the fixture's lamp is off screen at {centre:?}; move it"
+    );
+
+    // Pixels that differ between the two frames, within the glyph's reach of
+    // the lamp — and none far from it, since hiding a lamp changes nothing
+    // else about a studio-shaded picture.
+    let differ = |from: f32, to: f32| -> usize {
+        let mut n = 0;
+        for y in (with.viewport_rect.top() as u32)..(with.viewport_rect.bottom() as u32) {
+            for x in (with.viewport_rect.left() as u32)..(with.viewport_rect.right() as u32) {
+                let d = egui::pos2(x as f32, y as f32).distance(centre);
+                if d < from || d >= to {
+                    continue;
+                }
+                if with.at(x, y) != without.at(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let near = differ(0.0, 14.0);
+    assert!(near > 30, "only {near} pixels changed around the lamp at {centre:?}");
+    // The ground line runs from the lamp down to z = 0, so the band between
+    // is allowed to differ; well beyond both, nothing may.
+    let foot = projector
+        .project(glam::DVec3::new(at.x, at.y, 0.0))
+        .expect("the foot is in front of the camera");
+    let reach = centre.distance(foot) + 20.0;
+    let far = differ(reach, 10_000.0);
+    assert!(
+        far < 20,
+        "{far} pixels changed far from the lamp; hiding it should touch only its glyph"
+    );
 }
