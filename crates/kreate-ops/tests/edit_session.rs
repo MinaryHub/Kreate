@@ -405,3 +405,80 @@ fn undo_still_restores_through_a_session() {
         "the session wrote stale topology over an undo"
     );
 }
+
+/// The face of `mesh` whose centroid is highest.
+fn top_face(d: &Document, mesh: MeshId) -> (u32, f32) {
+    let m = d.mesh(mesh).unwrap();
+    let positions = m.positions();
+    let corner_verts = m.corner_verts();
+    (0..m.num_faces())
+        .map(|f| {
+            let z = m
+                .face_corner_range(f)
+                .map(|c| positions[corner_verts[c] as usize].z)
+                .sum::<f32>()
+                / m.face_len(f) as f32;
+            (f, z)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn pressing_extrude_twice_extrudes_the_same_face_twice() {
+    // The report: in edit mode, each press of E extruded a different face.
+    // The first press was right; the second grabbed whichever face happened
+    // to share a slot number with the new lid once the arena had a hole in
+    // it. Through the session, because the session is where the selection is
+    // adopted onto the edit structure — the path a script without one never
+    // takes, which is why no test had seen it.
+    let (r, mut h, mut d, mesh, c) = setup();
+    let (top, z0) = top_face(&d, mesh);
+    kreate_mesh::selection::set_selected(
+        d.mesh_mut(mesh).unwrap(),
+        kreate_mesh::attribute::Domain::Face,
+        top,
+        true,
+    );
+    let mut session = EditSessions::new();
+    session.open_for(&d, &[mesh]);
+
+    let faces_before = d.mesh(mesh).unwrap().num_faces();
+    for press in 1..=2 {
+        h.dispatch_in_session(
+            &r,
+            &mut d,
+            Some(&mut session),
+            &c,
+            "mesh.extrude_region",
+            &params(&[("offset", PropertyValue::Float(1.0))]),
+        )
+        .expect("mesh.extrude_region");
+
+        let m = d.mesh(mesh).unwrap();
+        // The extruded face is deleted and a lid and four walls appear: four
+        // more faces per press, and — the part that matters here — a hole in
+        // the edit structure's arena from the first press on.
+        assert_eq!(
+            m.num_faces(),
+            faces_before + 4 * press,
+            "press {press}: a lid and four walls for the face that was there"
+        );
+        // The selection is the new lid and nothing else, and the lid sits one
+        // unit higher per press — which it can only do if the second press
+        // extruded the first press's lid rather than some other face.
+        let selected: Vec<u32> = m
+            .attributes()
+            .get_bool(kreate_mesh::attribute::names::SELECT_FACE)
+            .map(|s| (0..s.len() as u32).filter(|i| s[*i as usize]).collect())
+            .unwrap_or_default();
+        let (lid, z) = top_face(&d, mesh);
+        assert_eq!(selected, vec![lid], "press {press}: the selection is not the lid alone");
+        assert!(
+            (z - (z0 + press as f32)).abs() < 1e-4,
+            "press {press}: the lid is at z={z}, expected {}",
+            z0 + press as f32
+        );
+    }
+}
+

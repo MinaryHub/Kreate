@@ -74,7 +74,28 @@ impl BMesh {
     /// slot `i` of the arena for as long as nothing has been added or removed.
     pub fn adopt_selection(&mut self, mesh: &crate::MeshData) {
         self.ensure_selection_layers();
-        for mode in [SelectMode::Vert, SelectMode::Edge, SelectMode::Face] {
+        // The document numbers elements densely and this structure numbers
+        // them by arena slot, and the two agree only until something is
+        // removed. `to_mesh_data` walks the live elements in slot order and
+        // gives each the next index, so the document's element *n* is the
+        // n-th live slot — which is how `adopt_positions` pairs them, and how
+        // this must too.
+        //
+        // It did not. It copied slot for slot, so after the first extrude —
+        // which deletes the original face and appends new ones, leaving a hole
+        // in the arena — the document's selected face landed on whichever
+        // slot happened to share its number. The next E extruded that one.
+        // "Each press extrudes a different face" was the report, and it was
+        // exactly right.
+        let live: [Vec<u32>; 3] = [
+            self.vert_ids().map(|v| v.index()).collect(),
+            self.edge_ids().map(|e| e.index()).collect(),
+            self.face_ids().map(|f| f.index()).collect(),
+        ];
+        for (mode, slots) in [SelectMode::Vert, SelectMode::Edge, SelectMode::Face]
+            .into_iter()
+            .zip(live)
+        {
             let Some(source) = mesh.attributes().get_bool(mode.layer()) else {
                 continue;
             };
@@ -82,10 +103,15 @@ impl BMesh {
             let Some(target) = self.attributes.make_mut_bool(mode.layer()) else {
                 continue;
             };
-            // Slot count and element count differ once anything has been
-            // removed, so the copy is bounded by both rather than assumed equal.
-            let n = target.len().min(source.len());
-            target[..n].copy_from_slice(&source[..n]);
+            // Every slot cleared first, so a dead one cannot keep a stale
+            // selection that a later element reuses.
+            target.fill(false);
+            for (rank, slot) in slots.into_iter().enumerate() {
+                let Some(on) = source.get(rank) else { break };
+                if let Some(t) = target.get_mut(slot as usize) {
+                    *t = *on;
+                }
+            }
         }
     }
 
@@ -496,6 +522,50 @@ mod tests {
                 .get_bool(names::SELECT_FACE)
                 .map(|s| s.iter().filter(|x| **x).count()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn a_selection_adopted_after_a_deletion_lands_on_the_right_face() {
+        // The bug as the user met it. Extruding a face deletes it and appends
+        // new ones, which leaves a hole in the arena; the document numbers
+        // faces densely, so from then on slot and index disagree. The
+        // selection has to be paired the way `to_mesh_data` numbers, by rank
+        // among the live faces, or the face the document says is selected is
+        // not the one this structure thinks is.
+        use crate::primitives;
+        let mut bm = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let top = bm
+            .face_ids()
+            .max_by(|a, b| {
+                let za = bm.face_normal(*a).z;
+                let zb = bm.face_normal(*b).z;
+                za.partial_cmp(&zb).unwrap()
+            })
+            .unwrap();
+        let out = crate::edit::extrude_faces(&mut bm, &[top], glam::Vec3::Z).unwrap();
+        let lid = out.new_faces[0];
+        // The extrude deleted the top and appended a lid and four walls, so
+        // there is a hole where the top was and every face after it has a
+        // slot one higher than its dense index. Without that the bug cannot
+        // show, so the fixture says so.
+        let slots: Vec<u32> = bm.face_ids().map(|f| f.index()).collect();
+        assert!(
+            slots.iter().any(|s| *s as usize >= slots.len()),
+            "the fixture needs a hole in the arena for the bug to show: {slots:?}"
+        );
+
+        // What the document holds: the lid selected, by its dense index.
+        let mut data = bm.to_mesh_data();
+        let dense_lid = bm.face_ids().position(|f| f == lid).unwrap();
+        crate::selection::set_selected(&mut data, Domain::Face, dense_lid as u32, true);
+
+        bm.select_none();
+        bm.adopt_selection(&data);
+        assert_eq!(
+            bm.selected_faces(),
+            vec![lid],
+            "the document's selected face was adopted onto a different one"
         );
     }
 }
