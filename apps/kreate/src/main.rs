@@ -1910,6 +1910,11 @@ impl App {
         for command in self.ui.queue.drain() {
             match command {
                 Command::RunOperator { op_id, params } => self.run_op(&op_id, params),
+                // The same path a key press takes, so a menu entry that says
+                // "Move" starts the drag the G key starts. See `dispatch`.
+                Command::Dispatch { op_id, params } => {
+                    self.dispatch(&Action { op_id, params });
+                }
                 Command::ToggleEditMode => self.toggle_edit_mode(),
                 // An unknown tag is ignored, which is what a script or a keymap
                 // written against a later version should get.

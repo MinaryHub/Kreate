@@ -865,6 +865,22 @@ struct Labels {
     exposure_manual: String,
     menu_file: String,
     menu_edit: String,
+    menu_view: String,
+    menu_select: String,
+    menu_transform: String,
+    select_all: String,
+    select_none: String,
+    select_invert: String,
+    view_frame_all: String,
+    view_frame_selected: String,
+    view_perspective: String,
+    view_sidebar: String,
+    overlays: String,
+    overlay_grid: String,
+    overlay_wireframe: String,
+    transform_move: String,
+    transform_rotate: String,
+    transform_scale: String,
     menu_object: String,
     menu_mesh: String,
     menu_edge: String,
@@ -944,6 +960,22 @@ impl Labels {
             exposure_manual: t("exposure-manual"),
             menu_file: t("menu-file"),
             menu_edit: t("menu-edit"),
+            menu_view: t("menu-view"),
+            menu_select: t("menu-select"),
+            menu_transform: t("menu-transform"),
+            select_all: t("select-all"),
+            select_none: t("select-none"),
+            select_invert: t("select-invert"),
+            view_frame_all: t("view-frame-all"),
+            view_frame_selected: t("view-frame-selected"),
+            view_perspective: t("view-perspective"),
+            view_sidebar: t("view-sidebar"),
+            overlays: t("overlays"),
+            overlay_grid: t("overlay-grid"),
+            overlay_wireframe: t("overlay-wireframe"),
+            transform_move: t("transform-move"),
+            transform_rotate: t("transform-rotate"),
+            transform_scale: t("transform-scale"),
             menu_object: t("menu-object"),
             menu_mesh: t("menu-mesh"),
             menu_edge: t("menu-edge"),
@@ -1071,20 +1103,15 @@ pub fn draw(
             });
     }
 
+    // **The top bar is the application's, not the viewport's.** Blender's
+    // rule, and the reason this row got short: what you can *do to a scene*
+    // — add, select, transform, change mode, change shading — belongs to the
+    // editor showing the scene, and moves with it when the layout changes. What
+    // is left up here is what is true of the whole window: the file, undo, and
+    // which workspace is open. A viewport in the UV workspace has the same
+    // Object menu as the one in Layout because the menu is *its own*.
     Panel::top("menu").show(ui, |ui| {
-        // **Menus, not a row of buttons.** In edit mode this row carried
-        // fifteen flat buttons and wrapped onto three lines on a normal
-        // window; finding "inset" meant reading all fifteen. The grouping
-        // below is Blender's, because Blender's is the one a modeller already
-        // knows: what a command acts *on* is what decides which menu it is in,
-        // so Bevel is under Edge and Inset is under Face even though both are
-        // "make the shape bigger somewhere".
-        //
-        // Still wrapped rather than clipped. A clipped row silently hides
-        // entries and the user concludes the command does not exist.
-        ui.horizontal_wrapped(|ui| {
-            // First, because that is where every application in this category
-            // puts it and where a user's eye goes for it.
+        ui.horizontal(|ui| {
             ui.menu_button(&l.menu_file, |ui| {
                 if ui.button(&l.file_new).clicked() {
                     state.queue.push(Command::NewDocument);
@@ -1117,8 +1144,7 @@ pub fn draw(
             // Undo and redo live here rather than as buttons on the row, which
             // is both Blender's arrangement and the honest one: they are
             // reached by keystroke a hundred times for every once they are
-            // reached by pointer, and two permanent buttons for that is two
-            // buttons' worth of row taken from commands that have no key.
+            // reached by pointer.
             ui.menu_button(&l.menu_edit, |ui| {
                 if ui
                     .add_enabled(history.can_undo(), egui::Button::new(&l.undo))
@@ -1136,97 +1162,11 @@ pub fn draw(
                 }
             });
 
-            // A menu since lights arrived: what can be added stopped being one
-            // thing, and a button per kind is how a header becomes unreadable.
-            ui.menu_button(&l.add_menu, |ui| {
-                if ui.button(&l.add_cube).clicked() {
-                    let mut p = PropertyMap::new();
-                    p.set("shape", kreate_reflect::PropertyValue::Enum(1));
-                    state.queue.run("object.add_primitive", p);
-                    ui.close();
-                }
-                ui.separator();
-                for (kind, label) in [
-                    (0u32, &l.add_light_point),
-                    (1, &l.add_light_sun),
-                    (2, &l.add_light_spot),
-                    (3, &l.add_light_area),
-                ] {
-                    if ui.button(label).clicked() {
-                        let mut p = PropertyMap::new();
-                        p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
-                        state.queue.run("object.add_light", p);
-                        ui.close();
-                    }
-                }
-            });
-
-            // What the menus after Add are depends on the mode, because what
-            // you can act on does. Object mode acts on whole objects; edit
-            // mode acts on the parts of one.
-            if mode.shows_elements() {
-                draw_mesh_menus(ui, state, &l);
-            } else {
-                ui.menu_button(&l.menu_object, |ui| {
-                    if menu_tool(ui, state, "object.duplicate", &l.duplicate) {
-                        let mut p = PropertyMap::new();
-                        p.set("linked", kreate_reflect::PropertyValue::Bool(true));
-                        state.queue.run("object.duplicate", p);
-                    }
-                    ui.separator();
-                    if menu_tool(ui, state, "object.delete", &l.delete) {
-                        state.queue.run("object.delete", PropertyMap::new());
-                    }
-                });
-            }
-
             ui.separator();
-
-            // A dropdown over every mode rather than a button that toggles
-            // between two. Which mode you are in governs what every other key
-            // does, so it has to be readable at a glance — and it has to still
-            // read as one thing when there are seven of them.
-            draw_mode_menu(ui, state, doc, mode);
-
-            // The element buttons stay buttons rather than becoming a menu.
-            // They are a *state* — which one is lit tells you what a click in
-            // the viewport will pick — and a state behind a menu is a state
-            // you cannot see.
-            //
-            // Pictures rather than words, and not for decoration: with Mesh,
-            // Edge and Face menus now in the same row, buttons reading "Edge"
-            // and "Face" sat inches from menus reading "Edge" and "Face" and
-            // meant something else. The name survives as the tooltip.
-            if mode.shows_elements() {
-                ui.separator();
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for element in kreate_ui::element_icon::Element::ALL {
-                    let index = element.index();
-                    let name = state.catalog.get(element.label_key());
-                    if kreate_ui::element_icon::element_button(
-                        ui,
-                        element,
-                        state.select_mode == index,
-                    )
-                    .on_hover_text(&name)
-                    .clicked()
-                    {
-                        state.queue.push(Command::SetSelectMode(index));
-                    }
-                }
-            }
-
-            ui.separator();
-            draw_shading_menu(ui, state, &l);
-            draw_exposure(ui, state, &l);
-
-            ui.separator();
+            // Workspaces right after the menus, where Blender puts them: they
+            // are the top bar's own tabs, and the eye finds them at the same
+            // place whatever the window width.
             draw_workspace_tabs(ui, state);
-            // No panel toggles here any more. An editor is opened by
-            // pointing an area at it, from that area's own header — which is
-            // where the user is looking when they want to change what they are
-            // looking at, and which scales to the nine more editors the plan
-            // has scheduled.
         });
     });
 
@@ -1305,6 +1245,7 @@ pub fn draw(
                     active,
                     &mut modifier_rows,
                     image,
+                    mode,
                 );
                 if Some(area.id) == first_viewport {
                     viewport_rect = rect;
@@ -1332,6 +1273,7 @@ fn draw_area(
     active: Option<u32>,
     modifier_rows: &mut [kreate_ui::ModifierRow],
     image: Option<ViewportImage>,
+    mode: kreate_ops::operator::Mode,
 ) -> egui::Rect {
     let theme = kreate_ui::theme::from_ui(ui);
 
@@ -1365,7 +1307,7 @@ fn draw_area(
             .id_salt(("area-header", area.id.0)),
         |ui| {
             ui.set_clip_rect(header);
-            draw_area_header(ui, state, area, l);
+            draw_area_header(ui, state, area, l, doc, mode);
         },
     );
 
@@ -1462,12 +1404,24 @@ fn draw_area(
     inner
 }
 
-/// The strip along the top of an area: which editor, and what can be done to
-/// the area itself.
+/// The strip along the top of an area: which editor, and that editor's menus.
+///
+/// **Each editor owns its header.** This is Blender's structure and the reason
+/// the top bar is short: the menus for acting on a scene sit on the editor
+/// that shows the scene, so they move with it, and a second viewport gets its
+/// own. The alternative — one global row that changes with whichever editor
+/// is "current" — is a row whose contents the user cannot predict.
 ///
 /// Everything here queues rather than acting. The tree cannot be edited while
 /// the frame is drawing against a layout derived from it.
-fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaRect, l: &Labels) {
+fn draw_area_header(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    area: &kreate_ui::AreaRect,
+    l: &Labels,
+    doc: &Document,
+    mode: kreate_ops::operator::Mode,
+) {
     ui.horizontal(|ui| {
         // From the registry, so an editor an add-on registered appears in the
         // dropdown without the shell being told about it. A variant list here
@@ -1502,6 +1456,101 @@ fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaR
                 }
             });
 
+        let is_viewport = area.editor == kreate_ui::EditorId::VIEWPORT;
+        if is_viewport {
+            // Which mode, first, because it governs what every other key
+            // does and what the menus after it contain.
+            draw_mode_menu(ui, state, doc, mode);
+            ui.separator();
+        }
+
+        // Every editor has a View menu, and the area operations live at the
+        // bottom of it — which is where Blender keeps them, and which is what
+        // makes "how do I split this" one answer for every editor.
+        draw_view_menu(ui, state, area, l, is_viewport);
+
+        if is_viewport {
+            draw_select_menu(ui, state, mode, l);
+            draw_add_menu(ui, state, l);
+            // What the menus after Add are depends on the mode, because what
+            // you can act on does. Object mode acts on whole objects; edit
+            // mode acts on the parts of one.
+            if mode.shows_elements() {
+                draw_mesh_menus(ui, state, l);
+            } else {
+                draw_object_menu(ui, state, l);
+            }
+
+            // The element buttons stay buttons rather than becoming a menu.
+            // They are a *state* — which one is lit tells you what a click in
+            // the viewport will pick — and a state behind a menu is a state
+            // you cannot see. Pictures rather than words: with Mesh, Edge and
+            // Face menus in the same row, buttons reading "Edge" and "Face"
+            // meant something else two inches away.
+            if mode.shows_elements() {
+                ui.separator();
+                let spacing = ui.spacing().item_spacing.x;
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for element in kreate_ui::element_icon::Element::ALL {
+                    let index = element.index();
+                    let name = state.catalog.get(element.label_key());
+                    if kreate_ui::element_icon::element_button(
+                        ui,
+                        element,
+                        state.select_mode == index,
+                    )
+                    .on_hover_text(&name)
+                    .clicked()
+                    {
+                        state.queue.push(Command::SetSelectMode(index));
+                    }
+                }
+                ui.spacing_mut().item_spacing.x = spacing;
+            }
+
+            // The right-hand group: how the picture is made. Right-aligned
+            // like Blender's shading buttons, so it stays put when the menus
+            // to its left change with the mode.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                draw_shading_pills(ui, state, l);
+                ui.separator();
+                draw_overlays_menu(ui, state, l);
+                draw_exposure(ui, state, l);
+            });
+        }
+    });
+}
+
+/// The View menu: how this area is looked at, and the area itself.
+///
+/// The bottom section is the same for every editor — split, close — because a
+/// user who has learnt it in one editor should not have to find it again in
+/// the next. The top section is the viewport's alone.
+fn draw_view_menu(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    area: &kreate_ui::AreaRect,
+    l: &Labels,
+    is_viewport: bool,
+) {
+    ui.menu_button(&l.menu_view, |ui| {
+        if is_viewport {
+            if menu_action(ui, state, "view.frame_all", &l.view_frame_all) {
+                state.queue.dispatch("view.frame_all", PropertyMap::new());
+            }
+            if ui.button(&l.view_frame_selected).clicked() {
+                state.queue.push(Command::FrameSelection);
+                ui.close();
+            }
+            ui.separator();
+            if menu_action(ui, state, "view.toggle_projection", &l.view_perspective) {
+                state.queue.dispatch("view.toggle_projection", PropertyMap::new());
+            }
+            if menu_action(ui, state, "view.toggle_sidebar", &l.view_sidebar) {
+                state.queue.dispatch("view.toggle_sidebar", PropertyMap::new());
+            }
+            ui.separator();
+        }
         ui.menu_button(&l.area_menu, |ui| {
             if ui.button(&l.area_split_v).clicked() {
                 state.split_area(area.id, kreate_ui::Axis::Vertical);
@@ -1520,6 +1569,176 @@ fn draw_area_header(ui: &mut Ui, state: &mut ShellState, area: &kreate_ui::AreaR
                 }
             });
         });
+    });
+}
+
+/// A menu entry for a keymap action: the label, the tooltip with its key, and
+/// the menu closing on a click. The caller does the dispatch, because what to
+/// send differs by entry.
+fn menu_action(ui: &mut Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
+    let response = ui.button(label);
+    let clicked = match state.command_info.get(op_id) {
+        Some(info) if info.has_tooltip() => response.on_hover_text(info.tooltip()).clicked(),
+        _ => response.clicked(),
+    };
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
+/// The Select menu: all, none, invert, and in edit mode the loop.
+///
+/// One menu in both modes with the same first three entries, which is the
+/// point of it: "select all" is one idea, and the user should not have to know
+/// that the operator behind it changes name when the mode does.
+fn draw_select_menu(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    mode: kreate_ops::operator::Mode,
+    l: &Labels,
+) {
+    ui.menu_button(&l.menu_select, |ui| {
+        if mode.shows_elements() {
+            for (action, label) in [
+                (0u32, &l.select_all),
+                (1, &l.select_none),
+                (2, &l.select_invert),
+            ] {
+                if menu_tool(ui, state, "mesh.select", label) {
+                    let mut p = PropertyMap::new();
+                    p.set("action", kreate_reflect::PropertyValue::Enum(action));
+                    p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
+                    state.queue.run("mesh.select", p);
+                }
+            }
+            ui.separator();
+            if menu_tool(ui, state, "mesh.select", &l.select_loop) {
+                let mut p = PropertyMap::new();
+                p.set("action", kreate_reflect::PropertyValue::Enum(3));
+                state.queue.run("mesh.select", p);
+            }
+        } else {
+            // `object.select_all` counts select, deselect, toggle, invert;
+            // the menu offers the three a person asks for by name.
+            for (action, label) in [
+                (0u32, &l.select_all),
+                (1, &l.select_none),
+                (3, &l.select_invert),
+            ] {
+                if menu_tool(ui, state, "object.select_all", label) {
+                    let mut p = PropertyMap::new();
+                    p.set("action", kreate_reflect::PropertyValue::Enum(action));
+                    state.queue.run("object.select_all", p);
+                }
+            }
+        }
+    });
+}
+
+/// The Add menu. A menu since lights arrived: what can be added stopped being
+/// one thing, and a button per kind is how a header becomes unreadable.
+fn draw_add_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.add_menu, |ui| {
+        if ui.button(&l.add_cube).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("shape", kreate_reflect::PropertyValue::Enum(1));
+            state.queue.run("object.add_primitive", p);
+            ui.close();
+        }
+        ui.separator();
+        for (kind, label) in [
+            (0u32, &l.add_light_point),
+            (1, &l.add_light_sun),
+            (2, &l.add_light_spot),
+            (3, &l.add_light_area),
+        ] {
+            if ui.button(label).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
+                state.queue.run("object.add_light", p);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// The Object menu: what can be done to whole objects.
+///
+/// The transforms are here as well as on keys, and go through `Dispatch` so
+/// that "Move" from the menu starts the same drag the G key starts. A menu
+/// entry that moved by a fixed amount would be a different command wearing the
+/// same name.
+fn draw_object_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.menu_object, |ui| {
+        ui.menu_button(&l.menu_transform, |ui| {
+            for (op, label) in [
+                ("object.translate", &l.transform_move),
+                ("object.rotate", &l.transform_rotate),
+                ("object.scale", &l.transform_scale),
+            ] {
+                if menu_action(ui, state, op, label) {
+                    state.queue.dispatch(op, PropertyMap::new());
+                }
+            }
+        });
+        ui.separator();
+        if menu_tool(ui, state, "object.duplicate", &l.duplicate) {
+            let mut p = PropertyMap::new();
+            p.set("linked", kreate_reflect::PropertyValue::Bool(true));
+            state.queue.run("object.duplicate", p);
+        }
+        ui.separator();
+        if menu_tool(ui, state, "object.delete", &l.delete) {
+            state.queue.run("object.delete", PropertyMap::new());
+        }
+    });
+}
+
+/// The three ways of shading the viewport, as a row of exclusive buttons.
+///
+/// Buttons rather than a dropdown, which is what Blender does and for a
+/// reason a dropdown cannot match: the *current* one is lit, so which way the
+/// picture is being made is readable without opening anything. In the
+/// rendered mode the exposure readout sits beside them, because it is a fact
+/// about that mode alone.
+fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let current = state.view_status.shading;
+    let spacing = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 2.0;
+    // Right-to-left layout, so the list is reversed to read Studio, Flat,
+    // Rendered from left to right on screen.
+    for mode in [
+        kreate_render::ShadingMode::Rendered,
+        kreate_render::ShadingMode::Flat,
+        kreate_render::ShadingMode::Studio,
+    ] {
+        if ui
+            .selectable_label(mode == current, shading_label(mode, l))
+            .on_hover_text(&l.shading_hint)
+            .clicked()
+        {
+            state.queue.push(Command::SetShading(mode));
+        }
+    }
+    ui.spacing_mut().item_spacing.x = spacing;
+}
+
+/// The overlays: what is drawn over the picture that is not the scene.
+///
+/// Toggles under one menu rather than a button each, because the set will
+/// grow — Blender's has two dozen — and a header full of toggles is a header
+/// nobody can read. Each entry says which key does the same thing.
+fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.overlays, |ui| {
+        for (op, label) in [
+            ("view.toggle_grid", &l.overlay_grid),
+            ("view.toggle_wireframe", &l.overlay_wireframe),
+        ] {
+            if menu_action(ui, state, op, label) {
+                state.queue.dispatch(op, PropertyMap::new());
+            }
+        }
     });
 }
 
@@ -2316,34 +2535,6 @@ fn draw_adjust_panel(
     }
 }
 
-/// How the viewport shades, and a way to change it.
-///
-/// `Z` cycled through the three and nothing said which one was current, so the
-/// only way to find out was to press it and look. A mode that governs what the
-/// picture *means* — studio light, flat colour, or the scene's own lamps — has
-/// to be readable without changing it.
-fn draw_shading_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
-    let current = state.view_status.shading;
-    let name = shading_label(current, l);
-    ui.menu_button(name, |ui| {
-        for mode in [
-            kreate_render::ShadingMode::Studio,
-            kreate_render::ShadingMode::Flat,
-            kreate_render::ShadingMode::Rendered,
-        ] {
-            if ui
-                .selectable_label(mode == current, shading_label(mode, l))
-                .clicked()
-            {
-                state.queue.push(Command::SetShading(mode));
-                ui.close();
-            }
-        }
-    })
-    .response
-    .on_hover_text(&l.shading_hint);
-}
-
 fn shading_label(mode: kreate_render::ShadingMode, l: &Labels) -> &str {
     match mode {
         kreate_render::ShadingMode::Studio => &l.shading_studio,
@@ -3031,6 +3222,22 @@ world-image = The background is an image; the colour below does not apply to it.
 light-shared = Shared by { $count } objects — editing this changes all of them
 menu-file = File
 menu-edit = Edit
+menu-view = View
+menu-select = Select
+menu-transform = Transform
+select-all = All
+select-none = None
+select-invert = Invert
+view-frame-all = Frame All
+view-frame-selected = Frame Selected
+view-perspective = Perspective/Orthographic
+view-sidebar = Sidebar
+overlays = Overlays
+overlay-grid = Grid
+overlay-wireframe = Wireframe
+transform-move = Move
+transform-rotate = Rotate
+transform-scale = Scale
 menu-object = Object
 menu-mesh = Mesh
 menu-edge = Edge
@@ -3252,6 +3459,22 @@ world-image = 배경이 이미지입니다. 아래 색은 적용되지 않습니
 light-shared = { $count }개의 오브젝트가 공유 — 여기서 고치면 전부 바뀍니다
 menu-file = 파일
 menu-edit = 편집
+menu-view = 보기
+menu-select = 선택
+menu-transform = 변환
+select-all = 모두
+select-none = 없음
+select-invert = 반전
+view-frame-all = 전체 보기
+view-frame-selected = 선택 항목 보기
+view-perspective = 원근/직교
+view-sidebar = 사이드바
+overlays = 오버레이
+overlay-grid = 격자
+overlay-wireframe = 와이어프레임
+transform-move = 이동
+transform-rotate = 회전
+transform-scale = 크기
 menu-object = 물체
 menu-mesh = 메시
 menu-edge = 모서리
@@ -4077,6 +4300,22 @@ mod tests {
         // key would otherwise show up on screen as the key itself.
         let catalog = load_catalog("ko-KR");
         for key in [
+            "menu-view",
+            "menu-select",
+            "menu-transform",
+            "select-all",
+            "select-none",
+            "select-invert",
+            "view-frame-all",
+            "view-frame-selected",
+            "view-perspective",
+            "view-sidebar",
+            "overlays",
+            "overlay-grid",
+            "overlay-wireframe",
+            "transform-move",
+            "transform-rotate",
+            "transform-scale",
             "menu-file-new",
             "menu-file-open",
             "menu-file-save",

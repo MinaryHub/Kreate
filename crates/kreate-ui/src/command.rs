@@ -106,6 +106,19 @@ pub enum Command {
     /// because the button that runs it lives in the Material tab, which is the
     /// only place somebody looks when they want one.
     NewMaterial,
+    /// Run an action the way a key press would.
+    ///
+    /// **The other door into the application.** `RunOperator` goes through
+    /// the history, which is right for anything that edits the document and
+    /// wrong for everything else: `view.frame_all` is not an undo step, and
+    /// `object.translate` from a menu should start the same drag the G key
+    /// starts rather than moving by a fixed amount. The keymap already routes
+    /// both correctly; this hands a menu entry the same route, so a header
+    /// menu and a key are two ways of saying one thing.
+    Dispatch {
+        op_id: String,
+        params: PropertyMap,
+    },
     /// Ask for a path and write the scene to an interchange format.
     ///
     /// Separate from saving, because it is not saving: an export goes through
@@ -141,6 +154,15 @@ impl CommandQueue {
 
     pub fn run(&mut self, op_id: impl Into<String>, params: PropertyMap) {
         self.push(Command::RunOperator {
+            op_id: op_id.into(),
+            params,
+        });
+    }
+
+    /// Queues an action to be dispatched the way a key press is. See
+    /// [`Command::Dispatch`].
+    pub fn dispatch(&mut self, op_id: impl Into<String>, params: PropertyMap) {
+        self.push(Command::Dispatch {
             op_id: op_id.into(),
             params,
         });

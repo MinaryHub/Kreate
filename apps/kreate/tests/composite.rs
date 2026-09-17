@@ -1364,12 +1364,21 @@ fn edit_mode_shows_element_selection_instead_of_the_object_outline() {
         orange(&edit_all)
     );
 
-    // And the toolbar grew: the mode button, three element-mode buttons and
-    // Extrude all appear, which no object-mode frame has.
-    let toolbar_width = |c: &Composited| {
-        (0..W)
+    // And the *viewport's header* grew: Mesh, Edge and Face and the three
+    // element buttons appear, which no object-mode frame has.
+    //
+    // The viewport's header and not the top bar. The top bar used to carry
+    // the mode's tools and this measured it there; since the editors took
+    // their menus into their own headers — Blender's arrangement — the top bar
+    // is the same in both modes by design, and a test that wanted it to
+    // change would be asking for the old layout back.
+    let header_width = |c: &Composited| {
+        let top = c.viewport_rect.top() as u32;
+        let band = top.saturating_sub(28)..top;
+        let right = c.viewport_rect.right() as u32;
+        (0..right.min(W))
             .filter(|x| {
-                (0..24).any(|y| {
+                band.clone().any(|y| {
                     let p = c.pixels[(y * W + x) as usize];
                     p[0] > 80 || p[1] > 80 || p[2] > 80
                 })
@@ -1377,8 +1386,10 @@ fn edit_mode_shows_element_selection_instead_of_the_object_outline() {
             .count()
     };
     assert!(
-        toolbar_width(&edit_all) > toolbar_width(&object_mode),
-        "the edit-mode toolbar should be wider than the object-mode one"
+        header_width(&edit_all) > header_width(&object_mode),
+        "the edit-mode viewport header should be wider than the object-mode one: {} vs {}",
+        header_width(&edit_all),
+        header_width(&object_mode)
     );
 }
 
