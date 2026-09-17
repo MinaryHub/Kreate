@@ -12,6 +12,8 @@ pub mod command_info;
 pub mod context_menu;
 pub mod element_icon;
 pub mod fonts;
+pub mod toolbar;
+pub mod view_icons;
 pub mod keymap_editor;
 pub mod modifier_stack;
 pub mod nav_gizmo;

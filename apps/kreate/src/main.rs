@@ -3283,6 +3283,14 @@ impl App {
             .map(|(g, _)| shell::ModalHeader {
                 text: g.status(),
                 axis: g.axis_index(),
+                // So the tool column lights the button for the drag in
+                // progress: what the header says in words, the column says
+                // by which picture is lit.
+                tool: Some(match g.kind {
+                    kreate::modal::Kind::Move => kreate_ui::toolbar::Tool::Move,
+                    kreate::modal::Kind::Rotate => kreate_ui::toolbar::Tool::Rotate,
+                    kreate::modal::Kind::Scale => kreate_ui::toolbar::Tool::Scale,
+                }),
             })
             .or_else(|| {
                 // The UV gesture wears the same header, over the same
@@ -3296,6 +3304,8 @@ impl App {
                         kreate::uvmodal::Axis::U => 0,
                         kreate::uvmodal::Axis::V => 1,
                     }),
+                    // The 3D tool column has no button for a UV drag.
+                    tool: None,
                 })
             });
 
@@ -3656,12 +3666,20 @@ impl App {
                 shading: gfx.viewport.shading,
                 exposure: shot.exposure as f32,
                 metered: shot.metered,
+                orthographic: matches!(
+                    self.camera.projection,
+                    kreate_render::Projection::Orthographic
+                ),
             };
         } else {
             // The other modes light themselves, so there is no exposure to
             // report and the header says nothing rather than a stale number.
             self.ui.view_status = kreate::shell::ViewStatus {
                 shading: gfx.viewport.shading,
+                orthographic: matches!(
+                    self.camera.projection,
+                    kreate_render::Projection::Orthographic
+                ),
                 ..Default::default()
             };
         }

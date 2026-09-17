@@ -507,14 +507,25 @@ fn the_sidebar_covers_the_viewport_and_takes_the_pointer() {
         state.toggle_sidebar();
     }));
 
-    assert!(
-        closed.state.viewport_blockers.is_empty(),
-        "something is blocking the viewport with the sidebar shut: {:?}",
-        closed.state.viewport_blockers
+    // The blocker that *appears* when the sidebar opens is the sidebar. Not
+    // "the only blocker": the tool column down the left registers one too, in
+    // both frames, and a click on a tool must not also select what is behind
+    // it. What the sidebar adds is what this is asking after.
+    let added: Vec<egui::Rect> = open
+        .state
+        .viewport_blockers
+        .iter()
+        .copied()
+        .filter(|r| !closed.state.viewport_blockers.contains(r))
+        .collect();
+    assert_eq!(
+        added.len(),
+        1,
+        "opening the sidebar should add exactly one blocker; closed {:?}, open {:?}",
+        closed.state.viewport_blockers,
+        open.state.viewport_blockers
     );
-    let blockers = &open.state.viewport_blockers;
-    assert_eq!(blockers.len(), 1, "{blockers:?}");
-    let bar = blockers[0];
+    let bar = added[0];
 
     // Inside the viewport, against its right edge, and a strip rather than the
     // whole thing.
@@ -576,7 +587,15 @@ fn the_sidebar_shows_the_active_object_s_placement() {
         state.toggle_sidebar();
     }));
 
-    let bar = active.state.viewport_blockers[0];
+    // The sidebar is the blocker against the viewport's right edge; the tool
+    // column is the one down the left.
+    let vr = active.viewport_rect;
+    let bar = *active
+        .state
+        .viewport_blockers
+        .iter()
+        .find(|r| (r.max.x - vr.max.x).abs() < 1.0)
+        .expect("a blocker against the right edge, which is the sidebar");
     // The fields are widgets with borders and numbers; the note is a line of
     // dim text. Counted as distinct colours inside the strip, which a row of
     // drag fields has many more of.
@@ -758,17 +777,22 @@ fn a_second_viewport_does_not_show_the_first_one_s_picture() {
     // *variety* of colour that separates a rendered half from an empty one: a
     // flat background is one colour, a shaded cube on a grid is many.
     let vr = c.viewport_rect;
+    // Below the view text and right of the tool column, which every viewport
+    // draws over its picture: the question is whether the *scene* reached the
+    // second viewport, and its own chrome is not the scene.
+    let chrome_left = kreate_ui::toolbar::WIDTH as u32 + 24;
+    let chrome_top = 60;
     let band = |from: u32, to: u32| -> usize {
         let mut seen: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
-        for y in (vr.min.y as u32 + 8)..(vr.max.y as u32 - 8) {
+        for y in (vr.min.y as u32 + chrome_top)..(vr.max.y as u32 - 8) {
             for x in from..to {
                 seen.insert(c.at(x, y));
             }
         }
         seen.len()
     };
-    let rendered = band(vr.min.x as u32 + 4, vr.max.x as u32 - 4);
-    let other = band(vr.max.x as u32 + 8, W - 4);
+    let rendered = band(vr.min.x as u32 + chrome_left, vr.max.x as u32 - 4);
+    let other = band(vr.max.x as u32 + 8 + chrome_left, W - 4);
     assert!(
         rendered > 20,
         "the first viewport has only {rendered} distinct colours; nothing rendered"
@@ -1046,6 +1070,7 @@ fn the_modal_header_draws_over_the_viewport_in_the_constrained_axis_colour() {
         state.modal = Some(kreate::shell::ModalHeader {
             text: "이동 X  1.400 0.000 0.000".into(),
             axis: Some(axis),
+            tool: None,
         });
     }));
     let without = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
@@ -1620,8 +1645,12 @@ fn shot_material_tab() {
 #[test]
 fn shot_menu_row() {
     let doc = doc_with_cube();
-    for (label, edit) in [("object", false), ("edit", true)] {
-        let Some(shot) = composite_in(&doc, "en", edit) else {
+    for (label, locale, edit) in [
+        ("object", "en", false),
+        ("edit", "en", true),
+        ("edit-ko", "ko-KR", true),
+    ] {
+        let Some(shot) = composite_in(&doc, locale, edit) else {
             eprintln!("no GPU; skipping");
             return;
         };

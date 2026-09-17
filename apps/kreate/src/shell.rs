@@ -245,6 +245,9 @@ pub struct ModalHeader {
     pub text: String,
     /// The constrained axis, if any, so the header can wear its colour.
     pub axis: Option<usize>,
+    /// Which tool the gesture is, so the tool column can light it. `None` for
+    /// a gesture the column has no button for.
+    pub tool: Option<kreate_ui::toolbar::Tool>,
 }
 
 /// A layout change, queued during a frame and applied after it.
@@ -733,6 +736,10 @@ pub struct ViewStatus {
     /// visibly moves when the lamp does is the difference between that being
     /// explicable and being a bug report.
     pub metered: bool,
+    /// Whether the camera is orthographic. For the view-information text in
+    /// the viewport's corner, which is where Blender says it and where a user
+    /// looks when a picture has stopped having depth.
+    pub orthographic: bool,
 }
 
 impl Default for ViewStatus {
@@ -741,6 +748,7 @@ impl Default for ViewStatus {
             shading: kreate_render::ShadingMode::Studio,
             exposure: 0.0,
             metered: false,
+            orthographic: false,
         }
     }
 }
@@ -881,6 +889,8 @@ struct Labels {
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
+    view_user_perspective: String,
+    view_user_orthographic: String,
     menu_object: String,
     menu_mesh: String,
     menu_edge: String,
@@ -976,6 +986,8 @@ impl Labels {
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
+            view_user_perspective: t("view-user-perspective"),
+            view_user_orthographic: t("view-user-orthographic"),
             menu_object: t("menu-object"),
             menu_mesh: t("menu-mesh"),
             menu_edge: t("menu-edge"),
@@ -1336,7 +1348,7 @@ fn draw_area(
             ui.set_clip_rect(inner);
             match area.editor.as_str() {
                 "viewport" => {
-                    draw_viewport(ui, state, inner, image);
+                    draw_viewport(ui, state, doc, mode, l, inner, image);
                     if state.sidebar_open(area.id) {
                         draw_item_sidebar(ui, state, doc, registry, area.id, inner, l);
                     }
@@ -1713,9 +1725,10 @@ fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         kreate_render::ShadingMode::Flat,
         kreate_render::ShadingMode::Studio,
     ] {
-        if ui
-            .selectable_label(mode == current, shading_label(mode, l))
-            .on_hover_text(&l.shading_hint)
+        // i18n-exempt: a translated name and a translated hint
+        let tip = format!("{}\n{}", shading_label(mode, l), l.shading_hint);
+        if kreate_ui::view_icons::shading_button(ui, mode, mode == current)
+            .on_hover_text(tip)
             .clicked()
         {
             state.queue.push(Command::SetShading(mode));
@@ -1743,9 +1756,13 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The 3D viewport: the rendered image, and everything painted over it.
+#[allow(clippy::too_many_arguments)]
 fn draw_viewport(
     ui: &mut Ui,
     state: &mut ShellState,
+    doc: &Document,
+    mode: kreate_ops::operator::Mode,
+    l: &Labels,
     rect: egui::Rect,
     image: Option<ViewportImage>,
 ) {
@@ -1760,10 +1777,183 @@ fn draw_viewport(
             egui::Color32::WHITE,
         );
     }
+    let toolbar = draw_toolbar(ui, state, mode, rect);
+    draw_view_info(ui, state, doc, mode, l, rect, toolbar);
     draw_select_band(ui, state, rect);
     draw_modal_header(ui, state, rect);
     draw_nav_gizmo(ui, state, rect);
     draw_context_menu(ui, state, rect);
+}
+
+/// The tool column down the left of the viewport. Returns its rectangle so the
+/// view text can start beside it rather than under it.
+///
+/// Every click goes out through `Dispatch`, the door a key press uses: Move
+/// from the column starts the drag G starts, and Extrude runs the same
+/// operator E does with the same defaults. The column teaches the keys — each
+/// tooltip carries one — which is how a toolbar stops being needed.
+fn draw_toolbar(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    mode: kreate_ops::operator::Mode,
+    viewport: egui::Rect,
+) -> egui::Rect {
+    use kreate_ui::toolbar::{tool_button, Tool, WIDTH};
+    let theme = kreate_ui::theme::from_ui(ui);
+    let tools: Vec<Tool> = if mode.shows_elements() {
+        Tool::COMMON.iter().chain(Tool::EDIT.iter()).copied().collect()
+    } else {
+        Tool::COMMON.to_vec()
+    };
+    let pad = 4.0;
+    let button = WIDTH - 6.0;
+    let gap = 2.0;
+    // A gap between the common group and the edit group, the way Blender
+    // separates its tool groups: the eye finds the boundary before it reads.
+    let groups_gap = if mode.shows_elements() { 8.0 } else { 0.0 };
+    let height = pad * 2.0 + tools.len() as f32 * (button + gap) - gap + groups_gap;
+    let rect = egui::Rect::from_min_size(
+        viewport.min + egui::vec2(8.0, 8.0),
+        egui::vec2(WIDTH, height.min(viewport.height() - 16.0)),
+    );
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return egui::Rect::NOTHING;
+    }
+    // Over the picture, so it takes the pointer: a click on a tool must not
+    // also select what is behind it.
+    state.viewport_blockers.push(rect);
+    let painter = ui.painter().with_clip_rect(viewport);
+    let radius = egui::CornerRadius::same(theme.radius + 1);
+    painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.96));
+    painter.rect_stroke(rect, radius, egui::Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+
+    // The lit tool is the transform in progress, if any; otherwise Select,
+    // which is what a click does when nothing else is going on. The header
+    // says which gesture is running, so that is what is read.
+    let active = state
+        .modal
+        .as_ref()
+        .and_then(|m| m.tool)
+        .unwrap_or(Tool::Select);
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(pad))
+            .id_salt(("toolbar", viewport.min.x as i32, viewport.min.y as i32)),
+        |ui| {
+            ui.set_clip_rect(rect);
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, gap);
+            ui.vertical(|ui| {
+                for (i, tool) in tools.iter().enumerate() {
+                    if i == Tool::COMMON.len() {
+                        ui.add_space(groups_gap - gap);
+                    }
+                    let name = state.catalog.get(tool.label_key());
+                    let op = match tool {
+                        Tool::Select => None,
+                        Tool::Move => Some(if mode.shows_elements() { "mesh.translate" } else { "object.translate" }),
+                        Tool::Rotate => Some(if mode.shows_elements() { "mesh.rotate" } else { "object.rotate" }),
+                        Tool::Scale => Some(if mode.shows_elements() { "mesh.scale" } else { "object.scale" }),
+                        Tool::Extrude => Some("mesh.extrude_region"),
+                        Tool::Inset => Some("mesh.inset"),
+                        Tool::Bevel => Some("mesh.bevel"),
+                        Tool::LoopCut => Some("mesh.loop_cut"),
+                    };
+                    let tip = match op.and_then(|id| state.command_info.get(id)) {
+                        Some(info) if !info.shortcut.is_empty() => {
+                            // i18n-exempt: a name and a key, both already translated
+                            format!("{name}
+{}", info.shortcut)
+                        }
+                        _ => name.clone(),
+                    };
+                    let response = tool_button(ui, *tool, *tool == active).on_hover_text(tip);
+                    if response.clicked() {
+                        match tool {
+                            Tool::Select => {}
+                            Tool::Move | Tool::Rotate | Tool::Scale => {
+                                if let Some(op) = op {
+                                    state.queue.dispatch(op, PropertyMap::new());
+                                }
+                            }
+                            Tool::Extrude => {
+                                let mut p = PropertyMap::new();
+                                p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
+                                state.queue.run("mesh.extrude_region", p);
+                            }
+                            Tool::Inset => {
+                                let mut p = PropertyMap::new();
+                                p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
+                                state.queue.run("mesh.inset", p);
+                            }
+                            Tool::Bevel => {
+                                let mut p = PropertyMap::new();
+                                p.set("width", kreate_reflect::PropertyValue::Float(0.1));
+                                state.queue.run("mesh.bevel", p);
+                            }
+                            Tool::LoopCut => {
+                                let mut p = PropertyMap::new();
+                                p.set("cuts", kreate_reflect::PropertyValue::Int(1));
+                                p.set("position", kreate_reflect::PropertyValue::Float(0.5));
+                                state.queue.run("mesh.loop_cut", p);
+                            }
+                        }
+                    }
+                }
+            });
+        },
+    );
+    rect
+}
+
+/// The view information in the viewport's top-left corner.
+///
+/// Two lines, as Blender writes them: how the scene is being looked at, and
+/// what is being acted on. The first answers "why does this have no depth"
+/// before it is asked; the second is the one fact a full-screen viewport has
+/// no other place to say.
+fn draw_view_info(
+    ui: &mut Ui,
+    state: &ShellState,
+    doc: &Document,
+    mode: kreate_ops::operator::Mode,
+    l: &Labels,
+    viewport: egui::Rect,
+    toolbar: egui::Rect,
+) {
+    let theme = kreate_ui::theme::from_ui(ui);
+    let painter = ui.painter().with_clip_rect(viewport);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let view = if state.view_status.orthographic {
+        &l.view_user_orthographic
+    } else {
+        &l.view_user_perspective
+    };
+    let mode_name = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
+    let active = doc
+        .selection
+        .active
+        .and_then(|id| doc.object(id))
+        .map(|o| o.name.as_str());
+    // i18n-exempt: composed from translated parts and the user's own object name
+    let second = match active {
+        Some(name) => format!("{mode_name} | {name}"),
+        None => mode_name,
+    };
+    let left = if toolbar.is_positive() {
+        toolbar.max.x + 12.0
+    } else {
+        viewport.min.x + 12.0
+    };
+    let mut y = viewport.min.y + 10.0;
+    for (text, colour) in [(view.as_str(), theme.text), (second.as_str(), theme.text_dim)] {
+        let galley = painter.layout_no_wrap(text.to_string(), font.clone(), colour);
+        // A soft shadow rather than a box: this text sits over the picture and
+        // a box would be a panel where the eye expects a scene.
+        painter.galley(egui::pos2(left + 1.0, y + 1.0), galley.clone(), theme.sunken.gamma_multiply(0.8));
+        painter.galley(egui::pos2(left, y), galley.clone(), colour);
+        y += galley.size().y + 2.0;
+    }
 }
 
 /// The UV editor, with the view state that belongs to this area.
@@ -3238,6 +3428,16 @@ overlay-wireframe = Wireframe
 transform-move = Move
 transform-rotate = Rotate
 transform-scale = Scale
+view-user-perspective = User Perspective
+view-user-orthographic = User Orthographic
+tool-select = Select Box
+tool-move = Move
+tool-rotate = Rotate
+tool-scale = Scale
+tool-extrude = Extrude Region
+tool-inset = Inset Faces
+tool-bevel = Bevel
+tool-loop-cut = Loop Cut
 menu-object = Object
 menu-mesh = Mesh
 menu-edge = Edge
@@ -3475,6 +3675,16 @@ overlay-wireframe = 와이어프레임
 transform-move = 이동
 transform-rotate = 회전
 transform-scale = 크기
+view-user-perspective = 사용자 원근
+view-user-orthographic = 사용자 직교
+tool-select = 박스 선택
+tool-move = 이동
+tool-rotate = 회전
+tool-scale = 크기
+tool-extrude = 영역 돌출
+tool-inset = 면 인셋
+tool-bevel = 베벨
+tool-loop-cut = 루프 잘라내기
 menu-object = 물체
 menu-mesh = 메시
 menu-edge = 모서리
@@ -4316,6 +4526,16 @@ mod tests {
             "transform-move",
             "transform-rotate",
             "transform-scale",
+            "view-user-perspective",
+            "view-user-orthographic",
+            "tool-select",
+            "tool-move",
+            "tool-rotate",
+            "tool-scale",
+            "tool-extrude",
+            "tool-inset",
+            "tool-bevel",
+            "tool-loop-cut",
             "menu-file-new",
             "menu-file-open",
             "menu-file-save",
