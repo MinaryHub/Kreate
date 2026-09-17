@@ -3673,6 +3673,21 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Into the region the caller will sample, like every other pass.
+            // This one did not, and the picture showed it: the geometry was
+            // projected across the whole allocation while the wireframe over
+            // it was projected across the drawn region, so whenever the two
+            // differed — a window whose size is not a multiple of the
+            // allocation step, which is most windows — the shaded object sat
+            // a few pixels off its own outline.
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.render_size.0 as f32,
+                self.render_size.1 as f32,
+                0.0,
+                1.0,
+            );
             // The background first, at the far plane, so the geometry that
             // follows tests against it rather than the other way round.
             pass.set_pipeline(&self.background_pipeline);
