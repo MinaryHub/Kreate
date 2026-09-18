@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
 pub mod container;
 pub mod gltf_export;
 pub mod gltf_import;

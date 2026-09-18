@@ -1640,6 +1640,7 @@ name = "kreate-ops"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "kreate-io",
  "kreate-math",
  "kreate-mesh",
  "kreate-ops-derive",

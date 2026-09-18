@@ -83,11 +83,17 @@ fn layout_screen() -> Screen {
 /// and the modifier stack are, and those are what a hand reaches for while
 /// shaping something. The scene list is a different question.
 fn modeling_screen() -> Screen {
+    // Blender's Modeling workspace keeps a small outliner above the
+    // properties: a modeller switching between parts of a model needs to name
+    // the part, and the tree is where names are.
     let mut screen = Screen::single(EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
-    screen
-        .split(viewport, Axis::Vertical, 0.82, EditorId::PROPERTIES)
+    let side = screen
+        .split(viewport, Axis::Vertical, 0.82, EditorId::OUTLINER)
         .expect("the screen has one area to split");
+    screen
+        .split(side, Axis::Horizontal, 0.3, EditorId::PROPERTIES)
+        .expect("the side was just created");
     screen
 }
 

@@ -157,6 +157,61 @@ impl Default for AddCameraParams {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddEmptyParams {
+    /// Where the empty goes, in metres.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+}
+
+impl Default for AddEmptyParams {
+    fn default() -> Self {
+        Self {
+            location: [0.0; 3],
+        }
+    }
+}
+
+/// Adds an empty: an object with a place and nothing else.
+///
+/// Blender's Add ▸ Empty. What a parent for a rig is, and a target for a
+/// constraint, and a marker for where something will go — a transform that
+/// other things are relative to. It has no datablock, so unlike a camera or a
+/// lamp there is only the one thing to add.
+pub struct AddEmpty;
+
+impl Operator for AddEmpty {
+    type Params = AddEmptyParams;
+
+    fn id() -> &'static str {
+        "object.add_empty"
+    }
+    fn label() -> &'static str {
+        "Add Empty"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document_mut();
+        let mut object = kreate_scene::document::Object::new(
+            "Empty",
+            kreate_scene::document::ObjectData::Empty,
+        );
+        object.transform.translation = DVec3::from_array(params.location);
+        let id = d.add_object(object);
+        // What was just added is what the user is about to move.
+        d.selection.clear();
+        d.selection.add(id);
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Adds a camera object and the datablock behind it.
 ///
 /// Two things, and the distinction is the point: the object is *where* the
@@ -1429,6 +1484,69 @@ impl Operator for Duplicate {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PasteParams {
+    /// The copied objects, as the text `kreate_io::clipboard::encode` makes.
+    ///
+    /// **The bytes ride in the parameters** rather than the operator reading
+    /// a clipboard, because an operator has to be replayable: a paste in the
+    /// history, redone a week later with the copied objects long deleted, must
+    /// produce what it produced the first time. Nothing but its own bytes can
+    /// promise that.
+    pub data: String,
+}
+
+/// Adds the copied objects to the document — Ctrl+V.
+///
+/// Copy is not an operator. It changes nothing in the document; it turns the
+/// selection into a fragment and the application keeps the text. This is the
+/// half that edits, and it is the half that can be undone.
+///
+/// The paste becomes the selection, and only it: the next thing a person does
+/// with something they pasted is move it.
+pub struct Paste;
+
+impl Operator for Paste {
+    type Params = PasteParams;
+
+    fn id() -> &'static str {
+        "object.paste"
+    }
+    fn label() -> &'static str {
+        "Paste Objects"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        // Text that is not a fragment — whatever another application left on
+        // the clipboard — is declined, not an error: "that was not ours" is the
+        // normal case for a paste.
+        let Some(fragment) = kreate_io::clipboard::decode(&params.data) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if fragment.object_count() == 0 {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        let pasted = d.merge_from(&fragment);
+        if pasted.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        d.selection.clear();
+        for id in &pasted {
+            d.selection.add(*id);
+        }
+        d.selection.active = pasted.last().copied();
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Which point a rotation or scale happens about.
 pub const PIVOTS: &[&str] = &["median", "individual", "active", "world_origin"];
 
@@ -1990,6 +2108,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<NewMaterial>();
     registry.register::<AddMaterialSlot>();
     registry.register::<SetVisible>();
+    registry.register::<Paste>();
+    registry.register::<AddEmpty>();
     registry.register::<RemoveMaterialSlot>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();

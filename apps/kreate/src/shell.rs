@@ -541,6 +541,11 @@ impl OutlinerOrder {
         &self.ids
     }
 
+    /// Indentation per row, parallel to `ids`, for the tree's collapsing.
+    pub fn depths(&self) -> &[u16] {
+        &self.depths
+    }
+
     pub fn len(&self) -> usize {
         self.ids.len()
     }
@@ -577,6 +582,27 @@ impl OutlinerOrder {
             }
         };
         let depth = self.depths.get(index).copied().unwrap_or(0);
+        // What the object is made of, for the rows under it when expanded.
+        let data_name = match object.data {
+            ObjectData::Empty => None,
+            ObjectData::Camera(c) => doc.camera(c).map(|c| c.name.clone()),
+            ObjectData::Light(l) => doc.light(l).map(|l| l.name.clone()),
+            ObjectData::Mesh(m) => doc.mesh(m).map(|_| object.name.clone()),
+        };
+        let materials: Vec<String> = match object.data {
+            ObjectData::Mesh(m) => (0..doc.mesh_slots(m).len())
+                .map(|slot| {
+                    doc.material_at(id, slot)
+                        .map(|mat| mat.name.clone())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let has_children = self
+            .depths
+            .get(index + 1)
+            .is_some_and(|next| *next > depth);
         Some(OutlinerRow {
             id: key,
             name: object.name.clone(),
@@ -585,6 +611,9 @@ impl OutlinerOrder {
             active: doc.selection.active == Some(id),
             visible: object.visible,
             kind,
+            data_name,
+            materials,
+            has_children,
             mesh_users: object
                 .mesh()
                 .and_then(|m| self.mesh_users.get(m.index() as usize))
@@ -870,7 +899,12 @@ struct Labels {
     recover_none: String,
     recover_discard: String,
     recover_discard_all: String,
-    add_cube: String,
+    add_mesh: String,
+    add_light: String,
+    add_camera: String,
+    add_empty: String,
+    /// One per entry of `ADD_SHAPES`.
+    add_shapes: [String; 8],
     shading_studio: String,
     shading_flat: String,
     shading_rendered: String,
@@ -915,6 +949,8 @@ struct Labels {
     tab_world: String,
     world_image: String,
     duplicate: String,
+    object_copy: String,
+    object_paste: String,
     delete: String,
     undo: String,
     redo: String,
@@ -972,7 +1008,20 @@ impl Labels {
             recover_none: t("recover-none"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
-            add_cube: t("menu-add-cube"),
+            add_mesh: t("menu-add-mesh"),
+            add_light: t("menu-add-light"),
+            add_camera: t("menu-add-camera"),
+            add_empty: t("menu-add-empty"),
+            add_shapes: [
+                t("menu-add-plane"),
+                t("menu-add-cube"),
+                t("menu-add-grid"),
+                t("menu-add-uv-sphere"),
+                t("menu-add-ico-sphere"),
+                t("menu-add-cylinder"),
+                t("menu-add-cone"),
+                t("menu-add-torus"),
+            ],
             shading_studio: t("shading-studio"),
             shading_flat: t("shading-flat"),
             shading_rendered: t("shading-rendered"),
@@ -1017,6 +1066,8 @@ impl Labels {
             tab_world: t("tab-world"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
+            object_copy: t("object-copy"),
+            object_paste: t("object-paste"),
             delete: t("menu-delete"),
             undo: t("menu-undo"),
             redo: t("menu-redo"),
@@ -1364,6 +1415,7 @@ fn draw_area(
                         ui,
                         &state.catalog,
                         order.ids(),
+                        order.depths(),
                         selected,
                         active,
                         |index| order.row(doc, index),
@@ -1707,32 +1759,62 @@ fn draw_select_menu(
     });
 }
 
-/// The Add menu. A menu since lights arrived: what can be added stopped being
-/// one thing, and a button per kind is how a header becomes unreadable.
+/// The Add menu, in Blender's shape: Mesh, Light, Camera, Empty.
+///
+/// Submenus because the list is long enough to need them — eight shapes and
+/// four lamps — and because the grouping is the one a modeller already knows.
+/// The shape indices are `PRIMITIVES`' order, which a test holds the labels to.
 fn draw_add_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     ui.menu_button(&l.add_menu, |ui| {
-        if ui.button(&l.add_cube).clicked() {
-            let mut p = PropertyMap::new();
-            p.set("shape", kreate_reflect::PropertyValue::Enum(1));
-            state.queue.run("object.add_primitive", p);
+        ui.menu_button(&l.add_mesh, |ui| {
+            for (shape, label) in ADD_SHAPES.iter().enumerate() {
+                if ui.button(&l.add_shapes[shape]).on_hover_text(*label).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("shape", kreate_reflect::PropertyValue::Enum(shape as u32));
+                    state.queue.run("object.add_primitive", p);
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button(&l.add_light, |ui| {
+            for (kind, label) in [
+                (0u32, &l.add_light_point),
+                (1, &l.add_light_sun),
+                (2, &l.add_light_spot),
+                (3, &l.add_light_area),
+            ] {
+                if ui.button(label).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
+                    state.queue.run("object.add_light", p);
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+        if ui.button(&l.add_camera).clicked() {
+            state.queue.run("object.add_camera", PropertyMap::new());
             ui.close();
         }
-        ui.separator();
-        for (kind, label) in [
-            (0u32, &l.add_light_point),
-            (1, &l.add_light_sun),
-            (2, &l.add_light_spot),
-            (3, &l.add_light_area),
-        ] {
-            if ui.button(label).clicked() {
-                let mut p = PropertyMap::new();
-                p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
-                state.queue.run("object.add_light", p);
-                ui.close();
-            }
+        if ui.button(&l.add_empty).clicked() {
+            state.queue.run("object.add_empty", PropertyMap::new());
+            ui.close();
         }
     });
 }
+
+/// The operator ids behind the Mesh submenu, in `PRIMITIVES` order — the
+/// tooltip, and the thing a test compares against the operator's own list.
+const ADD_SHAPES: [&str; 8] = [
+    "plane",
+    "cube",
+    "grid",
+    "uv_sphere",
+    "ico_sphere",
+    "cylinder",
+    "cone",
+    "torus",
+];
 
 /// The Object menu: what can be done to whole objects.
 ///
@@ -1758,6 +1840,15 @@ fn draw_object_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             let mut p = PropertyMap::new();
             p.set("linked", kreate_reflect::PropertyValue::Bool(true));
             state.queue.run("object.duplicate", p);
+        }
+        // Copy and paste beside Duplicate, which is the same family: a paste
+        // is a duplicate that survives the original being deleted and can be
+        // put down later. Through `Dispatch`, the door the keys use.
+        if menu_action(ui, state, "edit.copy", &l.object_copy) {
+            state.queue.dispatch("edit.copy", PropertyMap::new());
+        }
+        if menu_action(ui, state, "edit.paste", &l.object_paste) {
+            state.queue.dispatch("edit.paste", PropertyMap::new());
         }
         ui.separator();
         if menu_tool(ui, state, "object.delete", &l.delete) {
@@ -3491,7 +3582,19 @@ recover-age-hours = { $n } h ago
 recover-age-days = { $n } d ago
 status-saved = Saved { $path }
 status-opened = Opened { $path }
-menu-add-cube = Add Cube
+menu-add-mesh = Mesh
+menu-add-light = Light
+menu-add-camera = Camera
+menu-add-empty = Empty
+menu-add-plane = Plane
+menu-add-cube = Cube
+menu-add-grid = Grid
+menu-add-uv-sphere = UV Sphere
+menu-add-ico-sphere = Ico Sphere
+menu-add-cylinder = Cylinder
+menu-add-cone = Cone
+menu-add-torus = Torus
+outliner-scene-collection = Scene Collection
 menu-duplicate = Duplicate
 menu-delete = Delete
 menu-undo = Undo
@@ -3607,6 +3710,8 @@ menu-mesh = Mesh
 menu-edge = Edge
 menu-face = Face
 menu-add = Add
+object-copy = Copy
+object-paste = Paste
 menu-add-light-point = Point Light
 menu-add-light-sun = Sun
 menu-add-light-spot = Spot Light
@@ -3746,7 +3851,19 @@ recover-age-hours = { $n }시간 전
 recover-age-days = { $n }일 전
 status-saved = { $path } 저장함
 status-opened = { $path } 열었음
-menu-add-cube = 큐브 추가
+menu-add-mesh = 메시
+menu-add-light = 조명
+menu-add-camera = 카메라
+menu-add-empty = 엠프티
+menu-add-plane = 평면
+menu-add-cube = 큐브
+menu-add-grid = 격자
+menu-add-uv-sphere = UV 구
+menu-add-ico-sphere = 아이코 구
+menu-add-cylinder = 원기둥
+menu-add-cone = 원뿔
+menu-add-torus = 토러스
+outliner-scene-collection = 씬 컬렉션
 menu-duplicate = 복제
 menu-delete = 삭제
 menu-undo = 되돌리기
@@ -3862,6 +3979,8 @@ menu-mesh = 메시
 menu-edge = 모서리
 menu-face = 면
 menu-add = 추가
+object-copy = 복사
+object-paste = 붙여넣기
 menu-add-light-point = 점광원
 menu-add-light-sun = 태양
 menu-add-light-spot = 스포트라이트
@@ -4573,10 +4692,12 @@ mod tests {
 
     #[test]
     fn korean_is_preferred_and_english_is_the_fallback() {
+        // Any key with both translations serves as the probe; the entry is
+        // "Cube" now that it sits under Add ▸ Mesh, where Blender puts it.
         let ko = load_catalog("ko-KR");
-        assert_eq!(ko.get("menu-add-cube"), "큐브 추가");
+        assert_eq!(ko.get("menu-add-cube"), "큐브");
         let en = load_catalog("en-US");
-        assert_eq!(en.get("menu-add-cube"), "Add Cube");
+        assert_eq!(en.get("menu-add-cube"), "Cube");
     }
 
     #[test]
@@ -4682,6 +4803,8 @@ mod tests {
         // key would otherwise show up on screen as the key itself.
         let catalog = load_catalog("ko-KR");
         for key in [
+            "object-copy",
+            "object-paste",
             "menu-view",
             "menu-select",
             "menu-transform",
@@ -4762,6 +4885,18 @@ mod tests {
             "status-counts",
             "outliner-kind-empty",
             "outliner-kind-mesh",
+            "outliner-scene-collection",
+            "menu-add-mesh",
+            "menu-add-light",
+            "menu-add-camera",
+            "menu-add-empty",
+            "menu-add-plane",
+            "menu-add-grid",
+            "menu-add-uv-sphere",
+            "menu-add-ico-sphere",
+            "menu-add-cylinder",
+            "menu-add-cone",
+            "menu-add-torus",
             "outliner-kind-camera",
             "outliner-kind-light",
             "outliner-shared-mesh",
@@ -4981,5 +5116,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_add_menus_shapes_are_the_operators_in_the_operators_order() {
+        // The menu sends an index and the operator reads it against its own
+        // list; a shape inserted in one and not the other would add a cone
+        // when the user asked for a cylinder.
+        assert_eq!(&ADD_SHAPES[..], kreate_ops::ops::object::PRIMITIVES);
     }
 }

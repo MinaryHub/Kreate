@@ -475,6 +475,14 @@ fn common() -> Vec<Binding> {
             Context::ObjectMode,
             Action::new("object.delete"),
         ),
+        // Copy and paste on the keys every application puts them on. Both are
+        // the application's rather than operators — `edit.`, like undo: copy
+        // edits nothing, and paste has to be given the clipboard's text before
+        // the `object.paste` operator can run.
+        key("edit.copy", "C", Context::ObjectMode, Action::new("edit.copy"))
+            .with_modifiers(Modifiers::ctrl()),
+        key("edit.paste", "V", Context::ObjectMode, Action::new("edit.paste"))
+            .with_modifiers(Modifiers::ctrl()),
         // --- edit mode -----------------------------------------------------
         key(
             "mesh.extrude",

@@ -13,6 +13,9 @@ tracing.workspace = true
 kreate-math.workspace = true
 kreate-mesh.workspace = true
 kreate-scene.workspace = true
+# The paste operator decodes the fragment it carries. The other direction —
+# io depending on ops — is what would be a cycle, and it does not exist.
+kreate-io.workspace = true
 kreate-ops-derive.workspace = true
 kreate-reflect.workspace = true
 glam.workspace = true

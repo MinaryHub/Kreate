@@ -614,6 +614,13 @@ struct App {
     /// this instance runs means another instance crashed, and interrupting the
     /// user's work to say so is not this application's business.
     recoverable: Vec<docfile::Recoverable>,
+    /// What Ctrl+C took: the selection as a fragment's text, for Ctrl+V.
+    ///
+    /// The application's own rather than the system clipboard, for now — the
+    /// same as Blender's, which is per process. The text is what the system
+    /// clipboard would carry, so moving to it is a matter of where the string
+    /// is kept.
+    clipboard: Option<String>,
     /// Snapping, as the user has it set. `Ctrl` inverts it for one drag.
     ///
     /// Held on the application rather than inside a gesture because it is a
@@ -696,6 +703,7 @@ impl App {
             // Collected once, at startup. This is the only moment a recovery
             // offer is not an interruption.
             recoverable: docfile::find_recoverable(),
+            clipboard: None,
             shown_title: String::new(),
         }
     }
@@ -3149,6 +3157,34 @@ impl App {
         true
     }
 
+    /// Ctrl+C: the selected objects, as text the application keeps.
+    fn copy_selection(&mut self) {
+        if self.doc.selection.is_empty() {
+            self.status("nothing selected to copy");
+            return;
+        }
+        let fragment = self.doc.extract_objects(&self.doc.selection.objects);
+        match kreate_io::clipboard::encode(&fragment) {
+            Ok(text) => {
+                let count = fragment.object_count();
+                self.clipboard = Some(text);
+                self.status(&format!("copied {count} object(s)"));
+            }
+            Err(e) => self.status(&format!("could not copy: {e}")),
+        }
+    }
+
+    /// Ctrl+V: whatever Ctrl+C took, through the paste operator.
+    fn paste_clipboard(&mut self) {
+        let Some(text) = self.clipboard.clone() else {
+            self.status("nothing to paste");
+            return;
+        };
+        let mut params = PropertyMap::new();
+        params.set("data", PropertyValue::Text(text));
+        self.run_op("object.paste", params);
+    }
+
     /// The lamp or camera whose glyph is under the cursor, if any.
     ///
     /// Asked of the shell with the projector it drew the glyphs from, so a hit
@@ -4231,6 +4267,11 @@ impl App {
                     "proportional editing off"
                 });
             }
+            // Copy is not an edit: it turns the selection into a fragment and
+            // keeps the text. Paste is, and goes through the history with that
+            // text as its parameter — see `object.paste` on why.
+            "edit.copy" => self.copy_selection(),
+            "edit.paste" => self.paste_clipboard(),
             "file.new" => self.new_document(),
             "file.open" => self.open_document(),
             "file.save" => self.save_document(false),

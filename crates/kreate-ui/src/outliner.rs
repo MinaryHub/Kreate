@@ -63,6 +63,17 @@ pub struct OutlinerRow {
     /// changes every user, which the outliner must say before the user is
     /// surprised by it.
     pub mesh_users: usize,
+    /// The datablock behind the object — the mesh, the light, the camera — by
+    /// name, for the row under the object when it is expanded. `None` for an
+    /// empty, which has none.
+    pub data_name: Option<String>,
+    /// The materials on the mesh's slots, in slot order, for the rows under
+    /// the data row. Blender shows them there; a modeller looking for "which
+    /// material is on this thing" looks there.
+    pub materials: Vec<String>,
+    /// Whether the rows after this one, at greater depth, are this object's
+    /// children — which is what earns it an expander.
+    pub has_children: bool,
 }
 
 impl OutlinerRow {
@@ -76,8 +87,65 @@ impl OutlinerRow {
             visible: true,
             kind,
             mesh_users: 1,
+            data_name: None,
+            materials: Vec::new(),
+            has_children: false,
         }
     }
+}
+
+/// One line of the tree as drawn: which kind of row, and for an object row,
+/// its position in the order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeRow {
+    /// "Scene Collection", Blender's root. Not an object; not selectable.
+    Root,
+    /// The object at this position in the order.
+    Object(usize),
+    /// The datablock under the object at this position.
+    Data(usize),
+    /// The material in this slot, under the object at this position.
+    Material(usize, usize),
+}
+
+/// The rows on screen, given which objects are expanded.
+///
+/// Pure, over the order and the depths, so it can be tested without a window:
+/// a collapsed parent hides everything after it that is deeper, and an
+/// expanded object gains a row for its datablock and one per material. `row`
+/// is consulted only for expanded objects — the ones whose children are being
+/// listed — which keeps this linear in the number of objects rather than the
+/// number of strings.
+pub fn visible_rows(
+    depths: &[u16],
+    expanded: impl Fn(usize) -> bool,
+    row: impl Fn(usize) -> Option<OutlinerRow>,
+) -> Vec<TreeRow> {
+    let mut out = vec![TreeRow::Root];
+    // The depth below which rows are hidden by a collapsed ancestor, if any.
+    let mut hidden_below: Option<u16> = None;
+    for (index, depth) in depths.iter().enumerate() {
+        if let Some(limit) = hidden_below {
+            if *depth > limit {
+                continue;
+            }
+            hidden_below = None;
+        }
+        out.push(TreeRow::Object(index));
+        if expanded(index) {
+            if let Some(r) = row(index) {
+                if r.data_name.is_some() {
+                    out.push(TreeRow::Data(index));
+                }
+                for slot in 0..r.materials.len() {
+                    out.push(TreeRow::Material(index, slot));
+                }
+            }
+        } else {
+            hidden_below = Some(*depth);
+        }
+    }
+    out
 }
 
 /// How a click was modified.
@@ -138,36 +206,95 @@ pub fn resolve_click(
     (vec![clicked], Some(clicked))
 }
 
-/// Draws the outliner.
+/// Draws the outliner as a tree.
+///
+/// **Blender's shape.** A "Scene Collection" root, every object under it at
+/// its hierarchy depth, and an expander on each that opens to show what the
+/// object is made of — its mesh, light or camera, and the materials on the
+/// mesh's slots. A collapsed parent hides its children. What a modeller comes
+/// here to answer is "what is this thing, and what is on it", and a flat list
+/// of names answered neither.
 ///
 /// `order` is every object in hierarchy order; `row` materialises one by
-/// position and is called only for the rows on screen.
+/// position and is called for the rows on screen and for the objects that are
+/// expanded. Which objects are expanded is the widget's own memory, kept in
+/// egui's data by object key, so it survives the document changing.
+#[allow(clippy::too_many_arguments)]
 pub fn outliner(
     ui: &mut Ui,
     catalog: &Catalog,
     order: &[u32],
+    depths: &[u16],
     selected: &[u32],
     active: Option<u32>,
     row: impl Fn(usize) -> Option<OutlinerRow>,
     queue: &mut CommandQueue,
 ) {
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    let expanded_id = ui.id().with("expanded");
+    let expanded: std::collections::HashSet<u32> =
+        ui.data(|d| d.get_temp(expanded_id)).unwrap_or_default();
+
+    let rows = visible_rows(
+        depths,
+        |index| order.get(index).is_some_and(|key| expanded.contains(key)),
+        &row,
+    );
+    let mut toggled: Option<u32> = None;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         // Only the visible rows are laid out — and, because `row` is a function
         // rather than a slice, only the visible rows are *built*. The whole
         // point: a hundred thousand objects must cost the same as twenty.
-        .show_rows(ui, row_height, order.len(), |ui, visible| {
-            for index in visible {
-                let Some(data) = row(index) else { continue };
-                draw_row(ui, catalog, order, selected, active, index, &data, queue);
+        .show_rows(ui, row_height, rows.len(), |ui, visible| {
+            for at in visible {
+                match rows[at] {
+                    TreeRow::Root => draw_root(ui, catalog),
+                    TreeRow::Object(index) => {
+                        let Some(data) = row(index) else { continue };
+                        let open = expanded.contains(&data.id);
+                        if draw_object_row(ui, catalog, order, selected, active, index, &data, open, queue) {
+                            toggled = Some(data.id);
+                        }
+                    }
+                    TreeRow::Data(index) => {
+                        if let Some(data) = row(index) {
+                            draw_data_row(ui, catalog, &data);
+                        }
+                    }
+                    TreeRow::Material(index, slot) => {
+                        if let Some(data) = row(index) {
+                            draw_material_row(ui, &data, slot);
+                        }
+                    }
+                }
             }
         });
+
+    if let Some(key) = toggled {
+        let mut set = expanded;
+        if !set.remove(&key) {
+            set.insert(key);
+        }
+        ui.data_mut(|d| d.insert_temp(expanded_id, set));
+    }
 }
 
+/// Indentation per level of the tree, in points.
+const INDENT: f32 = 14.0;
+
+fn draw_root(ui: &mut Ui, catalog: &Catalog) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        collection_icon(ui, rect);
+        ui.label(egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[])).strong());
+    });
+}
+
+/// Draws one object's row. Returns whether its expander was clicked.
 #[allow(clippy::too_many_arguments)]
-fn draw_row(
+fn draw_object_row(
     ui: &mut Ui,
     catalog: &Catalog,
     order: &[u32],
@@ -175,15 +302,27 @@ fn draw_row(
     active: Option<u32>,
     index: usize,
     row: &OutlinerRow,
+    open: bool,
     queue: &mut CommandQueue,
-) {
+) -> bool {
+    let mut toggled = false;
     ui.horizontal(|ui| {
-        ui.add_space(row.depth as f32 * 12.0);
+        ui.add_space(INDENT * (row.depth as f32 + 1.0));
+
+        // The expander: a chevron when there is something to open, a gap the
+        // same width when there is not, so the icons line up.
+        let expandable = row.has_children || row.data_name.is_some();
+        let (chevron, response) =
+            ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::click());
+        if expandable {
+            paint_chevron(ui, chevron, open, response.hovered());
+            if response.clicked() {
+                toggled = true;
+            }
+        }
 
         // A drawn icon for what the object is, the way Blender's tree says
-        // mesh, light or camera before the name does. Painted rather than a
-        // glyph: the bundled font is a subset with no fallback, and the
-        // triangles and diamonds standing in here said nothing anyway.
+        // mesh, light or camera before the name does.
         let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         object_icon(ui, row.kind, icon_rect, row.visible);
         ui.interact(icon_rect, ui.id().with(("kind", row.id)), egui::Sense::hover())
@@ -243,6 +382,78 @@ fn draw_row(
             }
         });
     });
+    toggled
+}
+
+/// The datablock under an expanded object: what it is made of.
+fn draw_data_row(ui: &mut Ui, catalog: &Catalog, row: &OutlinerRow) {
+    let Some(name) = &row.data_name else { return };
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT * (row.depth as f32 + 2.0) + 12.0);
+        let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        object_icon(ui, row.kind, icon_rect, true);
+        // Dim: this is a fact about the object, not a thing to select. The
+        // summary carries the counts a modeller wants to glance at.
+        let text = match row.kind {
+            RowKind::Mesh { verts, faces } => format!("{name}  {verts}v {faces}f"),
+            _ => name.clone(),
+        };
+        ui.weak(text).on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
+    });
+}
+
+/// One material slot under an expanded object.
+fn draw_material_row(ui: &mut Ui, row: &OutlinerRow, slot: usize) {
+    let Some(name) = row.materials.get(slot) else { return };
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT * (row.depth as f32 + 3.0) + 12.0);
+        let theme = crate::theme::from_ui(ui);
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        // The material's sphere, the same mark the properties tab wears.
+        ui.painter().circle_filled(rect.center(), 4.0, theme.text_dim);
+        ui.weak(name);
+    });
+}
+
+/// The expander: right when folded, down when open.
+fn paint_chevron(ui: &Ui, rect: egui::Rect, open: bool, hovered: bool) {
+    let theme = crate::theme::from_ui(ui);
+    let ink = if hovered { theme.text } else { theme.text_dim };
+    let c = rect.center();
+    let s = 3.0;
+    let points = if open {
+        vec![
+            egui::Pos2::new(c.x - s, c.y - s * 0.5),
+            egui::Pos2::new(c.x + s, c.y - s * 0.5),
+            egui::Pos2::new(c.x, c.y + s * 0.6),
+        ]
+    } else {
+        vec![
+            egui::Pos2::new(c.x - s * 0.5, c.y - s),
+            egui::Pos2::new(c.x - s * 0.5, c.y + s),
+            egui::Pos2::new(c.x + s * 0.6, c.y),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, ink, egui::Stroke::NONE));
+}
+
+/// Blender's collection icon: a box with a lid.
+fn collection_icon(ui: &Ui, rect: egui::Rect) {
+    let theme = crate::theme::from_ui(ui);
+    let line = egui::Stroke::new(1.2, theme.text_dim);
+    let body = egui::Rect::from_center_size(
+        rect.center() + egui::Vec2::new(0.0, 1.5),
+        egui::Vec2::new(11.0, 8.0),
+    );
+    ui.painter().rect_stroke(body, 1.0, line, egui::StrokeKind::Middle);
+    ui.painter().line_segment(
+        [
+            egui::Pos2::new(body.min.x - 1.0, body.min.y),
+            egui::Pos2::new(body.max.x + 1.0, body.min.y),
+        ],
+        line,
+    );
 }
 
 /// The icon for what an object is.
@@ -467,5 +678,74 @@ mod tests {
         let (objects, active) = resolve_click(&big, &[0], Some(0), 99_999, range());
         assert_eq!(objects.len(), 100_000);
         assert_eq!(active, Some(99_999));
+    }
+
+    // --- the tree ---------------------------------------------------------
+
+    fn leaf(id: u32) -> OutlinerRow {
+        OutlinerRow::new(id, "x", RowKind::Empty)
+    }
+
+    #[test]
+    fn the_tree_starts_with_the_scene_collection() {
+        let rows = visible_rows(&[], |_| false, |_| None);
+        assert_eq!(rows, vec![TreeRow::Root]);
+    }
+
+    #[test]
+    fn a_collapsed_parent_hides_everything_deeper_after_it() {
+        // Parent at depth 0, two children at depth 1, a grandchild at 2, then a
+        // sibling of the parent at depth 0 again.
+        let depths = [0u16, 1, 2, 1, 0];
+        let rows = visible_rows(&depths, |_| false, |i| Some(leaf(i as u32)));
+        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Object(4)]);
+    }
+
+    #[test]
+    fn an_expanded_parent_shows_its_children_but_their_collapsed_children_stay_hidden() {
+        let depths = [0u16, 1, 2, 1, 0];
+        let rows = visible_rows(&depths, |i| i == 0, |i| Some(leaf(i as u32)));
+        assert_eq!(
+            rows,
+            vec![
+                TreeRow::Root,
+                TreeRow::Object(0),
+                TreeRow::Object(1),
+                TreeRow::Object(3),
+                TreeRow::Object(4),
+            ],
+            "the grandchild under the collapsed child must not show"
+        );
+    }
+
+    #[test]
+    fn an_expanded_object_shows_what_it_is_made_of() {
+        let depths = [0u16];
+        let rows = visible_rows(
+            &depths,
+            |_| true,
+            |_| {
+                let mut r = OutlinerRow::new(7, "Cube", RowKind::Mesh { verts: 8, faces: 6 });
+                r.data_name = Some("Cube".into());
+                r.materials = vec!["Body".into(), "Trim".into()];
+                Some(r)
+            },
+        );
+        assert_eq!(
+            rows,
+            vec![
+                TreeRow::Root,
+                TreeRow::Object(0),
+                TreeRow::Data(0),
+                TreeRow::Material(0, 0),
+                TreeRow::Material(0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_has_no_data_row_even_when_expanded() {
+        let rows = visible_rows(&[0u16], |_| true, |_| Some(leaf(1)));
+        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0)]);
     }
 }

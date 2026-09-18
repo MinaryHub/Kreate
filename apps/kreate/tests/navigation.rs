@@ -312,6 +312,10 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_proportional",
     "view.cycle_snap_mode",
     "edit.undo",
+    // Copy edits nothing; paste is given the clipboard's text by the
+    // application before the `object.paste` operator runs.
+    "edit.copy",
+    "edit.paste",
     "edit.redo",
     "edit.adjust_last",
     "app.print_script",

@@ -4,6 +4,7 @@
 //! [`document`] for why both of those are load-bearing rather than stylistic.
 
 pub mod camera;
+pub mod clipboard;
 pub mod document;
 pub mod edit_session;
 pub mod image;
