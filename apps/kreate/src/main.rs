@@ -1921,6 +1921,15 @@ impl App {
                 self.cancel_gesture();
                 true
             }
+            // Snapping for the rest of this drag, Blender's `B`. The header
+            // says `snap` while it is on, so the toggle is readable.
+            KeyCode::KeyB => {
+                if let Some((gesture, _)) = &mut self.gesture {
+                    gesture.toggle_snap();
+                }
+                self.drive_gesture();
+                true
+            }
             KeyCode::Backspace => {
                 if let Some((gesture, _)) = &mut self.gesture {
                     gesture.backspace();

@@ -1190,6 +1190,69 @@ fn ctrl_inverts_snapping_rather_than_enabling_it() {
 }
 
 #[test]
+fn b_turns_snapping_on_for_the_rest_of_the_drag_and_off_again() {
+    // Blender's `B` during a transform. A toggle, not a hold: `Ctrl` is the
+    // hold. Someone laying twenty panels on the grid presses `B` once per
+    // drag rather than holding a key through each.
+    let camera = camera();
+    let free_pointer = (473.0, 300.0);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    let on_increment = |t: f64| (t / 0.1 - (t / 0.1).round()).abs() < 1e-9;
+
+    let free = translation(&at(&mut g, free_pointer))[0];
+    assert!(!on_increment(free), "the fixture pointer must land off the grid: {free}");
+
+    g.toggle_snap();
+    let snapped = translation(&at(&mut g, free_pointer))[0];
+    assert!(on_increment(snapped), "B did not turn snapping on: {snapped}");
+    assert!(
+        g.status().contains("snap"),
+        "the header does not say snapping is on: {}",
+        g.status()
+    );
+
+    g.toggle_snap();
+    let released = translation(&at(&mut g, free_pointer))[0];
+    assert_eq!(released, free, "a second B did not turn snapping off again");
+}
+
+#[test]
+fn ctrl_still_inverts_after_b_has_turned_snapping_on() {
+    // The two compose the way the header states them: B sets the drag's
+    // setting, Ctrl inverts whatever the setting is.
+    let camera = camera();
+    let free_pointer = (473.0, 300.0);
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.cycle_axis(Axis::X);
+    g.toggle_snap();
+    g.set_snap_inverted(true);
+    let t = translation(&at(&mut g, free_pointer))[0];
+    assert!(
+        (t / 0.1 - (t / 0.1).round()).abs() > 1e-6,
+        "Ctrl should let the user off the snapping B turned on: {t}"
+    );
+}
+
+#[test]
 fn a_typed_value_is_never_snapped() {
     // Someone who wrote a number meant that number. Rounding it would be the
     // tool arguing with an instruction.

@@ -444,6 +444,17 @@ impl Gesture {
         self.snap_inverted = inverted;
     }
 
+    /// Turns snapping on, or off again, for the rest of this drag — `B`.
+    ///
+    /// Blender's key during a transform, and the reason it is a toggle and
+    /// not a hold: `Ctrl` is the hold. A modeller who wants to lay a row of
+    /// panels down on the grid holds `Ctrl` for one and presses `B` for
+    /// twenty, and it is the drag that remembers, not the scene — the setting
+    /// in the header is what the next drag starts from.
+    pub fn toggle_snap(&mut self) {
+        self.snap.enabled = !self.snap.enabled;
+    }
+
     /// Whether snapping applies right now.
     fn snapping(&self) -> bool {
         self.snap.enabled != self.snap_inverted
