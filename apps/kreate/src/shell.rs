@@ -866,6 +866,8 @@ struct Labels {
     material_add_slot: String,
     material_remove_slot: String,
     recover_open: String,
+    recover_menu: String,
+    recover_none: String,
     recover_discard: String,
     recover_discard_all: String,
     add_cube: String,
@@ -966,6 +968,8 @@ impl Labels {
             material_add_slot: t("material-add-slot"),
             material_remove_slot: t("material-remove-slot"),
             recover_open: t("recover-open"),
+            recover_menu: t("recover-menu"),
+            recover_none: t("recover-none"),
             recover_discard: t("recover-discard"),
             recover_discard_all: t("recover-discard-all"),
             add_cube: t("menu-add-cube"),
@@ -1096,36 +1100,6 @@ pub fn draw(
     // access the command queue needs.
     let mut modifier_rows = modifier_rows(doc, registry, &state.catalog);
 
-    // Drawn before the menu so it is the first thing in the window, and as a
-    // panel rather than a modal dialog: a user who has just lost a session wants
-    // to see their application, not a box in front of it. It also means the
-    // choice goes through the command queue like every other action instead of
-    // blocking the event loop at startup.
-    if !state.recoverable.is_empty() {
-        // The height goes on the *panel*, and it takes both setters. Measured,
-        // because none of this is guessable:
-        //
-        // - `ScrollArea::max_height` inside a non-resizable top panel is
-        //   inert. A hundred points came out whether it asked for two rows or
-        //   twenty-five.
-        // - `Panel::max_size` alone only ever *lowers* the height: two rows
-        //   worked, ten did nothing, because a non-resizable top panel falls
-        //   back to a default of about a hundred points.
-        // - `default_size` is the one that sets it, and `max_size` beside it
-        //   keeps a one-entry offer short.
-        //
-        // With both, the height tracks the row count: one row costs the
-        // viewport 47 points, four cost 117, ten cost 258.
-        let row = recovery_row_height(ui);
-        let height = row * (RECOVERY_VISIBLE_ROWS + 1.0);
-        Panel::top("recover")
-            .default_size(height)
-            .max_size(height)
-            .show(ui, |ui| {
-                draw_recovery(ui, state, &l);
-            });
-    }
-
     // **The top bar is the application's, not the viewport's.** Blender's
     // rule, and the reason this row got short: what you can *do to a scene*
     // — add, select, transform, change mode, change shading — belongs to the
@@ -1144,6 +1118,9 @@ pub fn draw(
                     state.queue.push(Command::OpenDocument);
                     ui.close();
                 }
+                // Recovered work under File, where Blender keeps it and where
+                // somebody who has just lost a session looks first.
+                draw_recover_menu(ui, state, &l);
                 ui.separator();
                 if ui.button(&l.file_save).clicked() {
                     state.queue.push(Command::SaveDocument);
@@ -1207,6 +1184,19 @@ pub fn draw(
                 // what the accent says everywhere else: this is what you are
                 // acting on.
                 ui.colored_label(theme.accent, name);
+            }
+            // Recovered work waiting under File ▸ Recover. Said here, quietly
+            // and for as long as it waits, because a menu nobody opens is a
+            // menu nobody finds — and the person this is for has just lost a
+            // session.
+            if !state.recoverable.is_empty() {
+                ui.separator();
+                let hint = state.catalog.format(
+                    "recover-hint",
+                    TextKind::Ui,
+                    &[("count", &state.recoverable.len().to_string())],
+                );
+                ui.colored_label(theme.info, hint);
             }
             // The last thing that happened.
             // A save that reports nothing is a save the user cannot distinguish
@@ -2657,71 +2647,78 @@ fn recovery_row_height(ui: &Ui) -> f32 {
     ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y * 2.0
 }
 
-/// The recovery offer: one row per autosave, in a bounded scrolling list.
+/// The recovery offer, as a submenu of File — Blender's File ▸ Recover.
 ///
-/// It used to be a `horizontal_wrapped` flow of every entry with its two
-/// buttons, which is fine for one and unusable for forty: a stale session
-/// directory per crashed process is normal, and a run of interrupted tests
-/// left forty-two. The offer filled two thirds of the window and pushed the
-/// viewport off the bottom.
+/// It was a panel across the top of the window, which made sense when there
+/// was nowhere else for it and stopped making sense the moment the top bar
+/// became the application's menus: a strip of buttons above File is a second,
+/// unlabelled menu. Under File it is where a user who has just lost a session
+/// looks first, and it costs the viewport nothing while it waits there. The
+/// status bar says the offers exist, so nobody has to know to look.
 ///
-/// So: a fixed maximum height, one row each, the count in the heading, and a
-/// way to dismiss the lot. The list is newest first, which `find_recoverable`
-/// guarantees — the one a user wants is almost always the last one written.
-fn draw_recovery(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
-    let count = state.recoverable.len();
-    let heading = state.catalog.format(
-        "recover-count",
-        TextKind::Ui,
-        &[("count", &count.to_string())],
-    );
-
-    ui.horizontal(|ui| {
+/// One row each in a list that scrolls after a few, the count above and a way
+/// to dismiss the lot below. A stale session directory per crashed process is
+/// normal, and a run of interrupted tests left forty-two.
+fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.recover_menu, |ui| {
+        let count = state.recoverable.len();
+        if count == 0 {
+            ui.add_enabled(false, egui::Button::new(&l.recover_none));
+            return;
+        }
+        let heading = state.catalog.format(
+            "recover-count",
+            TextKind::Ui,
+            &[("count", &count.to_string())],
+        );
         ui.label(egui::RichText::new(heading).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Present from the first row, not only when the list is long: a
-            // user who wants none of them should not have to click forty times
-            // to say so.
-            if ui.button(&l.recover_discard_all).clicked() {
-                discard_all_recoveries(state);
-            }
-        });
-    });
+        ui.separator();
 
-    // The scroll area is what makes the overflow reachable rather than
-    // clipped; the panel above is what bounds it.
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // A clone, because the buttons queue commands that will mutate this
-            // list and the loop would otherwise hold a borrow across it.
-            let offers: Vec<(std::path::PathBuf, String, String)> = state
-                .recoverable
-                .iter()
-                .map(|o| (o.path.clone(), o.name.clone(), o.age.clone()))
-                .collect();
-            for (path, name, age) in offers {
-                ui.horizontal(|ui| {
-                    // The full path on hover. Forty autosaves called
-                    // `untitled.kreate` differ only by the session directory
-                    // they came from, and the user occasionally needs to see it.
-                    ui.label(&name).on_hover_text(path.display().to_string());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(&l.recover_discard).clicked() {
-                            state
-                                .queue
-                                .push(Command::DiscardRecovery { path: path.clone() });
-                        }
-                        if ui.button(&l.recover_open).clicked() {
-                            state
-                                .queue
-                                .push(Command::RecoverDocument { path: path.clone() });
-                        }
-                        ui.weak(&age);
+        let row = recovery_row_height(ui);
+        // A clone, because the buttons queue commands that will mutate this
+        // list and the loop would otherwise hold a borrow across it.
+        let offers: Vec<(std::path::PathBuf, String, String)> = state
+            .recoverable
+            .iter()
+            .map(|o| (o.path.clone(), o.name.clone(), o.age.clone()))
+            .collect();
+        egui::ScrollArea::vertical()
+            .max_height(row * RECOVERY_VISIBLE_ROWS * 1.6)
+            .show(ui, |ui| {
+                ui.set_min_width(320.0);
+                for (path, name, age) in offers {
+                    ui.horizontal(|ui| {
+                        // The full path on hover. Forty autosaves called
+                        // `untitled.kreate` differ only by the session
+                        // directory they came from, and the user occasionally
+                        // needs to see it.
+                        ui.label(&name).on_hover_text(path.display().to_string());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(&l.recover_discard).clicked() {
+                                state
+                                    .queue
+                                    .push(Command::DiscardRecovery { path: path.clone() });
+                            }
+                            if ui.button(&l.recover_open).clicked() {
+                                state
+                                    .queue
+                                    .push(Command::RecoverDocument { path: path.clone() });
+                                ui.close();
+                            }
+                            ui.weak(&age);
+                        });
                     });
-                });
-            }
-        });
+                }
+            });
+        ui.separator();
+        // Present from the first offer, not only when the list is long: a
+        // user who wants none of them should not have to click forty times
+        // to say so.
+        if ui.button(&l.recover_discard_all).clicked() {
+            discard_all_recoveries(state);
+            ui.close();
+        }
+    });
 }
 
 /// The running transform's header, over the top of the viewport.
@@ -3482,6 +3479,9 @@ material-no-slots = No slots
 material-add-slot = Add a material slot
 material-remove-slot = Remove this material slot
 recover-count = { $count } recovered documents
+recover-menu = Recover
+recover-none = Nothing to recover
+recover-hint = { $count } recovered documents waiting in File ‣ Recover
 recover-open = Open
 recover-discard = Discard
 recover-discard-all = Discard all
@@ -3734,6 +3734,9 @@ material-no-slots = 슬롯 없음
 material-add-slot = 재질 슬롯 추가
 material-remove-slot = 이 재질 슬롯 삭제
 recover-count = 복구된 작업 { $count }개
+recover-menu = 복구
+recover-none = 복구할 작업 없음
+recover-hint = 복구된 작업 { $count }개 — 파일 ‣ 복구
 recover-open = 열기
 recover-discard = 버리기
 recover-discard-all = 모두 버리기
@@ -4728,6 +4731,9 @@ mod tests {
             "material-clear-image",
             "recover-count",
             "recover-open",
+            "recover-menu",
+            "recover-none",
+            "recover-hint",
             "recover-discard",
             "recover-discard-all",
             "recover-age-now",
@@ -4945,5 +4951,35 @@ mod tests {
         // anything is selected.
         assert_eq!(click_selection(&[1, 2, 3], Some(3), 3, true), (vec![1, 2], Some(2)));
         assert_eq!(click_selection(&[3], Some(3), 3, true), (Vec::<u32>::new(), None));
+    }
+
+    #[test]
+    fn every_catalog_string_can_be_drawn_by_the_bundled_font() {
+        // The font is a subset with no fallback, so a character outside it is
+        // a blank box. The tab glyphs are checked above; this checks every
+        // *sentence* — the place a stray typographic character lands when a
+        // label is written, and where nobody looks until a user reports a box
+        // in the middle of a status message. A Fluent placeholder is stripped
+        // first: `{ $count }` is not drawn.
+        for (locale, ftl) in [("en", EN_FTL), ("ko-KR", KO_FTL)] {
+            for line in ftl.lines() {
+                let Some((key, value)) = line.split_once(" = ") else { continue };
+                let mut text = String::new();
+                let mut depth = 0;
+                for ch in value.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        c if depth == 0 => text.push(c),
+                        _ => {}
+                    }
+                }
+                let missing = kreate_ui::fonts::missing_glyphs(&text);
+                assert!(
+                    missing.is_empty(),
+                    "{locale}: `{key}` uses {missing:?}, which the bundled font cannot draw"
+                );
+            }
+        }
     }
 }

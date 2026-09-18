@@ -1263,10 +1263,10 @@ fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
 #[test]
 fn many_recovered_documents_do_not_eat_the_window() {
     // A stale session directory per crashed process is normal, and a run of
-    // interrupted tests left forty-two. The offer was a `horizontal_wrapped`
-    // flow of every entry with its two buttons: it filled two thirds of the
-    // window and pushed the viewport off the bottom, which is what the
-    // screenshot that prompted this showed.
+    // interrupted tests left forty-two. The offer once filled two thirds of
+    // the window; then it was a bounded panel across the top; now it is a
+    // submenu of File, the way Blender keeps it, and costs the viewport
+    // nothing at all while it waits there.
     //
     // Measured as the viewport's height, because that is what the user loses.
     let none = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
@@ -1281,22 +1281,30 @@ fn many_recovered_documents_do_not_eat_the_window() {
     }));
 
     let lost = none.viewport_rect.height() - many.viewport_rect.height();
-    // More than one row, or the offer is not being drawn and this test is
-    // asserting nothing.
     assert!(
-        lost > 60.0,
-        "the offer cost only {lost} points, so it is probably not drawn"
-    );
-    // And bounded. The original wrapped flow cost 416; four rows cost 117.
-    assert!(
-        lost < 160.0,
+        lost.abs() < 1.0,
         "sixty recovery offers cost the viewport {lost} points of height; the \
-         list is not bounded"
+         offer belongs under File and should cost nothing"
     );
+
+    // And the user is still told: the status bar differs from the frame with
+    // nothing to recover, where the hint is.
+    let bar = |c: &Composited| -> usize {
+        let mut n = 0;
+        for y in (H - 30)..H {
+            for x in 0..(W / 2) {
+                let p = c.at(x, y);
+                if p[0] > 60 || p[1] > 60 || p[2] > 60 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
     assert!(
-        many.viewport_rect.height() > f32::from(H as u16) * 0.6,
-        "the viewport is down to {} points",
-        many.viewport_rect.height()
+        bar(&many) > bar(&none) + 40,
+        "the status bar says nothing about {} recovered documents",
+        many.state.recoverable.len()
     );
 }
 
