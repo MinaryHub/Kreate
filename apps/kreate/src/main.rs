@@ -1232,7 +1232,39 @@ impl App {
             ("mesh.bevel", &[]),
             ("mesh.merge", &[]),
             ("mesh.split", &[]),
+            ("mesh.shade", &[("smooth", PropertyValue::Bool(true))]),
+            ("mesh.shade", &[("smooth", PropertyValue::Bool(false))]),
+            ("mesh.normals", &[("action", PropertyValue::Enum(0))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(0))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(1))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(2))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(3))]),
+            ("object.select_all", &[("action", PropertyValue::Enum(0))]),
+            ("object.select_all", &[("action", PropertyValue::Enum(1))]),
+            ("object.select_all", &[("action", PropertyValue::Enum(3))]),
+            ("object.add_light", &[]),
+            ("object.add_camera", &[]),
+            ("object.add_empty", &[]),
+            // The application's own actions, which have keys too: a menu entry
+            // that says "Ctrl+S" beside Save is how the key gets learnt.
+            ("file.new", &[]),
+            ("file.open", &[]),
+            ("file.save", &[]),
+            ("file.save_as", &[]),
+            ("edit.undo", &[]),
+            ("edit.redo", &[]),
+            ("edit.copy", &[]),
+            ("edit.paste", &[]),
+            ("view.frame_all", &[]),
+            ("view.toggle_projection", &[]),
+            ("view.toggle_sidebar", &[]),
+            ("view.toggle_grid", &[]),
+            ("view.toggle_wireframe", &[]),
         ];
+        // Keyed by the *variant* — the operator with the parameters that make
+        // it this entry — so Select ▸ All and Select ▸ None, both `mesh.select`,
+        // each keep their own shortcut. An entry with no parameters is keyed by
+        // the bare id, which is the same string.
         self.ui.command_info = SHOWN
             .iter()
             .map(|(id, pairs)| {
@@ -1240,7 +1272,10 @@ impl App {
                 for (name, value) in *pairs {
                     params.set(name, value.clone());
                 }
-                (id.to_string(), self.command_info(id, &params))
+                (
+                    kreate_ui::command_info::variant_id(id, &params),
+                    self.command_info(id, &params),
+                )
             })
             .collect();
     }

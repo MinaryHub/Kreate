@@ -1161,34 +1161,29 @@ pub fn draw(
     Panel::top("menu").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button(&l.menu_file, |ui| {
-                if ui.button(&l.file_new).clicked() {
+                if menu_item(ui, state, "file.new", &[], &l.file_new) {
                     state.queue.push(Command::NewDocument);
-                    ui.close();
                 }
-                if ui.button(&l.file_open).clicked() {
+                if menu_item(ui, state, "file.open", &[], &l.file_open) {
                     state.queue.push(Command::OpenDocument);
-                    ui.close();
                 }
                 // Recovered work under File, where Blender keeps it and where
                 // somebody who has just lost a session looks first.
                 draw_recover_menu(ui, state, &l);
                 ui.separator();
-                if ui.button(&l.file_save).clicked() {
+                if menu_item(ui, state, "file.save", &[], &l.file_save) {
                     state.queue.push(Command::SaveDocument);
-                    ui.close();
                 }
-                if ui.button(&l.file_save_as).clicked() {
+                if menu_item(ui, state, "file.save_as", &[], &l.file_save_as) {
                     state.queue.push(Command::SaveDocumentAs);
-                    ui.close();
                 }
                 ui.separator();
                 // Below the fold from saving, and after a separator, because
                 // an export is not a save: the document keeps no path from it
                 // and treating a `.glb` as a working file loses everything the
                 // format cannot hold.
-                if ui.button(&l.file_export).clicked() {
+                if menu_item(ui, state, "file.export", &[], &l.file_export) {
                     state.queue.push(Command::ExportScene);
-                    ui.close();
                 }
             });
 
@@ -1197,19 +1192,11 @@ pub fn draw(
             // reached by keystroke a hundred times for every once they are
             // reached by pointer.
             ui.menu_button(&l.menu_edit, |ui| {
-                if ui
-                    .add_enabled(history.can_undo(), egui::Button::new(&l.undo))
-                    .clicked()
-                {
+                if menu_item_enabled(ui, state, "edit.undo", &[], &l.undo, history.can_undo()) {
                     state.queue.push(Command::Undo);
-                    ui.close();
                 }
-                if ui
-                    .add_enabled(history.can_redo(), egui::Button::new(&l.redo))
-                    .clicked()
-                {
+                if menu_item_enabled(ui, state, "edit.redo", &[], &l.redo, history.can_redo()) {
                     state.queue.push(Command::Redo);
-                    ui.close();
                 }
             });
 
@@ -1658,56 +1645,106 @@ fn draw_view_menu(
 ) {
     ui.menu_button(&l.menu_view, |ui| {
         if is_viewport {
-            if menu_action(ui, state, "view.frame_all", &l.view_frame_all) {
+            if menu_item(ui, state, "view.frame_all", &[], &l.view_frame_all) {
                 state.queue.dispatch("view.frame_all", PropertyMap::new());
             }
-            if ui.button(&l.view_frame_selected).clicked() {
+            if menu_item(ui, state, "view.frame_selected", &[], &l.view_frame_selected) {
                 state.queue.push(Command::FrameSelection);
-                ui.close();
             }
             ui.separator();
-            if menu_action(ui, state, "view.toggle_projection", &l.view_perspective) {
+            if menu_item(ui, state, "view.toggle_projection", &[], &l.view_perspective) {
                 state.queue.dispatch("view.toggle_projection", PropertyMap::new());
             }
-            if menu_action(ui, state, "view.toggle_sidebar", &l.view_sidebar) {
+            if menu_item(ui, state, "view.toggle_sidebar", &[], &l.view_sidebar) {
                 state.queue.dispatch("view.toggle_sidebar", PropertyMap::new());
             }
             ui.separator();
         }
         ui.menu_button(&l.area_menu, |ui| {
-            if ui.button(&l.area_split_v).clicked() {
+            if menu_item(ui, state, "area.split_vertical", &[], &l.area_split_v) {
                 state.split_area(area.id, kreate_ui::Axis::Vertical);
-                ui.close();
             }
-            if ui.button(&l.area_split_h).clicked() {
+            if menu_item(ui, state, "area.split_horizontal", &[], &l.area_split_h) {
                 state.split_area(area.id, kreate_ui::Axis::Horizontal);
-                ui.close();
             }
             // Disabled rather than hidden on the last area: a menu whose
             // entries come and go is a menu the user cannot learn.
-            ui.add_enabled_ui(state.screen().area_count() > 1, |ui| {
-                if ui.button(&l.area_close).clicked() {
-                    state.close_area(area.id);
-                    ui.close();
-                }
-            });
+            let last = state.screen().area_count() <= 1;
+            if menu_item_enabled(ui, state, "area.close", &[], &l.area_close, !last) {
+                state.close_area(area.id);
+            }
         });
     });
 }
 
-/// A menu entry for a keymap action: the label, the tooltip with its key, and
-/// the menu closing on a click. The caller does the dispatch, because what to
-/// send differs by entry.
-fn menu_action(ui: &mut Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
-    let response = ui.button(label);
-    let clicked = match state.command_info.get(op_id) {
-        Some(info) if info.has_tooltip() => response.on_hover_text(info.tooltip()).clicked(),
-        _ => response.clicked(),
-    };
-    if clicked {
-        ui.close();
+/// A menu entry: the label, and on hover what it does and which key does it.
+///
+/// **Every entry in every menu goes through this**, which is what makes the
+/// tooltips complete rather than present where somebody remembered. The
+/// sentence comes from the catalog under the entry's id — `op-file-save-desc`,
+/// `op-mesh-select-action-1-desc` — with the variant tried first and the bare
+/// operator second, so Select ▸ None can say something other than Select ▸ All
+/// while Bevel needs one sentence. The key comes from the keymap, resolved in
+/// the current mode, through `command_info`. An entry with neither shows no
+/// tooltip rather than an empty box.
+///
+/// Closes the menu on a click, which a menu entry has to do: leaving it open
+/// after running a command hides the very thing the command changed.
+fn menu_item(
+    ui: &mut Ui,
+    state: &ShellState,
+    id: &str,
+    params: &[(&'static str, kreate_reflect::PropertyValue)],
+    label: &str,
+) -> bool {
+    menu_item_enabled(ui, state, id, params, label, true)
+}
+
+/// [`menu_item`], greyed out when it cannot apply. Undo with nothing to undo.
+fn menu_item_enabled(
+    ui: &mut Ui,
+    state: &ShellState,
+    id: &str,
+    params: &[(&'static str, kreate_reflect::PropertyValue)],
+    label: &str,
+    enabled: bool,
+) -> bool {
+    let mut map = PropertyMap::new();
+    for (name, value) in params {
+        map.set(name, value.clone());
     }
-    clicked
+    let variant = kreate_ui::command_info::variant_id(id, &map);
+    let description = [variant.as_str(), id]
+        .iter()
+        .map(|key| kreate_ui::command_info::description_key(key))
+        .find(|key| state.catalog.has(key))
+        .map(|key| state.catalog.format(&key, TextKind::Tooltip, &[]))
+        .unwrap_or_default();
+    let shortcut = state
+        .command_info
+        .get(&variant)
+        .or_else(|| state.command_info.get(id))
+        .map(|info| info.shortcut.clone())
+        .unwrap_or_default();
+    let tooltip = match (description.is_empty(), shortcut.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => description,
+        (true, false) => shortcut,
+        // i18n-exempt: a translated sentence over a key name
+        (false, false) => format!("{description}\n{shortcut}"),
+    };
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    let response = if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(kreate_ui::text::wrap_tooltip(ui, &tooltip))
+    };
+    if response.clicked() {
+        ui.close();
+        true
+    } else {
+        false
+    }
 }
 
 /// The Select menu: all, none, invert, and in edit mode the loop.
@@ -1728,7 +1765,8 @@ fn draw_select_menu(
                 (1, &l.select_none),
                 (2, &l.select_invert),
             ] {
-                if menu_tool(ui, state, "mesh.select", label) {
+                let variant = [("action", kreate_reflect::PropertyValue::Enum(action))];
+                if menu_item(ui, state, "mesh.select", &variant, label) {
                     let mut p = PropertyMap::new();
                     p.set("action", kreate_reflect::PropertyValue::Enum(action));
                     p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
@@ -1736,7 +1774,8 @@ fn draw_select_menu(
                 }
             }
             ui.separator();
-            if menu_tool(ui, state, "mesh.select", &l.select_loop) {
+            let loop_variant = [("action", kreate_reflect::PropertyValue::Enum(3))];
+            if menu_item(ui, state, "mesh.select", &loop_variant, &l.select_loop) {
                 let mut p = PropertyMap::new();
                 p.set("action", kreate_reflect::PropertyValue::Enum(3));
                 state.queue.run("mesh.select", p);
@@ -1749,7 +1788,8 @@ fn draw_select_menu(
                 (1, &l.select_none),
                 (3, &l.select_invert),
             ] {
-                if menu_tool(ui, state, "object.select_all", label) {
+                let variant = [("action", kreate_reflect::PropertyValue::Enum(action))];
+                if menu_item(ui, state, "object.select_all", &variant, label) {
                     let mut p = PropertyMap::new();
                     p.set("action", kreate_reflect::PropertyValue::Enum(action));
                     state.queue.run("object.select_all", p);
@@ -1767,12 +1807,12 @@ fn draw_select_menu(
 fn draw_add_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     ui.menu_button(&l.add_menu, |ui| {
         ui.menu_button(&l.add_mesh, |ui| {
-            for (shape, label) in ADD_SHAPES.iter().enumerate() {
-                if ui.button(&l.add_shapes[shape]).on_hover_text(*label).clicked() {
+            for shape in 0..ADD_SHAPES.len() {
+                let variant = [("shape", kreate_reflect::PropertyValue::Enum(shape as u32))];
+                if menu_item(ui, state, "object.add_primitive", &variant, &l.add_shapes[shape]) {
                     let mut p = PropertyMap::new();
                     p.set("shape", kreate_reflect::PropertyValue::Enum(shape as u32));
                     state.queue.run("object.add_primitive", p);
-                    ui.close();
                 }
             }
         });
@@ -1783,22 +1823,20 @@ fn draw_add_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 (2, &l.add_light_spot),
                 (3, &l.add_light_area),
             ] {
-                if ui.button(label).clicked() {
+                let variant = [("kind", kreate_reflect::PropertyValue::Enum(kind))];
+                if menu_item(ui, state, "object.add_light", &variant, label) {
                     let mut p = PropertyMap::new();
                     p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
                     state.queue.run("object.add_light", p);
-                    ui.close();
                 }
             }
         });
         ui.separator();
-        if ui.button(&l.add_camera).clicked() {
+        if menu_item(ui, state, "object.add_camera", &[], &l.add_camera) {
             state.queue.run("object.add_camera", PropertyMap::new());
-            ui.close();
         }
-        if ui.button(&l.add_empty).clicked() {
+        if menu_item(ui, state, "object.add_empty", &[], &l.add_empty) {
             state.queue.run("object.add_empty", PropertyMap::new());
-            ui.close();
         }
     });
 }
@@ -1830,13 +1868,14 @@ fn draw_object_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 ("object.rotate", &l.transform_rotate),
                 ("object.scale", &l.transform_scale),
             ] {
-                if menu_action(ui, state, op, label) {
+                if menu_item(ui, state, op, &[], label) {
                     state.queue.dispatch(op, PropertyMap::new());
                 }
             }
         });
         ui.separator();
-        if menu_tool(ui, state, "object.duplicate", &l.duplicate) {
+        let linked = [("linked", kreate_reflect::PropertyValue::Bool(true))];
+        if menu_item(ui, state, "object.duplicate", &linked, &l.duplicate) {
             let mut p = PropertyMap::new();
             p.set("linked", kreate_reflect::PropertyValue::Bool(true));
             state.queue.run("object.duplicate", p);
@@ -1844,14 +1883,14 @@ fn draw_object_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         // Copy and paste beside Duplicate, which is the same family: a paste
         // is a duplicate that survives the original being deleted and can be
         // put down later. Through `Dispatch`, the door the keys use.
-        if menu_action(ui, state, "edit.copy", &l.object_copy) {
+        if menu_item(ui, state, "edit.copy", &[], &l.object_copy) {
             state.queue.dispatch("edit.copy", PropertyMap::new());
         }
-        if menu_action(ui, state, "edit.paste", &l.object_paste) {
+        if menu_item(ui, state, "edit.paste", &[], &l.object_paste) {
             state.queue.dispatch("edit.paste", PropertyMap::new());
         }
         ui.separator();
-        if menu_tool(ui, state, "object.delete", &l.delete) {
+        if menu_item(ui, state, "object.delete", &[], &l.delete) {
             state.queue.run("object.delete", PropertyMap::new());
         }
     });
@@ -1898,7 +1937,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             ("view.toggle_grid", &l.overlay_grid),
             ("view.toggle_wireframe", &l.overlay_wireframe),
         ] {
-            if menu_action(ui, state, op, label) {
+            if menu_item(ui, state, op, &[], label) {
                 state.queue.dispatch(op, PropertyMap::new());
             }
         }
@@ -2432,35 +2471,6 @@ fn draw_mode_menu(
         });
 }
 
-/// A toolbar button carrying whatever is known about the command behind it.
-///
-/// The label stays as the top row already spells it — the buttons are laid out
-/// and translated there — and the *tooltip* is what the command information
-/// adds: the sentence and, above all, the shortcut. Teaching the key at the
-/// moment the user reaches for the button is the whole point; a toolbar that
-/// only ever runs commands keeps its users coming back to it forever.
-fn command_tool(ui: &mut egui::Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
-    let response = ui.button(label);
-    match state.command_info.get(op_id) {
-        Some(info) if info.has_tooltip() => response.on_hover_text(info.tooltip()).clicked(),
-        _ => response.clicked(),
-    }
-}
-
-/// The same as [`command_tool`], for an entry inside a menu.
-///
-/// Closes the menu on a click, which a menu entry has to do and a toolbar
-/// button must not: leaving it open after running a command hides the very
-/// thing the command changed.
-fn menu_tool(ui: &mut egui::Ui, state: &ShellState, op_id: &str, label: &str) -> bool {
-    if command_tool(ui, state, op_id, label) {
-        ui.close();
-        true
-    } else {
-        false
-    }
-}
-
 /// The edit-mode menus: Mesh, Edge and Face.
 ///
 /// **Blender's grouping, on purpose.** What a command acts *on* decides which
@@ -2477,45 +2487,47 @@ fn draw_mesh_menus(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     ui.menu_button(&l.menu_mesh, |ui| {
         // Merge and dissolve both act on whatever the element mode is, so the
         // entry carries it rather than asking again.
-        if menu_tool(ui, state, "mesh.merge", &l.merge) {
+        if menu_item(ui, state, "mesh.merge", &[], &l.merge) {
             let mut p = PropertyMap::new();
             p.set("target", kreate_reflect::PropertyValue::Enum(0));
             state.queue.run("mesh.merge", p);
         }
-        if menu_tool(ui, state, "mesh.merge", &l.weld) {
+        if menu_item(ui, state, "mesh.merge.by_distance", &[], &l.weld) {
             let mut p = PropertyMap::new();
             p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
             state.queue.run("mesh.merge", p);
         }
         ui.separator();
-        if menu_tool(ui, state, "mesh.dissolve", &l.dissolve) {
+        if menu_item(ui, state, "mesh.dissolve", &[], &l.dissolve) {
             let mut p = PropertyMap::new();
             p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
             state.queue.run("mesh.dissolve", p);
         }
-        if menu_tool(ui, state, "mesh.delete", &l.delete) {
+        if menu_item(ui, state, "mesh.delete", &[], &l.delete) {
             let mut p = PropertyMap::new();
             p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
             state.queue.run("mesh.delete", p);
         }
         ui.separator();
-        if menu_tool(ui, state, "mesh.spin", &l.spin) {
+        if menu_item(ui, state, "mesh.spin", &[], &l.spin) {
             state.queue.run("mesh.spin", PropertyMap::new());
         }
         ui.separator();
         // Shading is a property of the mesh rather than of a selection, which
         // is why it is here and not under Face.
-        if menu_tool(ui, state, "mesh.shade", &l.shade_smooth) {
+        let smooth = [("smooth", kreate_reflect::PropertyValue::Bool(true))];
+        if menu_item(ui, state, "mesh.shade", &smooth, &l.shade_smooth) {
             let mut p = PropertyMap::new();
             p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
             state.queue.run("mesh.shade", p);
         }
-        if menu_tool(ui, state, "mesh.shade", &l.shade_flat) {
+        let flat = [("smooth", kreate_reflect::PropertyValue::Bool(false))];
+        if menu_item(ui, state, "mesh.shade", &flat, &l.shade_flat) {
             let mut p = PropertyMap::new();
             p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
             state.queue.run("mesh.shade", p);
         }
-        if menu_tool(ui, state, "mesh.normals", &l.recalc_normals) {
+        if menu_item(ui, state, "mesh.normals", &[], &l.recalc_normals) {
             let mut p = PropertyMap::new();
             p.set("action", kreate_reflect::PropertyValue::Enum(0));
             state.queue.run("mesh.normals", p);
@@ -2523,33 +2535,34 @@ fn draw_mesh_menus(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     });
 
     ui.menu_button(&l.menu_edge, |ui| {
-        if menu_tool(ui, state, "mesh.bevel", &l.bevel) {
+        if menu_item(ui, state, "mesh.bevel", &[], &l.bevel) {
             let mut p = PropertyMap::new();
             p.set("width", kreate_reflect::PropertyValue::Float(0.1));
             state.queue.run("mesh.bevel", p);
         }
-        if menu_tool(ui, state, "mesh.loop_cut", &l.loop_cut) {
+        if menu_item(ui, state, "mesh.loop_cut", &[], &l.loop_cut) {
             let mut p = PropertyMap::new();
             p.set("cuts", kreate_reflect::PropertyValue::Int(1));
             p.set("position", kreate_reflect::PropertyValue::Float(0.5));
             state.queue.run("mesh.loop_cut", p);
         }
-        if menu_tool(ui, state, "mesh.subdivide", &l.subdivide) {
+        if menu_item(ui, state, "mesh.subdivide", &[], &l.subdivide) {
             let mut p = PropertyMap::new();
             p.set("iterations", kreate_reflect::PropertyValue::Int(1));
             state.queue.run("mesh.subdivide", p);
         }
-        if menu_tool(ui, state, "mesh.bridge", &l.bridge) {
+        if menu_item(ui, state, "mesh.bridge", &[], &l.bridge) {
             state.queue.run("mesh.bridge", PropertyMap::new());
         }
         ui.separator();
-        if menu_tool(ui, state, "mesh.select", &l.select_loop) {
+        let loop_variant = [("action", kreate_reflect::PropertyValue::Enum(3))];
+        if menu_item(ui, state, "mesh.select", &loop_variant, &l.select_loop) {
             let mut p = PropertyMap::new();
             p.set("action", kreate_reflect::PropertyValue::Enum(3));
             state.queue.run("mesh.select", p);
         }
         ui.separator();
-        if ui.button(&l.mark_sharp).clicked() {
+        if menu_item(ui, state, "mesh.mark_sharp", &[], &l.mark_sharp) {
             // By angle rather than by selection: somebody reaching for this on
             // a freshly imported model has nothing selected, and thirty
             // degrees is the answer they want.
@@ -2559,23 +2572,22 @@ fn draw_mesh_menus(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 kreate_reflect::PropertyValue::Float(30f64.to_radians()),
             );
             state.queue.run("mesh.mark_sharp", p);
-            ui.close();
         }
     });
 
     ui.menu_button(&l.menu_face, |ui| {
-        if menu_tool(ui, state, "mesh.extrude_region", &l.extrude) {
+        if menu_item(ui, state, "mesh.extrude_region", &[], &l.extrude) {
             let mut p = PropertyMap::new();
             p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
             state.queue.run("mesh.extrude_region", p);
         }
-        if menu_tool(ui, state, "mesh.inset", &l.inset) {
+        if menu_item(ui, state, "mesh.inset", &[], &l.inset) {
             let mut p = PropertyMap::new();
             p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
             state.queue.run("mesh.inset", p);
         }
         ui.separator();
-        if menu_tool(ui, state, "mesh.fill", &l.fill) {
+        if menu_item(ui, state, "mesh.fill", &[], &l.fill) {
             state.queue.run("mesh.fill", PropertyMap::new());
         }
     });
@@ -2785,16 +2797,22 @@ fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                         // needs to see it.
                         ui.label(&name).on_hover_text(path.display().to_string());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(&l.recover_discard).clicked() {
+                            let discard = ui
+                                .button(&l.recover_discard)
+                                .on_hover_text(state.catalog.format(
+                                    "op-recover-discard-desc",
+                                    TextKind::Tooltip,
+                                    &[],
+                                ));
+                            if discard.clicked() {
                                 state
                                     .queue
                                     .push(Command::DiscardRecovery { path: path.clone() });
                             }
-                            if ui.button(&l.recover_open).clicked() {
+                            if menu_item(ui, state, "recover.open", &[], &l.recover_open) {
                                 state
                                     .queue
                                     .push(Command::RecoverDocument { path: path.clone() });
-                                ui.close();
                             }
                             ui.weak(&age);
                         });
@@ -2805,9 +2823,8 @@ fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         // Present from the first offer, not only when the list is long: a
         // user who wants none of them should not have to click forty times
         // to say so.
-        if ui.button(&l.recover_discard_all).clicked() {
+        if menu_item(ui, state, "recover.discard_all", &[], &l.recover_discard_all) {
             discard_all_recoveries(state);
-            ui.close();
         }
     });
 }
@@ -3747,6 +3764,54 @@ menu-group-object = Object
 # needs to read.
 op-mesh-translate = Move
 op-mesh-translate-desc = Moves the selected vertices, edges or faces.
+op-file-new-desc = Starts an empty document. Asks first if the open one has unsaved work.
+op-file-open-desc = Opens a .kreate file, replacing the open document.
+op-file-save-desc = Writes the document to its file, or asks where if it has none yet.
+op-file-save-as-desc = Writes the document to a new file and works from there on.
+op-file-export-desc = Writes the scene in an interchange format. The document keeps its own file.
+op-edit-undo-desc = Takes back the last change.
+op-edit-redo-desc = Does the last undone change again.
+op-edit-copy-desc = Copies the selected objects, with their meshes, materials and textures.
+op-edit-paste-desc = Adds the copied objects as new objects, in the same place, and selects them.
+op-recover-open-desc = Opens this autosave as a new, unsaved document.
+op-recover-discard-desc = Deletes this autosave.
+op-recover-discard-all-desc = Deletes every autosave listed here.
+op-view-frame-all-desc = Moves the view so the whole scene fits.
+op-view-frame-selected-desc = Moves the view so the selection fills it.
+op-view-toggle-projection-desc = Switches between perspective and orthographic views.
+op-view-toggle-sidebar-desc = Shows or hides the sidebar with the selection's placement.
+op-view-toggle-grid-desc = Shows or hides the floor grid and the axis lines.
+op-view-toggle-wireframe-desc = Shows or hides every edge over the surfaces.
+op-area-split-vertical-desc = Splits this area into two, side by side.
+op-area-split-horizontal-desc = Splits this area into two, one above the other.
+op-area-close-desc = Closes this area and gives its room to its neighbour.
+op-mesh-select-action-0-desc = Selects every element of the mesh.
+op-mesh-select-action-1-desc = Deselects everything.
+op-mesh-select-action-2-desc = Selects what is not selected and deselects what is.
+op-mesh-select-action-3-desc = Extends the selection along the edge loop it lies on.
+op-object-select-all-action-0-desc = Selects every object.
+op-object-select-all-action-1-desc = Deselects every object.
+op-object-select-all-action-3-desc = Selects the objects that are not selected and deselects the rest.
+op-object-add-primitive-shape-0-desc = Adds a flat square of one face.
+op-object-add-primitive-shape-1-desc = Adds a cube of six faces.
+op-object-add-primitive-shape-2-desc = Adds a flat square divided into many faces, for terrain and cloth.
+op-object-add-primitive-shape-3-desc = Adds a sphere of rings and segments, with poles.
+op-object-add-primitive-shape-4-desc = Adds a sphere of even triangles, with no poles.
+op-object-add-primitive-shape-5-desc = Adds a cylinder with closed ends.
+op-object-add-primitive-shape-6-desc = Adds a cone with a closed base.
+op-object-add-primitive-shape-7-desc = Adds a ring, round in section.
+op-object-add-light-kind-0-desc = Adds a light that shines in every direction from one point.
+op-object-add-light-kind-1-desc = Adds a light from infinitely far away, so its rays are parallel. Only its direction matters.
+op-object-add-light-kind-2-desc = Adds a light that shines in a cone.
+op-object-add-light-kind-3-desc = Adds a light that shines from a rectangle, for soft shadows.
+op-object-add-camera-desc = Adds a camera object and the lens behind it.
+op-object-add-empty-desc = Adds an object with a place and nothing else, to parent things to or aim things at.
+op-mesh-merge-by-distance-desc = Merges vertices that sit on top of one another.
+op-mesh-select-desc = Changes what is selected.
+op-object-select-all-desc = Changes which objects are selected.
+op-mesh-shade-desc = Sets how the selected faces are shaded.
+op-mesh-normals-desc = Sets which way the selected faces point.
+op-object-add-light-desc = Adds a light.
 op-mesh-rotate = Rotate
 op-mesh-rotate-desc = Turns the selection about its own centre.
 op-mesh-scale = Scale
@@ -4007,6 +4072,54 @@ menu-group-object = 오브젝트
 # --- 오퍼레이터 이름과 설명 ---
 op-mesh-translate = 이동
 op-mesh-translate-desc = 선택한 점, 선, 면을 옮깁니다.
+op-file-new-desc = 빈 문서를 시작합니다. 저장하지 않은 작업이 있으면 먼저 묻습니다.
+op-file-open-desc = .kreate 파일을 열어 지금 문서를 대체합니다.
+op-file-save-desc = 문서를 파일에 씁니다. 아직 파일이 없으면 어디에 쓸지 묻습니다.
+op-file-save-as-desc = 문서를 새 파일에 쓰고, 이후로는 그 파일로 작업합니다.
+op-file-export-desc = 장면을 교환 형식으로 내보냅니다. 문서의 파일은 그대로입니다.
+op-edit-undo-desc = 마지막 변경을 되돌립니다.
+op-edit-redo-desc = 되돌린 변경을 다시 적용합니다.
+op-edit-copy-desc = 선택한 물체를 메시·재질·텍스처와 함께 복사합니다.
+op-edit-paste-desc = 복사한 물체를 같은 자리에 새 물체로 추가하고 선택합니다.
+op-recover-open-desc = 이 자동 저장을 저장되지 않은 새 문서로 엽니다.
+op-recover-discard-desc = 이 자동 저장을 삭제합니다.
+op-recover-discard-all-desc = 여기 있는 자동 저장을 모두 삭제합니다.
+op-view-frame-all-desc = 장면 전체가 들어오게 시점을 옮깁니다.
+op-view-frame-selected-desc = 선택한 것이 화면을 채우게 시점을 옮깁니다.
+op-view-toggle-projection-desc = 원근 시점과 직교 시점을 전환합니다.
+op-view-toggle-sidebar-desc = 선택 항목의 위치를 보여주는 사이드바를 켜거나 끕니다.
+op-view-toggle-grid-desc = 바닥 격자와 축 선을 켜거나 끕니다.
+op-view-toggle-wireframe-desc = 표면 위의 모든 모서리를 켜거나 끕니다.
+op-area-split-vertical-desc = 이 영역을 좌우 둘로 나눕니다.
+op-area-split-horizontal-desc = 이 영역을 위아래 둘로 나눕니다.
+op-area-close-desc = 이 영역을 닫고 그 자리를 이웃 영역에 줍니다.
+op-mesh-select-action-0-desc = 메시의 모든 요소를 선택합니다.
+op-mesh-select-action-1-desc = 모두 선택 해제합니다.
+op-mesh-select-action-2-desc = 선택된 것은 해제하고, 안 된 것은 선택합니다.
+op-mesh-select-action-3-desc = 선택이 놓인 모서리 루프를 따라 선택을 넓힙니다.
+op-object-select-all-action-0-desc = 모든 물체를 선택합니다.
+op-object-select-all-action-1-desc = 모든 물체를 선택 해제합니다.
+op-object-select-all-action-3-desc = 선택되지 않은 물체를 선택하고 나머지는 해제합니다.
+op-object-add-primitive-shape-0-desc = 면 하나짜리 평평한 사각형을 추가합니다.
+op-object-add-primitive-shape-1-desc = 여섯 면의 큐브를 추가합니다.
+op-object-add-primitive-shape-2-desc = 여러 면으로 나뉜 평평한 사각형을 추가합니다. 지형이나 천에 씁니다.
+op-object-add-primitive-shape-3-desc = 링과 세그먼트로 이루어진, 극이 있는 구를 추가합니다.
+op-object-add-primitive-shape-4-desc = 균일한 삼각형으로 이루어진, 극이 없는 구를 추가합니다.
+op-object-add-primitive-shape-5-desc = 양 끝이 막힌 원기둥을 추가합니다.
+op-object-add-primitive-shape-6-desc = 바닥이 막힌 원뿔을 추가합니다.
+op-object-add-primitive-shape-7-desc = 단면이 둥근 고리를 추가합니다.
+op-object-add-light-kind-0-desc = 한 점에서 모든 방향으로 비추는 조명을 추가합니다.
+op-object-add-light-kind-1-desc = 무한히 멀리서 오는, 광선이 평행한 조명을 추가합니다. 방향만 의미가 있습니다.
+op-object-add-light-kind-2-desc = 원뿔 모양으로 비추는 조명을 추가합니다.
+op-object-add-light-kind-3-desc = 사각형 면에서 비추는 조명을 추가합니다. 그림자가 부드럽습니다.
+op-object-add-camera-desc = 카메라 물체와 그 뒤의 렌즈를 추가합니다.
+op-object-add-empty-desc = 위치만 있는 물체를 추가합니다. 다른 것의 부모나 목표로 씁니다.
+op-mesh-merge-by-distance-desc = 서로 겹쳐 있는 정점들을 하나로 합칩니다.
+op-mesh-select-desc = 선택을 바꿉니다.
+op-object-select-all-desc = 어느 물체가 선택되는지 바꿉니다.
+op-mesh-shade-desc = 선택한 면의 셰이딩 방식을 정합니다.
+op-mesh-normals-desc = 선택한 면이 향하는 방향을 정합니다.
+op-object-add-light-desc = 조명을 추가합니다.
 op-mesh-rotate = 회전
 op-mesh-rotate-desc = 선택 영역을 그 중심을 기준으로 돌립니다.
 op-mesh-scale = 크기
@@ -5124,5 +5237,37 @@ mod tests {
         // list; a shape inserted in one and not the other would add a cone
         // when the user asked for a cylinder.
         assert_eq!(&ADD_SHAPES[..], kreate_ops::ops::object::PRIMITIVES);
+    }
+
+    #[test]
+    fn every_menu_entry_has_a_sentence_to_show_on_hover() {
+        // The promise `menu_item` makes: hover any entry and it says what it
+        // does. Kept by reading this file for the ids the menus hand it and
+        // asking the catalog for each one's sentence — so an entry added
+        // without a description fails here rather than being the one silent
+        // item in a menu that otherwise explains itself.
+        let source = include_str!("shell.rs");
+        let catalog = load_catalog("en");
+        let mut ids: Vec<&str> = Vec::new();
+        for needle in ["menu_item(ui, state, \"", "menu_item_enabled(ui, state, \""] {
+            for (at, _) in source.match_indices(needle) {
+                let rest = &source[at + needle.len()..];
+                if let Some(end) = rest.find('"') {
+                    ids.push(&rest[..end]);
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert!(ids.len() > 30, "the scan found only {} entries; it has lost the menus", ids.len());
+        let missing: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !catalog.has(&kreate_ui::command_info::description_key(id)))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these menu entries have nothing to say on hover: {missing:?}"
+        );
     }
 }
