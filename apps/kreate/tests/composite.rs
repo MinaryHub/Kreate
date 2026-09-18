@@ -1815,3 +1815,35 @@ fn shot_workspaces() {
         shot.dump(&format!("workspace-{label}"));
     }
 }
+
+/// A picture of the Scripting workspace with a few lines in the console.
+#[test]
+fn shot_scripting() {
+    use kreate_ui::console::{ConsoleLine, LineKind};
+    let doc = doc_with_cube();
+    let Some(shot) = composite_with(&doc, "en", false, |state| {
+        state.switch_workspace(3);
+        state.console_log = vec![
+            ConsoleLine {
+                text: "kreate.ops.object.add_primitive(shape=1)".into(),
+                kind: LineKind::History,
+            },
+            ConsoleLine {
+                text: "kreate.ops.object.translate(translation=(1.4, 0.0, 0.0))".into(),
+                kind: LineKind::History,
+            },
+            ConsoleLine {
+                text: "mesh.nothing()".into(),
+                kind: LineKind::Input,
+            },
+            ConsoleLine {
+                text: "no operator called `mesh.nothing`".into(),
+                kind: LineKind::Error,
+            },
+        ];
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("workspace-scripting");
+}

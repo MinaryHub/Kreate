@@ -14,6 +14,7 @@ extern crate self as kreate_ops;
 pub mod history;
 pub mod operator;
 pub mod ops;
+pub mod script;
 /// The reflection types, re-exported so that `#[derive(OpParams)]` can keep
 /// emitting `::kreate_ops::property::…` paths.
 ///

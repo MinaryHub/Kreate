@@ -1967,6 +1967,10 @@ impl App {
                 Command::Dispatch { op_id, params } => {
                     self.dispatch(&Action { op_id, params });
                 }
+                // Through the history with the edit sessions, exactly as a
+                // key press would go: one undo step per line, and an
+                // edit-mode operator works on the open session.
+                Command::RunScript { source } => self.run_script(&source),
                 // The outliner's key resolved against the *current* document,
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.
@@ -3199,6 +3203,47 @@ impl App {
             }
         }
         true
+    }
+
+    /// Runs what the console was given, and tells the console what happened.
+    fn run_script(&mut self, source: &str) {
+        use kreate_ui::console::{ConsoleLine, LineKind};
+        let outcomes = self.history.run_script(
+            &self.registry,
+            &mut self.doc,
+            Some(&mut self.edit),
+            &self.op_ctx,
+            source,
+        );
+        let mut errors = 0;
+        for outcome in outcomes {
+            self.ui.console_log.push(ConsoleLine {
+                text: outcome.text.clone(),
+                kind: LineKind::Input,
+            });
+            match outcome.result {
+                Ok(kreate_ops::OpResult::Finished) => {}
+                Ok(other) => self.ui.console_log.push(ConsoleLine {
+                    // i18n-exempt: an operator outcome is API text
+                    text: format!("{other:?}"),
+                    kind: LineKind::Note,
+                }),
+                Err(e) => {
+                    errors += 1;
+                    self.ui.console_log.push(ConsoleLine {
+                        text: e.to_string(),
+                        kind: LineKind::Error,
+                    });
+                }
+            }
+        }
+        // The echo above is what was typed; the history line the console
+        // draws beneath it is what it became. A line that ran is not shown
+        // twice as the same thing.
+        if errors > 0 {
+            self.status(&format!("script: {errors} line(s) failed"));
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
     /// Ctrl+C: the selected objects, as text the application keeps.

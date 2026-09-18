@@ -90,6 +90,13 @@ pub struct ShellState {
     /// Whether the application is in mesh edit mode.
     /// Which element type edit-mode selection acts on. 0 vert, 1 edge, 2 face.
     pub select_mode: u32,
+    /// What is being typed into the console, and what it has said so far.
+    ///
+    /// The scrollback holds only what was *typed* and the answers; the
+    /// history's own lines are read from the history each frame, so an undo
+    /// takes them out of the log the way it takes them out of the document.
+    pub console_input: String,
+    pub console_log: Vec<kreate_ui::console::ConsoleLine>,
     /// Which material slot the Material tab is editing.
     ///
     /// **Interface state, not document state.** Blender keeps this on the
@@ -445,6 +452,8 @@ impl Default for ShellState {
             editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
             material_slot: 0,
+            console_input: String::new(),
+            console_log: Vec::new(),
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -891,6 +900,8 @@ struct Labels {
     material_none: String,
     material_base_colour: String,
     material_empty_slot: String,
+    console_placeholder: String,
+    console_empty: String,
     material_no_slots: String,
     material_add_slot: String,
     material_remove_slot: String,
@@ -1000,6 +1011,8 @@ impl Labels {
             material_none: t("material-none"),
             material_base_colour: t("material-base-colour"),
             material_empty_slot: t("material-empty-slot"),
+            console_placeholder: t("console-placeholder"),
+            console_empty: t("console-empty"),
             material_no_slots: t("material-no-slots"),
             material_add_slot: t("material-add-slot"),
             material_remove_slot: t("material-remove-slot"),
@@ -1424,6 +1437,9 @@ fn draw_area(
                 }
                 "uv" => {
                     draw_uv_editor(ui, state, area.id, l);
+                }
+                "console" => {
+                    draw_console(ui, state, history, l);
                 }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
@@ -2221,6 +2237,32 @@ fn draw_view_info(
         painter.galley(egui::pos2(left, y), galley.clone(), colour);
         y += galley.size().y + 2.0;
     }
+}
+
+/// The console: the history as script lines, what was typed, and the answers.
+///
+/// The history's lines are read fresh each frame rather than copied into the
+/// scrollback, so that undo takes a line out of the log the way it takes the
+/// edit out of the document — the two say the same thing at every moment.
+/// What was typed, and what the application said back, is the shell's own.
+fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labels) {
+    use kreate_ui::console::{ConsoleLine, LineKind};
+    let mut lines: Vec<ConsoleLine> = history
+        .entries()
+        .iter()
+        .map(|entry| ConsoleLine {
+            text: entry.to_script_call(),
+            kind: LineKind::History,
+        })
+        .collect();
+    lines.extend(state.console_log.iter().cloned());
+    let text = kreate_ui::console::ConsoleText {
+        placeholder: l.console_placeholder.clone(),
+        empty: l.console_empty.clone(),
+    };
+    let mut input = std::mem::take(&mut state.console_input);
+    kreate_ui::console::console(ui, &text, &lines, &mut input, &mut state.queue);
+    state.console_input = input;
 }
 
 /// The UV editor, with the view state that belongs to this area.
@@ -3663,6 +3705,9 @@ editor-outliner = Outliner
 editor-properties = Properties
 editor-uv = UV Editor
 editor-preferences = Preferences
+editor-console = Console
+console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
+console-empty = Every edit you make appears here as a line of script. Type one to run it.
 uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
 adjust-nothing = No operation to adjust
 status-counts = { $objects } objects, { $meshes } meshes, { $selected } selected
@@ -3980,6 +4025,9 @@ editor-outliner = 아웃라이너
 editor-properties = 특성
 editor-uv = UV 에디터
 editor-preferences = 환경 설정
+editor-console = 콘솔
+console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
+console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
 uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
 adjust-nothing = 조정할 작업이 없습니다
 status-counts = 오브젝트 { $objects }개, 메시 { $meshes }개, 선택 { $selected }개
@@ -4958,6 +5006,9 @@ mod tests {
             "material-none",
             "material-base-colour",
             "material-empty-slot",
+            "console-placeholder",
+            "console-empty",
+            "editor-console",
             "material-no-slots",
             "material-add-slot",
             "material-remove-slot",

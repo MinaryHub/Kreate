@@ -91,6 +91,8 @@ impl EditorId {
     pub const PROPERTIES: Self = Self::known("properties");
     pub const UV_EDITOR: Self = Self::known("uv");
     pub const PREFERENCES: Self = Self::known("preferences");
+    /// The history as a script, and a line to type one. Phase 9's first editor.
+    pub const CONSOLE: Self = Self::known("console");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -153,6 +155,7 @@ impl EditorRegistry {
             (EditorId::PROPERTIES, "editor-properties", false),
             (EditorId::UV_EDITOR, "editor-uv", false),
             (EditorId::PREFERENCES, "editor-preferences", false),
+            (EditorId::CONSOLE, "editor-console", false),
         ] {
             registry.register(EditorInfo {
                 id,

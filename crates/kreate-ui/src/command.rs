@@ -117,6 +117,13 @@ pub enum Command {
         object: u32,
         visible: bool,
     },
+    /// Run a script: operator calls, one per line, each its own undo step.
+    ///
+    /// From the console's input line. The application runs it through the
+    /// history and hands the console back what happened to each line.
+    RunScript {
+        source: String,
+    },
     /// Run an action the way a key press would.
     ///
     /// **The other door into the application.** `RunOperator` goes through

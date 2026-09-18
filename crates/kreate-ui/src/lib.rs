@@ -10,6 +10,7 @@ pub mod area;
 pub mod command;
 pub mod command_info;
 pub mod context_menu;
+pub mod console;
 pub mod element_icon;
 pub mod fonts;
 pub mod object_glyph;
