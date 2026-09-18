@@ -164,6 +164,9 @@ fn composite_with(
 
     let mut viewport = kreate_render::Viewport::new(&gpu.device, FORMAT, W, H);
     viewport.show_grid = true;
+    // The element overlays, the way the application switches them on in
+    // edit mode; without this the harness draws edit mode with no vertices.
+    viewport.show_elements = edit_mode;
 
     // --- run the shell -------------------------------------------------------
     let ctx = egui::Context::default();
@@ -186,6 +189,15 @@ fn composite_with(
     let keymap = kreate_input::presets::load(kreate_input::Preset::default());
     let overrides = std::collections::BTreeMap::new();
     let mut state = kreate::shell::ShellState::with_catalog(kreate::shell::load_catalog(locale));
+    // What the UV editor shows, built the way the application builds it from
+    // the edit session: without this the harness's UV editor always said
+    // "press Tab to enter edit mode", in edit mode, and a picture of the
+    // editor could not be taken.
+    if edit_mode {
+        state.uv = kreate_ops::ops::mesh::target_mesh(doc)
+            .and_then(|mesh| doc.mesh(mesh))
+            .map(|mesh| kreate::uvview::from_bmesh(&mesh.to_bmesh()).unwrap_or_default());
+    }
     let mode = if edit_mode {
         kreate_ops::operator::Mode::EditMesh
     } else {
@@ -1779,4 +1791,19 @@ fn a_lamp_is_drawn_where_it_is() {
         far < 20,
         "{far} pixels changed far from the lamp; hiding it should touch only its glyph"
     );
+}
+
+/// A picture of each workspace, in edit mode, for looking at.
+#[test]
+fn shot_workspaces() {
+    let doc = doc_with_cube();
+    for (index, label) in [(1usize, "modeling"), (2, "uv-editing")] {
+        let Some(shot) = composite_with(&doc, "en", true, |state| {
+            state.switch_workspace(index);
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("workspace-{label}"));
+    }
 }

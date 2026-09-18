@@ -1484,57 +1484,83 @@ fn draw_area_header(
             });
 
         let is_viewport = area.editor == kreate_ui::EditorId::VIEWPORT;
-        if is_viewport {
-            // Which mode, first, because it governs what every other key
-            // does and what the menus after it contain.
-            draw_mode_menu(ui, state, doc, mode);
-            ui.separator();
-        }
 
-        // Every editor has a View menu, and the area operations live at the
-        // bottom of it — which is where Blender keeps them, and which is what
-        // makes "how do I split this" one answer for every editor.
-        draw_view_menu(ui, state, area, l, is_viewport);
-
-        if is_viewport {
-            draw_select_menu(ui, state, mode, l);
-            draw_add_menu(ui, state, l);
-            // What the menus after Add are depends on the mode, because what
-            // you can act on does. Object mode acts on whole objects; edit
-            // mode acts on the parts of one.
-            if mode.shows_elements() {
-                draw_mesh_menus(ui, state, l);
-            } else {
-                draw_object_menu(ui, state, l);
-            }
-
-            // The element buttons stay buttons rather than becoming a menu.
-            // They are a *state* — which one is lit tells you what a click in
-            // the viewport will pick — and a state behind a menu is a state
-            // you cannot see. Pictures rather than words: with Mesh, Edge and
-            // Face menus in the same row, buttons reading "Edge" and "Face"
-            // meant something else two inches away.
-            if mode.shows_elements() {
-                ui.separator();
-                let spacing = ui.spacing().item_spacing.x;
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for element in kreate_ui::element_icon::Element::ALL {
-                    let index = element.index();
-                    let name = state.catalog.get(element.label_key());
-                    if kreate_ui::element_icon::element_button(
-                        ui,
-                        element,
-                        state.select_mode == index,
-                    )
-                    .on_hover_text(&name)
-                    .clicked()
-                    {
-                        state.queue.push(Command::SetSelectMode(index));
+        // **The right-hand group is measured first and given its width; the
+        // menus get what is left, clipped.** A right-to-left layout laid over
+        // whatever the menus had not used drew *on top of them* the moment an
+        // area was narrower than the two together — the UV Editing workspace's
+        // half-width viewport had "Overlays" printed across "Face" and the
+        // shading buttons cut off at the edge. Blender clips a header that does
+        // not fit; nothing overlaps.
+        let right_width = if is_viewport {
+            header_right_width(ui, state, l)
+        } else {
+            0.0
+        };
+        let left_width = (ui.available_width() - right_width).max(0.0);
+        egui::ScrollArea::horizontal()
+            .id_salt(("header-menus", area.id.0))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .max_width(left_width)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if is_viewport {
+                        // Which mode, first, because it governs what every
+                        // other key does and what the menus after it contain.
+                        draw_mode_menu(ui, state, doc, mode);
+                        ui.separator();
                     }
-                }
-                ui.spacing_mut().item_spacing.x = spacing;
-            }
 
+                    // Every editor has a View menu, and the area operations
+                    // live at the bottom of it — which is where Blender keeps
+                    // them, and which is what makes "how do I split this" one
+                    // answer for every editor.
+                    draw_view_menu(ui, state, area, l, is_viewport);
+
+                    if is_viewport {
+                        draw_select_menu(ui, state, mode, l);
+                        draw_add_menu(ui, state, l);
+                        // What the menus after Add are depends on the mode,
+                        // because what you can act on does. Object mode acts on
+                        // whole objects; edit mode acts on the parts of one.
+                        if mode.shows_elements() {
+                            draw_mesh_menus(ui, state, l);
+                        } else {
+                            draw_object_menu(ui, state, l);
+                        }
+
+                        // The element buttons stay buttons rather than becoming
+                        // a menu. They are a *state* — which one is lit tells
+                        // you what a click in the viewport will pick — and a
+                        // state behind a menu is a state you cannot see.
+                        // Pictures rather than words: with Mesh, Edge and Face
+                        // menus in the same row, buttons reading "Edge" and
+                        // "Face" meant something else two inches away.
+                        if mode.shows_elements() {
+                            ui.separator();
+                            let spacing = ui.spacing().item_spacing.x;
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for element in kreate_ui::element_icon::Element::ALL {
+                                let index = element.index();
+                                let name = state.catalog.get(element.label_key());
+                                if kreate_ui::element_icon::element_button(
+                                    ui,
+                                    element,
+                                    state.select_mode == index,
+                                )
+                                .on_hover_text(&name)
+                                .clicked()
+                                {
+                                    state.queue.push(Command::SetSelectMode(index));
+                                }
+                            }
+                            ui.spacing_mut().item_spacing.x = spacing;
+                        }
+                    }
+                });
+            });
+
+        if is_viewport {
             // The right-hand group: how the picture is made. Right-aligned
             // like Blender's shading buttons, so it stays put when the menus
             // to its left change with the mode.
@@ -1546,6 +1572,34 @@ fn draw_area_header(
             });
         }
     });
+}
+
+/// How wide the viewport header's right-hand group will be this frame.
+///
+/// Measured rather than remembered from the last frame, because the group
+/// changes with the mode — the exposure readout appears in the rendered mode
+/// only — and a one-frame-stale width is one frame of overlap.
+fn header_right_width(ui: &Ui, state: &ShellState, l: &Labels) -> f32 {
+    let spacing = ui.spacing();
+    let text_width = |text: &str| {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        ui.painter()
+            .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
+            .size()
+            .x
+    };
+    let button = |text: &str| text_width(text) + spacing.button_padding.x * 2.0;
+    // Three shading buttons at two points apart, a separator, Overlays, and
+    // the exposure when it is shown, each followed by the row's item spacing.
+    let icon = 14.0 + spacing.button_padding.x * 2.0;
+    let mut width = icon * 3.0 + 2.0 * 2.0 + spacing.item_spacing.x;
+    width += spacing.item_spacing.x * 2.0 + 1.0; // the separator
+    width += button(&l.overlays) + spacing.item_spacing.x;
+    if state.view_status.shading == kreate_render::ShadingMode::Rendered {
+        let text = format!("{} {:+.1}", l.exposure, state.view_status.exposure);
+        width += text_width(&text) + spacing.item_spacing.x;
+    }
+    width + 6.0
 }
 
 /// The View menu: how this area is looked at, and the area itself.
