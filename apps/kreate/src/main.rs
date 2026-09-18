@@ -2375,6 +2375,11 @@ impl App {
         self.hover = None;
         self.drag_select = None;
         self.ui.adjust_params = None;
+        // The whole scene in view, lamp and camera included, the way Blender's
+        // default file opens. Snapped rather than animated: there is no
+        // previous view to keep the user's bearings from, and a quarter-second
+        // glide from the last document's camera would be a glide from nowhere.
+        self.frame_all_with(false);
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
@@ -2481,6 +2486,11 @@ impl App {
     }
 
     fn frame_all(&mut self) {
+        self.frame_all_with(true);
+    }
+
+    /// Frames the whole scene, gliding to it or jumping.
+    fn frame_all_with(&mut self, animate: bool) {
         let bounds = self.doc.world_bounds();
         if bounds.is_empty() {
             return;
@@ -2499,11 +2509,17 @@ impl App {
             bounds.bounding_radius().max(1e-3) as f64,
             aspect,
         );
-        // Animated, never teleported. A camera that jumps costs the user their
-        // sense of where they are, and they then have to orbit around to
-        // rebuild it — which is a worse outcome than a quarter-second wait.
-        self.motion
-            .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        // Animated, never teleported, when there is a view to come from. A
+        // camera that jumps costs the user their sense of where they are, and
+        // they then have to orbit around to rebuild it — which is a worse
+        // outcome than a quarter-second wait. A document that has just been
+        // opened has no such view, and jumps.
+        if animate {
+            self.motion
+                .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        } else {
+            self.camera = destination;
+        }
         self.redraw.set(RedrawReason::CAMERA_MOVED);
     }
 

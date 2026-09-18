@@ -1252,19 +1252,30 @@ impl Document {
     }
 
     /// Bounding box of the whole scene, in world space.
+    ///
+    /// Every visible object counts: a mesh by its vertices, and anything
+    /// without a surface — a lamp, a camera, an empty — by where it is. This
+    /// is what Frame All frames, and Blender's frames the lamp and the camera
+    /// too; a new document whose lamp sat outside the first view read as a
+    /// document with no lamp in it.
     pub fn world_bounds(&self) -> kreate_math::Aabb {
         let mut bounds = kreate_math::Aabb::EMPTY;
         for (id, object) in self.objects.iter() {
             if !object.visible {
                 continue;
             }
-            let Some(mesh) = object.mesh().and_then(|m| self.mesh(m)) else {
-                continue;
-            };
             let world = self.world_transform(id);
-            for p in mesh.positions() {
-                let w = world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
-                bounds = bounds.extend(w.as_vec3());
+            match object.mesh().and_then(|m| self.mesh(m)) {
+                Some(mesh) => {
+                    for p in mesh.positions() {
+                        let w = world
+                            .transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+                        bounds = bounds.extend(w.as_vec3());
+                    }
+                }
+                None => {
+                    bounds = bounds.extend(world.translation.as_vec3());
+                }
             }
         }
         bounds
@@ -1605,6 +1616,24 @@ mod tests {
         let b = d.world_bounds();
         assert!((b.center().x - 10.0).abs() < 1e-4, "got {}", b.center().x);
         assert!((b.size().x - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_lamp_extends_the_bounds_to_where_it_is() {
+        // Frame All has to bring the lamp into view, or a new document reads
+        // as one with no lamp in it. A lamp has no vertices, so it counts by
+        // its origin.
+        let mut d = Document::new();
+        d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let before = d.world_bounds();
+        let light = d.add_light(crate::Light::of_kind("Lamp", crate::LightKind::BULB));
+        let mut lamp = Object::new("Lamp", ObjectData::Light(light));
+        lamp.transform.translation = DVec3::new(3.0, -3.0, 5.0);
+        d.add_object(lamp);
+        let after = d.world_bounds();
+        assert!(after.max.z >= 5.0 - 1e-6, "the lamp at z=5 is outside {after:?}");
+        assert!(after.max.x >= 3.0 - 1e-6 && after.min.y <= -3.0 + 1e-6);
+        assert!(after.max.z > before.max.z, "the lamp did not extend the bounds");
     }
 
     #[test]
