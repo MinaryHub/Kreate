@@ -63,6 +63,10 @@ impl Default for Workspaces {
                     screen: shading_screen(),
                 },
                 Workspace {
+                    name: "Animation".into(),
+                    screen: animation_screen(),
+                },
+                Workspace {
                     name: "Scripting".into(),
                     screen: scripting_screen(),
                 },
@@ -134,6 +138,20 @@ fn shading_screen() -> Screen {
         .expect("the screen has one area to split");
     screen
         .split(viewport, Axis::Vertical, 0.78, EditorId::PROPERTIES)
+        .expect("the viewport is still there to split");
+    screen
+}
+
+/// Blender's Animation workspace: the scene above, every key below, the
+/// properties at the side for the object being animated.
+fn animation_screen() -> Screen {
+    let mut screen = Screen::single(EditorId::VIEWPORT);
+    let viewport = screen.areas()[0].0;
+    screen
+        .split(viewport, Axis::Horizontal, 0.62, EditorId::DOPE_SHEET)
+        .expect("the screen has one area to split");
+    screen
+        .split(viewport, Axis::Vertical, 0.8, EditorId::PROPERTIES)
         .expect("the viewport is still there to split");
     screen
 }
@@ -265,12 +283,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_set_is_five_distinct_arrangements() {
+    fn the_shipped_set_is_six_distinct_arrangements() {
         // Each has to answer a different question, or it is a tab that costs
         // the user a decision and gives nothing back. Layout, Modeling, UV
-        // Editing, Shading — with the node graph — and Scripting.
+        // Editing, Shading — with the node graph — Animation — with every
+        // key — and Scripting.
         let w = Workspaces::default();
-        assert_eq!(w.len(), 5);
+        assert_eq!(w.len(), 6);
         assert_eq!(w.active_index(), 0);
         assert_eq!(w.active().name, "Layout");
 
@@ -340,8 +359,8 @@ mod tests {
         let source = w.screen().to_nodes();
 
         let index = w.duplicate_active("Mine");
-        assert_eq!(index, 5);
-        assert_eq!(w.active_index(), 5, "the copy is not active");
+        assert_eq!(index, 6);
+        assert_eq!(w.active_index(), 6, "the copy is not active");
         assert_eq!(w.active().name, "Mine");
         assert_eq!(w.screen().to_nodes(), source, "the copy is not a copy");
 
@@ -361,14 +380,14 @@ mod tests {
         // Every position relative to the active one, because each moves the
         // index differently and an index past the end is a panic in the middle
         // of a frame.
-        for active in 0..5 {
-            for removed in 0..5 {
+        for active in 0..6 {
+            for removed in 0..6 {
                 let mut w = Workspaces::default();
                 assert!(w.switch_to(active));
                 let was_active = w.active().name.clone();
                 assert!(w.remove(removed), "active={active} removed={removed}");
 
-                assert_eq!(w.len(), 4);
+                assert_eq!(w.len(), 5);
                 assert!(
                     w.active_index() < w.len(),
                     "active={active} removed={removed} left index {} of {}",

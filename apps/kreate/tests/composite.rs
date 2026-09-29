@@ -1829,7 +1829,7 @@ fn shot_scripting() {
     use kreate_ui::console::{ConsoleLine, LineKind};
     let doc = doc_with_cube();
     let Some(shot) = composite_with(&doc, "en", false, |state| {
-        state.switch_workspace(4);
+        state.switch_workspace(5);
         state.console_log = vec![
             ConsoleLine {
                 text: "kreate.ops.object.add_primitive(shape=1)".into(),
@@ -1951,6 +1951,39 @@ fn shot_timeline() {
                 playing: false,
                 keys: vec![1.0, 24.0, 60.0, 96.0],
             };
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
+/// A picture of the Animation workspace: a keyed cube in the dope sheet.
+#[test]
+fn shot_dope_sheet() {
+    use kreate_scene::animation::{Action, Interpolation};
+    for (label, locale) in [("dope-sheet", "en"), ("dope-sheet-ko", "ko-KR")] {
+        let mut doc = doc_with_cube();
+        let cube = doc.objects().next().map(|(id, _)| id).expect("a cube");
+        let mut action = Action::new("CubeAction");
+        for (frame, x) in [(1.0, 0.0), (24.0, 2.0), (60.0, -1.0)] {
+            for i in 0..3u8 {
+                action.curve_mut("location", i).insert(frame, if i == 0 { x } else { 0.0 }, Interpolation::Bezier);
+            }
+        }
+        for i in 0..3u8 {
+            action.curve_mut("scale", i).insert(40.0, 1.5, Interpolation::Bezier);
+        }
+        action.select_all_with(|_| false);
+        action.select_range(Some("location"), 24.0, 24.0, true);
+        let action = doc.add_action(action);
+        doc.object_mut(cube).unwrap().action = Some(action);
+        doc.selection.clear();
+        doc.selection.add(cube);
+        doc.playback.frame = 24.0;
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.switch_workspace(4);
         }) else {
             eprintln!("no GPU; skipping");
             return;

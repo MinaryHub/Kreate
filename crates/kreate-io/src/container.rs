@@ -233,6 +233,9 @@ pub struct KeyRecord {
     /// Written only when it is not the default Bézier, which most keys are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpolation: Option<String>,
+    /// Written only when set: what the dope sheet was showing selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -963,6 +966,7 @@ pub fn write(
                                     interpolation: (k.interpolation
                                         != kreate_scene::animation::Interpolation::default())
                                     .then(|| k.interpolation.tag().to_string()),
+                                    selected: k.selected,
                                 })
                                 .collect(),
                         })
@@ -1398,6 +1402,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                             .as_deref()
                             .and_then(kreate_scene::animation::Interpolation::from_tag)
                             .unwrap_or_default(),
+                        selected: k.selected,
                     })
                     .collect();
                 made.normalise();

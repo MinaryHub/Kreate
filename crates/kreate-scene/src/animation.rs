@@ -72,6 +72,12 @@ pub struct Keyframe {
     pub value: f64,
     /// How the curve leaves this key toward the next.
     pub interpolation: Interpolation,
+    /// Whether the dope sheet has it selected.
+    ///
+    /// On the key, as Blender keeps it: selection is part of the document, so
+    /// it saves, it undoes, and the operators that act on "the selected keys"
+    /// can be replayed from the history without being told which they were.
+    pub selected: bool,
 }
 
 /// Two keys closer than this are the same key: a key inserted where one
@@ -100,7 +106,9 @@ impl FCurve {
 
     /// Puts a key at `frame`, replacing one already there.
     pub fn insert(&mut self, frame: f64, value: f64, interpolation: Interpolation) {
-        let key = Keyframe { frame, value, interpolation };
+        // A key just put down is selected, so the next move or delete in the
+        // dope sheet acts on what was just keyed.
+        let key = Keyframe { frame, value, interpolation, selected: true };
         match self.keys.iter().position(|k| (k.frame - frame).abs() < SAME_FRAME) {
             Some(at) => self.keys[at] = key,
             None => {
@@ -210,6 +218,93 @@ impl Action {
                 self.curves.last_mut().expect("just pushed")
             }
         }
+    }
+
+    /// Selects (or, with `select` false, deselects) the keys of `property` —
+    /// or of every curve — whose frames are within `min..=max`.
+    pub fn select_range(&mut self, property: Option<&str>, min: f64, max: f64, select: bool) -> bool {
+        let mut changed = false;
+        for curve in self
+            .curves
+            .iter_mut()
+            .filter(|c| property.is_none_or(|p| c.path.property.as_ref() == p))
+        {
+            for key in &mut curve.keys {
+                if key.frame >= min - 1e-9 && key.frame <= max + 1e-9 && key.selected != select {
+                    key.selected = select;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Sets every key's selection with `f`. Returns whether anything changed.
+    pub fn select_all_with(&mut self, f: impl Fn(bool) -> bool) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            for key in &mut curve.keys {
+                let to = f(key.selected);
+                changed |= to != key.selected;
+                key.selected = to;
+            }
+        }
+        changed
+    }
+
+    pub fn any_selected(&self) -> bool {
+        self.curves.iter().any(|c| c.keys.iter().any(|k| k.selected))
+    }
+
+    /// Moves the selected keys by `offset` frames.
+    ///
+    /// A moved key landing where an unselected key is replaces it, as it does
+    /// in Blender: two keys at one frame is not a state a curve can be in, and
+    /// the one being moved is the one somebody meant.
+    pub fn move_selected(&mut self, offset: f64) -> bool {
+        let mut moved = false;
+        for curve in &mut self.curves {
+            let (mut going, staying): (Vec<Keyframe>, Vec<Keyframe>) =
+                curve.keys.iter().partition(|k| k.selected);
+            if going.is_empty() {
+                continue;
+            }
+            for key in &mut going {
+                key.frame += offset;
+            }
+            let mut keys: Vec<Keyframe> = staying
+                .into_iter()
+                .filter(|k| !going.iter().any(|g| (g.frame - k.frame).abs() < SAME_FRAME))
+                .collect();
+            keys.extend(going);
+            keys.sort_by(|a, b| a.frame.total_cmp(&b.frame));
+            curve.keys = keys;
+            moved = true;
+        }
+        moved
+    }
+
+    /// Takes away the selected keys, and any curve left with none.
+    pub fn delete_selected(&mut self) -> bool {
+        let before: usize = self.curves.iter().map(|c| c.keys.len()).sum();
+        for curve in &mut self.curves {
+            curve.keys.retain(|k| !k.selected);
+        }
+        self.curves.retain(|c| !c.keys.is_empty());
+        let after: usize = self.curves.iter().map(|c| c.keys.len()).sum();
+        after != before
+    }
+
+    /// Sets how the selected keys travel to the next.
+    pub fn set_selected_interpolation(&mut self, interpolation: Interpolation) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            for key in curve.keys.iter_mut().filter(|k| k.selected) {
+                changed |= key.interpolation != interpolation;
+                key.interpolation = interpolation;
+            }
+        }
+        changed
     }
 
     /// Every frame some curve has a key on, sorted, once each.
@@ -440,13 +535,76 @@ mod tests {
     fn a_file_with_keys_out_of_order_is_put_right() {
         let mut c = curve(&[]);
         c.keys = vec![
-            Keyframe { frame: 5.0, value: 1.0, interpolation: Interpolation::Linear },
-            Keyframe { frame: 1.0, value: 0.0, interpolation: Interpolation::Linear },
-            Keyframe { frame: 5.0, value: 9.0, interpolation: Interpolation::Linear },
-            Keyframe { frame: f64::NAN, value: 0.0, interpolation: Interpolation::Linear },
+            Keyframe { frame: 5.0, value: 1.0, interpolation: Interpolation::Linear, selected: false },
+            Keyframe { frame: 1.0, value: 0.0, interpolation: Interpolation::Linear, selected: false },
+            Keyframe { frame: 5.0, value: 9.0, interpolation: Interpolation::Linear, selected: false },
+            Keyframe { frame: f64::NAN, value: 0.0, interpolation: Interpolation::Linear, selected: false },
         ];
         c.normalise();
         let frames: Vec<f64> = c.keys.iter().map(|k| k.frame).collect();
         assert_eq!(frames, vec![1.0, 5.0]);
     }
+
+    fn two_curve_action() -> Action {
+        let mut a = Action::new("A");
+        for (f, v) in [(1.0, 0.0), (10.0, 5.0), (20.0, 2.0)] {
+            a.curve_mut("location", 0).insert(f, v, Interpolation::Linear);
+            a.curve_mut("scale", 1).insert(f, v, Interpolation::Linear);
+        }
+        a.select_all_with(|_| false);
+        a
+    }
+
+    fn selected(a: &Action, property: &str) -> Vec<f64> {
+        a.curves
+            .iter()
+            .filter(|c| c.path.property.as_ref() == property)
+            .flat_map(|c| c.keys.iter().filter(|k| k.selected).map(|k| k.frame))
+            .collect()
+    }
+
+    #[test]
+    fn a_range_selects_only_its_property_and_its_frames() {
+        let mut a = two_curve_action();
+        assert!(a.select_range(Some("location"), 9.5, 20.5, true));
+        assert_eq!(selected(&a, "location"), vec![10.0, 20.0]);
+        assert!(selected(&a, "scale").is_empty(), "a location row selected scale keys");
+        assert!(!a.select_range(Some("location"), 9.5, 20.5, true), "reselecting reported a change");
+    }
+
+    #[test]
+    fn moving_selected_keys_replaces_what_they_land_on_and_keeps_order() {
+        let mut a = two_curve_action();
+        a.select_range(None, 10.0, 10.0, true);
+        assert!(a.move_selected(10.0));
+        for curve in &a.curves {
+            let frames: Vec<f64> = curve.keys.iter().map(|k| k.frame).collect();
+            assert_eq!(frames, vec![1.0, 20.0], "{}", curve.path.property);
+            // The key that moved is the one that stayed at 20: value 5, not 2.
+            assert_eq!(curve.keys[1].value, 5.0);
+        }
+    }
+
+    #[test]
+    fn deleting_the_selection_leaves_the_rest_and_drops_empty_curves() {
+        let mut a = two_curve_action();
+        a.select_range(Some("scale"), 0.0, 100.0, true);
+        a.select_range(Some("location"), 1.0, 1.0, true);
+        assert!(a.delete_selected());
+        assert_eq!(a.curves.len(), 1, "the emptied scale curve stayed");
+        assert_eq!(a.curves[0].keys.len(), 2);
+        assert!(!a.delete_selected(), "nothing selected, and something was deleted");
+    }
+
+    #[test]
+    fn interpolation_changes_only_the_selected_keys() {
+        let mut a = two_curve_action();
+        a.select_range(None, 1.0, 1.0, true);
+        assert!(a.set_selected_interpolation(Interpolation::Constant));
+        for curve in &a.curves {
+            assert_eq!(curve.keys[0].interpolation, Interpolation::Constant);
+            assert_eq!(curve.keys[1].interpolation, Interpolation::Linear);
+        }
+    }
 }
+

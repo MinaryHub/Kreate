@@ -229,6 +229,8 @@ pub struct ShellState {
     node_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::NodeEditorState>,
     /// Each timeline's scrub state, per area.
     timeline_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
+    /// Each dope sheet's zoom and drag, per area.
+    sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
     /// The clock, published by the application each frame.
     pub timeline: kreate_ui::timeline::TimelineView,
     /// The UV map to draw, published by the application each frame.
@@ -406,22 +408,24 @@ impl ShellState {
             })
     }
 
-    /// Whether the pointer is over a shader editor.
+    /// Whether the pointer is over an editor that handles its own keys — the
+    /// shader editor or the dope sheet.
     ///
-    /// The application stops resolving its own keys there — `X` is "delete
-    /// the object" over the viewport and "delete the node" over the graph, and
-    /// the editor handles its own.
+    /// The application stops resolving its own keys there, all but the global
+    /// ones — `X` is "delete the object" over the viewport, "delete the node"
+    /// over the graph and "delete the keys" over the dope sheet, and each
+    /// editor handles its own.
     pub fn node_editor_at(&self, at: egui::Pos2) -> bool {
-        self.screen()
-            .areas()
-            .into_iter()
-            .filter(|(_, kind)| *kind == kreate_ui::EditorId::SHADER)
-            .any(|(id, _)| {
-                self.node_views
-                    .get(&id)
-                    .and_then(|s| s.rect)
-                    .is_some_and(|r| r.contains(at))
-            })
+        let over = |rect: Option<egui::Rect>| rect.is_some_and(|r| r.contains(at));
+        self.screen().areas().into_iter().any(|(id, kind)| {
+            if kind == kreate_ui::EditorId::SHADER {
+                over(self.node_views.get(&id).and_then(|s| s.rect))
+            } else if kind == kreate_ui::EditorId::DOPE_SHEET {
+                over(self.sheet_views.get(&id).and_then(|s| s.rect))
+            } else {
+                false
+            }
+        })
     }
 
     /// Whether the layouts are worth writing to disk right now.
@@ -464,6 +468,7 @@ impl ShellState {
                         self.uv_views.remove(&area);
                         self.node_views.remove(&area);
                         self.timeline_views.remove(&area);
+                        self.sheet_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
@@ -516,6 +521,7 @@ impl Default for ShellState {
             uv_views: std::collections::BTreeMap::new(),
             node_views: std::collections::BTreeMap::new(),
             timeline_views: std::collections::BTreeMap::new(),
+            sheet_views: std::collections::BTreeMap::new(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -942,6 +948,14 @@ struct Labels {
     palette_placeholder: String,
     pie_shading: String,
     time_play: String,
+    sheet_empty: String,
+    sheet_interpolation: String,
+    interp_constant: String,
+    interp_linear: String,
+    interp_bezier: String,
+    channel_location: String,
+    channel_rotation: String,
+    channel_scale: String,
     time_pause: String,
     time_play_menu: String,
     time_jump_start: String,
@@ -1089,6 +1103,14 @@ impl Labels {
             palette_placeholder: t("palette-placeholder"),
             pie_shading: t("pie-shading"),
             time_play: t("time-play"),
+            sheet_empty: t("sheet-empty"),
+            sheet_interpolation: t("sheet-interpolation"),
+            interp_constant: t("interp-constant"),
+            interp_linear: t("interp-linear"),
+            interp_bezier: t("interp-bezier"),
+            channel_location: t("channel-location"),
+            channel_rotation: t("channel-rotation"),
+            channel_scale: t("channel-scale"),
             time_pause: t("time-pause"),
             time_play_menu: t("op-time-play"),
             time_jump_start: t("time-jump-start"),
@@ -1707,6 +1729,9 @@ fn draw_area(
                 }
                 "timeline" => {
                     draw_timeline(ui, state, area.id, l);
+                }
+                "dope_sheet" => {
+                    draw_dope_sheet(ui, state, doc, area.id, l);
                 }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
@@ -2808,6 +2833,101 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
             }
         };
         state.queue.dispatch(id, p);
+    }
+}
+
+/// The dope sheet, over the selected objects' actions — what Blender's shows
+/// with Only Show Selected, and what the `anim.keys_*` operators act on.
+fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId, l: &Labels) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::dope_sheet::{SheetEdit as E, SheetKey, SheetRow};
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in &doc.selection.objects {
+        let Some(object) = doc.object(*id) else { continue };
+        let Some(action_id) = object.action.filter(|a| seen.insert(*a)) else { continue };
+        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else { continue };
+        // A key per frame on a row, selected if any key there is — what the
+        // summary row and a property's row both mean by one diamond.
+        let keys_of = |property: Option<&str>| -> Vec<SheetKey> {
+            let mut keys: Vec<SheetKey> = Vec::new();
+            for curve in action.curves.iter().filter(|c| property.is_none_or(|p| c.path.property.as_ref() == p)) {
+                for k in &curve.keys {
+                    match keys.iter_mut().find(|s| (s.frame - k.frame).abs() < kreate_scene::animation::SAME_FRAME) {
+                        Some(s) => s.selected |= k.selected,
+                        None => keys.push(SheetKey { frame: k.frame, selected: k.selected }),
+                    }
+                }
+            }
+            keys.sort_by(|a, b| a.frame.total_cmp(&b.frame));
+            keys
+        };
+        rows.push(SheetRow {
+            // i18n-exempt: an object's name is the user's own text
+            label: object.name.clone(),
+            depth: 0,
+            target: kreate_ops::ops::anim::row_target(uid.raw(), None),
+            keys: keys_of(None),
+        });
+        for (property, label) in [
+            ("location", &l.channel_location),
+            ("rotation_euler", &l.channel_rotation),
+            ("scale", &l.channel_scale),
+        ] {
+            if action.curves.iter().any(|c| c.path.property.as_ref() == property) {
+                rows.push(SheetRow {
+                    label: label.clone(),
+                    depth: 1,
+                    target: kreate_ops::ops::anim::row_target(uid.raw(), Some(property)),
+                    keys: keys_of(Some(property)),
+                });
+            }
+        }
+    }
+    let view = kreate_ui::dope_sheet::SheetView {
+        rows,
+        frame: doc.playback.frame,
+        start: doc.playback.start,
+        end: doc.playback.end,
+    };
+    let text = kreate_ui::dope_sheet::SheetText {
+        empty: l.sheet_empty.clone(),
+        interpolation: l.sheet_interpolation.clone(),
+        constant: l.interp_constant.clone(),
+        linear: l.interp_linear.clone(),
+        bezier: l.interp_bezier.clone(),
+    };
+    let mut panel = state.sheet_views.remove(&area).unwrap_or_default();
+    let edits = kreate_ui::dope_sheet::dope_sheet(ui, &view, &mut panel, &text);
+    state.sheet_views.insert(area, panel);
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        match edit {
+            E::Select { targets, frame_min, frame_max, extend } => {
+                p.set("targets", V::Text(targets.join(" ")));
+                p.set("frame_min", V::Float(frame_min));
+                p.set("frame_max", V::Float(frame_max));
+                p.set("extend", V::Bool(extend));
+                state.queue.run("anim.keys_select_box", p);
+            }
+            E::SelectAll(action) => {
+                p.set("action", V::Enum(action));
+                state.queue.run("anim.keys_select_all", p);
+            }
+            E::Move { offset } => {
+                p.set("offset", V::Float(offset));
+                state.queue.run("anim.keys_move", p);
+            }
+            E::Delete => state.queue.run("anim.keys_delete", p),
+            E::Interpolation(kind) => {
+                p.set("interpolation", V::Enum(kind));
+                state.queue.run("anim.keys_interpolation", p);
+            }
+            E::SetFrame(frame) => {
+                p.set("frame", V::Float(frame));
+                state.queue.dispatch("time.set_frame", p);
+            }
+        }
     }
 }
 
@@ -4387,6 +4507,15 @@ palette-placeholder = Search the menus: extrude, add cube, save...
 palette-nothing = Nothing matches.
 pie-shading = Shading
 editor-timeline = Timeline
+editor-dope-sheet = Dope Sheet
+sheet-empty = Select an animated object to see its keys.
+sheet-interpolation = Interpolation
+interp-constant = Constant
+interp-linear = Linear
+interp-bezier = Bezier
+channel-location = Location
+channel-rotation = Rotation
+channel-scale = Scale
 time-play = Play
 time-pause = Pause
 time-jump-start = Jump to the start
@@ -4782,6 +4911,15 @@ palette-placeholder = 메뉴 검색: extrude, 큐브 추가, 저장...
 palette-nothing = 일치하는 항목이 없습니다.
 pie-shading = 셰이딩
 editor-timeline = 타임라인
+editor-dope-sheet = 도프 시트
+sheet-empty = 애니메이션이 있는 오브젝트를 선택하면 키가 보입니다.
+sheet-interpolation = 보간
+interp-constant = 고정
+interp-linear = 선형
+interp-bezier = 베지어
+channel-location = 위치
+channel-rotation = 회전
+channel-scale = 크기
 time-play = 재생
 time-pause = 일시정지
 time-jump-start = 처음으로

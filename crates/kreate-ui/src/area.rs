@@ -97,6 +97,8 @@ impl EditorId {
     pub const SHADER: Self = Self::known("shader");
     /// The scene's clock and a ruler to move it along.
     pub const TIMELINE: Self = Self::known("timeline");
+    /// Every key of the selected objects, to select and retime.
+    pub const DOPE_SHEET: Self = Self::known("dope_sheet");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -162,6 +164,7 @@ impl EditorRegistry {
             (EditorId::CONSOLE, "editor-console", false),
             (EditorId::SHADER, "editor-shader", true),
             (EditorId::TIMELINE, "editor-timeline", true),
+            (EditorId::DOPE_SHEET, "editor-dope-sheet", true),
         ] {
             registry.register(EditorInfo {
                 id,

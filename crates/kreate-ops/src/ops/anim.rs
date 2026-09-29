@@ -16,6 +16,11 @@ use crate::operator::{Context, OpError, OpResult, Operator};
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<InsertKeyframe>();
     registry.register::<DeleteKeyframe>();
+    registry.register::<SelectKeysBox>();
+    registry.register::<SelectAllKeys>();
+    registry.register::<MoveKeys>();
+    registry.register::<DeleteKeys>();
+    registry.register::<SetKeyInterpolation>();
 }
 
 /// Which properties a key is inserted for.
@@ -182,3 +187,267 @@ impl Operator for DeleteKeyframe {
         Ok(OpResult::Finished)
     }
 }
+
+// --- the dope sheet's edits -------------------------------------------------
+//
+// These act on "the keys the dope sheet shows": the actions of the selected
+// objects, which is what Blender's dope sheet shows with Only Show Selected —
+// its default. So they need no list of which actions, and a replay acts on the
+// same keys whenever the same objects are selected.
+
+/// The actions the dope sheet shows, once each, in the selection's order.
+pub fn shown_actions(doc: &Document) -> Vec<kreate_scene::ActionId> {
+    let mut seen = std::collections::HashSet::new();
+    doc.selection
+        .objects
+        .iter()
+        .filter_map(|id| doc.object(*id).and_then(|o| o.action))
+        .filter(|a| doc.action(*a).is_some() && seen.insert(*a))
+        .collect()
+}
+
+fn any_shown(doc: &Document) -> bool {
+    !shown_actions(doc).is_empty()
+}
+
+/// One dope-sheet row, as text: an action's identity, a slash, and the
+/// property the row is for — empty for the row that stands for them all.
+pub fn row_target(action_uid: u64, property: Option<&str>) -> String {
+    format!("{action_uid}/{}", property.unwrap_or(""))
+}
+
+fn parse_targets(text: &str) -> Vec<(u64, Option<String>)> {
+    text.split_whitespace()
+        .filter_map(|t| {
+            let (uid, property) = t.split_once('/')?;
+            let uid = uid.parse().ok()?;
+            Some((uid, (!property.is_empty()).then(|| property.to_string())))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectKeysBoxParams {
+    /// Which rows, as `row_target` writes them, separated by spaces.
+    ///
+    /// Text rather than a list of numbers because a row is an action *and* a
+    /// property, and because a script line should say what it selects: `12/location`.
+    pub targets: String,
+    pub frame_min: f64,
+    pub frame_max: f64,
+    /// Add to the selection rather than replacing it.
+    pub extend: bool,
+}
+
+/// Selects the keys in some rows between two frames: a click is a box one
+/// frame wide on one row.
+pub struct SelectKeysBox;
+
+impl Operator for SelectKeysBox {
+    type Params = SelectKeysBoxParams;
+    fn id() -> &'static str {
+        "anim.keys_select_box"
+    }
+    fn label() -> &'static str {
+        "Select Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        let targets = parse_targets(&params.targets);
+        let d = doc.document_mut();
+        let mut changed = false;
+        if !params.extend {
+            for id in &shown {
+                if let Some(a) = d.action_mut(*id) {
+                    changed |= a.select_all_with(|_| false);
+                }
+            }
+        }
+        for (uid, property) in targets {
+            // Only the actions on show: a target naming another is a stale
+            // script line, and selecting keys nobody can see is a surprise.
+            let Some(id) = d.action_by_uid(kreate_scene::Uid::from_raw(uid)).filter(|a| shown.contains(a)) else {
+                continue;
+            };
+            if let Some(a) = d.action_mut(id) {
+                changed |= a.select_range(property.as_deref(), params.frame_min, params.frame_max, true);
+            }
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectAllKeysParams {
+    #[param(variants("select", "deselect", "invert"))]
+    pub action: u32,
+}
+
+/// Selects, deselects or inverts every key the dope sheet shows.
+pub struct SelectAllKeys;
+
+impl Operator for SelectAllKeys {
+    type Params = SelectAllKeysParams;
+    fn id() -> &'static str {
+        "anim.keys_select_all"
+    }
+    fn label() -> &'static str {
+        "Select All Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        let d = doc.document_mut();
+        let mut changed = false;
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                changed |= match params.action {
+                    0 => a.select_all_with(|_| true),
+                    1 => a.select_all_with(|_| false),
+                    _ => a.select_all_with(|s| !s),
+                };
+            }
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MoveKeysParams {
+    /// How many frames. Whole in practice — the dope sheet rounds — but a
+    /// script may say otherwise.
+    pub offset: f64,
+}
+
+/// Moves the selected keys along time.
+pub struct MoveKeys;
+
+impl Operator for MoveKeys {
+    type Params = MoveKeysParams;
+    fn id() -> &'static str {
+        "anim.keys_move"
+    }
+    fn label() -> &'static str {
+        "Move Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        if params.offset == 0.0 || !params.offset.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let shown = shown_actions(doc.document());
+        if !shown.iter().any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected())) {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                a.move_selected(params.offset);
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DeleteKeysParams {}
+
+/// Deletes the selected keys.
+pub struct DeleteKeys;
+
+impl Operator for DeleteKeys {
+    type Params = DeleteKeysParams;
+    fn id() -> &'static str {
+        "anim.keys_delete"
+    }
+    fn label() -> &'static str {
+        "Delete Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        if !shown.iter().any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected())) {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                a.delete_selected();
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetKeyInterpolationParams {
+    #[param(variants("constant", "linear", "bezier"))]
+    pub interpolation: u32,
+}
+
+/// Sets how the selected keys travel to the next: Blender's `T`.
+pub struct SetKeyInterpolation;
+
+impl Operator for SetKeyInterpolation {
+    type Params = SetKeyInterpolationParams;
+    fn id() -> &'static str {
+        "anim.keys_interpolation"
+    }
+    fn label() -> &'static str {
+        "Set Interpolation"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(kind) = Interpolation::ALL.get(params.interpolation as usize).copied() else {
+            return Ok(OpResult::Cancelled);
+        };
+        let shown = shown_actions(doc.document());
+        let any = shown.iter().any(|a| {
+            doc.document().action(*a).is_some_and(|a| {
+                a.curves.iter().any(|c| c.keys.iter().any(|k| k.selected && k.interpolation != kind))
+            })
+        });
+        if !any {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                a.set_selected_interpolation(kind);
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+

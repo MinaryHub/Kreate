@@ -118,3 +118,110 @@ fn keying_replays_from_the_history() {
     assert_eq!(frames(&doc), frames(&replay));
     assert_eq!(frames(&replay), Some(vec![3.0]));
 }
+
+// --- the dope sheet's edits --------------------------------------------------
+
+fn run(registry: &OperatorRegistry, history: &mut History, doc: &mut Document, ctx: &Context, op: &str, params: &[(&'static str, PropertyValue)]) -> bool {
+    let mut p = PropertyMap::new();
+    for (k, v) in params {
+        p.set(k, v.clone());
+    }
+    let depth = history.entries().len();
+    history.dispatch(registry, doc, ctx, op, &p).expect("ran");
+    history.entries().len() > depth
+}
+
+/// A selected object keyed at 1, 10 and 20, with nothing selected in its keys.
+fn keyed(registry: &OperatorRegistry, history: &mut History, doc: &mut Document, ctx: &Context) -> (kreate_scene::ObjectId, u64) {
+    let id = a_selected_empty(doc);
+    for f in [1.0, 10.0, 20.0] {
+        key(registry, history, doc, ctx, f);
+    }
+    run(registry, history, doc, ctx, "anim.keys_select_all", &[("action", PropertyValue::Enum(1))]);
+    let action = doc.object(id).unwrap().action.unwrap();
+    (id, doc.action_uid(action).unwrap().raw())
+}
+
+fn selected_frames(doc: &Document, id: kreate_scene::ObjectId, property: &str) -> Vec<f64> {
+    let action = doc.object(id).unwrap().action.unwrap();
+    let mut out: Vec<f64> = doc
+        .action(action)
+        .unwrap()
+        .curves
+        .iter()
+        .filter(|c| c.path.property.as_ref() == property)
+        .flat_map(|c| c.keys.iter().filter(|k| k.selected).map(|k| k.frame))
+        .collect();
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
+}
+
+#[test]
+fn a_box_selects_its_rows_between_its_frames() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (id, uid) = keyed(&registry, &mut history, &mut doc, &ctx);
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_box", &[
+        ("targets", PropertyValue::Text(kreate_ops::ops::anim::row_target(uid, Some("location")))),
+        ("frame_min", PropertyValue::Float(5.0)),
+        ("frame_max", PropertyValue::Float(25.0)),
+    ]));
+    assert_eq!(selected_frames(&doc, id, "location"), vec![10.0, 20.0]);
+    assert!(selected_frames(&doc, id, "scale").is_empty());
+    // A click without extend replaces; with extend it adds.
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_box", &[
+        ("targets", PropertyValue::Text(kreate_ops::ops::anim::row_target(uid, None))),
+        ("frame_min", PropertyValue::Float(0.5)),
+        ("frame_max", PropertyValue::Float(1.5)),
+        ("extend", PropertyValue::Bool(true)),
+    ]);
+    assert_eq!(selected_frames(&doc, id, "location"), vec![1.0, 10.0, 20.0]);
+    assert_eq!(selected_frames(&doc, id, "scale"), vec![1.0]);
+}
+
+#[test]
+fn moving_keys_moves_the_animation_and_undo_puts_them_back() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (id, uid) = keyed(&registry, &mut history, &mut doc, &ctx);
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_box", &[
+        ("targets", PropertyValue::Text(kreate_ops::ops::anim::row_target(uid, None))),
+        ("frame_min", PropertyValue::Float(20.0)),
+        ("frame_max", PropertyValue::Float(20.0)),
+    ]);
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_move", &[("offset", PropertyValue::Float(5.0))]));
+    let action = doc.object(id).unwrap().action.unwrap();
+    assert_eq!(doc.action(action).unwrap().key_frames(), vec![1.0, 10.0, 25.0]);
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc.action(action).unwrap().key_frames(), vec![1.0, 10.0, 20.0]);
+    // Nothing selected: a move is a cancel.
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_all", &[("action", PropertyValue::Enum(1))]);
+    assert!(!run(&registry, &mut history, &mut doc, &ctx, "anim.keys_move", &[("offset", PropertyValue::Float(5.0))]));
+}
+
+#[test]
+fn delete_and_interpolation_act_on_the_selection_only() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (id, uid) = keyed(&registry, &mut history, &mut doc, &ctx);
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_box", &[
+        ("targets", PropertyValue::Text(kreate_ops::ops::anim::row_target(uid, None))),
+        ("frame_min", PropertyValue::Float(1.0)),
+        ("frame_max", PropertyValue::Float(1.0)),
+    ]);
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_interpolation", &[("interpolation", PropertyValue::Enum(0))]));
+    let action = doc.object(id).unwrap().action.unwrap();
+    for curve in &doc.action(action).unwrap().curves {
+        assert_eq!(curve.keys[0].interpolation, kreate_scene::animation::Interpolation::Constant);
+        assert_eq!(curve.keys[1].interpolation, kreate_scene::animation::Interpolation::Bezier);
+    }
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_delete", &[]));
+    assert_eq!(doc.action(action).unwrap().key_frames(), vec![10.0, 20.0]);
+    assert!(!run(&registry, &mut history, &mut doc, &ctx, "anim.keys_delete", &[]), "nothing selected, yet a step");
+}
+
+#[test]
+fn a_new_key_is_selected_so_the_next_edit_acts_on_it() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (id, _) = keyed(&registry, &mut history, &mut doc, &ctx);
+    key(&registry, &mut history, &mut doc, &ctx, 30.0);
+    assert_eq!(selected_frames(&doc, id, "location"), vec![30.0]);
+}
