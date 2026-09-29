@@ -1949,6 +1949,7 @@ fn shot_timeline() {
                 start: 1,
                 end: 120,
                 playing: false,
+                autokey: true,
                 keys: vec![1.0, 24.0, 60.0, 96.0],
             };
         }) else {
@@ -1990,4 +1991,34 @@ fn shot_dope_sheet() {
         };
         shot.dump(label);
     }
+}
+
+/// A picture of the Material tab with keyed values, the diamonds lit.
+#[test]
+fn shot_keyed_material() {
+    use kreate_scene::animation::{Action, Interpolation};
+    let mut doc = doc_with_cube();
+    let mesh = doc.meshes().next().map(|(id, _)| id).expect("a mesh");
+    let mut action = Action::for_kind("RedAction", kreate_scene::DatablockKind::Material);
+    for i in 0..3u8 {
+        action.curve_mut("base_color", i).insert(1.0, 0.5, Interpolation::Bezier);
+    }
+    action.curve_mut("roughness", 0).insert(30.0, 0.2, Interpolation::Bezier);
+    let action = doc.add_action(action);
+    let material = doc.add_material(kreate_scene::Material {
+        name: "Red".into(),
+        action: Some(action),
+        ..Default::default()
+    });
+    doc.set_mesh_slot(mesh, 0, Some(material));
+    let Some(shot) = composite_with(&doc, "en", false, |state| {
+        let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+        for area in areas {
+            state.set_properties_tab(area, kreate::shell::PropertiesTab::Material);
+        }
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("material-keyed");
 }

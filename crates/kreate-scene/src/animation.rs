@@ -188,13 +188,29 @@ impl FCurve {
 }
 
 /// A set of curves, played by whatever is given it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Action {
     pub name: String,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
+    /// What kind of datablock plays it: an object's transform, a material's
+    /// surface, a light's colour and brightness. Its curves' properties are
+    /// that kind's — see [`animatable`].
+    pub animates: DatablockKind,
     pub curves: Vec<FCurve>,
+}
+
+impl Default for Action {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            linkage: Linkage::Local,
+            uid: Uid::NONE,
+            animates: DatablockKind::Object,
+            curves: Vec::new(),
+        }
+    }
 }
 
 impl Action {
@@ -202,6 +218,14 @@ impl Action {
         Self {
             name: name.into(),
             ..Default::default()
+        }
+    }
+
+    /// An action for a kind of datablock other than an object.
+    pub fn for_kind(name: impl Into<String>, animates: DatablockKind) -> Self {
+        Self {
+            animates,
+            ..Self::new(name)
         }
     }
 
@@ -214,7 +238,12 @@ impl Action {
         match at {
             Some(at) => &mut self.curves[at],
             None => {
-                self.curves.push(FCurve::owned(property, index));
+                self.curves.push(FCurve::new(PropertyPath::component(
+                    self.animates,
+                    Uid::NONE,
+                    property,
+                    index,
+                )));
                 self.curves.last_mut().expect("just pushed")
             }
         }
@@ -373,6 +402,93 @@ pub const OBJECT_ANIMATABLE: &[AnimatableDesc] = &[
         doc: "Its size along each of its own axes.",
     },
 ];
+
+/// The properties of a material a curve can drive.
+///
+/// The flat surface's numbers. A material that uses a node graph is shaded by
+/// the graph, so animating these changes what it would be without one — the
+/// graph's own values are keyed when the node editor learns to key them.
+pub const MATERIAL_ANIMATABLE: &[AnimatableDesc] = &[
+    AnimatableDesc { name: "base_color", kind: PropertyKind::Color, components: 3, doc: "The surface's colour, linear." },
+    AnimatableDesc { name: "metallic", kind: PropertyKind::Float, components: 1, doc: "Metal or not." },
+    AnimatableDesc { name: "roughness", kind: PropertyKind::Float, components: 1, doc: "How blurred reflections are." },
+    AnimatableDesc { name: "alpha", kind: PropertyKind::Float, components: 1, doc: "Opacity." },
+    AnimatableDesc { name: "normal_strength", kind: PropertyKind::Float, components: 1, doc: "How far the normal map tilts the surface." },
+];
+
+/// The properties of a light a curve can drive.
+pub const LIGHT_ANIMATABLE: &[AnimatableDesc] = &[
+    AnimatableDesc { name: "color", kind: PropertyKind::Color, components: 3, doc: "The light's tint, linear." },
+    AnimatableDesc { name: "intensity", kind: PropertyKind::Float, components: 1, doc: "How much light, in the kind's unit." },
+    AnimatableDesc { name: "exposure", kind: PropertyKind::Float, components: 1, doc: "Brightness in stops, on top of the intensity." },
+];
+
+/// What a kind of datablock can have animated.
+pub fn animatable(kind: DatablockKind) -> &'static [AnimatableDesc] {
+    match kind {
+        DatablockKind::Object => OBJECT_ANIMATABLE,
+        DatablockKind::Material => MATERIAL_ANIMATABLE,
+        DatablockKind::Light => LIGHT_ANIMATABLE,
+        _ => &[],
+    }
+}
+
+/// A material's animatable value, as its components.
+pub fn read_material(m: &crate::document::Material, property: &str) -> Option<Vec<f64>> {
+    Some(match property {
+        "base_color" => m.base_color.to_array().iter().map(|c| *c as f64).collect(),
+        "metallic" => vec![m.metallic as f64],
+        "roughness" => vec![m.roughness as f64],
+        "alpha" => vec![m.alpha as f64],
+        "normal_strength" => vec![m.normal_strength as f64],
+        _ => return None,
+    })
+}
+
+/// Plays `action` onto a material at `frame`.
+pub fn apply_to_material(action: &Action, frame: f64, m: &mut crate::document::Material) {
+    let mut colour = m.base_color.to_array();
+    for curve in &action.curves {
+        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        let v = v as f32;
+        match (curve.path.property.as_ref(), i) {
+            ("base_color", 0..=2) => colour[i as usize] = v.max(0.0),
+            ("metallic", 0) => m.metallic = v.clamp(0.0, 1.0),
+            ("roughness", 0) => m.roughness = v.clamp(0.0, 1.0),
+            ("alpha", 0) => m.alpha = v.clamp(0.0, 1.0),
+            ("normal_strength", 0) => m.normal_strength = v.max(0.0),
+            _ => {}
+        }
+    }
+    m.base_color = kreate_math::SceneRgb::new(colour[0], colour[1], colour[2]);
+}
+
+/// A light's animatable value, as its components.
+pub fn read_light(l: &crate::light::Light, property: &str) -> Option<Vec<f64>> {
+    Some(match property {
+        "color" => l.color.to_array().iter().map(|c| *c as f64).collect(),
+        "intensity" => vec![l.intensity],
+        "exposure" => vec![l.exposure],
+        _ => return None,
+    })
+}
+
+/// Plays `action` onto a light at `frame`.
+pub fn apply_to_light(action: &Action, frame: f64, l: &mut crate::light::Light) {
+    let mut colour = l.color.to_array();
+    for curve in &action.curves {
+        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        match (curve.path.property.as_ref(), i) {
+            ("color", 0..=2) => colour[i as usize] = (v as f32).max(0.0),
+            // A light cannot give out less than nothing: a Bézier easing to
+            // zero may undershoot, and a negative lamp darkens what it lights.
+            ("intensity", 0) => l.intensity = v.max(0.0),
+            ("exposure", 0) => l.exposure = v,
+            _ => {}
+        }
+    }
+    l.color = kreate_math::SceneRgb::new(colour[0], colour[1], colour[2]);
+}
 
 /// A rotation as Blender's XYZ Euler angles: X applied first, then Y, then Z.
 pub fn to_euler(q: DQuat) -> DVec3 {

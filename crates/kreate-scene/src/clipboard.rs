@@ -41,13 +41,17 @@ impl Document {
                     let slots: Vec<Option<MaterialId>> = self
                         .mesh_slots(*mesh)
                         .iter()
-                        .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images)))
+                        .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images, &mut actions)))
                         .collect();
                     out.set_mesh_slots(new_mesh, slots);
                     ObjectData::Mesh(new_mesh)
                 }
                 ObjectData::Light(light) => match self.light(*light) {
-                    Some(l) => ObjectData::Light(out.add_light(l.clone())),
+                    Some(l) => {
+                        let mut l = l.clone();
+                        l.action = l.action.and_then(|a| self.copy_action(a, &mut out, &mut actions));
+                        ObjectData::Light(out.add_light(l))
+                    }
                     None => continue,
                 },
                 ObjectData::Camera(camera) => match self.camera(*camera) {
@@ -59,18 +63,11 @@ impl Document {
             copy.material_overrides = object
                 .material_overrides
                 .iter()
-                .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images)))
+                .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images, &mut actions)))
                 .collect();
             // The action comes along, once however many copies play it, so
             // two pasted objects sharing a walk cycle still share one.
-            copy.action = object.action.and_then(|a| {
-                if let Some(done) = actions.get(&a) {
-                    return Some(*done);
-                }
-                let made = out.add_action(self.action(a)?.clone());
-                actions.insert(a, made);
-                Some(made)
-            });
+            copy.action = object.action.and_then(|a| self.copy_action(a, &mut out, &mut actions));
             // Parents are settled below, once every copy exists. Until then
             // the copy stands alone at its world placement.
             copy.parent = None;
@@ -122,13 +119,17 @@ impl Document {
                     let slots: Vec<Option<MaterialId>> = other
                         .mesh_slots(*mesh)
                         .iter()
-                        .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images)))
+                        .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images, &mut actions)))
                         .collect();
                     self.set_mesh_slots(new_mesh, slots);
                     ObjectData::Mesh(new_mesh)
                 }
                 ObjectData::Light(light) => match other.light(*light) {
-                    Some(l) => ObjectData::Light(self.add_light(l.clone())),
+                    Some(l) => {
+                        let mut l = l.clone();
+                        l.action = l.action.and_then(|a| other.copy_action(a, self, &mut actions));
+                        ObjectData::Light(self.add_light(l))
+                    }
                     None => continue,
                 },
                 ObjectData::Camera(camera) => match other.camera(*camera) {
@@ -140,16 +141,9 @@ impl Document {
             copy.material_overrides = object
                 .material_overrides
                 .iter()
-                .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images)))
+                .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images, &mut actions)))
                 .collect();
-            copy.action = object.action.and_then(|a| {
-                if let Some(done) = actions.get(&a) {
-                    return Some(*done);
-                }
-                let made = self.add_action(other.action(a)?.clone());
-                actions.insert(a, made);
-                Some(made)
-            });
+            copy.action = object.action.and_then(|a| other.copy_action(a, self, &mut actions));
             copy.parent = None;
             let new_id = self.add_object(copy);
             new_ids.insert(*id, new_id);
@@ -177,6 +171,7 @@ impl Document {
         into: &mut Document,
         materials: &mut HashMap<MaterialId, MaterialId>,
         images: &mut HashMap<ImageId, ImageId>,
+        actions: &mut HashMap<ActionId, ActionId>,
     ) -> MaterialId {
         if let Some(done) = materials.get(&id) {
             return *done;
@@ -207,9 +202,27 @@ impl Document {
                 }
             }
         }
+        // Its action, through the same table, so a material and the lamp
+        // beside it sharing one blink still share it in the paste.
+        material.action = material.action.and_then(|a| self.copy_action(a, into, actions));
         let new_id = into.add_material(material);
         materials.insert(id, new_id);
         new_id
+    }
+
+    /// Copies one of this document's actions into `into`, once.
+    fn copy_action(
+        &self,
+        id: ActionId,
+        into: &mut Document,
+        actions: &mut HashMap<ActionId, ActionId>,
+    ) -> Option<ActionId> {
+        if let Some(done) = actions.get(&id) {
+            return Some(*done);
+        }
+        let made = into.add_action(self.action(id)?.clone());
+        actions.insert(id, made);
+        Some(made)
     }
 }
 

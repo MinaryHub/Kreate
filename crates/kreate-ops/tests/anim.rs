@@ -225,3 +225,143 @@ fn a_new_key_is_selected_so_the_next_edit_acts_on_it() {
     key(&registry, &mut history, &mut doc, &ctx, 30.0);
     assert_eq!(selected_frames(&doc, id, "location"), vec![30.0]);
 }
+
+// --- auto-keying --------------------------------------------------------------
+
+#[test]
+fn an_autokeyed_move_keys_its_location_in_the_same_step() {
+    // The move and its key are one step: undo takes both, and the object is
+    // neither moved nor keyed afterwards. A separate step would leave a moved,
+    // unkeyed object that snaps back the next time the frame changes.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    let depth = history.entries().len();
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "object.translate", &[
+        ("translation", PropertyValue::Vec3([2.0, 0.0, 0.0])),
+        ("autokey", PropertyValue::Bool(true)),
+        ("key_frame", PropertyValue::Float(8.0)),
+    ]));
+    assert_eq!(history.entries().len(), depth + 1, "the key was a step of its own");
+    let action = doc.object(id).unwrap().action.expect("the move keyed");
+    let a = doc.action(action).unwrap();
+    assert_eq!(a.key_frames(), vec![8.0]);
+    assert!(a.curves.iter().all(|c| c.path.property.as_ref() == "location"), "a move keyed more than location");
+    assert_eq!(a.curves[0].keys[0].value, 2.0);
+
+    assert!(history.undo(&mut doc));
+    assert!(doc.object(id).unwrap().action.is_none());
+    assert_eq!(doc.object(id).unwrap().transform.translation.x, 0.0);
+}
+
+#[test]
+fn a_rotation_keys_the_location_it_moved_too() {
+    // Turning about a pivot that is not the object's origin moves it; keying
+    // only the rotation would snap it back to where it stood.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    run(&registry, &mut history, &mut doc, &ctx, "object.rotate", &[
+        ("angle", PropertyValue::Float(0.5)),
+        ("autokey", PropertyValue::Bool(true)),
+        ("key_frame", PropertyValue::Float(3.0)),
+    ]);
+    let action = doc.object(id).unwrap().action.unwrap();
+    let mut properties: Vec<String> = doc.action(action).unwrap().curves.iter().map(|c| c.path.property.to_string()).collect();
+    properties.sort();
+    properties.dedup();
+    assert_eq!(properties, vec!["location".to_string(), "rotation_euler".to_string()]);
+}
+
+#[test]
+fn without_autokey_a_move_keys_nothing_and_the_flag_is_kept_off_the_panels() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    run(&registry, &mut history, &mut doc, &ctx, "object.translate", &[("translation", PropertyValue::Vec3([1.0, 0.0, 0.0]))]);
+    assert!(doc.object(id).unwrap().action.is_none());
+    // Recorded and replayed, never drawn: the schema says so.
+    let info = registry.get("object.translate").unwrap();
+    for name in ["autokey", "key_frame"] {
+        let desc = info.schema.iter().find(|d| d.name == name).expect("a parameter");
+        assert!(desc.hidden, "{name} would show in the adjust-last panel");
+    }
+    assert!(!info.schema.iter().find(|d| d.name == "translation").unwrap().hidden);
+}
+
+// --- materials and lights -----------------------------------------------------
+
+#[test]
+fn a_materials_colour_and_a_lamps_brightness_play_between_their_keys() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let material = doc.add_material(kreate_scene::Material {
+        base_color: kreate_math::SceneRgb::new(1.0, 0.0, 0.0),
+        ..Default::default()
+    });
+    doc.set_mesh_slots(mesh, vec![Some(material)]);
+    let cube = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+    doc.selection.add(cube);
+
+    let key_property = |history: &mut History, doc: &mut Document, frame: f64, datablock: u32, property: &str| {
+        run(&registry, history, doc, &ctx, "anim.keyframe_insert_property", &[
+            ("frame", PropertyValue::Float(frame)),
+            ("datablock", PropertyValue::Enum(datablock)),
+            ("property", PropertyValue::Text(property.to_string())),
+        ])
+    };
+    assert!(key_property(&mut history, &mut doc, 1.0, 0, "base_color"));
+    doc.material_mut(material).unwrap().base_color = kreate_math::SceneRgb::new(0.0, 0.0, 1.0);
+    assert!(key_property(&mut history, &mut doc, 11.0, 0, "base_color"));
+    let action = doc.material(material).unwrap().action.expect("the material got an action");
+    assert_eq!(doc.action(action).unwrap().animates, kreate_scene::DatablockKind::Material);
+    doc.animate(1.0);
+    assert_eq!(doc.material(material).unwrap().base_color.r, 1.0);
+    doc.animate(11.0);
+    assert_eq!(doc.material(material).unwrap().base_color.b, 1.0);
+    // A misspelt property is refused, and leaves no action behind.
+    assert!(!key_property(&mut history, &mut doc, 1.0, 0, "colour"));
+
+    // A lamp, dimming.
+    let light = doc.add_light(kreate_scene::Light::of_kind("Bulb", kreate_scene::LightKind::BULB));
+    let lamp = doc.add_object(Object::new("Lamp", ObjectData::Light(light)));
+    doc.selection.clear();
+    doc.selection.add(lamp);
+    doc.light_mut(light).unwrap().intensity = 1000.0;
+    assert!(key_property(&mut history, &mut doc, 1.0, 1, "intensity"));
+    doc.light_mut(light).unwrap().intensity = 0.0;
+    assert!(key_property(&mut history, &mut doc, 21.0, 1, "intensity"));
+    doc.animate(11.0);
+    let mid = doc.light(light).unwrap().intensity;
+    assert!((mid - 500.0).abs() < 1e-6, "{mid}");
+    // The lamp's action is on show in the dope sheet with the lamp selected.
+    assert!(kreate_ops::ops::anim::shown_actions(&doc).contains(&doc.light(light).unwrap().action.unwrap()));
+
+    // And its key comes off again.
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_delete_property", &[
+        ("frame", PropertyValue::Float(21.0)),
+        ("datablock", PropertyValue::Enum(1)),
+        ("property", PropertyValue::Text("intensity".into())),
+    ]));
+    let action = doc.light(light).unwrap().action.unwrap();
+    assert_eq!(doc.action(action).unwrap().key_frames(), vec![1.0]);
+}
+
+#[test]
+fn a_script_line_mentions_autokeying_only_when_it_was_on() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    a_selected_empty(&mut doc);
+    run(&registry, &mut history, &mut doc, &ctx, "object.translate", &[("translation", PropertyValue::Vec3([1.0, 0.0, 0.0]))]);
+    run(&registry, &mut history, &mut doc, &ctx, "object.translate", &[
+        ("translation", PropertyValue::Vec3([1.0, 0.0, 0.0])),
+        ("autokey", PropertyValue::Bool(true)),
+        ("key_frame", PropertyValue::Float(8.0)),
+    ]);
+    let lines: Vec<String> = history.entries().iter().map(|e| e.to_script_call()).collect();
+    assert!(!lines[0].contains("autokey"), "{}", lines[0]);
+    assert!(lines[1].contains("autokey=True") && lines[1].contains("key_frame=8.0"), "{}", lines[1]);
+    // And the quiet line still replays to the same thing: nothing keyed.
+    let mut replay = Document::new();
+    let id = a_selected_empty(&mut replay);
+    let mut fresh = History::new();
+    fresh.run_script(&registry, &mut replay, None, &ctx, &lines.join("\n"));
+    let action = replay.object(id).unwrap().action.expect("the second line keyed");
+    assert_eq!(replay.action(action).unwrap().key_frames(), vec![8.0]);
+}

@@ -272,6 +272,8 @@ pub struct Material {
     /// materials is Blender's node *group*, which is a different feature and
     /// wants its own identity; a material's tree belongs to the material.
     pub graph: Option<crate::shader::ShaderGraph>,
+    /// The action animating this material's values, if any.
+    pub action: Option<ActionId>,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
@@ -290,6 +292,7 @@ impl Default for Material {
             normal_image: None,
             normal_strength: 1.0,
             graph: None,
+            action: None,
             linkage: Linkage::Local,
             uid: Uid::NONE,
         }
@@ -1158,6 +1161,38 @@ impl Document {
             .filter_map(|(id, o)| o.action.map(|a| (id, a)))
             .collect();
         let mut moved = 0;
+        // Materials and lights, which play their own actions: the colour of a
+        // warning light blinking, a lamp dimming at dusk.
+        let materials: Vec<(MaterialId, ActionId)> = self
+            .materials
+            .iter()
+            .filter_map(|(id, m)| m.action.map(|a| (id, a)))
+            .collect();
+        for (id, action) in materials {
+            let Some(action) = self.actions.get(action).cloned() else { continue };
+            if let Some(m) = self.materials.get_mut(id).map(Arc::make_mut) {
+                let before = m.clone();
+                crate::animation::apply_to_material(&action, frame, m);
+                moved += usize::from(m.base_color != before.base_color
+                    || m.metallic != before.metallic
+                    || m.roughness != before.roughness
+                    || m.alpha != before.alpha
+                    || m.normal_strength != before.normal_strength);
+            }
+        }
+        let lights: Vec<(LightId, ActionId)> = self
+            .lights
+            .iter()
+            .filter_map(|(id, l)| l.action.map(|a| (id, a)))
+            .collect();
+        for (id, action) in lights {
+            let Some(action) = self.actions.get(action).cloned() else { continue };
+            if let Some(l) = self.lights.get_mut(id).map(Arc::make_mut) {
+                let before = (l.color, l.intensity, l.exposure);
+                crate::animation::apply_to_light(&action, frame, l);
+                moved += usize::from(before != (l.color, l.intensity, l.exposure));
+            }
+        }
         for (object, action) in animated {
             let Some(action) = self.actions.get(action).cloned() else {
                 continue;

@@ -211,6 +211,10 @@ pub struct ActionRecord {
     pub name: String,
     #[serde(default)]
     pub uid: u64,
+    /// What kind of datablock plays it — `material`, `light` — or absent for
+    /// an object's, which most are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animates: Option<String>,
     pub curves: Vec<CurveRecord>,
 }
 
@@ -362,6 +366,9 @@ pub struct LightRecord {
     pub affect_specular: bool,
     pub max_bounces: u8,
 
+    /// Index into [`SceneFile::actions`]: what animates this light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<usize>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -447,6 +454,9 @@ pub struct MaterialRecord {
     /// The material's own node graph, when it uses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphRecord>,
+    /// Index into [`SceneFile::actions`]: what animates this material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<usize>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -679,6 +689,7 @@ fn light_record(light: &kreate_scene::Light) -> LightRecord {
         affect_diffuse: light.affect_diffuse,
         affect_specular: light.affect_specular,
         max_bounces: light.max_bounces,
+        action: None,
         extra: BTreeMap::new(),
     };
     match light.kind {
@@ -766,6 +777,7 @@ fn light_from_record(record: &LightRecord) -> kreate_scene::Light {
         affect_diffuse: record.affect_diffuse,
         affect_specular: record.affect_specular,
         max_bounces: record.max_bounces,
+        action: None,
     }
 }
 
@@ -950,6 +962,7 @@ pub fn write(
             .map(|(_, a)| ActionRecord {
                 name: a.name.clone(),
                 uid: a.uid.raw(),
+                animates: (a.animates != kreate_scene::DatablockKind::Object).then(|| a.animates.id().to_string()),
                 curves: a
                     .curves
                     .iter()
@@ -1003,6 +1016,7 @@ pub fn write(
                         .map(|uid| uid.raw()),
                     normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
+                    action: m.action.and_then(|a| action_index.get(&a).copied()),
                     extra: BTreeMap::new(),
                 }
             })
@@ -1031,7 +1045,11 @@ pub fn write(
             .collect();
         scene.lights = document
             .lights()
-            .map(|(_, light)| light_record(light))
+            .map(|(_, light)| {
+                let mut record = light_record(light);
+                record.action = light.action.and_then(|a| action_index.get(&a).copied());
+                record
+            })
             .collect();
 
         // Before the worlds, because a world's background names an image and
@@ -1311,6 +1329,47 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         document.restore_image(image, kreate_scene::Uid::from_raw(record.uid));
     }
 
+    // Actions first: objects, materials and lights all name them by position.
+    let action_ids: Vec<kreate_scene::ActionId> = scene
+        .actions
+        .iter()
+        .map(|record| {
+            let animates = record
+                .animates
+                .as_deref()
+                .and_then(kreate_reflect_kind)
+                .unwrap_or(kreate_scene::DatablockKind::Object);
+            let mut action = kreate_scene::animation::Action::for_kind(record.name.clone(), animates);
+            for curve in &record.curves {
+                let mut made = kreate_scene::animation::FCurve::new(kreate_scene::PropertyPath::component(
+                    animates,
+                    kreate_scene::Uid::NONE,
+                    &curve.property,
+                    curve.index,
+                ));
+                made.keys = curve
+                    .keys
+                    .iter()
+                    .map(|k| kreate_scene::animation::Keyframe {
+                        frame: k.frame,
+                        value: k.value,
+                        // An interpolation this build does not know is the
+                        // default: the key keeps its place and value, which
+                        // are what a curve is.
+                        interpolation: k
+                            .interpolation
+                            .as_deref()
+                            .and_then(kreate_scene::animation::Interpolation::from_tag)
+                            .unwrap_or_default(),
+                        selected: k.selected,
+                    })
+                    .collect();
+                made.normalise();
+                action.curves.push(made);
+            }
+            document.restore_action(action, kreate_scene::Uid::from_raw(record.uid))
+        })
+        .collect();
     let mut material_ids: Vec<kreate_scene::MaterialId> =
         Vec::with_capacity(scene.materials.len());
     for record in &scene.materials {
@@ -1342,6 +1401,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .graph
                 .as_ref()
                 .and_then(|g| graph_from_record(g, &document)),
+            action: record.action.and_then(|i| action_ids.get(i).copied()),
             linkage: Linkage::Local,
             uid: kreate_scene::Uid::NONE,
         };
@@ -1365,7 +1425,8 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
 
     let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());
     for record in &scene.lights {
-        let light = light_from_record(record);
+        let mut light = light_from_record(record);
+        light.action = record.action.and_then(|i| action_ids.get(i).copied());
         light_ids.push(document.restore_light(light, kreate_scene::Uid::from_raw(record.uid)));
     }
 
@@ -1380,37 +1441,6 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         document.set_active_world(Some(*id));
     }
 
-    // Actions before objects, which name them by position.
-    let action_ids: Vec<kreate_scene::ActionId> = scene
-        .actions
-        .iter()
-        .map(|record| {
-            let mut action = kreate_scene::animation::Action::new(record.name.clone());
-            for curve in &record.curves {
-                let mut made = kreate_scene::animation::FCurve::owned(&curve.property, curve.index);
-                made.keys = curve
-                    .keys
-                    .iter()
-                    .map(|k| kreate_scene::animation::Keyframe {
-                        frame: k.frame,
-                        value: k.value,
-                        // An interpolation this build does not know is the
-                        // default: the key keeps its place and value, which
-                        // are what a curve is.
-                        interpolation: k
-                            .interpolation
-                            .as_deref()
-                            .and_then(kreate_scene::animation::Interpolation::from_tag)
-                            .unwrap_or_default(),
-                        selected: k.selected,
-                    })
-                    .collect();
-                made.normalise();
-                action.curves.push(made);
-            }
-            document.restore_action(action, kreate_scene::Uid::from_raw(record.uid))
-        })
-        .collect();
     if let Some(p) = scene.playback {
         // Refused rather than trusted: an fps of zero divides every playback
         // step by nothing, and a file can say anything.
@@ -1575,3 +1605,9 @@ fn affine_to_array(m: &glam::DAffine3) -> [f64; 12] {
 fn affine_from_array(a: &[f64; 12]) -> glam::DAffine3 {
     glam::DAffine3::from_cols_array(a)
 }
+
+/// A datablock kind from its stable name.
+fn kreate_reflect_kind(id: &str) -> Option<kreate_scene::DatablockKind> {
+    kreate_scene::DatablockKind::from_id(id)
+}
+

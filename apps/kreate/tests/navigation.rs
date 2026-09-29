@@ -326,6 +326,7 @@ const APP_ACTIONS: &[&str] = &[
     "time.step",
     "time.jump",
     "time.set_range",
+    "time.toggle_autokey",
     "edit.copy_script",
     "file.run_script",
     "object.add_next_primitive",

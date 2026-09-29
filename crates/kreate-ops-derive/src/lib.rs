@@ -54,6 +54,8 @@ struct FieldAttrs {
     /// X, Y and Z — a base colour is not a direction, and calling red "X" is
     /// the interface asserting something untrue about the value.
     color: bool,
+    /// Kept out of every panel. See `PropertyDesc::hidden`.
+    hidden: bool,
 }
 
 struct Field {
@@ -233,6 +235,11 @@ fn parse_param_attr(args: &Group, out: &mut FieldAttrs) -> Result<(), String> {
             i += 1;
             continue;
         }
+        if key == "hidden" {
+            out.hidden = true;
+            i += 1;
+            continue;
+        }
 
         // `key = value`
         if !matches!(tokens.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=') {
@@ -393,7 +400,7 @@ fn emit(struct_name: &str, fields: &[Field]) -> TokenStream {
 
         schema.push_str(&format!(
             "PropertyDesc {{ name: {:?}, kind: {}, min: {}, max: {}, soft_min: {}, \
-             soft_max: {}, step: {}, unit: {}, doc: {:?} }},",
+             soft_max: {}, step: {}, unit: {}, doc: {:?}, hidden: {} }},",
             f.name,
             info.kind,
             opt(&f.attrs.min),
@@ -403,6 +410,7 @@ fn emit(struct_name: &str, fields: &[Field]) -> TokenStream {
             opt(&f.attrs.step),
             unit,
             f.doc,
+            f.attrs.hidden,
         ));
 
         to_map.push_str(&format!(

@@ -852,6 +852,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         normal_uid: None,
         normal_strength: None,
         graph: None,
+        action: None,
         extra: Default::default(),
     };
     let text = serde_json::to_string(&record).expect("serialises");
@@ -972,4 +973,29 @@ fn a_scene_that_never_touched_the_timeline_writes_no_clock() {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut archive.by_name("scene.json").expect("scene"), &mut text).expect("read");
     assert!(!text.contains("playback") && !text.contains("actions"), "{text}");
+}
+
+#[test]
+fn a_materials_and_a_lights_animation_survive_a_save() {
+    use kreate_scene::animation::{Action, Interpolation};
+    let mut doc = Document::new();
+    let mut blink = Action::for_kind("Blink", kreate_scene::DatablockKind::Material);
+    blink.curve_mut("base_color", 0).insert(1.0, 1.0, Interpolation::Constant);
+    let blink = doc.add_action(blink);
+    let mut dim = Action::for_kind("Dim", kreate_scene::DatablockKind::Light);
+    dim.curve_mut("intensity", 0).insert(5.0, 20.0, Interpolation::Linear);
+    let dim = doc.add_action(dim);
+    doc.add_material(kreate_scene::Material { name: "Warn".into(), action: Some(blink), ..Default::default() });
+    let mut light = kreate_scene::Light::new("Lamp");
+    light.action = Some(dim);
+    doc.add_light(light);
+
+    let after = round_trip(&doc).document;
+    let (_, m) = after.materials().next().unwrap();
+    let a = after.action(m.action.expect("the material's link came back")).unwrap();
+    assert_eq!((a.name.as_str(), a.animates), ("Blink", kreate_scene::DatablockKind::Material));
+    assert_eq!(a.curves[0].path.kind, kreate_scene::DatablockKind::Material);
+    let (_, l) = after.lights().next().unwrap();
+    let a = after.action(l.action.expect("the light's link came back")).unwrap();
+    assert_eq!((a.name.as_str(), a.animates), ("Dim", kreate_scene::DatablockKind::Light));
 }

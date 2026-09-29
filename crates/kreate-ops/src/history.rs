@@ -44,6 +44,8 @@ pub struct ModalSession {
     /// What the last successful apply recorded, which becomes the history
     /// entry's payload on commit.
     payload: UndoPayload,
+    /// Hidden parameters at their defaults. See `HistoryEntry::quiet`.
+    quiet: Vec<&'static str>,
 }
 
 impl ModalSession {
@@ -66,12 +68,38 @@ pub struct HistoryEntry {
     pub label: String,
     /// What to restore in order to undo this.
     payload: UndoPayload,
+    /// Hidden parameters that were at their defaults, left out of the script
+    /// line.
+    ///
+    /// The record keeps every parameter — replay must not depend on today's
+    /// defaults — but a script line that said `autokey=False, key_frame=0.0`
+    /// after every move would be noise about a feature that was off. An
+    /// auto-keyed move still says so, because then the values are not the
+    /// defaults.
+    quiet: Vec<&'static str>,
+}
+
+/// The hidden parameters of `info` that `full` leaves at their defaults.
+fn quiet_names(info: &crate::operator::OperatorInfo, full: &PropertyMap) -> Vec<&'static str> {
+    let defaults = info.defaults();
+    info.schema
+        .iter()
+        .filter(|d| d.hidden && full.get(d.name) == defaults.get(d.name))
+        .map(|d| d.name)
+        .collect()
 }
 
 impl HistoryEntry {
     /// The script line that reproduces this operation.
     pub fn to_script_call(&self) -> String {
-        self.params.to_script_call(&self.op_id)
+        if self.quiet.is_empty() {
+            return self.params.to_script_call(&self.op_id);
+        }
+        let mut shown = PropertyMap::new();
+        for (name, value) in self.params.iter().filter(|(n, _)| !self.quiet.contains(n)) {
+            shown.set(name, value.clone());
+        }
+        shown.to_script_call(&self.op_id)
     }
 
     pub fn bytes(&self) -> usize {
@@ -206,11 +234,13 @@ impl History {
             Ok(OpResult::Finished) => {
                 // A redo branch that is no longer reachable.
                 self.entries.truncate(self.cursor);
+                let quiet = quiet_names(info, &full);
                 self.entries.push(HistoryEntry {
                     op_id: op_id.to_string(),
                     params: full,
                     label,
                     payload,
+                    quiet,
                 });
                 self.cursor = self.entries.len();
                 self.enforce_budget();
@@ -280,6 +310,7 @@ impl History {
                 op_id: op_id.to_string(),
                 label,
                 before,
+                quiet: quiet_names(info, &full),
                 params: full,
                 payload,
             })),
@@ -333,6 +364,7 @@ impl History {
 
         match result {
             Ok(OpResult::Finished) => {
+                modal.quiet = quiet_names(info, &full);
                 modal.params = full;
                 modal.payload = payload;
                 Ok(())
@@ -365,6 +397,7 @@ impl History {
             params: modal.params,
             label: modal.label,
             payload: modal.payload,
+            quiet: modal.quiet,
         });
         self.cursor = self.entries.len();
         self.enforce_budget();

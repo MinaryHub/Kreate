@@ -187,6 +187,13 @@ pub struct PropertyDesc {
     /// Doc comment on the field, used as the fallback tooltip when no
     /// translation is loaded.
     pub doc: &'static str,
+    /// Not drawn by any panel.
+    ///
+    /// For a parameter that carries *context* rather than a choice — which
+    /// frame an auto-key goes on — so it is recorded, replayed and scriptable
+    /// like every other parameter, but a person adjusting the last operation
+    /// is not offered a dial for a thing they never chose.
+    pub hidden: bool,
 }
 
 impl PropertyDesc {
@@ -439,6 +446,7 @@ mod tests {
             step: Some(0.01),
             unit: Unit::Length,
             doc: "Width of the bevel.",
+            hidden: false,
         },
         PropertyDesc {
             name: "segments",
@@ -450,6 +458,7 @@ mod tests {
             step: Some(1.0),
             unit: Unit::Count,
             doc: "",
+            hidden: false,
         },
     ];
 
@@ -490,6 +499,7 @@ mod tests {
             step: None,
             unit: Unit::None,
             doc: "",
+            hidden: false,
         };
         assert_eq!(desc.clamp(PropertyValue::Enum(9)), PropertyValue::Enum(1));
     }

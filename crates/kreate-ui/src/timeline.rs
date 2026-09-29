@@ -24,6 +24,8 @@ pub struct TimelineView {
     pub start: i32,
     pub end: i32,
     pub playing: bool,
+    /// Whether transforms key themselves: the record button.
+    pub autokey: bool,
     /// Frames the selected objects have keys on.
     pub keys: Vec<f64>,
 }
@@ -36,6 +38,7 @@ pub enum TimelineEdit {
     JumpStart,
     JumpEnd,
     SetRange { start: i32, end: i32 },
+    ToggleAutokey,
 }
 
 /// The panel's strings.
@@ -46,6 +49,7 @@ pub struct TimelineText {
     pub jump_end: String,
     pub start: String,
     pub end: String,
+    pub autokey: String,
 }
 
 /// What the panel remembers.
@@ -125,6 +129,12 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
             }
             if icon_button(ui, Icon::JumpEnd).on_hover_text(&text.jump_end).clicked() {
                 out.push(TimelineEdit::JumpEnd);
+            }
+            ui.separator();
+            // The record button: a red dot, lit while on — Blender's, and a
+            // state rather than an action, so it shows which it is in.
+            if record_button(ui, view.autokey).on_hover_text(&text.autokey).clicked() {
+                out.push(TimelineEdit::ToggleAutokey);
             }
             ui.separator();
             let mut frame = view.frame.round() as i32;
@@ -223,6 +233,18 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
     out
 }
 
+/// The auto-key toggle: a dot, red and on a lit button while recording.
+fn record_button(ui: &mut Ui, on: bool) -> egui::Response {
+    let size = Vec2::splat(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let visuals = ui.style().interact(&response);
+    let theme = crate::theme::from_ui(ui);
+    ui.painter().rect_filled(rect, 3.0, if on { theme.accent_wash } else { visuals.weak_bg_fill });
+    let dot = if on { Color32::from_rgb(0xe0, 0x3c, 0x3c) } else { visuals.fg_stroke.color };
+    ui.painter().circle_filled(rect.center(), rect.height() * 0.2, dot);
+    response
+}
+
 #[derive(Clone, Copy)]
 enum Icon {
     Play,
@@ -310,7 +332,7 @@ mod tests {
     fn scrub(from_frame: f64, to_frame: f64) -> Vec<TimelineEdit> {
         let ctx = egui::Context::default();
         let mut state = TimelineState::default();
-        let view = TimelineView { frame: 1.0, start: 1, end: 100, playing: false, keys: vec![10.0] };
+        let view = TimelineView { frame: 1.0, start: 1, end: 100, playing: false, autokey: false, keys: vec![10.0] };
         let text = TimelineText {
             play: String::new(),
             pause: String::new(),
@@ -318,6 +340,7 @@ mod tests {
             jump_end: String::new(),
             start: String::new(),
             end: String::new(),
+            autokey: String::new(),
         };
         let mut out = Vec::new();
         let mut time = 0.0;

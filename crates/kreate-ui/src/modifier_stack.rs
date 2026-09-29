@@ -228,6 +228,7 @@ mod tests {
             step: None,
             unit: Unit::Count,
             doc: "",
+            hidden: false,
         }
     }
 

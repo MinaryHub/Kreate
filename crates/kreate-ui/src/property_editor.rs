@@ -142,12 +142,47 @@ pub fn property_editor_where(
     values: &mut PropertyMap,
     keep: impl Fn(&str) -> bool,
 ) -> bool {
+    property_editor_keyed(ui, catalog, op_id, schema, values, keep, |_| None, "").0
+}
+
+/// Whether a value is animated, as the diamond beside it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyMark {
+    /// Not animated: a hollow diamond, to key it.
+    None,
+    /// Animated, with no key on this frame.
+    Animated,
+    /// Keyed on this frame.
+    Keyed,
+}
+
+/// The same, with a keyframe diamond beside every parameter `mark` answers for.
+///
+/// Blender's decorator column: a hollow diamond keys the value where it
+/// stands, a lit one says it is keyed on this frame and takes that key away.
+/// Returns what changed and the name of the parameter whose diamond was
+/// clicked, for the caller to key or unkey — this crate knows no documents.
+#[allow(clippy::too_many_arguments)]
+pub fn property_editor_keyed(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    op_id: &str,
+    schema: &[PropertyDesc],
+    values: &mut PropertyMap,
+    keep: impl Fn(&str) -> bool,
+    mark: impl Fn(&str) -> Option<KeyMark>,
+    key_tip: &str,
+) -> (bool, Option<&'static str>) {
     let mut changed = false;
+    let mut clicked = None;
+    let decorated = schema.iter().any(|d| mark(d.name).is_some());
     egui::Grid::new(("props", op_id))
-        .num_columns(2)
+        .num_columns(if decorated { 3 } else { 2 })
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            for desc in schema.iter().filter(|d| keep(d.name)) {
+            // Hidden parameters carry context, not choices: recorded and
+            // replayed, never drawn. See `PropertyDesc::hidden`.
+            for desc in schema.iter().filter(|d| !d.hidden && keep(d.name)) {
                 let (name, tip) = labels(catalog, op_id, desc);
                 let label = ui.label(name);
                 if !tip.is_empty() {
@@ -157,10 +192,47 @@ pub fn property_editor_where(
                     label.on_hover_text(crate::text::wrap_tooltip(ui, &tip));
                 }
                 changed |= property_widget(ui, desc, values);
+                if decorated {
+                    match mark(desc.name) {
+                        Some(m) => {
+                            let response = key_diamond(ui, m);
+                            let response = if key_tip.is_empty() { response } else { response.on_hover_text(key_tip) };
+                            if response.clicked() {
+                                clicked = Some(desc.name);
+                            }
+                        }
+                        None => {
+                            ui.label("");
+                        }
+                    }
+                }
                 ui.end_row();
             }
         });
-    changed
+    (changed, clicked)
+}
+
+/// A keyframe diamond, painted: hollow, dim or lit.
+fn key_diamond(ui: &mut Ui, mark: KeyMark) -> egui::Response {
+    let size = egui::Vec2::splat(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let theme = crate::theme::from_ui(ui);
+    let c = rect.center();
+    let r = size.y * 0.26;
+    let points = vec![
+        egui::pos2(c.x, c.y - r),
+        egui::pos2(c.x + r, c.y),
+        egui::pos2(c.x, c.y + r),
+        egui::pos2(c.x - r, c.y),
+    ];
+    let hover = response.hovered();
+    let (fill, stroke) = match mark {
+        KeyMark::Keyed => (theme.accent, theme.accent),
+        KeyMark::Animated => (theme.text_dim, theme.text_dim),
+        KeyMark::None => (egui::Color32::TRANSPARENT, if hover { theme.text } else { theme.text_faint }),
+    };
+    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(1.2, stroke)));
+    response
 }
 
 /// Draws the widget for one parameter.
@@ -395,6 +467,7 @@ mod tests {
             step: None,
             unit,
             doc: "",
+            hidden: false,
         }
     }
 
@@ -520,6 +593,7 @@ mod tests {
             step: Some(0.01),
             unit: Unit::Length,
             doc: "",
+            hidden: false,
         };
         assert!(d.soft_max.unwrap() < d.max.unwrap());
         // And the hard range is what actually constrains a stored value.

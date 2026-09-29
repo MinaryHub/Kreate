@@ -634,6 +634,9 @@ struct App {
     /// Application state, not the document's: a file saved mid-play opens
     /// stopped, the way every animation tool's does.
     playing: Option<std::time::Instant>,
+    /// Blender's record button: while on, every object transform keys what it
+    /// changed at the current frame.
+    autokey: bool,
     /// Snapping, as the user has it set. `Ctrl` inverts it for one drag.
     ///
     /// Held on the application rather than inside a gesture because it is a
@@ -719,12 +722,19 @@ impl App {
             clipboard: None,
             dispatching_key: None,
             playing: None,
+            autokey: false,
             shown_title: String::new(),
         }
     }
 
     /// Dispatches an operator. The only way this application changes the document.
+    /// The frame auto-keying puts a key on, or `None` while it is off.
+    fn autokey_frame(&self) -> Option<f64> {
+        self.autokey.then(|| self.doc.playback.frame.round())
+    }
+
     fn run_op(&mut self, op_id: &str, params: PropertyMap) {
+        let params = with_autokey(self.autokey_frame(), op_id, &params);
         // Recorded before it runs, not after. The operator that panics is the one
         // most worth having in the report, and an entry written on success would
         // be missing exactly that one.
@@ -1502,13 +1512,14 @@ impl App {
         let op_id = kind.op_id(mode);
         // Started with the identity parameters, so pressing the key alone moves
         // nothing. The first pointer motion is what does anything.
+        let start = with_autokey(self.autokey_frame(), op_id, &gesture.params());
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
             Some(&mut self.edit),
             &self.op_ctx,
             op_id,
-            &gesture.params(),
+            &start,
         ) {
             Ok(Some(session)) => {
                 let status = gesture.status();
@@ -1791,9 +1802,11 @@ impl App {
 
         // Restore and re-apply from the original — §2.2's rule. `update_modal`
         // owns that; nothing here is incremental.
+        let key = self.autokey_frame();
         let Some((_, session)) = &mut self.gesture else {
             return;
         };
+        let params = with_autokey(key, session.op_id(), &params);
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
@@ -1810,6 +1823,7 @@ impl App {
 
     /// Confirms the gesture: one history entry, carrying the final parameters.
     fn confirm_gesture(&mut self) {
+        let key = self.autokey_frame();
         let Some((gesture, mut session)) = self.gesture.take() else {
             return;
         };
@@ -1822,6 +1836,7 @@ impl App {
         // The preview is dropped rather than restored: this run rewrites the
         // positions, which makes a new handle, which `gpu_sync` repositions. One
         // extraction, at mouse-up, instead of one per frame.
+        let final_params = with_autokey(key, session.op_id(), &gesture.params());
         if self
             .gfx
             .as_mut()
@@ -1833,7 +1848,7 @@ impl App {
                 Some(&mut self.edit),
                 &self.op_ctx,
                 &mut session,
-                &gesture.params(),
+                &final_params,
             ) {
                 tracing::warn!(error = %e, "transform failed");
             }
@@ -2035,7 +2050,23 @@ impl App {
                         .orbit(-dx as f64 * scale, -dy as f64 * scale);
                     self.redraw.set(RedrawReason::CAMERA_MOVED);
                 }
-                Command::AdjustLast { params } => {
+                Command::AdjustLast { mut params } => {
+                    // A panel adjusting the last operation sends the values it
+                    // shows, and hidden ones — an auto-key's frame — are not
+                    // shown. Carried over from the step being adjusted, or a
+                    // drag of a sidebar field would drop the key its first
+                    // frame put down.
+                    if let Some(last) = self.history.last() {
+                        if let Some(info) = self.registry.get(&last.op_id) {
+                            for desc in info.schema.iter().filter(|d| d.hidden) {
+                                if params.get(desc.name).is_none() {
+                                    if let Some(v) = last.params.get(desc.name) {
+                                        params.set(desc.name, v.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match self.history.adjust_last(
                         &self.registry,
                         &mut self.doc,
@@ -2416,12 +2447,13 @@ impl App {
 
     /// Hands the clock to the timeline panel.
     fn sync_timeline(&mut self) {
-        let mut keys: Vec<f64> = Vec::new();
-        for id in &self.doc.selection.objects {
-            if let Some(action) = self.doc.object(*id).and_then(|o| o.action).and_then(|a| self.doc.action(a)) {
-                keys.extend(action.key_frames());
-            }
-        }
+        // Every action the dope sheet shows: the selection's, its materials'
+        // and its lamps', so a blinking material's keys are somewhere to aim.
+        let mut keys: Vec<f64> = kreate_ops::ops::anim::shown_actions(&self.doc)
+            .into_iter()
+            .filter_map(|a| self.doc.action(a))
+            .flat_map(|a| a.key_frames())
+            .collect();
         keys.sort_by(f64::total_cmp);
         keys.dedup();
         let p = self.doc.playback;
@@ -2430,6 +2462,7 @@ impl App {
             start: p.start,
             end: p.end,
             playing: self.playing.is_some(),
+            autokey: self.autokey,
             keys,
         };
     }
@@ -4547,6 +4580,11 @@ impl App {
                 };
                 self.redraw.set(RedrawReason::PLAYING);
             }
+            "time.toggle_autokey" => {
+                self.autokey = !self.autokey;
+                self.status(if self.autokey { "auto-keying on" } else { "auto-keying off" });
+                self.redraw.set(RedrawReason::UI);
+            }
             "time.set_frame" => {
                 if let Some(PropertyValue::Float(frame)) = action.params.get("frame") {
                     self.set_frame(*frame);
@@ -5342,6 +5380,26 @@ fn install_panic_hook() {
         eprintln!("crash report written to {}", report.display());
         previous(info);
     }));
+}
+
+/// `params` with the auto-key parameters set, when auto-keying is on and the
+/// operator transforms objects.
+///
+/// Not when the caller already named them: a script line or a replayed step
+/// that says `autokey=False` means it, whatever the record button says now.
+fn with_autokey(frame: Option<f64>, op_id: &str, params: &PropertyMap) -> PropertyMap {
+    let mut out = params.clone();
+    let transforms = matches!(
+        op_id,
+        "object.translate" | "object.rotate" | "object.scale" | "object.set_transform"
+    );
+    if let (Some(frame), true) = (frame, transforms) {
+        if out.get("autokey").is_none() {
+            out.set("autokey", PropertyValue::Bool(true));
+            out.set("key_frame", PropertyValue::Float(frame));
+        }
+    }
+    out
 }
 
 /// The egui key for a keymap key name, for a widget that watches the key

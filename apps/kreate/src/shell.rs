@@ -948,14 +948,13 @@ struct Labels {
     palette_placeholder: String,
     pie_shading: String,
     time_play: String,
+    key_property: String,
+    time_autokey: String,
     sheet_empty: String,
     sheet_interpolation: String,
     interp_constant: String,
     interp_linear: String,
     interp_bezier: String,
-    channel_location: String,
-    channel_rotation: String,
-    channel_scale: String,
     time_pause: String,
     time_play_menu: String,
     time_jump_start: String,
@@ -1103,14 +1102,13 @@ impl Labels {
             palette_placeholder: t("palette-placeholder"),
             pie_shading: t("pie-shading"),
             time_play: t("time-play"),
+            key_property: t("key-property"),
+            time_autokey: t("time-autokey"),
             sheet_empty: t("sheet-empty"),
             sheet_interpolation: t("sheet-interpolation"),
             interp_constant: t("interp-constant"),
             interp_linear: t("interp-linear"),
             interp_bezier: t("interp-bezier"),
-            channel_location: t("channel-location"),
-            channel_rotation: t("channel-rotation"),
-            channel_scale: t("channel-scale"),
             time_pause: t("time-pause"),
             time_play_menu: t("op-time-play"),
             time_jump_start: t("time-jump-start"),
@@ -2808,6 +2806,7 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
         jump_end: l.time_jump_end.clone(),
         start: l.time_start.clone(),
         end: l.time_end.clone(),
+        autokey: l.time_autokey.clone(),
     };
     let view = state.timeline.clone();
     let mut panel = state.timeline_views.remove(&area).unwrap_or_default();
@@ -2831,9 +2830,19 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
                 p.set("end", V::Int(end as i64));
                 "time.set_range"
             }
+            E::ToggleAutokey => "time.toggle_autokey",
         };
         state.queue.dispatch(id, p);
     }
+}
+
+/// What plays an action: the object, material or lamp it belongs to, by name.
+fn owner_name(doc: &Document, action: kreate_scene::ActionId) -> Option<String> {
+    doc.objects()
+        .find(|(_, o)| o.action == Some(action))
+        .map(|(_, o)| o.name.clone())
+        .or_else(|| doc.materials().find(|(_, m)| m.action == Some(action)).map(|(_, m)| m.name.clone()))
+        .or_else(|| doc.lights().find(|(_, l)| l.action == Some(action)).map(|(_, l)| l.name.clone()))
 }
 
 /// The dope sheet, over the selected objects' actions — what Blender's shows
@@ -2842,11 +2851,12 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
     use kreate_reflect::PropertyValue as V;
     use kreate_ui::dope_sheet::{SheetEdit as E, SheetKey, SheetRow};
     let mut rows = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for id in &doc.selection.objects {
-        let Some(object) = doc.object(*id) else { continue };
-        let Some(action_id) = object.action.filter(|a| seen.insert(*a)) else { continue };
+    // Every action on show — the objects', then their materials' and lamps' —
+    // in the order the operators act on them, each with its owner's name and
+    // a row per property its kind animates.
+    for action_id in kreate_ops::ops::anim::shown_actions(doc) {
         let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else { continue };
+        let owner = owner_name(doc, action_id).unwrap_or_else(|| action.name.clone());
         // A key per frame on a row, selected if any key there is — what the
         // summary row and a property's row both mean by one diamond.
         let keys_of = |property: Option<&str>| -> Vec<SheetKey> {
@@ -2863,23 +2873,19 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
             keys
         };
         rows.push(SheetRow {
-            // i18n-exempt: an object's name is the user's own text
-            label: object.name.clone(),
+            // i18n-exempt: a datablock's name is the user's own text
+            label: owner,
             depth: 0,
             target: kreate_ops::ops::anim::row_target(uid.raw(), None),
             keys: keys_of(None),
         });
-        for (property, label) in [
-            ("location", &l.channel_location),
-            ("rotation_euler", &l.channel_rotation),
-            ("scale", &l.channel_scale),
-        ] {
-            if action.curves.iter().any(|c| c.path.property.as_ref() == property) {
+        for desc in kreate_scene::animation::animatable(action.animates) {
+            if action.curves.iter().any(|c| c.path.property.as_ref() == desc.name) {
                 rows.push(SheetRow {
-                    label: label.clone(),
+                    label: state.catalog.format(&format!("channel-{}", desc.name.replace('_', "-")), TextKind::Ui, &[]),
                     depth: 1,
-                    target: kreate_ops::ops::anim::row_target(uid.raw(), Some(property)),
-                    keys: keys_of(Some(property)),
+                    target: kreate_ops::ops::anim::row_target(uid.raw(), Some(desc.name)),
+                    keys: keys_of(Some(desc.name)),
                 });
             }
         }
@@ -3306,7 +3312,7 @@ fn draw_item_sidebar(
                 return;
             };
             let t = active.transform;
-            let (rx, ry, rz) = t.rotation.to_euler(kreate_math::glam::EulerRot::XYZ);
+            let [rx, ry, rz] = kreate_scene::animation::to_euler(t.rotation).to_array();
             // The values the operator would need in order to leave things
             // exactly as they are. Everything the panel does is edit one of
             // them and send all of them, which is what makes the operator
@@ -4040,7 +4046,7 @@ fn draw_object_tab(
         return;
     };
     let t = active.transform;
-    let (rx, ry, rz) = t.rotation.to_euler(kreate_math::glam::EulerRot::XYZ);
+    let [rx, ry, rz] = kreate_scene::animation::to_euler(t.rotation).to_array();
     let mut params = kreate_reflect::PropertyMap::new();
     params.set(
         "location",
@@ -4298,7 +4304,7 @@ fn draw_material_tab(
     let mut params = kreate_reflect::OpParams::to_map(
         &kreate_ops::ops::object::material_params(material, slot),
     );
-    if kreate_ui::property_editor::property_editor_where(
+    let (changed, keyed) = kreate_ui::property_editor::property_editor_keyed(
         ui,
         &state.catalog,
         info.id,
@@ -4314,9 +4320,15 @@ fn draw_material_tab(
             name != "slot"
                 && (name != "normal_strength" || material.normal_image.is_some())
         },
-    ) {
+        |name| material_animated(name).map(|p| key_mark(doc, material.action, p)),
+        &l.key_property,
+    );
+    if changed {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "material.set_properties", params, dragging);
+    }
+    if let Some(property) = keyed.and_then(material_animated) {
+        toggle_key(state, doc, material.action, 0, slot, property);
     }
     });
 }
@@ -4464,18 +4476,92 @@ fn draw_light_data(
         _ => 0,
     };
     kreate_ui::panel::section(ui, &l.panel_light, true, |ui| {
-        if kreate_ui::property_editor::property_editor_where(
+        let (changed, keyed) = kreate_ui::property_editor::property_editor_keyed(
             ui,
             &state.catalog,
             info.id,
             info.schema,
             &mut params,
             |name| kreate_ops::ops::object::light_param_applies(kind, name),
-        ) {
+            |name| light_animated(name).map(|p| key_mark(doc, light.action, p)),
+            &l.key_property,
+        );
+        if changed {
             let dragging = ui.ctx().input(|i| i.pointer.any_down());
             send_edit(state, "light.set_properties", params, dragging);
         }
+        if let Some(property) = keyed.and_then(light_animated) {
+            toggle_key(state, doc, light.action, 1, 0, property);
+        }
     });
+}
+
+/// The animatable property a material panel field drives, if any.
+fn material_animated(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "color" => "base_color",
+        "metallic" => "metallic",
+        "roughness" => "roughness",
+        "alpha" => "alpha",
+        "normal_strength" => "normal_strength",
+        _ => return None,
+    })
+}
+
+/// The animatable property a light panel field drives, if any.
+fn light_animated(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "color" => "color",
+        "intensity" => "intensity",
+        "exposure" => "exposure",
+        _ => return None,
+    })
+}
+
+/// How a property's diamond looks: keyed on the frame the clock is on, keyed
+/// elsewhere, or not at all.
+fn key_mark(
+    doc: &Document,
+    action: Option<kreate_scene::ActionId>,
+    property: &str,
+) -> kreate_ui::KeyMark {
+    let Some(action) = action.and_then(|a| doc.action(a)) else {
+        return kreate_ui::KeyMark::None;
+    };
+    let mut curves = action.curves.iter().filter(|c| c.path.property.as_ref() == property).peekable();
+    if curves.peek().is_none() {
+        return kreate_ui::KeyMark::None;
+    }
+    let frame = doc.playback.frame.round();
+    if curves.any(|c| c.keys.iter().any(|k| (k.frame - frame).abs() < kreate_scene::animation::SAME_FRAME)) {
+        kreate_ui::KeyMark::Keyed
+    } else {
+        kreate_ui::KeyMark::Animated
+    }
+}
+
+/// Keys a property, or takes its key away if it is keyed on this frame — what
+/// clicking its diamond means. Through `Dispatch`, so the application fills
+/// in the frame the clock is on.
+fn toggle_key(
+    state: &mut ShellState,
+    doc: &Document,
+    action: Option<kreate_scene::ActionId>,
+    datablock: u32,
+    slot: u32,
+    property: &str,
+) {
+    use kreate_reflect::PropertyValue as V;
+    let mut p = PropertyMap::new();
+    p.set("datablock", V::Enum(datablock));
+    p.set("slot", V::Int(slot as i64));
+    p.set("property", V::Text(property.to_string()));
+    let op = if key_mark(doc, action, property) == kreate_ui::KeyMark::Keyed {
+        "anim.keyframe_delete_property"
+    } else {
+        "anim.keyframe_insert_property"
+    };
+    state.queue.dispatch(op, p);
 }
 
 /// Draws the modifier stack for the active object.
@@ -4514,9 +4600,19 @@ interp-constant = Constant
 interp-linear = Linear
 interp-bezier = Bezier
 channel-location = Location
-channel-rotation = Rotation
+channel-rotation-euler = Rotation
 channel-scale = Scale
+channel-base-color = Base Color
+channel-metallic = Metallic
+channel-roughness = Roughness
+channel-alpha = Alpha
+channel-normal-strength = Normal Strength
+channel-color = Color
+channel-intensity = Intensity
+channel-exposure = Exposure
 time-play = Play
+key-property = Keyframe: keys this value at the current frame, or takes away its key there
+time-autokey = Auto-keying: while on, moving, turning or scaling an object keys it at the current frame
 time-pause = Pause
 time-jump-start = Jump to the start
 time-jump-end = Jump to the end
@@ -4918,9 +5014,19 @@ interp-constant = 고정
 interp-linear = 선형
 interp-bezier = 베지어
 channel-location = 위치
-channel-rotation = 회전
+channel-rotation-euler = 회전
 channel-scale = 크기
+channel-base-color = 베이스 컬러
+channel-metallic = 메탈릭
+channel-roughness = 러프니스
+channel-alpha = 알파
+channel-normal-strength = 노멀 세기
+channel-color = 색상
+channel-intensity = 세기
+channel-exposure = 노출
 time-play = 재생
+key-property = 키프레임: 이 값을 현재 프레임에 키로 넣거나, 이미 있으면 뺍니다
+time-autokey = 자동 키: 켜져 있으면 오브젝트를 옮기거나 돌리거나 크기를 바꿀 때 현재 프레임에 키가 들어갑니다
 time-pause = 일시정지
 time-jump-start = 처음으로
 time-jump-end = 끝으로

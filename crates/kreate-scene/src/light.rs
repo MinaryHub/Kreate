@@ -276,6 +276,8 @@ pub struct Light {
     pub affect_specular: bool,
     /// How many bounces this light contributes to. Renderer only.
     pub max_bounces: u8,
+    /// The action animating this light's colour and brightness, if any.
+    pub action: Option<crate::document::ActionId>,
 }
 
 impl Default for Light {
@@ -296,6 +298,7 @@ impl Default for Light {
             affect_diffuse: true,
             affect_specular: true,
             max_bounces: 8,
+            action: None,
         }
     }
 }

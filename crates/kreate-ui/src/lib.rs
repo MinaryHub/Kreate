@@ -43,7 +43,7 @@ pub use keymap_editor::{keymap_editor, KeymapEdit, KeymapText};
 pub use modifier_stack::{modifier_stack, ModifierRow, ModifierText};
 pub use node_editor::{node_editor, GraphView, NodeEdit, NodeEditorState, NodeText};
 pub use outliner::{outliner, ClickModifiers, OutlinerRow, RowKind};
-pub use property_editor::{property_editor, property_widget, UnitDisplay};
+pub use property_editor::{property_editor, property_editor_keyed, property_widget, KeyMark, UnitDisplay};
 pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};
 pub use theme::{install as install_theme, Density, Theme};
 pub use uv_editor::{uv_editor, UvData, UvState, UvText, UvView};

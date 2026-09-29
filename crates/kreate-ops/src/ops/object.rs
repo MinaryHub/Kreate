@@ -1580,6 +1580,15 @@ pub struct TranslateParams {
     /// Offset applied to every selected object, in metres.
     #[param(unit = "length")]
     pub translation: [f64; 3],
+    /// Key what this changed, at `key_frame`: auto-keying, filled in by the
+    /// application when its record button is on. Hidden, because it is the
+    /// application's state and not a choice about this operation — but a
+    /// parameter, so the move and its key are one step to undo and a replay
+    /// keys as the original did.
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 /// Moves the selected objects.
@@ -1609,10 +1618,13 @@ impl Operator for Translate {
         }
         let offset = DVec3::from_array(params.translation);
         let d = doc.document_mut();
-        for id in targets {
-            if let Some(o) = d.object_mut(id) {
+        for id in &targets {
+            if let Some(o) = d.object_mut(*id) {
                 o.transform.translation += offset;
             }
+        }
+        if params.autokey {
+            crate::ops::anim::key_objects(d, &targets, params.key_frame, &["location"]);
         }
         Ok(OpResult::Finished)
     }
@@ -1635,6 +1647,15 @@ pub struct SetTransformParams {
     #[param(unit = "angle")]
     pub rotation: [f64; 3],
     pub scale: [f64; 3],
+    /// Key what this changed, at `key_frame`: auto-keying, filled in by the
+    /// application when its record button is on. Hidden, because it is the
+    /// application's state and not a choice about this operation — but a
+    /// parameter, so the move and its key are one step to undo and a replay
+    /// keys as the original did.
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 impl Default for SetTransformParams {
@@ -1643,6 +1664,8 @@ impl Default for SetTransformParams {
             location: [0.0; 3],
             rotation: [0.0; 3],
             scale: [1.0; 3],
+            autokey: false,
+            key_frame: 1.0,
         }
     }
 }
@@ -1689,13 +1712,10 @@ impl Operator for SetTransform {
         };
         let wanted = kreate_math::DTransform {
             translation: DVec3::from_array(params.location),
-            rotation: kreate_math::glam::DQuat::from_euler(
-                kreate_math::glam::EulerRot::XYZ,
-                params.rotation[0],
-                params.rotation[1],
-                params.rotation[2],
-            )
-            .normalize(),
+            // Blender's XYZ Euler — X first, then Y, then Z — the convention
+            // the rotation curves are keyed in, so the numbers in the sidebar
+            // and the values on a curve are the same numbers.
+            rotation: kreate_scene::animation::from_euler(DVec3::from_array(params.rotation)).normalize(),
             scale: DVec3::from_array(params.scale),
         };
         let d = doc.document_mut();
@@ -1710,6 +1730,14 @@ impl Operator for SetTransform {
             return Ok(OpResult::Cancelled);
         }
         object.transform = wanted;
+        if params.autokey {
+            crate::ops::anim::key_objects(
+                d,
+                &[active],
+                params.key_frame,
+                crate::ops::anim::KEYING_SETS[0],
+            );
+        }
         Ok(OpResult::Finished)
     }
 }
@@ -1725,6 +1753,15 @@ pub struct RotateParams {
     /// What the rotation happens about.
     #[param(variants("median", "individual", "active", "world_origin"))]
     pub pivot: u32,
+    /// Key what this changed, at `key_frame`: auto-keying, filled in by the
+    /// application when its record button is on. Hidden, because it is the
+    /// application's state and not a choice about this operation — but a
+    /// parameter, so the move and its key are one step to undo and a replay
+    /// keys as the original did.
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 /// Rotates the selected objects.
@@ -1761,7 +1798,7 @@ impl Operator for Rotate {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
-        for id in targets {
+        for &id in &targets {
             // `individual` rotates each object about its own origin, so there is
             // no orbiting component.
             let about = if params.pivot == 1 {
@@ -1776,6 +1813,11 @@ impl Operator for Rotate {
                 o.transform.rotation = (rotation * o.transform.rotation).normalize();
             }
         }
+        if params.autokey {
+            // Location too: turning about any pivot but an object's own origin
+            // moves it, and a key of the rotation alone would snap it back.
+            crate::ops::anim::key_objects(d, &targets, params.key_frame, &["location", "rotation_euler"]);
+        }
         Ok(OpResult::Finished)
     }
 }
@@ -1787,6 +1829,15 @@ pub struct ScaleParams {
     /// What the scaling happens about.
     #[param(variants("median", "individual", "active", "world_origin"))]
     pub pivot: u32,
+    /// Key what this changed, at `key_frame`: auto-keying, filled in by the
+    /// application when its record button is on. Hidden, because it is the
+    /// application's state and not a choice about this operation — but a
+    /// parameter, so the move and its key are one step to undo and a replay
+    /// keys as the original did.
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 impl Default for ScaleParams {
@@ -1794,6 +1845,8 @@ impl Default for ScaleParams {
         Self {
             scale: [1.0; 3],
             pivot: 0,
+            autokey: false,
+            key_frame: 1.0,
         }
     }
 }
@@ -1827,7 +1880,7 @@ impl Operator for Scale {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
-        for id in targets {
+        for &id in &targets {
             let about = if params.pivot == 1 {
                 d.object(id).map(|o| o.transform.translation)
             } else {
@@ -1839,6 +1892,10 @@ impl Operator for Scale {
                 o.transform.translation = about + offset * factor;
                 o.transform.scale *= factor;
             }
+        }
+        if params.autokey {
+            // Location too, for the reason rotate gives.
+            crate::ops::anim::key_objects(d, &targets, params.key_frame, &["location", "scale"]);
         }
         Ok(OpResult::Finished)
     }
