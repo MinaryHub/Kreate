@@ -923,16 +923,22 @@ impl App {
         // inside it can be. A sweep proved the point — the guard that used to
         // live here, and the selection sweep below, could both be removed
         // without a single test noticing.
-        let target = kreate_ops::ops::mesh::target_mesh(&self.doc);
-        let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, target.is_some()) else {
+        let has = kreate_ops::mode::Has::of(&self.doc);
+        let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, has) else {
             return;
         };
+        // Only a change into or out of a mode with element selections sweeps
+        // them. Entering pose mode is not an edit of any mesh, and a history
+        // step for a selection nobody can see would be one more thing to undo.
+        let sweeps = self.op_ctx.mode.edits_elements() || change.to.edits_elements();
         self.op_ctx.mode = change.to;
 
-        self.run_op_with(
-            "mesh.select",
-            &[("action", PropertyValue::Enum(u32::from(!change.select_all)))],
-        );
+        if sweeps {
+            self.run_op_with(
+                "mesh.select",
+                &[("action", PropertyValue::Enum(u32::from(!change.select_all)))],
+            );
+        }
 
         // Opened after the selection change rather than before it, so the
         // sessions start current with the document instead of immediately
@@ -1271,6 +1277,7 @@ impl App {
             ("object.add_light", &[]),
             ("object.add_camera", &[]),
             ("object.add_empty", &[]),
+            ("object.add_armature", &[]),
             // The application's own actions, which have keys too: a menu entry
             // that says "Ctrl+S" beside Save is how the key gets learnt.
             ("file.new", &[]),
@@ -1344,6 +1351,12 @@ impl App {
     /// gesture because what counts as "the selection" is a question about the
     /// document.
     fn selection_pivot(&self) -> Option<DVec3> {
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Bones {
+            // The operator's own pivot, for the reason the edit-mode branch
+            // gives: a gesture measured about another point would turn the
+            // bones out from under the pointer.
+            return kreate_ops::ops::pose::pivot(&self.doc);
+        }
         if self.op_ctx.mode.edits_elements() {
             // The operator's own answer, not a second calculation of it. The
             // gesture measures the pointer's angle and its scale factor from
@@ -3326,6 +3339,32 @@ impl App {
                     None => {}
                 }
             }
+            kreate_ops::mode::ActsOn::Bones => {
+                let Some(object) = kreate_ops::ops::pose::posed_object(&self.doc) else {
+                    return true;
+                };
+                let (Some((x, y)), Some(projector)) = (self.input.cursor, self.ui.projector) else {
+                    return true;
+                };
+                let ppp = self.egui_ctx.pixels_per_point();
+                let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+                match shell::bone_under(&self.doc, object, &projector, at) {
+                    Some((_, bone)) => {
+                        let mut params = PropertyMap::new();
+                        params.set("bone", PropertyValue::Text(bone));
+                        params.set("extend", PropertyValue::Bool(extend));
+                        self.run_op("pose.select_pick", params);
+                    }
+                    // A miss deselects, as it does for objects and elements —
+                    // but not when extending.
+                    None if !extend => {
+                        let mut params = PropertyMap::new();
+                        params.set("action", PropertyValue::Enum(1));
+                        self.run_op("pose.select_all", params);
+                    }
+                    None => {}
+                }
+            }
             kreate_ops::mode::ActsOn::Objects => {
                 // A lamp's or camera's glyph first, because it is drawn on
                 // top. The id buffer has never heard of them — they have no
@@ -4081,7 +4120,10 @@ impl App {
         // against its depth — see `glyphs`. Rebuilt each frame: a handful of
         // objects, and a copy of their transforms would be one more thing to
         // keep in step with undo.
-        let (marker_lines, marker_points) = kreate::glyphs::markers_for(&self.doc);
+        let posing = (self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Bones)
+            .then(|| kreate_ops::ops::pose::posed_object(&self.doc))
+            .flatten();
+        let (marker_lines, marker_points) = kreate::glyphs::markers_posing(&self.doc, posing);
         gfx.viewport.set_markers(
             &gfx.gpu.device,
             &gfx.gpu.queue,
@@ -4528,9 +4570,11 @@ impl App {
                     _ => kreate::uvmodal::Kind::Move,
                 });
             }
-            "object.translate" | "mesh.translate" => self.begin_gesture(kreate::modal::Kind::Move),
-            "object.rotate" | "mesh.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
-            "object.scale" | "mesh.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            "object.translate" | "mesh.translate" | "pose.translate" => {
+                self.begin_gesture(kreate::modal::Kind::Move)
+            }
+            "object.rotate" | "mesh.rotate" | "pose.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
+            "object.scale" | "mesh.scale" | "pose.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
             "view.cycle_snap_mode" => {
                 self.snap.mode = self.snap.mode.next();
                 let label = self.snap.mode.label();

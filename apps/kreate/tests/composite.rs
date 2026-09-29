@@ -2080,6 +2080,43 @@ fn shot_drivers() {
     }
 }
 
+/// An arm of three bones beside the cube, bent at the elbow and the wrist.
+#[test]
+fn shot_armature() {
+    use kreate_scene::armature::{Armature, Bone};
+    let mut doc = doc_with_cube();
+    let mut arm = Armature::new("Arm");
+    arm.bones[0].name = "Upper".into();
+    arm.bones[0].tail = kreate_math::DVec3::new(0.0, 0.0, 1.2);
+    arm.add_bone(Bone {
+        name: "Lower".into(),
+        parent: Some(0),
+        head: kreate_math::DVec3::new(0.0, 0.0, 1.2),
+        tail: kreate_math::DVec3::new(0.0, 0.0, 2.2),
+        roll: 0.0,
+    });
+    arm.add_bone(Bone {
+        name: "Hand".into(),
+        parent: Some(1),
+        head: kreate_math::DVec3::new(0.0, 0.0, 2.2),
+        tail: kreate_math::DVec3::new(0.0, 0.0, 2.6),
+        roll: 0.0,
+    });
+    let id = doc.add_armature(arm);
+    let mut object = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id));
+    object.transform.translation = kreate_math::DVec3::new(0.6, -2.0, 0.0);
+    object.pose.entry("Lower").transform.rotation = kreate_math::DQuat::from_rotation_x(-0.9);
+    object.pose.entry("Hand").transform.rotation = kreate_math::DQuat::from_rotation_x(-0.6);
+    let rig = doc.add_object(object);
+    doc.selection.clear();
+    doc.selection.add(rig);
+    let Some(shot) = composite_with(&doc, "en", false, |_| {}) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("armature");
+}
+
 /// A picture of the Material tab with keyed values, the diamonds lit.
 #[test]
 fn shot_keyed_material() {

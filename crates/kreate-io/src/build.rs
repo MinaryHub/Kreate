@@ -667,6 +667,15 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 ImportNodeData::Camera(index)
             }
             ObjectData::Empty => ImportNodeData::Empty,
+            ObjectData::Armature(_) => {
+                // A skin is a joint per bone and weights per vertex, and the
+                // document has no weights yet. The placement goes, so a rig's
+                // children are still where they were; the bones do not.
+                notes.push(LossyNote::Unsupported {
+                    what: format!("{}: an armature was written as an empty; skins are not written yet", object.name),
+                });
+                ImportNodeData::Empty
+            }
         };
         nodes.push(ExportNode {
             name: object.name.clone(),

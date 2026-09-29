@@ -338,6 +338,7 @@ fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
                 ObjectData::Empty => "empty",
                 ObjectData::Camera(_) => "camera",
                 ObjectData::Light(_) => "light",
+                ObjectData::Armature(_) => "armature",
             };
             println!(
                 "  {:indent$}{} [{kind}] at {:.4?}{}{}",
@@ -492,6 +493,10 @@ fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
             ObjectData::Empty => print!(" empty"),
             ObjectData::Camera(_) => print!(" camera"),
             ObjectData::Light(_) => print!(" light"),
+            ObjectData::Armature(armature) => match document.armature(armature) {
+                Some(a) => print!(" armature bones {}", a.bones.len()),
+                None => print!(" armature missing"),
+            },
         }
         if !object.visible {
             print!(" hidden");

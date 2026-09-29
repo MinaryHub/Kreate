@@ -58,6 +58,10 @@ impl Document {
                     Some(c) => ObjectData::Camera(out.add_camera(c.clone())),
                     None => continue,
                 },
+                ObjectData::Armature(armature) => match self.armature(*armature) {
+                    Some(a) => ObjectData::Armature(out.add_armature(a.clone())),
+                    None => continue,
+                },
                 ObjectData::Empty => ObjectData::Empty,
             };
             copy.material_overrides = object
@@ -134,6 +138,10 @@ impl Document {
                 },
                 ObjectData::Camera(camera) => match other.camera(*camera) {
                     Some(c) => ObjectData::Camera(self.add_camera(c.clone())),
+                    None => continue,
+                },
+                ObjectData::Armature(armature) => match other.armature(*armature) {
+                    Some(a) => ObjectData::Armature(self.add_armature(a.clone())),
                     None => continue,
                 },
                 ObjectData::Empty => ObjectData::Empty,

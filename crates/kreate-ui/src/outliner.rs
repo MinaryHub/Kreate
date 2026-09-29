@@ -32,6 +32,7 @@ pub enum RowKind {
     Mesh { verts: u32, faces: u32 },
     Camera,
     Light,
+    Armature,
 }
 
 impl RowKind {
@@ -41,6 +42,7 @@ impl RowKind {
             RowKind::Mesh { .. } => "outliner-kind-mesh",
             RowKind::Camera => "outliner-kind-camera",
             RowKind::Light => "outliner-kind-light",
+            RowKind::Armature => "outliner-kind-armature",
         }
     }
 }
@@ -504,6 +506,16 @@ fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: bool) {
                 egui::Color32::TRANSPARENT,
                 line,
             ));
+        }
+        // A bone: Blender's octahedron, seen side on — a long thin diamond
+        // leaning to the right.
+        RowKind::Armature => {
+            let head = egui::Pos2::new(c.x - s * 0.8, c.y + s * 0.8);
+            let tail = egui::Pos2::new(c.x + s * 0.8, c.y - s * 0.8);
+            // A quarter of the way up, a little either side of the axis.
+            let waist = head + (tail - head) * 0.25;
+            let side = egui::vec2(s * 0.3, s * 0.3);
+            p.add(egui::Shape::closed_line(vec![head, waist + side, tail, waist - side], line));
         }
         // An empty: three axes from a point.
         RowKind::Empty => {

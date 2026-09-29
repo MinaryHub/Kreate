@@ -478,6 +478,23 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             Action::new("mesh.scale").with("scale", PropertyValue::Vec3([1.2, 1.2, 1.2])),
         ),
+        // --- pose mode: the same three keys, on bones ------------------------
+        key("pose.translate", "G", Context::Pose, Action::new("pose.translate")),
+        key("pose.rotate", "R", Context::Pose, Action::new("pose.rotate")),
+        key("pose.scale", "S", Context::Pose, Action::new("pose.scale")),
+        // Blender's: `A` all, `Alt+A` none, `Ctrl+I` the others; and
+        // `Alt+G/R/S` put what was moved, turned or scaled back at rest.
+        key("pose.select_all", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 0)),
+        key("pose.select_none", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 1))
+            .with_modifiers(Modifiers::alt()),
+        key("pose.select_invert", "I", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 3))
+            .with_modifiers(Modifiers::ctrl()),
+        key("pose.clear_location", "G", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 1))
+            .with_modifiers(Modifiers::alt()),
+        key("pose.clear_rotation", "R", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 2))
+            .with_modifiers(Modifiers::alt()),
+        key("pose.clear_scale", "S", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 3))
+            .with_modifiers(Modifiers::alt()),
         // --- object mode ---------------------------------------------------
         key(
             "object.add_cube",

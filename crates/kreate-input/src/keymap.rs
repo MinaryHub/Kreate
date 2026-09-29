@@ -137,6 +137,8 @@ pub enum Context {
     Viewport,
     ObjectMode,
     EditMesh,
+    /// Pose mode: `G` moves bones, not objects.
+    Pose,
     /// The pointer is over the UV editor.
     ///
     /// Its own context, and deliberately *not* inside `Viewport`: `G` in the
@@ -163,6 +165,7 @@ impl Context {
             Context::Viewport => &[Context::Viewport, Context::Global],
             Context::ObjectMode => &[Context::ObjectMode, Context::Viewport, Context::Global],
             Context::EditMesh => &[Context::EditMesh, Context::Viewport, Context::Global],
+            Context::Pose => &[Context::Pose, Context::Viewport, Context::Global],
             Context::UvEditor => &[Context::UvEditor, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
             // stray `S` would start a scale inside a running transform.
@@ -178,6 +181,7 @@ impl Context {
             Context::Viewport => "viewport",
             Context::ObjectMode => "object_mode",
             Context::EditMesh => "edit_mesh",
+            Context::Pose => "pose",
             Context::UvEditor => "uv_editor",
             Context::Modal => "modal",
         }
@@ -193,6 +197,7 @@ impl Context {
         Context::Viewport,
         Context::ObjectMode,
         Context::EditMesh,
+        Context::Pose,
         Context::UvEditor,
         Context::Modal,
     ];
@@ -820,6 +825,13 @@ mod tests {
                 Context::EditMesh,
                 Input::key("G"),
                 Action::new("mesh.translate"),
+            ),
+            // Every mode, or the one left out still reaches the outer key.
+            Binding::new(
+                "pose.translate",
+                Context::Pose,
+                Input::key("G"),
+                Action::new("pose.translate"),
             ),
         ]);
         let conflicts = k.conflicts();

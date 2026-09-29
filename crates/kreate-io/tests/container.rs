@@ -1027,3 +1027,42 @@ fn a_driver_comes_back_driving_the_same_thing_from_the_same_object() {
     assert_eq!(after.object_by_uid(o.drivers[0].variables[0].target), Some(handle_after));
     let _ = door_after;
 }
+
+#[test]
+fn an_armature_and_its_pose_come_back() {
+    use kreate_scene::armature::{Armature, Bone};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let mut a = Armature::new("Arm");
+    a.bones[0].roll = 0.25;
+    a.add_bone(Bone {
+        name: "Lower".into(),
+        parent: Some(0),
+        head: glam::DVec3::Z,
+        tail: glam::DVec3::new(0.0, 0.5, 2.0),
+        roll: -0.5,
+    });
+    let id = doc.add_armature(a.clone());
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(id)));
+    {
+        let o = doc.object_mut(rig).unwrap();
+        let lower = o.pose.entry("Lower");
+        lower.transform.rotation = glam::DQuat::from_rotation_x(0.7);
+        lower.transform.scale = glam::DVec3::new(1.0, 1.5, 1.0);
+        lower.selected = true;
+        o.pose.active = Some("Lower".into());
+    }
+    let before = doc.posed_bones(rig);
+
+    let loaded = round_trip(&doc);
+    let after = &loaded.document;
+    let (rig_after, o) = after.objects().find(|(_, o)| o.name == "Rig").expect("the rig");
+    let (_, arm) = after.armature_of(rig_after).expect("still an armature");
+    assert_eq!(arm.bones, a.bones);
+    assert_eq!(o.pose.active.as_deref(), Some("Lower"));
+    assert!(o.pose.is_selected("Lower"));
+    for (x, y) in before.iter().zip(after.posed_bones(rig_after)) {
+        assert!((x.translation - y.translation).length() < 1e-12);
+        assert!(x.matrix3.abs_diff_eq(y.matrix3, 1e-12));
+    }
+}

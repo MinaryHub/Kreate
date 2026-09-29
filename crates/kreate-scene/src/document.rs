@@ -79,6 +79,12 @@ define_id! {
 }
 
 define_id! {
+    /// An armature datablock: bones at rest. The pose is on the object, so
+    /// two characters can share one skeleton and stand differently.
+    pub struct ArmatureId;
+}
+
+define_id! {
     /// A world datablock: what light arrives from no object in particular.
     ///
     /// An arena and not a field on the document, because a studio setup is a
@@ -109,6 +115,7 @@ pub enum ObjectData {
     Mesh(MeshId),
     Camera(CameraId),
     Light(LightId),
+    Armature(ArmatureId),
 }
 
 /// Whether a datablock is owned by this file or linked from another.
@@ -173,6 +180,9 @@ pub struct Object {
     /// Properties of this object that are expressions of others'. See
     /// [`crate::driver`].
     pub drivers: Vec<crate::driver::Driver>,
+    /// How this object holds its armature's bones. Empty for anything that is
+    /// not an armature, and for one at rest.
+    pub pose: crate::armature::Pose,
 }
 
 impl Object {
@@ -192,6 +202,7 @@ impl Object {
             modifiers: Vec::new(),
             action: None,
             drivers: Vec::new(),
+            pose: crate::armature::Pose::default(),
         }
     }
 
@@ -467,6 +478,7 @@ pub struct Document {
     lights: Arena<LightId, Arc<Light>>,
     worlds: Arena<WorldId, Arc<World>>,
     actions: Arena<ActionId, Arc<crate::animation::Action>>,
+    armatures: Arena<ArmatureId, Arc<crate::armature::Armature>>,
     /// The scene's clock: the frame it is on, the range it plays, how fast.
     pub playback: crate::animation::Playback,
     /// Which world is lighting the scene.
@@ -535,6 +547,7 @@ struct UidCounters {
     world: Uid,
     material: Uid,
     action: Uid,
+    armature: Uid,
 }
 
 impl Document {
@@ -636,11 +649,7 @@ impl Document {
             DatablockKind::Light => &mut self.uids.light,
             DatablockKind::World => &mut self.uids.world,
             DatablockKind::Action => &mut self.uids.action,
-            // Nothing else is a datablock in this document yet. Reaching here
-            // means a kind was added to the enum and not to the counters, and
-            // handing back the unassigned id makes that a resolvable path to
-            // nothing rather than a silent collision with object 1.
-            _ => return Uid::NONE,
+            DatablockKind::Armature => &mut self.uids.armature,
         };
         *counter = counter.next();
         *counter
@@ -1004,6 +1013,60 @@ impl Document {
     /// empty resolves to nothing.
     pub fn object_at_slot(&self, index: u32) -> Option<ObjectId> {
         self.objects.handle_at(index)
+    }
+
+    // --- armatures ----------------------------------------------------------
+
+    pub fn add_armature(&mut self, armature: crate::armature::Armature) -> ArmatureId {
+        let uid = self.issue(DatablockKind::Armature);
+        self.touch();
+        self.armatures.insert(Arc::new(crate::armature::Armature { uid, ..armature }))
+    }
+
+    /// Adds an armature with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_armature(&mut self, armature: crate::armature::Armature, uid: Uid) -> ArmatureId {
+        if uid.is_none() {
+            return self.add_armature(armature);
+        }
+        self.uids.armature = self.uids.armature.max(uid);
+        self.touch();
+        self.armatures.insert(Arc::new(crate::armature::Armature { uid, ..armature }))
+    }
+
+    pub fn armature(&self, id: ArmatureId) -> Option<&crate::armature::Armature> {
+        self.armatures.get(id).map(|a| a.as_ref())
+    }
+
+    /// Copy-on-write access to an armature.
+    pub fn armature_mut(&mut self, id: ArmatureId) -> Option<&mut crate::armature::Armature> {
+        self.touch();
+        self.armatures.get_mut(id).map(Arc::make_mut)
+    }
+
+    /// Every armature datablock, in arena slot order.
+    pub fn armatures(&self) -> impl Iterator<Item = (ArmatureId, &crate::armature::Armature)> {
+        self.armatures.iter().map(|(id, a)| (id, a.as_ref()))
+    }
+
+    pub fn armature_uid(&self, id: ArmatureId) -> Option<Uid> {
+        self.armatures.get(id).map(|a| a.uid)
+    }
+
+    /// The armature an object is, if it is one.
+    pub fn armature_of(&self, object: ObjectId) -> Option<(ArmatureId, &crate::armature::Armature)> {
+        match self.object(object)?.data {
+            ObjectData::Armature(id) => Some((id, self.armature(id)?)),
+            _ => None,
+        }
+    }
+
+    /// An armature object's bones, posed, in world space.
+    pub fn posed_bones(&self, object: ObjectId) -> Vec<DAffine3> {
+        let Some((_, armature)) = self.armature_of(object) else { return Vec::new() };
+        let Some(o) = self.object(object) else { return Vec::new() };
+        let world = self.world_transform(object);
+        crate::armature::posed(armature, &o.pose).into_iter().map(|f| world * f).collect()
     }
 
     // --- cameras ------------------------------------------------------------
@@ -1521,6 +1584,12 @@ impl Document {
             let cloned = self.mesh(mesh_id)?.clone();
             copy.data = ObjectData::Mesh(self.add_mesh(cloned));
         }
+        // A skeleton too, as Blender's full duplicate does: the copy is a
+        // character that can be rebuilt without rebuilding the original.
+        if let ObjectData::Armature(armature_id) = copy.data {
+            let cloned = self.armature(armature_id)?.clone();
+            copy.data = ObjectData::Armature(self.add_armature(cloned));
+        }
         Some(self.add_object(copy))
     }
 
@@ -1548,6 +1617,13 @@ impl Document {
                 }
                 None => {
                     bounds = bounds.extend(world.translation.as_vec3());
+                    // A rig is as big as its bones, not its origin.
+                    if let Some((_, armature)) = self.armature_of(id) {
+                        for (bone, frame) in armature.bones.iter().zip(self.posed_bones(id)) {
+                            bounds = bounds.extend(frame.translation.as_vec3());
+                            bounds = bounds.extend(frame.transform_point3(DVec3::Y * bone.length()).as_vec3());
+                        }
+                    }
                 }
             }
         }

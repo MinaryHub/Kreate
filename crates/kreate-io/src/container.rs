@@ -185,6 +185,15 @@ pub struct ObjectRecord {
     /// Index into [`SceneFile::lights`], for an object that is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<usize>,
+    /// Index into [`SceneFile::armatures`], for an object that is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armature: Option<usize>,
+    /// How it holds its bones: the ones not at rest or selected, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pose: Vec<PoseBoneRecord>,
+    /// The active bone, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_bone: Option<String>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -207,6 +216,41 @@ pub struct ObjectRecord {
     pub linked: Option<[String; 2]>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// An armature: its bones at rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArmatureRecord {
+    pub name: String,
+    #[serde(default)]
+    pub uid: u64,
+    pub bones: Vec<BoneRecord>,
+}
+
+/// One bone at rest, in the armature's space. Its parent by index into the
+/// same list, which is always an earlier one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoneRecord {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    pub head: [f64; 3],
+    pub tail: [f64; 3],
+    #[serde(default)]
+    pub roll: f64,
+}
+
+/// One bone's pose: its transform relative to rest, and whether it is
+/// selected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoseBoneRecord {
+    pub bone: String,
+    pub translation: [f64; 3],
+    /// `xyzw`.
+    pub rotation: [f64; 4],
+    pub scale: [f64; 3],
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selected: bool,
 }
 
 /// One driver: what it drives, and the expression and names it reads.
@@ -653,6 +697,9 @@ pub struct SceneFile {
     /// to one by its index here, like a camera.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lights: Vec<LightRecord>,
+    /// Armature datablocks, in the order the document holds them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub armatures: Vec<ArmatureRecord>,
     /// World datablocks. More than one, because a file holding a day setup and
     /// a night setup is the ordinary case and switching between them should not
     /// mean deleting one.
@@ -972,6 +1019,27 @@ pub fn write(
             })
             .collect();
 
+        let armature_index: BTreeMap<kreate_scene::ArmatureId, usize> =
+            document.armatures().enumerate().map(|(i, (id, _))| (id, i)).collect();
+        scene.armatures = document
+            .armatures()
+            .map(|(_, a)| ArmatureRecord {
+                name: a.name.clone(),
+                uid: a.uid.raw(),
+                bones: a
+                    .bones
+                    .iter()
+                    .map(|b| BoneRecord {
+                        name: b.name.clone(),
+                        parent: b.parent,
+                        head: b.head.to_array(),
+                        tail: b.tail.to_array(),
+                        roll: b.roll,
+                    })
+                    .collect(),
+            })
+            .collect();
+
         let material_index: BTreeMap<kreate_scene::MaterialId, usize> = document
             .materials()
             .enumerate()
@@ -1130,6 +1198,30 @@ pub fn write(
                 ObjectData::Light(l) => light_index.get(&l).copied(),
                 _ => None,
             };
+            let armature = match object.data {
+                ObjectData::Armature(a) => armature_index.get(&a).copied(),
+                _ => None,
+            };
+            // Only the bones that are not simply at rest and unselected: the
+            // pose is sparse in the document and stays so in the file.
+            let pose: Vec<PoseBoneRecord> = object
+                .pose
+                .bones
+                .iter()
+                .filter(|b| b.selected || b.transform != kreate_math::DTransform::IDENTITY)
+                .map(|b| PoseBoneRecord {
+                    bone: b.name.clone(),
+                    translation: b.transform.translation.to_array(),
+                    rotation: [
+                        b.transform.rotation.x,
+                        b.transform.rotation.y,
+                        b.transform.rotation.z,
+                        b.transform.rotation.w,
+                    ],
+                    scale: b.transform.scale.to_array(),
+                    selected: b.selected,
+                })
+                .collect();
             let t = &object.transform;
             let m = object.parent_inverse;
             scene.objects.push(ObjectRecord {
@@ -1143,6 +1235,9 @@ pub fn write(
                 mesh,
                 camera,
                 light,
+                armature,
+                pose,
+                active_bone: object.pose.active.clone(),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -1472,6 +1567,24 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     }
 
 
+    let armature_ids: Vec<kreate_scene::ArmatureId> = scene
+        .armatures
+        .iter()
+        .map(|record| {
+            let mut armature = kreate_scene::armature::Armature::new(record.name.clone());
+            armature.bones.clear();
+            for b in &record.bones {
+                armature.add_bone(kreate_scene::armature::Bone {
+                    name: b.name.clone(),
+                    parent: b.parent,
+                    head: glam::DVec3::from_array(b.head),
+                    tail: glam::DVec3::from_array(b.tail),
+                    roll: b.roll,
+                });
+            }
+            document.restore_armature(armature, kreate_scene::Uid::from_raw(record.uid))
+        })
+        .collect();
     let mut light_ids: Vec<kreate_scene::LightId> = Vec::with_capacity(scene.lights.len());
     for record in &scene.lights {
         let mut light = light_from_record(record);
@@ -1520,7 +1633,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 Some(id) => ObjectData::Camera(*id),
                 None => match record.light.and_then(|i| light_ids.get(i)) {
                     Some(id) => ObjectData::Light(*id),
-                    None => ObjectData::Empty,
+                    None => match record.armature.and_then(|i| armature_ids.get(i)) {
+                        Some(id) => ObjectData::Armature(*id),
+                        None => ObjectData::Empty,
+                    },
                 },
             },
         };
@@ -1539,6 +1655,22 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.visible = record.visible;
         object.selectable = record.selectable;
         object.action = record.action.and_then(|i| action_ids.get(i).copied());
+        object.pose = kreate_scene::armature::Pose {
+            bones: record
+                .pose
+                .iter()
+                .map(|b| kreate_scene::armature::PoseBone {
+                    name: b.bone.clone(),
+                    transform: kreate_math::DTransform {
+                        translation: glam::DVec3::from_array(b.translation),
+                        rotation: glam::DQuat::from_xyzw(b.rotation[0], b.rotation[1], b.rotation[2], b.rotation[3]),
+                        scale: glam::DVec3::from_array(b.scale),
+                    },
+                    selected: b.selected,
+                })
+                .collect(),
+            active: record.active_bone.clone(),
+        };
         // Variables name their objects by identity, and every object's
         // identity is restored from the file, so these resolve whatever order
         // the objects come back in.

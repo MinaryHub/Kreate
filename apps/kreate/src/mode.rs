@@ -16,6 +16,7 @@
 //! What is left in the application is the application of this: four statements,
 //! each of which the compiler checks.
 
+use kreate_ops::mode::Has;
 use kreate_ops::operator::Mode;
 
 /// What a mode change requires of the application.
@@ -45,14 +46,14 @@ pub struct Change {
 /// entering a mode with nothing to act on — a mode where every tool declines is
 /// worse than not having switched, because the user has no way to tell which
 /// happened.
-pub fn plan(from: Mode, to: Mode, has_mesh: bool) -> Option<Change> {
-    if from == to || !to.can_enter(has_mesh) {
+pub fn plan(from: Mode, to: Mode, has: Has) -> Option<Change> {
+    if from == to || !to.can_enter(has) {
         return None;
     }
     Some(Change {
         to,
         select_all: to.edits_elements(),
-        open_session: to.edits_elements() && has_mesh,
+        open_session: to.edits_elements() && has.mesh,
     })
 }
 
@@ -74,12 +75,12 @@ mod tests {
         // The guard whose removal broke nothing. Entering a mode with nothing to
         // act on leaves every tool declining, and the user cannot tell that from
         // the tool being broken.
-        assert_eq!(plan(Mode::Object, Mode::EditMesh, false), None);
-        assert!(plan(Mode::Object, Mode::EditMesh, true).is_some());
+        assert_eq!(plan(Mode::Object, Mode::EditMesh, Has::NOTHING), None);
+        assert!(plan(Mode::Object, Mode::EditMesh, Has::EVERYTHING).is_some());
 
         // Leaving does not: an object-mode user with nothing selected is the
         // ordinary case, and refusing to leave would trap them.
-        assert!(plan(Mode::EditMesh, Mode::Object, false).is_some());
+        assert!(plan(Mode::EditMesh, Mode::Object, Has::NOTHING).is_some());
     }
 
     #[test]
@@ -88,22 +89,22 @@ mod tests {
         // would clear the selection the user had, and the tool they reach for
         // next would decline. A sweep that swapped them broke nothing before
         // this test existed.
-        let entering = plan(Mode::Object, Mode::EditMesh, true).expect("can enter");
+        let entering = plan(Mode::Object, Mode::EditMesh, Has::EVERYTHING).expect("can enter");
         assert!(entering.select_all, "entering must select everything");
 
-        let leaving = plan(Mode::EditMesh, Mode::Object, true).expect("can leave");
+        let leaving = plan(Mode::EditMesh, Mode::Object, Has::EVERYTHING).expect("can leave");
         assert!(!leaving.select_all, "leaving must clear the selection");
     }
 
     #[test]
     fn the_edit_session_lives_exactly_as_long_as_the_mode_that_needs_it() {
         assert!(
-            plan(Mode::Object, Mode::EditMesh, true)
+            plan(Mode::Object, Mode::EditMesh, Has::EVERYTHING)
                 .expect("can enter")
                 .open_session
         );
         assert!(
-            !plan(Mode::EditMesh, Mode::Object, true)
+            !plan(Mode::EditMesh, Mode::Object, Has::EVERYTHING)
                 .expect("can leave")
                 .open_session
         );
@@ -116,8 +117,8 @@ mod tests {
         // for nothing — which at a million vertices is a quarter of a second of
         // the user's time to arrive where they already were.
         for mode in Mode::ALL {
-            assert_eq!(plan(mode, mode, true), None, "{mode:?}");
-            assert_eq!(plan(mode, mode, false), None, "{mode:?}");
+            assert_eq!(plan(mode, mode, Has::EVERYTHING), None, "{mode:?}");
+            assert_eq!(plan(mode, mode, Has::NOTHING), None, "{mode:?}");
         }
     }
 
@@ -130,7 +131,7 @@ mod tests {
             let entered = Mode::ALL
                 .into_iter()
                 .filter(|from| *from != to)
-                .any(|from| plan(from, to, true).is_some());
+                .any(|from| plan(from, to, Has::EVERYTHING).is_some());
             assert!(entered, "no mode reaches {to:?}");
         }
     }

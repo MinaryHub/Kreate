@@ -35,6 +35,15 @@ const LINE_PX: f32 = 1.2;
 /// colours a mesh's wireframe uses for the same two states, so a selected lamp
 /// and a selected cube say "selected" the same way.
 pub fn markers_for(doc: &Document) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
+    markers_posing(doc, None)
+}
+
+/// The same, with `posing` the armature in pose mode, whose bones then say
+/// which of *them* is selected rather than whether the object is.
+pub fn markers_posing(
+    doc: &Document,
+    posing: Option<kreate_scene::ObjectId>,
+) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
     let mut lines = Vec::new();
     let mut points = Vec::new();
     let accent = palette::display_rgba(palette::ACCENT);
@@ -53,6 +62,9 @@ pub fn markers_for(doc: &Document) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
                     lamp(&transform, light.kind, color, &mut lines, &mut points);
                 }
             }
+            ObjectData::Armature(_) => {
+                armature_glyph(doc, id, posing == Some(id), color, dim, accent, &mut lines);
+            }
             ObjectData::Camera(camera) => {
                 if let Some(camera) = doc.camera(*camera) {
                     // The frame one unit ahead, from the lens: half the sensor
@@ -69,6 +81,42 @@ pub fn markers_for(doc: &Document) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
         }
     }
     (lines, points)
+}
+
+/// Blender's octahedral bones: a diamond a tenth of the way up, joined to the
+/// head below and the tail above.
+///
+/// In pose mode a bone wears the accent when it is selected and white when it
+/// is the active one; otherwise every bone wears the object's colour.
+fn armature_glyph(
+    doc: &Document,
+    object: kreate_scene::ObjectId,
+    posing: bool,
+    color: [f32; 4],
+    dim: [f32; 4],
+    accent: [f32; 4],
+    lines: &mut Vec<OverlayLine>,
+) {
+    let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else { return };
+    let frames = doc.posed_bones(object);
+    for (bone, frame) in armature.bones.iter().zip(&frames) {
+        let tint = if !posing {
+            color
+        } else if o.pose.active.as_deref() == Some(bone.name.as_str()) && o.pose.is_selected(&bone.name) {
+            [1.0, 1.0, 1.0, 1.0]
+        } else if o.pose.is_selected(&bone.name) {
+            accent
+        } else {
+            dim
+        };
+        let [head, a, b, c, d, tail] = kreate_scene::armature::octahedron(frame, bone.length());
+        let ring = [a, b, c, d];
+        for i in 0..4 {
+            lines.push(line(head, ring[i], tint, false));
+            lines.push(line(ring[i], ring[(i + 1) % 4], tint, false));
+            lines.push(line(ring[i], tail, tint, false));
+        }
+    }
 }
 
 fn line(a: DVec3, b: DVec3, color: [f32; 4], dashed: bool) -> OverlayLine {
@@ -199,6 +247,29 @@ fn perpendicular(v: DVec3) -> DVec3 {
 fn basis(v: DVec3) -> (DVec3, DVec3) {
     let u = perpendicular(v);
     (u, v.cross(u).normalize_or_zero())
+}
+
+#[cfg(test)]
+mod armature_tests {
+    use super::*;
+
+    #[test]
+    fn a_bone_is_twelve_lines_and_pose_mode_colours_by_bone() {
+        let mut doc = Document::new();
+        let a = doc.add_armature(kreate_scene::armature::Armature::new("Rig"));
+        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        let (lines, _) = markers_for(&doc);
+        assert_eq!(lines.len(), 12);
+        // The tail is a unit up: the bone stands on its head.
+        assert!(lines.iter().any(|l| (l.b - DVec3::Z).length() < 1e-9));
+
+        doc.object_mut(rig).unwrap().pose.entry("Bone").selected = true;
+        let accent = palette::display_rgba(palette::ACCENT);
+        let (unposed, _) = markers_posing(&doc, None);
+        assert!(unposed.iter().all(|l| l.color != accent), "an unselected armature looks selected");
+        let (posed, _) = markers_posing(&doc, Some(rig));
+        assert!(posed.iter().all(|l| l.color == accent), "a selected bone does not say so");
+    }
 }
 
 #[cfg(test)]

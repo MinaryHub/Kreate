@@ -643,6 +643,7 @@ impl OutlinerOrder {
             ObjectData::Empty => RowKind::Empty,
             ObjectData::Camera(_) => RowKind::Camera,
             ObjectData::Light(_) => RowKind::Light,
+            ObjectData::Armature(_) => RowKind::Armature,
             ObjectData::Mesh(mesh_id) => {
                 let mesh = doc.mesh(mesh_id);
                 RowKind::Mesh {
@@ -657,6 +658,7 @@ impl OutlinerOrder {
             ObjectData::Empty => None,
             ObjectData::Camera(c) => doc.camera(c).map(|c| c.name.clone()),
             ObjectData::Light(l) => doc.light(l).map(|l| l.name.clone()),
+            ObjectData::Armature(a) => doc.armature(a).map(|a| a.name.clone()),
             ObjectData::Mesh(m) => doc.mesh(m).map(|_| object.name.clone()),
         };
         let materials: Vec<String> = match object.data {
@@ -1021,6 +1023,12 @@ struct Labels {
     add_light: String,
     add_camera: String,
     add_empty: String,
+    add_armature: String,
+    menu_pose: String,
+    pose_clear_all: String,
+    pose_clear_location: String,
+    pose_clear_rotation: String,
+    pose_clear_scale: String,
     /// One per entry of `ADD_SHAPES`.
     add_shapes: [String; 8],
     shading_studio: String,
@@ -1180,6 +1188,12 @@ impl Labels {
             add_light: t("menu-add-light"),
             add_camera: t("menu-add-camera"),
             add_empty: t("menu-add-empty"),
+            add_armature: t("menu-add-armature"),
+            menu_pose: t("menu-pose"),
+            pose_clear_all: t("pose-clear-all"),
+            pose_clear_location: t("pose-clear-location"),
+            pose_clear_rotation: t("pose-clear-rotation"),
+            pose_clear_scale: t("pose-clear-scale"),
             add_shapes: [
                 t("menu-add-plane"),
                 t("menu-add-cube"),
@@ -1459,7 +1473,7 @@ fn pie_entries(
     l: &Labels,
     shading: kreate_render::ShadingMode,
     mode: kreate_ops::operator::Mode,
-    has_mesh: bool,
+    has: kreate_ops::mode::Has,
 ) -> Option<(String, Vec<(MenuEntry, bool)>)> {
     use kreate_render::{ShadingMode, ViewAxis};
     let shade = |id: &'static str, label: &str, to: ShadingMode| {
@@ -1508,7 +1522,7 @@ fn pie_entries(
                     let label = l.mode_names.get(info.tag).cloned().unwrap_or_default();
                     (
                         MenuEntry::new(info.label_key, &label, Run::Command(Command::SetMode(info.tag.to_string())))
-                            .enabled(m.can_enter(has_mesh)),
+                            .enabled(m.can_enter(has)),
                         *m == mode,
                     )
                 })
@@ -1529,12 +1543,8 @@ fn draw_pie(
     let Some(open) = state.pie.open.clone() else {
         return;
     };
-    let has_mesh = doc
-        .selection
-        .active
-        .and_then(|id| doc.object(id))
-        .is_some_and(|o| o.mesh().is_some());
-    let Some((title, entries)) = pie_entries(&open.name, l, state.view_status.shading, mode, has_mesh) else {
+    let has = kreate_ops::mode::Has::of(doc);
+    let Some((title, entries)) = pie_entries(&open.name, l, state.view_status.shading, mode, has) else {
         // A name nothing defines — a binding from a newer keymap. Closed
         // rather than drawn empty.
         state.pie.open = None;
@@ -2235,6 +2245,10 @@ fn viewport_menus(
                 nodes: object_nodes(l),
             }),
             kreate_ops::mode::Menu::Mesh => out.extend(mesh_menus(l, select_mode)),
+            kreate_ops::mode::Menu::Pose => out.push(TopMenu {
+                label: l.menu_pose.clone(),
+                nodes: pose_nodes(l),
+            }),
         }
     }
     out
@@ -2311,7 +2325,14 @@ fn run_entry(state: &mut ShellState, entry: &MenuEntry) {
 fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
     let mut out = Vec::new();
-    if mode.edits_elements() {
+    if mode.acts_on() == kreate_ops::mode::ActsOn::Bones {
+        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (3, &l.select_invert)] {
+            out.push(MenuNode::Entry(
+                MenuEntry::new("pose.select_all", label, op("pose.select_all", &[("action", V::Enum(action))]))
+                    .variant("action", V::Enum(action)),
+            ));
+        }
+    } else if mode.edits_elements() {
         for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (2, &l.select_invert)] {
             out.push(MenuNode::Entry(
                 MenuEntry::new(
@@ -2338,6 +2359,25 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
         }
     }
     out
+}
+
+/// The Pose menu: putting what was done to the selected bones back.
+fn pose_nodes(l: &Labels) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    [
+        (0u32, &l.pose_clear_all),
+        (1, &l.pose_clear_location),
+        (2, &l.pose_clear_rotation),
+        (3, &l.pose_clear_scale),
+    ]
+    .into_iter()
+    .map(|(what, label)| {
+        MenuNode::Entry(
+            MenuEntry::new("pose.clear_transform", label, op("pose.clear_transform", &[("what", V::Enum(what))]))
+                .variant("what", V::Enum(what)),
+        )
+    })
+    .collect()
 }
 
 /// The Add menu, in Blender's shape: Mesh, Light, Camera, Empty.
@@ -2380,6 +2420,7 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Separator,
         entry("object.add_camera", &l.add_camera, op("object.add_camera", &[])),
         entry("object.add_empty", &l.add_empty, op("object.add_empty", &[])),
+        entry("object.add_armature", &l.add_armature, op("object.add_armature", &[])),
     ]
 }
 
@@ -2572,6 +2613,15 @@ pub fn glyph_under(
         if !object.visible {
             continue;
         }
+        if matches!(object.data, kreate_scene::document::ObjectData::Armature(_)) {
+            // An armature has no body of its own to hit; its bones are it.
+            if let Some((distance, _)) = bone_under(doc, id, projector, at) {
+                if best.is_none_or(|(d, _)| distance < d) {
+                    best = Some((distance, id));
+                }
+            }
+            continue;
+        }
         if !matches!(
             object.data,
             kreate_scene::document::ObjectData::Light(_)
@@ -2592,6 +2642,34 @@ pub fn glyph_under(
         }
     }
     best.map(|(_, id)| id)
+}
+
+/// How near, in points, the pointer has to be to a bone to hit it.
+const BONE_REACH: f32 = 8.0;
+
+/// The bone of `object` nearest the pointer on screen, and how near, if any is
+/// within reach: the distance from the pointer to the segment from head to
+/// tail, which is what the eye aims at on a drawn bone.
+pub fn bone_under(
+    doc: &Document,
+    object: ObjectId,
+    projector: &kreate_ui::object_glyph::Projector,
+    at: egui::Pos2,
+) -> Option<(f32, String)> {
+    let (_, armature) = doc.armature_of(object)?;
+    let frames = doc.posed_bones(object);
+    let mut best: Option<(f32, String)> = None;
+    for (bone, frame) in armature.bones.iter().zip(&frames) {
+        let tail = frame.transform_point3(kreate_math::DVec3::Y * bone.length());
+        let (Some(a), Some(b)) = (projector.project(frame.translation), projector.project(tail)) else { continue };
+        let ab = b - a;
+        let t = if ab.length_sq() > 0.0 { ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+        let distance = (a + ab * t).distance(at);
+        if distance <= BONE_REACH && best.as_ref().is_none_or(|(d, _)| distance < *d) {
+            best = Some((distance, bone.name.clone()));
+        }
+    }
+    best
 }
 
 /// The tool column down the left of the viewport. Returns its rectangle so the
@@ -3679,13 +3757,13 @@ fn draw_mode_menu(
         .collect();
     // Asked once, outside the closure: the answer is the same for every entry
     // and reading the document inside would hold a borrow across the queue.
-    let has_mesh = kreate_ops::ops::mesh::target_mesh(doc).is_some();
+    let has = kreate_ops::mode::Has::of(doc);
 
     egui::ComboBox::from_id_salt("mode")
         .selected_text(current)
         .show_ui(ui, |ui| {
             for (kind, name) in &names {
-                let available = kind.can_enter(has_mesh);
+                let available = kind.can_enter(has);
                 ui.add_enabled_ui(available, |ui| {
                     if ui.selectable_label(*kind == mode, name).clicked() {
                         state.queue.push(Command::SetMode(kind.tag().to_string()));
@@ -4952,6 +5030,7 @@ op-view-axis-front-desc = Looks at the pivot from the front, along +Y.
 op-view-axis-back-desc = Looks at the pivot from behind, along -Y.
 op-mode-object-desc = Acts on whole objects: select, move and add them.
 op-mode-edit-desc = Acts on the vertices, edges and faces of the meshes being edited.
+op-mode-pose-desc = Acts on the bones of the active armature, as it holds them.
 op-app-search = Search
 op-app-search-desc = Find any menu command by typing part of its name, and run it with Enter.
 op-edit-copy-script = Copy History as Script
@@ -4988,6 +5067,15 @@ menu-add-mesh = Mesh
 menu-add-light = Light
 menu-add-camera = Camera
 menu-add-empty = Empty
+menu-add-armature = Armature
+menu-pose = Pose
+pose-clear-all = Clear Transform
+pose-clear-location = Clear Location
+pose-clear-rotation = Clear Rotation
+pose-clear-scale = Clear Scale
+mode-pose = Pose Mode
+outliner-kind-armature = Armature
+keymap-context-pose = Pose Mode
 menu-add-plane = Plane
 menu-add-cube = Cube
 menu-add-grid = Grid
@@ -5222,6 +5310,9 @@ op-object-add-light-kind-2-desc = Adds a light that shines in a cone.
 op-object-add-light-kind-3-desc = Adds a light that shines from a rectangle, for soft shadows.
 op-object-add-camera-desc = Adds a camera object and the lens behind it.
 op-object-add-empty-desc = Adds an object with a place and nothing else, to parent things to or aim things at.
+op-object-add-armature-desc = Adds a skeleton of one bone, to build a rig from.
+op-pose-clear-transform-desc = Puts the selected bones back where the skeleton was built.
+op-pose-select-all-desc = Selects every bone, none, or the others.
 op-mesh-merge-by-distance-desc = Merges vertices that sit on top of one another.
 op-mesh-select-desc = Changes what is selected.
 op-object-select-all-desc = Changes which objects are selected.
@@ -5388,6 +5479,7 @@ op-view-axis-front-desc = 앞에서 +Y 방향으로 피벗을 봅니다.
 op-view-axis-back-desc = 뒤에서 -Y 방향으로 피벗을 봅니다.
 op-mode-object-desc = 오브젝트 전체에 작용합니다: 선택하고, 옮기고, 추가합니다.
 op-mode-edit-desc = 편집 중인 메시의 점, 선, 면에 작용합니다.
+op-mode-pose-desc = 활성 아마튜어의 뼈대에 작용합니다.
 op-app-search = 검색
 op-app-search-desc = 메뉴 명령의 이름 일부를 입력해 찾고, Enter로 실행합니다.
 op-edit-copy-script = 히스토리를 스크립트로 복사
@@ -5424,6 +5516,15 @@ menu-add-mesh = 메시
 menu-add-light = 조명
 menu-add-camera = 카메라
 menu-add-empty = 엠프티
+menu-add-armature = 아마튜어
+menu-pose = 포즈
+pose-clear-all = 트랜스폼 지우기
+pose-clear-location = 위치 지우기
+pose-clear-rotation = 회전 지우기
+pose-clear-scale = 스케일 지우기
+mode-pose = 포즈 모드
+outliner-kind-armature = 아마튜어
+keymap-context-pose = 포즈 모드
 menu-add-plane = 평면
 menu-add-cube = 큐브
 menu-add-grid = 격자
@@ -5649,6 +5750,9 @@ op-object-add-light-kind-2-desc = 원뿔 모양으로 비추는 조명을 추가
 op-object-add-light-kind-3-desc = 사각형 면에서 비추는 조명을 추가합니다. 그림자가 부드럽습니다.
 op-object-add-camera-desc = 카메라 물체와 그 뒤의 렌즈를 추가합니다.
 op-object-add-empty-desc = 위치만 있는 물체를 추가합니다. 다른 것의 부모나 목표로 씁니다.
+op-object-add-armature-desc = 뼈 하나짜리 골격을 추가합니다. 여기서 리그를 만듭니다.
+op-pose-clear-transform-desc = 선택한 뼈를 만들어진 자리로 되돌립니다.
+op-pose-select-all-desc = 모든 뼈를 선택하거나, 해제하거나, 반전합니다.
 op-mesh-merge-by-distance-desc = 서로 겹쳐 있는 정점들을 하나로 합칩니다.
 op-mesh-select-desc = 선택을 바꿉니다.
 op-object-select-all-desc = 어느 물체가 선택되는지 바꿉니다.
@@ -6865,7 +6969,7 @@ mod tests {
         names.dedup();
         assert_eq!(names, vec!["mode", "shading", "view"]);
         for name in &names {
-            let (_, entries) = pie_entries(name, &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true)
+            let (_, entries) = pie_entries(name, &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING)
                 .unwrap_or_else(|| panic!("no pie called {name}"));
             assert!(!entries.is_empty() && entries.len() <= kreate_ui::pie_menu::MAX_SLOTS, "{name}");
             for (entry, _) in &entries {
@@ -6877,7 +6981,7 @@ mod tests {
                 assert!(!entry.label.is_empty() && !entry.label.contains('-'), "{name}: label {:?}", entry.label);
             }
         }
-        assert!(pie_entries("from_the_future", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true).is_none());
+        assert!(pie_entries("from_the_future", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING).is_none());
     }
 
     #[test]
@@ -6886,7 +6990,7 @@ mod tests {
         // pair here is a pie that shows the back when asked for the front.
         let catalog = load_catalog("en");
         let l = Labels::new(&catalog);
-        let (_, entries) = pie_entries("view", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true).unwrap();
+        let (_, entries) = pie_entries("view", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING).unwrap();
         let axis_of = |id: &str| match &entries.iter().find(|(e, _)| e.id == id).unwrap().0.run {
             Run::Command(Command::SnapToAxis(axis)) => *axis,
             other => panic!("{id} runs {other:?}"),
@@ -6905,10 +7009,11 @@ mod tests {
     fn the_mode_pie_lights_the_mode_you_are_in_and_greys_what_you_cannot_enter() {
         let catalog = load_catalog("en");
         let l = Labels::new(&catalog);
-        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, false).unwrap();
+        let nothing = kreate_ops::mode::Has::NOTHING;
+        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, nothing).unwrap();
         for ((entry, current), mode) in entries.iter().zip(kreate_ops::Mode::ALL) {
             assert_eq!(*current, mode == kreate_ops::Mode::RESTING);
-            assert_eq!(entry.enabled, mode.can_enter(false), "{mode:?}");
+            assert_eq!(entry.enabled, mode.can_enter(nothing), "{mode:?}");
         }
     }
 

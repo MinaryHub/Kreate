@@ -508,7 +508,7 @@ mod mode_tests {
             );
         }
         assert_eq!(Mode::from_tag("nonesuch"), None);
-        assert_eq!(Mode::ALL.len(), 2, "ALL must list every variant");
+        assert_eq!(Mode::ALL.len(), 3, "ALL must list every variant");
     }
 
     #[test]
@@ -535,15 +535,21 @@ mod mode_tests {
         // The rule the header and the application both ask, so that they cannot
         // disagree about it. A menu entry the user can click that then does
         // nothing is what disagreement looks like.
-        assert!(Mode::Object.can_enter(false));
-        assert!(Mode::Object.can_enter(true));
-        assert!(!Mode::EditMesh.can_enter(false));
-        assert!(Mode::EditMesh.can_enter(true));
+        use crate::mode::Has;
+        let mesh = Has { mesh: true, armature: false };
+        let armature = Has { mesh: false, armature: true };
+        assert!(Mode::Object.can_enter(Has::NOTHING));
+        assert!(Mode::Object.can_enter(mesh));
+        assert!(!Mode::EditMesh.can_enter(Has::NOTHING));
+        assert!(Mode::EditMesh.can_enter(mesh));
+        assert!(!Mode::EditMesh.can_enter(armature));
+        assert!(!Mode::Pose.can_enter(mesh));
+        assert!(Mode::Pose.can_enter(armature));
 
-        // Every mode is reachable with a mesh present, or it could never be
-        // entered at all.
+        // Every mode is reachable with everything present, or it could never
+        // be entered at all.
         for mode in Mode::ALL {
-            assert!(mode.can_enter(true), "{mode:?} can never be entered");
+            assert!(mode.can_enter(Has::EVERYTHING), "{mode:?} can never be entered");
         }
     }
 }

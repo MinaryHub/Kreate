@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod modifier;
 pub mod node;
 pub mod object;
+pub mod pose;
 pub mod uv;
 
 /// Registers every built-in operator.
@@ -21,5 +22,6 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     modifier::register(registry);
     node::register(registry);
     object::register(registry);
+    pose::register(registry);
     uv::register(registry);
 }

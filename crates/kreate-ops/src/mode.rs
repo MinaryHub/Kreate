@@ -28,6 +28,7 @@ pub enum Mode {
     #[default]
     Object,
     EditMesh,
+    Pose,
 }
 
 /// What a mode needs to be entered.
@@ -36,6 +37,33 @@ pub enum Needs {
     Nothing,
     /// An active mesh object.
     Mesh,
+    /// An active armature object.
+    Armature,
+}
+
+/// What there is to enter a mode with: the answers to every [`Needs`].
+///
+/// A struct rather than one flag per call, so a mode that needs something new
+/// is a field here and not a new argument threaded through every caller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Has {
+    /// A mesh the edit tools can act on.
+    pub mesh: bool,
+    /// An active armature.
+    pub armature: bool,
+}
+
+impl Has {
+    pub const NOTHING: Has = Has { mesh: false, armature: false };
+    pub const EVERYTHING: Has = Has { mesh: true, armature: true };
+
+    /// What `doc` has, as the header and the application both ask it.
+    pub fn of(doc: &kreate_scene::Document) -> Self {
+        Self {
+            mesh: crate::ops::mesh::target_mesh(doc).is_some(),
+            armature: doc.selection.active.and_then(|a| doc.armature_of(a)).is_some(),
+        }
+    }
 }
 
 /// What a click, a drag and a transform act on.
@@ -45,6 +73,8 @@ pub enum ActsOn {
     Objects,
     /// The vertices, edges and faces of the meshes being edited.
     MeshElements,
+    /// The bones of the active armature, posed.
+    Bones,
 }
 
 /// A header menu a mode offers after Add.
@@ -53,6 +83,8 @@ pub enum Menu {
     Object,
     /// Mesh, Vertex, Edge and Face — the four edit-mode menus.
     Mesh,
+    /// Pose: selecting bones and clearing what was done to them.
+    Pose,
 }
 
 /// Everything the application asks of a mode.
@@ -88,7 +120,7 @@ pub struct ModeInfo {
 }
 
 /// The cards, in the order the mode menu lists them.
-pub const MODES: [ModeInfo; 2] = [
+pub const MODES: [ModeInfo; 3] = [
     ModeInfo {
         mode: Mode::Object,
         tag: "object",
@@ -117,11 +149,27 @@ pub const MODES: [ModeInfo; 2] = [
         transform: ["mesh.translate", "mesh.rotate", "mesh.scale"],
         tab: Mode::Object,
     },
+    ModeInfo {
+        mode: Mode::Pose,
+        tag: "pose",
+        label_key: "mode-pose",
+        needs: Needs::Armature,
+        acts_on: ActsOn::Bones,
+        keymap: "pose",
+        menus: &[Menu::Pose],
+        element_buttons: false,
+        edit_tools: false,
+        shows_elements: false,
+        transform: ["pose.translate", "pose.rotate", "pose.scale"],
+        // Blender's Tab from pose mode goes to the armature's edit mode, which
+        // does not exist yet; out is the other half of the toggle.
+        tab: Mode::Object,
+    },
 ];
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 2] = [Mode::Object, Mode::EditMesh];
+    pub const ALL: [Mode; 3] = [Mode::Object, Mode::EditMesh, Mode::Pose];
 
     /// This mode's card.
     ///
@@ -131,6 +179,7 @@ impl Mode {
         match self {
             Mode::Object => &MODES[0],
             Mode::EditMesh => &MODES[1],
+            Mode::Pose => &MODES[2],
         }
     }
 
@@ -166,8 +215,12 @@ impl Mode {
     ///
     /// One expression, in one place: the header that greys out the entry and
     /// the application that refuses the change must not disagree.
-    pub fn can_enter(self, has_mesh: bool) -> bool {
-        !self.needs_mesh() || has_mesh
+    pub fn can_enter(self, has: Has) -> bool {
+        match self.info().needs {
+            Needs::Nothing => true,
+            Needs::Mesh => has.mesh,
+            Needs::Armature => has.armature,
+        }
     }
 
     /// Whether a mesh's elements are on screen as selectable things.
@@ -222,6 +275,9 @@ mod tests {
             if info.acts_on == ActsOn::MeshElements {
                 assert_eq!(info.needs, Needs::Mesh, "{mode:?} edits a mesh it may not have");
             }
+            if info.acts_on == ActsOn::Bones {
+                assert_eq!(info.needs, Needs::Armature, "{mode:?} poses an armature it may not have");
+            }
         }
     }
 
@@ -231,6 +287,7 @@ mod tests {
             let prefix = match mode.acts_on() {
                 ActsOn::Objects => "object.",
                 ActsOn::MeshElements => "mesh.",
+                ActsOn::Bones => "pose.",
             };
             for op in mode.info().transform {
                 assert!(op.starts_with(prefix), "{mode:?}: {op}");

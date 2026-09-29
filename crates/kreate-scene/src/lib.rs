@@ -4,6 +4,7 @@
 //! [`document`] for why both of those are load-bearing rather than stylistic.
 
 pub mod animation;
+pub mod armature;
 pub mod camera;
 pub mod clipboard;
 pub mod document;
@@ -18,7 +19,7 @@ pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    ActionId, Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
+    ActionId, ArmatureId, Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
     MeshId, Object, ObjectData, ObjectId, ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};

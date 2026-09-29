@@ -44,6 +44,7 @@ fn the_header_offers_what_the_mode_acts_on() {
         let want = match info.acts_on {
             ActsOn::Objects => Menu::Object,
             ActsOn::MeshElements => Menu::Mesh,
+            ActsOn::Bones => Menu::Pose,
         };
         assert!(info.menus.contains(&want), "{mode:?} does not offer {want:?}");
     }
