@@ -9,6 +9,7 @@
 pub mod area;
 pub mod command;
 pub mod command_info;
+pub mod command_palette;
 pub mod context_menu;
 pub mod console;
 pub mod element_icon;

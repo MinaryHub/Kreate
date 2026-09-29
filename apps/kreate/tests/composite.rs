@@ -1892,3 +1892,31 @@ fn shot_shading() {
     }
 }
 
+/// A picture of F3's search, typed into, in both languages.
+#[test]
+fn shot_search() {
+    let doc = doc_with_cube();
+    for (label, locale, edit, query) in [
+        ("search", "en", false, "add"),
+        ("search-edit-ko", "ko-KR", true, "ext"),
+    ] {
+        let Some(shot) = composite_with(&doc, locale, edit, |state| {
+            state.palette.open_with(query);
+            // The harness has no keymap, so the shortcut the application
+            // would resolve is given here, to see the column.
+            state.command_info.insert(
+                "mesh.extrude_region".to_string(),
+                kreate_ui::command_info::CommandInfo {
+                    name: String::new(),
+                    description: String::new(),
+                    shortcut: "E".to_string(),
+                },
+            );
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+

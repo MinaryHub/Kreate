@@ -186,6 +186,9 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::ctrl()),
         key("edit.redo", "Y", Context::Global, Action::new("edit.redo"))
             .with_modifiers(Modifiers::ctrl()),
+        // Blender's menu search, on Blender's key, everywhere: a command whose
+        // menu you cannot find is one you can still name.
+        key("app.search", "F3", Context::Global, Action::new("app.search")),
         key(
             "view.frame_all",
             "F",

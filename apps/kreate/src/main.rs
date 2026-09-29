@@ -1256,6 +1256,9 @@ impl App {
             ("view.toggle_sidebar", &[]),
             ("view.toggle_grid", &[]),
             ("view.toggle_wireframe", &[]),
+            ("app.search", &[]),
+            ("edit.copy_script", &[]),
+            ("file.run_script", &[]),
         ];
         // Keyed by the *variant* — the operator with the parameters that make
         // it this entry — so Select ▸ All and Select ▸ None, both `mesh.select`,
@@ -3255,6 +3258,24 @@ impl App {
     }
 
     /// Runs what the console was given, and tells the console what happened.
+    /// Asks for a text file of script lines and runs it, as the console would.
+    ///
+    /// Through `run_script`, so every line is its own undo step and a failing
+    /// line is reported in the console and does not stop the rest.
+    fn run_script_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Script", &["txt", "kscript", "py"])
+            .set_title("Run Script")
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(source) => self.run_script(&source),
+            Err(e) => self.status(&format!("cannot read {}: {e}", path.display())),
+        }
+    }
+
     fn run_script(&mut self, source: &str) {
         use kreate_ui::console::{ConsoleLine, LineKind};
         let outcomes = self.history.run_script(
@@ -4446,6 +4467,19 @@ impl App {
                 );
                 println!("---");
             }
+            "app.search" => {
+                self.ui.palette.open();
+                self.redraw.set(RedrawReason::UI);
+            }
+            // The history on the system clipboard as script lines, for a text
+            // editor, a bug report or File ▸ Run Script later.
+            "edit.copy_script" => {
+                let script = self.history.to_script();
+                let lines = script.lines().count();
+                self.egui_ctx.copy_text(script);
+                self.status(&format!("copied {lines} script lines"));
+            }
+            "file.run_script" => self.run_script_file(),
             "view.frame_all" => self.frame_all(),
             "view.toggle_edit_mode" => self.toggle_edit_mode(),
             "view.toggle_sidebar" => {
@@ -4601,6 +4635,19 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit4 => "Digit4",
         KeyCode::Digit5 => "Digit5",
         KeyCode::Tab => "Tab",
+        // F1 is not here: it is outside the keymap on purpose, so help is
+        // reachable from any keymap however broken.
+        KeyCode::F2 => "F2",
+        KeyCode::F3 => "F3",
+        KeyCode::F4 => "F4",
+        KeyCode::F5 => "F5",
+        KeyCode::F6 => "F6",
+        KeyCode::F7 => "F7",
+        KeyCode::F8 => "F8",
+        KeyCode::F9 => "F9",
+        KeyCode::F10 => "F10",
+        KeyCode::F11 => "F11",
+        KeyCode::F12 => "F12",
         KeyCode::BracketLeft => "BracketLeft",
         KeyCode::BracketRight => "BracketRight",
         _ => return None,

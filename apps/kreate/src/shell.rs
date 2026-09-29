@@ -203,6 +203,8 @@ pub struct ShellState {
     /// interface, is what sees the key event — the panel only says which binding
     /// is listening.
     pub capturing: Option<kreate_input::BindingId>,
+    /// F3's search: open or not, what is typed, what was run from it lately.
+    pub palette: kreate_ui::command_palette::PaletteState,
     /// What the panel asked for this frame.
     pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
     /// Whether the UV editor is open.
@@ -501,6 +503,7 @@ impl Default for ShellState {
             status: None,
             recoverable: Vec::new(),
             capturing: None,
+            palette: Default::default(),
             keymap_edits: Vec::new(),
             uv_views: std::collections::BTreeMap::new(),
             node_views: std::collections::BTreeMap::new(),
@@ -525,7 +528,10 @@ impl ShellState {
     /// single check in a single place on purpose: scattered `if !typing` tests
     /// are how the bug comes back.
     pub fn keymap_enabled(&self) -> bool {
-        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing()
+        // Not while the search is open: its field has the keyboard from the
+        // frame after it opens, but on the frame it opens a typed `E` would
+        // otherwise extrude.
+        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing() && !self.palette.open
     }
 }
 
@@ -914,6 +920,11 @@ struct Labels {
     file_save: String,
     file_save_as: String,
     file_export: String,
+    file_run_script: String,
+    menu_search: String,
+    menu_copy_script: String,
+    palette_placeholder: String,
+    palette_nothing: String,
     world_pick_image: String,
     world_clear_image: String,
     material_pick_image: String,
@@ -1035,6 +1046,11 @@ impl Labels {
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
             file_export: t("menu-file-export"),
+            file_run_script: t("menu-file-run-script"),
+            menu_search: t("menu-search"),
+            menu_copy_script: t("menu-copy-script"),
+            palette_placeholder: t("palette-placeholder"),
+            palette_nothing: t("palette-nothing"),
             world_pick_image: t("world-pick-image"),
             world_clear_image: t("world-clear-image"),
             material_pick_image: t("material-pick-image"),
@@ -1216,45 +1232,13 @@ pub fn draw(
     // Object menu as the one in Layout because the menu is *its own*.
     Panel::top("menu").show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.menu_button(&l.menu_file, |ui| {
-                if menu_item(ui, state, "file.new", &[], &l.file_new) {
-                    state.queue.push(Command::NewDocument);
-                }
-                if menu_item(ui, state, "file.open", &[], &l.file_open) {
-                    state.queue.push(Command::OpenDocument);
-                }
-                // Recovered work under File, where Blender keeps it and where
-                // somebody who has just lost a session looks first.
-                draw_recover_menu(ui, state, &l);
-                ui.separator();
-                if menu_item(ui, state, "file.save", &[], &l.file_save) {
-                    state.queue.push(Command::SaveDocument);
-                }
-                if menu_item(ui, state, "file.save_as", &[], &l.file_save_as) {
-                    state.queue.push(Command::SaveDocumentAs);
-                }
-                ui.separator();
-                // Below the fold from saving, and after a separator, because
-                // an export is not a save: the document keeps no path from it
-                // and treating a `.glb` as a working file loses everything the
-                // format cannot hold.
-                if menu_item(ui, state, "file.export", &[], &l.file_export) {
-                    state.queue.push(Command::ExportScene);
-                }
-            });
-
-            // Undo and redo live here rather than as buttons on the row, which
-            // is both Blender's arrangement and the honest one: they are
-            // reached by keystroke a hundred times for every once they are
-            // reached by pointer.
-            ui.menu_button(&l.menu_edit, |ui| {
-                if menu_item_enabled(ui, state, "edit.undo", &[], &l.undo, history.can_undo()) {
-                    state.queue.push(Command::Undo);
-                }
-                if menu_item_enabled(ui, state, "edit.redo", &[], &l.redo, history.can_redo()) {
-                    state.queue.push(Command::Redo);
-                }
-            });
+            // File and Edit, from the same tree F3 searches. Undo and redo
+            // live under Edit rather than as buttons on the row, which is
+            // both Blender's arrangement and the honest one: they are reached
+            // by keystroke a hundred times for every once by pointer.
+            for menu in top_bar_menus(&l, history.can_undo(), history.can_redo()) {
+                ui.menu_button(&menu.label, |ui| draw_nodes(ui, state, &l, &menu.nodes));
+            }
 
             ui.separator();
             // Workspaces right after the menus, where Blender puts them: they
@@ -1364,7 +1348,74 @@ pub fn draw(
             }
         });
     state.apply_area_edits();
+    draw_search(ui, state, &l, history, mode);
     viewport_rect
+}
+
+/// F3's search, over the menus this mode offers.
+///
+/// Built from the same tree the menus draw, and run through the same
+/// `run_entry`, so choosing Extrude here is choosing it from Face — with the
+/// menu's parameters, not a guess at them.
+fn draw_search(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    l: &Labels,
+    history: &History,
+    mode: kreate_ops::operator::Mode,
+) {
+    if !state.palette.open {
+        return;
+    }
+    let entries = flatten(&searchable_menus(
+        &state.catalog,
+        mode,
+        state.select_mode,
+        history.can_undo(),
+        history.can_redo(),
+    ));
+    let items: Vec<kreate_ui::command_palette::PaletteItem> = entries
+        .iter()
+        .map(|(path, e)| {
+            let mut map = PropertyMap::new();
+            for (name, value) in &e.variant {
+                map.set(name, value.clone());
+            }
+            let variant = kreate_ui::command_info::variant_id(e.id, &map);
+            let detail = [variant.as_str(), e.id]
+                .iter()
+                .map(|key| kreate_ui::command_info::description_key(key))
+                .find(|key| state.catalog.has(key))
+                .map(|key| state.catalog.format(&key, TextKind::Tooltip, &[]))
+                .unwrap_or_default();
+            let shortcut = state
+                .command_info
+                .get(&variant)
+                .or_else(|| state.command_info.get(e.id))
+                .map(|info| info.shortcut.clone())
+                .unwrap_or_default();
+            kreate_ui::command_palette::PaletteItem {
+                key: format!("{path}/{variant}"),
+                title: e.label.clone(),
+                path: path.clone(),
+                detail,
+                shortcut,
+                keywords: variant.replace(['.', '_'], " "),
+                enabled: e.enabled,
+            }
+        })
+        .collect();
+    let text = kreate_ui::command_palette::PaletteText {
+        placeholder: l.palette_placeholder.clone(),
+        nothing: l.palette_nothing.clone(),
+    };
+    let ctx = ui.ctx().clone();
+    if let Some(index) =
+        kreate_ui::command_palette::command_palette(&ctx, &mut state.palette, &items, &text)
+    {
+        let entry = entries[index].1.clone();
+        run_entry(state, &entry);
+    }
 }
 
 /// One area: a header saying what it is, and the editor below it.
@@ -1609,16 +1660,12 @@ fn draw_area_header(
                     draw_view_menu(ui, state, area, l, is_viewport);
 
                     if is_viewport {
-                        draw_select_menu(ui, state, mode, l);
-                        draw_add_menu(ui, state, l);
-                        // What the menus after Add are is the mode's to say,
-                        // because what you can act on is. Object mode acts on
-                        // whole objects; edit mode acts on the parts of one.
-                        for menu in mode.info().menus {
-                            match menu {
-                                kreate_ops::mode::Menu::Object => draw_object_menu(ui, state, l),
-                                kreate_ops::mode::Menu::Mesh => draw_mesh_menus(ui, state, l),
-                            }
+                        // Select, Add, and whatever the mode's card says acts on
+                        // what it acts on — from the tree F3 searches.
+                        for menu in viewport_menus(l, mode, state.select_mode) {
+                            ui.menu_button(&menu.label, |ui| {
+                                draw_nodes(ui, state, l, &menu.nodes)
+                            });
                         }
 
                         // The element buttons stay buttons rather than becoming
@@ -1708,19 +1755,7 @@ fn draw_view_menu(
 ) {
     ui.menu_button(&l.menu_view, |ui| {
         if is_viewport {
-            if menu_item(ui, state, "view.frame_all", &[], &l.view_frame_all) {
-                state.queue.dispatch("view.frame_all", PropertyMap::new());
-            }
-            if menu_item(ui, state, "view.frame_selected", &[], &l.view_frame_selected) {
-                state.queue.push(Command::FrameSelection);
-            }
-            ui.separator();
-            if menu_item(ui, state, "view.toggle_projection", &[], &l.view_perspective) {
-                state.queue.dispatch("view.toggle_projection", PropertyMap::new());
-            }
-            if menu_item(ui, state, "view.toggle_sidebar", &[], &l.view_sidebar) {
-                state.queue.dispatch("view.toggle_sidebar", PropertyMap::new());
-            }
+            draw_nodes(ui, state, l, &view_nodes(l));
             ui.separator();
         }
         ui.menu_button(&l.area_menu, |ui| {
@@ -1810,56 +1845,282 @@ fn menu_item_enabled(
     }
 }
 
+// --- the menus, as data ------------------------------------------------------
+//
+// Every header menu is a tree built here and drawn by `draw_nodes`, and F3's
+// search reads the same tree. One description of what each entry is and does,
+// so the search cannot offer an entry the menus do not have, or run it with
+// different parameters than the menu would — which is exactly what a second
+// table would drift into.
+
+/// What choosing an entry does.
+#[derive(Clone, Debug)]
+enum Run {
+    /// Through the history, with exactly these parameters.
+    Op(&'static str, PropertyMap),
+    /// Through the application's dispatch — the door the keys use — so an app
+    /// action runs as its key does, and a transform starts the same drag `G`
+    /// starts rather than moving by a fixed amount.
+    Dispatch(&'static str, PropertyMap),
+    /// A command of the interface's own.
+    Command(Command),
+}
+
+/// One entry.
+#[derive(Clone, Debug)]
+pub struct MenuEntry {
+    pub label: String,
+    /// What the entry is described and shortcut by: an operator's id, or an
+    /// application action's.
+    pub id: &'static str,
+    /// The parameters that make this entry a variant of `id`, for its
+    /// description and its shortcut. Not always what runs — see `run`.
+    pub variant: Vec<(&'static str, kreate_reflect::PropertyValue)>,
+    run: Run,
+    pub enabled: bool,
+}
+
+impl MenuEntry {
+    fn new(id: &'static str, label: &str, run: Run) -> Self {
+        Self {
+            label: label.to_string(),
+            id,
+            variant: Vec::new(),
+            run,
+            enabled: true,
+        }
+    }
+
+    fn variant(mut self, name: &'static str, value: kreate_reflect::PropertyValue) -> Self {
+        self.variant.push((name, value));
+        self
+    }
+
+    fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The operator or action it runs, for a check that it exists.
+    pub fn runs(&self) -> Option<&'static str> {
+        match &self.run {
+            Run::Op(id, _) | Run::Dispatch(id, _) => Some(id),
+            Run::Command(_) => None,
+        }
+    }
+}
+
+/// A node of a menu.
+#[derive(Clone, Debug)]
+pub enum MenuNode {
+    Entry(MenuEntry),
+    Sub(String, Vec<MenuNode>),
+    Separator,
+    /// File ▸ Recover, whose entries are the recoverable documents of the
+    /// moment — drawn by `draw_recover_menu`, and not searched.
+    Recover,
+}
+
+/// A menu on a bar.
+#[derive(Clone, Debug)]
+pub struct TopMenu {
+    pub label: String,
+    pub nodes: Vec<MenuNode>,
+}
+
+fn op(id: &'static str, params: &[(&'static str, kreate_reflect::PropertyValue)]) -> Run {
+    let mut map = PropertyMap::new();
+    for (name, value) in params {
+        map.set(name, value.clone());
+    }
+    Run::Op(id, map)
+}
+
+fn dispatch(id: &'static str) -> Run {
+    Run::Dispatch(id, PropertyMap::new())
+}
+
+fn entry(id: &'static str, label: &str, run: Run) -> MenuNode {
+    MenuNode::Entry(MenuEntry::new(id, label, run))
+}
+
+/// File and Edit: the top bar's own, true of the whole window.
+fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
+    use MenuNode::Separator;
+    vec![
+        TopMenu {
+            label: l.menu_file.clone(),
+            nodes: vec![
+                entry("file.new", &l.file_new, Run::Command(Command::NewDocument)),
+                entry("file.open", &l.file_open, Run::Command(Command::OpenDocument)),
+                // Recovered work under File, where Blender keeps it and where
+                // somebody who has just lost a session looks first.
+                MenuNode::Recover,
+                Separator,
+                entry("file.save", &l.file_save, Run::Command(Command::SaveDocument)),
+                entry("file.save_as", &l.file_save_as, Run::Command(Command::SaveDocumentAs)),
+                Separator,
+                // A script is a file of history lines, the console's language.
+                entry("file.run_script", &l.file_run_script, dispatch("file.run_script")),
+                Separator,
+                // After a separator, because an export is not a save: the
+                // document keeps no path from it and treating a `.glb` as a
+                // working file loses everything the format cannot hold.
+                entry("file.export", &l.file_export, Run::Command(Command::ExportScene)),
+            ],
+        },
+        TopMenu {
+            label: l.menu_edit.clone(),
+            nodes: vec![
+                MenuNode::Entry(
+                    MenuEntry::new("edit.undo", &l.undo, Run::Command(Command::Undo)).enabled(can_undo),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new("edit.redo", &l.redo, Run::Command(Command::Redo)).enabled(can_redo),
+                ),
+                Separator,
+                entry("app.search", &l.menu_search, dispatch("app.search")),
+                // The history, as the script it already is — Blender's "Copy
+                // as Python", for the language this application speaks.
+                entry("edit.copy_script", &l.menu_copy_script, dispatch("edit.copy_script")),
+            ],
+        },
+    ]
+}
+
+/// The viewport's View entries: how the scene is looked at.
+fn view_nodes(l: &Labels) -> Vec<MenuNode> {
+    vec![
+        entry("view.frame_all", &l.view_frame_all, dispatch("view.frame_all")),
+        entry("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)),
+        MenuNode::Separator,
+        entry("view.toggle_projection", &l.view_perspective, dispatch("view.toggle_projection")),
+        entry("view.toggle_sidebar", &l.view_sidebar, dispatch("view.toggle_sidebar")),
+    ]
+}
+
+/// Select, Add, and the menus the mode's card names.
+fn viewport_menus(
+    l: &Labels,
+    mode: kreate_ops::operator::Mode,
+    select_mode: u32,
+) -> Vec<TopMenu> {
+    let mut out = vec![
+        TopMenu { label: l.menu_select.clone(), nodes: select_nodes(l, mode, select_mode) },
+        TopMenu { label: l.add_menu.clone(), nodes: add_nodes(l) },
+    ];
+    // What the menus after Add are is the mode's to say, because what you can
+    // act on is. Object mode acts on whole objects; edit mode on the parts of one.
+    for menu in mode.info().menus {
+        match menu {
+            kreate_ops::mode::Menu::Object => out.push(TopMenu {
+                label: l.menu_object.clone(),
+                nodes: object_nodes(l),
+            }),
+            kreate_ops::mode::Menu::Mesh => out.extend(mesh_menus(l, select_mode)),
+        }
+    }
+    out
+}
+
+/// Every menu a search offers in this mode: the top bar's, the viewport's
+/// View entries, and the viewport's menus.
+pub fn searchable_menus(
+    catalog: &Catalog,
+    mode: kreate_ops::operator::Mode,
+    select_mode: u32,
+    can_undo: bool,
+    can_redo: bool,
+) -> Vec<TopMenu> {
+    let l = Labels::new(catalog);
+    let mut out = top_bar_menus(&l, can_undo, can_redo);
+    out.push(TopMenu { label: l.menu_view.clone(), nodes: view_nodes(&l) });
+    out.extend(viewport_menus(&l, mode, select_mode));
+    out
+}
+
+/// Every entry of some menus, with the path to it.
+pub fn flatten(menus: &[TopMenu]) -> Vec<(String, MenuEntry)> {
+    fn walk(path: &str, nodes: &[MenuNode], out: &mut Vec<(String, MenuEntry)>) {
+        for node in nodes {
+            match node {
+                MenuNode::Entry(e) => out.push((path.to_string(), e.clone())),
+                MenuNode::Sub(label, children) => walk(&format!("{path} / {label}"), children, out),
+                MenuNode::Separator | MenuNode::Recover => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for menu in menus {
+        walk(&menu.label, &menu.nodes, &mut out);
+    }
+    out
+}
+
+/// Draws a tree into an open menu.
+fn draw_nodes(ui: &mut Ui, state: &mut ShellState, l: &Labels, nodes: &[MenuNode]) {
+    for node in nodes {
+        match node {
+            MenuNode::Entry(e) => {
+                if menu_item_enabled(ui, state, e.id, &e.variant, &e.label, e.enabled) {
+                    run_entry(state, e);
+                }
+            }
+            MenuNode::Sub(label, children) => {
+                ui.menu_button(label, |ui| draw_nodes(ui, state, l, children));
+            }
+            MenuNode::Separator => {
+                ui.separator();
+            }
+            MenuNode::Recover => draw_recover_menu(ui, state, l),
+        }
+    }
+}
+
+/// Does what choosing `entry` does — from a menu or from the search.
+fn run_entry(state: &mut ShellState, entry: &MenuEntry) {
+    match &entry.run {
+        Run::Op(id, params) => state.queue.run(*id, params.clone()),
+        Run::Dispatch(id, params) => state.queue.dispatch(*id, params.clone()),
+        Run::Command(command) => state.queue.push(command.clone()),
+    }
+}
+
 /// The Select menu: all, none, invert, and in edit mode the loop.
 ///
 /// One menu in both modes with the same first three entries, which is the
 /// point of it: "select all" is one idea, and the user should not have to know
 /// that the operator behind it changes name when the mode does.
-fn draw_select_menu(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    mode: kreate_ops::operator::Mode,
-    l: &Labels,
-) {
-    ui.menu_button(&l.menu_select, |ui| {
-        if mode.edits_elements() {
-            for (action, label) in [
-                (0u32, &l.select_all),
-                (1, &l.select_none),
-                (2, &l.select_invert),
-            ] {
-                let variant = [("action", kreate_reflect::PropertyValue::Enum(action))];
-                if menu_item(ui, state, "mesh.select", &variant, label) {
-                    let mut p = PropertyMap::new();
-                    p.set("action", kreate_reflect::PropertyValue::Enum(action));
-                    p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
-                    state.queue.run("mesh.select", p);
-                }
-            }
-            ui.separator();
-            let loop_variant = [("action", kreate_reflect::PropertyValue::Enum(3))];
-            if menu_item(ui, state, "mesh.select", &loop_variant, &l.select_loop) {
-                let mut p = PropertyMap::new();
-                p.set("action", kreate_reflect::PropertyValue::Enum(3));
-                state.queue.run("mesh.select", p);
-            }
-        } else {
-            // `object.select_all` counts select, deselect, toggle, invert;
-            // the menu offers the three a person asks for by name.
-            for (action, label) in [
-                (0u32, &l.select_all),
-                (1, &l.select_none),
-                (3, &l.select_invert),
-            ] {
-                let variant = [("action", kreate_reflect::PropertyValue::Enum(action))];
-                if menu_item(ui, state, "object.select_all", &variant, label) {
-                    let mut p = PropertyMap::new();
-                    p.set("action", kreate_reflect::PropertyValue::Enum(action));
-                    state.queue.run("object.select_all", p);
-                }
-            }
+fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    let mut out = Vec::new();
+    if mode.edits_elements() {
+        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (2, &l.select_invert)] {
+            out.push(MenuNode::Entry(
+                MenuEntry::new(
+                    "mesh.select",
+                    label,
+                    op("mesh.select", &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))]),
+                )
+                .variant("action", V::Enum(action)),
+            ));
         }
-    });
+        out.push(MenuNode::Separator);
+        out.push(MenuNode::Entry(
+            MenuEntry::new("mesh.select", &l.select_loop, op("mesh.select", &[("action", V::Enum(3))]))
+                .variant("action", V::Enum(3)),
+        ));
+    } else {
+        // `object.select_all` counts select, deselect, toggle, invert; the
+        // menu offers the three a person asks for by name.
+        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (3, &l.select_invert)] {
+            out.push(MenuNode::Entry(
+                MenuEntry::new("object.select_all", label, op("object.select_all", &[("action", V::Enum(action))]))
+                    .variant("action", V::Enum(action)),
+            ));
+        }
+    }
+    out
 }
 
 /// The Add menu, in Blender's shape: Mesh, Light, Camera, Empty.
@@ -1867,41 +2128,42 @@ fn draw_select_menu(
 /// Submenus because the list is long enough to need them — eight shapes and
 /// four lamps — and because the grouping is the one a modeller already knows.
 /// The shape indices are `PRIMITIVES`' order, which a test holds the labels to.
-fn draw_add_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
-    ui.menu_button(&l.add_menu, |ui| {
-        ui.menu_button(&l.add_mesh, |ui| {
-            for shape in 0..ADD_SHAPES.len() {
-                let variant = [("shape", kreate_reflect::PropertyValue::Enum(shape as u32))];
-                if menu_item(ui, state, "object.add_primitive", &variant, &l.add_shapes[shape]) {
-                    let mut p = PropertyMap::new();
-                    p.set("shape", kreate_reflect::PropertyValue::Enum(shape as u32));
-                    state.queue.run("object.add_primitive", p);
-                }
-            }
-        });
-        ui.menu_button(&l.add_light, |ui| {
-            for (kind, label) in [
-                (0u32, &l.add_light_point),
-                (1, &l.add_light_sun),
-                (2, &l.add_light_spot),
-                (3, &l.add_light_area),
-            ] {
-                let variant = [("kind", kreate_reflect::PropertyValue::Enum(kind))];
-                if menu_item(ui, state, "object.add_light", &variant, label) {
-                    let mut p = PropertyMap::new();
-                    p.set("kind", kreate_reflect::PropertyValue::Enum(kind));
-                    state.queue.run("object.add_light", p);
-                }
-            }
-        });
-        ui.separator();
-        if menu_item(ui, state, "object.add_camera", &[], &l.add_camera) {
-            state.queue.run("object.add_camera", PropertyMap::new());
-        }
-        if menu_item(ui, state, "object.add_empty", &[], &l.add_empty) {
-            state.queue.run("object.add_empty", PropertyMap::new());
-        }
-    });
+fn add_nodes(l: &Labels) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    let shapes = (0..ADD_SHAPES.len())
+        .map(|shape| {
+            let value = V::Enum(shape as u32);
+            MenuNode::Entry(
+                MenuEntry::new(
+                    "object.add_primitive",
+                    &l.add_shapes[shape],
+                    op("object.add_primitive", &[("shape", value.clone())]),
+                )
+                .variant("shape", value),
+            )
+        })
+        .collect();
+    let lights = [
+        (0u32, &l.add_light_point),
+        (1, &l.add_light_sun),
+        (2, &l.add_light_spot),
+        (3, &l.add_light_area),
+    ]
+    .into_iter()
+    .map(|(kind, label)| {
+        MenuNode::Entry(
+            MenuEntry::new("object.add_light", label, op("object.add_light", &[("kind", V::Enum(kind))]))
+                .variant("kind", V::Enum(kind)),
+        )
+    })
+    .collect();
+    vec![
+        MenuNode::Sub(l.add_mesh.clone(), shapes),
+        MenuNode::Sub(l.add_light.clone(), lights),
+        MenuNode::Separator,
+        entry("object.add_camera", &l.add_camera, op("object.add_camera", &[])),
+        entry("object.add_empty", &l.add_empty, op("object.add_empty", &[])),
+    ]
 }
 
 /// The operator ids behind the Mesh submenu, in `PRIMITIVES` order — the
@@ -1923,40 +2185,30 @@ const ADD_SHAPES: [&str; 8] = [
 /// that "Move" from the menu starts the same drag the G key starts. A menu
 /// entry that moved by a fixed amount would be a different command wearing the
 /// same name.
-fn draw_object_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
-    ui.menu_button(&l.menu_object, |ui| {
-        ui.menu_button(&l.menu_transform, |ui| {
-            for (op, label) in [
-                ("object.translate", &l.transform_move),
-                ("object.rotate", &l.transform_rotate),
-                ("object.scale", &l.transform_scale),
-            ] {
-                if menu_item(ui, state, op, &[], label) {
-                    state.queue.dispatch(op, PropertyMap::new());
-                }
-            }
-        });
-        ui.separator();
-        let linked = [("linked", kreate_reflect::PropertyValue::Bool(true))];
-        if menu_item(ui, state, "object.duplicate", &linked, &l.duplicate) {
-            let mut p = PropertyMap::new();
-            p.set("linked", kreate_reflect::PropertyValue::Bool(true));
-            state.queue.run("object.duplicate", p);
-        }
+fn object_nodes(l: &Labels) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    vec![
+        MenuNode::Sub(
+            l.menu_transform.clone(),
+            vec![
+                entry("object.translate", &l.transform_move, dispatch("object.translate")),
+                entry("object.rotate", &l.transform_rotate, dispatch("object.rotate")),
+                entry("object.scale", &l.transform_scale, dispatch("object.scale")),
+            ],
+        ),
+        MenuNode::Separator,
+        MenuNode::Entry(
+            MenuEntry::new("object.duplicate", &l.duplicate, op("object.duplicate", &[("linked", V::Bool(true))]))
+                .variant("linked", V::Bool(true)),
+        ),
         // Copy and paste beside Duplicate, which is the same family: a paste
         // is a duplicate that survives the original being deleted and can be
         // put down later. Through `Dispatch`, the door the keys use.
-        if menu_item(ui, state, "edit.copy", &[], &l.object_copy) {
-            state.queue.dispatch("edit.copy", PropertyMap::new());
-        }
-        if menu_item(ui, state, "edit.paste", &[], &l.object_paste) {
-            state.queue.dispatch("edit.paste", PropertyMap::new());
-        }
-        ui.separator();
-        if menu_item(ui, state, "object.delete", &[], &l.delete) {
-            state.queue.run("object.delete", PropertyMap::new());
-        }
-    });
+        entry("edit.copy", &l.object_copy, dispatch("edit.copy")),
+        entry("edit.paste", &l.object_paste, dispatch("edit.paste")),
+        MenuNode::Separator,
+        entry("object.delete", &l.delete, op("object.delete", &[])),
+    ]
 }
 
 /// The three ways of shading the viewport, as a row of exclusive buttons.
@@ -2821,114 +3073,73 @@ fn draw_mode_menu(
 /// vertex-specific: Merge and Weld read the element mode rather than assuming
 /// one, so they belong under Mesh. An empty menu would be a promise the
 /// application does not keep.
-fn draw_mesh_menus(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
-    ui.menu_button(&l.menu_mesh, |ui| {
-        // Merge and dissolve both act on whatever the element mode is, so the
-        // entry carries it rather than asking again.
-        if menu_item(ui, state, "mesh.merge", &[], &l.merge) {
-            let mut p = PropertyMap::new();
-            p.set("target", kreate_reflect::PropertyValue::Enum(0));
-            state.queue.run("mesh.merge", p);
-        }
-        if menu_item(ui, state, "mesh.merge.by_distance", &[], &l.weld) {
-            let mut p = PropertyMap::new();
-            p.set("distance", kreate_reflect::PropertyValue::Float(1e-4));
-            state.queue.run("mesh.merge", p);
-        }
-        ui.separator();
-        if menu_item(ui, state, "mesh.dissolve", &[], &l.dissolve) {
-            let mut p = PropertyMap::new();
-            p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
-            state.queue.run("mesh.dissolve", p);
-        }
-        if menu_item(ui, state, "mesh.delete", &[], &l.delete) {
-            let mut p = PropertyMap::new();
-            p.set("mode", kreate_reflect::PropertyValue::Enum(state.select_mode));
-            state.queue.run("mesh.delete", p);
-        }
-        ui.separator();
-        if menu_item(ui, state, "mesh.spin", &[], &l.spin) {
-            state.queue.run("mesh.spin", PropertyMap::new());
-        }
-        ui.separator();
-        // Shading is a property of the mesh rather than of a selection, which
-        // is why it is here and not under Face.
-        let smooth = [("smooth", kreate_reflect::PropertyValue::Bool(true))];
-        if menu_item(ui, state, "mesh.shade", &smooth, &l.shade_smooth) {
-            let mut p = PropertyMap::new();
-            p.set("smooth", kreate_reflect::PropertyValue::Bool(true));
-            state.queue.run("mesh.shade", p);
-        }
-        let flat = [("smooth", kreate_reflect::PropertyValue::Bool(false))];
-        if menu_item(ui, state, "mesh.shade", &flat, &l.shade_flat) {
-            let mut p = PropertyMap::new();
-            p.set("smooth", kreate_reflect::PropertyValue::Bool(false));
-            state.queue.run("mesh.shade", p);
-        }
-        if menu_item(ui, state, "mesh.normals", &[], &l.recalc_normals) {
-            let mut p = PropertyMap::new();
-            p.set("action", kreate_reflect::PropertyValue::Enum(0));
-            state.queue.run("mesh.normals", p);
-        }
-    });
-
-    ui.menu_button(&l.menu_edge, |ui| {
-        if menu_item(ui, state, "mesh.bevel", &[], &l.bevel) {
-            let mut p = PropertyMap::new();
-            p.set("width", kreate_reflect::PropertyValue::Float(0.1));
-            state.queue.run("mesh.bevel", p);
-        }
-        if menu_item(ui, state, "mesh.loop_cut", &[], &l.loop_cut) {
-            let mut p = PropertyMap::new();
-            p.set("cuts", kreate_reflect::PropertyValue::Int(1));
-            p.set("position", kreate_reflect::PropertyValue::Float(0.5));
-            state.queue.run("mesh.loop_cut", p);
-        }
-        if menu_item(ui, state, "mesh.subdivide", &[], &l.subdivide) {
-            let mut p = PropertyMap::new();
-            p.set("iterations", kreate_reflect::PropertyValue::Int(1));
-            state.queue.run("mesh.subdivide", p);
-        }
-        if menu_item(ui, state, "mesh.bridge", &[], &l.bridge) {
-            state.queue.run("mesh.bridge", PropertyMap::new());
-        }
-        ui.separator();
-        let loop_variant = [("action", kreate_reflect::PropertyValue::Enum(3))];
-        if menu_item(ui, state, "mesh.select", &loop_variant, &l.select_loop) {
-            let mut p = PropertyMap::new();
-            p.set("action", kreate_reflect::PropertyValue::Enum(3));
-            state.queue.run("mesh.select", p);
-        }
-        ui.separator();
-        if menu_item(ui, state, "mesh.mark_sharp", &[], &l.mark_sharp) {
-            // By angle rather than by selection: somebody reaching for this on
-            // a freshly imported model has nothing selected, and thirty
-            // degrees is the answer they want.
-            let mut p = PropertyMap::new();
-            p.set(
-                "angle",
-                kreate_reflect::PropertyValue::Float(30f64.to_radians()),
-            );
-            state.queue.run("mesh.mark_sharp", p);
-        }
-    });
-
-    ui.menu_button(&l.menu_face, |ui| {
-        if menu_item(ui, state, "mesh.extrude_region", &[], &l.extrude) {
-            let mut p = PropertyMap::new();
-            p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
-            state.queue.run("mesh.extrude_region", p);
-        }
-        if menu_item(ui, state, "mesh.inset", &[], &l.inset) {
-            let mut p = PropertyMap::new();
-            p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
-            state.queue.run("mesh.inset", p);
-        }
-        ui.separator();
-        if menu_item(ui, state, "mesh.fill", &[], &l.fill) {
-            state.queue.run("mesh.fill", PropertyMap::new());
-        }
-    });
+fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
+    use kreate_reflect::PropertyValue as V;
+    use MenuNode::Separator;
+    vec![
+        TopMenu {
+            label: l.menu_mesh.clone(),
+            nodes: vec![
+                // Merge and dissolve both act on whatever the element mode is,
+                // so the entry carries it rather than asking again.
+                entry("mesh.merge", &l.merge, op("mesh.merge", &[("target", V::Enum(0))])),
+                entry("mesh.merge.by_distance", &l.weld, op("mesh.merge", &[("distance", V::Float(1e-4))])),
+                Separator,
+                entry("mesh.dissolve", &l.dissolve, op("mesh.dissolve", &[("mode", V::Enum(select_mode))])),
+                entry("mesh.delete", &l.delete, op("mesh.delete", &[("mode", V::Enum(select_mode))])),
+                Separator,
+                entry("mesh.spin", &l.spin, op("mesh.spin", &[])),
+                Separator,
+                // Shading is a property of the mesh rather than of a selection,
+                // which is why it is here and not under Face.
+                MenuNode::Entry(
+                    MenuEntry::new("mesh.shade", &l.shade_smooth, op("mesh.shade", &[("smooth", V::Bool(true))]))
+                        .variant("smooth", V::Bool(true)),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new("mesh.shade", &l.shade_flat, op("mesh.shade", &[("smooth", V::Bool(false))]))
+                        .variant("smooth", V::Bool(false)),
+                ),
+                entry("mesh.normals", &l.recalc_normals, op("mesh.normals", &[("action", V::Enum(0))])),
+            ],
+        },
+        TopMenu {
+            label: l.menu_edge.clone(),
+            nodes: vec![
+                entry("mesh.bevel", &l.bevel, op("mesh.bevel", &[("width", V::Float(0.1))])),
+                entry(
+                    "mesh.loop_cut",
+                    &l.loop_cut,
+                    op("mesh.loop_cut", &[("cuts", V::Int(1)), ("position", V::Float(0.5))]),
+                ),
+                entry("mesh.subdivide", &l.subdivide, op("mesh.subdivide", &[("iterations", V::Int(1))])),
+                entry("mesh.bridge", &l.bridge, op("mesh.bridge", &[])),
+                Separator,
+                MenuNode::Entry(
+                    MenuEntry::new("mesh.select", &l.select_loop, op("mesh.select", &[("action", V::Enum(3))]))
+                        .variant("action", V::Enum(3)),
+                ),
+                Separator,
+                // By angle rather than by selection: somebody reaching for this
+                // on a freshly imported model has nothing selected, and thirty
+                // degrees is the answer they want.
+                entry(
+                    "mesh.mark_sharp",
+                    &l.mark_sharp,
+                    op("mesh.mark_sharp", &[("angle", V::Float(30f64.to_radians()))]),
+                ),
+            ],
+        },
+        TopMenu {
+            label: l.menu_face.clone(),
+            nodes: vec![
+                entry("mesh.extrude_region", &l.extrude, op("mesh.extrude_region", &[("offset", V::Float(1.0))])),
+                entry("mesh.inset", &l.inset, op("mesh.inset", &[("thickness", V::Float(0.1))])),
+                Separator,
+                entry("mesh.fill", &l.fill, op("mesh.fill", &[])),
+            ],
+        },
+    ]
 }
 
 /// How wide the right-click menu is, in interface points.
@@ -3947,6 +4158,17 @@ menu-file-open = Open...
 menu-file-save = Save
 menu-file-save-as = Save As...
 menu-file-export = Export...
+menu-file-run-script = Run Script...
+menu-search = Search...
+menu-copy-script = Copy History as Script
+palette-placeholder = Search the menus: extrude, add cube, save...
+palette-nothing = Nothing matches.
+op-app-search = Search
+op-app-search-desc = Find any menu command by typing part of its name, and run it with Enter.
+op-edit-copy-script = Copy History as Script
+op-edit-copy-script-desc = Puts every edit so far on the clipboard as script lines the console and Run Script can replay.
+op-file-run-script = Run Script
+op-file-run-script-desc = Runs a text file of script lines, one undo step per line, the way the console runs what is typed into it.
 world-pick-image = Environment...
 world-clear-image = Clear
 material-pick-image = Open Image...
@@ -4297,6 +4519,17 @@ menu-file-open = 열기...
 menu-file-save = 저장
 menu-file-save-as = 다른 이름으로 저장...
 menu-file-export = 내보내기...
+menu-file-run-script = 스크립트 실행...
+menu-search = 검색...
+menu-copy-script = 히스토리를 스크립트로 복사
+palette-placeholder = 메뉴 검색: extrude, 큐브 추가, 저장...
+palette-nothing = 일치하는 항목이 없습니다.
+op-app-search = 검색
+op-app-search-desc = 메뉴 명령의 이름 일부를 입력해 찾고, Enter로 실행합니다.
+op-edit-copy-script = 히스토리를 스크립트로 복사
+op-edit-copy-script-desc = 지금까지의 모든 편집을 콘솔과 스크립트 실행이 다시 돌릴 수 있는 스크립트 줄로 클립보드에 넣습니다.
+op-file-run-script = 스크립트 실행
+op-file-run-script-desc = 스크립트 줄이 적힌 텍스트 파일을 실행합니다. 콘솔에 입력한 것처럼 한 줄이 되돌리기 한 단계입니다.
 world-pick-image = 환경 이미지...
 world-clear-image = 지우기
 material-pick-image = 이미지 열기...
@@ -5709,10 +5942,11 @@ mod tests {
     #[test]
     fn every_menu_entry_has_a_sentence_to_show_on_hover() {
         // The promise `menu_item` makes: hover any entry and it says what it
-        // does. Kept by reading this file for the ids the menus hand it and
-        // asking the catalog for each one's sentence — so an entry added
-        // without a description fails here rather than being the one silent
-        // item in a menu that otherwise explains itself.
+        // does. Kept by walking the menu tree, in both modes, and asking the
+        // catalog for each entry's sentence — plus the few entries still drawn
+        // by hand (the area's own), found by reading this file for them. An
+        // entry added without a description fails here rather than being the
+        // one silent item in a menu that otherwise explains itself.
         let source = include_str!("shell.rs");
         let catalog = load_catalog("en");
         let mut ids: Vec<&str> = Vec::new();
@@ -5724,9 +5958,14 @@ mod tests {
                 }
             }
         }
+        for mode in kreate_ops::Mode::ALL {
+            for (_, entry) in flatten(&searchable_menus(&catalog, mode, 0, true, true)) {
+                ids.push(entry.id);
+            }
+        }
         ids.sort_unstable();
         ids.dedup();
-        assert!(ids.len() > 30, "the scan found only {} entries; it has lost the menus", ids.len());
+        assert!(ids.len() > 30, "the walk found only {} entries; it has lost the menus", ids.len());
         let missing: Vec<&str> = ids
             .iter()
             .copied()
@@ -5736,5 +5975,61 @@ mod tests {
             missing.is_empty(),
             "these menu entries have nothing to say on hover: {missing:?}"
         );
+    }
+
+    #[test]
+    fn the_search_offers_what_the_menus_offer_in_each_mode() {
+        // One tree for both, so this is about the shape of the tree: object
+        // mode searches the Object menu and not the Mesh menus, edit mode the
+        // other way round, and both reach the top bar and Add.
+        let catalog = load_catalog("en");
+        let ids = |mode| -> Vec<&'static str> {
+            flatten(&searchable_menus(&catalog, mode, 0, true, true))
+                .into_iter()
+                .map(|(_, e)| e.id)
+                .collect()
+        };
+        let object = ids(kreate_ops::Mode::Object);
+        let edit = ids(kreate_ops::Mode::EditMesh);
+        for common in ["file.save", "edit.undo", "app.search", "object.add_primitive", "view.frame_all"] {
+            assert!(object.contains(&common) && edit.contains(&common), "{common} is missing somewhere");
+        }
+        assert!(object.contains(&"object.delete") && !object.contains(&"mesh.bevel"));
+        assert!(edit.contains(&"mesh.bevel") && !edit.contains(&"object.delete"));
+        // Every shape of the Add menu, each its own entry.
+        assert_eq!(object.iter().filter(|id| **id == "object.add_primitive").count(), ADD_SHAPES.len());
+    }
+
+    #[test]
+    fn a_searched_entry_runs_what_its_menu_entry_runs() {
+        // Extrude from the search is Extrude from Face ▸ Extrude: the same
+        // operator with the same parameters, because it is the same entry.
+        let catalog = load_catalog("en");
+        let entries = flatten(&searchable_menus(&catalog, kreate_ops::Mode::EditMesh, 2, true, true));
+        let (path, extrude) = entries
+            .iter()
+            .find(|(_, e)| e.id == "mesh.extrude_region")
+            .expect("extrude is searchable in edit mode");
+        assert!(path.ends_with(&Labels::new(&catalog).menu_face), "{path}");
+        let mut state = ShellState::default();
+        run_entry(&mut state, extrude);
+        let commands = state.queue.drain();
+        match commands.as_slice() {
+            [Command::RunOperator { op_id, params }] => {
+                assert_eq!(op_id, "mesh.extrude_region");
+                assert_eq!(params.get("offset"), Some(&kreate_reflect::PropertyValue::Float(1.0)));
+            }
+            other => panic!("ran {other:?}"),
+        }
+        // And an entry that reads the element mode reads the one it was
+        // built with.
+        let (_, delete) = entries.iter().find(|(_, e)| e.id == "mesh.delete").unwrap();
+        run_entry(&mut state, delete);
+        match state.queue.drain().as_slice() {
+            [Command::RunOperator { params, .. }] => {
+                assert_eq!(params.get("mode"), Some(&kreate_reflect::PropertyValue::Enum(2)));
+            }
+            other => panic!("ran {other:?}"),
+        }
     }
 }

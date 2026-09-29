@@ -319,6 +319,9 @@ const APP_ACTIONS: &[&str] = &[
     "edit.redo",
     "edit.adjust_last",
     "app.print_script",
+    "app.search",
+    "edit.copy_script",
+    "file.run_script",
     "object.add_next_primitive",
 ];
 
@@ -513,4 +516,25 @@ fn snapping_is_animated_and_lands_on_the_axis() {
     }
     assert!(frames > 5, "an axis snap must not teleport");
     assert!((current.forward() + DVec3::X).length() < 1e-9);
+}
+
+#[test]
+fn every_menu_entry_runs_something_that_exists() {
+    // The menu tree names what each entry runs as a string, and a typo there
+    // is a menu entry — and a search result — that does nothing. Checked in
+    // both modes, against the registry and the application's own actions.
+    let mut registry = kreate_ops::OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let catalog = kreate::shell::load_catalog("en");
+    for mode in kreate_ops::Mode::ALL {
+        let menus = kreate::shell::searchable_menus(&catalog, mode, 0, true, true);
+        for (path, entry) in kreate::shell::flatten(&menus) {
+            let Some(id) = entry.runs() else { continue };
+            assert!(
+                APP_ACTIONS.contains(&id) || registry.get(id).is_some(),
+                "{mode:?}: {path} / {} runs `{id}`, which nothing handles",
+                entry.label
+            );
+        }
+    }
 }
