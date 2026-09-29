@@ -784,6 +784,10 @@ pub struct SetMaterialParams {
     pub roughness: f64,
     #[param(min = 0.0, max = 1.0)]
     pub alpha: f64,
+    /// How far the normal map tilts the surface: zero is flat, one is the map
+    /// as painted. Does nothing without a normal map.
+    #[param(min = 0.0, soft_max = 2.0)]
+    pub normal_strength: f64,
 }
 
 impl Default for SetMaterialParams {
@@ -794,6 +798,7 @@ impl Default for SetMaterialParams {
             metallic: 0.0,
             roughness: 0.5,
             alpha: 1.0,
+            normal_strength: 1.0,
         }
     }
 }
@@ -842,6 +847,7 @@ impl Operator for SetMaterial {
         .as_reflectance();
         material.metallic = params.metallic.clamp(0.0, 1.0) as f32;
         material.roughness = params.roughness.clamp(0.0, 1.0) as f32;
+        material.normal_strength = params.normal_strength.max(0.0) as f32;
         material.alpha = params.alpha.clamp(0.0, 1.0) as f32;
         Ok(OpResult::Finished)
     }
@@ -880,6 +886,13 @@ pub struct SetMaterialImageParams {
     /// See [`SetMaterialParams::slot`] on why the slot travels as a parameter.
     #[param(min = 0.0)]
     pub slot: u32,
+    /// Which of the material's textures: the order of
+    /// [`MaterialMap::ALL`](kreate_scene::MaterialMap::ALL).
+    ///
+    /// Base colour first and so the default, which keeps every script written
+    /// before there were other maps meaning what it meant.
+    #[param(variants("base_color", "metallic_roughness", "normal"))]
+    pub map: u32,
     /// The image datablock's identity, in decimal. Empty takes the texture off.
     ///
     /// Text and an identity for the two reasons [`SetWorldImageParams::uid`]
@@ -888,7 +901,8 @@ pub struct SetMaterialImageParams {
     pub uid: String,
 }
 
-/// Points the active object's material at a base colour texture, or takes it off.
+/// Points one of the active object's material's textures at an image, or takes
+/// it off.
 ///
 /// The same division of labour as [`SetWorldImage`], and for the same reason:
 /// the application opens the file and adds the datablock, and this makes the
@@ -942,7 +956,11 @@ impl Operator for SetMaterialImage {
         let Some(material) = d.material_mut(id) else {
             return Ok(OpResult::Cancelled);
         };
-        material.base_color_image = image;
+        let map = kreate_scene::MaterialMap::ALL
+            .get(params.map as usize)
+            .copied()
+            .unwrap_or(kreate_scene::MaterialMap::BaseColor);
+        *material.map_mut(map) = image;
         Ok(OpResult::Finished)
     }
 }
@@ -1175,16 +1193,22 @@ pub fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
     }
 }
 
-/// The parameters that would leave a material's texture exactly as it is.
+/// The parameters that would leave one of a material's textures exactly as it
+/// is.
 pub fn material_image_params(
     doc: &Document,
     material: &kreate_scene::Material,
     slot: u32,
+    map: kreate_scene::MaterialMap,
 ) -> SetMaterialImageParams {
     SetMaterialImageParams {
         slot,
+        map: kreate_scene::MaterialMap::ALL
+            .iter()
+            .position(|m| *m == map)
+            .unwrap_or(0) as u32,
         uid: material
-            .base_color_image
+            .map(map)
             .and_then(|id| doc.image_uid(id))
             .map(|uid| uid.raw().to_string())
             .unwrap_or_default(),
@@ -1203,6 +1227,7 @@ pub fn material_params(
         metallic: material.metallic as f64,
         roughness: material.roughness as f64,
         alpha: material.alpha as f64,
+        normal_strength: material.normal_strength as f64,
     }
 }
 

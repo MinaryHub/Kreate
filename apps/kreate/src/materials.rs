@@ -37,7 +37,7 @@ impl Materials {
     /// Compiles every material in the document, plus the default at zero.
     pub fn compile(doc: &Document) -> Self {
         // The default first, so its index is zero whatever else happens.
-        let mut compiled = vec![compile_one(&ShaderGraph::standard(
+        let mut compiled = vec![compile_one(doc, &ShaderGraph::standard(
             "Default",
             kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
             0.0,
@@ -52,7 +52,7 @@ impl Materials {
             // lives beside the fields rather than here — one answer to "what is
             // a standard surface", which is what keeps a field added to the
             // material from having to be added twice.
-            compiled.push(compile_one(&ShaderGraph::for_material(material)));
+            compiled.push(compile_one(doc, &ShaderGraph::for_material(material)));
         }
         Self { compiled, index }
     }
@@ -112,34 +112,73 @@ impl Materials {
     }
 }
 
-/// The pixels one compiled material's images resolve to, in layer order.
+/// The pixels one compiled material's images resolve to, parallel to
+/// [`kreate_shader::Compiled::images`].
 ///
 /// §0's seam: the compiler hands back image *identities*, which belong to the
 /// document, and `kreate-render` is given what they resolve to. This is the
 /// joining, and it is the whole of what the application does here.
 ///
-/// **Encoded, not decoded.** The atlas is an sRGB format and the sampler
-/// applies the transfer function, so what goes over is the file's own bytes —
-/// see `kreate_render::material::SourceImage::pixels` for why decoding here
-/// would cost the darks.
+/// **Parallel, even when an image is missing.** A material naming an image the
+/// document no longer has gets one white texel in its place. Dropping it would
+/// shift every later image down a layer, and the material after the gap would
+/// be sampling its neighbour's texture.
+///
+/// **Colours encoded, not decoded.** The colour atlas is an sRGB format and the
+/// sampler applies the transfer function, so what goes over is the file's own
+/// bytes — see `kreate_render::material::SourceImage::pixels` for why decoding
+/// here would cost the darks. Data goes over as the numbers it is.
 pub fn pixels_for(doc: &Document, compiled: &kreate_shader::Compiled) -> Vec<TextureImage> {
     compiled
         .images
         .iter()
-        .filter_map(|id| doc.image(*id))
-        .map(|image| TextureImage {
-            width: image.width(),
-            height: image.height(),
-            pixels: encoded_rgba(image),
+        .zip(&compiled.image_spaces)
+        .map(|(id, space)| {
+            let kind = kind_of(*space);
+            match doc.image(*id) {
+                Some(image) => TextureImage {
+                    width: image.width(),
+                    height: image.height(),
+                    kind,
+                    pixels: encoded_rgba(image, *space),
+                },
+                None => TextureImage {
+                    width: 1,
+                    height: 1,
+                    kind,
+                    pixels: vec![255; 4],
+                },
+            }
         })
         .collect()
+}
+
+/// Which atlas an image in this space belongs in.
+pub fn kind_of(space: kreate_scene::ColorSpace) -> kreate_render::material::TextureKind {
+    match space {
+        kreate_scene::ColorSpace::Srgb => kreate_render::material::TextureKind::Color,
+        kreate_scene::ColorSpace::Raw => kreate_render::material::TextureKind::Data,
+    }
 }
 
 /// One image's bytes, untiled into a row-major `Rgba8` block.
 pub struct TextureImage {
     pub width: u32,
     pub height: u32,
+    pub kind: kreate_render::material::TextureKind,
     pub pixels: Vec<u8>,
+}
+
+impl TextureImage {
+    /// Borrowed as the renderer takes it.
+    pub fn source(&self) -> kreate_render::material::SourceImage<'_> {
+        kreate_render::material::SourceImage {
+            width: self.width,
+            height: self.height,
+            kind: self.kind,
+            pixels: &self.pixels,
+        }
+    }
 }
 
 /// Walks the tiling back out into the rows a texture upload wants.
@@ -148,7 +187,7 @@ pub struct TextureImage {
 /// black — the same answer the environment's walk gives, and for the same
 /// reason: a partly loaded image is a real state (§3.6) and half a texture
 /// beats a failure.
-fn encoded_rgba(image: &kreate_scene::Image) -> Vec<u8> {
+fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) -> Vec<u8> {
     let width = image.width() as usize;
     let height = image.height() as usize;
     let mut out = vec![0u8; width * height * 4];
@@ -173,7 +212,7 @@ fn encoded_rgba(image: &kreate_scene::Image) -> Vec<u8> {
                     }
                     let at = (row * tile + column) * stride;
                     let to = (y * width + x) * 4;
-                    out[to..to + 4].copy_from_slice(&texel(image, &bytes[at..at + stride]));
+                    out[to..to + 4].copy_from_slice(&texel(image, space, &bytes[at..at + stride]));
                 }
             }
         }
@@ -181,13 +220,13 @@ fn encoded_rgba(image: &kreate_scene::Image) -> Vec<u8> {
     out
 }
 
-/// One texel as four sRGB-encoded bytes.
-fn texel(image: &kreate_scene::Image, bytes: &[u8]) -> [u8; 4] {
+/// One texel as the four bytes its atlas holds: sRGB-encoded for a colour, the
+/// plain value for data.
+fn texel(image: &kreate_scene::Image, space: kreate_scene::ColorSpace, bytes: &[u8]) -> [u8; 4] {
     use kreate_scene::PixelFormat;
     match image.format {
-        // Already what the atlas holds, whatever the datablock says it means —
-        // the application only assigns colours to a material today, and the
-        // note on `SourceImage::pixels` is where that stops being enough.
+        // Already what the atlas holds: eight-bit bytes are stored as the file
+        // had them, and the file's encoding is what the space declares.
         PixelFormat::Rgba8 => [bytes[0], bytes[1], bytes[2], bytes[3]],
         // A mask or a height, replicated. Opaque, because one channel carries
         // no transparency and a zero alpha would make it disappear.
@@ -197,20 +236,38 @@ fn texel(image: &kreate_scene::Image, bytes: &[u8]) -> [u8; 4] {
         // one is clipped, because the atlas is eight bits and a reflectance
         // above one is not a colour anyway.
         PixelFormat::Rgba16F => {
+            // Data is stored as it is — a float normal map is already its
+            // numbers — and only a colour is encoded for the sRGB atlas.
             let channel = |i: usize| {
-                let v = half::f16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]).to_f32();
-                (kreate_math::linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
+                let v = half::f16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])
+                    .to_f32()
+                    .clamp(0.0, 1.0);
+                let e = match space {
+                    kreate_scene::ColorSpace::Srgb => kreate_math::linear_to_srgb(v),
+                    kreate_scene::ColorSpace::Raw => v,
+                };
+                (e * 255.0).round() as u8
             };
             [channel(0), channel(1), channel(2), 255]
         }
     }
 }
 
-fn compile_one(graph: &ShaderGraph) -> kreate_shader::Compiled {
-    // A graph built here cannot fail to compile: it has a surface and no wires.
-    // A graph from a *file* can, and when materials carry their own the error
-    // becomes a note beside the material rather than an `expect`.
-    kreate_shader::compile(graph).expect("a standard surface always compiles")
+fn compile_one(doc: &Document, graph: &ShaderGraph) -> kreate_shader::Compiled {
+    // A graph built here cannot fail to compile: `for_material` wires only
+    // what it adds. A graph from a *file* can, and when materials carry their
+    // own the error becomes a note beside the material rather than an
+    // `expect`.
+    //
+    // Each image's space is the datablock's own declaration, made when it was
+    // loaded into the slot that wanted it. An image the document has lost is
+    // a colour, which is also what the white stand-in `pixels_for` sends is.
+    kreate_shader::compile_with(graph, |id| {
+        doc.image(id)
+            .map(|image| image.color_space)
+            .unwrap_or(kreate_scene::ColorSpace::Srgb)
+    })
+    .expect("a standard surface always compiles")
 }
 
 #[cfg(test)]

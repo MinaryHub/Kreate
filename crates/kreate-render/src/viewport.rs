@@ -1159,7 +1159,7 @@ pub struct Viewport {
     /// with none draws no geometry — a material is not optional the way a
     /// light is. The end-to-end test is what says the application supplies
     /// them; there is no built-in fallback, because a fallback would be a
-    /// second `material_surface` and §3's fifth decision is that there is one.
+    /// second `material_sample` and §3's fifth decision is that there is one.
     materials: Vec<crate::material::Material>,
     /// One pipeline per distinct compiled shader, keyed on the text.
     ///
@@ -4013,7 +4013,7 @@ fn shading_bind_group(
 /// Text, numbers and pixels — nothing from the document. See
 /// [`Viewport::set_materials`].
 pub struct MaterialSource<'a> {
-    /// The `material_surface` function `kreate-shader` produced.
+    /// The `material_sample` function `kreate-shader` produced.
     pub wgsl: &'a str,
     pub constants: &'a [[f32; 4]],
     pub image_slots: &'a [usize],

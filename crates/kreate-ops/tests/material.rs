@@ -414,6 +414,7 @@ fn the_parameters_that_read_a_material_back_leave_it_alone() {
         &doc,
         doc.material(material).expect("a material"),
         0,
+        kreate_scene::MaterialMap::BaseColor,
     );
     assert_eq!(read.uid, uid);
     set_image(&registry, &mut history, &mut doc, &ctx, &read.uid);
@@ -681,4 +682,56 @@ fn an_operator_naming_a_slot_that_is_empty_declines() {
         .dispatch(&registry, &mut doc, &ctx, "material.set_image", &params)
         .is_ok());
     assert!(doc.material_at(object, 0).is_none());
+}
+
+#[test]
+fn each_map_goes_in_its_own_slot_and_leaves_the_others() {
+    // The `map` parameter. Base colour is the default, so every script written
+    // before there were other maps still means what it meant.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let colour = an_image(&mut doc);
+    let normal = an_image(&mut doc);
+    let uid = |doc: &kreate_scene::Document, id| doc.image_uid(id).expect("an identity").raw().to_string();
+
+    let (colour_uid, normal_uid) = (uid(&doc, colour), uid(&doc, normal));
+    set_image(&registry, &mut history, &mut doc, &ctx, &colour_uid);
+    let mut params = PropertyMap::new();
+    params.set("map", PropertyValue::Enum(2));
+    params.set("uid", PropertyValue::Text(normal_uid.clone()));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "material.set_image", &params)
+        .expect("the operator ran");
+
+    let m = doc.material(material).unwrap();
+    assert_eq!(m.base_color_image, Some(colour), "the normal map replaced the colour");
+    assert_eq!(m.normal_image, Some(normal));
+    assert_eq!(m.metallic_roughness_image, None);
+
+    // And the panel's read-back names the map it read.
+    let read = kreate_ops::ops::object::material_image_params(
+        &doc,
+        m,
+        0,
+        kreate_scene::MaterialMap::Normal,
+    );
+    assert_eq!(read.map, 2);
+    assert_eq!(read.uid, normal_uid);
+}
+
+#[test]
+fn the_normal_strength_reads_back_as_it_was_set() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let material = a_cube_with_a_material(&mut doc);
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::material_params(
+        doc.material(material).unwrap(),
+        0,
+    ));
+    params.set("normal_strength", PropertyValue::Float(0.25));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &params)
+        .expect("ran");
+    let m = doc.material(material).unwrap();
+    assert_eq!(m.normal_strength, 0.25);
+    assert_eq!(kreate_ops::ops::object::material_params(m, 0).normal_strength, 0.25);
 }

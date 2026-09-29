@@ -105,7 +105,7 @@ fn vs(@builtin(vertex_index) index: u32) -> Vertex {
 
 @fragment
 fn fs(in: Vertex) -> @location(0) vec4<f32> {
-    let s = material_surface(in.uv);
+    let s = material_sample(in.uv, dpdx(in.uv), dpdy(in.uv)).surface;
     return vec4<f32>(shade_point(s, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0), vec2<u32>(0u, 0u)), 1.0);
 }
 "#
@@ -260,6 +260,7 @@ fn the_uploaded_constants_are_as_long_as_the_shader_declares() {
             image_slots: &compiled.image_slots,
         },
         &[SourceImage {
+            kind: kreate_render::material::TextureKind::Color,
             width: 8,
             height: 4,
             pixels: &pixels,
@@ -287,6 +288,7 @@ fn an_image_lands_where_the_shader_will_look_for_it() {
             image_slots: &compiled.image_slots,
         },
         &[SourceImage {
+            kind: kreate_render::material::TextureKind::Color,
             width: 8,
             height: 4,
             pixels: &small,
@@ -318,11 +320,13 @@ fn a_smaller_image_gets_a_rectangle_rather_than_being_stretched() {
         },
         &[
             SourceImage {
+                kind: kreate_render::material::TextureKind::Color,
                 width: 16,
                 height: 16,
                 pixels: &big,
             },
             SourceImage {
+                kind: kreate_render::material::TextureKind::Color,
                 width: 4,
                 height: 8,
                 pixels: &small,
@@ -488,6 +492,37 @@ fn shading_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 /// running corner to corner, which is what makes "the left half differs from
 /// the right half" a statement about a texture.
 fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::SourceImage<'_>]) -> Vec<[f32; 4]> {
+    let compiled = kreate_shader::compile(graph).expect("compiles");
+    shoot_with(gpu, &compiled, images, &Stage::default())
+}
+
+/// What surrounds the quad: its lights, its sky, how often the texture repeats.
+struct Stage {
+    lights: Vec<kreate_render::lights::PlacedLight>,
+    world: [f32; 3],
+    /// How many times the UVs cross the quad. More than one is a texture
+    /// minified, which is what a mip chain is for.
+    repeat: f32,
+}
+
+impl Default for Stage {
+    fn default() -> Self {
+        Self {
+            lights: Vec::new(),
+            world: [1.0; 3],
+            repeat: 1.0,
+        }
+    }
+}
+
+/// The same with a material already compiled — for one whose images are not
+/// all colours, which `kreate_shader::compile` assumes they are — and a stage.
+fn shoot_with(
+    gpu: &Gpu,
+    compiled: &kreate_shader::Compiled,
+    images: &[kreate_render::material::SourceImage<'_>],
+    stage: &Stage,
+) -> Vec<[f32; 4]> {
     use kreate_render::{Camera, Draw, RenderMeshCpu, ShadingMode, Viewport};
 
     const SIZE: u32 = 48;
@@ -501,7 +536,7 @@ fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::Sour
     // own colour rather than a lamp's angle. Every texel of the quad faces the
     // same way, so a difference across the frame can only come from the
     // material.
-    viewport.set_world([1.0; 3]);
+    viewport.set_world(stage.world);
     viewport.set_display(
         &gpu.queue,
         kreate_render::display::Display {
@@ -510,7 +545,6 @@ fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::Sour
         },
     );
 
-    let compiled = kreate_shader::compile(graph).expect("compiles");
     viewport.set_materials(
         &gpu.device,
         &gpu.queue,
@@ -529,7 +563,7 @@ fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::Sour
     // one texel. That is a gap in the primitives rather than in the renderer,
     // and it is not papered over here — what is being asked about is the path
     // from a coordinate to a pixel, so the fixture makes its own coordinates.
-    let mesh = planar_uvs(kreate_mesh::primitives::grid(2.0, 1, 1));
+    let mesh = planar_uvs(kreate_mesh::primitives::grid(2.0, 1, 1), stage.repeat);
     let cpu = RenderMeshCpu::extract(&mesh);
     assert!(
         cpu.uvs.iter().any(|uv| uv[0] != 0.0 || uv[1] != 0.0),
@@ -545,7 +579,7 @@ fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::Sour
         ..Camera::default()
     };
     let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
-    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &stage.lights);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -624,7 +658,7 @@ fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::Sour
 ///
 /// The simplest projection there is, and enough: what is being checked is that
 /// a coordinate reaches a pixel, not that any particular unwrap is good.
-fn planar_uvs(mut mesh: kreate_mesh::MeshData) -> kreate_mesh::MeshData {
+fn planar_uvs(mut mesh: kreate_mesh::MeshData, repeat: f32) -> kreate_mesh::MeshData {
     use kreate_mesh::attribute::{names, AttrData, Domain};
     let positions = mesh.positions().to_vec();
     let uvs: Vec<glam::Vec2> = mesh
@@ -632,7 +666,7 @@ fn planar_uvs(mut mesh: kreate_mesh::MeshData) -> kreate_mesh::MeshData {
         .iter()
         .map(|v| {
             let p = positions[*v as usize];
-            glam::Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5)
+            glam::Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5) * repeat
         })
         .collect();
     mesh.attributes_mut()
@@ -672,6 +706,7 @@ fn a_texture_reaches_the_picture_and_lands_the_right_way_round() {
         &gpu,
         &graph,
         &[kreate_render::material::SourceImage {
+            kind: kreate_render::material::TextureKind::Color,
             width: 16,
             height: 16,
             pixels: &pixels,
@@ -756,6 +791,7 @@ fn the_atlas_decodes_srgb_rather_than_taking_bytes_as_light() {
             &gpu,
             &graph,
             &[kreate_render::material::SourceImage {
+                kind: kreate_render::material::TextureKind::Color,
                 width: 16,
                 height: 16,
                 pixels: &pixels,
@@ -783,3 +819,218 @@ fn the_atlas_decodes_srgb_rather_than_taking_bytes_as_light() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mips, data maps and normal maps.
+
+/// A one-texel checkerboard: the worst case for a texture seen from far away.
+fn checker(size: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+            out.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_minified_texture_is_its_average_rather_than_noise() {
+    // **What a mip chain is for.** A one-texel checkerboard repeated sixteen
+    // times across a 48-pixel quad puts more than twenty texels under every
+    // pixel. Read at level zero, each pixel lands on black or white by the
+    // accident of where its centre falls, and the frame is static. With the
+    // chain the sampler reads a level where the checks have already been
+    // averaged, and the frame is a flat grey.
+    let gpu = gpu_or_skip!(gpu());
+    let (graph, _doc) = textured();
+    let compiled = kreate_shader::compile(&graph).expect("compiles");
+    let pixels = checker(64);
+    let frame = shoot_with(
+        &gpu,
+        &compiled,
+        &[kreate_render::material::SourceImage {
+            kind: kreate_render::material::TextureKind::Color,
+            width: 64,
+            height: 64,
+            pixels: &pixels,
+        }],
+        &Stage {
+            repeat: 16.0,
+            ..Stage::default()
+        },
+    );
+    let size = 48usize;
+    let row: Vec<f32> = (size / 4..3 * size / 4)
+        .map(|x| frame[size / 2 * size + x][1])
+        .collect();
+    let lo = row.iter().cloned().fold(f32::MAX, f32::min);
+    let hi = row.iter().cloned().fold(f32::MIN, f32::max);
+    assert!(
+        hi - lo < 0.08,
+        "a minified checkerboard ranges from {lo:.2} to {hi:.2} across one row: \
+         the sampler is reading texels, not a level that averages them"
+    );
+    // And the average is half the *light*, not half the bytes — the chain is
+    // built in light — which is well away from black.
+    assert!(lo > 0.2, "the minified checkerboard went dark: {lo:.2}");
+}
+
+#[test]
+fn a_data_map_is_read_as_the_numbers_it_holds() {
+    // The same three greys the sRGB test uses, through the *data* atlas. There
+    // the steps must come out equal: a roughness of 0.75 is half again as far
+    // from 0.25 as 0.5 is, and no curve may bend it. Through the colour atlas
+    // they would be nearly two to one — a roughness map loaded as a colour,
+    // which is what this atlas exists to prevent.
+    let gpu = gpu_or_skip!(gpu());
+    let (graph, _doc) = textured();
+    let compiled =
+        kreate_shader::compile_with(&graph, |_| kreate_scene::ColorSpace::Raw).expect("compiles");
+    assert!(
+        compiled.wgsl.contains("material_data"),
+        "a raw image was sampled from the colour atlas"
+    );
+    let grey = |value: u8| {
+        let pixels = [value, value, value, 255].repeat(16 * 16);
+        let frame = shoot_with(
+            &gpu,
+            &compiled,
+            &[kreate_render::material::SourceImage {
+                kind: kreate_render::material::TextureKind::Data,
+                width: 16,
+                height: 16,
+                pixels: &pixels,
+            }],
+            &Stage::default(),
+        );
+        let size = 48usize;
+        frame[size / 2 * size + size / 2]
+    };
+    let (low, mid, high) = (grey(64), grey(128), grey(192));
+    for c in 0..3 {
+        assert!(low[c] > 1e-4 && high[c] < 0.99, "channel {c} is against a clip");
+        let steps = (high[c] - mid[c]) / (mid[c] - low[c]);
+        assert!(
+            (steps - 1.0).abs() < 0.25,
+            "channel {c}: the steps are {steps:.2} to one; numbers read as numbers \
+             are 1.00, and read through sRGB they would be nearly 2"
+        );
+    }
+}
+
+/// A material whose only texture is a normal map of one texel value.
+fn normal_mapped(texel: [u8; 3]) -> (kreate_shader::Compiled, Vec<u8>) {
+    let mut doc = kreate_scene::Document::new();
+    let image = doc.add_image(kreate_scene::Image::new(
+        "Normal",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
+    let material = kreate_scene::Material {
+        base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        roughness: 1.0,
+        normal_image: Some(image),
+        ..Default::default()
+    };
+    let graph = ShaderGraph::for_material(&material);
+    let compiled =
+        kreate_shader::compile_with(&graph, |_| kreate_scene::ColorSpace::Raw).expect("compiles");
+    let pixels = [texel[0], texel[1], texel[2], 255].repeat(4 * 4);
+    (compiled, pixels)
+}
+
+/// The centre of the frame under a sun leaning in from `toward`, with a
+/// normal map of one texel — or none.
+fn lit_centre(gpu: &Gpu, toward: glam::Vec3, texel: Option<[u8; 3]>) -> f32 {
+    let stage = Stage {
+        // A sun from the side the map may tilt toward, and no sky: under a
+        // uniform sky every normal receives the same light, and a normal map
+        // would be invisible by construction.
+        lights: vec![kreate_render::lights::PlacedLight {
+            falloff: kreate_render::lights::Falloff::Parallel,
+            direction: (-toward - glam::Vec3::Z).normalize(),
+            amount: [2.0; 3],
+            cast_shadow: false,
+            ..Default::default()
+        }],
+        world: [0.0; 3],
+        repeat: 1.0,
+    };
+    let frame = match texel {
+        Some(texel) => {
+            let (compiled, pixels) = normal_mapped(texel);
+            shoot_with(
+                gpu,
+                &compiled,
+                &[kreate_render::material::SourceImage {
+                    kind: kreate_render::material::TextureKind::Data,
+                    width: 4,
+                    height: 4,
+                    pixels: &pixels,
+                }],
+                &stage,
+            )
+        }
+        None => {
+            let graph = ShaderGraph::standard(
+                "Plain",
+                kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+                0.0,
+                1.0,
+            );
+            let compiled = kreate_shader::compile(&graph).expect("compiles");
+            shoot_with(gpu, &compiled, &[], &stage)
+        }
+    };
+    let size = 48usize;
+    let p = frame[size / 2 * size + size / 2];
+    (p[0] + p[1] + p[2]) / 3.0
+}
+
+#[test]
+fn a_flat_normal_map_changes_nothing() {
+    // (128, 128, 255) is straight up. A material wearing it must draw as the
+    // material without it — or every normal map tilts the whole surface a
+    // little, which reads as a lighting bug nobody can find.
+    let gpu = gpu_or_skip!(gpu());
+    let toward = glam::Vec3::X;
+    let plain = lit_centre(&gpu, toward, None);
+    let flat = lit_centre(&gpu, toward, Some([128, 128, 255]));
+    assert!(plain > 0.05, "the fixture is dark: {plain}");
+    assert!(
+        (plain - flat).abs() < 0.02,
+        "a flat normal map changed the surface: {plain:.3} without, {flat:.3} with"
+    );
+}
+
+#[test]
+fn a_normal_map_tilts_the_surface_the_way_its_channels_say() {
+    // Red is +U and green is +V, which this quad maps to +X and +Y. A map
+    // tilted toward the light faces it and is brighter; tilted away, darker.
+    // Checked on both axes and both signs, because the frame is solved from
+    // derivatives and a sign error on either axis is a map lit from the wrong
+    // side — the classic inside-out normal map, which looks embossed where it
+    // was painted engraved.
+    let gpu = gpu_or_skip!(gpu());
+    for (axis, toward, lean, away) in [
+        // Twenty-five degrees rather than forty-five: this camera sees the
+        // quad from an angle, and a normal tipped far enough away from it
+        // faces away from the viewer — which the BRDF rightly draws black, and
+        // which would make "darker" true for the wrong reason.
+        ("red", glam::Vec3::X, [182, 128, 238], [74, 128, 238]),
+        ("green", glam::Vec3::Y, [128, 182, 238], [128, 74, 238]),
+    ] {
+        let flat = lit_centre(&gpu, toward, Some([128, 128, 255]));
+        let into = lit_centre(&gpu, toward, Some(lean));
+        let from = lit_centre(&gpu, toward, Some(away));
+        assert!(
+            into > flat + 0.03 && from < flat - 0.03,
+            "{axis}: tilted toward the light {into:.3}, flat {flat:.3}, tilted away {from:.3}"
+        );
+    }
+}
+
+

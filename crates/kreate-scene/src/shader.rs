@@ -31,7 +31,7 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! Normal maps, emission, transmission, clearcoat and the rest of §2.3's lobes.
+//! Emission, transmission, clearcoat and the rest of §2.3's lobes.
 //! They are nodes and inputs, not architecture, and adding them before anything
 //! consumes the graph would be guessing at what the compiler wants.
 
@@ -41,7 +41,7 @@ use kreate_reflect::Uid;
 
 /// What flows along a wire.
 ///
-/// Two, and a colour is not three scalars: a wire carrying a colour into a
+/// A colour is not three scalars: a wire carrying a colour into a
 /// roughness would be a material that is wrong in a way the picture does not
 /// explain. Where a conversion is wanted it is a *node*, so it is visible in
 /// the graph rather than implied by a connection.
@@ -51,6 +51,14 @@ pub enum Socket {
     Color,
     /// One number.
     Scalar,
+    /// A direction in the surface's tangent space: +Z out of the surface, +X
+    /// along the texture's U, +Y along its V.
+    ///
+    /// Its own type because a normal is not a colour even when it arrives in
+    /// one. A normal map *is* a colour image on disk, and the node that turns
+    /// it into a direction is where the `* 2 - 1` lives — wired straight into a
+    /// colour it would be a surface lit by a purple picture of itself.
+    Vector,
 }
 
 /// What a node does.
@@ -81,6 +89,22 @@ pub enum NodeKind {
     /// image node a factor of its own would have been the same rule written
     /// where only one node can reach it.
     Multiply,
+    /// A colour's three channels as three numbers.
+    ///
+    /// What reading a packed map needs: glTF puts roughness in green and
+    /// metallic in blue of one image, and a socket type that refused the
+    /// colour-to-number wire would be useless without a node that says which
+    /// channel.
+    SeparateRgb,
+    /// Two numbers, multiplied. The scalar [`NodeKind::Multiply`]: a roughness
+    /// map scales the roughness dial rather than replacing it, for the reason
+    /// a base colour map tints.
+    MultiplyValue,
+    /// A tangent-space normal map's colour, decoded into a direction.
+    ///
+    /// `strength` scales the tilt before renormalising, which is glTF's
+    /// `normalTexture.scale`: zero is flat, one is the map as painted.
+    NormalMap { strength: f32 },
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -99,7 +123,12 @@ impl NodeKind {
         match self {
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
             NodeKind::Multiply => &[Socket::Color, Socket::Color],
-            NodeKind::Surface { .. } => &[Socket::Color, Socket::Scalar, Socket::Scalar],
+            NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &[Socket::Color],
+            NodeKind::MultiplyValue => &[Socket::Scalar, Socket::Scalar],
+            // Base colour, metallic, roughness, normal.
+            NodeKind::Surface { .. } => {
+                &[Socket::Color, Socket::Scalar, Socket::Scalar, Socket::Vector]
+            }
         }
     }
 
@@ -113,6 +142,9 @@ impl NodeKind {
             // mistake the type system is here to refuse.
             NodeKind::Image { .. } => &[Socket::Color, Socket::Scalar],
             NodeKind::Multiply => &[Socket::Color],
+            NodeKind::SeparateRgb => &[Socket::Scalar, Socket::Scalar, Socket::Scalar],
+            NodeKind::MultiplyValue => &[Socket::Scalar],
+            NodeKind::NormalMap { .. } => &[Socket::Vector],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -129,6 +161,9 @@ impl NodeKind {
             NodeKind::Value(_) => "value",
             NodeKind::Image { .. } => "image",
             NodeKind::Multiply => "multiply",
+            NodeKind::SeparateRgb => "separate_rgb",
+            NodeKind::MultiplyValue => "multiply_value",
+            NodeKind::NormalMap { .. } => "normal_map",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -244,27 +279,58 @@ impl ShaderGraph {
             material.metallic,
             material.roughness,
         );
-        if let Some(image) = material.base_color_image {
-            // `standard` puts the surface at zero and adds nothing else, so the
-            // links below reach nodes that are certainly there.
-            let mut add = |name: &str, kind| {
-                graph
-                    .add_node(Node::new(name, kind))
-                    .expect("only the surface can be refused")
-            };
-            let texture = add("Base Colour", NodeKind::Image { image: Some(image) });
-            let factor = add("Tint", NodeKind::Color(material.base_color));
-            let product = add("Base Colour x Tint", NodeKind::Multiply);
-            let mut wire = |from_node, to_socket| {
-                graph
-                    .link(Link { from_node, from_socket: 0, to_node: product, to_socket })
-                    .expect("two colours");
-            };
-            wire(texture, 0);
-            wire(factor, 1);
+        // `standard` puts the surface at zero and adds nothing else, so every
+        // link below reaches nodes that are certainly there, of the types the
+        // sockets want — which is why each `expect` is a statement about this
+        // function and not about the caller.
+        let add = |graph: &mut Self, name: &str, kind| {
             graph
-                .link(Link { from_node: product, from_socket: 0, to_node: 0, to_socket: 0 })
-                .expect("a colour into a base colour");
+                .add_node(Node::new(name, kind))
+                .expect("only the surface can be refused")
+        };
+        let wire = |graph: &mut Self, from_node, from_socket, to_node, to_socket| {
+            graph
+                .link(Link { from_node, from_socket, to_node, to_socket })
+                .expect("the sockets agree")
+        };
+        if let Some(image) = material.base_color_image {
+            let texture = add(&mut graph, "Base Colour", NodeKind::Image { image: Some(image) });
+            let factor = add(&mut graph, "Tint", NodeKind::Color(material.base_color));
+            let product = add(&mut graph, "Base Colour x Tint", NodeKind::Multiply);
+            wire(&mut graph, texture, 0, product, 0);
+            wire(&mut graph, factor, 0, product, 1);
+            wire(&mut graph, product, 0, 0, 0);
+        }
+        if let Some(image) = material.metallic_roughness_image {
+            // glTF's packing: green is roughness, blue is metallic, and each
+            // multiplies its factor. Red is occlusion and is not read here.
+            let texture = add(
+                &mut graph,
+                "Metallic Roughness",
+                NodeKind::Image { image: Some(image) },
+            );
+            let channels = add(&mut graph, "Channels", NodeKind::SeparateRgb);
+            wire(&mut graph, texture, 0, channels, 0);
+            for (channel, name, factor, socket) in [
+                (1, "Roughness", material.roughness, 2),
+                (2, "Metallic", material.metallic, 1),
+            ] {
+                let value = add(&mut graph, name, NodeKind::Value(factor));
+                let product = add(&mut graph, name, NodeKind::MultiplyValue);
+                wire(&mut graph, channels, channel, product, 0);
+                wire(&mut graph, value, 0, product, 1);
+                wire(&mut graph, product, 0, 0, socket);
+            }
+        }
+        if let Some(image) = material.normal_image {
+            let texture = add(&mut graph, "Normal", NodeKind::Image { image: Some(image) });
+            let decode = add(
+                &mut graph,
+                "Normal Map",
+                NodeKind::NormalMap { strength: material.normal_strength },
+            );
+            wire(&mut graph, texture, 0, decode, 0);
+            wire(&mut graph, decode, 0, 0, 3);
         }
         graph
     }
@@ -712,4 +778,48 @@ mod tests {
         };
         assert_eq!(ShaderGraph::for_material(&material).images(), vec![image]);
     }
+
+    #[test]
+    fn every_map_a_material_names_is_one_the_graph_asks_for() {
+        // Three maps, three images, each once. A map the graph did not reach
+        // is a texture that never uploads and a slot that silently does
+        // nothing.
+        let mut doc = crate::Document::new();
+        let (a, b, c) = (an_image(&mut doc), an_image(&mut doc), an_image(&mut doc));
+        let material = crate::document::Material {
+            base_color_image: Some(a),
+            metallic_roughness_image: Some(b),
+            normal_image: Some(c),
+            ..Default::default()
+        };
+        let graph = ShaderGraph::for_material(&material);
+        let images = graph.images();
+        assert_eq!(images.len(), 3, "{images:?}");
+        for id in [a, b, c] {
+            assert!(images.contains(&id), "{id:?} is not asked for");
+        }
+        let surface = graph.output().expect("a surface");
+        for socket in 0..4 {
+            assert!(graph.incoming(surface, socket).is_some(), "socket {socket} is unwired");
+        }
+    }
+
+    #[test]
+    fn a_normal_is_not_a_colour() {
+        // The type that keeps a normal map from being wired into a base colour
+        // raw — which would compile, and draw a surface lit by a purple
+        // picture of itself.
+        let mut graph = ShaderGraph::standard("M", SceneRgb::new(1.0, 1.0, 1.0), 0.0, 0.5);
+        let decode = graph
+            .add_node(Node::new("N", NodeKind::NormalMap { strength: 1.0 }))
+            .expect("added");
+        assert_eq!(
+            graph.link(Link { from_node: decode, from_socket: 0, to_node: 0, to_socket: 0 }),
+            Err(LinkError::TypeMismatch { from: Socket::Vector, to: Socket::Color })
+        );
+        assert!(graph
+            .link(Link { from_node: decode, from_socket: 0, to_node: 0, to_socket: 3 })
+            .is_ok());
+    }
 }
+

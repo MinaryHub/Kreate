@@ -196,7 +196,7 @@ pub fn shader_source() -> String {
 /// what the viewport runs is the function the device tests measure.
 ///
 /// This does not compile on its own, and that is the point: the fragment stage
-/// calls `material_surface`, which a material's own compiled code provides. A
+/// calls `material_sample`, which a material's own compiled code provides. A
 /// version of it that worked alone would need a built-in surface, and a
 /// built-in surface is the second implementation §3's fifth decision exists to
 /// prevent. Use [`rendered_source_with`].
@@ -638,7 +638,7 @@ mod tests {
         // shading, the device tests would still pass and the picture would
         // still be plausible — which is exactly the drift §5 warns about.
         // With a material on the end, because that is what a pipeline is:
-        // the fragment stage calls `material_surface` and a material's own code
+        // the fragment stage calls `material_sample` and a material's own code
         // is where that comes from. Parsing the library alone would be parsing
         // something no device is ever given.
         let source = rendered_source_with(&a_material());
@@ -653,8 +653,8 @@ mod tests {
         // And no probe: those declare buffers a drawing pass does not bind.
         assert!(!source.contains("fn probe_shading"));
         // One material function, from the material, and the fragment calls it.
-        assert_eq!(source.matches("fn material_surface").count(), 1);
-        assert!(source.contains("material_surface(in.uv)"));
+        assert_eq!(source.matches("fn material_sample").count(), 1);
+        assert!(source.contains("material_sample(in.uv, uv_dx, uv_dy)"));
     }
 
     /// A plain grey material, compiled.

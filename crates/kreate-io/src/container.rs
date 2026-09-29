@@ -386,6 +386,20 @@ pub struct MaterialRecord {
     /// texture" rather than as "the image whose uid is zero".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_uid: Option<u64>,
+    /// The packed metallic-roughness map's identity. Absent for none, for the
+    /// reason `image_uid` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic_roughness_uid: Option<u64>,
+    /// The normal map's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_uid: Option<u64>,
+    /// The normal map's strength, written only when it is not one.
+    ///
+    /// Absent reads as one, which is the value every file written before this
+    /// field had — so an old file and a new file that never touched the dial
+    /// are byte-identical, and the golden file does not move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_strength: Option<f32>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -791,6 +805,15 @@ pub fn write(
                         .base_color_image
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
+                    metallic_roughness_uid: m
+                        .metallic_roughness_image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
+                    normal_uid: m
+                        .normal_image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
+                    normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
                     extra: BTreeMap::new(),
                 }
             })
@@ -1118,6 +1141,13 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             base_color_image: record
                 .image_uid
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            metallic_roughness_image: record
+                .metallic_roughness_uid
+                .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            normal_image: record
+                .normal_uid
+                .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            normal_strength: record.normal_strength.unwrap_or(1.0),
             linkage: Linkage::Local,
             uid: kreate_scene::Uid::NONE,
         };

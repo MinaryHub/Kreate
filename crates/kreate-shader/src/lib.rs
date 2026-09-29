@@ -33,17 +33,47 @@
 //! ```text
 //! struct Surface        from kreate-render's brdf.wgsl
 //! @group(3) @binding(0) var<uniform> material: MaterialConstants
-//! @group(3) @binding(1) var material_textures: texture_2d_array<f32>
+//! @group(3) @binding(1) var material_textures: texture_2d_array<f32>   colours
 //! @group(3) @binding(2) var material_sampler: sampler
+//! @group(3) @binding(3) var material_data: texture_2d_array<f32>       numbers
 //! ```
 //!
 //! A texture *array* rather than one binding per image, because bindless is not
 //! in wgpu's core (v1 §4.7) and a binding per image would make the layout —
 //! and therefore the pipeline — depend on how many images a material happens to
-//! use. The array's layer is the index into [`Compiled::images`].
+//! use.
+//!
+//! **Two arrays, because an image is either a colour or a number.** The colour
+//! array is an sRGB format so the sampler decodes each tap before it filters,
+//! which is the only order that is right; a roughness or normal map through
+//! that array would come back bent by a curve it was never encoded with. The
+//! data array is plain `Unorm`. Which one an image goes in is its declared
+//! [`ColorSpace`], asked of the caller — see [`compile_with`] — and an image's
+//! layer is its position among the images [`Compiled::images`] lists *of the
+//! same space*.
+//!
+//! # What the emitted function is
+//!
+//! ```text
+//! fn material_sample(uv, uv_dx, uv_dy) -> MaterialSample
+//! struct MaterialSample { surface: Surface, normal: vec3<f32> }
+//! ```
+//!
+//! The UV's screen derivatives are *arguments*. A fragment pass has them from
+//! `dpdx`, and a compute pass — §2.5's path tracer — has none and must supply
+//! its own from a ray cone. Computing them in here would make the material
+//! compile only into fragment shaders. They choose the mip level: the sample
+//! is `textureSampleGrad`, never `textureSample`, because the UV is wrapped
+//! with `fract` first and the derivative of a wrapped coordinate jumps at the
+//! wrap — `textureSample` would read that jump as a texture minified to one
+//! texel and draw a seam in the smallest mip.
+//!
+//! `normal` is tangent-space, +Z out of the surface. The pass owns the tangent
+//! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
 use kreate_scene::shader::{NodeKind, ShaderGraph, Socket};
+use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
 /// The bind group a material's own data arrives in.
@@ -52,9 +82,9 @@ pub const MATERIAL_GROUP: u32 = 3;
 /// What a compiled material needs alongside its code.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compiled {
-    /// The function `material_surface(uv: vec2<f32>) -> Surface`, and nothing
-    /// else: no entry point, no library. A pass appends this to the shading
-    /// library and calls it.
+    /// The function `material_sample(uv, uv_dx, uv_dy) -> MaterialSample`
+    /// and its struct, and nothing else: no entry point, no library. A pass
+    /// appends this to the shading library and calls it.
     pub wgsl: String,
     /// One `vec4` per constant slot, in the order the code indexes them.
     ///
@@ -63,8 +93,14 @@ pub struct Compiled {
     /// first in the wrong place, which is a material that is wrong in a way
     /// nobody can see the cause of.
     pub constants: Vec<[f32; 4]>,
-    /// The images the graph samples, in layer order.
+    /// The images the graph samples, in the order the graph reaches them.
     pub images: Vec<ImageId>,
+    /// Parallel to `images`: which array each one is in.
+    ///
+    /// An image's layer is its position among the images of its own space, so
+    /// a renderer that packs each array in this list's order puts every image
+    /// where the code looks for it.
+    pub image_spaces: Vec<ColorSpace>,
     /// Which constant slot each image's rectangle goes in, parallel to
     /// `images`.
     ///
@@ -101,13 +137,32 @@ pub enum CompileError {
     BrokenLink,
 }
 
-/// Compiles a graph.
+/// Compiles a graph whose images are all colours.
+///
+/// For a graph that only has a base colour map — and for tests, which is most
+/// callers. Anything with a data map wants [`compile_with`], because the
+/// images' spaces are the document's to say and not this crate's to guess.
 pub fn compile(graph: &ShaderGraph) -> Result<Compiled, CompileError> {
+    compile_with(graph, |_| ColorSpace::Srgb)
+}
+
+/// Compiles a graph, asking `space_of` what each image's numbers are.
+///
+/// A lookup rather than a copy in the graph, because the image datablock
+/// already says — a second record of it in every node that samples it is a
+/// second authority, and the two part company the first time somebody changes
+/// an image's declared space.
+pub fn compile_with(
+    graph: &ShaderGraph,
+    space_of: impl Fn(ImageId) -> ColorSpace,
+) -> Result<Compiled, CompileError> {
     let output = graph.output().ok_or(CompileError::NoSurface)?;
     let mut out = Emitter {
         graph,
+        space_of: &space_of,
         constants: Vec::new(),
         images: Vec::new(),
+        image_spaces: Vec::new(),
         image_slots: Vec::new(),
         notes: Vec::new(),
         body: String::new(),
@@ -150,10 +205,19 @@ pub fn compile(graph: &ShaderGraph) -> Result<Compiled, CompileError> {
         wgsl,
         "@group({MATERIAL_GROUP}) @binding(2) var material_sampler: sampler;"
     );
+    let _ = writeln!(
+        wgsl,
+        "@group({MATERIAL_GROUP}) @binding(3) var material_data: texture_2d_array<f32>;"
+    );
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "fn material_surface(uv: vec2<f32>) -> Surface {{\n{}    var s: Surface;",
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32> }}"
+    );
+    let _ = writeln!(wgsl);
+    let _ = writeln!(
+        wgsl,
+        "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> MaterialSample {{\n{}    var s: Surface;",
         out.body
     );
 
@@ -167,12 +231,18 @@ pub fn compile(graph: &ShaderGraph) -> Result<Compiled, CompileError> {
     // Clamped away from zero at the bottom, because a roughness of exactly zero
     // is a delta lobe and the microfacet arithmetic divides by its square.
     let _ = writeln!(wgsl, "    s.roughness = clamp({roughness}, 0.02, 1.0);");
-    let _ = writeln!(wgsl, "    return s;\n}}");
+    // Straight up when nothing is wired: the geometric normal, unchanged.
+    let normal = out.input_expr(output, 3, "vec3<f32>(0.0, 0.0, 1.0)")?;
+    let _ = writeln!(wgsl, "    var out: MaterialSample;");
+    let _ = writeln!(wgsl, "    out.surface = s;");
+    let _ = writeln!(wgsl, "    out.normal = {normal};");
+    let _ = writeln!(wgsl, "    return out;\n}}");
 
     Ok(Compiled {
         wgsl,
         constants: out.constants,
         images: out.images,
+        image_spaces: out.image_spaces,
         image_slots: out.image_slots,
         notes: out.notes,
     })
@@ -181,8 +251,10 @@ pub fn compile(graph: &ShaderGraph) -> Result<Compiled, CompileError> {
 /// Walks the graph and writes the statements.
 struct Emitter<'a> {
     graph: &'a ShaderGraph,
+    space_of: &'a dyn Fn(ImageId) -> ColorSpace,
     constants: Vec<[f32; 4]>,
     images: Vec<ImageId>,
+    image_spaces: Vec<ColorSpace>,
     image_slots: Vec<usize>,
     notes: Vec<Note>,
     body: String,
@@ -237,8 +309,14 @@ impl Emitter<'_> {
                 self.constants.push([0.0; 4]);
                 match image {
                     Some(id) => {
-                        let layer = self.images.len();
+                        let space = (self.space_of)(id);
+                        let layer = self.image_spaces.iter().filter(|s| **s == space).count();
+                        let array = match space {
+                            ColorSpace::Srgb => "material_textures",
+                            ColorSpace::Raw => "material_data",
+                        };
                         self.images.push(id);
+                        self.image_spaces.push(space);
                         self.image_slots.push(slot);
                         // The rectangle moves the UV into the image's corner of
                         // its layer. `fract` first, so that a surface whose UVs
@@ -255,9 +333,13 @@ impl Emitter<'_> {
                             self.body,
                             "    let n{node}_rect = material.values[{slot}];"
                         );
+                        // The gradients are the UV's, scaled into the rectangle
+                        // the same way the coordinate is — and taken from the
+                        // *unwrapped* UV, which is the point of passing them:
+                        // see the module docs on the seam `fract` would draw.
                         let _ = writeln!(
                             self.body,
-                            "    let n{node}_rgba = textureSample(material_textures, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer});"
+                            "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
                         );
                     }
                     None => {
@@ -280,6 +362,34 @@ impl Emitter<'_> {
                 let a = self.input_expr(node, 0, "vec3<f32>(1.0)")?;
                 let b = self.input_expr(node, 1, "vec3<f32>(1.0)")?;
                 let _ = writeln!(self.body, "    let n{node} = {a} * {b};");
+            }
+            NodeKind::SeparateRgb => {
+                self.constants.push([0.0; 4]);
+                let c = self.input_expr(node, 0, "vec3<f32>(1.0)")?;
+                let _ = writeln!(self.body, "    let n{node} = {c};");
+            }
+            NodeKind::MultiplyValue => {
+                self.constants.push([0.0; 4]);
+                // One on both sides, for the reason the colour multiply uses
+                // white: an unwired factor is the identity.
+                let a = self.input_expr(node, 0, "1.0")?;
+                let b = self.input_expr(node, 1, "1.0")?;
+                let _ = writeln!(self.body, "    let n{node} = {a} * {b};");
+            }
+            NodeKind::NormalMap { strength } => {
+                self.constants.push([strength, 0.0, 0.0, 0.0]);
+                // Unwired is the flat normal's encoding, so the node alone is
+                // the identity rather than a surface tipped toward +X+Y.
+                let c = self.input_expr(node, 0, "vec3<f32>(0.5, 0.5, 1.0)")?;
+                let _ = writeln!(self.body, "    let n{node}_t = {c} * 2.0 - vec3<f32>(1.0);");
+                // Strength scales the tilt, not the vector: glTF's rule. Z is
+                // kept off zero and off the back, because a badly encoded map
+                // with a texel pointing into the surface would otherwise light
+                // that texel from behind.
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
+                );
             }
             NodeKind::Surface { base_color, metallic, roughness } => {
                 // Two slots: the colour and the metallic share one, the
@@ -318,6 +428,12 @@ impl Emitter<'_> {
             // statement names the whole `vec4` and the sockets slice it.
             (NodeKind::Image { .. }, Socket::Color) => format!("n{}_rgba.rgb", link.from_node),
             (NodeKind::Image { .. }, Socket::Scalar) => format!("n{}_rgba.a", link.from_node),
+            (NodeKind::SeparateRgb, _) => {
+                let channel = ["x", "y", "z"]
+                    .get(link.from_socket)
+                    .ok_or(CompileError::BrokenLink)?;
+                format!("n{}.{channel}", link.from_node)
+            }
             _ => format!("n{}", link.from_node),
         })
     }
@@ -504,7 +620,7 @@ mod tests {
         assert_eq!(compiled.images.len(), 1);
         assert_eq!(compiled.image_slots.len(), 1);
         parses(&compiled);
-        assert_eq!(compiled.wgsl.matches("textureSample(").count(), 1);
+        assert_eq!(compiled.wgsl.matches("textureSampleGrad(").count(), 1);
         assert!(compiled.wgsl.contains(&format!("s.base_color = n{image}_rgba.rgb;")));
         assert!(compiled
             .wgsl
@@ -613,7 +729,7 @@ mod multiply_tests {
         let compiled = compile(&graph).expect("it compiles");
         assert_eq!(compiled.images, vec![image], "the texture is not uploaded");
         assert_eq!(
-            compiled.wgsl.matches("textureSample").count(),
+            compiled.wgsl.matches("textureSampleGrad").count(),
             1,
             "a tint should not cost a second tap"
         );
@@ -665,5 +781,130 @@ mod multiply_tests {
         let b = compile(&graph_of(two, SceneRgb::new(0.0, 0.0, 1.0))).expect("compiles");
         assert_eq!(a.wgsl, b.wgsl, "a texture swap became a pipeline");
         assert_ne!(a.constants, b.constants, "the colours did not reach the numbers");
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+    use kreate_math::SceneRgb;
+
+    /// A material with all three maps, each its own image.
+    fn mapped() -> (ShaderGraph, [ImageId; 3]) {
+        let mut doc = kreate_scene::Document::new();
+        let mut add = |name: &str| {
+            doc.add_image(kreate_scene::Image::new(name, 4, 4, kreate_scene::PixelFormat::Rgba8))
+        };
+        let (colour, packed, normal) = (add("C"), add("MR"), add("N"));
+        let material = kreate_scene::Material {
+            base_color: SceneRgb::new(0.5, 0.5, 0.5),
+            metallic: 0.25,
+            roughness: 0.75,
+            base_color_image: Some(colour),
+            metallic_roughness_image: Some(packed),
+            normal_image: Some(normal),
+            normal_strength: 0.5,
+            ..Default::default()
+        };
+        (ShaderGraph::for_material(&material), [colour, packed, normal])
+    }
+
+    /// The spaces a document would answer with: the colour map sRGB, the
+    /// others raw.
+    fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
+        move |id| if id == ids[0] { ColorSpace::Srgb } else { ColorSpace::Raw }
+    }
+
+    fn parses(compiled: &Compiled) {
+        let source = format!(
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}\n{}",
+            compiled.wgsl
+        );
+        naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    #[test]
+    fn each_image_is_sampled_from_the_array_its_space_says() {
+        // Colour from the sRGB array and the two data maps from the plain one,
+        // each numbered from zero within its own array — the layer rule the
+        // renderer's packer follows.
+        let (graph, ids) = mapped();
+        let compiled = compile_with(&graph, spaces(ids)).expect("compiles");
+        parses(&compiled);
+        assert_eq!(compiled.images.len(), 3);
+        assert_eq!(
+            compiled.image_spaces,
+            compiled
+                .images
+                .iter()
+                .map(|id| spaces(ids)(*id))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(compiled.wgsl.matches("textureSampleGrad(material_textures").count(), 1);
+        assert_eq!(compiled.wgsl.matches("textureSampleGrad(material_data").count(), 2);
+        assert!(compiled.wgsl.contains("material_textures, material_sampler, n"));
+        // Two data images: layers 0 and 1 of the data array, not 1 and 2.
+        let data_layers: Vec<&str> = compiled
+            .wgsl
+            .lines()
+            .filter(|l| l.contains("textureSampleGrad(material_data"))
+            .map(|l| l.split(".zw, ").nth(1).and_then(|r| r.split(',').next()).unwrap_or(""))
+            .collect();
+        assert_eq!(data_layers, vec!["0", "1"], "{}", compiled.wgsl);
+    }
+
+    #[test]
+    fn the_packed_map_feeds_roughness_from_green_and_metallic_from_blue() {
+        // glTF's packing. Swapping the two is a material that is shiny where it
+        // was painted rough, and nothing but the picture would say so.
+        let (graph, ids) = mapped();
+        let compiled = compile_with(&graph, spaces(ids)).expect("compiles");
+        let line = |field: &str| {
+            compiled
+                .wgsl
+                .lines()
+                .find(|l| l.contains(&format!("s.{field} = ")))
+                .expect("the field is set")
+                .to_string()
+        };
+        // Each is a product node; find what feeds it.
+        let product_of = |field: &str| {
+            let l = line(field);
+            let name = l.split("clamp(").nth(1).and_then(|r| r.split(',').next()).expect("a node");
+            compiled
+                .wgsl
+                .lines()
+                .find(|x| x.contains(&format!("let {name} = ")))
+                .expect("the product is emitted")
+                .to_string()
+        };
+        assert!(product_of("roughness").contains(".y *"), "{}", compiled.wgsl);
+        assert!(product_of("metallic").contains(".z *"), "{}", compiled.wgsl);
+    }
+
+    #[test]
+    fn a_normal_map_reaches_the_output_and_nothing_else_does() {
+        let (graph, ids) = mapped();
+        let compiled = compile_with(&graph, spaces(ids)).expect("compiles");
+        assert!(compiled.wgsl.contains("* 2.0 - vec3<f32>(1.0)"), "the map is not decoded");
+        assert!(!compiled.wgsl.contains("out.normal = vec3<f32>(0.0, 0.0, 1.0);"));
+        // And its strength is a constant, not text: two strengths, one shader.
+        let flat = compile(&ShaderGraph::standard("F", SceneRgb::new(1.0, 1.0, 1.0), 0.0, 0.5))
+            .expect("compiles");
+        assert!(flat.wgsl.contains("out.normal = vec3<f32>(0.0, 0.0, 1.0);"));
+        assert!(compiled.constants.iter().any(|c| c[0] == 0.5), "the strength did not travel");
+    }
+
+    #[test]
+    fn a_graph_of_colour_images_compiles_the_same_either_way() {
+        // `compile` is `compile_with` everything sRGB. If the two ever
+        // differed for a graph with only a base colour, the tests that use the
+        // short form would be about a different shader from the application's.
+        let (graph, _) = mapped();
+        assert_eq!(
+            compile(&graph).expect("compiles"),
+            compile_with(&graph, |_| ColorSpace::Srgb).expect("compiles")
+        );
     }
 }

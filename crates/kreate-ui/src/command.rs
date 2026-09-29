@@ -93,13 +93,17 @@ pub enum Command {
     PickWorldImage,
     /// Put the world's background back to a colour.
     ClearWorldImage,
-    /// Ask for an image file and make it the active material's base colour map.
+    /// Ask for an image file and put it in one of the active material's
+    /// texture slots.
     ///
     /// A command for the same reason `PickWorldImage` is one: the file read
-    /// cannot live in an operator. `material.set_image` makes the link.
-    PickMaterialImage,
-    /// Take the base colour map off the active material.
-    ClearMaterialImage,
+    /// cannot live in an operator. `material.set_image` makes the link. `map`
+    /// is the operator's parameter of the same name — which slot — and it
+    /// also decides how the file is read: a base colour as sRGB, a roughness
+    /// or normal map as the numbers it holds.
+    PickMaterialImage { map: u32 },
+    /// Take one of the active material's textures off.
+    ClearMaterialImage { map: u32 },
     /// Give the active object a material, so that there is one to edit.
     ///
     /// A command rather than a menu entry wired straight to the operator

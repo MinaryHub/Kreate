@@ -85,7 +85,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("shading", kreate_render::shading::probe_source().into()),
         // Also a fragment, and also checked as what a device receives — which
         // means with a material on the end. The library half does not compile
-        // alone: its fragment stage calls `material_surface`, and that comes
+        // alone: its fragment stage calls `material_sample`, and that comes
         // from a material's own compiled code.
         (
             "rendered",

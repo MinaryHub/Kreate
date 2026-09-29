@@ -234,6 +234,20 @@ pub struct Material {
     /// carry its own graph and this becomes the thing that graph is built from
     /// on the way in.
     pub base_color_image: Option<ImageId>,
+    /// glTF's `metallicRoughnessTexture`: roughness in green, metallic in blue.
+    ///
+    /// Each channel *multiplies* its dial, the way the base colour map
+    /// multiplies the colour — so a map assigned over a roughness of 1 means
+    /// what the map says, and the dial goes on meaning something afterwards.
+    /// Red is left alone: glTF packs occlusion there, and a map that serves
+    /// both is the ordinary case.
+    pub metallic_roughness_image: Option<ImageId>,
+    /// A tangent-space normal map, +Y up (the OpenGL and glTF convention).
+    pub normal_image: Option<ImageId>,
+    /// How far the normal map tilts the surface. glTF's `normalTexture.scale`:
+    /// it scales the map's X and Y before the vector is renormalised, so zero
+    /// is a flat surface and one is the map as painted.
+    pub normal_strength: f32,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
@@ -248,8 +262,79 @@ impl Default for Material {
             metallic: 0.0,
             roughness: 0.5,
             base_color_image: None,
+            metallic_roughness_image: None,
+            normal_image: None,
+            normal_strength: 1.0,
             linkage: Linkage::Local,
             uid: Uid::NONE,
+        }
+    }
+}
+
+/// Which of a material's images: the texture slots a standard surface has.
+///
+/// One enum rather than three fields read by name everywhere, because every
+/// place that touches one touches all of them — the file, the clipboard, the
+/// operator, the panel — and a map added later must not be one those places
+/// forget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MaterialMap {
+    BaseColor,
+    MetallicRoughness,
+    Normal,
+}
+
+impl MaterialMap {
+    /// Every map, in the order the panel lists them and the operator numbers
+    /// them.
+    pub const ALL: [MaterialMap; 3] = [
+        MaterialMap::BaseColor,
+        MaterialMap::MetallicRoughness,
+        MaterialMap::Normal,
+    ];
+
+    /// A stable name for scripts and files. Not the discriminant, for the
+    /// reason `NodeKind::tag` gives.
+    pub fn tag(self) -> &'static str {
+        match self {
+            MaterialMap::BaseColor => "base_color",
+            MaterialMap::MetallicRoughness => "metallic_roughness",
+            MaterialMap::Normal => "normal",
+        }
+    }
+
+    /// What the numbers in an image in this slot are.
+    ///
+    /// **Declared by the slot, not guessed from the file** (§2.1). A base colour
+    /// is a reflectance somebody chose by eye, which is what an eight-bit file
+    /// holds; a roughness or a normal is a measurement, and running it through
+    /// sRGB's curve moves every value but the two ends.
+    pub fn color_space(self) -> crate::image::ColorSpace {
+        match self {
+            MaterialMap::BaseColor => crate::image::ColorSpace::Srgb,
+            MaterialMap::MetallicRoughness | MaterialMap::Normal => {
+                crate::image::ColorSpace::Raw
+            }
+        }
+    }
+}
+
+impl Material {
+    /// The image in one of the material's texture slots.
+    pub fn map(&self, map: MaterialMap) -> Option<ImageId> {
+        match map {
+            MaterialMap::BaseColor => self.base_color_image,
+            MaterialMap::MetallicRoughness => self.metallic_roughness_image,
+            MaterialMap::Normal => self.normal_image,
+        }
+    }
+
+    /// The slot itself, to assign or clear.
+    pub fn map_mut(&mut self, map: MaterialMap) -> &mut Option<ImageId> {
+        match map {
+            MaterialMap::BaseColor => &mut self.base_color_image,
+            MaterialMap::MetallicRoughness => &mut self.metallic_roughness_image,
+            MaterialMap::Normal => &mut self.normal_image,
         }
     }
 }

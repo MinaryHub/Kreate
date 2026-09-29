@@ -114,7 +114,7 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     // this the rendered pass has nothing to shade with and draws no geometry —
     // which is what these tests found the moment the viewport stopped carrying
     // a built-in surface, and is the reason it has no fallback: a fallback
-    // would be a second `material_surface` for §3's fifth decision to have
+    // would be a second `material_sample` for §3's fifth decision to have
     // ruled out.
     let materials = kreate::materials::Materials::compile(doc);
     let pixels: Vec<Vec<kreate::materials::TextureImage>> = materials
@@ -126,11 +126,7 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
         .iter()
         .map(|set| {
             set.iter()
-                .map(|i| kreate_render::material::SourceImage {
-                    width: i.width,
-                    height: i.height,
-                    pixels: &i.pixels,
-                })
+                .map(|i| i.source())
                 .collect()
         })
         .collect();

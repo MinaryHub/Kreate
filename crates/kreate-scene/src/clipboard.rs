@@ -165,14 +165,19 @@ impl Document {
             .material(id)
             .cloned()
             .unwrap_or_default();
-        material.base_color_image = material.base_color_image.and_then(|image| {
-            if let Some(done) = images.get(&image) {
-                return Some(*done);
-            }
-            let copied = into.add_image(self.image(image)?.clone());
-            images.insert(image, copied);
-            Some(copied)
-        });
+        // Every map, through the one image table: a file used as both the
+        // colour and the roughness is one image in the result, as it was here.
+        for map in crate::document::MaterialMap::ALL {
+            let slot = material.map_mut(map);
+            *slot = slot.and_then(|image| {
+                if let Some(done) = images.get(&image) {
+                    return Some(*done);
+                }
+                let copied = into.add_image(self.image(image)?.clone());
+                images.insert(image, copied);
+                Some(copied)
+            });
+        }
         let new_id = into.add_material(material);
         materials.insert(id, new_id);
         new_id

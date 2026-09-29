@@ -11,7 +11,7 @@
 // does not add any shading — every light and every lobe is `shade_point`, which
 // the CPU has its own copy of and a device test holds the two together.
 //
-// And it does not decide what a surface is made of. `material_surface` is
+// And it does not decide what a surface is made of. `material_sample` is
 // appended after this, generated from the object's shading graph by
 // `kreate-shader`, so a material is compiled once and this pass calls it. §3's
 // fifth decision: one graph, one compiler, and no hand-written shading mode.
@@ -120,13 +120,18 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
     // open and inconsistently wound geometry mid-edit, and a black backface is
     // worse than a lit one — the same judgement `solid.wgsl` makes, and the
     // reason neither pass culls.
-    var normal = normalize(in.normal);
-    if dot(normal, view) < 0.0 {
-        normal = -normal;
+    var geometric = normalize(in.normal);
+    if dot(geometric, view) < 0.0 {
+        geometric = -geometric;
     }
 
-    // The compiled material, at this fragment's surface coordinate.
-    let surface = material_surface(in.uv);
+    // Derivatives first and unconditionally: they are only defined in uniform
+    // control flow, and the material needs the UV's to choose a mip level.
+    let uv_dx = dpdx(in.uv);
+    let uv_dy = dpdy(in.uv);
+    let sample = material_sample(in.uv, uv_dx, uv_dy);
+    let surface = sample.surface;
+    let normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
 
     // `in.clip` is the fragment's position in pixels here — the same builtin
     // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that
@@ -134,4 +139,51 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
     let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy));
     // Linear and unbounded. The display transform is a later pass.
     return vec4<f32>(lit, 1.0);
+}
+
+// Tilts `n` by a tangent-space normal, with the tangent frame taken from the
+// screen derivatives of position and UV.
+//
+// No per-vertex tangents: the frame is solved per pixel from how the surface
+// and its coordinates move across the screen (Schüler's cotangent frame). It
+// needs nothing uploaded and nothing kept in step with the mesh, and it is
+// exactly the frame the UVs imply — which is what a map painted on those UVs
+// was painted in. Where it differs from a baked MikkTSpace frame is across
+// smooth-shaded faces, by the per-face variation of the UV mapping; a
+// glTF normal map baked against MikkTSpace can show faint facets there.
+//
+// +X along U and +Y along V, with V up. That is the OpenGL and glTF convention
+// once glTF's top-left UV origin is flipped to ours, which the importer does.
+fn perturb_normal(
+    n: vec3<f32>,
+    p: vec3<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
+    tangent_normal: vec3<f32>,
+) -> vec3<f32> {
+    let dp_dx = dpdx(p);
+    let dp_dy = dpdy(p);
+    // The crosses are the other way round from the usual GLSL listing, and
+    // must be: WGSL's `dpdy` runs *down* the screen where GLSL's `dFdy` runs
+    // up, which negates both the position and the UV term and so the whole
+    // frame. Copied as written, every normal map is lit inside out — a test
+    // that tilts a map toward the light caught exactly that.
+    let dp_dy_perp = cross(n, dp_dy);
+    let dp_dx_perp = cross(dp_dx, n);
+    let t = dp_dy_perp * uv_dx.x + dp_dx_perp * uv_dy.x;
+    let b = dp_dy_perp * uv_dx.y + dp_dx_perp * uv_dy.y;
+    let scale = max(dot(t, t), dot(b, b));
+    // A surface whose UVs do not change across the pixel — no UVs at all, or
+    // a degenerate projection — has no frame to tilt in. Unchanged rather
+    // than NaN, which would be a black pixel.
+    if scale < 1e-30 {
+        return n;
+    }
+    let inv = inverseSqrt(scale);
+    let tilted = t * (inv * tangent_normal.x) + b * (inv * tangent_normal.y) + n * tangent_normal.z;
+    let len2 = dot(tilted, tilted);
+    if len2 < 1e-20 {
+        return n;
+    }
+    return tilted * inverseSqrt(len2);
 }

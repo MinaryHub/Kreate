@@ -15,7 +15,7 @@ pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialOverrides,
+    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
     MeshId, Object, ObjectData, ObjectId, ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};

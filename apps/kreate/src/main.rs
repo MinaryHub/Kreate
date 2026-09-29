@@ -2062,8 +2062,8 @@ impl App {
                 Command::SaveDocumentAs => self.save_document(true),
                 Command::ExportScene => self.export_scene(),
                 Command::PickWorldImage => self.pick_world_image(),
-                Command::PickMaterialImage => self.pick_material_image(),
-                Command::ClearMaterialImage => self.clear_material_image(),
+                Command::PickMaterialImage { map } => self.pick_material_image(map),
+                Command::ClearMaterialImage { map } => self.clear_material_image(map),
                 Command::NewMaterial => {
                     let params = self.material_slot_param();
                     self.run_op("material.new", params)
@@ -2330,20 +2330,28 @@ impl App {
     /// The same division as `pick_world_image`, and the same consequence for
     /// undo: the datablock is added outside the history, so undoing the link
     /// leaves the image in the document with nothing pointing at it.
-    fn pick_material_image(&mut self) {
+    fn pick_material_image(&mut self, map: u32) {
+        let Some(slot) = kreate_scene::MaterialMap::ALL.get(map as usize).copied() else {
+            return;
+        };
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Image", &["png", "jpg", "jpeg", "hdr"])
-            .set_title("Base Colour")
+            .set_title(match slot {
+                kreate_scene::MaterialMap::BaseColor => "Base Colour",
+                kreate_scene::MaterialMap::MetallicRoughness => "Metallic / Roughness",
+                kreate_scene::MaterialMap::Normal => "Normal Map",
+            })
             .pick_file()
         else {
             return;
         };
-        // sRGB, and this one is not a guess either: a base colour is a
+        // The slot declares the space, and not as a guess: a base colour is a
         // reflectance an artist chose by looking at it, which is what an
-        // eight-bit file in this slot always holds. It is also what the atlas
-        // assumes — see the note on `SourceImage::pixels`. A float file ignores
-        // the declaration, because it has no transfer function to undo.
-        let image = match kreate_io::load_image_file(&path, kreate_scene::ColorSpace::Srgb) {
+        // eight-bit file in that slot always holds, and a roughness or normal
+        // map is a measurement stored as plain numbers. The declaration also
+        // picks the atlas the image is drawn from. A float file ignores it,
+        // because it has no transfer function to undo.
+        let image = match kreate_io::load_image_file(&path, slot.color_space()) {
             Ok(image) => image,
             Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
         };
@@ -2353,14 +2361,16 @@ impl App {
             return self.status("the image has no identity");
         };
         let mut params = self.material_slot_param();
+        params.set("map", kreate_reflect::PropertyValue::Enum(map));
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("material.set_image", params);
-        self.status(&format!("base colour: {name}"));
+        self.status(&format!("{}: {name}", slot.tag()));
     }
 
-    /// Takes the base colour texture off the active material.
-    fn clear_material_image(&mut self) {
+    /// Takes one of the active material's textures off.
+    fn clear_material_image(&mut self, map: u32) {
         let mut params = self.material_slot_param();
+        params.set("map", kreate_reflect::PropertyValue::Enum(map));
         params.set("uid", kreate_reflect::PropertyValue::Text(String::new()));
         self.run_op("material.set_image", params);
     }
@@ -3826,11 +3836,7 @@ impl App {
                     .iter()
                     .map(|set| {
                         set.iter()
-                            .map(|i| kreate_render::material::SourceImage {
-                                width: i.width,
-                                height: i.height,
-                                pixels: &i.pixels,
-                            })
+                            .map(|i| i.source())
                             .collect()
                     })
                     .collect();

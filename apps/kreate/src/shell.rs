@@ -899,6 +899,8 @@ struct Labels {
     material_new: String,
     material_none: String,
     material_base_colour: String,
+    material_metallic_roughness: String,
+    material_normal_map: String,
     material_empty_slot: String,
     console_placeholder: String,
     console_empty: String,
@@ -1010,6 +1012,8 @@ impl Labels {
             material_new: t("material-new"),
             material_none: t("material-none"),
             material_base_colour: t("material-base-colour"),
+            material_metallic_roughness: t("material-metallic-roughness"),
+            material_normal_map: t("material-normal-map"),
             material_empty_slot: t("material-empty-slot"),
             console_placeholder: t("console-placeholder"),
             console_empty: t("console-empty"),
@@ -3390,33 +3394,41 @@ fn draw_material_tab(
     // panel with no texture, so the one question somebody opens this tab to
     // answer had no answer on screen.
     kreate_ui::panel::section(ui, &l.panel_surface, true, |ui| {
-    ui.label(&l.material_base_colour);
-    ui.horizontal(|ui| {
-        let assigned = material
-            .base_color_image
-            .and_then(|id| doc.image(id))
-            .map(|image| image.name.clone());
-        match &assigned {
-            // i18n-exempt: an image's name is the user's own text
-            Some(name) => {
-                if ui.button(name).on_hover_text(&l.material_pick_image).clicked() {
-                    state.queue.push(Command::PickMaterialImage);
+    for (index, map) in kreate_scene::MaterialMap::ALL.into_iter().enumerate() {
+        let label = match map {
+            kreate_scene::MaterialMap::BaseColor => &l.material_base_colour,
+            kreate_scene::MaterialMap::MetallicRoughness => &l.material_metallic_roughness,
+            kreate_scene::MaterialMap::Normal => &l.material_normal_map,
+        };
+        let map_id = index as u32;
+        ui.label(label);
+        ui.horizontal(|ui| {
+            let assigned = material
+                .map(map)
+                .and_then(|id| doc.image(id))
+                .map(|image| image.name.clone());
+            match &assigned {
+                // i18n-exempt: an image's name is the user's own text
+                Some(name) => {
+                    if ui.button(name).on_hover_text(&l.material_pick_image).clicked() {
+                        state.queue.push(Command::PickMaterialImage { map: map_id });
+                    }
+                    if ui
+                        .button(CLEAR_GLYPH)
+                        .on_hover_text(&l.material_clear_image)
+                        .clicked()
+                    {
+                        state.queue.push(Command::ClearMaterialImage { map: map_id });
+                    }
                 }
-                if ui
-                    .button(CLEAR_GLYPH)
-                    .on_hover_text(&l.material_clear_image)
-                    .clicked()
-                {
-                    state.queue.push(Command::ClearMaterialImage);
+                None => {
+                    if ui.button(&l.material_pick_image).clicked() {
+                        state.queue.push(Command::PickMaterialImage { map: map_id });
+                    }
                 }
             }
-            None => {
-                if ui.button(&l.material_pick_image).clicked() {
-                    state.queue.push(Command::PickMaterialImage);
-                }
-            }
-        }
-    });
+        });
+    }
     ui.separator();
     let mut params = kreate_reflect::OpParams::to_map(
         &kreate_ops::ops::object::material_params(material, slot),
@@ -3430,7 +3442,13 @@ fn draw_material_tab(
         // The slot is *which* material is being edited, not a property of it.
         // Drawn as a spinner it would be a second, worse copy of the list
         // above, and one that could point at a slot the list does not show.
-        |name| name != "slot",
+        // The normal strength only once there is a normal map for it to
+        // scale: a dial that does nothing is the dead control this panel was
+        // cleaned of once already.
+        |name| {
+            name != "slot"
+                && (name != "normal_strength" || material.normal_image.is_some())
+        },
     ) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "material.set_properties", params, dragging);
@@ -3624,6 +3642,8 @@ material-clear-image = Clear
 material-new = New Material
 material-none = This object has no material.
 material-base-colour = Base Colour
+material-metallic-roughness = Metallic / Roughness
+material-normal-map = Normal Map
 material-empty-slot = Empty
 material-no-slots = No slots
 material-add-slot = Add a material slot
@@ -3944,6 +3964,8 @@ material-clear-image = 지우기
 material-new = 새 재질
 material-none = 이 물체에는 재질이 없습니다.
 material-base-colour = 베이스 컬러
+material-metallic-roughness = 메탈릭 / 러프니스
+material-normal-map = 노멀 맵
 material-empty-slot = 비어 있음
 material-no-slots = 슬롯 없음
 material-add-slot = 재질 슬롯 추가
@@ -5005,6 +5027,8 @@ mod tests {
             "material-new",
             "material-none",
             "material-base-colour",
+            "material-metallic-roughness",
+            "material-normal-map",
             "material-empty-slot",
             "console-placeholder",
             "console-empty",

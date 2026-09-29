@@ -798,3 +798,63 @@ fn a_texture_the_file_does_not_carry_comes_back_as_no_texture() {
         "a uid naming nothing resolved to something"
     );
 }
+
+#[test]
+fn every_map_and_the_normal_strength_survive_a_save() {
+    // Three images in three slots, each a different one, so a slot read back
+    // from its neighbour's field points at the wrong name rather than passing.
+    // And the data maps keep their declared space: a normal map that came back
+    // as a colour would go through the sRGB atlas and light every face wrongly.
+    let mut doc = Document::new();
+    let mut add = |name: &str, space| {
+        let mut image = kreate_scene::Image::new(name, 4, 4, kreate_scene::PixelFormat::Rgba8);
+        image.color_space = space;
+        doc.add_image(image)
+    };
+    let colour = add("Albedo", kreate_scene::ColorSpace::Srgb);
+    let packed = add("ORM", kreate_scene::ColorSpace::Raw);
+    let normal = add("Normal", kreate_scene::ColorSpace::Raw);
+    doc.add_material(kreate_scene::Material {
+        name: "Mapped".into(),
+        base_color_image: Some(colour),
+        metallic_roughness_image: Some(packed),
+        normal_image: Some(normal),
+        normal_strength: 0.35,
+        ..Default::default()
+    });
+
+    let after = round_trip(&doc).document;
+    let (_, m) = after.materials().next().expect("the material came back");
+    let name_of = |id: Option<kreate_scene::document::ImageId>| {
+        id.and_then(|id| after.image(id)).map(|i| (i.name.clone(), i.color_space))
+    };
+    use kreate_scene::ColorSpace::{Raw, Srgb};
+    assert_eq!(name_of(m.base_color_image), Some(("Albedo".into(), Srgb)));
+    assert_eq!(name_of(m.metallic_roughness_image), Some(("ORM".into(), Raw)));
+    assert_eq!(name_of(m.normal_image), Some(("Normal".into(), Raw)));
+    assert_eq!(m.normal_strength, 0.35);
+}
+
+#[test]
+fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
+    // Absent rather than default-valued, so a file that uses none of this is
+    // byte-for-byte what it was before these fields existed — which is what
+    // keeps the golden file still.
+    let record = kreate_io::container::MaterialRecord {
+        name: "M".into(),
+        uid: 1,
+        base_color: [0.8; 3],
+        alpha: 1.0,
+        metallic: 0.0,
+        roughness: 0.5,
+        image_uid: None,
+        metallic_roughness_uid: None,
+        normal_uid: None,
+        normal_strength: None,
+        extra: Default::default(),
+    };
+    let text = serde_json::to_string(&record).expect("serialises");
+    for field in ["metallic_roughness_uid", "normal_uid", "normal_strength"] {
+        assert!(!text.contains(field), "{field} was written: {text}");
+    }
+}

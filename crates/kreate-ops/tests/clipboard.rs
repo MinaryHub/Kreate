@@ -168,3 +168,31 @@ fn a_lamp_can_be_copied_and_pasted() {
     assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
     assert_eq!(doc.light_count(), 2);
 }
+
+#[test]
+fn every_map_comes_along_and_a_shared_image_stays_shared() {
+    // One file used as both the colour and the packed map — an ordinary thing
+    // to do with a grey mask. It is one image in the paste too, as it was here.
+    let (registry, mut history, mut doc, ctx) = wired();
+    let a = cube(&mut doc, "A");
+    let mask = doc.add_image(kreate_scene::Image::new("Mask", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let normal = doc.add_image(kreate_scene::Image::new("N", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let material = doc.add_material(kreate_scene::Material {
+        base_color_image: Some(mask),
+        metallic_roughness_image: Some(mask),
+        normal_image: Some(normal),
+        ..Default::default()
+    });
+    let mesh = doc.object(a).unwrap().mesh().unwrap();
+    doc.set_mesh_slots(mesh, vec![Some(material)]);
+    doc.selection.add(a);
+    let text = copy(&doc);
+    let images_before = doc.images().count();
+
+    assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
+    let pasted = doc.selection.active.expect("the paste is active");
+    let m = doc.material_at(pasted, 0).expect("a material");
+    assert!(m.normal_image.is_some(), "the normal map did not come along");
+    assert_eq!(m.base_color_image, m.metallic_roughness_image, "a shared image was split");
+    assert_eq!(doc.images().count(), images_before + 2, "two images, not three");
+}

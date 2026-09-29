@@ -1638,9 +1638,16 @@ fn shot_material_tab() {
             512,
             kreate_scene::PixelFormat::Rgba8,
         ));
+        let normal = textured.add_image(kreate_scene::Image::new(
+            "bricks_normal.png",
+            512,
+            512,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
         let material = textured.add_material(kreate_scene::Material {
             name: "Brick".into(),
             base_color_image: Some(image),
+            normal_image: Some(normal),
             ..Default::default()
         });
         textured.set_mesh_slot(mesh, 0, Some(material));
