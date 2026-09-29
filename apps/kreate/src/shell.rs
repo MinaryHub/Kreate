@@ -227,6 +227,10 @@ pub struct ShellState {
     /// Each shader editor's pan, zoom and selection, per area for the reason
     /// `uv_views` is.
     node_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::NodeEditorState>,
+    /// Each timeline's scrub state, per area.
+    timeline_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
+    /// The clock, published by the application each frame.
+    pub timeline: kreate_ui::timeline::TimelineView,
     /// The UV map to draw, published by the application each frame.
     ///
     /// `None` outside edit mode, and empty when the mesh has no UVs yet —
@@ -459,6 +463,7 @@ impl ShellState {
                         // otherwise accumulate for the life of the session.
                         self.uv_views.remove(&area);
                         self.node_views.remove(&area);
+                        self.timeline_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
@@ -510,6 +515,8 @@ impl Default for ShellState {
             keymap_edits: Vec::new(),
             uv_views: std::collections::BTreeMap::new(),
             node_views: std::collections::BTreeMap::new(),
+            timeline_views: std::collections::BTreeMap::new(),
+            timeline: Default::default(),
             uv: None,
             modal: None,
         }
@@ -934,6 +941,16 @@ struct Labels {
     menu_copy_script: String,
     palette_placeholder: String,
     pie_shading: String,
+    time_play: String,
+    time_pause: String,
+    time_play_menu: String,
+    time_jump_start: String,
+    time_jump_end: String,
+    time_start: String,
+    time_end: String,
+    menu_animation: String,
+    anim_insert: String,
+    anim_delete: String,
     pie_view: String,
     pie_mode: String,
     view_left: String,
@@ -1071,6 +1088,16 @@ impl Labels {
             menu_copy_script: t("menu-copy-script"),
             palette_placeholder: t("palette-placeholder"),
             pie_shading: t("pie-shading"),
+            time_play: t("time-play"),
+            time_pause: t("time-pause"),
+            time_play_menu: t("op-time-play"),
+            time_jump_start: t("time-jump-start"),
+            time_jump_end: t("time-jump-end"),
+            time_start: t("time-start"),
+            time_end: t("time-end"),
+            menu_animation: t("menu-animation"),
+            anim_insert: t("op-anim-keyframe-insert"),
+            anim_delete: t("op-anim-keyframe-delete"),
             pie_view: t("pie-view"),
             pie_mode: t("pie-mode"),
             view_left: t("view-left"),
@@ -1678,6 +1705,9 @@ fn draw_area(
                 "shader" => {
                     draw_shader_editor(ui, state, doc, area.id, l);
                 }
+                "timeline" => {
+                    draw_timeline(ui, state, area.id, l);
+                }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
                     let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
@@ -2136,6 +2166,8 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Separator,
         entry("view.toggle_projection", &l.view_perspective, dispatch("view.toggle_projection")),
         entry("view.toggle_sidebar", &l.view_sidebar, dispatch("view.toggle_sidebar")),
+        MenuNode::Separator,
+        entry("time.play", &l.time_play_menu, dispatch("time.play")),
     ]
 }
 
@@ -2346,6 +2378,16 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
         // put down later. Through `Dispatch`, the door the keys use.
         entry("edit.copy", &l.object_copy, dispatch("edit.copy")),
         entry("edit.paste", &l.object_paste, dispatch("edit.paste")),
+        MenuNode::Separator,
+        // Through `Dispatch`, so the application fills in the frame the
+        // timeline is on — the key the menu entry stands for does the same.
+        MenuNode::Sub(
+            l.menu_animation.clone(),
+            vec![
+                entry("anim.keyframe_insert", &l.anim_insert, dispatch("anim.keyframe_insert")),
+                entry("anim.keyframe_delete", &l.anim_delete, dispatch("anim.keyframe_delete")),
+            ],
+        ),
         MenuNode::Separator,
         entry("object.delete", &l.delete, op("object.delete", &[])),
     ]
@@ -2726,6 +2768,46 @@ fn draw_uv_editor(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, 
     state.uv_views.insert(area, view);
     for command in commands {
         state.queue.push(command);
+    }
+}
+
+/// The timeline, turning what the pointer asks for into the application's
+/// clock actions — the same ones the keys and the menus reach.
+fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l: &Labels) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::timeline::TimelineEdit as E;
+    let text = kreate_ui::timeline::TimelineText {
+        play: l.time_play.clone(),
+        pause: l.time_pause.clone(),
+        jump_start: l.time_jump_start.clone(),
+        jump_end: l.time_jump_end.clone(),
+        start: l.time_start.clone(),
+        end: l.time_end.clone(),
+    };
+    let view = state.timeline.clone();
+    let mut panel = state.timeline_views.remove(&area).unwrap_or_default();
+    let edits = kreate_ui::timeline::timeline(ui, &view, &mut panel, &text);
+    state.timeline_views.insert(area, panel);
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        let id = match edit {
+            E::SetFrame(frame) => {
+                p.set("frame", V::Float(frame));
+                "time.set_frame"
+            }
+            E::TogglePlay => "time.play",
+            E::JumpStart => "time.jump",
+            E::JumpEnd => {
+                p.set("to_end", V::Bool(true));
+                "time.jump"
+            }
+            E::SetRange { start, end } => {
+                p.set("start", V::Int(start as i64));
+                p.set("end", V::Int(end as i64));
+                "time.set_range"
+            }
+        };
+        state.queue.dispatch(id, p);
     }
 }
 
@@ -4304,6 +4386,20 @@ menu-copy-script = Copy History as Script
 palette-placeholder = Search the menus: extrude, add cube, save...
 palette-nothing = Nothing matches.
 pie-shading = Shading
+editor-timeline = Timeline
+time-play = Play
+time-pause = Pause
+time-jump-start = Jump to the start
+time-jump-end = Jump to the end
+time-start = Start
+time-end = End
+menu-animation = Animation
+op-time-play = Play Animation
+op-time-play-desc = Plays the scene from the frame it is on, looping at the end of the range. Again to stop.
+op-anim-keyframe-insert = Insert Keyframe
+op-anim-keyframe-insert-desc = Keys the selected objects' location, rotation and scale at the current frame.
+op-anim-keyframe-delete = Delete Keyframe
+op-anim-keyframe-delete-desc = Takes away the selected objects' keys at the current frame.
 pie-view = View
 pie-mode = Mode
 view-left = Left
@@ -4685,6 +4781,20 @@ menu-copy-script = 히스토리를 스크립트로 복사
 palette-placeholder = 메뉴 검색: extrude, 큐브 추가, 저장...
 palette-nothing = 일치하는 항목이 없습니다.
 pie-shading = 셰이딩
+editor-timeline = 타임라인
+time-play = 재생
+time-pause = 일시정지
+time-jump-start = 처음으로
+time-jump-end = 끝으로
+time-start = 시작
+time-end = 끝
+menu-animation = 애니메이션
+op-time-play = 애니메이션 재생
+op-time-play-desc = 지금 프레임부터 장면을 재생하고, 범위 끝에서 처음으로 돌아갑니다. 다시 누르면 멈춥니다.
+op-anim-keyframe-insert = 키프레임 삽입
+op-anim-keyframe-insert-desc = 선택한 오브젝트의 위치, 회전, 크기를 현재 프레임에 키로 기록합니다.
+op-anim-keyframe-delete = 키프레임 삭제
+op-anim-keyframe-delete-desc = 선택한 오브젝트의 현재 프레임 키를 지웁니다.
 pie-view = 보기
 pie-mode = 모드
 view-left = 왼쪽
@@ -5276,7 +5386,8 @@ mod tests {
         let state = ShellState::default();
         let areas = state.screen().areas();
         assert!(state.has_editor(kreate_ui::EditorId::VIEWPORT));
-        assert_eq!(areas.len(), 3, "viewport, outliner, properties");
+        assert_eq!(areas.len(), 4, "viewport, timeline, outliner, properties");
+        assert!(state.has_editor(kreate_ui::EditorId::TIMELINE), "Layout keeps its clock in reach");
 
         let mut ids: Vec<_> = areas.iter().map(|(id, _)| *id).collect();
         ids.sort();

@@ -1935,3 +1935,26 @@ fn shot_pies() {
         shot.dump(label);
     }
 }
+
+/// A picture of the Layout workspace's timeline, with keys on it.
+#[test]
+fn shot_timeline() {
+    let doc = doc_with_cube();
+    for (label, locale) in [("timeline", "en"), ("timeline-ko", "ko-KR")] {
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            // The application publishes this each frame; the harness has no
+            // application, so it is given here.
+            state.timeline = kreate_ui::timeline::TimelineView {
+                frame: 24.0,
+                start: 1,
+                end: 120,
+                playing: false,
+                keys: vec![1.0, 24.0, 60.0, 96.0],
+            };
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}

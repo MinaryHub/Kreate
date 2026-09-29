@@ -82,6 +82,12 @@ fn layout_screen() -> Screen {
     screen
         .split(outliner, Axis::Horizontal, 0.4, EditorId::PROPERTIES)
         .expect("the outliner was just created");
+    // The timeline along the bottom of the viewport, where Blender's Layout
+    // keeps it: the clock is always in reach, and short enough not to cost
+    // the viewport anything a modeller would miss.
+    screen
+        .split(viewport, Axis::Horizontal, 0.84, EditorId::TIMELINE)
+        .expect("the viewport is still there to split");
     screen
 }
 

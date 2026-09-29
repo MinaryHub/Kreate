@@ -130,6 +130,8 @@ impl RedrawReason {
     /// frequent thing that asks for a frame, and having it named is what lets
     /// "why is this window redrawing" be answered rather than guessed at.
     const HOVER_CHANGED: u32 = 1 << 5;
+    /// The animation is playing, and the next frame is a new one.
+    const PLAYING: u32 = 1 << 6;
 
     fn set(&mut self, bit: u32) {
         self.0 |= bit;
@@ -627,6 +629,11 @@ struct App {
     /// opens one has to know which key that was — and an action is a keymap
     /// entry, which says what to do and not how it was asked for.
     dispatching_key: Option<&'static str>,
+    /// Whether the animation is playing, and when the last frame was stepped.
+    ///
+    /// Application state, not the document's: a file saved mid-play opens
+    /// stopped, the way every animation tool's does.
+    playing: Option<std::time::Instant>,
     /// Snapping, as the user has it set. `Ctrl` inverts it for one drag.
     ///
     /// Held on the application rather than inside a gesture because it is a
@@ -711,6 +718,7 @@ impl App {
             recoverable: docfile::find_recoverable(),
             clipboard: None,
             dispatching_key: None,
+            playing: None,
             shown_title: String::new(),
         }
     }
@@ -2375,6 +2383,55 @@ impl App {
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("material.set_image", params);
         self.status(&format!("{}: {name}", slot.tag()));
+    }
+
+    /// Moves the clock to `frame` and plays every animation there.
+    fn set_frame(&mut self, frame: f64) {
+        if !frame.is_finite() {
+            return;
+        }
+        self.doc.animate(frame);
+        if let Some(time) = kreate_math::SceneTime::new(frame, self.doc.playback.fps) {
+            // The modifier stack's time too, so anything that reads the clock
+            // is evaluated at the frame on screen.
+            self.time = time;
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Steps the clock by the wall time since the last step, while playing.
+    ///
+    /// By elapsed time rather than a frame per redraw, so the animation plays
+    /// at its own rate whatever the display does — a slow frame is a skipped
+    /// frame, not a slower film.
+    fn advance_playback(&mut self) {
+        let Some(last) = self.playing else { return };
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(last).as_secs_f64().min(0.25);
+        self.playing = Some(now);
+        let next = self.doc.playback.advanced(dt);
+        self.set_frame(next);
+        self.redraw.set(RedrawReason::PLAYING);
+    }
+
+    /// Hands the clock to the timeline panel.
+    fn sync_timeline(&mut self) {
+        let mut keys: Vec<f64> = Vec::new();
+        for id in &self.doc.selection.objects {
+            if let Some(action) = self.doc.object(*id).and_then(|o| o.action).and_then(|a| self.doc.action(a)) {
+                keys.extend(action.key_frames());
+            }
+        }
+        keys.sort_by(f64::total_cmp);
+        keys.dedup();
+        let p = self.doc.playback;
+        self.ui.timeline = kreate_ui::timeline::TimelineView {
+            frame: p.frame,
+            start: p.start,
+            end: p.end,
+            playing: self.playing.is_some(),
+            keys,
+        };
     }
 
     /// Opens an image file into an Image Texture node.
@@ -4480,6 +4537,44 @@ impl App {
                 );
                 println!("---");
             }
+            // The clock. Not operators: moving through time changes what the
+            // scene shows and leaves nothing to undo, as Blender's frame
+            // change does not.
+            "time.play" => {
+                self.playing = match self.playing {
+                    Some(_) => None,
+                    None => Some(std::time::Instant::now()),
+                };
+                self.redraw.set(RedrawReason::PLAYING);
+            }
+            "time.set_frame" => {
+                if let Some(PropertyValue::Float(frame)) = action.params.get("frame") {
+                    self.set_frame(*frame);
+                }
+            }
+            "time.step" => {
+                let delta = match action.params.get("delta") {
+                    Some(PropertyValue::Int(d)) => *d as f64,
+                    _ => 1.0,
+                };
+                self.set_frame(self.doc.playback.frame.round() + delta);
+            }
+            "time.jump" => {
+                let to_end = matches!(action.params.get("to_end"), Some(PropertyValue::Bool(true)));
+                let p = self.doc.playback;
+                self.set_frame(if to_end { p.end } else { p.start } as f64);
+            }
+            "time.set_range" => {
+                let get = |name: &str| match action.params.get(name) {
+                    Some(PropertyValue::Int(v)) => Some(*v as i32),
+                    _ => None,
+                };
+                if let (Some(start), Some(end)) = (get("start"), get("end")) {
+                    self.doc.playback.start = start;
+                    self.doc.playback.end = end.max(start + 1);
+                    self.redraw.set(RedrawReason::UI);
+                }
+            }
             "app.search" => {
                 self.ui.palette.open();
                 self.redraw.set(RedrawReason::UI);
@@ -4587,6 +4682,13 @@ impl App {
                 // did not name one, so `X` deletes whatever the user is
                 // selecting rather than always vertices.
                 let mut params = action.params.clone();
+                // A key goes on the frame the timeline is on, unless the
+                // binding or the script named one. Whole, because the clock can
+                // be between frames while playing and a key at 12.37 is one
+                // nobody can land on again.
+                if action.op_id.starts_with("anim.keyframe") && params.get("frame").is_none() {
+                    params.set("frame", PropertyValue::Float(self.doc.playback.frame.round()));
+                }
                 if action.op_id.starts_with("mesh.")
                     && params.get("mode").is_none()
                     && matches!(
@@ -4666,6 +4768,11 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit5 => "Digit5",
         KeyCode::Tab => "Tab",
         KeyCode::Backquote => "Backquote",
+        KeyCode::Space => "Space",
+        KeyCode::ArrowLeft => "ArrowLeft",
+        KeyCode::ArrowRight => "ArrowRight",
+        KeyCode::ArrowUp => "ArrowUp",
+        KeyCode::ArrowDown => "ArrowDown",
         // F1 is not here: it is outside the keymap on purpose, so help is
         // reachable from any keymap however broken.
         KeyCode::F2 => "F2",
@@ -5016,6 +5123,8 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                self.advance_playback();
+                self.sync_timeline();
                 self.apply_input();
                 if self.redraw.any() {
                     self.render();
@@ -5034,6 +5143,7 @@ impl ApplicationHandler for App {
             || self.redraw.any()
             || self.motion.is_animating()
             || !self.ui.queue.is_empty()
+            || self.playing.is_some()
         {
             if let Some(w) = &self.window {
                 w.request_redraw();

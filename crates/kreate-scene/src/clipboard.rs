@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::document::{Document, ImageId, MaterialId, Object, ObjectData, ObjectId};
+use crate::document::{ActionId, Document, ImageId, MaterialId, Object, ObjectData, ObjectId};
 use kreate_math::DTransform;
 
 impl Document {
@@ -29,6 +29,7 @@ impl Document {
         let mut new_ids: HashMap<ObjectId, ObjectId> = HashMap::new();
         let mut materials: HashMap<MaterialId, MaterialId> = HashMap::new();
         let mut images: HashMap<ImageId, ImageId> = HashMap::new();
+        let mut actions: HashMap<ActionId, ActionId> = HashMap::new();
 
         for id in &taken {
             let Some(object) = self.object(*id) else { continue };
@@ -60,6 +61,16 @@ impl Document {
                 .iter()
                 .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images)))
                 .collect();
+            // The action comes along, once however many copies play it, so
+            // two pasted objects sharing a walk cycle still share one.
+            copy.action = object.action.and_then(|a| {
+                if let Some(done) = actions.get(&a) {
+                    return Some(*done);
+                }
+                let made = out.add_action(self.action(a)?.clone());
+                actions.insert(a, made);
+                Some(made)
+            });
             // Parents are settled below, once every copy exists. Until then
             // the copy stands alone at its world placement.
             copy.parent = None;
@@ -96,6 +107,7 @@ impl Document {
         let mut materials: HashMap<MaterialId, MaterialId> = HashMap::new();
         let mut images: HashMap<ImageId, ImageId> = HashMap::new();
         let mut new_ids: HashMap<ObjectId, ObjectId> = HashMap::new();
+        let mut actions: HashMap<ActionId, ActionId> = HashMap::new();
         let mut added = Vec::new();
 
         let source_ids: Vec<ObjectId> = other.objects().map(|(id, _)| id).collect();
@@ -130,6 +142,14 @@ impl Document {
                 .iter()
                 .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images)))
                 .collect();
+            copy.action = object.action.and_then(|a| {
+                if let Some(done) = actions.get(&a) {
+                    return Some(*done);
+                }
+                let made = self.add_action(other.action(a)?.clone());
+                actions.insert(a, made);
+                Some(made)
+            });
             copy.parent = None;
             let new_id = self.add_object(copy);
             new_ids.insert(*id, new_id);

@@ -937,3 +937,39 @@ fn a_graph_with_a_node_this_build_does_not_know_falls_back_to_the_flat_material(
     assert!(m.graph.is_none(), "an unreadable graph was half-read");
     assert_eq!(m.name, "Future");
 }
+
+#[test]
+fn an_animation_and_the_clock_survive_a_save() {
+    use kreate_scene::animation::{Action, Interpolation, Playback};
+    let mut doc = Document::new();
+    let mut action = Action::new("Bounce");
+    action.curve_mut("location", 2).insert(1.0, 0.0, Interpolation::Bezier);
+    action.curve_mut("location", 2).insert(12.0, 3.5, Interpolation::Constant);
+    action.curve_mut("rotation_euler", 1).insert(6.0, 1.25, Interpolation::Linear);
+    let action = doc.add_action(action);
+    let mut object = kreate_scene::document::Object::new("Ball", kreate_scene::document::ObjectData::Empty);
+    object.action = Some(action);
+    doc.add_object(object);
+    doc.playback = Playback { frame: 37.0, start: 10, end: 90, fps: 30.0 };
+
+    let after = round_trip(&doc).document;
+    assert_eq!(after.playback, doc.playback);
+    let (_, ball) = after.objects().next().expect("the object came back");
+    let played = after.action(ball.action.expect("the link came back")).expect("the action came back");
+    let before = doc.action(action).unwrap();
+    assert_eq!(played.name, "Bounce");
+    assert_eq!(played.uid, before.uid, "the action's identity changed");
+    assert_eq!(played.curves, before.curves);
+}
+
+#[test]
+fn a_scene_that_never_touched_the_timeline_writes_no_clock() {
+    // So a file saved before there was animation and one saved after, from
+    // the same scene, are the same bytes — the golden file does not move.
+    let doc = Document::new();
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("a zip");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut archive.by_name("scene.json").expect("scene"), &mut text).expect("read");
+    assert!(!text.contains("playback") && !text.contains("actions"), "{text}");
+}

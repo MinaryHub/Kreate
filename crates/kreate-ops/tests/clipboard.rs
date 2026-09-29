@@ -196,3 +196,21 @@ fn every_map_comes_along_and_a_shared_image_stays_shared() {
     assert_eq!(m.base_color_image, m.metallic_roughness_image, "a shared image was split");
     assert_eq!(doc.images().count(), images_before + 2, "two images, not three");
 }
+
+#[test]
+fn an_animated_object_pastes_with_its_animation_and_shares_it_with_nothing() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let a = cube(&mut doc, "A");
+    let mut action = kreate_scene::animation::Action::new("Spin");
+    action.curve_mut("location", 0).insert(1.0, 0.0, Default::default());
+    action.curve_mut("location", 0).insert(9.0, 4.0, Default::default());
+    let action = doc.add_action(action);
+    doc.object_mut(a).unwrap().action = Some(action);
+    doc.selection.add(a);
+    let text = copy(&doc);
+    assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
+    let pasted = doc.selection.active.expect("the paste is active");
+    let its = doc.object(pasted).unwrap().action.expect("the animation did not come along");
+    assert_ne!(its, action, "the paste plays the original's action");
+    assert_eq!(doc.action(its).unwrap().key_frames(), vec![1.0, 9.0]);
+}

@@ -87,6 +87,15 @@ define_id! {
     pub struct WorldId;
 }
 define_id! {
+    /// An action datablock: a set of curves, played by whatever is given it.
+    ///
+    /// A datablock rather than a field on the object for §2.4's reason: a walk
+    /// cycle is shared between characters, and an animation that lived inside
+    /// one object could not be.
+    pub struct ActionId;
+}
+
+define_id! {
     /// A collection: a named grouping of objects, orthogonal to the parent
     /// hierarchy.
     pub struct CollectionId;
@@ -159,6 +168,8 @@ pub struct Object {
     /// result of running this stack over it. See [`crate::modifier`] for why the
     /// evaluated result is cached outside the document rather than here.
     pub modifiers: Vec<crate::modifier::ModifierInstance>,
+    /// The action this object plays, if it is animated.
+    pub action: Option<ActionId>,
 }
 
 impl Object {
@@ -176,6 +187,7 @@ impl Object {
             material_overrides: MaterialOverrides::new(),
             uid: Uid::NONE,
             modifiers: Vec::new(),
+            action: None,
         }
     }
 
@@ -447,6 +459,9 @@ pub struct Document {
     images: Arena<ImageId, Arc<Image>>,
     lights: Arena<LightId, Arc<Light>>,
     worlds: Arena<WorldId, Arc<World>>,
+    actions: Arena<ActionId, Arc<crate::animation::Action>>,
+    /// The scene's clock: the frame it is on, the range it plays, how fast.
+    pub playback: crate::animation::Playback,
     /// Which world is lighting the scene.
     ///
     /// A pointer and not the world itself, so that swapping a lighting setup is
@@ -512,6 +527,7 @@ struct UidCounters {
     light: Uid,
     world: Uid,
     material: Uid,
+    action: Uid,
 }
 
 impl Document {
@@ -600,6 +616,7 @@ impl Document {
             DatablockKind::Material => &mut self.uids.material,
             DatablockKind::Light => &mut self.uids.light,
             DatablockKind::World => &mut self.uids.world,
+            DatablockKind::Action => &mut self.uids.action,
             // Nothing else is a datablock in this document yet. Reaching here
             // means a kind was added to the enum and not to the counters, and
             // handing back the unassigned id makes that a resolvable path to
@@ -1074,6 +1091,90 @@ impl Document {
             .iter()
             .find(|(_, i)| i.uid == uid)
             .map(|(id, _)| id)
+    }
+
+    // --- actions ------------------------------------------------------------
+
+    pub fn add_action(&mut self, action: crate::animation::Action) -> ActionId {
+        let uid = self.issue(DatablockKind::Action);
+        self.touch();
+        self.actions.insert(Arc::new(crate::animation::Action { uid, ..action }))
+    }
+
+    /// Adds an action with an identity it already had. See
+    /// [`Document::restore_object`].
+    pub fn restore_action(&mut self, action: crate::animation::Action, uid: Uid) -> ActionId {
+        if uid.is_none() {
+            return self.add_action(action);
+        }
+        self.uids.action = self.uids.action.max(uid);
+        self.touch();
+        self.actions.insert(Arc::new(crate::animation::Action { uid, ..action }))
+    }
+
+    pub fn action(&self, id: ActionId) -> Option<&crate::animation::Action> {
+        self.actions.get(id).map(|a| a.as_ref())
+    }
+
+    /// Copy-on-write access to an action.
+    pub fn action_mut(&mut self, id: ActionId) -> Option<&mut crate::animation::Action> {
+        self.touch();
+        self.actions.get_mut(id).map(Arc::make_mut)
+    }
+
+    pub fn actions(&self) -> impl Iterator<Item = (ActionId, &crate::animation::Action)> {
+        self.actions.iter().map(|(id, a)| (id, a.as_ref()))
+    }
+
+    pub fn action_count(&self) -> usize {
+        self.actions.len()
+    }
+
+    pub fn action_uid(&self, id: ActionId) -> Option<Uid> {
+        self.actions.get(id).map(|a| a.uid)
+    }
+
+    pub fn action_by_uid(&self, uid: Uid) -> Option<ActionId> {
+        self.actions.iter().find(|(_, a)| a.uid == uid).map(|(id, _)| id)
+    }
+
+    /// Plays every animated object's action at `frame`, and moves the clock
+    /// there.
+    ///
+    /// Blender's model: an animated property *is* its curve's value at the
+    /// current frame, written into the property so that every reader — the
+    /// renderer, picking, the panels — sees the animated scene without knowing
+    /// animation exists. Not an edit: stepping through the timeline leaves
+    /// nothing to undo, and a change to a keyed property that is not keyed is
+    /// replaced the next time the frame moves, as it is in Blender.
+    ///
+    /// Returns how many objects moved, so a caller can skip a redraw when a
+    /// frame change animated nothing.
+    pub fn animate(&mut self, frame: f64) -> usize {
+        self.playback.frame = frame;
+        let animated: Vec<(ObjectId, ActionId)> = self
+            .objects
+            .iter()
+            .filter_map(|(id, o)| o.action.map(|a| (id, a)))
+            .collect();
+        let mut moved = 0;
+        for (object, action) in animated {
+            let Some(action) = self.actions.get(action).cloned() else {
+                continue;
+            };
+            let Some(o) = self.objects.get_mut(object) else {
+                continue;
+            };
+            let before = o.transform;
+            crate::animation::apply_to_object(&action, frame, &mut o.transform);
+            if o.transform != before {
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            self.touch();
+        }
+        moved
     }
 
     // --- lights -------------------------------------------------------------

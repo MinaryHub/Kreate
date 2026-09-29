@@ -186,6 +186,26 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::ctrl()),
         key("edit.redo", "Y", Context::Global, Action::new("edit.redo"))
             .with_modifiers(Modifiers::ctrl()),
+        // The clock, on Blender's keys and everywhere — an animator plays from
+        // whichever editor the pointer is over. Space plays and stops; the
+        // arrows step a frame, or with Shift jump to either end of the range.
+        key("time.play", "Space", Context::Global, Action::new("time.play")),
+        key(
+            "time.next",
+            "ArrowRight",
+            Context::Global,
+            Action::new("time.step").with("delta", PropertyValue::Int(1)),
+        ),
+        key(
+            "time.previous",
+            "ArrowLeft",
+            Context::Global,
+            Action::new("time.step").with("delta", PropertyValue::Int(-1)),
+        ),
+        key("time.end", "ArrowRight", Context::Global, Action::new("time.jump").with("to_end", PropertyValue::Bool(true)))
+            .with_modifiers(Modifiers::shift()),
+        key("time.start", "ArrowLeft", Context::Global, Action::new("time.jump"))
+            .with_modifiers(Modifiers::shift()),
         // Blender's menu search, on Blender's key, everywhere: a command whose
         // menu you cannot find is one you can still name.
         key("app.search", "F3", Context::Global, Action::new("app.search")),
@@ -504,6 +524,22 @@ fn common() -> Vec<Binding> {
         // the application's rather than operators — `edit.`, like undo: copy
         // edits nothing, and paste has to be given the clipboard's text before
         // the `object.paste` operator can run.
+        // Keyframes, on Blender's keys: `I` keys the selection's transform at
+        // the current frame, `Alt+I` takes the keys there away. Object mode
+        // only — `I` in edit mode is Inset.
+        key(
+            "anim.keyframe_insert",
+            "I",
+            Context::ObjectMode,
+            Action::new("anim.keyframe_insert"),
+        ),
+        key(
+            "anim.keyframe_delete",
+            "I",
+            Context::ObjectMode,
+            Action::new("anim.keyframe_delete"),
+        )
+        .with_modifiers(Modifiers::alt()),
         key("edit.copy", "C", Context::ObjectMode, Action::new("edit.copy"))
             .with_modifiers(Modifiers::ctrl()),
         key("edit.paste", "V", Context::ObjectMode, Action::new("edit.paste"))

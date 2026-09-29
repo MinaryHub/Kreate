@@ -95,6 +95,8 @@ impl EditorId {
     pub const CONSOLE: Self = Self::known("console");
     /// A material's node graph.
     pub const SHADER: Self = Self::known("shader");
+    /// The scene's clock and a ruler to move it along.
+    pub const TIMELINE: Self = Self::known("timeline");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -159,6 +161,7 @@ impl EditorRegistry {
             (EditorId::PREFERENCES, "editor-preferences", false),
             (EditorId::CONSOLE, "editor-console", false),
             (EditorId::SHADER, "editor-shader", true),
+            (EditorId::TIMELINE, "editor-timeline", true),
         ] {
             registry.register(EditorInfo {
                 id,

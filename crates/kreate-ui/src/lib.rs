@@ -27,6 +27,7 @@ pub mod outliner;
 pub mod property_editor;
 pub mod text;
 pub mod theme;
+pub mod timeline;
 pub mod uv_editor;
 pub mod workspace;
 pub mod wsfile;

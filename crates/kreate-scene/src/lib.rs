@@ -3,6 +3,7 @@
 //! Typed arenas rather than an ECS, and copy-on-write throughout — see
 //! [`document`] for why both of those are load-bearing rather than stylistic.
 
+pub mod animation;
 pub mod camera;
 pub mod clipboard;
 pub mod document;
@@ -15,7 +16,7 @@ pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
+    ActionId, Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
     MeshId, Object, ObjectData, ObjectId, ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};

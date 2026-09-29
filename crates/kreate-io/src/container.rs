@@ -193,6 +193,9 @@ pub struct ObjectRecord {
     /// zero and that entry must not erase it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub material_overrides: Vec<Option<usize>>,
+    /// Index into [`SceneFile::actions`]: the action this object plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<usize>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -200,6 +203,44 @@ pub struct ObjectRecord {
     pub linked: Option<[String; 2]>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// An action: its curves, each a property of whoever plays it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionRecord {
+    pub name: String,
+    #[serde(default)]
+    pub uid: u64,
+    pub curves: Vec<CurveRecord>,
+}
+
+/// One curve: a component of a property, and its keys.
+///
+/// The property by the name its type declares, for the reason
+/// `kreate_reflect::path` gives: a name is code and stays put, a number would
+/// silently retarget every curve the day its table was reordered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CurveRecord {
+    pub property: String,
+    pub index: u8,
+    pub keys: Vec<KeyRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyRecord {
+    pub frame: f64,
+    pub value: f64,
+    /// Written only when it is not the default Bézier, which most keys are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpolation: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackRecord {
+    pub frame: f64,
+    pub start: i32,
+    pub end: i32,
+    pub fps: f64,
 }
 
 /// The scene graph, as the file describes it.
@@ -597,6 +638,13 @@ pub struct SceneFile {
     /// thing to want rather than a missing value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_world: Option<usize>,
+    /// Every action, in the order objects' `action` indices count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionRecord>,
+    /// The scene's clock. Absent when it is at its defaults, so a file that
+    /// never touched the timeline reads as it did before there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<PlaybackRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -886,6 +934,46 @@ pub fn write(
             .enumerate()
             .map(|(i, (id, _))| (id, i))
             .collect();
+        // Actions before the objects that name them, by position in this
+        // list — the file's convention for a reference that is rewritten
+        // wholesale on load.
+        let action_index: std::collections::HashMap<kreate_scene::ActionId, usize> = document
+            .actions()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        scene.actions = document
+            .actions()
+            .map(|(_, a)| ActionRecord {
+                name: a.name.clone(),
+                uid: a.uid.raw(),
+                curves: a
+                    .curves
+                    .iter()
+                    .filter_map(|c| {
+                        Some(CurveRecord {
+                            property: c.path.property.to_string(),
+                            index: c.path.index?,
+                            keys: c
+                                .keys
+                                .iter()
+                                .map(|k| KeyRecord {
+                                    frame: k.frame,
+                                    value: k.value,
+                                    interpolation: (k.interpolation
+                                        != kreate_scene::animation::Interpolation::default())
+                                    .then(|| k.interpolation.tag().to_string()),
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
+        scene.playback = (document.playback != kreate_scene::animation::Playback::default()).then(|| {
+            let p = document.playback;
+            PlaybackRecord { frame: p.frame, start: p.start, end: p.end, fps: p.fps }
+        });
         scene.materials = document
             .materials()
             .map(|(_, m)| {
@@ -1009,6 +1097,7 @@ pub fn write(
                     .iter()
                     .map(|s| s.and_then(|m| material_index.get(&m).copied()))
                     .collect(),
+                action: object.action.and_then(|a| action_index.get(&a).copied()),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -1287,6 +1376,49 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         document.set_active_world(Some(*id));
     }
 
+    // Actions before objects, which name them by position.
+    let action_ids: Vec<kreate_scene::ActionId> = scene
+        .actions
+        .iter()
+        .map(|record| {
+            let mut action = kreate_scene::animation::Action::new(record.name.clone());
+            for curve in &record.curves {
+                let mut made = kreate_scene::animation::FCurve::owned(&curve.property, curve.index);
+                made.keys = curve
+                    .keys
+                    .iter()
+                    .map(|k| kreate_scene::animation::Keyframe {
+                        frame: k.frame,
+                        value: k.value,
+                        // An interpolation this build does not know is the
+                        // default: the key keeps its place and value, which
+                        // are what a curve is.
+                        interpolation: k
+                            .interpolation
+                            .as_deref()
+                            .and_then(kreate_scene::animation::Interpolation::from_tag)
+                            .unwrap_or_default(),
+                    })
+                    .collect();
+                made.normalise();
+                action.curves.push(made);
+            }
+            document.restore_action(action, kreate_scene::Uid::from_raw(record.uid))
+        })
+        .collect();
+    if let Some(p) = scene.playback {
+        // Refused rather than trusted: an fps of zero divides every playback
+        // step by nothing, and a file can say anything.
+        if p.fps.is_finite() && p.fps > 0.0 && p.frame.is_finite() {
+            document.playback = kreate_scene::animation::Playback {
+                frame: p.frame,
+                start: p.start,
+                end: p.end.max(p.start),
+                fps: p.fps,
+            };
+        }
+    }
+
     let mut object_ids: Vec<ObjectId> = Vec::with_capacity(scene.objects.len());
     for record in &scene.objects {
         let data = match &record.mesh {
@@ -1322,6 +1454,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.parent_inverse = affine_from_array(&record.parent_inverse);
         object.visible = record.visible;
         object.selectable = record.selectable;
+        object.action = record.action.and_then(|i| action_ids.get(i).copied());
         object.material_overrides = record
             .material_overrides
             .iter()
