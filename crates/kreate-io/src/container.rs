@@ -400,8 +400,104 @@ pub struct MaterialRecord {
     /// are byte-identical, and the golden file does not move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal_strength: Option<f32>,
+    /// The material's own node graph, when it uses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A material's shading graph, as the file writes it.
+///
+/// Nodes by tag and flat numbers rather than by serde's view of the enum:
+/// `NodeKind::tag` is the stable name the module docs promise, and inserting a
+/// kind must not renumber every file. An image travels as an identity, for
+/// the reason `MaterialRecord::image_uid` does.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphRecord {
+    pub nodes: Vec<NodeRecord>,
+    /// `[from_node, from_socket, to_node, to_socket]`.
+    pub links: Vec<[usize; 4]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeRecord {
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_uid: Option<u64>,
+}
+
+/// A graph as its record.
+fn graph_record(graph: &kreate_scene::shader::ShaderGraph, document: &Document) -> GraphRecord {
+    GraphRecord {
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|node| NodeRecord {
+                name: node.name.clone(),
+                kind: node.kind.tag().to_string(),
+                position: node.position,
+                values: node.kind.values(),
+                image_uid: match node.kind {
+                    kreate_scene::shader::NodeKind::Image { image } => image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
+                    _ => None,
+                },
+            })
+            .collect(),
+        links: graph
+            .links
+            .iter()
+            .map(|l| [l.from_node, l.from_socket, l.to_node, l.to_socket])
+            .collect(),
+    }
+}
+
+/// A record as a graph, or `None` when it cannot be one.
+///
+/// **All or nothing.** A node of a kind this build does not know makes the
+/// whole graph unreadable, and the material falls back to its flat fields —
+/// which it kept for exactly this. A graph with the unknown node dropped would
+/// load, draw, and be a different material with nothing saying so. Links are
+/// checked the way the editor checks them, and one the graph refuses is
+/// dropped: a wire is not a material, and the file can say anything.
+fn graph_from_record(
+    record: &GraphRecord,
+    document: &Document,
+) -> Option<kreate_scene::shader::ShaderGraph> {
+    use kreate_scene::shader::{Link, Node, NodeKind, ShaderGraph};
+    let mut graph = ShaderGraph {
+        name: String::new(),
+        linkage: Linkage::Local,
+        uid: kreate_scene::Uid::NONE,
+        nodes: Vec::with_capacity(record.nodes.len()),
+        links: Vec::new(),
+    };
+    for node in &record.nodes {
+        let image = node
+            .image_uid
+            .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw)));
+        let kind = NodeKind::from_parts(&node.kind, &node.values, image)?;
+        let mut made = Node::new(node.name.clone(), kind);
+        made.position = node.position;
+        graph.add_node(made)?;
+    }
+    graph.output()?;
+    for [from_node, from_socket, to_node, to_socket] in &record.links {
+        let _ = graph.link(Link {
+            from_node: *from_node,
+            from_socket: *from_socket,
+            to_node: *to_node,
+            to_socket: *to_socket,
+        });
+    }
+    Some(graph)
 }
 
 /// An image datablock, as the file describes it.
@@ -814,6 +910,7 @@ pub fn write(
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
                     normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
+                    graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     extra: BTreeMap::new(),
                 }
             })
@@ -1148,6 +1245,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .normal_uid
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
             normal_strength: record.normal_strength.unwrap_or(1.0),
+            graph: record
+                .graph
+                .as_ref()
+                .and_then(|g| graph_from_record(g, &document)),
             linkage: Linkage::Local,
             uid: kreate_scene::Uid::NONE,
         };

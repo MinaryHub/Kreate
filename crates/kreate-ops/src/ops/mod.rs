@@ -7,6 +7,7 @@
 
 pub mod mesh;
 pub mod modifier;
+pub mod node;
 pub mod object;
 pub mod uv;
 
@@ -14,6 +15,7 @@ pub mod uv;
 pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     mesh::register(registry);
     modifier::register(registry);
+    node::register(registry);
     object::register(registry);
     uv::register(registry);
 }

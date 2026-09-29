@@ -52,7 +52,7 @@ impl Materials {
             // lives beside the fields rather than here — one answer to "what is
             // a standard surface", which is what keeps a field added to the
             // material from having to be added twice.
-            compiled.push(compile_one(doc, &ShaderGraph::for_material(material)));
+            compiled.push(compile_one(doc, &material.shading_graph()));
         }
         Self { compiled, index }
     }
@@ -192,10 +192,12 @@ fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) ->
 }
 
 fn compile_one(doc: &Document, graph: &ShaderGraph) -> kreate_shader::Compiled {
-    // A graph built here cannot fail to compile: `for_material` wires only
-    // what it adds. A graph from a *file* can, and when materials carry their
-    // own the error becomes a note beside the material rather than an
-    // `expect`.
+    // A graph built from flat fields cannot fail to compile. One somebody
+    // edited can — the operators keep its surface, but a file can say
+    // anything — and a material that fails draws as the plain grey rather
+    // than taking the frame down with an `expect`. Grey and not invisible:
+    // a hole in the model reads as broken geometry, and what is broken is a
+    // material.
     //
     // Each image's space is the datablock's own declaration, made when it was
     // loaded into the slot that wanted it. An image the document has lost is
@@ -205,7 +207,15 @@ fn compile_one(doc: &Document, graph: &ShaderGraph) -> kreate_shader::Compiled {
             .map(|image| image.color_space)
             .unwrap_or(kreate_scene::ColorSpace::Srgb)
     })
-    .expect("a standard surface always compiles")
+    .unwrap_or_else(|_| {
+        kreate_shader::compile(&ShaderGraph::standard(
+            "Default",
+            kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+            0.0,
+            0.5,
+        ))
+        .expect("a standard surface always compiles")
+    })
 }
 
 #[cfg(test)]

@@ -1829,7 +1829,7 @@ fn shot_scripting() {
     use kreate_ui::console::{ConsoleLine, LineKind};
     let doc = doc_with_cube();
     let Some(shot) = composite_with(&doc, "en", false, |state| {
-        state.switch_workspace(3);
+        state.switch_workspace(4);
         state.console_log = vec![
             ConsoleLine {
                 text: "kreate.ops.object.add_primitive(shape=1)".into(),
@@ -1854,3 +1854,41 @@ fn shot_scripting() {
     };
     shot.dump("workspace-scripting");
 }
+
+/// A picture of the Shading workspace, with a textured material's graph.
+#[test]
+fn shot_shading() {
+    for (label, locale) in [("shading", "en"), ("shading-ko", "ko-KR")] {
+        let mut doc = doc_with_cube();
+        let mesh = doc.meshes().next().map(|(id, _)| id).expect("a mesh");
+        let colour = doc.add_image(kreate_scene::Image::new(
+            "bricks.png",
+            64,
+            64,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let normal = doc.add_image(kreate_scene::Image::new(
+            "bricks_normal.png",
+            64,
+            64,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let mut material = kreate_scene::Material {
+            name: "Brick".into(),
+            base_color_image: Some(colour),
+            normal_image: Some(normal),
+            ..Default::default()
+        };
+        material.graph = Some(material.shading_graph());
+        let material = doc.add_material(material);
+        doc.set_mesh_slot(mesh, 0, Some(material));
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.switch_workspace(3);
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("workspace-{label}"));
+    }
+}
+

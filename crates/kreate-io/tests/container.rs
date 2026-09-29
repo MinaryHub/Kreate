@@ -851,10 +851,89 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         metallic_roughness_uid: None,
         normal_uid: None,
         normal_strength: None,
+        graph: None,
         extra: Default::default(),
     };
     let text = serde_json::to_string(&record).expect("serialises");
     for field in ["metallic_roughness_uid", "normal_uid", "normal_strength"] {
         assert!(!text.contains(field), "{field} was written: {text}");
     }
+}
+
+#[test]
+fn a_materials_node_graph_survives_a_save() {
+    // Nodes, their numbers, their places, the image a texture node reads and
+    // every wire — the graph that comes back is the graph that went.
+    let mut doc = Document::new();
+    let image = doc.add_image(kreate_scene::Image::new("Bricks", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let mut material = kreate_scene::Material {
+        name: "Noded".into(),
+        base_color_image: Some(image),
+        normal_image: Some(image),
+        normal_strength: 0.3,
+        ..Default::default()
+    };
+    let mut graph = material.shading_graph();
+    graph.nodes[0].position = [12.5, -40.0];
+    material.graph = Some(graph.clone());
+    doc.add_material(material);
+
+    let after = round_trip(&doc).document;
+    let (_, m) = after.materials().next().expect("the material came back");
+    let back = m.graph.clone().expect("the graph came back");
+    assert_eq!(back.nodes.len(), graph.nodes.len());
+    for (a, b) in graph.nodes.iter().zip(&back.nodes) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.position, b.position);
+        assert_eq!(a.kind.tag(), b.kind.tag());
+        assert_eq!(a.kind.values(), b.kind.values());
+    }
+    assert_eq!(back.links, graph.links);
+    let images = back.images();
+    assert_eq!(images.len(), 2);
+    assert!(images.iter().all(|id| after.image(*id).map(|i| i.name.as_str()) == Some("Bricks")));
+}
+
+#[test]
+fn a_graph_with_a_node_this_build_does_not_know_falls_back_to_the_flat_material() {
+    // All or nothing: a graph with the unknown node dropped would be a
+    // different material with nothing saying so.
+    let mut doc = Document::new();
+    let mut material = kreate_scene::Material {
+        name: "Future".into(),
+        ..Default::default()
+    };
+    material.graph = Some(material.shading_graph());
+    doc.add_material(material);
+    let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
+    let bytes = {
+        use std::io::{Read, Write};
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("a zip");
+        let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).expect("entry");
+            let name = entry.name().to_string();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).expect("read");
+            if name.ends_with(".json") {
+                let text = String::from_utf8(data).expect("text");
+                // The file is pretty-printed; match either spacing so the
+                // edit cannot silently miss and leave the test about nothing.
+                let edited = text
+                    .replace("\"kind\": \"surface\"", "\"kind\": \"from_the_future\"")
+                    .replace("\"kind\":\"surface\"", "\"kind\":\"from_the_future\"");
+                if name == "scene.json" {
+                    assert_ne!(edited, text, "the edit found no surface node to rename");
+                }
+                data = edited.into_bytes();
+            }
+            out.start_file(name, zip::write::SimpleFileOptions::default()).expect("start");
+            out.write_all(&data).expect("write");
+        }
+        out.finish().expect("finish").into_inner()
+    };
+    let after = container::read(Cursor::new(bytes)).expect("still opens").document;
+    let (_, m) = after.materials().next().expect("the material came back");
+    assert!(m.graph.is_none(), "an unreadable graph was half-read");
+    assert_eq!(m.name, "Future");
 }

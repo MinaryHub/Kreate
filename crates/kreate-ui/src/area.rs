@@ -93,6 +93,8 @@ impl EditorId {
     pub const PREFERENCES: Self = Self::known("preferences");
     /// The history as a script, and a line to type one. Phase 9's first editor.
     pub const CONSOLE: Self = Self::known("console");
+    /// A material's node graph.
+    pub const SHADER: Self = Self::known("shader");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -156,6 +158,7 @@ impl EditorRegistry {
             (EditorId::UV_EDITOR, "editor-uv", false),
             (EditorId::PREFERENCES, "editor-preferences", false),
             (EditorId::CONSOLE, "editor-console", false),
+            (EditorId::SHADER, "editor-shader", true),
         ] {
             registry.register(EditorInfo {
                 id,

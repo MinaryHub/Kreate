@@ -248,6 +248,18 @@ pub struct Material {
     /// it scales the map's X and Y before the vector is renormalised, so zero
     /// is a flat surface and one is the map as painted.
     pub normal_strength: f32,
+    /// The material's own shading graph, once somebody has asked for one.
+    ///
+    /// `None` is the fast path v1 §5.6 describes: the flat fields above *are*
+    /// the material, and [`crate::shader::ShaderGraph::for_material`] reaches
+    /// the same model by a shorter route. `Some` is Blender's "Use Nodes": the
+    /// graph is authoritative and the flat fields are what the material was
+    /// before, kept so that turning nodes off gives it back.
+    ///
+    /// Inline rather than a datablock of its own. A graph shared between
+    /// materials is Blender's node *group*, which is a different feature and
+    /// wants its own identity; a material's tree belongs to the material.
+    pub graph: Option<crate::shader::ShaderGraph>,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
@@ -265,6 +277,7 @@ impl Default for Material {
             metallic_roughness_image: None,
             normal_image: None,
             normal_strength: 1.0,
+            graph: None,
             linkage: Linkage::Local,
             uid: Uid::NONE,
         }
@@ -320,6 +333,27 @@ impl MaterialMap {
 }
 
 impl Material {
+    /// The graph this material shades with: its own, or the one its flat
+    /// fields are.
+    ///
+    /// The one question every consumer asks — the compiler, the exporter, the
+    /// node editor — answered in one place, so none of them can quietly read
+    /// the flat fields of a material whose graph says something else.
+    pub fn shading_graph(&self) -> crate::shader::ShaderGraph {
+        match &self.graph {
+            Some(graph) => graph.clone(),
+            None => crate::shader::ShaderGraph::for_material(self),
+        }
+    }
+
+    /// Every image the material reaches, through its graph or its maps.
+    pub fn images(&self) -> Vec<ImageId> {
+        match &self.graph {
+            Some(graph) => graph.images(),
+            None => MaterialMap::ALL.iter().filter_map(|m| self.map(*m)).collect(),
+        }
+    }
+
     /// The image in one of the material's texture slots.
     pub fn map(&self, map: MaterialMap) -> Option<ImageId> {
         match map {

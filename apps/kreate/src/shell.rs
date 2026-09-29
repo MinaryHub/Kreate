@@ -220,6 +220,9 @@ pub struct ShellState {
     /// baffling. The area id is stable for the area's life, so the state stays
     /// with it when a neighbour is split or closed.
     uv_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::UvState>,
+    /// Each shader editor's pan, zoom and selection, per area for the reason
+    /// `uv_views` is.
+    node_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::NodeEditorState>,
     /// The UV map to draw, published by the application each frame.
     ///
     /// `None` outside edit mode, and empty when the mesh has no UVs yet —
@@ -395,6 +398,24 @@ impl ShellState {
             })
     }
 
+    /// Whether the pointer is over a shader editor.
+    ///
+    /// The application stops resolving its own keys there — `X` is "delete
+    /// the object" over the viewport and "delete the node" over the graph, and
+    /// the editor handles its own.
+    pub fn node_editor_at(&self, at: egui::Pos2) -> bool {
+        self.screen()
+            .areas()
+            .into_iter()
+            .filter(|(_, kind)| *kind == kreate_ui::EditorId::SHADER)
+            .any(|(id, _)| {
+                self.node_views
+                    .get(&id)
+                    .and_then(|s| s.rect)
+                    .is_some_and(|r| r.contains(at))
+            })
+    }
+
     /// Whether the layouts are worth writing to disk right now.
     ///
     /// Not while a boundary is being dragged: the layout changes every frame of
@@ -433,6 +454,7 @@ impl ShellState {
                         // The state of an area that no longer exists would
                         // otherwise accumulate for the life of the session.
                         self.uv_views.remove(&area);
+                        self.node_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
@@ -481,6 +503,7 @@ impl Default for ShellState {
             capturing: None,
             keymap_edits: Vec::new(),
             uv_views: std::collections::BTreeMap::new(),
+            node_views: std::collections::BTreeMap::new(),
             uv: None,
             modal: None,
         }
@@ -901,6 +924,14 @@ struct Labels {
     material_base_colour: String,
     material_metallic_roughness: String,
     material_normal_map: String,
+    material_uses_nodes: String,
+    node_use_nodes: String,
+    node_use_nodes_hint: String,
+    node_no_graph: String,
+    node_no_material: String,
+    node_add: String,
+    node_no_image: String,
+    node_open_image: String,
     material_empty_slot: String,
     console_placeholder: String,
     console_empty: String,
@@ -1014,6 +1045,14 @@ impl Labels {
             material_base_colour: t("material-base-colour"),
             material_metallic_roughness: t("material-metallic-roughness"),
             material_normal_map: t("material-normal-map"),
+            material_uses_nodes: t("material-uses-nodes"),
+            node_use_nodes: t("node-use-nodes"),
+            node_use_nodes_hint: t("node-use-nodes-hint"),
+            node_no_graph: t("node-no-graph"),
+            node_no_material: t("node-no-material"),
+            node_add: t("node-add"),
+            node_no_image: t("node-no-image"),
+            node_open_image: t("node-open-image"),
             material_empty_slot: t("material-empty-slot"),
             console_placeholder: t("console-placeholder"),
             console_empty: t("console-empty"),
@@ -1444,6 +1483,9 @@ fn draw_area(
                 }
                 "console" => {
                     draw_console(ui, state, history, l);
+                }
+                "shader" => {
+                    draw_shader_editor(ui, state, doc, area.id, l);
                 }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
@@ -2289,6 +2331,252 @@ fn draw_uv_editor(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, 
     for command in commands {
         state.queue.push(command);
     }
+}
+
+/// The shader editor, for the material the Material tab is showing.
+///
+/// Same slot as the tab: the active object's, the row selected there. One
+/// "which material" for both, so the graph on screen and the slot list beside
+/// it can never disagree about what is being edited.
+fn draw_shader_editor(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
+    let slot = state.material_slot;
+    let material = doc
+        .selection
+        .active
+        .and_then(|object| doc.material_at(object, slot as usize));
+    let view = material
+        .and_then(|m| m.graph.as_ref())
+        .map(|graph| graph_view(doc, graph, &state.catalog));
+    let text = kreate_ui::NodeText {
+        no_graph: if material.is_some() {
+            l.node_no_graph.clone()
+        } else {
+            l.node_no_material.clone()
+        },
+        use_nodes: if material.is_some() {
+            l.node_use_nodes.clone()
+        } else {
+            l.material_new.clone()
+        },
+        add: l.node_add.clone(),
+        no_image: l.node_no_image.clone(),
+        open_image: l.node_open_image.clone(),
+    };
+    let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    let mut asked = false;
+    let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
+    state.node_views.insert(area, editor);
+    if asked {
+        if material.is_some() {
+            let mut p = PropertyMap::new();
+            p.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+            p.set("enabled", kreate_reflect::PropertyValue::Bool(true));
+            state.queue.run("material.use_nodes", p);
+        } else {
+            state.queue.push(Command::NewMaterial);
+        }
+    }
+    apply_node_edits(state, slot, edits);
+}
+
+/// Turns what the pointer did in the graph into the operators that do it.
+fn apply_node_edits(state: &mut ShellState, slot: u32, edits: Vec<kreate_ui::NodeEdit>) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::NodeEdit as E;
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        p.set("slot", V::Int(slot as i64));
+        match edit {
+            E::Translate { nodes, x, y } => {
+                p.set("nodes", V::Ints(nodes));
+                p.set("x", V::Float(x as f64));
+                p.set("y", V::Float(y as f64));
+                state.queue.run("node.translate", p);
+            }
+            E::Link { from_node, from_socket, to_node, to_socket } => {
+                p.set("from_node", V::Int(from_node as i64));
+                p.set("from_socket", V::Int(from_socket as i64));
+                p.set("to_node", V::Int(to_node as i64));
+                p.set("to_socket", V::Int(to_socket as i64));
+                state.queue.run("node.link", p);
+            }
+            E::Unlink { to_node, to_socket } => {
+                p.set("to_node", V::Int(to_node as i64));
+                p.set("to_socket", V::Int(to_socket as i64));
+                state.queue.run("node.unlink", p);
+            }
+            E::Add { kind, x, y } => {
+                p.set("kind", V::Enum(kind));
+                p.set("x", V::Float(x as f64));
+                p.set("y", V::Float(y as f64));
+                state.queue.run("node.add", p);
+            }
+            E::Remove { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                state.queue.run("node.remove", p);
+            }
+            // A drag in a field is one step, folded the way a slider's is.
+            E::SetColor { node, field, swatch, continuing } => {
+                p.set("node", V::Int(node as i64));
+                p.set("field", V::Int(field as i64));
+                p.set("color", V::Vec3(swatch.map(|c| c as f64)));
+                send_edit(state, "node.set_color", p, continuing);
+            }
+            E::SetValue { node, field, value, continuing } => {
+                p.set("node", V::Int(node as i64));
+                p.set("field", V::Int(field as i64));
+                p.set("value", V::Float(value as f64));
+                send_edit(state, "node.set_value", p, continuing);
+            }
+            E::SetImage { node, uid } => {
+                p.set("node", V::Int(node as i64));
+                p.set("uid", V::Text(uid));
+                state.queue.run("node.set_image", p);
+            }
+            E::OpenImage { node } => state.queue.push(Command::PickNodeImage { slot, node }),
+        }
+    }
+}
+
+/// A graph as the editor draws it.
+fn graph_view(
+    doc: &Document,
+    graph: &kreate_scene::shader::ShaderGraph,
+    catalog: &kreate_i18n::Catalog,
+) -> kreate_ui::GraphView {
+    use kreate_scene::shader::{NodeKind, Socket};
+    use kreate_ui::node_editor::{Family, FieldView, LinkView, NodeView, SocketType, SocketView};
+    let t = |key: &str| catalog.format(key, kreate_i18n::TextKind::Ui, &[]);
+    let ty = |s: Socket| match s {
+        Socket::Color => SocketType::Color,
+        Socket::Scalar => SocketType::Scalar,
+        Socket::Vector => SocketType::Vector,
+    };
+    let socket_label = |name: &str| t(&format!("node-socket-{}", slug(name)));
+    let swatch = |c: kreate_math::SceneRgb| {
+        let s = c.as_swatch();
+        [s.r, s.g, s.b]
+    };
+    let nodes = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(n, node)| {
+            let kind = &node.kind;
+            let outputs = kind
+                .outputs()
+                .iter()
+                .zip(kind.output_names())
+                .map(|(s, name)| SocketView {
+                    label: socket_label(name),
+                    ty: ty(*s),
+                    connected: false,
+                    default: None,
+                })
+                .collect();
+            let inputs = kind
+                .inputs()
+                .iter()
+                .zip(kind.input_names())
+                .enumerate()
+                .map(|(i, (s, name))| SocketView {
+                    label: socket_label(name),
+                    ty: ty(*s),
+                    connected: graph.incoming(n, i).is_some(),
+                    default: match (kind, i) {
+                        (NodeKind::Surface { base_color, .. }, 0) => {
+                            Some(FieldView::Color { field: 0, swatch: swatch(*base_color) })
+                        }
+                        (NodeKind::Surface { metallic, .. }, 1) => Some(FieldView::Value {
+                            field: 1,
+                            value: *metallic,
+                            min: 0.0,
+                            max: 1.0,
+                            label: String::new(),
+                        }),
+                        (NodeKind::Surface { roughness, .. }, 2) => Some(FieldView::Value {
+                            field: 2,
+                            value: *roughness,
+                            min: 0.0,
+                            max: 1.0,
+                            label: String::new(),
+                        }),
+                        _ => None,
+                    },
+                })
+                .collect();
+            let fields = match kind {
+                NodeKind::Color(c) => vec![FieldView::Color { field: 0, swatch: swatch(*c) }],
+                NodeKind::Value(v) => vec![FieldView::Value {
+                    field: 0,
+                    value: *v,
+                    min: 0.0,
+                    max: 10.0,
+                    label: String::new(),
+                }],
+                NodeKind::NormalMap { strength } => vec![FieldView::Value {
+                    field: 0,
+                    value: *strength,
+                    min: 0.0,
+                    max: 2.0,
+                    label: t("node-socket-strength"),
+                }],
+                NodeKind::Image { image } => vec![FieldView::Image {
+                    name: image.and_then(|id| doc.image(id)).map(|i| i.name.clone()),
+                }],
+                _ => Vec::new(),
+            };
+            NodeView {
+                // i18n-exempt: a node's name is the document's own text
+                title: node.name.clone(),
+                position: node.position,
+                outputs,
+                fields,
+                inputs,
+                family: match kind {
+                    NodeKind::Color(_) | NodeKind::Value(_) => Family::Input,
+                    NodeKind::Image { .. } => Family::Texture,
+                    NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::SeparateRgb => {
+                        Family::Converter
+                    }
+                    NodeKind::NormalMap { .. } => Family::Vector,
+                    NodeKind::Surface { .. } => Family::Shader,
+                },
+            }
+        })
+        .collect();
+    kreate_ui::GraphView {
+        nodes,
+        links: graph
+            .links
+            .iter()
+            .map(|l| LinkView {
+                from: (l.from_node, l.from_socket),
+                to: (l.to_node, l.to_socket),
+            })
+            .collect(),
+        images: doc
+            .images()
+            .filter_map(|(id, image)| {
+                Some((doc.image_uid(id)?.raw().to_string(), image.name.clone()))
+            })
+            .collect(),
+        addable: NodeKind::ADDABLE
+            .iter()
+            .map(|tag| t(&format!("node-kind-{}", slug(tag))))
+            .collect(),
+    }
+}
+
+/// A name as a catalog key segment: lower case, words joined by hyphens.
+fn slug(name: &str) -> String {
+    name.to_lowercase().replace([' ', '_'], "-")
 }
 
 /// Lets the pointer move the boundaries between areas.
@@ -3385,6 +3673,26 @@ fn draw_material_tab(
         return;
     };
 
+    // Blender's "Use Nodes". On, the graph is the material and the Shader
+    // Editor is where it is edited; the flat controls below would be editing
+    // fields the picture no longer reads, so they are not offered.
+    let uses_nodes = material.graph.is_some();
+    if ui
+        .selectable_label(uses_nodes, &l.node_use_nodes)
+        .on_hover_text(&l.node_use_nodes_hint)
+        .clicked()
+    {
+        let mut p = PropertyMap::new();
+        p.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+        p.set("enabled", kreate_reflect::PropertyValue::Bool(!uses_nodes));
+        state.queue.run("material.use_nodes", p);
+    }
+    if uses_nodes {
+        ui.add_space(4.0);
+        ui.weak(&l.material_uses_nodes);
+        return;
+    }
+
     // The base colour texture. The image node, the compiler's layer
     // assignment, the texture array and the surface coordinates all stand, and
     // until there is a control here none of it is a feature anybody has.
@@ -3726,6 +4034,34 @@ editor-properties = Properties
 editor-uv = UV Editor
 editor-preferences = Preferences
 editor-console = Console
+editor-shader = Shader Editor
+material-uses-nodes = This material uses nodes. Edit it in the Shader Editor.
+node-use-nodes = Use Nodes
+node-use-nodes-hint = Give this material a node graph, built from what it already is
+node-no-graph = This material has no node graph yet.
+node-no-material = The active object has no material in this slot.
+node-add = Add
+node-no-image = No image
+node-open-image = Open Image...
+node-kind-color = RGB
+node-kind-value = Value
+node-kind-image = Image Texture
+node-kind-multiply = Mix (Multiply)
+node-kind-multiply-value = Math (Multiply)
+node-kind-separate-rgb = Separate RGB
+node-kind-normal-map = Normal Map
+node-socket-base-color = Base Color
+node-socket-metallic = Metallic
+node-socket-roughness = Roughness
+node-socket-normal = Normal
+node-socket-color = Color
+node-socket-value = Value
+node-socket-alpha = Alpha
+node-socket-a = A
+node-socket-b = B
+node-socket-r = R
+node-socket-g = G
+node-socket-strength = Strength
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = Every edit you make appears here as a line of script. Type one to run it.
 uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
@@ -4048,6 +4384,34 @@ editor-properties = 특성
 editor-uv = UV 에디터
 editor-preferences = 환경 설정
 editor-console = 콘솔
+editor-shader = 셰이더 에디터
+material-uses-nodes = 이 재질은 노드를 사용합니다. 셰이더 에디터에서 편집하세요.
+node-use-nodes = 노드 사용
+node-use-nodes-hint = 이 재질의 현재 모습 그대로 노드 그래프를 만듭니다
+node-no-graph = 이 재질에는 아직 노드 그래프가 없습니다.
+node-no-material = 활성 오브젝트의 이 슬롯에 재질이 없습니다.
+node-add = 추가
+node-no-image = 이미지 없음
+node-open-image = 이미지 열기...
+node-kind-color = RGB
+node-kind-value = 값
+node-kind-image = 이미지 텍스처
+node-kind-multiply = 혼합 (곱하기)
+node-kind-multiply-value = 수학 (곱하기)
+node-kind-separate-rgb = RGB 분리
+node-kind-normal-map = 노멀 맵
+node-socket-base-color = 베이스 컬러
+node-socket-metallic = 메탈릭
+node-socket-roughness = 러프니스
+node-socket-normal = 노멀
+node-socket-color = 색상
+node-socket-value = 값
+node-socket-alpha = 알파
+node-socket-a = A
+node-socket-b = B
+node-socket-r = R
+node-socket-g = G
+node-socket-strength = 세기
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
 uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
@@ -5031,6 +5395,30 @@ mod tests {
             "material-normal-map",
             "material-empty-slot",
             "console-placeholder",
+            "editor-shader",
+            "material-uses-nodes",
+            "node-use-nodes",
+            "node-use-nodes-hint",
+            "node-no-graph",
+            "node-no-material",
+            "node-add",
+            "node-no-image",
+            "node-open-image",
+            "node-kind-color",
+            "node-kind-value",
+            "node-kind-image",
+            "node-kind-multiply",
+            "node-kind-multiply-value",
+            "node-kind-separate-rgb",
+            "node-kind-normal-map",
+            "node-socket-base-color",
+            "node-socket-metallic",
+            "node-socket-roughness",
+            "node-socket-normal",
+            "node-socket-color",
+            "node-socket-value",
+            "node-socket-alpha",
+            "node-socket-strength",
             "console-empty",
             "editor-console",
             "material-no-slots",

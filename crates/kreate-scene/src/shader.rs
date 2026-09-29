@@ -167,6 +167,91 @@ impl NodeKind {
             NodeKind::Surface { .. } => "surface",
         }
     }
+
+    /// The numbers the node holds, flat, for a file.
+    ///
+    /// The inverse of [`NodeKind::from_parts`]. An image is not a number and
+    /// travels beside these, as an identity.
+    pub fn values(&self) -> Vec<f32> {
+        match self {
+            NodeKind::Color(c) => vec![c.r, c.g, c.b],
+            NodeKind::Value(v) => vec![*v],
+            NodeKind::NormalMap { strength } => vec![*strength],
+            NodeKind::Surface { base_color, metallic, roughness } => {
+                vec![base_color.r, base_color.g, base_color.b, *metallic, *roughness]
+            }
+            NodeKind::Image { .. }
+            | NodeKind::Multiply
+            | NodeKind::SeparateRgb
+            | NodeKind::MultiplyValue => Vec::new(),
+        }
+    }
+
+    /// A node kind from its tag, its numbers and its image.
+    ///
+    /// `None` for a tag this build does not know — a file from a newer one —
+    /// which the caller must treat as "this graph cannot be read", not as a
+    /// node to skip: a graph with a node silently missing is a different
+    /// material. Missing numbers take the kind's defaults, so a file that
+    /// wrote fewer than this build expects still reads.
+    pub fn from_parts(tag: &str, values: &[f32], image: Option<ImageId>) -> Option<Self> {
+        let at = |i: usize, default: f32| values.get(i).copied().unwrap_or(default);
+        Some(match tag {
+            "color" => NodeKind::Color(SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8))),
+            "value" => NodeKind::Value(at(0, 0.5)),
+            "image" => NodeKind::Image { image },
+            "multiply" => NodeKind::Multiply,
+            "separate_rgb" => NodeKind::SeparateRgb,
+            "multiply_value" => NodeKind::MultiplyValue,
+            "normal_map" => NodeKind::NormalMap { strength: at(0, 1.0) },
+            "surface" => NodeKind::Surface {
+                base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
+                metallic: at(3, 0.0),
+                roughness: at(4, 0.5),
+            },
+            _ => return None,
+        })
+    }
+
+    /// A fresh node of the kind a tag names, as the Add menu makes it.
+    pub fn new_of(tag: &str) -> Option<Self> {
+        Self::from_parts(tag, &[], None)
+    }
+
+    /// The kinds somebody can add, in the order the Add menu lists them.
+    ///
+    /// Not the surface: a graph has exactly one, and it is never added.
+    pub const ADDABLE: [&'static str; 7] = [
+        "color",
+        "value",
+        "image",
+        "multiply",
+        "multiply_value",
+        "separate_rgb",
+        "normal_map",
+    ];
+
+    /// What each input is called, for a person.
+    pub fn input_names(&self) -> &'static [&'static str] {
+        match self {
+            NodeKind::Multiply | NodeKind::MultiplyValue => &["A", "B"],
+            NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &["Color"],
+            NodeKind::Surface { .. } => &["Base Color", "Metallic", "Roughness", "Normal"],
+            NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
+        }
+    }
+
+    /// What each output is called.
+    pub fn output_names(&self) -> &'static [&'static str] {
+        match self {
+            NodeKind::Color(_) | NodeKind::Multiply => &["Color"],
+            NodeKind::Value(_) | NodeKind::MultiplyValue => &["Value"],
+            NodeKind::Image { .. } => &["Color", "Alpha"],
+            NodeKind::SeparateRgb => &["R", "G", "B"],
+            NodeKind::NormalMap { .. } => &["Normal"],
+            NodeKind::Surface { .. } => &[],
+        }
+    }
 }
 
 /// One node.
@@ -332,7 +417,72 @@ impl ShaderGraph {
             wire(&mut graph, texture, 0, decode, 0);
             wire(&mut graph, decode, 0, 0, 3);
         }
+        graph.arrange();
         graph
+    }
+
+    /// What an image read by `node` should be declared as, judged by where
+    /// its wires go.
+    ///
+    /// For the moment a file is picked for a texture node: a PNG does not say
+    /// whether it is a colour or a roughness, and the slot is what knows
+    /// (§2.1). Here the "slot" is the graph — an image feeding a normal map,
+    /// a channel split or a number is data, and anything else is a colour.
+    /// A guess only when the node is not wired yet, and then the guess is the
+    /// common case.
+    pub fn image_space(&self, node: usize) -> crate::image::ColorSpace {
+        let data = self.links.iter().filter(|l| l.from_node == node).any(|l| {
+            match self.nodes.get(l.to_node).map(|n| &n.kind) {
+                Some(NodeKind::NormalMap { .. })
+                | Some(NodeKind::SeparateRgb)
+                | Some(NodeKind::MultiplyValue) => true,
+                Some(NodeKind::Surface { .. }) => l.to_socket != 0,
+                _ => false,
+            }
+        });
+        if data {
+            crate::image::ColorSpace::Raw
+        } else {
+            crate::image::ColorSpace::Srgb
+        }
+    }
+
+    /// Lays the nodes out in columns by how far they are from the surface.
+    ///
+    /// For a graph nobody has arranged — one built from flat fields, or read
+    /// from a file that had no positions. The surface on the right, and each
+    /// node one column left of the leftmost thing it feeds, which is how a
+    /// person reading a node tree expects to follow it: left to right, towards
+    /// the output.
+    pub fn arrange(&mut self) {
+        const COLUMN: f32 = 240.0;
+        const ROW: f32 = 140.0;
+        let count = self.nodes.len();
+        // Longest distance to the output, by relaxation. Bounded by the node
+        // count because the graph is acyclic by construction; the bound is
+        // what keeps a graph from a damaged file from looping.
+        let mut depth = vec![0usize; count];
+        for _ in 0..count {
+            let mut changed = false;
+            for link in &self.links {
+                let (Some(&to), true) = (depth.get(link.to_node), link.from_node < count) else {
+                    continue;
+                };
+                if depth[link.from_node] < to + 1 {
+                    depth[link.from_node] = to + 1;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut rows = std::collections::HashMap::new();
+        for (index, node) in self.nodes.iter_mut().enumerate() {
+            let row = rows.entry(depth[index]).or_insert(0usize);
+            node.position = [-(depth[index] as f32) * COLUMN, *row as f32 * ROW];
+            *row += 1;
+        }
     }
 
     /// Adds a node, or refuses a second surface.
@@ -820,6 +970,72 @@ mod tests {
         assert!(graph
             .link(Link { from_node: decode, from_socket: 0, to_node: 0, to_socket: 3 })
             .is_ok());
+    }
+
+    #[test]
+    fn every_kind_comes_back_from_its_parts() {
+        // The file's inverse. A kind whose numbers came back in another order
+        // is a material that loads as somebody else's.
+        let mut doc = crate::Document::new();
+        let image = an_image(&mut doc);
+        let kinds = [
+            NodeKind::Color(SceneRgb::new(0.1, 0.2, 0.3)),
+            NodeKind::Value(0.7),
+            NodeKind::Image { image: Some(image) },
+            NodeKind::Multiply,
+            NodeKind::SeparateRgb,
+            NodeKind::MultiplyValue,
+            NodeKind::NormalMap { strength: 0.4 },
+            NodeKind::Surface {
+                base_color: SceneRgb::new(0.9, 0.8, 0.7),
+                metallic: 0.6,
+                roughness: 0.3,
+            },
+        ];
+        for kind in kinds {
+            let image = match kind {
+                NodeKind::Image { image } => image,
+                _ => None,
+            };
+            assert_eq!(
+                NodeKind::from_parts(kind.tag(), &kind.values(), image),
+                Some(kind.clone()),
+                "{} did not come back",
+                kind.tag()
+            );
+            assert_eq!(kind.input_names().len(), kind.inputs().len(), "{}", kind.tag());
+            assert_eq!(kind.output_names().len(), kind.outputs().len(), "{}", kind.tag());
+        }
+        assert_eq!(NodeKind::from_parts("from_the_future", &[], None), None);
+        for tag in NodeKind::ADDABLE {
+            let made = NodeKind::new_of(tag).expect("an addable kind is a kind");
+            assert_ne!(made.tag(), "surface");
+        }
+    }
+
+    #[test]
+    fn an_arranged_graph_reads_left_to_right() {
+        // Every wire runs from a node to one strictly to its right, so the
+        // tree reads towards the output.
+        let mut doc = crate::Document::new();
+        let (a, b) = (an_image(&mut doc), an_image(&mut doc));
+        let graph = ShaderGraph::for_material(&crate::document::Material {
+            base_color_image: Some(a),
+            normal_image: Some(b),
+            ..Default::default()
+        });
+        for link in &graph.links {
+            assert!(
+                graph.nodes[link.from_node].position[0] < graph.nodes[link.to_node].position[0],
+                "a wire runs backwards: {link:?}"
+            );
+        }
+        // And no two nodes sit on top of each other.
+        for (i, x) in graph.nodes.iter().enumerate() {
+            for y in &graph.nodes[i + 1..] {
+                assert_ne!(x.position, y.position, "{} and {} overlap", x.name, y.name);
+            }
+        }
     }
 }
 

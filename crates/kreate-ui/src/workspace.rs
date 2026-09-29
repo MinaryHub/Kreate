@@ -59,6 +59,10 @@ impl Default for Workspaces {
                     screen: uv_screen(),
                 },
                 Workspace {
+                    name: "Shading".into(),
+                    screen: shading_screen(),
+                },
+                Workspace {
                     name: "Scripting".into(),
                     screen: scripting_screen(),
                 },
@@ -111,6 +115,20 @@ fn scripting_screen() -> Screen {
     screen
         .split(viewport, Axis::Vertical, 0.45, EditorId::CONSOLE)
         .expect("the screen has one area to split");
+    screen
+}
+
+/// Blender's Shading workspace: the lit scene above, the material's graph
+/// below, and the properties at the side for the material's slots.
+fn shading_screen() -> Screen {
+    let mut screen = Screen::single(EditorId::VIEWPORT);
+    let viewport = screen.areas()[0].0;
+    screen
+        .split(viewport, Axis::Horizontal, 0.55, EditorId::SHADER)
+        .expect("the screen has one area to split");
+    screen
+        .split(viewport, Axis::Vertical, 0.78, EditorId::PROPERTIES)
+        .expect("the viewport is still there to split");
     screen
 }
 
@@ -241,12 +259,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_set_is_four_distinct_arrangements() {
+    fn the_shipped_set_is_five_distinct_arrangements() {
         // Each has to answer a different question, or it is a tab that costs
         // the user a decision and gives nothing back. Layout, Modeling, UV
-        // Editing, and — with the console — Scripting.
+        // Editing, Shading — with the node graph — and Scripting.
         let w = Workspaces::default();
-        assert_eq!(w.len(), 4);
+        assert_eq!(w.len(), 5);
         assert_eq!(w.active_index(), 0);
         assert_eq!(w.active().name, "Layout");
 
@@ -316,8 +334,8 @@ mod tests {
         let source = w.screen().to_nodes();
 
         let index = w.duplicate_active("Mine");
-        assert_eq!(index, 4);
-        assert_eq!(w.active_index(), 4, "the copy is not active");
+        assert_eq!(index, 5);
+        assert_eq!(w.active_index(), 5, "the copy is not active");
         assert_eq!(w.active().name, "Mine");
         assert_eq!(w.screen().to_nodes(), source, "the copy is not a copy");
 
@@ -337,14 +355,14 @@ mod tests {
         // Every position relative to the active one, because each moves the
         // index differently and an index past the end is a panic in the middle
         // of a frame.
-        for active in 0..4 {
-            for removed in 0..4 {
+        for active in 0..5 {
+            for removed in 0..5 {
                 let mut w = Workspaces::default();
                 assert!(w.switch_to(active));
                 let was_active = w.active().name.clone();
                 assert!(w.remove(removed), "active={active} removed={removed}");
 
-                assert_eq!(w.len(), 3);
+                assert_eq!(w.len(), 4);
                 assert!(
                     w.active_index() < w.len(),
                     "active={active} removed={removed} left index {} of {}",

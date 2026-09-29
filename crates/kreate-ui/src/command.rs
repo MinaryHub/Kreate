@@ -104,6 +104,10 @@ pub enum Command {
     PickMaterialImage { map: u32 },
     /// Take one of the active material's textures off.
     ClearMaterialImage { map: u32 },
+    /// Ask for an image file and put it in an Image Texture node of the
+    /// material in `slot`. A command for the reason `PickMaterialImage` is:
+    /// `node.set_image` makes the link, the file read cannot be an operator.
+    PickNodeImage { slot: u32, node: u32 },
     /// Give the active object a material, so that there is one to edit.
     ///
     /// A command rather than a menu entry wired straight to the operator

@@ -389,6 +389,18 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         Some(index)
     };
     for (id, material) in doc.materials() {
+        if material.graph.is_some() {
+            // glTF has no node graphs; a material is a standard surface and
+            // nothing else. What goes out is the flat surface the material
+            // had, which is what the graph was made from — and may no longer
+            // be what it draws.
+            notes.push(LossyNote::Unsupported {
+                what: format!(
+                    "{}: uses a node graph, which glTF cannot hold; its flat surface was written",
+                    material.name
+                ),
+            });
+        }
         material_index.insert(id, materials.len());
         materials.push(ImportMaterial {
             name: material.name.clone(),

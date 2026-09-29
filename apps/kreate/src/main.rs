@@ -2064,6 +2064,7 @@ impl App {
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
+                Command::PickNodeImage { slot, node } => self.pick_node_image(slot, node),
                 Command::NewMaterial => {
                     let params = self.material_slot_param();
                     self.run_op("material.new", params)
@@ -2365,6 +2366,43 @@ impl App {
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("material.set_image", params);
         self.status(&format!("{}: {name}", slot.tag()));
+    }
+
+    /// Opens an image file into an Image Texture node.
+    ///
+    /// The space is the graph's to say — see `ShaderGraph::image_space` — so
+    /// a file picked for a node that feeds a normal map arrives as numbers.
+    fn pick_node_image(&mut self, slot: u32, node: u32) {
+        let space = self
+            .doc
+            .selection
+            .active
+            .and_then(|object| self.doc.material_at(object, slot as usize))
+            .and_then(|m| m.graph.as_ref())
+            .map(|g| g.image_space(node as usize))
+            .unwrap_or(kreate_scene::ColorSpace::Srgb);
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg", "hdr"])
+            .set_title("Image Texture")
+            .pick_file()
+        else {
+            return;
+        };
+        let image = match kreate_io::load_image_file(&path, space) {
+            Ok(image) => image,
+            Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
+        };
+        let name = image.name.clone();
+        let id = self.doc.add_image(image);
+        let Some(uid) = self.doc.image_uid(id) else {
+            return self.status("the image has no identity");
+        };
+        let mut params = PropertyMap::new();
+        params.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+        params.set("node", kreate_reflect::PropertyValue::Int(node as i64));
+        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        self.run_op("node.set_image", params);
+        self.status(&format!("image texture: {name}"));
     }
 
     /// Takes one of the active material's textures off.
@@ -4047,10 +4085,27 @@ impl App {
         if self.pointer_in_uv_panel() {
             return KeyContext::UvEditor;
         }
+        // Over the shader editor only the global keys — undo, save — reach the
+        // keymap. The graph handles its own `X` and `Shift+A`, and the
+        // viewport's meaning of them (delete the object, add a cube) is the
+        // last thing somebody pointing at a node wants.
+        if self.pointer_in_node_editor() {
+            return KeyContext::Global;
+        }
         match self.op_ctx.mode {
             OpMode::EditMesh => KeyContext::EditMesh,
             OpMode::Object => KeyContext::ObjectMode,
         }
+    }
+
+    /// Whether the pointer is over a shader editor.
+    fn pointer_in_node_editor(&self) -> bool {
+        let Some((x, y)) = self.input.cursor else {
+            return false;
+        };
+        let scale = f64::from(self.egui_ctx.pixels_per_point().max(0.01));
+        self.ui
+            .node_editor_at(egui::pos2((x / scale) as f32, (y / scale) as f32))
     }
 
     /// Whether the pointer is over the open UV panel.

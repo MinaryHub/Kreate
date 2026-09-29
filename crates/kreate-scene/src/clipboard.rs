@@ -167,16 +167,25 @@ impl Document {
             .unwrap_or_default();
         // Every map, through the one image table: a file used as both the
         // colour and the roughness is one image in the result, as it was here.
+        let mut carry = |image: ImageId| -> Option<ImageId> {
+            if let Some(done) = images.get(&image) {
+                return Some(*done);
+            }
+            let copied = into.add_image(self.image(image)?.clone());
+            images.insert(image, copied);
+            Some(copied)
+        };
         for map in crate::document::MaterialMap::ALL {
             let slot = material.map_mut(map);
-            *slot = slot.and_then(|image| {
-                if let Some(done) = images.get(&image) {
-                    return Some(*done);
+            *slot = slot.and_then(&mut carry);
+        }
+        // And the graph's own image nodes, through the same table.
+        if let Some(graph) = &mut material.graph {
+            for node in &mut graph.nodes {
+                if let crate::shader::NodeKind::Image { image } = &mut node.kind {
+                    *image = image.and_then(&mut carry);
                 }
-                let copied = into.add_image(self.image(image)?.clone());
-                images.insert(image, copied);
-                Some(copied)
-            });
+            }
         }
         let new_id = into.add_material(material);
         materials.insert(id, new_id);
