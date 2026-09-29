@@ -320,6 +320,7 @@ const APP_ACTIONS: &[&str] = &[
     "edit.adjust_last",
     "app.print_script",
     "app.search",
+    "app.pie",
     "edit.copy_script",
     "file.run_script",
     "object.add_next_primitive",

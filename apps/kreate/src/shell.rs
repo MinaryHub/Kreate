@@ -205,6 +205,8 @@ pub struct ShellState {
     pub capturing: Option<kreate_input::BindingId>,
     /// F3's search: open or not, what is typed, what was run from it lately.
     pub palette: kreate_ui::command_palette::PaletteState,
+    /// The pie menu that is open, if one is.
+    pub pie: kreate_ui::pie_menu::PieState,
     /// What the panel asked for this frame.
     pub keymap_edits: Vec<kreate_ui::KeymapEdit>,
     /// Whether the UV editor is open.
@@ -504,6 +506,7 @@ impl Default for ShellState {
             recoverable: Vec::new(),
             capturing: None,
             palette: Default::default(),
+            pie: Default::default(),
             keymap_edits: Vec::new(),
             uv_views: std::collections::BTreeMap::new(),
             node_views: std::collections::BTreeMap::new(),
@@ -531,7 +534,13 @@ impl ShellState {
         // Not while the search is open: its field has the keyboard from the
         // frame after it opens, but on the frame it opens a typed `E` would
         // otherwise extrude.
-        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing() && !self.palette.open
+        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing() && !self.overlay_open()
+    }
+
+    /// Whether a search box or a pie has the keyboard. While one does, keys
+    /// are its — and `Escape` closes it rather than doing anything else.
+    pub fn overlay_open(&self) -> bool {
+        self.palette.open || self.pie.open.is_some()
     }
 }
 
@@ -924,6 +933,17 @@ struct Labels {
     menu_search: String,
     menu_copy_script: String,
     palette_placeholder: String,
+    pie_shading: String,
+    pie_view: String,
+    pie_mode: String,
+    view_left: String,
+    view_right: String,
+    view_bottom: String,
+    view_top: String,
+    view_front: String,
+    view_back: String,
+    /// Each mode's name, by its tag.
+    mode_names: std::collections::HashMap<&'static str, String>,
     palette_nothing: String,
     world_pick_image: String,
     world_clear_image: String,
@@ -1050,6 +1070,19 @@ impl Labels {
             menu_search: t("menu-search"),
             menu_copy_script: t("menu-copy-script"),
             palette_placeholder: t("palette-placeholder"),
+            pie_shading: t("pie-shading"),
+            pie_view: t("pie-view"),
+            pie_mode: t("pie-mode"),
+            view_left: t("view-left"),
+            view_right: t("view-right"),
+            view_bottom: t("view-bottom"),
+            view_top: t("view-top"),
+            view_front: t("view-front"),
+            view_back: t("view-back"),
+            mode_names: kreate_ops::Mode::ALL
+                .iter()
+                .map(|m| (m.info().tag, t(m.info().label_key)))
+                .collect(),
             palette_nothing: t("palette-nothing"),
             world_pick_image: t("world-pick-image"),
             world_clear_image: t("world-clear-image"),
@@ -1349,7 +1382,114 @@ pub fn draw(
         });
     state.apply_area_edits();
     draw_search(ui, state, &l, history, mode);
+    draw_pie(ui, state, &l, doc, mode);
     viewport_rect
+}
+
+/// A pie's entries and title, by the name its key binding gives.
+///
+/// Built from menu entries like every other menu, so what a pie runs is what
+/// the same entry runs from a menu or the search. Listed in the pie's slot
+/// order: left, right, bottom, top, then the diagonals.
+fn pie_entries(
+    name: &str,
+    l: &Labels,
+    shading: kreate_render::ShadingMode,
+    mode: kreate_ops::operator::Mode,
+    has_mesh: bool,
+) -> Option<(String, Vec<(MenuEntry, bool)>)> {
+    use kreate_render::{ShadingMode, ViewAxis};
+    let shade = |id: &'static str, label: &str, to: ShadingMode| {
+        (MenuEntry::new(id, label, Run::Command(Command::SetShading(to))), shading == to)
+    };
+    let axis = |id: &'static str, label: &str, to: ViewAxis| {
+        (MenuEntry::new(id, label, Run::Command(Command::SnapToAxis(to))), false)
+    };
+    Some(match name {
+        // Blender's Z: wireframe left, rendered right, solid below, the
+        // flat look above.
+        "shading" => (
+            l.pie_shading.clone(),
+            vec![
+                (MenuEntry::new("view.toggle_wireframe", &l.overlay_wireframe, dispatch("view.toggle_wireframe")), false),
+                shade("view.shading_rendered", &l.shading_rendered, ShadingMode::Rendered),
+                shade("view.shading_studio", &l.shading_studio, ShadingMode::Studio),
+                shade("view.shading_flat", &l.shading_flat, ShadingMode::Flat),
+            ],
+        ),
+        // Blender's `~`. Each view is named for where the eye goes: Front
+        // looks from -Y, as the numpad's 1 does.
+        "view" => (
+            l.pie_view.clone(),
+            vec![
+                axis("view.axis_left", &l.view_left, ViewAxis::NegX),
+                axis("view.axis_right", &l.view_right, ViewAxis::PosX),
+                axis("view.axis_bottom", &l.view_bottom, ViewAxis::NegZ),
+                axis("view.axis_top", &l.view_top, ViewAxis::PosZ),
+                axis("view.axis_front", &l.view_front, ViewAxis::NegY),
+                axis("view.axis_back", &l.view_back, ViewAxis::PosY),
+                (MenuEntry::new("view.frame_all", &l.view_frame_all, dispatch("view.frame_all")), false),
+                (MenuEntry::new("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)), false),
+            ],
+        ),
+        // Blender's Ctrl+Tab: every mode, the one you are in lit, the ones
+        // that cannot be entered greyed for the reason the mode menu greys
+        // them. The id is the mode's own label key, so its description sits
+        // beside its name in the catalog.
+        "mode" => (
+            l.pie_mode.clone(),
+            kreate_ops::Mode::ALL
+                .iter()
+                .map(|m| {
+                    let info = m.info();
+                    let label = l.mode_names.get(info.tag).cloned().unwrap_or_default();
+                    (
+                        MenuEntry::new(info.label_key, &label, Run::Command(Command::SetMode(info.tag.to_string())))
+                            .enabled(m.can_enter(has_mesh)),
+                        *m == mode,
+                    )
+                })
+                .collect(),
+        ),
+        _ => return None,
+    })
+}
+
+/// Draws the open pie, and runs what it chooses.
+fn draw_pie(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    l: &Labels,
+    doc: &Document,
+    mode: kreate_ops::operator::Mode,
+) {
+    let Some(open) = state.pie.open.clone() else {
+        return;
+    };
+    let has_mesh = doc
+        .selection
+        .active
+        .and_then(|id| doc.object(id))
+        .is_some_and(|o| o.mesh().is_some());
+    let Some((title, entries)) = pie_entries(&open.name, l, state.view_status.shading, mode, has_mesh) else {
+        // A name nothing defines — a binding from a newer keymap. Closed
+        // rather than drawn empty.
+        state.pie.open = None;
+        return;
+    };
+    let items: Vec<kreate_ui::pie_menu::PieItem> = entries
+        .iter()
+        .map(|(e, current)| kreate_ui::pie_menu::PieItem {
+            label: e.label.clone(),
+            enabled: e.enabled,
+            current: *current,
+        })
+        .collect();
+    let ctx = ui.ctx().clone();
+    if let Some(index) = kreate_ui::pie_menu::pie_menu(&ctx, &mut state.pie, &title, &items) {
+        let entry = entries[index].0.clone();
+        run_entry(state, &entry);
+    }
 }
 
 /// F3's search, over the menus this mode offers.
@@ -4163,6 +4303,26 @@ menu-search = Search...
 menu-copy-script = Copy History as Script
 palette-placeholder = Search the menus: extrude, add cube, save...
 palette-nothing = Nothing matches.
+pie-shading = Shading
+pie-view = View
+pie-mode = Mode
+view-left = Left
+view-right = Right
+view-bottom = Bottom
+view-top = Top
+view-front = Front
+view-back = Back
+op-view-shading-studio-desc = Lights that show the shape, whatever the scene's lamps are doing.
+op-view-shading-flat-desc = Every face its plain colour, with no light at all.
+op-view-shading-rendered-desc = The scene's own lamps and sky, through the camera's exposure.
+op-view-axis-left-desc = Looks at the pivot from the left, along +X.
+op-view-axis-right-desc = Looks at the pivot from the right, along -X.
+op-view-axis-bottom-desc = Looks up at the pivot from below.
+op-view-axis-top-desc = Looks down at the pivot from above.
+op-view-axis-front-desc = Looks at the pivot from the front, along +Y.
+op-view-axis-back-desc = Looks at the pivot from behind, along -Y.
+op-mode-object-desc = Acts on whole objects: select, move and add them.
+op-mode-edit-desc = Acts on the vertices, edges and faces of the meshes being edited.
 op-app-search = Search
 op-app-search-desc = Find any menu command by typing part of its name, and run it with Enter.
 op-edit-copy-script = Copy History as Script
@@ -4524,6 +4684,26 @@ menu-search = 검색...
 menu-copy-script = 히스토리를 스크립트로 복사
 palette-placeholder = 메뉴 검색: extrude, 큐브 추가, 저장...
 palette-nothing = 일치하는 항목이 없습니다.
+pie-shading = 셰이딩
+pie-view = 보기
+pie-mode = 모드
+view-left = 왼쪽
+view-right = 오른쪽
+view-bottom = 아래
+view-top = 위
+view-front = 앞
+view-back = 뒤
+op-view-shading-studio-desc = 장면의 조명과 상관없이 형태가 잘 보이는 조명으로 보여줍니다.
+op-view-shading-flat-desc = 조명 없이 각 면을 원래 색 그대로 보여줍니다.
+op-view-shading-rendered-desc = 장면의 조명과 하늘을 카메라 노출로 보여줍니다.
+op-view-axis-left-desc = 왼쪽에서 +X 방향으로 피벗을 봅니다.
+op-view-axis-right-desc = 오른쪽에서 -X 방향으로 피벗을 봅니다.
+op-view-axis-bottom-desc = 아래에서 피벗을 올려다봅니다.
+op-view-axis-top-desc = 위에서 피벗을 내려다봅니다.
+op-view-axis-front-desc = 앞에서 +Y 방향으로 피벗을 봅니다.
+op-view-axis-back-desc = 뒤에서 -Y 방향으로 피벗을 봅니다.
+op-mode-object-desc = 오브젝트 전체에 작용합니다: 선택하고, 옮기고, 추가합니다.
+op-mode-edit-desc = 편집 중인 메시의 점, 선, 면에 작용합니다.
 op-app-search = 검색
 op-app-search-desc = 메뉴 명령의 이름 일부를 입력해 찾고, Enter로 실행합니다.
 op-edit-copy-script = 히스토리를 스크립트로 복사
@@ -5975,6 +6155,76 @@ mod tests {
             missing.is_empty(),
             "these menu entries have nothing to say on hover: {missing:?}"
         );
+    }
+
+    #[test]
+    fn every_pie_a_key_opens_is_a_pie_and_says_what_its_entries_do() {
+        // A binding names its pie by string, so a typo would be a key that
+        // opens nothing — checked for every preset. And every entry says what
+        // it does, like every menu entry.
+        let catalog = load_catalog("en");
+        let l = Labels::new(&catalog);
+        let mut names = Vec::new();
+        for preset in kreate_input::presets::ALL {
+            for binding in kreate_input::presets::load(*preset).bindings() {
+                if binding.action.op_id != "app.pie" {
+                    continue;
+                }
+                match binding.action.params.get("menu") {
+                    Some(kreate_reflect::PropertyValue::Text(name)) => names.push(name.clone()),
+                    other => panic!("{preset:?}: a pie binding names no pie: {other:?}"),
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        assert_eq!(names, vec!["mode", "shading", "view"]);
+        for name in &names {
+            let (_, entries) = pie_entries(name, &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true)
+                .unwrap_or_else(|| panic!("no pie called {name}"));
+            assert!(!entries.is_empty() && entries.len() <= kreate_ui::pie_menu::MAX_SLOTS, "{name}");
+            for (entry, _) in &entries {
+                assert!(
+                    catalog.has(&kreate_ui::command_info::description_key(entry.id)),
+                    "{name}: `{}` has nothing to say on hover",
+                    entry.id
+                );
+                assert!(!entry.label.is_empty() && !entry.label.contains('-'), "{name}: label {:?}", entry.label);
+            }
+        }
+        assert!(pie_entries("from_the_future", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true).is_none());
+    }
+
+    #[test]
+    fn the_view_pie_looks_from_where_it_says() {
+        // Front is where the numpad's 1 puts the eye: on the -Y side. A swapped
+        // pair here is a pie that shows the back when asked for the front.
+        let catalog = load_catalog("en");
+        let l = Labels::new(&catalog);
+        let (_, entries) = pie_entries("view", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, true).unwrap();
+        let axis_of = |id: &str| match &entries.iter().find(|(e, _)| e.id == id).unwrap().0.run {
+            Run::Command(Command::SnapToAxis(axis)) => *axis,
+            other => panic!("{id} runs {other:?}"),
+        };
+        use kreate_render::ViewAxis::*;
+        assert_eq!(axis_of("view.axis_front"), NegY);
+        assert_eq!(axis_of("view.axis_back"), PosY);
+        assert_eq!(axis_of("view.axis_right"), PosX);
+        assert_eq!(axis_of("view.axis_top"), PosZ);
+        // And the first two slots are left and right, Blender's order.
+        assert_eq!(entries[0].0.id, "view.axis_left");
+        assert_eq!(entries[1].0.id, "view.axis_right");
+    }
+
+    #[test]
+    fn the_mode_pie_lights_the_mode_you_are_in_and_greys_what_you_cannot_enter() {
+        let catalog = load_catalog("en");
+        let l = Labels::new(&catalog);
+        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, false).unwrap();
+        for ((entry, current), mode) in entries.iter().zip(kreate_ops::Mode::ALL) {
+            assert_eq!(*current, mode == kreate_ops::Mode::RESTING);
+            assert_eq!(entry.enabled, mode.can_enter(false), "{mode:?}");
+        }
     }
 
     #[test]

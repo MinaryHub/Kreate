@@ -1920,3 +1920,18 @@ fn shot_search() {
     }
 }
 
+
+/// A picture of the shading and view pies, open at the middle of the window.
+#[test]
+fn shot_pies() {
+    let doc = doc_with_cube();
+    for (label, locale, pie) in [("pie-shading", "en", "shading"), ("pie-view-ko", "ko-KR", "view")] {
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.pie.open(pie, egui::pos2(500.0, 400.0), None, 0.0);
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}

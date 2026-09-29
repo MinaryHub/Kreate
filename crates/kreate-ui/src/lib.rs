@@ -16,6 +16,7 @@ pub mod element_icon;
 pub mod fonts;
 pub mod object_glyph;
 pub mod panel;
+pub mod pie_menu;
 pub mod toolbar;
 pub mod view_icons;
 pub mod keymap_editor;

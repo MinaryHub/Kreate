@@ -621,6 +621,12 @@ struct App {
     /// clipboard would carry, so moving to it is a matter of where the string
     /// is kept.
     clipboard: Option<String>,
+    /// The key name of the keystroke being dispatched, while it is.
+    ///
+    /// A pie closes when the key that opened it is let go, so the action that
+    /// opens one has to know which key that was — and an action is a keymap
+    /// entry, which says what to do and not how it was asked for.
+    dispatching_key: Option<&'static str>,
     /// Snapping, as the user has it set. `Ctrl` inverts it for one drag.
     ///
     /// Held on the application rather than inside a gesture because it is a
@@ -704,6 +710,7 @@ impl App {
             // offer is not an interruption.
             recoverable: docfile::find_recoverable(),
             clipboard: None,
+            dispatching_key: None,
             shown_title: String::new(),
         }
     }
@@ -4332,6 +4339,10 @@ impl App {
         // Escape and F1 are deliberately outside the keymap: there must always
         // be a way out and a way to ask, even from a keymap the user has broken.
         match code {
+            // A search box or a pie has the keyboard: `Escape` is how it
+            // closes, and it must not also end the session. Found by the
+            // search, whose Escape quit the application.
+            KeyCode::Escape if self.ui.overlay_open() => return,
             KeyCode::Escape => {
                 event_loop.exit();
                 return;
@@ -4378,7 +4389,9 @@ impl App {
         ) else {
             return;
         };
+        self.dispatching_key = Some(name);
         self.dispatch(&action);
+        self.dispatching_key = None;
     }
 
     /// Sends a resolved action to whichever half of the application owns it.
@@ -4469,6 +4482,23 @@ impl App {
             }
             "app.search" => {
                 self.ui.palette.open();
+                self.redraw.set(RedrawReason::UI);
+            }
+            // A pie, at the pointer, closed by letting go of the key that
+            // opened it.
+            "app.pie" => {
+                let Some(PropertyValue::Text(name)) = action.params.get("menu") else {
+                    return;
+                };
+                let scale = f64::from(self.egui_ctx.pixels_per_point().max(0.01));
+                let at = self
+                    .input
+                    .cursor
+                    .map(|(x, y)| egui::pos2((x / scale) as f32, (y / scale) as f32))
+                    .unwrap_or(egui::pos2(200.0, 200.0));
+                let key = self.dispatching_key.and_then(egui_key);
+                let now = self.egui_ctx.input(|i| i.time);
+                self.ui.pie.open(name, at, key, now);
                 self.redraw.set(RedrawReason::UI);
             }
             // The history on the system clipboard as script lines, for a text
@@ -4635,6 +4665,7 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit4 => "Digit4",
         KeyCode::Digit5 => "Digit5",
         KeyCode::Tab => "Tab",
+        KeyCode::Backquote => "Backquote",
         // F1 is not here: it is outside the keymap on purpose, so help is
         // reachable from any keymap however broken.
         KeyCode::F2 => "F2",
@@ -5203,6 +5234,17 @@ fn install_panic_hook() {
     }));
 }
 
+/// The egui key for a keymap key name, for a widget that watches the key
+/// itself — a pie waiting for its key to be let go.
+fn egui_key(name: &str) -> Option<egui::Key> {
+    match name {
+        "Backquote" => Some(egui::Key::Backtick),
+        "BracketLeft" => Some(egui::Key::OpenBracket),
+        "BracketRight" => Some(egui::Key::CloseBracket),
+        other => egui::Key::from_name(other.strip_prefix("Digit").unwrap_or(other)),
+    }
+}
+
 /// The keymap context a mode's keys resolve in, as its card names it.
 ///
 /// Object mode's for a tag the keymap does not know — a mode from a newer
@@ -5213,6 +5255,24 @@ fn mode_key_context(mode: OpMode) -> KeyContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_key_that_opens_a_pie_can_be_watched_for_its_release() {
+        // The pie closes when its key is let go, which it can only see if the
+        // keymap's name for the key has an egui key. One without would open a
+        // pie that hold-and-release never closes.
+        for preset in kreate_input::presets::ALL {
+            for binding in kreate_input::presets::load(*preset).bindings() {
+                if binding.action.op_id != "app.pie" {
+                    continue;
+                }
+                let kreate_input::Input::Key(name) = &binding.input else {
+                    panic!("{preset:?}: a pie opened by something that is not a key");
+                };
+                assert!(egui_key(name).is_some(), "{preset:?}: `{name}` has no egui key");
+            }
+        }
+    }
+
     use super::*;
 
     /// An application with no window, which is all the input state machine needs.

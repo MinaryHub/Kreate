@@ -205,12 +205,29 @@ fn common() -> Vec<Binding> {
         // application for the same reason navigation is: they are things a user
         // rebinds, and a table that holds only *some* of the keys is a table
         // whose remapping screen has exceptions to explain.
+        // Blender's three pies, on Blender's keys: shading on `Z`, the view
+        // directions on the key under Escape, modes on `Ctrl+Tab`. `Tab`
+        // alone still toggles edit mode, which is the gesture used a hundred
+        // times for every once the pie is.
         key(
             "view.shading",
             "Z",
             Context::Viewport,
-            Action::new("view.cycle_shading"),
+            Action::new("app.pie").with("menu", PropertyValue::Text("shading".into())),
         ),
+        key(
+            "view.pie",
+            "Backquote",
+            Context::Viewport,
+            Action::new("app.pie").with("menu", PropertyValue::Text("view".into())),
+        ),
+        key(
+            "view.mode_pie",
+            "Tab",
+            Context::Viewport,
+            Action::new("app.pie").with("menu", PropertyValue::Text("mode".into())),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         key(
             "view.projection",
             "O",
@@ -250,12 +267,17 @@ fn common() -> Vec<Binding> {
         // The two standing transform settings. Toggles rather than holds: they
         // are how the user works, not something wanted for one drag — `Ctrl`
         // covers the one-drag case by inverting the snap setting.
+        // `Shift+Tab`, Blender's snapping toggle. It sat on the key under
+        // Escape, which the application never learnt the name of — so it was
+        // a binding no keystroke could reach. That key is the view pie's now,
+        // as it is in Blender.
         key(
             "view.snap",
-            "Backquote",
+            "Tab",
             Context::Viewport,
             Action::new("view.toggle_snap"),
-        ),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "view.proportional",
             "O",
@@ -264,11 +286,11 @@ fn common() -> Vec<Binding> {
         ),
         key(
             "view.snap_mode",
-            "Backquote",
+            "Tab",
             Context::Viewport,
             Action::new("view.cycle_snap_mode"),
         )
-        .with_modifiers(Modifiers::shift()),
+        .with_modifiers(Modifiers::ctrl_shift()),
         key(
             "edit.adjust_smaller",
             "BracketLeft",
