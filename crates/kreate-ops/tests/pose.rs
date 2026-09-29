@@ -40,7 +40,7 @@ fn arm() -> (Document, kreate_scene::ObjectId) {
     let mut doc = Document::new();
     let mut a = Armature::new("Arm");
     a.bones[0].name = "Upper".into();
-    a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::new(0.0, 0.0, 2.0), roll: 0.0 });
+    a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::new(0.0, 0.0, 2.0), roll: 0.0, ..Default::default() });
     let id = doc.add_armature(a);
     let mut object = Object::new("Rig", ObjectData::Armature(id));
     object.transform.translation = DVec3::new(5.0, 0.0, 0.0);

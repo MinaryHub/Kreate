@@ -38,11 +38,30 @@ pub fn markers_for(doc: &Document) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
     markers_posing(doc, None)
 }
 
+/// How an armature is being shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bones {
+    /// As an object: every bone in the object's colour.
+    Object,
+    /// Posed, each bone saying whether it is selected.
+    Pose,
+    /// At rest, with its joints as dots that say whether they are selected.
+    Edit,
+}
+
 /// The same, with `posing` the armature in pose mode, whose bones then say
 /// which of *them* is selected rather than whether the object is.
 pub fn markers_posing(
     doc: &Document,
     posing: Option<kreate_scene::ObjectId>,
+) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
+    markers_with(doc, posing.map(|id| (id, Bones::Pose)))
+}
+
+/// The same, with one armature shown in pose or edit mode.
+pub fn markers_with(
+    doc: &Document,
+    armature: Option<(kreate_scene::ObjectId, Bones)>,
 ) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
     let mut lines = Vec::new();
     let mut points = Vec::new();
@@ -63,7 +82,11 @@ pub fn markers_posing(
                 }
             }
             ObjectData::Armature(_) => {
-                armature_glyph(doc, id, posing == Some(id), color, dim, accent, &mut lines);
+                let how = match armature {
+                    Some((a, how)) if a == id => how,
+                    _ => Bones::Object,
+                };
+                armature_glyph(doc, id, how, color, dim, accent, &mut lines, &mut points);
             }
             ObjectData::Camera(camera) => {
                 if let Some(camera) = doc.camera(*camera) {
@@ -88,19 +111,49 @@ pub fn markers_posing(
 ///
 /// In pose mode a bone wears the accent when it is selected and white when it
 /// is the active one; otherwise every bone wears the object's colour.
+#[allow(clippy::too_many_arguments)]
 fn armature_glyph(
     doc: &Document,
     object: kreate_scene::ObjectId,
-    posing: bool,
+    how: Bones,
     color: [f32; 4],
     dim: [f32; 4],
     accent: [f32; 4],
     lines: &mut Vec<OverlayLine>,
+    points: &mut Vec<OverlayPoint>,
 ) {
     let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else { return };
-    let frames = doc.posed_bones(object);
-    for (bone, frame) in armature.bones.iter().zip(&frames) {
-        let tint = if !posing {
+    // Edit mode shows the skeleton as built, which is what is being edited;
+    // the others show it as it stands.
+    let frames = if how == Bones::Edit {
+        let world = doc.world_transform(object);
+        armature.bones.iter().map(|b| world * b.rest()).collect()
+    } else {
+        doc.posed_bones(object)
+    };
+    if how == Bones::Edit {
+        let world = doc.world_transform(object);
+        let mut joint = |at: kreate_math::DVec3, selected: bool| {
+            points.push(OverlayPoint {
+                position: world.transform_point3(at),
+                color: if selected { accent } else { dim },
+                radius_px: 4.0,
+                shape: MarkerShape::Ring,
+                dot: selected,
+            });
+        };
+        for (i, bone) in armature.bones.iter().enumerate() {
+            // A connected head is its parent's tail, drawn once there.
+            if !(bone.connected && bone.parent.is_some()) {
+                joint(bone.head, armature.head_selected(i));
+            }
+            joint(bone.tail, bone.select_tail);
+        }
+    }
+    for (i, (bone, frame)) in armature.bones.iter().zip(&frames).enumerate() {
+        let tint = if how == Bones::Edit {
+            if armature.bone_selected(i) { accent } else { dim }
+        } else if how == Bones::Object {
             color
         } else if o.pose.active.as_deref() == Some(bone.name.as_str()) && o.pose.is_selected(&bone.name) {
             [1.0, 1.0, 1.0, 1.0]
@@ -269,6 +322,29 @@ mod armature_tests {
         assert!(unposed.iter().all(|l| l.color != accent), "an unselected armature looks selected");
         let (posed, _) = markers_posing(&doc, Some(rig));
         assert!(posed.iter().all(|l| l.color == accent), "a selected bone does not say so");
+    }
+
+    #[test]
+    fn edit_mode_draws_each_joint_once_and_the_skeleton_at_rest() {
+        let mut arm = kreate_scene::armature::Armature::new("Rig");
+        arm.bones[0].select_tail = true;
+        arm.add_bone(kreate_scene::armature::Bone {
+            name: "Next".into(),
+            parent: Some(0),
+            head: DVec3::Z,
+            tail: DVec3::new(0.0, 0.0, 2.0),
+            connected: true,
+            ..Default::default()
+        });
+        let mut doc = Document::new();
+        let a = doc.add_armature(arm);
+        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        // A pose that edit mode must not show.
+        doc.object_mut(rig).unwrap().pose.entry("Bone").transform.translation = DVec3::X * 5.0;
+        let (lines, points) = markers_with(&doc, Some((rig, Bones::Edit)));
+        assert_eq!(points.len(), 3, "the shared joint was drawn twice, or not at all");
+        assert_eq!(points.iter().filter(|p| p.dot).count(), 1, "one joint is selected");
+        assert!(lines.iter().all(|l| l.a.x.abs() < 1.0), "edit mode drew the pose");
     }
 }
 

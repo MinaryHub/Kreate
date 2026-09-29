@@ -1025,6 +1025,10 @@ struct Labels {
     add_empty: String,
     add_armature: String,
     menu_pose: String,
+    menu_armature: String,
+    armature_add_bone: String,
+    armature_extrude: String,
+    armature_delete: String,
     pose_clear_all: String,
     pose_clear_location: String,
     pose_clear_rotation: String,
@@ -1190,6 +1194,10 @@ impl Labels {
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
+            menu_armature: t("menu-armature"),
+            armature_add_bone: t("armature-add-bone"),
+            armature_extrude: t("armature-extrude"),
+            armature_delete: t("armature-delete"),
             pose_clear_all: t("pose-clear-all"),
             pose_clear_location: t("pose-clear-location"),
             pose_clear_rotation: t("pose-clear-rotation"),
@@ -2249,6 +2257,15 @@ fn viewport_menus(
                 label: l.menu_pose.clone(),
                 nodes: pose_nodes(l),
             }),
+            kreate_ops::mode::Menu::Armature => out.push(TopMenu {
+                label: l.menu_armature.clone(),
+                nodes: vec![
+                    entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[])),
+                    entry("armature.extrude", &l.armature_extrude, dispatch("armature.extrude")),
+                    MenuNode::Separator,
+                    entry("armature.delete", &l.armature_delete, op("armature.delete", &[])),
+                ],
+            }),
         }
     }
     out
@@ -2325,11 +2342,15 @@ fn run_entry(state: &mut ShellState, entry: &MenuEntry) {
 fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
     let mut out = Vec::new();
-    if mode.acts_on() == kreate_ops::mode::ActsOn::Bones {
+    let bones = match mode.acts_on() {
+        kreate_ops::mode::ActsOn::Bones => Some("pose.select_all"),
+        kreate_ops::mode::ActsOn::BoneJoints => Some("armature.select_all"),
+        _ => None,
+    };
+    if let Some(id) = bones {
         for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (3, &l.select_invert)] {
             out.push(MenuNode::Entry(
-                MenuEntry::new("pose.select_all", label, op("pose.select_all", &[("action", V::Enum(action))]))
-                    .variant("action", V::Enum(action)),
+                MenuEntry::new(id, label, op(id, &[("action", V::Enum(action))])).variant("action", V::Enum(action)),
             ));
         }
     } else if mode.edits_elements() {
@@ -2642,6 +2663,46 @@ pub fn glyph_under(
         }
     }
     best.map(|(_, id)| id)
+}
+
+/// The end of a bone at rest nearest the pointer — `(bone, 1)` for a head,
+/// `(bone, 2)` for a tail — or, failing that, the bone whose segment is
+/// nearest, as `(bone, 0)`: what a click in armature edit mode selects.
+pub fn joint_under(
+    doc: &Document,
+    object: ObjectId,
+    projector: &kreate_ui::object_glyph::Projector,
+    at: egui::Pos2,
+) -> Option<(String, u32)> {
+    let (_, armature) = doc.armature_of(object)?;
+    let world = doc.world_transform(object);
+    let mut best: Option<(f32, String, u32)> = None;
+    let consider = |d: f32, name: &str, part: u32, best: &mut Option<(f32, String, u32)>| {
+        if d <= BONE_REACH && best.as_ref().is_none_or(|(b, _, _)| d < *b) {
+            *best = Some((d, name.to_string(), part));
+        }
+    };
+    for bone in &armature.bones {
+        for (point, part) in [(bone.head, 1u32), (bone.tail, 2)] {
+            if let Some(p) = projector.project(world.transform_point3(point)) {
+                consider(p.distance(at), &bone.name, part, &mut best);
+            }
+        }
+    }
+    if best.is_none() {
+        for bone in &armature.bones {
+            let (Some(a), Some(b)) = (
+                projector.project(world.transform_point3(bone.head)),
+                projector.project(world.transform_point3(bone.tail)),
+            ) else {
+                continue;
+            };
+            let ab = b - a;
+            let t = if ab.length_sq() > 0.0 { ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+            consider((a + ab * t).distance(at), &bone.name, 0, &mut best);
+        }
+    }
+    best.map(|(_, name, part)| (name, part))
 }
 
 /// How near, in points, the pointer has to be to a bone to hit it.
@@ -5069,6 +5130,17 @@ menu-add-camera = Camera
 menu-add-empty = Empty
 menu-add-armature = Armature
 menu-pose = Pose
+menu-armature = Armature
+armature-add-bone = Add Bone
+armature-extrude = Extrude
+armature-delete = Delete Bones
+mode-edit-armature = Edit Mode
+keymap-context-edit-armature = Armature Edit Mode
+op-mode-edit-armature-desc = Acts on the heads and tails of the active armature's bones, as built.
+op-armature-bone-add-desc = Adds a free bone standing a unit tall.
+op-armature-extrude-desc = Grows a connected bone out of each selected tail, then moves it.
+op-armature-delete-desc = Deletes the selected bones; their children go to their parents.
+op-armature-select-all-desc = Selects every bone end, none, or the others.
 pose-clear-all = Clear Transform
 pose-clear-location = Clear Location
 pose-clear-rotation = Clear Rotation
@@ -5518,6 +5590,17 @@ menu-add-camera = 카메라
 menu-add-empty = 엠프티
 menu-add-armature = 아마튜어
 menu-pose = 포즈
+menu-armature = 아마튜어
+armature-add-bone = 뼈 추가
+armature-extrude = 돌출
+armature-delete = 뼈 삭제
+mode-edit-armature = 편집 모드
+keymap-context-edit-armature = 아마튜어 편집 모드
+op-mode-edit-armature-desc = 활성 아마튜어 뼈의 머리와 꼬리에 작용합니다(만들어진 자세 그대로).
+op-armature-bone-add-desc = 한 단위 높이로 선 독립된 뼈를 추가합니다.
+op-armature-extrude-desc = 선택한 꼬리마다 이어진 뼈를 뽑아내고 바로 움직입니다.
+op-armature-delete-desc = 선택한 뼈를 삭제합니다. 자식 뼈는 부모에게 넘어갑니다.
+op-armature-select-all-desc = 모든 뼈 끝을 선택하거나, 해제하거나, 반전합니다.
 pose-clear-all = 트랜스폼 지우기
 pose-clear-location = 위치 지우기
 pose-clear-rotation = 회전 지우기

@@ -62,8 +62,8 @@ pub fn plan(from: Mode, to: Mode, has: Has) -> Option<Change> {
 /// A toggle, which is what the user means by that key and which is not
 /// expressible as "set this mode". It stays a two-way gesture as modes are
 /// added: out of whatever is being edited, or back into it.
-pub fn toggled(from: Mode) -> Mode {
-    from.info().tab
+pub fn toggled(from: Mode, has: Has) -> Mode {
+    from.toggled(has)
 }
 
 #[cfg(test)]
@@ -138,11 +138,11 @@ mod tests {
 
     #[test]
     fn tab_is_a_two_way_gesture() {
-        assert_eq!(toggled(Mode::Object), Mode::EditMesh);
-        assert_eq!(toggled(Mode::EditMesh), Mode::Object);
+        assert_eq!(toggled(Mode::Object, Has::EVERYTHING), Mode::EditMesh);
+        assert_eq!(toggled(Mode::EditMesh, Has::EVERYTHING), Mode::Object);
         // And it always leads somewhere else, from every mode there is.
         for mode in Mode::ALL {
-            assert_ne!(toggled(mode), mode, "{mode:?} toggles to itself");
+            assert_ne!(toggled(mode, Has::EVERYTHING), mode, "{mode:?} toggles to itself");
         }
     }
 }

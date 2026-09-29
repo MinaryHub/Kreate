@@ -2094,6 +2094,7 @@ fn shot_armature() {
         head: kreate_math::DVec3::new(0.0, 0.0, 1.2),
         tail: kreate_math::DVec3::new(0.0, 0.0, 2.2),
         roll: 0.0,
+        ..Default::default()
     });
     arm.add_bone(Bone {
         name: "Hand".into(),
@@ -2101,6 +2102,7 @@ fn shot_armature() {
         head: kreate_math::DVec3::new(0.0, 0.0, 2.2),
         tail: kreate_math::DVec3::new(0.0, 0.0, 2.6),
         roll: 0.0,
+        ..Default::default()
     });
     let id = doc.add_armature(arm);
     let mut object = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id));

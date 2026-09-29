@@ -79,6 +79,7 @@ pub fn context_key(context: Context) -> &'static str {
         Context::ObjectMode => "keymap-context-object",
         Context::EditMesh => "keymap-context-edit",
         Context::Pose => "keymap-context-pose",
+        Context::EditArmature => "keymap-context-edit-armature",
         Context::UvEditor => "keymap-context-uv",
         Context::Modal => "keymap-context-modal",
     }
@@ -108,12 +109,13 @@ pub struct KeymapText {
 
 /// The order contexts are listed in: outermost first, matching how a user thinks
 /// about scope rather than how resolution walks it.
-pub const CONTEXT_ORDER: [Context; 7] = [
+pub const CONTEXT_ORDER: [Context; 8] = [
     Context::Global,
     Context::Viewport,
     Context::ObjectMode,
     Context::EditMesh,
     Context::Pose,
+    Context::EditArmature,
     Context::UvEditor,
     Context::Modal,
 ];

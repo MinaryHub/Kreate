@@ -1041,6 +1041,7 @@ fn an_armature_and_its_pose_come_back() {
         head: glam::DVec3::Z,
         tail: glam::DVec3::new(0.0, 0.5, 2.0),
         roll: -0.5,
+        ..Default::default()
     });
     let id = doc.add_armature(a.clone());
     let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(id)));

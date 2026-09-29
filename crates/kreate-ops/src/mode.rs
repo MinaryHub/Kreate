@@ -28,6 +28,7 @@ pub enum Mode {
     #[default]
     Object,
     EditMesh,
+    EditArmature,
     Pose,
 }
 
@@ -75,6 +76,8 @@ pub enum ActsOn {
     MeshElements,
     /// The bones of the active armature, posed.
     Bones,
+    /// The heads and tails of the active armature's bones, at rest.
+    BoneJoints,
 }
 
 /// A header menu a mode offers after Add.
@@ -85,6 +88,8 @@ pub enum Menu {
     Mesh,
     /// Pose: selecting bones and clearing what was done to them.
     Pose,
+    /// Armature: adding, extruding and deleting bones.
+    Armature,
 }
 
 /// Everything the application asks of a mode.
@@ -120,7 +125,7 @@ pub struct ModeInfo {
 }
 
 /// The cards, in the order the mode menu lists them.
-pub const MODES: [ModeInfo; 3] = [
+pub const MODES: [ModeInfo; 4] = [
     ModeInfo {
         mode: Mode::Object,
         tag: "object",
@@ -150,6 +155,20 @@ pub const MODES: [ModeInfo; 3] = [
         tab: Mode::Object,
     },
     ModeInfo {
+        mode: Mode::EditArmature,
+        tag: "edit_armature",
+        label_key: "mode-edit-armature",
+        needs: Needs::Armature,
+        acts_on: ActsOn::BoneJoints,
+        keymap: "edit_armature",
+        menus: &[Menu::Armature],
+        element_buttons: false,
+        edit_tools: false,
+        shows_elements: false,
+        transform: ["armature.translate", "armature.rotate", "armature.scale"],
+        tab: Mode::Object,
+    },
+    ModeInfo {
         mode: Mode::Pose,
         tag: "pose",
         label_key: "mode-pose",
@@ -161,15 +180,14 @@ pub const MODES: [ModeInfo; 3] = [
         edit_tools: false,
         shows_elements: false,
         transform: ["pose.translate", "pose.rotate", "pose.scale"],
-        // Blender's Tab from pose mode goes to the armature's edit mode, which
-        // does not exist yet; out is the other half of the toggle.
-        tab: Mode::Object,
+        // Blender's: Tab from pose mode goes to the skeleton's edit mode.
+        tab: Mode::EditArmature,
     },
 ];
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 3] = [Mode::Object, Mode::EditMesh, Mode::Pose];
+    pub const ALL: [Mode; 4] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose];
 
     /// This mode's card.
     ///
@@ -179,7 +197,8 @@ impl Mode {
         match self {
             Mode::Object => &MODES[0],
             Mode::EditMesh => &MODES[1],
-            Mode::Pose => &MODES[2],
+            Mode::EditArmature => &MODES[2],
+            Mode::Pose => &MODES[3],
         }
     }
 
@@ -221,6 +240,24 @@ impl Mode {
             Needs::Mesh => has.mesh,
             Needs::Armature => has.armature,
         }
+    }
+
+    /// Where `Tab` goes from here, given what there is.
+    ///
+    /// The card's answer when it can be entered. Otherwise the first mode
+    /// whose own Tab comes back here and that can be — so Tab on an armature
+    /// in object mode edits the skeleton, as it edits a mesh's vertices on a
+    /// mesh, without object mode's card having to know about either.
+    pub fn toggled(self, has: Has) -> Mode {
+        let card = self.info().tab;
+        if card.can_enter(has) {
+            return card;
+        }
+        Mode::ALL
+            .iter()
+            .copied()
+            .find(|m| *m != self && m.info().tab == self && m.can_enter(has))
+            .unwrap_or(card)
     }
 
     /// Whether a mesh's elements are on screen as selectable things.
@@ -275,7 +312,7 @@ mod tests {
             if info.acts_on == ActsOn::MeshElements {
                 assert_eq!(info.needs, Needs::Mesh, "{mode:?} edits a mesh it may not have");
             }
-            if info.acts_on == ActsOn::Bones {
+            if matches!(info.acts_on, ActsOn::Bones | ActsOn::BoneJoints) {
                 assert_eq!(info.needs, Needs::Armature, "{mode:?} poses an armature it may not have");
             }
         }
@@ -288,10 +325,21 @@ mod tests {
                 ActsOn::Objects => "object.",
                 ActsOn::MeshElements => "mesh.",
                 ActsOn::Bones => "pose.",
+                ActsOn::BoneJoints => "armature.",
             };
             for op in mode.info().transform {
                 assert!(op.starts_with(prefix), "{mode:?}: {op}");
             }
         }
+    }
+
+    #[test]
+    fn tab_edits_whatever_is_active() {
+        let mesh = Has { mesh: true, armature: false };
+        let armature = Has { mesh: false, armature: true };
+        assert_eq!(Mode::Object.toggled(mesh), Mode::EditMesh);
+        assert_eq!(Mode::Object.toggled(armature), Mode::EditArmature);
+        assert_eq!(Mode::EditArmature.toggled(armature), Mode::Object);
+        assert_eq!(Mode::Pose.toggled(armature), Mode::EditArmature);
     }
 }

@@ -495,6 +495,19 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::alt()),
         key("pose.clear_scale", "S", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 3))
             .with_modifiers(Modifiers::alt()),
+        // --- armature edit mode: building the skeleton -------------------------
+        key("armature.translate", "G", Context::EditArmature, Action::new("armature.translate")),
+        key("armature.rotate", "R", Context::EditArmature, Action::new("armature.rotate")),
+        key("armature.scale", "S", Context::EditArmature, Action::new("armature.scale")),
+        key("armature.extrude", "E", Context::EditArmature, Action::new("armature.extrude")),
+        key("armature.delete", "X", Context::EditArmature, Action::new("armature.delete")),
+        key("armature.bone_add", "A", Context::EditArmature, Action::new("armature.bone_add"))
+            .with_modifiers(Modifiers::shift()),
+        key("armature.select_all", "A", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 0)),
+        key("armature.select_none", "A", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 1))
+            .with_modifiers(Modifiers::alt()),
+        key("armature.select_invert", "I", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 3))
+            .with_modifiers(Modifiers::ctrl()),
         // --- object mode ---------------------------------------------------
         key(
             "object.add_cube",

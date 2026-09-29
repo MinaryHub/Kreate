@@ -238,6 +238,13 @@ pub struct BoneRecord {
     pub tail: [f64; 3],
     #[serde(default)]
     pub roll: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connected: bool,
+    /// Edit-mode selection, as the skeleton was left.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub select_head: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub select_tail: bool,
 }
 
 /// One bone's pose: its transform relative to rest, and whether it is
@@ -1035,6 +1042,9 @@ pub fn write(
                         head: b.head.to_array(),
                         tail: b.tail.to_array(),
                         roll: b.roll,
+                        connected: b.connected,
+                        select_head: b.select_head,
+                        select_tail: b.select_tail,
                     })
                     .collect(),
             })
@@ -1580,6 +1590,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     head: glam::DVec3::from_array(b.head),
                     tail: glam::DVec3::from_array(b.tail),
                     roll: b.roll,
+                    connected: b.connected,
+                    select_head: b.select_head,
+                    select_tail: b.select_tail,
                 });
             }
             document.restore_armature(armature, kreate_scene::Uid::from_raw(record.uid))

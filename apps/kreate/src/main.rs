@@ -908,7 +908,8 @@ impl App {
         // user means "in or out of editing whatever this is". With more modes it
         // is still a two-way gesture, between object mode and the last one they
         // were editing in.
-        self.set_mode(kreate::mode::toggled(self.op_ctx.mode));
+        let has = kreate_ops::mode::Has::of(&self.doc);
+        self.set_mode(kreate::mode::toggled(self.op_ctx.mode, has));
     }
 
     /// Switches mode, if the mode can be entered.
@@ -1356,6 +1357,9 @@ impl App {
             // gives: a gesture measured about another point would turn the
             // bones out from under the pointer.
             return kreate_ops::ops::pose::pivot(&self.doc);
+        }
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints {
+            return kreate_ops::ops::armature::pivot(&self.doc);
         }
         if self.op_ctx.mode.edits_elements() {
             // The operator's own answer, not a second calculation of it. The
@@ -3339,6 +3343,31 @@ impl App {
                     None => {}
                 }
             }
+            kreate_ops::mode::ActsOn::BoneJoints => {
+                let Some(object) = kreate_ops::ops::armature::edited_object(&self.doc) else {
+                    return true;
+                };
+                let (Some((x, y)), Some(projector)) = (self.input.cursor, self.ui.projector) else {
+                    return true;
+                };
+                let ppp = self.egui_ctx.pixels_per_point();
+                let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+                match shell::joint_under(&self.doc, object, &projector, at) {
+                    Some((bone, part)) => {
+                        let mut params = PropertyMap::new();
+                        params.set("bone", PropertyValue::Text(bone));
+                        params.set("part", PropertyValue::Enum(part));
+                        params.set("extend", PropertyValue::Bool(extend));
+                        self.run_op("armature.select_pick", params);
+                    }
+                    None if !extend => {
+                        let mut params = PropertyMap::new();
+                        params.set("action", PropertyValue::Enum(1));
+                        self.run_op("armature.select_all", params);
+                    }
+                    None => {}
+                }
+            }
             kreate_ops::mode::ActsOn::Bones => {
                 let Some(object) = kreate_ops::ops::pose::posed_object(&self.doc) else {
                     return true;
@@ -4120,10 +4149,16 @@ impl App {
         // against its depth — see `glyphs`. Rebuilt each frame: a handful of
         // objects, and a copy of their transforms would be one more thing to
         // keep in step with undo.
-        let posing = (self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Bones)
-            .then(|| kreate_ops::ops::pose::posed_object(&self.doc))
-            .flatten();
-        let (marker_lines, marker_points) = kreate::glyphs::markers_posing(&self.doc, posing);
+        let shown = match self.op_ctx.mode.acts_on() {
+            kreate_ops::mode::ActsOn::Bones => {
+                kreate_ops::ops::pose::posed_object(&self.doc).map(|id| (id, kreate::glyphs::Bones::Pose))
+            }
+            kreate_ops::mode::ActsOn::BoneJoints => {
+                kreate_ops::ops::armature::edited_object(&self.doc).map(|id| (id, kreate::glyphs::Bones::Edit))
+            }
+            _ => None,
+        };
+        let (marker_lines, marker_points) = kreate::glyphs::markers_with(&self.doc, shown);
         gfx.viewport.set_markers(
             &gfx.gpu.device,
             &gfx.gpu.queue,
@@ -4575,6 +4610,18 @@ impl App {
             }
             "object.rotate" | "mesh.rotate" | "pose.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "object.scale" | "mesh.scale" | "pose.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
+            "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
+            "armature.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            // Blender's E: grow the bones, then the drag that places them. Two
+            // steps, as Extrude and Move are in Blender's history too.
+            "armature.extrude" => {
+                let before = self.history.entries().len();
+                self.run_op("armature.extrude", PropertyMap::new());
+                if self.history.entries().len() > before {
+                    self.begin_gesture(kreate::modal::Kind::Move);
+                }
+            }
             "view.cycle_snap_mode" => {
                 self.snap.mode = self.snap.mode.next();
                 let label = self.snap.mode.label();

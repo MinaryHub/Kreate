@@ -27,7 +27,7 @@ use kreate_reflect::Uid;
 use crate::document::Linkage;
 
 /// One bone at rest.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bone {
     pub name: String,
     /// Index into [`Armature::bones`]. Always an earlier bone, which
@@ -38,6 +38,15 @@ pub struct Bone {
     pub tail: DVec3,
     /// Radians about the bone's own Y.
     pub roll: f64,
+    /// Whether its head is its parent's tail. Kept true by every edit: moving
+    /// the parent's tail moves this head, and the other way round — Blender's
+    /// Connected, what a chain extruded with `E` is.
+    pub connected: bool,
+    /// Edit-mode selection of the two ends. On the skeleton rather than the
+    /// object because it is the skeleton being edited, as Blender keeps it.
+    /// A connected bone's head is its parent's tail, and its flag follows.
+    pub select_head: bool,
+    pub select_tail: bool,
 }
 
 impl Bone {
@@ -90,7 +99,7 @@ impl Armature {
                 parent: None,
                 head: DVec3::ZERO,
                 tail: DVec3::Z,
-                roll: 0.0,
+                ..Bone::default()
             }],
         }
     }
@@ -101,6 +110,9 @@ impl Armature {
     pub fn add_bone(&mut self, mut bone: Bone) -> usize {
         if bone.parent.is_some_and(|p| p >= self.bones.len()) {
             bone.parent = None;
+        }
+        if bone.parent.is_none() {
+            bone.connected = false;
         }
         self.bones.push(bone);
         self.bones.len() - 1
@@ -116,10 +128,91 @@ impl Armature {
         if self.bone_index(base).is_none() {
             return base.to_string();
         }
+        // The number is Blender's, and is replaced rather than stacked:
+        // extruding from `Bone.001` makes `Bone.002`, not `Bone.001.001`.
+        let base = match base.rsplit_once('.') {
+            Some((stem, n)) if n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()) => stem,
+            _ => base,
+        };
         (1..)
             .map(|i| format!("{base}.{i:03}"))
             .find(|n| self.bone_index(n).is_none())
             .expect("the names run out after the integers do")
+    }
+}
+
+impl Armature {
+    /// Whether the bone's head is selected, a connected head answering for
+    /// its parent's tail.
+    pub fn head_selected(&self, i: usize) -> bool {
+        let b = &self.bones[i];
+        match (b.connected, b.parent) {
+            (true, Some(p)) => self.bones[p].select_tail,
+            _ => b.select_head,
+        }
+    }
+
+    /// Whether the whole bone is selected: both ends.
+    pub fn bone_selected(&self, i: usize) -> bool {
+        self.head_selected(i) && self.bones[i].select_tail
+    }
+
+    /// Sets a head's selection — its parent's tail, if connected.
+    pub fn set_head_selected(&mut self, i: usize, selected: bool) {
+        match (self.bones[i].connected, self.bones[i].parent) {
+            (true, Some(p)) => self.bones[p].select_tail = selected,
+            _ => self.bones[i].select_head = selected,
+        }
+    }
+
+    /// Puts every connected head back on its parent's tail, parents first.
+    pub fn reconnect(&mut self) {
+        for i in 0..self.bones.len() {
+            if let (true, Some(p)) = (self.bones[i].connected, self.bones[i].parent) {
+                self.bones[i].head = self.bones[p].tail;
+            }
+        }
+    }
+
+    /// Takes bones out, their children going to the removed bone's parent,
+    /// no longer connected — the joint they were connected at is gone.
+    pub fn remove_bones(&mut self, remove: &[bool]) {
+        let n = self.bones.len();
+        // Where each old index lands, and each removed bone's surviving
+        // ancestor, resolved parents first.
+        let mut next = 0;
+        let new_index: Vec<Option<usize>> = (0..n)
+            .map(|i| {
+                (!remove.get(i).copied().unwrap_or(false)).then(|| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect();
+        let mut heir: Vec<Option<usize>> = vec![None; n];
+        for i in 0..n {
+            heir[i] = match new_index[i] {
+                Some(k) => Some(k),
+                None => self.bones[i].parent.and_then(|p| heir[p]),
+            };
+        }
+        let mut kept = Vec::with_capacity(next);
+        for (i, bone) in self.bones.iter().enumerate() {
+            if new_index[i].is_none() {
+                continue;
+            }
+            let mut b = bone.clone();
+            match b.parent {
+                Some(p) if new_index[p].is_none() => {
+                    b.parent = heir[p];
+                    b.connected = false;
+                }
+                Some(p) => b.parent = new_index[p],
+                None => {}
+            }
+            kept.push(b);
+        }
+        self.bones = kept;
     }
 }
 
@@ -238,13 +331,13 @@ mod tests {
     fn arm() -> Armature {
         let mut a = Armature::new("Arm");
         a.bones[0].name = "Upper".into();
-        a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::new(0.0, 0.0, 2.0), roll: 0.0 });
+        a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::new(0.0, 0.0, 2.0), roll: 0.0, ..Default::default() });
         a
     }
 
     #[test]
     fn a_bones_y_runs_from_head_to_tail() {
-        let b = Bone { name: "B".into(), parent: None, head: DVec3::new(1.0, 0.0, 0.0), tail: DVec3::new(1.0, 0.0, 3.0), roll: 0.0 };
+        let b = Bone { name: "B".into(), parent: None, head: DVec3::new(1.0, 0.0, 0.0), tail: DVec3::new(1.0, 0.0, 3.0), roll: 0.0, ..Default::default() };
         let r = b.rest();
         assert!(close(r.translation, DVec3::new(1.0, 0.0, 0.0)));
         assert!(close(r.matrix3 * DVec3::Y, DVec3::Z));
@@ -308,7 +401,10 @@ mod tests {
         let mut a = arm();
         assert_eq!(a.unique_name("Lower"), "Lower.001");
         assert_eq!(a.unique_name("Hand"), "Hand");
-        let i = a.add_bone(Bone { name: "Loose".into(), parent: Some(99), head: DVec3::ZERO, tail: DVec3::Y, roll: 0.0 });
+        // Numbered from the stem, not stacked on the number.
+        a.bones[1].name = "Lower.001".into();
+        assert_eq!(a.unique_name("Lower.001"), "Lower.002");
+        let i = a.add_bone(Bone { name: "Loose".into(), parent: Some(99), head: DVec3::ZERO, tail: DVec3::Y, roll: 0.0, ..Default::default() });
         assert_eq!(a.bones[i].parent, None);
         assert!(is_ancestor(&a, 0, 1));
         assert!(!is_ancestor(&a, 1, 0));
