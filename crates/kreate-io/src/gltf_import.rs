@@ -60,7 +60,7 @@
 
 use crate::gltf_export::NGON_EXTENSION;
 use crate::ir::{
-    ImportCamera, ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode,
+    ImportCamera, ImportImage, ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode,
     ImportNodeData, ImportScene, ImportTransform, LossyNote, SourceMetadata, UvOrigin,
 };
 use glam::{Vec2, Vec3};
@@ -105,7 +105,7 @@ pub enum GltfError {
 /// cannot do. `import_slice` handles embedded base64 buffers and `.glb`, which
 /// covers the overwhelming majority of files that get passed around.
 pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, GltfError> {
-    let (document, buffers, _images) = gltf::import_slice(bytes)?;
+    let (document, buffers, images) = gltf::import_slice(bytes)?;
 
     let mut source = SourceMetadata::new("gltf");
     // Applied exactly once, here at the boundary. Every position, and every
@@ -124,9 +124,66 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
     let mut scene = ImportScene::new(source);
     read_nodes(&document, &mut scene);
 
+    // Every image, in the file's order, so a texture's `source` index is an
+    // index here too. Decoded already — `import_slice` unpacks embedded PNG and
+    // JPEG — and widened or narrowed to the one layout the document takes.
+    for (index, (data, image)) in images.iter().zip(document.images()).enumerate() {
+        let name = image
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("image{index}"));
+        let pixels = match rgba8(data) {
+            Some(pixels) => pixels,
+            None => {
+                // A float image as a material map: glTF's core has no such
+                // thing, so this is an extension's, and keeping its range
+                // would need a float path this reader does not have. Said,
+                // and left as an empty slot rather than a wrong texture.
+                scene.source.notes.push(LossyNote::Unsupported {
+                    what: format!("{name}: a {:?} image was not read", data.format),
+                });
+                Vec::new()
+            }
+        };
+        scene.images.push(ImportImage {
+            name,
+            width: if pixels.is_empty() { 0 } else { data.width },
+            height: if pixels.is_empty() { 0 } else { data.height },
+            pixels,
+        });
+    }
+
     for material in document.materials() {
         let pbr = material.pbr_metallic_roughness();
         let base = pbr.base_color_factor();
+        let material_name = material.name().unwrap_or("material").to_string();
+        // Only the first coordinate set is read, so a texture that asks for
+        // another would land on the wrong coordinates. Kept — the image is
+        // right and the mapping is the approximation — and said.
+        let mut texture = |slot: &str, tex_coord: u32, source: usize| {
+            if tex_coord != 0 {
+                scene.source.notes.push(LossyNote::Unsupported {
+                    what: format!(
+                        "{material_name}: the {slot} map uses texture coordinates {tex_coord}; \
+                         only the first set is read"
+                    ),
+                });
+            }
+            Some(source)
+        };
+        let base_color_texture = pbr
+            .base_color_texture()
+            .and_then(|t| texture("base colour", t.tex_coord(), t.texture().source().index()));
+        let metallic_roughness_texture = pbr.metallic_roughness_texture().and_then(|t| {
+            texture("metallic-roughness", t.tex_coord(), t.texture().source().index())
+        });
+        let (normal_texture, normal_scale) = match material.normal_texture() {
+            Some(t) => (
+                texture("normal", t.tex_coord(), t.texture().source().index()),
+                t.scale(),
+            ),
+            None => (None, 1.0),
+        };
         scene.materials.push(ImportMaterial {
             name: material
                 .name()
@@ -136,12 +193,10 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             metallic: pbr.metallic_factor(),
             roughness: pbr.roughness_factor(),
             emissive: Vec3::from_array(material.emissive_factor()),
-            // The name only. Reading the pixels is a separate concern, and a
-            // material that remembers which texture it wanted can be reconnected
-            // later; one that forgot cannot.
-            base_color_texture: pbr
-                .base_color_texture()
-                .and_then(|t| t.texture().source().name().map(str::to_string)),
+            base_color_texture,
+            metallic_roughness_texture,
+            normal_texture,
+            normal_scale,
         });
     }
 
@@ -529,4 +584,50 @@ fn note_unread_features(document: &gltf::Document, notes: &mut Vec<LossyNote>) {
             document.textures().len()
         ));
     }
+}
+
+/// A decoded glTF image as eight-bit RGBA, or `None` for a float one.
+///
+/// Sixteen-bit channels keep their high byte: a material map is sampled
+/// through an eight-bit atlas anyway, and rounding here rather than there is
+/// the same answer. The `gltf` crate hands sixteen-bit data over in the
+/// machine's own byte order.
+fn rgba8(data: &gltf::image::Data) -> Option<Vec<u8>> {
+    use gltf::image::Format;
+    let count = data.width as usize * data.height as usize;
+    let wide = |i: usize| -> u8 {
+        let at = i * 2;
+        data.pixels
+            .get(at..at + 2)
+            .map(|b| (u16::from_ne_bytes([b[0], b[1]]) >> 8) as u8)
+            .unwrap_or(0)
+    };
+    let narrow = |i: usize| data.pixels.get(i).copied().unwrap_or(0);
+    let mut out = Vec::with_capacity(count * 4);
+    for p in 0..count {
+        let texel = match data.format {
+            Format::R8 => {
+                let v = narrow(p);
+                [v, v, v, 255]
+            }
+            Format::R8G8 => [narrow(p * 2), narrow(p * 2 + 1), 0, 255],
+            Format::R8G8B8 => [narrow(p * 3), narrow(p * 3 + 1), narrow(p * 3 + 2), 255],
+            Format::R8G8B8A8 => [
+                narrow(p * 4),
+                narrow(p * 4 + 1),
+                narrow(p * 4 + 2),
+                narrow(p * 4 + 3),
+            ],
+            Format::R16 => {
+                let v = wide(p);
+                [v, v, v, 255]
+            }
+            Format::R16G16 => [wide(p * 2), wide(p * 2 + 1), 0, 255],
+            Format::R16G16B16 => [wide(p * 3), wide(p * 3 + 1), wide(p * 3 + 2), 255],
+            Format::R16G16B16A16 => [wide(p * 4), wide(p * 4 + 1), wide(p * 4 + 2), wide(p * 4 + 3)],
+            Format::R32G32B32FLOAT | Format::R32G32B32A32FLOAT => return None,
+        };
+        out.extend_from_slice(&texel);
+    }
+    Some(out)
 }

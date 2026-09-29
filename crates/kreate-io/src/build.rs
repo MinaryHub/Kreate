@@ -11,11 +11,11 @@
 //! not be.
 
 use crate::ir::{
-    ExportNode, ExportScene, ImportCamera, ImportLight, ImportLightKind, ImportMaterial,
-    ImportNodeData, ImportScene, LossyNote,
+    ExportNode, ExportScene, ImportCamera, ImportImage, ImportLight, ImportLightKind,
+    ImportMaterial, ImportNodeData, ImportScene, LossyNote,
 };
-use kreate_scene::document::{MaterialId, Object, ObjectData, ObjectId};
-use kreate_scene::Document;
+use kreate_scene::document::{ImageId, MaterialId, Object, ObjectData, ObjectId};
+use kreate_scene::{ColorSpace, Document, MaterialMap};
 
 /// What was lost or guessed while building the document.
 ///
@@ -31,6 +31,9 @@ pub enum BuildNote {
     /// A spot's cone came through; its blend was derived from the two angles
     /// glTF writes, which is not the same parameterisation.
     ConeBlend { light: String },
+    /// A material named a texture that is not in the file, or one that could
+    /// not be read. The slot is left empty.
+    MissingImage { material: String },
 }
 
 /// Adds everything in `scene` to `doc`, placed as the file placed it.
@@ -42,11 +45,42 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 
     // The datablocks first, because a node refers to one by index and a
     // document refers to one by id.
+    let materials = build_materials(scene, doc, &mut notes);
+
+    // A face in the file names a material in the *file's* table; a face in the
+    // document names a slot in its *mesh's* list (§7.5). So each mesh gets the
+    // materials it actually uses as its slots, in the order of their file
+    // numbers, and its faces are renumbered into that list. Handing every mesh
+    // the whole table would work and would give a one-material prop fifty
+    // empty-looking slots in a file with fifty materials.
+    let mut working = scene.clone();
+    let mut slot_lists: Vec<Vec<Option<MaterialId>>> = Vec::with_capacity(working.meshes.len());
+    for mesh in &mut working.meshes {
+        let Some(faces) = &mut mesh.face_materials else {
+            slot_lists.push(Vec::new());
+            continue;
+        };
+        let mut used: Vec<i32> = faces.iter().copied().filter(|m| *m >= 0).collect();
+        used.sort_unstable();
+        used.dedup();
+        for face in faces.iter_mut() {
+            *face = used.binary_search(face).map(|slot| slot as i32).unwrap_or(-1);
+        }
+        slot_lists.push(
+            used.iter()
+                .map(|m| materials.get(*m as usize).copied())
+                .collect(),
+        );
+    }
     let meshes: Vec<_> = {
-        let mut out = Vec::with_capacity(scene.meshes.len());
-        let (converted, _) = scene.clone().into_mesh_data();
-        for (_, mesh) in converted {
-            out.push(doc.add_mesh(mesh));
+        let mut out = Vec::with_capacity(working.meshes.len());
+        let (converted, _) = working.into_mesh_data();
+        for ((_, mesh), slots) in converted.into_iter().zip(slot_lists) {
+            let id = doc.add_mesh(mesh);
+            if !slots.is_empty() {
+                doc.set_mesh_slots(id, slots);
+            }
+            out.push(id);
         }
         out
     };
@@ -217,6 +251,84 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
     (made, notes)
 }
 
+/// The file's materials as datablocks, in the file's order, with their images.
+///
+/// An image becomes one datablock per *space* it is used in: glTF lets one
+/// picture be both a base colour and a roughness map, and the document
+/// declares a space per image (§2.1), so the two uses are two datablocks. The
+/// usual case — each image in one slot — is one each.
+fn build_materials(
+    scene: &ImportScene,
+    doc: &mut Document,
+    notes: &mut Vec<BuildNote>,
+) -> Vec<MaterialId> {
+    let mut made: std::collections::HashMap<(usize, ColorSpace), ImageId> =
+        std::collections::HashMap::new();
+    scene
+        .materials
+        .iter()
+        .map(|m| {
+            let mut image_for = |index: Option<usize>, space: ColorSpace| -> Option<ImageId> {
+                let index = index?;
+                if let Some(id) = made.get(&(index, space)) {
+                    return Some(*id);
+                }
+                let built = scene.images.get(index).and_then(|image| {
+                    if image.pixels.is_empty() {
+                        return None;
+                    }
+                    crate::image_import::image_from_rgba8(
+                        &image.name,
+                        image.width,
+                        image.height,
+                        &image.pixels,
+                        space,
+                    )
+                    .ok()
+                });
+                match built {
+                    Some(image) => {
+                        let id = doc.add_image(image);
+                        made.insert((index, space), id);
+                        Some(id)
+                    }
+                    None => {
+                        notes.push(BuildNote::MissingImage {
+                            material: m.name.clone(),
+                        });
+                        None
+                    }
+                }
+            };
+            let base_color_image =
+                image_for(m.base_color_texture, MaterialMap::BaseColor.color_space());
+            let metallic_roughness_image = image_for(
+                m.metallic_roughness_texture,
+                MaterialMap::MetallicRoughness.color_space(),
+            );
+            let normal_image = image_for(m.normal_texture, MaterialMap::Normal.color_space());
+            doc.add_material(kreate_scene::Material {
+                name: m.name.clone(),
+                // Linear on both sides — glTF's factor is linear, and so is the
+                // datablock's colour — so this is a copy, not a decode.
+                base_color: kreate_math::SceneRgb::new(
+                    m.base_color[0],
+                    m.base_color[1],
+                    m.base_color[2],
+                ),
+                alpha: m.base_color[3],
+                metallic: m.metallic,
+                roughness: m.roughness,
+                base_color_image,
+                metallic_roughness_image,
+                normal_image,
+                normal_strength: m.normal_scale,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 /// A transform in the shape the document stores.
 fn to_transform(affine: kreate_math::DAffine3) -> kreate_math::DTransform {
     let (scale, rotation, translation) = affine.to_scale_rotation_translation();
@@ -247,6 +359,35 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
     let mut material_index: std::collections::HashMap<MaterialId, usize> =
         std::collections::HashMap::new();
     let mut materials = Vec::new();
+    // Each image once, however many materials and slots use it, so a file
+    // carries one copy of a shared texture — the sharing the document had.
+    let mut images: Vec<ImportImage> = Vec::new();
+    let mut image_index: std::collections::HashMap<ImageId, usize> =
+        std::collections::HashMap::new();
+    let mut texture = |map: MaterialMap, id: Option<ImageId>, notes: &mut Vec<LossyNote>| {
+        let id = id?;
+        if let Some(index) = image_index.get(&id) {
+            return Some(*index);
+        }
+        let image = doc.image(id)?;
+        if image.format == kreate_scene::PixelFormat::Rgba16F {
+            notes.push(LossyNote::Unsupported {
+                what: format!(
+                    "{}: a float image was written as eight bits, and lost its range above one",
+                    image.name
+                ),
+            });
+        }
+        let index = images.len();
+        images.push(ImportImage {
+            name: image.name.clone(),
+            width: image.width(),
+            height: image.height(),
+            pixels: crate::image_import::rgba8_of(image, map.color_space()),
+        });
+        image_index.insert(id, index);
+        Some(index)
+    };
     for (id, material) in doc.materials() {
         material_index.insert(id, materials.len());
         materials.push(ImportMaterial {
@@ -263,7 +404,14 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             // emission will live, and inventing a value here would make the
             // file claim one.
             emissive: glam::Vec3::ZERO,
-            base_color_texture: None,
+            base_color_texture: texture(MaterialMap::BaseColor, material.base_color_image, &mut notes),
+            metallic_roughness_texture: texture(
+                MaterialMap::MetallicRoughness,
+                material.metallic_roughness_image,
+                &mut notes,
+            ),
+            normal_texture: texture(MaterialMap::Normal, material.normal_image, &mut notes),
+            normal_scale: material.normal_strength,
         });
     }
 
@@ -404,6 +552,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         ExportScene {
             meshes,
             materials,
+            images,
             mesh_slots,
             lights,
             cameras,

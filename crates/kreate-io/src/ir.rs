@@ -116,7 +116,31 @@ pub struct ImportMaterial {
     pub metallic: f32,
     pub roughness: f32,
     pub emissive: Vec3,
-    pub base_color_texture: Option<String>,
+    /// Index into the scene's `images`, for each of the three maps a standard
+    /// surface has. An index rather than a name: two images in one file may
+    /// share a name, and a name the importer cannot resolve is a texture that
+    /// silently never arrives.
+    pub base_color_texture: Option<usize>,
+    /// glTF's packing: roughness in green, metallic in blue.
+    pub metallic_roughness_texture: Option<usize>,
+    pub normal_texture: Option<usize>,
+    /// glTF's `normalTexture.scale`.
+    pub normal_scale: f32,
+}
+
+/// An image as a file carries it: eight bits a channel, four channels.
+///
+/// **The bytes as stored**, not decoded. Whether they are sRGB-encoded colour
+/// or plain numbers is not the image's to say in glTF — it is the slot's, and
+/// the same image can sit in two — so the space is decided where a material
+/// takes it up, which is the rule the document follows too.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportImage {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA, `width * height * 4` bytes, top row first.
+    pub pixels: Vec<u8>,
 }
 
 impl Default for ImportMaterial {
@@ -128,6 +152,9 @@ impl Default for ImportMaterial {
             roughness: 0.5,
             emissive: Vec3::ZERO,
             base_color_texture: None,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
         }
     }
 }
@@ -615,6 +642,8 @@ impl ExportNode {
 pub struct ExportScene<'a> {
     pub meshes: Vec<(String, &'a MeshData)>,
     pub materials: Vec<ImportMaterial>,
+    /// What the materials' texture indices point at.
+    pub images: Vec<ImportImage>,
     /// Which material each mesh's slots refer to, parallel to `meshes`.
     ///
     /// A face carries a *slot* index and a slot is per-mesh (§7.5), so slot 1
@@ -638,6 +667,7 @@ impl<'a> ExportScene<'a> {
         Self {
             meshes,
             materials: Vec::new(),
+            images: Vec::new(),
             mesh_slots: Vec::new(),
             lights: Vec::new(),
             cameras: Vec::new(),
@@ -667,6 +697,8 @@ impl<'a> ExportScene<'a> {
 pub struct ImportScene {
     pub meshes: Vec<ImportMesh>,
     pub materials: Vec<ImportMaterial>,
+    /// What the materials' texture indices point at.
+    pub images: Vec<ImportImage>,
     pub lights: Vec<ImportLight>,
     pub cameras: Vec<ImportCamera>,
     /// The file's hierarchy, parents before children is *not* guaranteed — a
@@ -685,6 +717,7 @@ impl ImportScene {
         Self {
             meshes: Vec::new(),
             materials: Vec::new(),
+            images: Vec::new(),
             lights: Vec::new(),
             cameras: Vec::new(),
             nodes: Vec::new(),

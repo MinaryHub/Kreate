@@ -118,6 +118,93 @@ pub fn load_image_file(path: &std::path::Path, space: ColorSpace) -> Result<Imag
     Ok(image)
 }
 
+/// An image datablock from eight-bit RGBA rows, as a file carried them.
+///
+/// For pixels that arrive already decoded from a container — a glTF's embedded
+/// PNG, which the glTF reader has unpacked — rather than as a file of their
+/// own. `space` says what the bytes mean, for the reason [`load_image`]'s
+/// does. Short pixels leave the rest of the image at zero rather than failing:
+/// a truncated buffer is a damaged file, and half a texture beats no model.
+pub fn image_from_rgba8(
+    name: &str,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    space: ColorSpace,
+) -> Result<Image, ImageError> {
+    let mut out = declare(name, width, height, PixelFormat::Rgba8)?;
+    fill(&mut out, width, height, |x, y, into| {
+        let at = (y as usize * width as usize + x as usize) * 4;
+        if let Some(p) = pixels.get(at..at + 4) {
+            into.copy_from_slice(p);
+        }
+    });
+    out.color_space = space;
+    Ok(out)
+}
+
+/// An image's pixels as eight-bit RGBA rows, top row first.
+///
+/// The inverse of [`image_from_rgba8`], and what a writer or an upload wants.
+/// Eight-bit images come out as stored; a single channel is replicated and
+/// opaque; a float image is encoded for `space` — sRGB for a colour, clamped
+/// numbers for data — and loses its range above one, which is the caller's to
+/// note. Tiles that are not resident read as transparent black.
+pub fn rgba8_of(image: &Image, space: ColorSpace) -> Vec<u8> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let mut out = vec![0u8; width * height * 4];
+    let (across, down) = image.tile_counts();
+    let stride = image.format.bytes_per_pixel();
+    let tile = TILE as usize;
+    for ty in 0..down {
+        for tx in 0..across {
+            let Some(held) = image.tile(tx, ty) else {
+                continue;
+            };
+            let bytes = held.bytes();
+            for row in 0..tile {
+                let y = ty as usize * tile + row;
+                if y >= height {
+                    break;
+                }
+                for column in 0..tile {
+                    let x = tx as usize * tile + column;
+                    if x >= width {
+                        break;
+                    }
+                    let at = (row * tile + column) * stride;
+                    let to = (y * width + x) * 4;
+                    out[to..to + 4].copy_from_slice(&texel(image.format, space, &bytes[at..at + stride]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One texel as four bytes. See [`rgba8_of`].
+fn texel(format: PixelFormat, space: ColorSpace, bytes: &[u8]) -> [u8; 4] {
+    match format {
+        PixelFormat::Rgba8 => [bytes[0], bytes[1], bytes[2], bytes[3]],
+        PixelFormat::R8 => [bytes[0], bytes[0], bytes[0], 255],
+        PixelFormat::Rgba16F => {
+            let channel = |i: usize| {
+                let v = f16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])
+                    .to_f32()
+                    .clamp(0.0, 1.0);
+                let e = match space {
+                    ColorSpace::Srgb => kreate_math::linear_to_srgb(v),
+                    ColorSpace::Raw => v,
+                };
+                (e * 255.0).round() as u8
+            };
+            let alpha = f16::from_le_bytes([bytes[6], bytes[7]]).to_f32().clamp(0.0, 1.0);
+            [channel(0), channel(1), channel(2), (alpha * 255.0).round() as u8]
+        }
+    }
+}
+
 /// An empty image of the decoded size, or an error if that size is absurd.
 fn declare(
     name: &str,

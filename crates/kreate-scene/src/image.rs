@@ -54,7 +54,7 @@ pub const TILE: u32 = 128;
 /// texture whose space nobody wrote down is a texture two systems will disagree
 /// about, and the disagreement looks like a material that is slightly wrong
 /// rather than a bug.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ColorSpace {
     /// sRGB-encoded colour: an albedo, an emission, a painted layer.
     ///

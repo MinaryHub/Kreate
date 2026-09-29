@@ -178,6 +178,10 @@ pub fn write_gltf_scene(
     let mut mesh_indices: std::collections::BTreeMap<usize, u32> =
         std::collections::BTreeMap::new();
 
+    // The textures before the meshes, so that a material emitted while the
+    // meshes are written can name one by the scene's own image index.
+    write_textures(&scene.images, &mut root, &mut bin, &mut notes);
+
     for (index, (name, mesh)) in scene.meshes.iter().enumerate() {
         let mesh_index = root.meshes.len() as u32;
         let primitives = write_mesh(
@@ -521,6 +525,7 @@ fn write_mesh(
     };
 
     let face_materials = mesh.attributes().get_i32(names::MATERIAL_INDEX);
+    let has_slots = scene.mesh_slots.get(index).is_some_and(|slots| !slots.is_empty());
     let tri = mesh.triangulate();
 
     // Which faces go in which primitive. Sorted by material index so the output
@@ -535,6 +540,14 @@ fn write_mesh(
             continue;
         }
         let m = face_materials.map(|m| m[f as usize]).unwrap_or(-1);
+        // A face with no slot number, or a negative one, is drawn in slot zero
+        // by the renderer (`mesh_gpu`), so a mesh that *has* slots exports it
+        // there too. Without this, a fresh cube with a material assigned — no
+        // per-face numbers at all, which is every primitive — left the file
+        // with no material, and the round trip lost every material there was.
+        // A bare mesh list has no slots, and "no material" is still what it
+        // means.
+        let m = if m < 0 && has_slots { 0 } else { m };
         groups.entry(m).or_default().push(f);
     }
 
@@ -763,6 +776,92 @@ fn ngon_extension(
     json::extensions::mesh::Primitive { others }
 }
 
+/// Writes every image into the binary blob as PNG, with one texture each.
+///
+/// Texture `i` is image `i`, so a material's index into the scene's images is
+/// already the glTF texture index — no table to keep in step.
+///
+/// **Inside the file, never beside it.** A `.glb` is one file by definition
+/// and a `.gltf` here is already self-contained (its buffer is a data URI), so
+/// an image written as a sibling `.png` would be the one piece that does not
+/// travel when somebody emails the model.
+///
+/// PNG because it is lossless and every reader has it. The pixels are the
+/// bytes the document stores; whether they are colour or numbers is said by
+/// the slot that points at them, which is glTF's rule and the document's.
+fn write_textures(
+    images: &[crate::ir::ImportImage],
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    notes: &mut Vec<LossyNote>,
+) {
+    if images.is_empty() {
+        return;
+    }
+    // One sampler for all of them: repeat, with mipmaps — what a material
+    // map on a surface means, and what the viewport does.
+    root.samplers.push(json::texture::Sampler {
+        mag_filter: Some(Checked::Valid(json::texture::MagFilter::Linear)),
+        min_filter: Some(Checked::Valid(json::texture::MinFilter::LinearMipmapLinear)),
+        wrap_s: Checked::Valid(json::texture::WrappingMode::Repeat),
+        wrap_t: Checked::Valid(json::texture::WrappingMode::Repeat),
+        ..Default::default()
+    });
+    for (index, image) in images.iter().enumerate() {
+        let png = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
+            .and_then(|pixels| {
+                let mut out = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgba8(pixels)
+                    .write_to(&mut out, image::ImageFormat::Png)
+                    .ok()
+                    .map(|_| out.into_inner())
+            });
+        // An image that will not encode still gets its slot in the table, as a
+        // one-pixel white stand-in: dropping it would shift every later
+        // texture index onto its neighbour's picture.
+        let png = png.unwrap_or_else(|| {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: the image could not be encoded and was written blank", image.name),
+            });
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([255, 255, 255, 255]),
+            ))
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("a one-pixel image encodes");
+            out.into_inner()
+        });
+        let view = push_view(root, bin, &png, None);
+        root.images.push(json::Image {
+            buffer_view: Some(view),
+            mime_type: Some(json::image::MimeType("image/png".to_string())),
+            name: Some(image.name.clone()),
+            uri: None,
+            extensions: None,
+            extras: Default::default(),
+        });
+        root.textures.push(json::Texture {
+            name: None,
+            sampler: Some(json::Index::new(0)),
+            source: json::Index::new(index as u32),
+            extensions: None,
+            extras: Default::default(),
+        });
+    }
+}
+
+/// A texture reference, for a slot that has one.
+fn texture_info(index: Option<usize>) -> Option<json::texture::Info> {
+    index.map(|i| json::texture::Info {
+        index: json::Index::new(i as u32),
+        tex_coord: 0,
+        extensions: None,
+        extras: Default::default(),
+    })
+}
+
 /// Emits a material for a source index the first time it is referenced.
 fn emit_material(
     root: &mut json::Root,
@@ -793,8 +892,21 @@ fn emit_material(
             roughness_factor: json::material::StrengthFactor(
                 described.map(|m| m.roughness).unwrap_or(0.5),
             ),
+            base_color_texture: texture_info(described.and_then(|m| m.base_color_texture)),
+            metallic_roughness_texture: texture_info(
+                described.and_then(|m| m.metallic_roughness_texture),
+            ),
             ..Default::default()
         },
+        normal_texture: described.and_then(|m| {
+            m.normal_texture.map(|i| json::material::NormalTexture {
+                index: json::Index::new(i as u32),
+                scale: m.normal_scale,
+                tex_coord: 0,
+                extensions: None,
+                extras: Default::default(),
+            })
+        }),
         emissive_factor: json::material::EmissiveFactor(
             described.map(|m| m.emissive.to_array()).unwrap_or_default(),
         ),

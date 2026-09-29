@@ -183,74 +183,12 @@ impl TextureImage {
 
 /// Walks the tiling back out into the rows a texture upload wants.
 ///
-/// A tile that is not resident leaves its rows at zero, which is transparent
-/// black — the same answer the environment's walk gives, and for the same
-/// reason: a partly loaded image is a real state (§3.6) and half a texture
-/// beats a failure.
+/// The same walk an export does, so it lives beside the image loader: one
+/// answer to "what are this image's bytes". A tile that is not resident reads
+/// as transparent black — a partly loaded image is a real state (§3.6) and half
+/// a texture beats a failure.
 fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) -> Vec<u8> {
-    let width = image.width() as usize;
-    let height = image.height() as usize;
-    let mut out = vec![0u8; width * height * 4];
-    let (across, down) = image.tile_counts();
-    let stride = image.format.bytes_per_pixel();
-    let tile = kreate_scene::image::TILE as usize;
-    for ty in 0..down {
-        for tx in 0..across {
-            let Some(held) = image.tile(tx, ty) else {
-                continue;
-            };
-            let bytes = held.bytes();
-            for row in 0..tile {
-                let y = ty as usize * tile + row;
-                if y >= height {
-                    break;
-                }
-                for column in 0..tile {
-                    let x = tx as usize * tile + column;
-                    if x >= width {
-                        break;
-                    }
-                    let at = (row * tile + column) * stride;
-                    let to = (y * width + x) * 4;
-                    out[to..to + 4].copy_from_slice(&texel(image, space, &bytes[at..at + stride]));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// One texel as the four bytes its atlas holds: sRGB-encoded for a colour, the
-/// plain value for data.
-fn texel(image: &kreate_scene::Image, space: kreate_scene::ColorSpace, bytes: &[u8]) -> [u8; 4] {
-    use kreate_scene::PixelFormat;
-    match image.format {
-        // Already what the atlas holds: eight-bit bytes are stored as the file
-        // had them, and the file's encoding is what the space declares.
-        PixelFormat::Rgba8 => [bytes[0], bytes[1], bytes[2], bytes[3]],
-        // A mask or a height, replicated. Opaque, because one channel carries
-        // no transparency and a zero alpha would make it disappear.
-        PixelFormat::R8 => [bytes[0], bytes[0], bytes[0], 255],
-        // Float and linear, so it has to be encoded on the way in — an HDRI
-        // assigned as a base colour, which is unusual and not an error. Above
-        // one is clipped, because the atlas is eight bits and a reflectance
-        // above one is not a colour anyway.
-        PixelFormat::Rgba16F => {
-            // Data is stored as it is — a float normal map is already its
-            // numbers — and only a colour is encoded for the sRGB atlas.
-            let channel = |i: usize| {
-                let v = half::f16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])
-                    .to_f32()
-                    .clamp(0.0, 1.0);
-                let e = match space {
-                    kreate_scene::ColorSpace::Srgb => kreate_math::linear_to_srgb(v),
-                    kreate_scene::ColorSpace::Raw => v,
-                };
-                (e * 255.0).round() as u8
-            };
-            [channel(0), channel(1), channel(2), 255]
-        }
-    }
+    kreate_io::image_import::rgba8_of(image, space)
 }
 
 fn compile_one(doc: &Document, graph: &ShaderGraph) -> kreate_shader::Compiled {
