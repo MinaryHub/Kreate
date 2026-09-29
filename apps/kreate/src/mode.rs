@@ -51,8 +51,8 @@ pub fn plan(from: Mode, to: Mode, has_mesh: bool) -> Option<Change> {
     }
     Some(Change {
         to,
-        select_all: to.shows_elements(),
-        open_session: to.shows_elements() && has_mesh,
+        select_all: to.edits_elements(),
+        open_session: to.edits_elements() && has_mesh,
     })
 }
 
@@ -62,10 +62,7 @@ pub fn plan(from: Mode, to: Mode, has_mesh: bool) -> Option<Change> {
 /// expressible as "set this mode". It stays a two-way gesture as modes are
 /// added: out of whatever is being edited, or back into it.
 pub fn toggled(from: Mode) -> Mode {
-    match from {
-        Mode::Object => Mode::EditMesh,
-        _ => Mode::Object,
-    }
+    from.info().tab
 }
 
 #[cfg(test)]

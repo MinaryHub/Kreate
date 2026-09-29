@@ -943,11 +943,7 @@ impl App {
             .get(op_id)
             .map(|info| info.label)
             .unwrap_or(op_id);
-        let context = if self.op_ctx.mode == OpMode::EditMesh {
-            kreate_input::Context::EditMesh
-        } else {
-            kreate_input::Context::ObjectMode
-        };
+        let context = mode_key_context(self.op_ctx.mode);
         kreate_ui::command_info::describe(
             &self.ui.catalog,
             &kreate_ui::command_info::variant_id(op_id, params),
@@ -1074,7 +1070,7 @@ impl App {
         }
 
         let t = |key: &str| self.ui.catalog.get(key);
-        let groups = if self.op_ctx.mode == OpMode::EditMesh {
+        let groups = if self.op_ctx.mode.edits_elements() {
             vec![
                 group(
                     &t("menu-group-transform"),
@@ -1315,7 +1311,7 @@ impl App {
     /// gesture because what counts as "the selection" is a question about the
     /// document.
     fn selection_pivot(&self) -> Option<DVec3> {
-        if self.op_ctx.mode == OpMode::EditMesh {
+        if self.op_ctx.mode.edits_elements() {
             // The operator's own answer, not a second calculation of it. The
             // gesture measures the pointer's angle and its scale factor from
             // this point, so a pivot that disagreed with the one the transform
@@ -1399,7 +1395,10 @@ impl App {
             return world;
         }
 
-        let edited = (self.op_ctx.mode == OpMode::EditMesh)
+        let edited = self
+            .op_ctx
+            .mode
+            .edits_elements()
             .then(|| kreate_ops::ops::mesh::target_mesh(&self.doc))
             .flatten();
 
@@ -1411,7 +1410,7 @@ impl App {
             }
             let to_world = self.doc.world_transform(*id);
 
-            let moving: Vec<u32> = if self.op_ctx.mode == OpMode::EditMesh {
+            let moving: Vec<u32> = if self.op_ctx.mode.edits_elements() {
                 // In edit mode only the selected elements move, and only within
                 // the mesh being edited. Every other object is a candidate whole.
                 if object.mesh() == edited {
@@ -1479,7 +1478,7 @@ impl App {
         // Asked of the mode, because that is the claim: proportional editing
         // falls off towards neighbouring *geometry*, and only a mode that has
         // the elements on screen has any.
-        if mode.shows_elements() {
+        if mode.edits_elements() {
             gesture.set_proportional(self.proportional);
         }
         let op_id = kind.op_id(mode);
@@ -2471,7 +2470,7 @@ impl App {
         self.doc = document;
         self.history = History::new();
         self.edit.clear();
-        self.op_ctx.mode = OpMode::Object;
+        self.op_ctx.mode = OpMode::RESTING;
 
         self.pick = kreate::pick::PickCache::default();
         self.modifiers = kreate_scene::ModifierCache::new();
@@ -2790,7 +2789,7 @@ impl App {
     /// Which element domain the id pass should draw.
     fn pick_domain(&self) -> kreate_render::PickDomain {
         use kreate_render::PickDomain;
-        if self.op_ctx.mode != OpMode::EditMesh {
+        if !self.op_ctx.mode.edits_elements() {
             return PickDomain::Object;
         }
         match self.select_mode {
@@ -2835,7 +2834,7 @@ impl App {
         if !drag.moved {
             return None;
         }
-        if self.op_ctx.mode != OpMode::EditMesh {
+        if !self.op_ctx.mode.edits_elements() {
             // One past the largest key in the scene. Keys are arena indices, so
             // they outrun the object *count* as soon as anything has been
             // deleted — sizing the bitset by the count would drop the objects
@@ -3121,7 +3120,7 @@ impl App {
             return;
         };
 
-        if self.op_ctx.mode != OpMode::EditMesh {
+        if !self.op_ctx.mode.edits_elements() {
             // The reduction collected object ids, which are the same keys the
             // outliner round-trips — so this goes through the same command, and
             // the same resolution against the *current* document.
@@ -3179,8 +3178,10 @@ impl App {
             return false;
         }
         let hit = self.hover;
-        match self.op_ctx.mode {
-            OpMode::EditMesh => {
+        // Exhaustive on what the mode acts on, so a mode that acts on bones
+        // has to say what a click does rather than landing in a default.
+        match self.op_ctx.mode.acts_on() {
+            kreate_ops::mode::ActsOn::MeshElements => {
                 let mode = match self.pick_domain() {
                     kreate_render::PickDomain::Vert => 0u32,
                     kreate_render::PickDomain::Edge => 1,
@@ -3208,7 +3209,7 @@ impl App {
                     None => {}
                 }
             }
-            _ => {
+            kreate_ops::mode::ActsOn::Objects => {
                 // A lamp's or camera's glyph first, because it is drawn on
                 // top. The id buffer has never heard of them — they have no
                 // surface — so without this a click on a lamp selected
@@ -3742,7 +3743,7 @@ impl App {
                         // the screen; this is the other end of it.
                         .with_materials(&slot_materials[at])
                         .selected(
-                            self.op_ctx.mode == OpMode::Object
+                            self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
                                 && self.doc.selection.contains(*id),
                         )
                         // The same key the outliner round-trips, so a pick and a
@@ -3758,7 +3759,7 @@ impl App {
                         // would be the one thing eligible to have its overlays
                         // faded — precisely backwards.
                         .editing(
-                            self.op_ctx.mode == OpMode::EditMesh
+                            self.op_ctx.mode.edits_elements()
                                 && self.doc.selection.contains(*id),
                         ),
                 );
@@ -4092,10 +4093,7 @@ impl App {
         if self.pointer_in_node_editor() {
             return KeyContext::Global;
         }
-        match self.op_ctx.mode {
-            OpMode::EditMesh => KeyContext::EditMesh,
-            OpMode::Object => KeyContext::ObjectMode,
-        }
+        mode_key_context(self.op_ctx.mode)
     }
 
     /// Whether the pointer is over a shader editor.
@@ -5156,6 +5154,14 @@ fn install_panic_hook() {
         eprintln!("crash report written to {}", report.display());
         previous(info);
     }));
+}
+
+/// The keymap context a mode's keys resolve in, as its card names it.
+///
+/// Object mode's for a tag the keymap does not know — a mode from a newer
+/// build. A test holds every shipped mode's tag to a real context.
+fn mode_key_context(mode: OpMode) -> KeyContext {
+    KeyContext::from_tag(mode.info().keymap).unwrap_or(KeyContext::ObjectMode)
 }
 
 #[cfg(test)]

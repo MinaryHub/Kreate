@@ -12,6 +12,7 @@
 extern crate self as kreate_ops;
 
 pub mod history;
+pub mod mode;
 pub mod operator;
 pub mod ops;
 pub mod script;

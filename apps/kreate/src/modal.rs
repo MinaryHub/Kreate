@@ -89,14 +89,11 @@ impl Kind {
     /// answer, and a boolean lets it be defaulted — silently, to whichever of
     /// the two it happens not to equal.
     pub fn op_id(self, mode: kreate_ops::operator::Mode) -> &'static str {
-        use kreate_ops::operator::Mode;
-        match (self, mode) {
-            (Kind::Move, Mode::Object) => "object.translate",
-            (Kind::Rotate, Mode::Object) => "object.rotate",
-            (Kind::Scale, Mode::Object) => "object.scale",
-            (Kind::Move, Mode::EditMesh) => "mesh.translate",
-            (Kind::Rotate, Mode::EditMesh) => "mesh.rotate",
-            (Kind::Scale, Mode::EditMesh) => "mesh.scale",
+        let [translate, rotate, scale] = mode.info().transform;
+        match self {
+            Kind::Move => translate,
+            Kind::Rotate => rotate,
+            Kind::Scale => scale,
         }
     }
 

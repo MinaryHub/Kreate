@@ -22,7 +22,7 @@ use kreate_mesh::ArenaIndex;
 use kreate_scene::document::{MeshId, Object, ObjectData};
 use kreate_scene::{DocMut, Document};
 
-use crate::operator::{Context, Mode, OpError, OpResult, Operator};
+use crate::operator::{Context, OpError, OpResult, Operator};
 use crate::OpParams;
 
 /// The mesh an edit-mode operator acts on.
@@ -313,7 +313,7 @@ fn nothing_selected_anywhere(doc: &Document) -> bool {
 
 /// True when there is a mesh to edit at all.
 pub(crate) fn can_edit(ctx: &Context, doc: &Document) -> bool {
-    ctx.mode == Mode::EditMesh && target_mesh(doc).is_some()
+    ctx.mode.edits_elements() && target_mesh(doc).is_some()
 }
 
 // --- transforming a selection -----------------------------------------------
@@ -2343,7 +2343,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{History, OperatorRegistry, PropertyMap, PropertyValue};
+    use crate::{History, Mode, OperatorRegistry, PropertyMap, PropertyValue};
     use kreate_scene::document::{Object, ObjectData};
 
     fn registry() -> OperatorRegistry {

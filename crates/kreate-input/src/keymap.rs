@@ -170,6 +170,23 @@ impl Context {
         }
     }
 
+    /// A stable name, which is how a mode names the context its keys resolve
+    /// in without the operator crate depending on this one.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Context::Global => "global",
+            Context::Viewport => "viewport",
+            Context::ObjectMode => "object_mode",
+            Context::EditMesh => "edit_mesh",
+            Context::UvEditor => "uv_editor",
+            Context::Modal => "modal",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|c| c.tag() == tag)
+    }
+
     /// Every context there is.
     pub const ALL: &'static [Context] = &[
         Context::Global,

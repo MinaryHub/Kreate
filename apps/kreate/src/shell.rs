@@ -1611,13 +1611,14 @@ fn draw_area_header(
                     if is_viewport {
                         draw_select_menu(ui, state, mode, l);
                         draw_add_menu(ui, state, l);
-                        // What the menus after Add are depends on the mode,
-                        // because what you can act on does. Object mode acts on
+                        // What the menus after Add are is the mode's to say,
+                        // because what you can act on is. Object mode acts on
                         // whole objects; edit mode acts on the parts of one.
-                        if mode.shows_elements() {
-                            draw_mesh_menus(ui, state, l);
-                        } else {
-                            draw_object_menu(ui, state, l);
+                        for menu in mode.info().menus {
+                            match menu {
+                                kreate_ops::mode::Menu::Object => draw_object_menu(ui, state, l),
+                                kreate_ops::mode::Menu::Mesh => draw_mesh_menus(ui, state, l),
+                            }
                         }
 
                         // The element buttons stay buttons rather than becoming
@@ -1627,7 +1628,7 @@ fn draw_area_header(
                         // Pictures rather than words: with Mesh, Edge and Face
                         // menus in the same row, buttons reading "Edge" and
                         // "Face" meant something else two inches away.
-                        if mode.shows_elements() {
+                        if mode.info().element_buttons {
                             ui.separator();
                             let spacing = ui.spacing().item_spacing.x;
                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -1821,7 +1822,7 @@ fn draw_select_menu(
     l: &Labels,
 ) {
     ui.menu_button(&l.menu_select, |ui| {
-        if mode.shows_elements() {
+        if mode.edits_elements() {
             for (action, label) in [
                 (0u32, &l.select_all),
                 (1, &l.select_none),
@@ -2129,7 +2130,7 @@ fn draw_toolbar(
 ) -> egui::Rect {
     use kreate_ui::toolbar::{tool_button, Tool, WIDTH};
     let theme = kreate_ui::theme::from_ui(ui);
-    let tools: Vec<Tool> = if mode.shows_elements() {
+    let tools: Vec<Tool> = if mode.info().edit_tools {
         Tool::COMMON.iter().chain(Tool::EDIT.iter()).copied().collect()
     } else {
         Tool::COMMON.to_vec()
@@ -2139,7 +2140,7 @@ fn draw_toolbar(
     let gap = 2.0;
     // A gap between the common group and the edit group, the way Blender
     // separates its tool groups: the eye finds the boundary before it reads.
-    let groups_gap = if mode.shows_elements() { 8.0 } else { 0.0 };
+    let groups_gap = if mode.info().edit_tools { 8.0 } else { 0.0 };
     let height = pad * 2.0 + tools.len() as f32 * (button + gap) - gap + groups_gap;
     let rect = egui::Rect::from_min_size(
         viewport.min + egui::vec2(8.0, 8.0),
@@ -2180,9 +2181,12 @@ fn draw_toolbar(
                     let name = state.catalog.get(tool.label_key());
                     let op = match tool {
                         Tool::Select => None,
-                        Tool::Move => Some(if mode.shows_elements() { "mesh.translate" } else { "object.translate" }),
-                        Tool::Rotate => Some(if mode.shows_elements() { "mesh.rotate" } else { "object.rotate" }),
-                        Tool::Scale => Some(if mode.shows_elements() { "mesh.scale" } else { "object.scale" }),
+                        // The mode's own G, R and S: one table, the one the
+                        // modal transform reads too, so the tooltip names the
+                        // operator the key actually runs.
+                        Tool::Move => Some(mode.info().transform[0]),
+                        Tool::Rotate => Some(mode.info().transform[1]),
+                        Tool::Scale => Some(mode.info().transform[2]),
                         Tool::Extrude => Some("mesh.extrude_region"),
                         Tool::Inset => Some("mesh.inset"),
                         Tool::Bevel => Some("mesh.bevel"),
