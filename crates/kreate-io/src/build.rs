@@ -815,6 +815,13 @@ fn export_animations(doc: &Document, notes: &mut Vec<LossyNote>) -> Vec<crate::i
             scale: moves("scale"),
         });
     }
+    for (_, o) in doc.objects() {
+        if !o.drivers.is_empty() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: its drivers have no place in glTF; it was written as it stands now", o.name),
+            });
+        }
+    }
     for (_, m) in doc.materials() {
         if m.action.is_some() {
             notes.push(LossyNote::Unsupported {

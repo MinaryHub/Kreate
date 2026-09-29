@@ -233,6 +233,8 @@ pub struct ShellState {
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
     /// Each graph editor's view and drag, per area.
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
+    /// What is being typed in each Drivers editor, per area.
+    driver_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::drivers::DriversState>,
     /// The clock, published by the application each frame.
     pub timeline: kreate_ui::timeline::TimelineView,
     /// The UV map to draw, published by the application each frame.
@@ -474,6 +476,7 @@ impl ShellState {
                         self.timeline_views.remove(&area);
                         self.sheet_views.remove(&area);
                         self.graph_views.remove(&area);
+                        self.driver_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
@@ -528,6 +531,7 @@ impl Default for ShellState {
             timeline_views: std::collections::BTreeMap::new(),
             sheet_views: std::collections::BTreeMap::new(),
             graph_views: std::collections::BTreeMap::new(),
+            driver_views: std::collections::BTreeMap::new(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -1746,6 +1750,9 @@ fn draw_area(
                 "graph" => {
                     draw_graph_editor(ui, state, doc, area.id, l);
                 }
+                "drivers" => {
+                    draw_drivers(ui, state, doc, area.id);
+                }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
                     let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
@@ -2848,6 +2855,140 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
             E::ToggleAutokey => "time.toggle_autokey",
         };
         state.queue.dispatch(id, p);
+    }
+}
+
+/// Why a driver cannot be evaluated, in the reader's language.
+fn driver_error_text(catalog: &Catalog, error: &kreate_scene::driver::DriverError) -> String {
+    use kreate_scene::driver::DriverError as D;
+    use kreate_scene::expression::ExprError as X;
+    let t = |key: &str, args: &[(&str, &str)]| catalog.format(key, TextKind::Ui, args);
+    match error {
+        D::Expression(X::Empty) => t("driver-error-empty", &[]),
+        D::Expression(X::Syntax { at }) => t("driver-error-syntax", &[("at", &(at + 1).to_string())]),
+        D::Expression(X::UnknownName(n)) => t("driver-error-name", &[("name", n)]),
+        D::Expression(X::UnknownFunction(n)) => t("driver-error-function", &[("name", n)]),
+        D::Expression(X::Arguments { function, expected }) => {
+            t("driver-error-arguments", &[("name", function), ("count", &expected.to_string())])
+        }
+        D::Expression(X::NotFinite) => t("driver-error-infinite", &[]),
+        D::NoTarget { variable } => t("driver-error-target", &[("name", variable)]),
+        D::BadProperty { variable } => t("driver-error-property", &[("name", variable)]),
+        D::BadName { variable } => t("driver-error-bad-name", &[("name", variable)]),
+    }
+}
+
+/// The Drivers editor, over the selected objects' drivers.
+fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId) {
+    use kreate_ops::ops::driver::{driver_target, DRIVABLE};
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::drivers::{DriverEdit as E, DriverView, VariableView};
+    const AXES: [&str; 3] = ["X", "Y", "Z"];
+    let channel = |catalog: &Catalog, property: &str| {
+        catalog.format(&format!("channel-{}", property.replace('_', "-")), TextKind::Ui, &[])
+    };
+    let cycles = doc.driver_cycles();
+    let mut drivers = Vec::new();
+    for id in &doc.selection.objects {
+        let (Some(object), Some(uid)) = (doc.object(*id), doc.object_uid(*id)) else { continue };
+        for (i, d) in object.drivers.iter().enumerate() {
+            let axis = AXES.get(d.index as usize).copied().unwrap_or("");
+            let result = if cycles.contains(id) {
+                Err(state.catalog.format("driver-error-cycle", TextKind::Ui, &[]))
+            } else {
+                doc.evaluate_driver(*id, i).map_err(|e| driver_error_text(&state.catalog, &e))
+            };
+            drivers.push(DriverView {
+                // i18n-exempt: the object's name is the user's own text
+                label: format!("{}: {} {axis}", object.name, channel(&state.catalog, &d.property)),
+                target: driver_target(uid.raw(), &d.property, d.index),
+                expression: d.expression.clone(),
+                result,
+                variables: d
+                    .variables
+                    .iter()
+                    .map(|v| VariableView {
+                        name: v.name.clone(),
+                        object: (v.target != kreate_scene::Uid::NONE).then(|| v.target.raw()),
+                        property: DRIVABLE.iter().position(|p| *p == v.property.as_ref()).unwrap_or(0) as u32,
+                        index: v.index as u32,
+                    })
+                    .collect(),
+            });
+        }
+    }
+    let mut addable = Vec::new();
+    if let Some((object, uid)) = doc.selection.active.and_then(|id| Some((doc.object(id)?, doc.object_uid(id)?))) {
+        for property in DRIVABLE {
+            for index in 0..3u8 {
+                if !object.drivers.iter().any(|d| d.property.as_ref() == property && d.index == index) {
+                    addable.push((
+                        // i18n-exempt: a translated channel and an axis letter
+                        format!("{} {}", channel(&state.catalog, property), AXES[index as usize]),
+                        driver_target(uid.raw(), property, index),
+                    ));
+                }
+            }
+        }
+    }
+    let view = kreate_ui::drivers::DriversView {
+        drivers,
+        objects: doc
+            .objects()
+            .filter_map(|(id, o)| Some((doc.object_uid(id)?.raw(), o.name.clone())))
+            .collect(),
+        addable,
+    };
+    let t = |key: &str| state.catalog.format(key, TextKind::Ui, &[]);
+    let text = kreate_ui::drivers::DriversText {
+        empty: t("drivers-empty"),
+        add: t("drivers-add"),
+        remove: t("drivers-remove"),
+        expression: t("drivers-expression"),
+        add_variable: t("drivers-add-variable"),
+        remove_variable: t("drivers-remove-variable"),
+        none: t("drivers-none"),
+        properties: [t("channel-location"), t("channel-rotation-euler"), t("channel-scale")],
+        axes: AXES.map(String::from),
+    };
+    let mut panel = state.driver_views.remove(&area).unwrap_or_default();
+    let edits = kreate_ui::drivers::drivers_editor(ui, &view, &mut panel, &text);
+    state.driver_views.insert(area, panel);
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        match edit {
+            E::Add(target) => {
+                p.set("target", V::Text(target));
+                state.queue.run("anim.driver_add", p);
+            }
+            E::Remove(target) => {
+                p.set("target", V::Text(target));
+                state.queue.run("anim.driver_remove", p);
+            }
+            E::Expression { target, expression } => {
+                p.set("target", V::Text(target));
+                p.set("expression", V::Text(expression));
+                state.queue.run("anim.driver_expression", p);
+            }
+            E::AddVariable(target) => {
+                p.set("target", V::Text(target));
+                state.queue.run("anim.driver_variable_add", p);
+            }
+            E::SetVariable { target, variable, value } => {
+                p.set("target", V::Text(target));
+                p.set("variable", V::Int(variable as i64));
+                p.set("name", V::Text(value.name));
+                p.set("object", V::Text(value.object.map(|u| u.to_string()).unwrap_or_default()));
+                p.set("property", V::Enum(value.property));
+                p.set("index", V::Int(value.index as i64));
+                state.queue.run("anim.driver_variable_set", p);
+            }
+            E::RemoveVariable { target, variable } => {
+                p.set("target", V::Text(target));
+                p.set("variable", V::Int(variable as i64));
+                state.queue.run("anim.driver_variable_remove", p);
+            }
+        }
     }
 }
 
@@ -4740,6 +4881,24 @@ pie-shading = Shading
 editor-timeline = Timeline
 editor-dope-sheet = Dope Sheet
 editor-graph = Graph Editor
+editor-drivers = Drivers
+drivers-empty = No drivers on the selected objects
+drivers-add = Add Driver
+drivers-remove = Remove
+drivers-expression = Expression
+drivers-add-variable = Add Variable
+drivers-remove-variable = Remove
+drivers-none = (none)
+driver-error-empty = The expression is empty
+driver-error-syntax = Syntax error at character { $at }
+driver-error-name = Unknown name: { $name }
+driver-error-function = Unknown function: { $name }
+driver-error-arguments = { $name } takes { $count } arguments
+driver-error-infinite = The result is not a finite number
+driver-error-target = “{ $name }” reads no object
+driver-error-property = “{ $name }” reads no such property
+driver-error-bad-name = “{ $name }” is not a valid name
+driver-error-cycle = Drivers read each other in a loop
 graph-handles = Handles
 handle-auto = Auto Clamped
 handle-flat = Flat
@@ -5158,6 +5317,24 @@ pie-shading = 셰이딩
 editor-timeline = 타임라인
 editor-dope-sheet = 도프 시트
 editor-graph = 그래프 에디터
+editor-drivers = 드라이버
+drivers-empty = 선택한 물체에 드라이버가 없습니다
+drivers-add = 드라이버 추가
+drivers-remove = 제거
+drivers-expression = 수식
+drivers-add-variable = 변수 추가
+drivers-remove-variable = 제거
+drivers-none = (없음)
+driver-error-empty = 수식이 비어 있습니다
+driver-error-syntax = { $at }번째 글자에서 문법 오류
+driver-error-name = 모르는 이름: { $name }
+driver-error-function = 모르는 함수: { $name }
+driver-error-arguments = { $name }에는 인수가 { $count }개 필요합니다
+driver-error-infinite = 결과가 유한한 수가 아닙니다
+driver-error-target = “{ $name }”이(가) 읽을 물체가 없습니다
+driver-error-property = “{ $name }”이(가) 읽는 속성이 없습니다
+driver-error-bad-name = “{ $name }”은(는) 쓸 수 없는 이름입니다
+driver-error-cycle = 드라이버들이 서로를 읽는 고리가 있습니다
 graph-handles = 핸들
 handle-auto = 자동 (클램프)
 handle-flat = 평평하게

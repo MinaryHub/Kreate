@@ -999,3 +999,31 @@ fn a_materials_and_a_lights_animation_survive_a_save() {
     let a = after.action(l.action.expect("the light's link came back")).unwrap();
     assert_eq!((a.name.as_str(), a.animates), ("Dim", kreate_scene::DatablockKind::Light));
 }
+
+#[test]
+fn a_driver_comes_back_driving_the_same_thing_from_the_same_object() {
+    use kreate_scene::driver::{Driver, DriverVariable};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let handle = doc.add_object(Object::new("Handle", ObjectData::Empty));
+    let door = doc.add_object(Object::new("Door", ObjectData::Empty));
+    let mut driver = Driver::new("rotation_euler", 2, "h * 2 + frame / 100");
+    driver.variables.push(DriverVariable {
+        name: "h".into(),
+        target: doc.object_uid(handle).unwrap(),
+        property: "location".into(),
+        index: 0,
+    });
+    // And one pointed at nothing yet, which is a state the panel leaves.
+    driver.variables.push(DriverVariable::new("spare"));
+    doc.object_mut(door).unwrap().drivers.push(driver.clone());
+
+    let loaded = round_trip(&doc);
+    let after = &loaded.document;
+    let (door_after, o) = after.objects().find(|(_, o)| o.name == "Door").expect("the door");
+    assert_eq!(o.drivers, vec![driver], "the driver changed on the way through");
+    // The variable's identity still names the handle.
+    let (handle_after, _) = after.objects().find(|(_, o)| o.name == "Handle").expect("the handle");
+    assert_eq!(after.object_by_uid(o.drivers[0].variables[0].target), Some(handle_after));
+    let _ = door_after;
+}

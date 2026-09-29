@@ -170,6 +170,9 @@ pub struct Object {
     pub modifiers: Vec<crate::modifier::ModifierInstance>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
+    /// Properties of this object that are expressions of others'. See
+    /// [`crate::driver`].
+    pub drivers: Vec<crate::driver::Driver>,
 }
 
 impl Object {
@@ -188,6 +191,7 @@ impl Object {
             uid: Uid::NONE,
             modifiers: Vec::new(),
             action: None,
+            drivers: Vec::new(),
         }
     }
 
@@ -566,6 +570,18 @@ impl Document {
     #[inline]
     fn touch(&mut self) {
         self.version += 1;
+    }
+
+    /// For the drivers, which write only when a value changed and must not
+    /// bump the version otherwise — the application re-runs them whenever the
+    /// version moves, and a run that always moved it would never settle.
+    pub(crate) fn touch_version(&mut self) {
+        self.touch();
+    }
+
+    /// An object to write without counting as a change; see `touch_version`.
+    pub(crate) fn object_untouched_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        self.objects.get_mut(id)
     }
 
     // --- objects ------------------------------------------------------------
@@ -1209,7 +1225,9 @@ impl Document {
         if moved > 0 {
             self.touch();
         }
-        moved
+        // After the keys, so a driver wins over a curve on the same property
+        // and reads the frame's values rather than the last frame's.
+        moved + self.drive()
     }
 
     // --- lights -------------------------------------------------------------

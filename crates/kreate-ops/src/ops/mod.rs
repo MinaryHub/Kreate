@@ -6,6 +6,7 @@
 //! — which is the point of the design rather than a nice side effect.
 
 pub mod anim;
+pub mod driver;
 pub mod mesh;
 pub mod modifier;
 pub mod node;
@@ -15,6 +16,7 @@ pub mod uv;
 /// Registers every built-in operator.
 pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     anim::register(registry);
+    driver::register(registry);
     mesh::register(registry);
     modifier::register(registry);
     node::register(registry);

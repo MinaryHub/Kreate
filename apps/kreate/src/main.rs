@@ -634,6 +634,10 @@ struct App {
     /// Application state, not the document's: a file saved mid-play opens
     /// stopped, the way every animation tool's does.
     playing: Option<std::time::Instant>,
+    /// The document version the drivers last ran against. They run again
+    /// whenever it moves — an edit, an undo, a frame — so a driven property
+    /// follows its variables while they are being changed.
+    driven_at: u64,
     /// Blender's record button: while on, every object transform keys what it
     /// changed at the current frame.
     autokey: bool,
@@ -722,6 +726,7 @@ impl App {
             clipboard: None,
             dispatching_key: None,
             playing: None,
+            driven_at: u64::MAX,
             autokey: false,
             shown_title: String::new(),
         }
@@ -2414,6 +2419,18 @@ impl App {
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("material.set_image", params);
         self.status(&format!("{}: {name}", slot.tag()));
+    }
+
+    /// Runs the drivers if the document changed since they last ran.
+    fn run_drivers(&mut self) {
+        if self.doc.version() == self.driven_at {
+            return;
+        }
+        if self.doc.drive() > 0 {
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
+        // After the run, so the run's own writes are not a change to answer.
+        self.driven_at = self.doc.version();
     }
 
     /// Moves the clock to `frame` and plays every animation there.
@@ -5164,6 +5181,7 @@ impl ApplicationHandler for App {
                 self.advance_playback();
                 self.sync_timeline();
                 self.apply_input();
+                self.run_drivers();
                 if self.redraw.any() {
                     self.render();
                     self.redraw.clear();

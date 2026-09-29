@@ -196,6 +196,10 @@ pub struct ObjectRecord {
     /// Index into [`SceneFile::actions`]: the action this object plays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<usize>,
+    /// Its drivers. Written only when there are some, so a file without them
+    /// is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drivers: Vec<DriverRecord>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -203,6 +207,27 @@ pub struct ObjectRecord {
     pub linked: Option<[String; 2]>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// One driver: what it drives, and the expression and names it reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DriverRecord {
+    pub property: String,
+    pub index: u8,
+    pub expression: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<DriverVariableRecord>,
+}
+
+/// A driver's variable. The object it reads by identity, which outlives the
+/// file — zero for one pointed at nothing yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DriverVariableRecord {
+    pub name: String,
+    #[serde(default)]
+    pub target: u64,
+    pub property: String,
+    pub index: u8,
 }
 
 /// An action: its curves, each a property of whoever plays it.
@@ -1124,6 +1149,25 @@ pub fn write(
                     .map(|s| s.and_then(|m| material_index.get(&m).copied()))
                     .collect(),
                 action: object.action.and_then(|a| action_index.get(&a).copied()),
+                drivers: object
+                    .drivers
+                    .iter()
+                    .map(|d| DriverRecord {
+                        property: d.property.to_string(),
+                        index: d.index,
+                        expression: d.expression.clone(),
+                        variables: d
+                            .variables
+                            .iter()
+                            .map(|v| DriverVariableRecord {
+                                name: v.name.clone(),
+                                target: v.target.raw(),
+                                property: v.property.to_string(),
+                                index: v.index,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -1495,6 +1539,28 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.visible = record.visible;
         object.selectable = record.selectable;
         object.action = record.action.and_then(|i| action_ids.get(i).copied());
+        // Variables name their objects by identity, and every object's
+        // identity is restored from the file, so these resolve whatever order
+        // the objects come back in.
+        object.drivers = record
+            .drivers
+            .iter()
+            .map(|d| kreate_scene::driver::Driver {
+                property: d.property.as_str().into(),
+                index: d.index,
+                expression: d.expression.clone(),
+                variables: d
+                    .variables
+                    .iter()
+                    .map(|v| kreate_scene::driver::DriverVariable {
+                        name: v.name.clone(),
+                        target: kreate_scene::Uid::from_raw(v.target),
+                        property: v.property.as_str().into(),
+                        index: v.index,
+                    })
+                    .collect(),
+            })
+            .collect();
         object.material_overrides = record
             .material_overrides
             .iter()

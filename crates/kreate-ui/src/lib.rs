@@ -12,6 +12,7 @@ pub mod command_info;
 pub mod command_palette;
 pub mod context_menu;
 pub mod dope_sheet;
+pub mod drivers;
 pub mod console;
 pub mod element_icon;
 pub mod fonts;

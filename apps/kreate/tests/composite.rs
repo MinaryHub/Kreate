@@ -2036,6 +2036,50 @@ fn shot_graph_editor() {
     }
 }
 
+/// The properties area as a Drivers editor: a working driver with its
+/// variable, and a broken one saying why.
+#[test]
+fn shot_drivers() {
+    use kreate_scene::driver::{Driver, DriverVariable};
+    for (label, locale) in [("drivers", "en"), ("drivers-ko", "ko-KR")] {
+        let mut doc = doc_with_cube();
+        let cube = doc.objects().next().map(|(id, _)| id).expect("a cube");
+        let handle = doc.add_object(kreate_scene::document::Object::new(
+            "Handle",
+            kreate_scene::document::ObjectData::Empty,
+        ));
+        doc.object_mut(handle).unwrap().transform.translation.x = 0.3;
+        let mut turn = Driver::new("rotation_euler", 2, "h * 2");
+        turn.variables.push(DriverVariable {
+            name: "h".into(),
+            target: doc.object_uid(handle).unwrap(),
+            property: "location".into(),
+            index: 0,
+        });
+        let broken = Driver::new("location", 2, "sin(frame / 10) * height");
+        doc.object_mut(cube).unwrap().drivers = vec![turn, broken];
+        doc.drive();
+        doc.selection.clear();
+        doc.selection.add(cube);
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            let timelines: Vec<_> = state
+                .screen()
+                .areas()
+                .into_iter()
+                .filter(|(_, k)| *k == kreate_ui::EditorId::PROPERTIES)
+                .map(|(a, _)| a)
+                .collect();
+            for area in timelines {
+                state.screen_mut().set_editor(area, kreate_ui::EditorId::DRIVERS);
+            }
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
 /// A picture of the Material tab with keyed values, the diamonds lit.
 #[test]
 fn shot_keyed_material() {

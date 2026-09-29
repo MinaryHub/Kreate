@@ -8,6 +8,8 @@ pub mod camera;
 pub mod clipboard;
 pub mod document;
 pub mod edit_session;
+pub mod expression;
+pub mod driver;
 pub mod image;
 pub mod shader;
 pub mod light;

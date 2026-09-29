@@ -691,7 +691,7 @@ pub fn curve_target(action_uid: u64, property: &str, index: u8) -> String {
     format!("{action_uid}/{property}/{index}")
 }
 
-fn parse_curve(text: &str) -> Option<(u64, String, u8)> {
+pub(crate) fn parse_curve(text: &str) -> Option<(u64, String, u8)> {
     let mut parts = text.split('/');
     let uid = parts.next()?.parse().ok()?;
     let property = parts.next()?.to_string();

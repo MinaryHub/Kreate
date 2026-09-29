@@ -101,6 +101,8 @@ impl EditorId {
     pub const DOPE_SHEET: Self = Self::known("dope_sheet");
     /// Each curve as value over time, with its keys and handles.
     pub const GRAPH: Self = Self::known("graph");
+    /// The drivers of the selected objects: expressions and their variables.
+    pub const DRIVERS: Self = Self::known("drivers");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -168,6 +170,7 @@ impl EditorRegistry {
             (EditorId::TIMELINE, "editor-timeline", true),
             (EditorId::DOPE_SHEET, "editor-dope-sheet", true),
             (EditorId::GRAPH, "editor-graph", true),
+            (EditorId::DRIVERS, "editor-drivers", true),
         ] {
             registry.register(EditorInfo {
                 id,
