@@ -3145,11 +3145,16 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
                 continue;
             };
             let property = curve.path.property.as_ref();
-            let (components, is_color) = kreate_scene::animation::animatable(action.animates)
-                .iter()
-                .find(|d| d.name == property)
+            let (components, is_color) = kreate_scene::animation::describe(action.animates, property)
                 .map(|d| (d.components, d.kind == kreate_reflect::PropertyKind::Color))
                 .unwrap_or((1, false));
+            // A quaternion's W first, then its X, Y, Z in the axes' colours.
+            let (components, index) = if components == 4 {
+                if index == 0 { (1, 0) } else { (3, index - 1) }
+            } else {
+                (components, index)
+            };
+            let quaternion = kreate_scene::animation::describe(action.animates, property).is_some_and(|d| d.components == 4);
             // X red, Y green, Z blue, as the axes everywhere else are; a
             // colour's R, G and B the same, and a single number white.
             let color = match (components, index) {
@@ -3158,14 +3163,16 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
                 (_, 1) => egui::Color32::from_rgb(0x7c, 0xc4, 0x4c),
                 _ => egui::Color32::from_rgb(0x5a, 0x8c, 0xe0),
             };
-            let axis = if components == 1 {
+            let axis = if quaternion && components == 1 {
+                "W".to_string()
+            } else if components == 1 {
                 String::new()
             } else if is_color {
                 ["R", "G", "B"].get(index as usize).copied().unwrap_or("").to_string()
             } else {
                 ["X", "Y", "Z"].get(index as usize).copied().unwrap_or("").to_string()
             };
-            let channel = state.catalog.format(&format!("channel-{}", property.replace('_', "-")), TextKind::Ui, &[]);
+            let channel = channel_label(&state.catalog, property);
             // Sampled over the range and the keys, with room either side, at
             // most a thousand points: enough to draw, not a thousand per frame
             // of a long scene.
@@ -3261,6 +3268,17 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
     }
 }
 
+/// A curve's property as a person reads it: the channel's name, and for a
+/// bone's the bone's name before it — "Upper: Rotation".
+fn channel_label(catalog: &Catalog, property: &str) -> String {
+    let channel = |p: &str| catalog.format(&format!("channel-{}", p.replace('_', "-")), TextKind::Ui, &[]);
+    match kreate_scene::animation::parse_bone_path(property) {
+        // i18n-exempt: a bone's name is the user's own text
+        Some((bone, p)) => format!("{bone}: {}", channel(p)),
+        None => channel(property),
+    }
+}
+
 /// What plays an action: the object, material or lamp it belongs to, by name.
 fn owner_name(doc: &Document, action: kreate_scene::ActionId) -> Option<String> {
     doc.objects()
@@ -3313,6 +3331,22 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
                     keys: keys_of(Some(desc.name)),
                 });
             }
+        }
+        // Then each bone's channels, in the order they were first keyed.
+        let mut bone_paths: Vec<&str> = Vec::new();
+        for c in &action.curves {
+            let path = c.path.property.as_ref();
+            if kreate_scene::animation::parse_bone_path(path).is_some() && !bone_paths.contains(&path) {
+                bone_paths.push(path);
+            }
+        }
+        for path in bone_paths {
+            rows.push(SheetRow {
+                label: channel_label(&state.catalog, path),
+                depth: 1,
+                target: kreate_ops::ops::anim::row_target(uid.raw(), Some(path)),
+                keys: keys_of(Some(path)),
+            });
         }
     }
     let view = kreate_ui::dope_sheet::SheetView {
@@ -5049,6 +5083,7 @@ interp-bezier = Bezier
 channel-location = Location
 channel-rotation-euler = Rotation
 channel-scale = Scale
+channel-rotation-quaternion = Rotation
 channel-base-color = Base Color
 channel-metallic = Metallic
 channel-roughness = Roughness
@@ -5509,6 +5544,7 @@ interp-bezier = 베지어
 channel-location = 위치
 channel-rotation-euler = 회전
 channel-scale = 크기
+channel-rotation-quaternion = 회전
 channel-base-color = 베이스 컬러
 channel-metallic = 메탈릭
 channel-roughness = 러프니스

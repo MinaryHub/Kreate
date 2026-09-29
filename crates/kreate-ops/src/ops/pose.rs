@@ -106,6 +106,26 @@ fn transform_bones(doc: &mut DocMut<'_>, change: impl Fn(DAffine3) -> DAffine3) 
     Ok(OpResult::Finished)
 }
 
+/// Keys the bones a transform just moved, when auto-keying asked for it — in
+/// the same step, so the move and its key undo together.
+fn autokey(doc: &mut DocMut<'_>, done: OpResult, on: bool, frame: f64, properties: &[&str]) -> Result<OpResult, OpError> {
+    if on && done == OpResult::Finished && frame.is_finite() {
+        if let Some(object) = posed_object(doc.document()) {
+            let bones: Vec<String> = {
+                let d = doc.document();
+                match (d.armature_of(object), d.object(object)) {
+                    (Some((_, a)), Some(o)) => {
+                        moving_bones(a, o).into_iter().map(|i| a.bones[i].name.clone()).collect()
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            crate::ops::anim::key_bones(doc.document_mut(), object, &bones, frame, properties);
+        }
+    }
+    Ok(done)
+}
+
 fn in_pose_mode(ctx: &Context, doc: &Document) -> bool {
     ctx.mode.acts_on() == crate::mode::ActsOn::Bones && posed_object(doc).is_some()
 }
@@ -251,6 +271,11 @@ pub struct TranslateParams {
     /// World offset, in metres.
     #[param(unit = "length")]
     pub translation: [f64; 3],
+    /// Key what this changed at `key_frame` — auto-keying, as on objects.
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 /// Moves the selected bones.
@@ -272,7 +297,8 @@ impl Operator for Translate {
         if !offset.is_finite() {
             return Ok(OpResult::Cancelled);
         }
-        transform_bones(doc, |f| DAffine3::from_translation(offset) * f)
+        let done = transform_bones(doc, |f| DAffine3::from_translation(offset) * f)?;
+        autokey(doc, done, params.autokey, params.key_frame, &["location"])
     }
 }
 
@@ -282,6 +308,10 @@ pub struct RotateParams {
     pub angle: f64,
     #[param(variants("x", "y", "z"))]
     pub axis: u32,
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 /// Turns the selected bones about a world axis through their heads' median.
@@ -307,7 +337,10 @@ impl Operator for Rotate {
         let turn = DAffine3::from_translation(p)
             * DAffine3::from_quat(DQuat::from_axis_angle(axis, params.angle))
             * DAffine3::from_translation(-p);
-        transform_bones(doc, |f| turn * f)
+        let done = transform_bones(doc, |f| turn * f)?;
+        // The location too: a bone turned about a point that is not its head
+        // has moved as well as turned.
+        autokey(doc, done, params.autokey, params.key_frame, &["location", "rotation_quaternion"])
     }
 }
 
@@ -315,11 +348,15 @@ impl Operator for Rotate {
 pub struct ScaleParams {
     /// Along each of the bone's own axes.
     pub scale: [f64; 3],
+    #[param(hidden)]
+    pub autokey: bool,
+    #[param(hidden)]
+    pub key_frame: f64,
 }
 
 impl Default for ScaleParams {
     fn default() -> Self {
-        Self { scale: [1.0; 3] }
+        Self { scale: [1.0; 3], autokey: false, key_frame: 1.0 }
     }
 }
 
@@ -348,7 +385,8 @@ impl Operator for Scale {
         if !s.is_finite() || s.min_element().abs() < 1e-9 {
             return Ok(OpResult::Cancelled);
         }
-        transform_bones(doc, |f| f * DAffine3::from_scale(s))
+        let done = transform_bones(doc, |f| f * DAffine3::from_scale(s))?;
+        autokey(doc, done, params.autokey, params.key_frame, &["scale"])
     }
 }
 

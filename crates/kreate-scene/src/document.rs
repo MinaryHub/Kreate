@@ -1281,7 +1281,11 @@ impl Document {
             };
             let before = o.transform;
             crate::animation::apply_to_object(&action, frame, &mut o.transform);
-            if o.transform != before {
+            // And the bones, from the same action: Blender's model, where one
+            // action is a character's placement and its pose together.
+            let pose_before = o.pose.clone();
+            crate::animation::apply_to_pose(&action, frame, &mut o.pose);
+            if o.transform != before || o.pose != pose_before {
                 moved += 1;
             }
         }

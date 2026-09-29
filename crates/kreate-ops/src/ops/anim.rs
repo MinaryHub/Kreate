@@ -74,10 +74,22 @@ impl Operator for InsertKeyframe {
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
-        _ctx: &Context,
+        ctx: &Context,
     ) -> Result<OpResult, OpError> {
         if !params.frame.is_finite() {
             return Ok(OpResult::Cancelled);
+        }
+        // In pose mode `I` keys the selected bones, as Blender's does — the
+        // same key and the same keying sets, with a bone's rotation its
+        // quaternion.
+        if posing(ctx) {
+            let properties = BONE_KEYING_SETS.get(params.what as usize).copied().unwrap_or(BONE_KEYING_SETS[0]);
+            let Some(object) = crate::ops::pose::posed_object(doc.document()) else {
+                return Ok(OpResult::Cancelled);
+            };
+            let bones = selected_bones(doc.document(), object);
+            let keyed = key_bones(doc.document_mut(), object, &bones, params.frame, properties);
+            return Ok(if keyed { OpResult::Finished } else { OpResult::Cancelled });
         }
         let properties = KEYING_SETS
             .get(params.what as usize)
@@ -91,6 +103,86 @@ impl Operator for InsertKeyframe {
             OpResult::Cancelled
         })
     }
+}
+
+/// The bone keying sets, in [`KEYING_SETS`]' order.
+pub const BONE_KEYING_SETS: [&[&str]; 4] = [
+    &["location", "rotation_quaternion", "scale"],
+    &["location"],
+    &["rotation_quaternion"],
+    &["scale"],
+];
+
+fn posing(ctx: &Context) -> bool {
+    ctx.mode.acts_on() == crate::mode::ActsOn::Bones
+}
+
+/// The names of the posed armature's selected bones, in bone order.
+pub fn selected_bones(doc: &Document, object: kreate_scene::ObjectId) -> Vec<String> {
+    let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else {
+        return Vec::new();
+    };
+    armature.bones.iter().filter(|b| o.pose.is_selected(&b.name)).map(|b| b.name.clone()).collect()
+}
+
+/// Keys `properties` of each of `bones` of `object`'s pose at `frame`, on the
+/// object's action — made, named after it, if it has none.
+///
+/// A quaternion is keyed on the side of the sphere nearest the curve's value
+/// there: `q` and `-q` are one rotation, and the curves draw a straight line
+/// between their numbers — so keying the far one turns the bone the long way
+/// round between two keys that look a degree apart.
+pub fn key_bones(
+    d: &mut Document,
+    object: kreate_scene::ObjectId,
+    bones: &[String],
+    frame: f64,
+    properties: &[&str],
+) -> bool {
+    let Some(o) = d.object(object) else { return false };
+    if bones.is_empty() {
+        return false;
+    }
+    let pose = o.pose.clone();
+    let action = match o.action.filter(|a| d.action(*a).is_some()) {
+        Some(action) => action,
+        None => {
+            let action = d.add_action(Action::new(format!("{}Action", o.name)));
+            if let Some(o) = d.object_mut(object) {
+                o.action = Some(action);
+            }
+            action
+        }
+    };
+    let Some(action) = d.action_mut(action) else { return false };
+    for bone in bones {
+        let transform = pose.transform(bone);
+        for property in properties {
+            let Some(mut values) = animation::read_bone(&transform, property) else { continue };
+            let path = animation::bone_path(bone, property);
+            if *property == "rotation_quaternion" {
+                let there: Vec<Option<f64>> = (0..4u8)
+                    .map(|i| {
+                        action
+                            .curves
+                            .iter()
+                            .find(|c| c.path.property.as_ref() == path && c.path.index == Some(i))
+                            .and_then(|c| c.evaluate(frame))
+                    })
+                    .collect();
+                if there.iter().all(Option::is_some) {
+                    let dot: f64 = there.iter().zip(&values).map(|(a, b)| a.unwrap_or(0.0) * b).sum();
+                    if dot < 0.0 {
+                        values.iter_mut().for_each(|v| *v = -*v);
+                    }
+                }
+            }
+            for (index, value) in values.into_iter().enumerate() {
+                action.curve_mut(&path, index as u8).insert(frame, value, Interpolation::default());
+            }
+        }
+    }
+    true
 }
 
 /// Keys `properties` of each of `objects` at `frame`, as they stand.
@@ -170,8 +262,35 @@ impl Operator for DeleteKeyframe {
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
-        _ctx: &Context,
+        ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        // In pose mode, the selected bones' keys and nothing else — Alt+I on
+        // a hand must not take the character's placement key with it.
+        if posing(ctx) {
+            let Some(object) = crate::ops::pose::posed_object(doc.document()) else {
+                return Ok(OpResult::Cancelled);
+            };
+            let bones = selected_bones(doc.document(), object);
+            let Some(action) = doc.document().object(object).and_then(|o| o.action) else {
+                return Ok(OpResult::Cancelled);
+            };
+            let ours = |c: &animation::FCurve| {
+                animation::parse_bone_path(&c.path.property).is_some_and(|(b, _)| bones.iter().any(|n| n == b))
+            };
+            let any = doc.document().action(action).is_some_and(|a| {
+                a.curves.iter().filter(|c| ours(c)).any(|c| c.keys.iter().any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME))
+            });
+            if !any {
+                return Ok(OpResult::Cancelled);
+            }
+            if let Some(a) = doc.document_mut().action_mut(action) {
+                for curve in a.curves.iter_mut().filter(|c| ours(c)) {
+                    curve.remove(params.frame);
+                }
+                a.curves.retain(|c| !c.keys.is_empty());
+            }
+            return Ok(OpResult::Finished);
+        }
         let actions: Vec<_> = {
             let d = doc.document();
             // Two selected objects sharing one action delete once.
@@ -245,7 +364,17 @@ fn any_shown(doc: &Document) -> bool {
 /// One dope-sheet row, as text: an action's identity, a slash, and the
 /// property the row is for — empty for the row that stands for them all.
 pub fn row_target(action_uid: u64, property: Option<&str>) -> String {
-    format!("{action_uid}/{}", property.unwrap_or(""))
+    format!("{action_uid}/{}", escape(property.unwrap_or("")))
+}
+
+/// A property as a target writes it: a bone's name can hold a space, which
+/// separates targets, or a slash, which separates a target's parts.
+fn escape(property: &str) -> String {
+    property.replace('%', "%25").replace(' ', "%20").replace('/', "%2F")
+}
+
+fn unescape(property: &str) -> String {
+    property.replace("%2F", "/").replace("%20", " ").replace("%25", "%")
 }
 
 fn parse_targets(text: &str) -> Vec<(u64, Option<String>)> {
@@ -253,7 +382,7 @@ fn parse_targets(text: &str) -> Vec<(u64, Option<String>)> {
         .filter_map(|t| {
             let (uid, property) = t.split_once('/')?;
             let uid = uid.parse().ok()?;
-            Some((uid, (!property.is_empty()).then(|| property.to_string())))
+            Some((uid, (!property.is_empty()).then(|| unescape(property))))
         })
         .collect()
 }
@@ -688,13 +817,13 @@ impl Operator for UnkeyProperty {
 /// One curve, as text: an action's identity, the property and the component —
 /// `12/location/0`.
 pub fn curve_target(action_uid: u64, property: &str, index: u8) -> String {
-    format!("{action_uid}/{property}/{index}")
+    format!("{action_uid}/{}/{index}", escape(property))
 }
 
 pub(crate) fn parse_curve(text: &str) -> Option<(u64, String, u8)> {
     let mut parts = text.split('/');
     let uid = parts.next()?.parse().ok()?;
-    let property = parts.next()?.to_string();
+    let property = unescape(parts.next()?);
     let index = parts.next()?.parse().ok()?;
     Some((uid, property, index))
 }

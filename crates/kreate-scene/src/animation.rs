@@ -558,6 +558,95 @@ pub fn apply_to_light(action: &Action, frame: f64, l: &mut crate::light::Light) 
     l.color = kreate_math::SceneRgb::new(colour[0], colour[1], colour[2]);
 }
 
+// --- what a pose animates ---------------------------------------------------
+
+/// The properties of a bone's pose a curve can drive: Blender's pose-bone
+/// channels, with the rotation a quaternion as Blender's default is — a bone
+/// turns in every direction, and Euler angles lock up exactly where a
+/// shoulder does.
+pub const BONE_ANIMATABLE: &[AnimatableDesc] = &[
+    AnimatableDesc { name: "location", kind: PropertyKind::Vec3, components: 3, doc: "Where the bone is moved from rest, in its own axes." },
+    AnimatableDesc {
+        name: "rotation_quaternion",
+        kind: PropertyKind::Float,
+        components: 4,
+        doc: "How it is turned from rest, as W, X, Y, Z.",
+    },
+    AnimatableDesc { name: "scale", kind: PropertyKind::Vec3, components: 3, doc: "Its size along its own axes." },
+];
+
+/// The path a curve on a bone's pose has: Blender's, so it reads as the same
+/// thing to anyone who has seen one — `pose.bones["Upper"].location`.
+///
+/// On the *object's* action, as Blender keeps them: one action animates a
+/// character, its placement and its bones together.
+pub fn bone_path(bone: &str, property: &str) -> String {
+    format!("pose.bones[\"{bone}\"].{property}")
+}
+
+/// The bone and the property of a pose path, if it is one.
+pub fn parse_bone_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("pose.bones[\"")?;
+    let (bone, property) = rest.split_once("\"].")?;
+    Some((bone, property))
+}
+
+/// What a curve's property is, on an action that animates `kind`: an entry of
+/// [`animatable`], or of [`BONE_ANIMATABLE`] for a pose path.
+pub fn describe(kind: DatablockKind, property: &str) -> Option<&'static AnimatableDesc> {
+    if kind == DatablockKind::Object {
+        if let Some((_, p)) = parse_bone_path(property) {
+            return BONE_ANIMATABLE.iter().find(|d| d.name == p);
+        }
+    }
+    animatable(kind).iter().find(|d| d.name == property)
+}
+
+/// A bone's pose values, as the curves see them. The quaternion is W, X, Y, Z.
+pub fn read_bone(t: &DTransform, property: &str) -> Option<Vec<f64>> {
+    Some(match property {
+        "location" => t.translation.to_array().to_vec(),
+        "rotation_quaternion" => vec![t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z],
+        "scale" => t.scale.to_array().to_vec(),
+        _ => return None,
+    })
+}
+
+/// Plays the pose curves of `action` onto `pose` at `frame`. A bone nothing
+/// keys is left as it is; a quaternion is normalised after its four curves
+/// are read, since four numbers each moving in a line are not a rotation
+/// between the keys.
+pub fn apply_to_pose(action: &Action, frame: f64, pose: &mut crate::armature::Pose) {
+    let mut turned: Vec<(String, [f64; 4])> = Vec::new();
+    for curve in &action.curves {
+        let Some((bone, property)) = parse_bone_path(&curve.path.property) else { continue };
+        let (Some(index), Some(value)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        let i = index as usize;
+        match property {
+            "location" if i < 3 => pose.entry(bone).transform.translation[i] = value,
+            "scale" if i < 3 => pose.entry(bone).transform.scale[i] = value,
+            "rotation_quaternion" if i < 4 => {
+                let at = match turned.iter().position(|(b, _)| b == bone) {
+                    Some(at) => at,
+                    None => {
+                        let q = pose.transform(bone).rotation;
+                        turned.push((bone.to_string(), [q.w, q.x, q.y, q.z]));
+                        turned.len() - 1
+                    }
+                };
+                turned[at].1[i] = value;
+            }
+            _ => {}
+        }
+    }
+    for (bone, [w, x, y, z]) in turned {
+        let q = DQuat::from_xyzw(x, y, z, w);
+        if q.length_squared() > 1e-24 {
+            pose.entry(&bone).transform.rotation = q.normalize();
+        }
+    }
+}
+
 /// A rotation as Blender's XYZ Euler angles: X applied first, then Y, then Z.
 pub fn to_euler(q: DQuat) -> DVec3 {
     let (z, y, x) = q.to_euler(kreate_math::glam::EulerRot::ZYX);
@@ -819,6 +908,39 @@ mod tests {
         assert!(a.offset_selected_values(1.0));
         let x = a.curves.iter().find(|c| c.path.property.as_ref() == "location").unwrap();
         assert_eq!(x.keys.iter().map(|k| k.value).collect::<Vec<_>>(), vec![0.0, 6.0, 3.0]);
+    }
+
+    #[test]
+    fn a_bone_path_reads_back_and_plays_onto_the_pose() {
+        let path = bone_path("Upper Arm", "rotation_quaternion");
+        assert_eq!(path, "pose.bones[\"Upper Arm\"].rotation_quaternion");
+        assert_eq!(parse_bone_path(&path), Some(("Upper Arm", "rotation_quaternion")));
+        assert_eq!(parse_bone_path("location"), None);
+        assert_eq!(describe(DatablockKind::Object, &path).map(|d| d.components), Some(4));
+        assert_eq!(describe(DatablockKind::Object, "location").map(|d| d.components), Some(3));
+
+        // Half a turn about X over ten frames, keyed as a quaternion.
+        let mut a = Action::new("Wave");
+        let q1 = DQuat::from_rotation_x(1.0);
+        for (i, v) in [1.0, 0.0, 0.0, 0.0].into_iter().enumerate() {
+            a.curve_mut(&path, i as u8).insert(1.0, v, Interpolation::Linear);
+        }
+        for (i, v) in [q1.w, q1.x, q1.y, q1.z].into_iter().enumerate() {
+            a.curve_mut(&path, i as u8).insert(11.0, v, Interpolation::Linear);
+        }
+        a.curve_mut(&bone_path("Upper Arm", "location"), 2).insert(1.0, 0.5, Interpolation::Linear);
+        let mut pose = crate::armature::Pose::default();
+        apply_to_pose(&a, 11.0, &mut pose);
+        let t = pose.transform("Upper Arm");
+        assert!(t.rotation.dot(q1).abs() > 1.0 - 1e-12);
+        assert_eq!(t.translation.z, 0.5);
+        // Between the keys it is still a rotation.
+        apply_to_pose(&a, 6.0, &mut pose);
+        assert!((pose.transform("Upper Arm").rotation.length() - 1.0).abs() < 1e-12);
+        // And an object transform ignores the bone's curves.
+        let mut t = DTransform::IDENTITY;
+        apply_to_object(&a, 11.0, &mut t);
+        assert_eq!(t, DTransform::IDENTITY);
     }
 }
 

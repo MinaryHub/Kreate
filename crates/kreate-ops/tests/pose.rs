@@ -164,3 +164,140 @@ fn add_armature_makes_one_standing_bone_and_selects_it() {
     assert_eq!(a.bones.len(), 1);
     assert!((doc.posed_bones(rig)[0].matrix3 * DVec3::Y - DVec3::Z).length() < 1e-12);
 }
+
+// --- keys ---------------------------------------------------------------------
+
+fn key(registry: &OperatorRegistry, history: &mut History, doc: &mut Document, ctx: &Context, op: &str, frame: f64) -> bool {
+    run(registry, history, doc, ctx, op, &[("frame", PropertyValue::Float(frame))])
+}
+
+#[test]
+fn i_in_pose_mode_keys_the_selected_bones_and_the_pose_plays_back() {
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    let ctx = pose_ctx();
+    run(&registry, &mut history, &mut doc, &ctx, "pose.select_pick", &[("bone", text("Upper"))]);
+    assert!(key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 1.0));
+    run(&registry, &mut history, &mut doc, &ctx, "pose.rotate", &[("angle", PropertyValue::Float(1.0)), ("axis", PropertyValue::Enum(0))]);
+    assert!(key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 11.0));
+
+    let action = doc.object(rig).unwrap().action.expect("keying made an action");
+    let paths: Vec<String> = doc.action(action).unwrap().curves.iter().map(|c| c.path.property.to_string()).collect();
+    assert_eq!(paths.len(), 10, "three, four and three curves: {paths:?}");
+    assert!(paths.iter().all(|p| p.starts_with("pose.bones[\"Upper\"].")), "{paths:?}");
+
+    // Halfway, the bone is halfway round, and the object has not moved.
+    doc.animate(6.0);
+    let turned = doc.object(rig).unwrap().pose.transform("Upper").rotation;
+    let (axis, angle) = turned.to_axis_angle();
+    assert!((angle - 0.5).abs() < 0.05, "turned {angle} halfway between 0 and 1");
+    assert!(axis.x.abs() > 0.99);
+    assert_eq!(doc.object(rig).unwrap().transform.translation, DVec3::new(5.0, 0.0, 0.0));
+    doc.animate(1.0);
+    assert!(doc.object(rig).unwrap().pose.transform("Upper").rotation.dot(DQuat::IDENTITY).abs() > 1.0 - 1e-12);
+}
+
+#[test]
+fn a_key_on_the_far_side_of_the_sphere_is_brought_back() {
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    let ctx = pose_ctx();
+    run(&registry, &mut history, &mut doc, &ctx, "pose.select_pick", &[("bone", text("Upper"))]);
+    key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 1.0);
+    // The same rotation, written as its negative: a straight line from +1 to
+    // -1 in W goes through nothing, and the bone would spin all the way round.
+    doc.object_mut(rig).unwrap().pose.entry("Upper").transform.rotation = -DQuat::from_rotation_x(0.2);
+    key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 11.0);
+    let action = doc.object(rig).unwrap().action.unwrap();
+    let w = doc
+        .action(action)
+        .unwrap()
+        .curves
+        .iter()
+        .find(|c| c.path.property.ends_with("rotation_quaternion") && c.path.index == Some(0))
+        .unwrap()
+        .keys[1]
+        .value;
+    assert!(w > 0.9, "keyed on the far side: w = {w}");
+}
+
+#[test]
+fn alt_i_in_pose_mode_leaves_the_objects_own_keys() {
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    // A key on the object first, in object mode.
+    assert!(key(&registry, &mut history, &mut doc, &Context::default(), "anim.keyframe_insert", 1.0));
+    let ctx = pose_ctx();
+    run(&registry, &mut history, &mut doc, &ctx, "pose.select_pick", &[("bone", text("Lower"))]);
+    key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 1.0);
+    let action = doc.object(rig).unwrap().action.unwrap();
+    assert_eq!(doc.action(action).unwrap().curves.len(), 19);
+    assert!(key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_delete", 1.0));
+    let left: Vec<String> = doc.action(action).unwrap().curves.iter().map(|c| c.path.property.to_string()).collect();
+    assert_eq!(left.len(), 9, "{left:?}");
+    assert!(left.iter().all(|p| !p.starts_with("pose.")));
+}
+
+#[test]
+fn auto_keying_keys_the_bones_a_turn_moved() {
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    let ctx = pose_ctx();
+    run(&registry, &mut history, &mut doc, &ctx, "pose.select_pick", &[("bone", text("Lower"))]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "pose.rotate",
+        &[
+            ("angle", PropertyValue::Float(0.4)),
+            ("axis", PropertyValue::Enum(0)),
+            ("autokey", PropertyValue::Bool(true)),
+            ("key_frame", PropertyValue::Float(7.0)),
+        ],
+    );
+    let action = doc.object(rig).unwrap().action.expect("the turn keyed");
+    let a = doc.action(action).unwrap();
+    assert_eq!(a.curves.len(), 7, "location and rotation");
+    assert!(a.curves.iter().all(|c| c.keys.len() == 1 && c.keys[0].frame == 7.0));
+    // One step: undoing the turn takes its key too.
+    assert!(history.undo(&mut doc));
+    assert!(doc.object(rig).unwrap().action.is_none());
+}
+
+#[test]
+fn a_bone_with_a_space_in_its_name_can_be_picked_in_the_dope_sheet() {
+    use kreate_ops::ops::anim::row_target;
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    let ctx = pose_ctx();
+    doc.armature_mut(doc.armature_of(rig).unwrap().0).unwrap().bones[1].name = "Lower Arm".into();
+    run(&registry, &mut history, &mut doc, &ctx, "pose.select_pick", &[("bone", text("Lower Arm"))]);
+    key(&registry, &mut history, &mut doc, &ctx, "anim.keyframe_insert", 1.0);
+    let action = doc.object(rig).unwrap().action.unwrap();
+    let uid = doc.action_uid(action).unwrap().raw();
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_all", &[("action", PropertyValue::Enum(1))]);
+    let path = kreate_scene::animation::bone_path("Lower Arm", "location");
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "anim.keys_select_box",
+        &[
+            ("targets", text(&row_target(uid, Some(&path)))),
+            ("frame_min", PropertyValue::Float(0.5)),
+            ("frame_max", PropertyValue::Float(1.5)),
+        ]
+    ));
+    let selected: Vec<String> = doc
+        .action(action)
+        .unwrap()
+        .curves
+        .iter()
+        .filter(|c| c.keys.iter().any(|k| k.selected))
+        .map(|c| c.path.property.to_string())
+        .collect();
+    assert_eq!(selected, vec![path.clone(), path.clone(), path]);
+}

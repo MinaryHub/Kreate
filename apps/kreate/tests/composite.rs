@@ -2119,6 +2119,38 @@ fn shot_armature() {
     shot.dump("armature");
 }
 
+/// The Animation workspace with an armature's bones keyed: a row per bone
+/// channel under the rig.
+#[test]
+fn shot_pose_keys() {
+    use kreate_scene::animation::{bone_path, Action, Interpolation};
+    for (label, locale) in [("pose-keys", "en"), ("pose-keys-ko", "ko-KR")] {
+        let mut doc = doc_with_cube();
+        let id = doc.add_armature(kreate_scene::armature::Armature::new("Arm"));
+        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id)));
+        let mut action = Action::new("RigAction");
+        for frame in [1.0, 12.0, 24.0] {
+            for i in 0..4u8 {
+                action.curve_mut(&bone_path("Bone", "rotation_quaternion"), i).insert(frame, if i == 0 { 1.0 } else { 0.0 }, Interpolation::Bezier);
+            }
+        }
+        for i in 0..3u8 {
+            action.curve_mut(&bone_path("Bone", "location"), i).insert(12.0, 0.0, Interpolation::Bezier);
+        }
+        let action = doc.add_action(action);
+        doc.object_mut(rig).unwrap().action = Some(action);
+        doc.selection.clear();
+        doc.selection.add(rig);
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.switch_workspace(4);
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
 /// A picture of the Material tab with keyed values, the diamonds lit.
 #[test]
 fn shot_keyed_material() {

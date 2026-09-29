@@ -5500,7 +5500,13 @@ fn with_autokey(frame: Option<f64>, op_id: &str, params: &PropertyMap) -> Proper
     let mut out = params.clone();
     let transforms = matches!(
         op_id,
-        "object.translate" | "object.rotate" | "object.scale" | "object.set_transform"
+        "object.translate"
+            | "object.rotate"
+            | "object.scale"
+            | "object.set_transform"
+            | "pose.translate"
+            | "pose.rotate"
+            | "pose.scale"
     );
     if let (Some(frame), true) = (frame, transforms) {
         if out.get("autokey").is_none() {

@@ -484,6 +484,11 @@ fn common() -> Vec<Binding> {
         key("pose.scale", "S", Context::Pose, Action::new("pose.scale")),
         // Blender's: `A` all, `Alt+A` none, `Ctrl+I` the others; and
         // `Alt+G/R/S` put what was moved, turned or scaled back at rest.
+        // Keys on the same keys as in object mode; the operators know which
+        // mode they are in and key the bones.
+        key("pose.keyframe_insert", "I", Context::Pose, Action::new("anim.keyframe_insert")),
+        key("pose.keyframe_delete", "I", Context::Pose, Action::new("anim.keyframe_delete"))
+            .with_modifiers(Modifiers::alt()),
         key("pose.select_all", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 0)),
         key("pose.select_none", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 1))
             .with_modifiers(Modifiers::alt()),
