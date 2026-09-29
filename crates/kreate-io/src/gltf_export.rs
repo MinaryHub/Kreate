@@ -216,6 +216,7 @@ pub fn write_gltf_scene(
     write_lights(&scene.lights, &mut root);
     write_cameras(scene, &mut root, &mut notes);
     write_nodes(scene, &mesh_indices, &mut root, &mut notes);
+    write_animations(scene, &mut root, &mut bin, &mut notes);
 
     if used_ngons {
         root.extensions_used.push(NGON_EXTENSION.to_string());
@@ -480,6 +481,124 @@ fn write_nodes(
 }
 
 /// The default scene, made on first use.
+/// Writes the clips: per track, one shared list of times and a channel for
+/// each part of the placement that moves.
+///
+/// The axis change is the same call a node's rest placement makes, sample by
+/// sample, so a moving node and a still one cannot come out in two different
+/// conventions. glTF's node indices are the scene's own, because `write_nodes`
+/// writes every node in order.
+fn write_animations(
+    scene: &ExportScene<'_>,
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    notes: &mut Vec<LossyNote>,
+) {
+    use json::animation::{Channel, Interpolation, Property, Sampler, Target};
+    if scene.nodes.is_empty() {
+        return;
+    }
+    let target = SourceMetadata {
+        axis: AxisConvention::GLTF,
+        ..SourceMetadata::new("gltf")
+    };
+    for animation in &scene.animations {
+        let mut out = json::Animation {
+            extensions: None,
+            extras: Default::default(),
+            channels: Vec::new(),
+            name: Some(animation.name.clone()),
+            samplers: Vec::new(),
+        };
+        for track in &animation.tracks {
+            let count = track.times.len().min(track.transforms.len());
+            if track.node >= scene.nodes.len() || count == 0 {
+                notes.push(LossyNote::Unsupported {
+                    what: format!("{}: a track with nothing to write", animation.name),
+                });
+                continue;
+            }
+            let times = &track.times[..count];
+            let placed: Vec<ImportTransform> = track.transforms[..count]
+                .iter()
+                .map(|t| ImportTransform::from_kreate(t.to_affine(), &target))
+                .collect();
+            let input_view = push_view(root, bin, bytemuck::cast_slice(times), None);
+            let (first, last) = (times[0], times[count - 1]);
+            let input = push_accessor(
+                root,
+                input_view,
+                count,
+                json::accessor::ComponentType::F32,
+                json::accessor::Type::Scalar,
+                // Required by the specification for a sampler's input.
+                Some(serde_json::json!([first])),
+                Some(serde_json::json!([last])),
+            );
+            let interpolation = if track.step { Interpolation::Step } else { Interpolation::Linear };
+            let channel = |root: &mut json::Root,
+                               bin: &mut Vec<u8>,
+                               out: &mut json::Animation,
+                               data: Vec<f32>,
+                               ty: json::accessor::Type,
+                               path: Property| {
+                let view = push_view(root, bin, bytemuck::cast_slice(&data), None);
+                let output = push_accessor(root, view, count, json::accessor::ComponentType::F32, ty, None, None);
+                let sampler = out.samplers.len() as u32;
+                out.samplers.push(Sampler {
+                    extensions: None,
+                    extras: Default::default(),
+                    input,
+                    interpolation: Checked::Valid(interpolation),
+                    output,
+                });
+                out.channels.push(Channel {
+                    sampler: json::Index::new(sampler),
+                    target: Target {
+                        extensions: None,
+                        extras: Default::default(),
+                        node: json::Index::new(track.node as u32),
+                        path: Checked::Valid(path),
+                    },
+                    extensions: None,
+                    extras: Default::default(),
+                });
+            };
+            if track.translation {
+                let data = placed.iter().flat_map(|p| p.translation.to_array()).collect();
+                channel(root, bin, &mut out, data, json::accessor::Type::Vec3, Property::Translation);
+            }
+            if track.rotation {
+                // Each quaternion on the same side as the one before: `q` and
+                // `-q` are one rotation, and a reader slerps between neighbours
+                // as written — so a sign flip between two samples a degree
+                // apart is a full turn the long way round.
+                let mut previous = glam::Quat::IDENTITY;
+                let data = placed
+                    .iter()
+                    .flat_map(|p| {
+                        // A sample scaled to nothing has no rotation to take
+                        // apart, and NaN in a file is a file nobody opens: it
+                        // keeps the one before, which is what it looked like.
+                        let r = if p.rotation.is_finite() { p.rotation } else { previous };
+                        let q = if r.dot(previous) < 0.0 { -r } else { r };
+                        previous = q;
+                        q.to_array()
+                    })
+                    .collect();
+                channel(root, bin, &mut out, data, json::accessor::Type::Vec4, Property::Rotation);
+            }
+            if track.scale {
+                let data = placed.iter().flat_map(|p| p.scale.to_array()).collect();
+                channel(root, bin, &mut out, data, json::accessor::Type::Vec3, Property::Scale);
+            }
+        }
+        if !out.channels.is_empty() {
+            root.animations.push(out);
+        }
+    }
+}
+
 fn root_scene(root: &mut json::Root) -> &mut json::Scene {
     if root.scenes.is_empty() {
         root.scenes.push(json::Scene {

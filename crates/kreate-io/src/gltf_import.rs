@@ -62,6 +62,7 @@ use crate::gltf_export::NGON_EXTENSION;
 use crate::ir::{
     ImportCamera, ImportImage, ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode,
     ImportNodeData, ImportScene, ImportTransform, LossyNote, SourceMetadata, UvOrigin,
+    ChannelInterpolation, ChannelValues, ImportAnimation, ImportChannel,
 };
 use glam::{Vec2, Vec3};
 use kreate_math::AxisConvention;
@@ -123,6 +124,7 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 
     let mut scene = ImportScene::new(source);
     read_nodes(&document, &mut scene);
+    read_animations(&document, &buffers, &mut scene);
 
     // Every image, in the file's order, so a texture's `source` index is an
     // index here too. Decoded already — `import_slice` unpacks embedded PNG and
@@ -362,6 +364,60 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 /// `mesh_of` maps a glTF mesh index onto the index the IR gave it, because the
 /// two need not agree — they do today, and relying on that would be a rule
 /// nobody wrote down.
+/// Every clip, channel by channel, as the file wrote it.
+///
+/// Morph target weights are said and skipped: the document has no shape keys
+/// yet (Phase 11). A channel whose lists cannot be read, or that names a node
+/// the file does not have, is skipped and said too — one broken channel is not
+/// a reason to lose the rest of the clip.
+fn read_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data], scene: &mut ImportScene) {
+    use gltf::animation::util::ReadOutputs;
+    for (index, animation) in document.animations().enumerate() {
+        let name = animation
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Animation{index}"));
+        let mut out = ImportAnimation { name: name.clone(), channels: Vec::new() };
+        for channel in animation.channels() {
+            let node = channel.target().node().index();
+            let reader = channel.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+            let times: Option<Vec<f32>> = reader.read_inputs().map(|i| i.collect());
+            let values = match reader.read_outputs() {
+                Some(ReadOutputs::Translations(v)) => Some(ChannelValues::Translation(v.map(Vec3::from).collect())),
+                Some(ReadOutputs::Rotations(v)) => Some(ChannelValues::Rotation(
+                    v.into_f32().map(glam::Quat::from_array).collect(),
+                )),
+                Some(ReadOutputs::Scales(v)) => Some(ChannelValues::Scale(v.map(Vec3::from).collect())),
+                Some(ReadOutputs::MorphTargetWeights(_)) => {
+                    scene.source.notes.push(LossyNote::Unsupported {
+                        what: format!("{name}: morph target weights are not animated yet"),
+                    });
+                    continue;
+                }
+                None => None,
+            };
+            let (Some(times), Some(values)) = (times, values) else {
+                scene.source.notes.push(LossyNote::Unsupported {
+                    what: format!("{name}: a channel whose keys could not be read"),
+                });
+                continue;
+            };
+            if node >= scene.nodes.len() {
+                continue;
+            }
+            let interpolation = match channel.sampler().interpolation() {
+                gltf::animation::Interpolation::Step => ChannelInterpolation::Step,
+                gltf::animation::Interpolation::Linear => ChannelInterpolation::Linear,
+                gltf::animation::Interpolation::CubicSpline => ChannelInterpolation::CubicSpline,
+            };
+            out.channels.push(ImportChannel { node, interpolation, times, values });
+        }
+        if !out.channels.is_empty() {
+            scene.animations.push(out);
+        }
+    }
+}
+
 fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
     // `lights()` answers nothing at all when the file does not declare the
     // extension, which is not the same as declaring it with no lights — and

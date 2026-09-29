@@ -34,6 +34,10 @@ pub enum BuildNote {
     /// A material named a texture that is not in the file, or one that could
     /// not be read. The slot is left empty.
     MissingImage { material: String },
+    /// A second clip moved a node the first had already given an action. An
+    /// object plays one action, so the later clip's movement of it was left
+    /// out.
+    LaterClip { animation: String, node: String },
 }
 
 /// Adds everything in `scene` to `doc`, placed as the file placed it.
@@ -248,7 +252,152 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         }
     }
 
+    build_animations(scene, &made, doc, &mut notes);
+
     (made, notes)
+}
+
+/// The file's clips as actions: one per animated node, keyed on the frames
+/// the file keyed.
+///
+/// glTF keys a node's whole placement, in its own axes, with a quaternion; the
+/// document keys location, Euler angles and scale on Z-up. So every key is the
+/// whole placement at that instant, put through the same conversion the rest
+/// placement went through — asking the channels where the node is rather than
+/// converting their numbers one by one, which the axis change would scramble.
+///
+/// Where the file's curve is not one the document can draw between keys —
+/// a cubic spline, or a rotation (a slerp is not a straight line in Euler
+/// angles) — it is sampled every frame. Straight lines and holds are exact on
+/// the file's own keys.
+fn build_animations(scene: &ImportScene, made: &[ObjectId], doc: &mut Document, notes: &mut Vec<BuildNote>) {
+    use crate::ir::ChannelInterpolation as I;
+    use kreate_scene::animation::{Action, Interpolation};
+    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let start = doc.playback.start as f64;
+    let mut animated: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut last_frame = f64::NEG_INFINITY;
+    for animation in &scene.animations {
+        let mut nodes: Vec<usize> = animation.channels.iter().map(|c| c.node).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        for node in nodes {
+            let (Some(object), Some(rest)) = (made.get(node), scene.nodes.get(node)) else { continue };
+            if !animated.insert(node) {
+                notes.push(BuildNote::LaterClip { animation: animation.name.clone(), node: rest.name.clone() });
+                continue;
+            }
+            let channels: Vec<_> = animation.channels.iter().filter(|c| c.node == node && c.key_count() > 0).collect();
+            if channels.is_empty() {
+                continue;
+            }
+            let mut times: Vec<f32> = channels.iter().flat_map(|c| c.times[..c.key_count()].iter().copied()).collect();
+            times.sort_by(f32::total_cmp);
+            times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            let step = channels.iter().all(|c| c.interpolation == I::Step);
+            let sampled = channels.iter().any(|c| {
+                c.interpolation == I::CubicSpline
+                    || (c.interpolation == I::Linear && matches!(c.values, crate::ir::ChannelValues::Rotation(_)) && c.key_count() > 1)
+            });
+            let frame_of = |t: f32| start + t as f64 * fps;
+            let mut frames: Vec<f64> = times.iter().map(|t| frame_of(*t)).collect();
+            if sampled {
+                let (first, last) = (frames[0], frames[frames.len() - 1]);
+                let mut f = first.ceil();
+                while f < last {
+                    frames.push(f);
+                    f += 1.0;
+                }
+                frames.sort_by(f64::total_cmp);
+                frames.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            }
+            let (mut moves_t, mut moves_r, mut moves_s) = (false, false, false);
+            for c in &channels {
+                match c.values {
+                    crate::ir::ChannelValues::Translation(_) => moves_t = true,
+                    crate::ir::ChannelValues::Rotation(_) => moves_r = true,
+                    crate::ir::ChannelValues::Scale(_) => moves_s = true,
+                }
+            }
+            let interpolation = if step { Interpolation::Constant } else { Interpolation::Linear };
+            let mut action = Action::new(format!("{}Action", rest.name));
+            let mut previous_euler: Option<kreate_math::DVec3> = None;
+            for frame in &frames {
+                let t = ((frame - start) / fps) as f32;
+                let mut placed = rest.transform;
+                for c in &channels {
+                    match c.values {
+                        crate::ir::ChannelValues::Translation(_) => {
+                            placed.translation = c.vec3_at(t).unwrap_or(placed.translation)
+                        }
+                        crate::ir::ChannelValues::Rotation(_) => placed.rotation = c.quat_at(t).unwrap_or(placed.rotation),
+                        crate::ir::ChannelValues::Scale(_) => placed.scale = c.vec3_at(t).unwrap_or(placed.scale),
+                    }
+                }
+                let local = to_transform(placed.to_kreate(&scene.source));
+                if moves_t {
+                    for i in 0..3u8 {
+                        action.curve_mut("location", i).insert(*frame, local.translation[i as usize], interpolation);
+                    }
+                }
+                if moves_r {
+                    let euler = continuous_euler(local.rotation, previous_euler);
+                    previous_euler = Some(euler);
+                    for i in 0..3u8 {
+                        action.curve_mut("rotation_euler", i).insert(*frame, euler[i as usize], interpolation);
+                    }
+                }
+                if moves_s {
+                    for i in 0..3u8 {
+                        action.curve_mut("scale", i).insert(*frame, local.scale[i as usize], interpolation);
+                    }
+                }
+                last_frame = last_frame.max(*frame);
+            }
+            action.select_all_with(|_| false);
+            let id = doc.add_action(action);
+            if let Some(o) = doc.object_mut(*object) {
+                o.action = Some(id);
+            }
+        }
+    }
+    // The scene's range grows to hold what arrived, and never shrinks: a clip
+    // that ends past frame 250 should play to its end, and one shorter than
+    // the range leaves the author's range alone.
+    if last_frame.is_finite() && last_frame.ceil() as i32 > doc.playback.end {
+        doc.playback.end = last_frame.ceil() as i32;
+    }
+    if !animated.is_empty() {
+        let frame = doc.playback.frame;
+        doc.animate(frame);
+    }
+}
+
+/// Euler angles for `q`, chosen to be nearest the previous key's.
+///
+/// Every rotation has two XYZ Euler triples, and each angle any number of whole
+/// turns; the plain conversion picks within ±π, so a spin past half a turn
+/// would jump back by a full one between two keys and the curve would play the
+/// long way round. Of the two triples, each unwrapped to the previous one, the
+/// closer wins.
+fn continuous_euler(q: kreate_math::DQuat, previous: Option<kreate_math::DVec3>) -> kreate_math::DVec3 {
+    use std::f64::consts::{PI, TAU};
+    let e = kreate_scene::animation::to_euler(q);
+    let Some(p) = previous else { return e };
+    let unwrap = |v: kreate_math::DVec3| {
+        kreate_math::DVec3::new(
+            v.x + ((p.x - v.x) / TAU).round() * TAU,
+            v.y + ((p.y - v.y) / TAU).round() * TAU,
+            v.z + ((p.z - v.z) / TAU).round() * TAU,
+        )
+    };
+    let a = unwrap(e);
+    let b = unwrap(kreate_math::DVec3::new(e.x + PI, PI - e.y, e.z + PI));
+    if (a - p).length_squared() <= (b - p).length_squared() {
+        a
+    } else {
+        b
+    }
 }
 
 /// The file's materials as datablocks, in the file's order, with their images.
@@ -550,6 +699,8 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         }
     }
 
+    let animations = export_animations(doc, &mut notes);
+
     for (index, (_, object)) in doc.objects().enumerate() {
         let Some(parent) = object.parent else { continue };
         nodes[index].parent = node_of.get(&parent).copied();
@@ -569,9 +720,119 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             lights,
             cameras,
             nodes,
+            animations,
         },
         notes,
     )
+}
+
+/// The objects' actions as one clip, sampled from the document itself.
+///
+/// One clip for the scene rather than one per action, because that is what
+/// plays: a viewer given several clips plays one, and an object missing from
+/// it stands still.
+///
+/// Holds and straight lines on location and scale are exact on the union of
+/// the keys, and written only there. Anything else — a Bézier, or a rotation,
+/// which glTF interpolates as a quaternion and the document as Euler angles —
+/// is sampled every frame, which is what Blender's exporter does by default.
+///
+/// Frame `start` is second zero, so a clip reimported into a scene with the
+/// same range and rate lands on the frames it left from.
+fn export_animations(doc: &Document, notes: &mut Vec<LossyNote>) -> Vec<crate::ir::ExportAnimation> {
+    use kreate_scene::animation::Interpolation;
+    const MOVES: [&str; 3] = ["location", "rotation_euler", "scale"];
+    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    // Keys before the range would be negative seconds; the clip starts at
+    // whichever is earlier.
+    let mut origin = doc.playback.start as f64;
+    for (_, object) in doc.objects() {
+        if let Some(action) = object.action.and_then(|a| doc.action(a)) {
+            for curve in action.curves.iter().filter(|c| MOVES.contains(&c.path.property.as_ref())) {
+                if let Some(first) = curve.keys.first() {
+                    origin = origin.min(first.frame);
+                }
+            }
+        }
+    }
+    if origin < doc.playback.start as f64 {
+        notes.push(LossyNote::Unsupported {
+            what: format!("keys before frame {} moved the clip's start to frame {origin}", doc.playback.start),
+        });
+    }
+    let mut tracks = Vec::new();
+    for (index, (_, object)) in doc.objects().enumerate() {
+        let Some(action) = object.action.and_then(|a| doc.action(a)) else { continue };
+        let curves: Vec<_> = action
+            .curves
+            .iter()
+            .filter(|c| MOVES.contains(&c.path.property.as_ref()) && !c.keys.is_empty())
+            .collect();
+        if curves.is_empty() {
+            continue;
+        }
+        let moves = |p: &str| curves.iter().any(|c| c.path.property.as_ref() == p);
+        // The interpolation that matters is each key's but the last's: it is
+        // how the curve leaves a key, and nothing leaves the last one.
+        let all = |kind: Interpolation| {
+            curves.iter().all(|c| c.keys[..c.keys.len() - 1].iter().all(|k| k.interpolation == kind))
+        };
+        let step = all(Interpolation::Constant);
+        let exact = step || (all(Interpolation::Linear) && !moves("rotation_euler"));
+        let mut frames: Vec<f64> = curves.iter().flat_map(|c| c.keys.iter().map(|k| k.frame)).collect();
+        frames.sort_by(f64::total_cmp);
+        frames.dedup_by(|a, b| (*a - *b).abs() < kreate_scene::animation::SAME_FRAME);
+        if !exact {
+            let (first, last) = (frames[0], frames[frames.len() - 1]);
+            let mut f = first.ceil();
+            while f < last {
+                frames.push(f);
+                f += 1.0;
+            }
+            frames.sort_by(f64::total_cmp);
+            frames.dedup_by(|a, b| (*a - *b).abs() < kreate_scene::animation::SAME_FRAME);
+        }
+        let transforms = frames
+            .iter()
+            .map(|frame| {
+                let mut t = object.transform;
+                kreate_scene::animation::apply_to_object(action, *frame, &mut t);
+                // Folded as the rest placement is: see `ExportNode::transform`.
+                if object.parent.is_some() {
+                    kreate_math::DTransform::from_affine(object.parent_inverse * t.to_affine())
+                } else {
+                    t
+                }
+            })
+            .collect();
+        tracks.push(crate::ir::ExportTrack {
+            node: index,
+            times: frames.iter().map(|f| ((f - origin) / fps) as f32).collect(),
+            transforms,
+            step,
+            translation: moves("location"),
+            rotation: moves("rotation_euler"),
+            scale: moves("scale"),
+        });
+    }
+    for (_, m) in doc.materials() {
+        if m.action.is_some() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: a material's animation has no place in glTF and was not written", m.name),
+            });
+        }
+    }
+    for (_, l) in doc.lights() {
+        if l.action.is_some() {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: a light's animation has no place in glTF and was not written", l.name),
+            });
+        }
+    }
+    if tracks.is_empty() {
+        return Vec::new();
+    }
+    vec![crate::ir::ExportAnimation { name: "Animation".into(), tracks }]
 }
 
 /// One light, in the units an interchange format writes.

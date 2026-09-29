@@ -14,7 +14,7 @@
 //! primvars all collapse into one representation instead of four special cases.
 
 use ahash::AHashMap;
-use glam::{Quat, Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3, Vec4};
 use kreate_math::{AxisConvention, Mat3};
 use kreate_mesh::attribute::{names, AttrData, Domain};
 use kreate_mesh::MeshData;
@@ -629,6 +629,181 @@ impl ExportNode {
     }
 }
 
+/// How a channel travels between its keys, as glTF says it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChannelInterpolation {
+    /// Holds each key until the next.
+    Step,
+    /// Straight lines, and the shorter arc for a rotation.
+    #[default]
+    Linear,
+    /// Hermite, with an in and an out tangent stored around every value.
+    CubicSpline,
+}
+
+/// Which part of a node's placement a channel drives.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChannelValues {
+    Translation(Vec<Vec3>),
+    Rotation(Vec<Quat>),
+    Scale(Vec<Vec3>),
+}
+
+/// One animated part of one node, in the *file's* space and time.
+///
+/// As the file wrote it, keys and all, rather than already turned into curves:
+/// the axis change mixes the components of a translation (Y-up's Y is Z-up's
+/// Z) and the rotation is a quaternion where the document keys Euler angles, so
+/// the conversion needs the whole placement at an instant — which is the
+/// builder's job, with every channel of the node in hand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportChannel {
+    /// Index into [`ImportScene::nodes`].
+    pub node: usize,
+    pub interpolation: ChannelInterpolation,
+    /// Seconds, increasing.
+    pub times: Vec<f32>,
+    /// One per time — or, for a cubic spline, three: in-tangent, value,
+    /// out-tangent, which is how glTF lays them out.
+    pub values: ChannelValues,
+}
+
+impl ImportChannel {
+    /// How many keys the channel has: the shorter of its two lists, so a file
+    /// whose lists disagree is read as far as they agree rather than indexed
+    /// out of bounds.
+    pub fn key_count(&self) -> usize {
+        let len = match &self.values {
+            ChannelValues::Translation(v) | ChannelValues::Scale(v) => v.len(),
+            ChannelValues::Rotation(v) => v.len(),
+        };
+        let per = if self.interpolation == ChannelInterpolation::CubicSpline { 3 } else { 1 };
+        (len / per).min(self.times.len())
+    }
+
+    /// Where the key `i`'s value sits in the values list.
+    fn at(&self, i: usize) -> usize {
+        if self.interpolation == ChannelInterpolation::CubicSpline {
+            i * 3 + 1
+        } else {
+            i
+        }
+    }
+
+    /// The span `t` falls in and how far along it: `(i, i + 1, u)`, clamped to
+    /// the first and last key, as glTF holds a channel outside its range.
+    fn span(&self, t: f32) -> Option<(usize, usize, f32)> {
+        let n = self.key_count();
+        if n == 0 {
+            return None;
+        }
+        if n == 1 || t <= self.times[0] {
+            return Some((0, 0, 0.0));
+        }
+        if t >= self.times[n - 1] {
+            return Some((n - 1, n - 1, 0.0));
+        }
+        let next = self.times[..n].partition_point(|k| *k <= t).clamp(1, n - 1);
+        let prev = next - 1;
+        let width = self.times[next] - self.times[prev];
+        let u = if width > 0.0 { (t - self.times[prev]) / width } else { 0.0 };
+        Some((prev, next, u))
+    }
+
+    /// The vector value at `t` — a translation's or a scale's.
+    pub fn vec3_at(&self, t: f32) -> Option<Vec3> {
+        let (ChannelValues::Translation(v) | ChannelValues::Scale(v)) = &self.values else {
+            return None;
+        };
+        let (a, b, u) = self.span(t)?;
+        let (va, vb) = (v[self.at(a)], v[self.at(b)]);
+        Some(match self.interpolation {
+            _ if a == b => va,
+            ChannelInterpolation::Step => va,
+            ChannelInterpolation::Linear => va.lerp(vb, u),
+            ChannelInterpolation::CubicSpline => {
+                let width = self.times[b] - self.times[a];
+                hermite(
+                    Vec4::from((va, 0.0)),
+                    Vec4::from((v[self.at(a) + 1], 0.0)) * width,
+                    Vec4::from((vb, 0.0)),
+                    Vec4::from((v[self.at(b) - 1], 0.0)) * width,
+                    u,
+                )
+                .truncate()
+            }
+        })
+    }
+
+    /// The rotation at `t`.
+    pub fn quat_at(&self, t: f32) -> Option<Quat> {
+        let ChannelValues::Rotation(v) = &self.values else { return None };
+        let (a, b, u) = self.span(t)?;
+        let (qa, qb) = (v[self.at(a)], v[self.at(b)]);
+        Some(match self.interpolation {
+            _ if a == b => qa.normalize(),
+            ChannelInterpolation::Step => qa.normalize(),
+            ChannelInterpolation::Linear => qa.normalize().slerp(qb.normalize(), u),
+            ChannelInterpolation::CubicSpline => {
+                // glTF's own rule: the spline on the four numbers, then
+                // normalised.
+                let width = self.times[b] - self.times[a];
+                let h = hermite(
+                    Vec4::from(qa),
+                    Vec4::from(v[self.at(a) + 1]) * width,
+                    Vec4::from(qb),
+                    Vec4::from(v[self.at(b) - 1]) * width,
+                    u,
+                );
+                Quat::from_vec4(h).normalize()
+            }
+        })
+    }
+}
+
+fn hermite(p: Vec4, m: Vec4, q: Vec4, n: Vec4, u: f32) -> Vec4 {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    p * (2.0 * u3 - 3.0 * u2 + 1.0) + m * (u3 - 2.0 * u2 + u) + q * (-2.0 * u3 + 3.0 * u2) + n * (u3 - u2)
+}
+
+/// One clip: glTF's `animation`, a set of channels played together.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImportAnimation {
+    pub name: String,
+    pub channels: Vec<ImportChannel>,
+}
+
+/// One node's movement on the way out, in Kreate space.
+///
+/// Already sampled into placements, not curves: the document keys Euler angles
+/// and a file keys quaternions in another axis convention, and the only
+/// conversion between the two that cannot disagree with how the document plays
+/// is to ask the document where the object is. The writer changes the axes,
+/// once, the way it does for a node's rest placement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportTrack {
+    /// Index into [`ExportScene::nodes`].
+    pub node: usize,
+    /// Seconds, increasing.
+    pub times: Vec<f32>,
+    /// Relative to the parent, as [`ExportNode::transform`] is, one per time.
+    pub transforms: Vec<kreate_math::DTransform>,
+    /// Hold each until the next rather than drawing lines between them.
+    pub step: bool,
+    /// Which parts move: a channel is written for each, and only for each.
+    pub translation: bool,
+    pub rotation: bool,
+    pub scale: bool,
+}
+
+/// One clip on the way out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExportAnimation {
+    pub name: String,
+    pub tracks: Vec<ExportTrack>,
+}
+
 /// A scene on its way into a file.
 ///
 /// The other half of [`ImportScene`], and it did not exist: an export took a
@@ -659,7 +834,8 @@ pub struct ExportScene<'a> {
     pub cameras: Vec<ImportCamera>,
     /// The hierarchy. Empty means the format should place each mesh at the
     /// origin, which is what OBJ and STL can say and what a bare mesh list is.
-    pub nodes: Vec<ExportNode>,
+    pub nodes: Vec<ExportNode>,    /// What moves. Empty for a still scene and for every format without time.
+    pub animations: Vec<ExportAnimation>,
 }
 
 impl<'a> ExportScene<'a> {
@@ -672,6 +848,7 @@ impl<'a> ExportScene<'a> {
             lights: Vec::new(),
             cameras: Vec::new(),
             nodes: Vec::new(),
+            animations: Vec::new(),
         }
     }
 
@@ -709,6 +886,8 @@ pub struct ImportScene {
     /// file puts them, and inventing a node for each would claim a structure
     /// the file does not have.
     pub nodes: Vec<ImportNode>,
+    /// What moves, clip by clip. Empty for a format without time.
+    pub animations: Vec<ImportAnimation>,
     pub source: SourceMetadata,
 }
 
@@ -721,6 +900,7 @@ impl ImportScene {
             lights: Vec::new(),
             cameras: Vec::new(),
             nodes: Vec::new(),
+            animations: Vec::new(),
             source,
         }
     }
