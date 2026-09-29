@@ -23,6 +23,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetKeyInterpolation>();
     registry.register::<KeyProperty>();
     registry.register::<UnkeyProperty>();
+    registry.register::<SelectKeysRegion>();
+    registry.register::<SetHandleType>();
+    registry.register::<SetKeySlope>();
 }
 
 /// Which properties a key is inserted for.
@@ -359,6 +362,8 @@ pub struct MoveKeysParams {
     /// How many frames. Whole in practice — the dope sheet rounds — but a
     /// script may say otherwise.
     pub offset: f64,
+    /// How much to add to their values: the graph editor's vertical drag.
+    pub value: f64,
 }
 
 /// Moves the selected keys along time.
@@ -380,7 +385,10 @@ impl Operator for MoveKeys {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        if params.offset == 0.0 || !params.offset.is_finite() {
+        if (params.offset == 0.0 && params.value == 0.0)
+            || !params.offset.is_finite()
+            || !params.value.is_finite()
+        {
             return Ok(OpResult::Cancelled);
         }
         let shown = shown_actions(doc.document());
@@ -390,7 +398,12 @@ impl Operator for MoveKeys {
         let d = doc.document_mut();
         for id in shown {
             if let Some(a) = d.action_mut(id) {
-                a.move_selected(params.offset);
+                if params.offset != 0.0 {
+                    a.move_selected(params.offset);
+                }
+                if params.value != 0.0 {
+                    a.offset_selected_values(params.value);
+                }
             }
         }
         Ok(OpResult::Finished)
@@ -666,6 +679,189 @@ impl Operator for UnkeyProperty {
             }
             a.curves.retain(|c| !c.keys.is_empty());
         }
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- the graph editor's edits -------------------------------------------------
+
+/// One curve, as text: an action's identity, the property and the component —
+/// `12/location/0`.
+pub fn curve_target(action_uid: u64, property: &str, index: u8) -> String {
+    format!("{action_uid}/{property}/{index}")
+}
+
+fn parse_curve(text: &str) -> Option<(u64, String, u8)> {
+    let mut parts = text.split('/');
+    let uid = parts.next()?.parse().ok()?;
+    let property = parts.next()?.to_string();
+    let index = parts.next()?.parse().ok()?;
+    Some((uid, property, index))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectKeysRegionParams {
+    /// Which curves, as `curve_target` writes them, separated by spaces.
+    pub targets: String,
+    pub frame_min: f64,
+    pub frame_max: f64,
+    pub value_min: f64,
+    pub value_max: f64,
+    pub extend: bool,
+}
+
+/// Selects the keys inside a box on the graph: a frame range and a value
+/// range, on some curves. A click is a small box around one key.
+pub struct SelectKeysRegion;
+
+impl Operator for SelectKeysRegion {
+    type Params = SelectKeysRegionParams;
+    fn id() -> &'static str {
+        "anim.keys_select_region"
+    }
+    fn label() -> &'static str {
+        "Select Keys in Region"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        let d = doc.document_mut();
+        let mut changed = false;
+        if !params.extend {
+            for id in &shown {
+                if let Some(a) = d.action_mut(*id) {
+                    changed |= a.select_all_with(|_| false);
+                }
+            }
+        }
+        for (uid, property, index) in params.targets.split_whitespace().filter_map(parse_curve) {
+            let Some(id) = d.action_by_uid(kreate_scene::Uid::from_raw(uid)).filter(|a| shown.contains(a)) else {
+                continue;
+            };
+            if let Some(a) = d.action_mut(id) {
+                changed |= a.select_region(
+                    &property,
+                    index,
+                    (params.frame_min, params.frame_max),
+                    (params.value_min, params.value_max),
+                );
+            }
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetHandleTypeParams {
+    /// Auto-clamped, or flat — Blender's `V` menu, the two a person reaches for.
+    #[param(variants("auto", "flat"))]
+    pub kind: u32,
+}
+
+/// Sets how the selected keys' handles are made.
+pub struct SetHandleType;
+
+impl Operator for SetHandleType {
+    type Params = SetHandleTypeParams;
+    fn id() -> &'static str {
+        "anim.keys_handle_type"
+    }
+    fn label() -> &'static str {
+        "Set Handle Type"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let slope = if params.kind == 1 { Some(0.0) } else { None };
+        let shown = shown_actions(doc.document());
+        let any = shown.iter().any(|a| {
+            doc.document()
+                .action(*a)
+                .is_some_and(|a| a.curves.iter().any(|c| c.keys.iter().any(|k| k.selected && k.slope != slope)))
+        });
+        if !any {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                a.set_selected_slope(slope);
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetKeySlopeParams {
+    /// The curve, as `curve_target` writes it.
+    pub target: String,
+    /// Which key on it.
+    pub frame: f64,
+    /// Value per frame.
+    pub slope: f64,
+}
+
+/// Sets one key's slope: what dragging its handle in the graph editor means.
+pub struct SetKeySlope;
+
+impl Operator for SetKeySlope {
+    type Params = SetKeySlopeParams;
+    fn id() -> &'static str {
+        "anim.key_set_slope"
+    }
+    fn label() -> &'static str {
+        "Set Key Slope"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((uid, property, index)) = parse_curve(&params.target) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if !params.slope.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let shown = shown_actions(doc.document());
+        let Some(id) = doc
+            .document()
+            .action_by_uid(kreate_scene::Uid::from_raw(uid))
+            .filter(|a| shown.contains(a))
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(a) = doc.document_mut().action_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(key) = a
+            .curves
+            .iter_mut()
+            .filter(|c| c.path.property.as_ref() == property && c.path.index == Some(index))
+            .flat_map(|c| c.keys.iter_mut())
+            .find(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        if key.slope == Some(params.slope) {
+            return Ok(OpResult::Cancelled);
+        }
+        key.slope = Some(params.slope);
         Ok(OpResult::Finished)
     }
 }

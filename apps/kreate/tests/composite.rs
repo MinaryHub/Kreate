@@ -1993,6 +1993,49 @@ fn shot_dope_sheet() {
     }
 }
 
+/// The dope sheet's area turned into a graph editor: a bouncing X, a flat
+/// Y and Z, one key selected with its handles showing.
+#[test]
+fn shot_graph_editor() {
+    use kreate_scene::animation::{Action, Interpolation};
+    for (label, locale) in [("graph-editor", "en"), ("graph-editor-ko", "ko-KR")] {
+        let mut doc = doc_with_cube();
+        let cube = doc.objects().next().map(|(id, _)| id).expect("a cube");
+        let mut action = Action::new("CubeAction");
+        for (frame, x, z) in [(1.0, 0.0, 0.0), (24.0, 2.0, 1.0), (48.0, -1.0, 0.5), (72.0, 1.0, 0.0)] {
+            action.curve_mut("location", 0).insert(frame, x, Interpolation::Bezier);
+            action.curve_mut("location", 2).insert(frame, z, Interpolation::Bezier);
+        }
+        action.select_all_with(|_| false);
+        action.select_region("location", 0, (24.0, 24.0), (1.9, 2.1));
+        let action = doc.add_action(action);
+        doc.object_mut(cube).unwrap().action = Some(action);
+        doc.selection.clear();
+        doc.selection.add(cube);
+        doc.playback.frame = 30.0;
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            // Layout's timeline, made a graph editor: the layout edits are
+            // deferred to the frame's end, so a workspace switch here would
+            // leave nothing to change yet.
+            let timelines: Vec<_> = state
+                .screen()
+                .areas()
+                .into_iter()
+                .filter(|(_, k)| *k == kreate_ui::EditorId::TIMELINE)
+                .map(|(a, _)| a)
+                .collect();
+            assert!(!timelines.is_empty(), "Layout has a timeline");
+            for area in timelines {
+                state.screen_mut().set_editor(area, kreate_ui::EditorId::GRAPH);
+            }
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
 /// A picture of the Material tab with keyed values, the diamonds lit.
 #[test]
 fn shot_keyed_material() {

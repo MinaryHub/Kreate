@@ -231,6 +231,8 @@ pub struct ShellState {
     timeline_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
     /// Each dope sheet's zoom and drag, per area.
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
+    /// Each graph editor's view and drag, per area.
+    graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
     /// The clock, published by the application each frame.
     pub timeline: kreate_ui::timeline::TimelineView,
     /// The UV map to draw, published by the application each frame.
@@ -422,6 +424,8 @@ impl ShellState {
                 over(self.node_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::DOPE_SHEET {
                 over(self.sheet_views.get(&id).and_then(|s| s.rect))
+            } else if kind == kreate_ui::EditorId::GRAPH {
+                over(self.graph_views.get(&id).and_then(|s| s.rect))
             } else {
                 false
             }
@@ -469,6 +473,7 @@ impl ShellState {
                         self.node_views.remove(&area);
                         self.timeline_views.remove(&area);
                         self.sheet_views.remove(&area);
+                        self.graph_views.remove(&area);
                     }
                 }
                 AreaEdit::Resize(split, ratio, extent) => {
@@ -522,6 +527,7 @@ impl Default for ShellState {
             node_views: std::collections::BTreeMap::new(),
             timeline_views: std::collections::BTreeMap::new(),
             sheet_views: std::collections::BTreeMap::new(),
+            graph_views: std::collections::BTreeMap::new(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -951,6 +957,9 @@ struct Labels {
     key_property: String,
     time_autokey: String,
     sheet_empty: String,
+    graph_handles: String,
+    handle_auto: String,
+    handle_flat: String,
     sheet_interpolation: String,
     interp_constant: String,
     interp_linear: String,
@@ -1105,6 +1114,9 @@ impl Labels {
             key_property: t("key-property"),
             time_autokey: t("time-autokey"),
             sheet_empty: t("sheet-empty"),
+            graph_handles: t("graph-handles"),
+            handle_auto: t("handle-auto"),
+            handle_flat: t("handle-flat"),
             sheet_interpolation: t("sheet-interpolation"),
             interp_constant: t("interp-constant"),
             interp_linear: t("interp-linear"),
@@ -1730,6 +1742,9 @@ fn draw_area(
                 }
                 "dope_sheet" => {
                     draw_dope_sheet(ui, state, doc, area.id, l);
+                }
+                "graph" => {
+                    draw_graph_editor(ui, state, doc, area.id, l);
                 }
                 "preferences" => {
                     let conflicts = keymap.conflicts();
@@ -2833,6 +2848,136 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
             E::ToggleAutokey => "time.toggle_autokey",
         };
         state.queue.dispatch(id, p);
+    }
+}
+
+/// The graph editor, over the curves of every action the dope sheet shows.
+fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId, l: &Labels) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::graph_editor::{GraphCurve, GraphEdit as E, GraphKey};
+    let p = doc.playback;
+    let mut curves = Vec::new();
+    for action_id in kreate_ops::ops::anim::shown_actions(doc) {
+        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else { continue };
+        let owner = owner_name(doc, action_id).unwrap_or_else(|| action.name.clone());
+        for curve in &action.curves {
+            let (Some(index), Some(first), Some(last)) = (curve.path.index, curve.keys.first(), curve.keys.last()) else {
+                continue;
+            };
+            let property = curve.path.property.as_ref();
+            let (components, is_color) = kreate_scene::animation::animatable(action.animates)
+                .iter()
+                .find(|d| d.name == property)
+                .map(|d| (d.components, d.kind == kreate_reflect::PropertyKind::Color))
+                .unwrap_or((1, false));
+            // X red, Y green, Z blue, as the axes everywhere else are; a
+            // colour's R, G and B the same, and a single number white.
+            let color = match (components, index) {
+                (1, _) => egui::Color32::from_gray(210),
+                (_, 0) => egui::Color32::from_rgb(0xe0, 0x5a, 0x5a),
+                (_, 1) => egui::Color32::from_rgb(0x7c, 0xc4, 0x4c),
+                _ => egui::Color32::from_rgb(0x5a, 0x8c, 0xe0),
+            };
+            let axis = if components == 1 {
+                String::new()
+            } else if is_color {
+                ["R", "G", "B"].get(index as usize).copied().unwrap_or("").to_string()
+            } else {
+                ["X", "Y", "Z"].get(index as usize).copied().unwrap_or("").to_string()
+            };
+            let channel = state.catalog.format(&format!("channel-{}", property.replace('_', "-")), TextKind::Ui, &[]);
+            // Sampled over the range and the keys, with room either side, at
+            // most a thousand points: enough to draw, not a thousand per frame
+            // of a long scene.
+            let from = first.frame.min(p.start as f64) - 20.0;
+            let to = last.frame.max(p.end as f64) + 20.0;
+            let step = ((to - from) / 1000.0).max(0.25);
+            let mut samples = Vec::new();
+            let mut f = from;
+            while f <= to {
+                if let Some(v) = curve.evaluate(f) {
+                    samples.push([f, v]);
+                }
+                f += step;
+            }
+            let keys = curve
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| GraphKey {
+                    frame: k.frame,
+                    value: k.value,
+                    selected: k.selected,
+                    slope: curve.slope(i),
+                    before: i.checked_sub(1).map(|j| k.frame - curve.keys[j].frame).unwrap_or(10.0),
+                    after: curve.keys.get(i + 1).map(|n| n.frame - k.frame).unwrap_or(10.0),
+                })
+                .collect();
+            curves.push(GraphCurve {
+                // i18n-exempt: the owner's name is the user's own text
+                label: format!("{owner}: {channel} {axis}"),
+                target: kreate_ops::ops::anim::curve_target(uid.raw(), property, index),
+                color,
+                keys,
+                samples,
+            });
+        }
+    }
+    let view = kreate_ui::graph_editor::GraphView { curves, frame: p.frame, start: p.start, end: p.end };
+    let text = kreate_ui::graph_editor::GraphText {
+        empty: l.sheet_empty.clone(),
+        interpolation: l.sheet_interpolation.clone(),
+        constant: l.interp_constant.clone(),
+        linear: l.interp_linear.clone(),
+        bezier: l.interp_bezier.clone(),
+        handles: l.graph_handles.clone(),
+        auto: l.handle_auto.clone(),
+        flat: l.handle_flat.clone(),
+    };
+    let mut panel = state.graph_views.remove(&area).unwrap_or_default();
+    let edits = kreate_ui::graph_editor::graph_editor(ui, &view, &mut panel, &text);
+    state.graph_views.insert(area, panel);
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        match edit {
+            E::Select { targets, frames, values, extend } => {
+                p.set("targets", V::Text(targets.join(" ")));
+                p.set("frame_min", V::Float(frames.0));
+                p.set("frame_max", V::Float(frames.1));
+                p.set("value_min", V::Float(values.0));
+                p.set("value_max", V::Float(values.1));
+                p.set("extend", V::Bool(extend));
+                state.queue.run("anim.keys_select_region", p);
+            }
+            E::SelectAll(action) => {
+                p.set("action", V::Enum(action));
+                state.queue.run("anim.keys_select_all", p);
+            }
+            E::Move { frames, value } => {
+                p.set("offset", V::Float(frames));
+                p.set("value", V::Float(value));
+                state.queue.run("anim.keys_move", p);
+            }
+            E::Delete => state.queue.run("anim.keys_delete", p),
+            E::Interpolation(kind) => {
+                p.set("interpolation", V::Enum(kind));
+                state.queue.run("anim.keys_interpolation", p);
+            }
+            E::HandleType(kind) => {
+                p.set("kind", V::Enum(kind));
+                state.queue.run("anim.keys_handle_type", p);
+            }
+            E::SetSlope { target, frame, slope } => {
+                p.set("target", V::Text(target));
+                p.set("frame", V::Float(frame));
+                p.set("slope", V::Float(slope));
+                state.queue.run("anim.key_set_slope", p);
+            }
+            E::SetFrame(frame) => {
+                p.set("frame", V::Float(frame));
+                state.queue.dispatch("time.set_frame", p);
+            }
+        }
     }
 }
 
@@ -4594,6 +4739,10 @@ palette-nothing = Nothing matches.
 pie-shading = Shading
 editor-timeline = Timeline
 editor-dope-sheet = Dope Sheet
+editor-graph = Graph Editor
+graph-handles = Handles
+handle-auto = Auto Clamped
+handle-flat = Flat
 sheet-empty = Select an animated object to see its keys.
 sheet-interpolation = Interpolation
 interp-constant = Constant
@@ -5008,6 +5157,10 @@ palette-nothing = 일치하는 항목이 없습니다.
 pie-shading = 셰이딩
 editor-timeline = 타임라인
 editor-dope-sheet = 도프 시트
+editor-graph = 그래프 에디터
+graph-handles = 핸들
+handle-auto = 자동 (클램프)
+handle-flat = 평평하게
 sheet-empty = 애니메이션이 있는 오브젝트를 선택하면 키가 보입니다.
 sheet-interpolation = 보간
 interp-constant = 고정

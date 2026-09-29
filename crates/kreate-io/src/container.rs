@@ -240,6 +240,9 @@ pub struct KeyRecord {
     /// Written only when set: what the dope sheet was showing selected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub selected: bool,
+    /// A hand-set slope, value per frame; absent for auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slope: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -980,6 +983,7 @@ pub fn write(
                                         != kreate_scene::animation::Interpolation::default())
                                     .then(|| k.interpolation.tag().to_string()),
                                     selected: k.selected,
+                                    slope: k.slope,
                                 })
                                 .collect(),
                         })
@@ -1362,6 +1366,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                             .and_then(kreate_scene::animation::Interpolation::from_tag)
                             .unwrap_or_default(),
                         selected: k.selected,
+                        slope: k.slope.filter(|s| s.is_finite()),
                     })
                     .collect();
                 made.normalise();

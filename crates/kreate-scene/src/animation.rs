@@ -78,6 +78,15 @@ pub struct Keyframe {
     /// it saves, it undoes, and the operators that act on "the selected keys"
     /// can be replayed from the history without being told which they were.
     pub selected: bool,
+    /// A slope set by hand, in value per frame, for a Bézier key — the graph
+    /// editor's handle. `None` is auto-clamped: derived from the neighbours.
+    ///
+    /// A slope and not a pair of handle points: the handles stay a third of
+    /// the way to each neighbour, as auto handles are, so the curve is still a
+    /// cubic in the frame and one number says everything a person dragging a
+    /// handle changes. Blender's handles can also be lengthened; that is the
+    /// weighted-tangent feature, and it is not this one.
+    pub slope: Option<f64>,
 }
 
 /// Two keys closer than this are the same key: a key inserted where one
@@ -108,9 +117,11 @@ impl FCurve {
     pub fn insert(&mut self, frame: f64, value: f64, interpolation: Interpolation) {
         // A key just put down is selected, so the next move or delete in the
         // dope sheet acts on what was just keyed.
-        let key = Keyframe { frame, value, interpolation, selected: true };
+        let key = Keyframe { frame, value, interpolation, selected: true, slope: None };
         match self.keys.iter().position(|k| (k.frame - frame).abs() < SAME_FRAME) {
-            Some(at) => self.keys[at] = key,
+            // A handle somebody set survives the key being set again: keying a
+            // new value is not a request to forget how the curve bends there.
+            Some(at) => self.keys[at] = Keyframe { slope: self.keys[at].slope, ..key },
             None => {
                 let at = self.keys.partition_point(|k| k.frame < frame);
                 self.keys.insert(at, key);
@@ -175,7 +186,10 @@ impl FCurve {
     /// clamp, which is what keeps a bouncing ball from dipping through the
     /// floor between two keys that both say "on the floor". Otherwise the
     /// slope of the line through the two neighbours.
-    fn slope(&self, i: usize) -> f64 {
+    pub fn slope(&self, i: usize) -> f64 {
+        if let Some(slope) = self.keys.get(i).and_then(|k| k.slope) {
+            return slope;
+        }
         let (Some(prev), Some(next)) = (i.checked_sub(1).and_then(|p| self.keys.get(p)), self.keys.get(i + 1)) else {
             return 0.0;
         };
@@ -283,6 +297,60 @@ impl Action {
 
     pub fn any_selected(&self) -> bool {
         self.curves.iter().any(|c| c.keys.iter().any(|k| k.selected))
+    }
+
+    /// Selects the keys of one component of one property within a frame
+    /// range and a value range: the graph editor's box, where a key is a point
+    /// on a plane and not a column on a row.
+    pub fn select_region(
+        &mut self,
+        property: &str,
+        index: u8,
+        frames: (f64, f64),
+        values: (f64, f64),
+    ) -> bool {
+        let mut changed = false;
+        for curve in self
+            .curves
+            .iter_mut()
+            .filter(|c| c.path.property.as_ref() == property && c.path.index == Some(index))
+        {
+            for key in &mut curve.keys {
+                let inside = key.frame >= frames.0 - 1e-9
+                    && key.frame <= frames.1 + 1e-9
+                    && key.value >= values.0
+                    && key.value <= values.1;
+                if inside && !key.selected {
+                    key.selected = true;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Changes the value of the selected keys by `by`.
+    pub fn offset_selected_values(&mut self, by: f64) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            for key in curve.keys.iter_mut().filter(|k| k.selected) {
+                key.value += by;
+                changed |= by != 0.0;
+            }
+        }
+        changed
+    }
+
+    /// Sets the hand-set slope of the selected keys: `None` for auto.
+    pub fn set_selected_slope(&mut self, slope: Option<f64>) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            for key in curve.keys.iter_mut().filter(|k| k.selected) {
+                changed |= key.slope != slope;
+                key.slope = slope;
+            }
+        }
+        changed
     }
 
     /// Moves the selected keys by `offset` frames.
@@ -651,10 +719,10 @@ mod tests {
     fn a_file_with_keys_out_of_order_is_put_right() {
         let mut c = curve(&[]);
         c.keys = vec![
-            Keyframe { frame: 5.0, value: 1.0, interpolation: Interpolation::Linear, selected: false },
-            Keyframe { frame: 1.0, value: 0.0, interpolation: Interpolation::Linear, selected: false },
-            Keyframe { frame: 5.0, value: 9.0, interpolation: Interpolation::Linear, selected: false },
-            Keyframe { frame: f64::NAN, value: 0.0, interpolation: Interpolation::Linear, selected: false },
+            Keyframe { frame: 5.0, value: 1.0, interpolation: Interpolation::Linear, selected: false, slope: None },
+            Keyframe { frame: 1.0, value: 0.0, interpolation: Interpolation::Linear, selected: false, slope: None },
+            Keyframe { frame: 5.0, value: 9.0, interpolation: Interpolation::Linear, selected: false, slope: None },
+            Keyframe { frame: f64::NAN, value: 0.0, interpolation: Interpolation::Linear, selected: false, slope: None },
         ];
         c.normalise();
         let frames: Vec<f64> = c.keys.iter().map(|k| k.frame).collect();
@@ -721,6 +789,36 @@ mod tests {
             assert_eq!(curve.keys[0].interpolation, Interpolation::Constant);
             assert_eq!(curve.keys[1].interpolation, Interpolation::Linear);
         }
+    }
+
+    #[test]
+    fn a_hand_set_slope_bends_the_curve_and_auto_gives_it_back() {
+        let mut c = curve(&[(0.0, 0.0, Interpolation::Bezier), (10.0, 0.0, Interpolation::Bezier)]);
+        // Flat keys at the same value: auto is a straight line.
+        assert!(c.evaluate(5.0).unwrap().abs() < 1e-12);
+        c.keys[0].slope = Some(1.0);
+        // Leaving upwards now, so the middle is above.
+        assert!(c.evaluate(5.0).unwrap() > 0.5);
+        assert_eq!(c.slope(0), 1.0);
+        c.keys[0].slope = None;
+        assert_eq!(c.slope(0), 0.0);
+        // Keying the frame again keeps the handle.
+        c.keys[0].slope = Some(2.0);
+        c.insert(0.0, 3.0, Interpolation::Bezier);
+        assert_eq!(c.keys[0].slope, Some(2.0));
+        assert_eq!(c.keys[0].value, 3.0);
+    }
+
+    #[test]
+    fn a_region_selects_by_value_as_well_as_frame() {
+        let mut a = two_curve_action();
+        // Keys of location X: (1,0) (10,5) (20,2). A box over values 1..6
+        // between frames 5 and 25 takes 10 and 20, not 1.
+        assert!(a.select_region("location", 0, (5.0, 25.0), (1.0, 6.0)));
+        assert_eq!(selected(&a, "location"), vec![10.0, 20.0]);
+        assert!(a.offset_selected_values(1.0));
+        let x = a.curves.iter().find(|c| c.path.property.as_ref() == "location").unwrap();
+        assert_eq!(x.keys.iter().map(|k| k.value).collect::<Vec<_>>(), vec![0.0, 6.0, 3.0]);
     }
 }
 

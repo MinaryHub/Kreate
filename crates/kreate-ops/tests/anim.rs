@@ -365,3 +365,56 @@ fn a_script_line_mentions_autokeying_only_when_it_was_on() {
     let action = replay.object(id).unwrap().action.expect("the second line keyed");
     assert_eq!(replay.action(action).unwrap().key_frames(), vec![8.0]);
 }
+
+// --- the graph editor's edits ----------------------------------------------------
+
+#[test]
+fn a_region_selects_points_and_a_move_can_change_their_values() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    key(&registry, &mut history, &mut doc, &ctx, 1.0);
+    doc.object_mut(id).unwrap().transform.translation.x = 4.0;
+    key(&registry, &mut history, &mut doc, &ctx, 10.0);
+    let action = doc.object(id).unwrap().action.unwrap();
+    let uid = doc.action_uid(action).unwrap().raw();
+    // Location X at frame 10 has value 4; Y and Z there are 0. A box over
+    // values 3..5 on the X curve takes only that key.
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_region", &[
+        ("targets", PropertyValue::Text(kreate_ops::ops::anim::curve_target(uid, "location", 0))),
+        ("frame_min", PropertyValue::Float(0.0)),
+        ("frame_max", PropertyValue::Float(20.0)),
+        ("value_min", PropertyValue::Float(3.0)),
+        ("value_max", PropertyValue::Float(5.0)),
+    ]));
+    let selected: Vec<(String, f64)> = doc.action(action).unwrap().curves.iter()
+        .flat_map(|c| c.keys.iter().filter(|k| k.selected).map(move |k| (format!("{}{}", c.path.property, c.path.index.unwrap()), k.frame)))
+        .collect();
+    assert_eq!(selected, vec![("location0".to_string(), 10.0)]);
+
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_move", &[("value", PropertyValue::Float(2.0))]));
+    doc.animate(10.0);
+    assert!((doc.object(id).unwrap().transform.translation.x - 6.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_handle_can_be_set_by_hand_and_given_back_to_auto() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    key(&registry, &mut history, &mut doc, &ctx, 1.0);
+    key(&registry, &mut history, &mut doc, &ctx, 11.0);
+    let action = doc.object(id).unwrap().action.unwrap();
+    let uid = doc.action_uid(action).unwrap().raw();
+    let target = kreate_ops::ops::anim::curve_target(uid, "location", 2);
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.key_set_slope", &[
+        ("target", PropertyValue::Text(target)),
+        ("frame", PropertyValue::Float(1.0)),
+        ("slope", PropertyValue::Float(0.5)),
+    ]));
+    doc.animate(6.0);
+    assert!(doc.object(id).unwrap().transform.translation.z > 0.5, "the handle did not bend the curve");
+    // Every key selected, then back to auto: the curve is flat again.
+    run(&registry, &mut history, &mut doc, &ctx, "anim.keys_select_all", &[("action", PropertyValue::Enum(0))]);
+    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.keys_handle_type", &[("kind", PropertyValue::Enum(0))]));
+    doc.animate(6.0);
+    assert!(doc.object(id).unwrap().transform.translation.z.abs() < 1e-9);
+}
