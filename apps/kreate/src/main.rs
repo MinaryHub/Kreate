@@ -1592,7 +1592,14 @@ impl App {
         let Some((_, _, w, h)) = self.viewport_px else {
             return;
         };
-        let Some(pivot) = self.selection_pivot() else {
+        // A loop cut the pointer chose needs no selection: it pivots on its
+        // edge. Everything else pivots on what is selected.
+        let hovered_edge = self
+            .loop_cut_seed
+            .filter(|_| kind == kreate::modal::Kind::LoopCut)
+            .and_then(|(edge, _)| kreate_ops::ops::mesh::edge_in_world(&self.doc, edge))
+            .map(|(a, b)| (a + b) * 0.5);
+        let Some(pivot) = hovered_edge.or_else(|| self.selection_pivot()) else {
             self.status("nothing selected");
             return;
         };
