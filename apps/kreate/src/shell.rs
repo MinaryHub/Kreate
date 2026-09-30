@@ -241,6 +241,8 @@ pub struct ShellState {
     /// The knife's path while `K` is drawing it: the points clicked, then
     /// where the next one would go. Empty otherwise.
     pub knife_preview: Vec<kreate_math::DVec3>,
+    /// Circle select's brush radius in interface points, while `C` is on.
+    pub circle_select: Option<f32>,
     /// What a rotation or a scale turns about — Blender's Pivot Point:
     /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
     /// 3D cursor.
@@ -547,6 +549,7 @@ impl Default for ShellState {
             paint: PaintSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
+            circle_select: None,
             pivot: 0,
             timeline: Default::default(),
             uv: None,
@@ -1963,6 +1966,15 @@ fn draw_area(
                         for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
                             painter.line_segment([at + d * (r - 4.0), at + d * (r + 5.0)], cross);
                             painter.line_segment([at - d * (r - 4.0), at - d * (r + 5.0)], cross);
+                        }
+                    }
+                    // Circle select's brush, under the pointer.
+                    if let Some(radius) = state.circle_select {
+                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p)) {
+                            let theme = kreate_ui::theme::from_ui(ui);
+                            ui.painter()
+                                .with_clip_rect(inner)
+                                .circle_stroke(p, radius, egui::Stroke::new(1.2, theme.text));
                         }
                     }
                     // The knife's path: the cut so far and the next stretch.
@@ -6111,6 +6123,8 @@ op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
 op-mesh-knife = Knife
+op-view-circle-select = Circle Select
+op-view-circle-select-desc = A brush that selects what it passes over. Shift to deselect, wheel for size, Esc or right-click to stop.
 op-mesh-knife-desc = Cuts new edges along a path clicked over the surface. Enter cuts, Esc gives up.
 op-view-cursor-place-desc = Puts the 3D cursor on the surface under the pointer.
 op-scene-cursor-set = Set 3D Cursor
@@ -6682,6 +6696,8 @@ op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
 op-mesh-knife = 나이프
+op-view-circle-select = 원형 선택
+op-view-circle-select-desc = 지나가는 것을 선택하는 브러시입니다. Shift는 해제, 휠은 크기, Esc나 우클릭으로 끝냅니다.
 op-mesh-knife-desc = 표면 위에 클릭한 경로를 따라 새 엣지를 자릅니다. Enter로 자르고 Esc로 취소합니다.
 op-view-cursor-place-desc = 포인터 아래 표면에 3D 커서를 둡니다.
 op-scene-cursor-set = 3D 커서 설정

@@ -338,6 +338,24 @@ impl ViewportTarget {
 /// identical until the pointer moves. Deciding on release is what lets one
 /// gesture be both without either a spurious history step or a selection that
 /// flickers to something else mid-drag.
+/// Blender's circle select: a brush that selects what it passes over.
+struct CircleSelect {
+    /// Its radius in the viewport's own pixels.
+    radius: f32,
+    /// The stroke in progress, while the button is down.
+    stroke: Option<CircleStroke>,
+}
+
+/// One stroke of the brush: everything it has passed over so far, and — in
+/// edit mode — the operator running live, so the stroke is one undo step.
+struct CircleStroke {
+    deselect: bool,
+    elements: std::collections::BTreeSet<u32>,
+    session: Option<kreate_ops::ModalSession>,
+    /// The object selection it started from, for object mode.
+    before: Vec<u32>,
+}
+
 struct DragSelect {
     /// Where the drag began, in the viewport's own pixels.
     origin: (f32, f32),
@@ -653,6 +671,10 @@ struct App {
     /// `K` drawing a cut: the points clicked so far, in the world, and where
     /// the next click would put one.
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
+    /// The brush size circle select last used, so the next one starts there.
+    circle_radius: f32,
+    /// `C`: the selection brush, while it is on.
+    circle: Option<CircleSelect>,
     /// The document version the drivers last ran against. They run again
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
@@ -752,6 +774,8 @@ impl App {
             loop_cut_hover: None,
             loop_cut_seed: None,
             knife: None,
+            circle_radius: 40.0,
+            circle: None,
             autokey: false,
             shown_title: String::new(),
         }
@@ -2198,6 +2222,122 @@ impl App {
         self.run_op(op, params);
     }
 
+    /// `C`: turns the selection brush on, or off again.
+    fn toggle_circle_select(&mut self) {
+        if self.circle.is_some() {
+            self.end_circle_select();
+            return;
+        }
+        if !matches!(
+            self.op_ctx.mode.acts_on(),
+            kreate_ops::mode::ActsOn::Objects | kreate_ops::mode::ActsOn::MeshElements
+        ) {
+            return;
+        }
+        let radius = self.circle_radius;
+        self.circle = Some(CircleSelect { radius, stroke: None });
+        self.show_circle();
+        self.status("Circle Select — drag to select, Shift+drag to deselect, wheel for size, Esc or right-click to stop");
+    }
+
+    fn show_circle(&mut self) {
+        let ppp = self.egui_ctx.pixels_per_point().max(0.01);
+        self.ui.circle_select = self.circle.as_ref().map(|c| c.radius / ppp);
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    fn end_circle_select(&mut self) {
+        self.finish_circle_stroke();
+        if let Some(c) = self.circle.take() {
+            self.circle_radius = c.radius;
+        }
+        self.ui.circle_select = None;
+        self.status("");
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// A press with the brush on: a stroke begins.
+    fn begin_circle_stroke(&mut self) {
+        let before: Vec<u32> = self.doc.selection.objects.iter().map(|id| shell::object_key(*id)).collect();
+        let deselect = self.input.shift_down || self.input.ctrl_down;
+        // What an earlier drag left in the reduction is not this stroke's.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.region.clear();
+        }
+        if let Some(c) = &mut self.circle {
+            c.stroke = Some(CircleStroke { deselect, elements: Default::default(), session: None, before });
+        }
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// Adds what the brush has covered since the last frame to the stroke,
+    /// and applies it — live, so the selection grows under the brush.
+    fn drive_circle_stroke(&mut self) {
+        let Some(resolved) = self.gfx.as_ref().and_then(|g| g.region.resolved()).map(|e| e.to_vec()) else { return };
+        let edits = self.op_ctx.mode.edits_elements();
+        let mode = match self.pick_domain() {
+            kreate_render::PickDomain::Vert => 0u32,
+            kreate_render::PickDomain::Edge => 1,
+            _ => 2,
+        };
+        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.as_mut()) else { return };
+        let before = stroke.elements.len();
+        stroke.elements.extend(resolved);
+        if stroke.elements.len() == before {
+            return;
+        }
+        if !edits {
+            // Objects: the selection the stroke began with, plus or minus
+            // everything the brush has passed over.
+            let mut objects: Vec<u32> = if stroke.deselect {
+                stroke.before.iter().copied().filter(|k| !stroke.elements.contains(k)).collect()
+            } else {
+                let mut all = stroke.before.clone();
+                all.extend(stroke.elements.iter().copied().filter(|k| !stroke.before.contains(k)));
+                all
+            };
+            objects.dedup();
+            let active = objects.last().copied();
+            self.ui.queue.push(kreate_ui::Command::SetSelection { objects, active });
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+            return;
+        }
+        let mut params = PropertyMap::new();
+        params.set("elements", PropertyValue::Ints(stroke.elements.iter().copied().collect()));
+        params.set("mode", PropertyValue::Enum(mode));
+        params.set("extend", PropertyValue::Bool(true));
+        params.set("deselect", PropertyValue::Bool(stroke.deselect));
+        match stroke.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, session, &params) {
+                    tracing::warn!(error = %e, "circle select failed");
+                }
+            }
+            None => {
+                // Begun on the first stroke that changes anything, so a stroke
+                // over what was already selected leaves no step behind.
+                if let Ok(Some(session)) =
+                    self.history.begin_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, "mesh.select_set", &params)
+                {
+                    stroke.session = Some(session);
+                }
+            }
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// The button comes up: the stroke is one step to undo.
+    fn finish_circle_stroke(&mut self) {
+        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.take()) else { return };
+        if let Some(session) = stroke.session {
+            self.history.commit_modal(session);
+            if let Some(entry) = self.history.last() {
+                println!("{}", entry.to_script_call());
+            }
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
     /// `K`: from here until Enter, each click adds a point to the cut.
     fn begin_knife(&mut self) {
         if self.gesture.is_some() || self.knife.is_some() {
@@ -3541,10 +3681,15 @@ impl App {
     /// `None` when nothing is being dragged, which is the overwhelmingly common
     /// case and costs nothing.
     fn region_request(&self) -> Option<(kreate_render::SelectShape, kreate_render::Collect)> {
-        let drag = self.drag_select.as_ref()?;
-        if !drag.moved {
-            return None;
-        }
+        // A circle-select stroke tests the brush where the pointer is now.
+        let shape = match (&self.circle, self.drag_select.as_ref()) {
+            (Some(CircleSelect { radius, stroke: Some(_) }), _) => {
+                let (x, y) = self.cursor_viewport_px()?;
+                kreate_render::SelectShape::Circle { centre: (x as f32, y as f32), radius: *radius }
+            }
+            (_, Some(drag)) if drag.moved => drag.shape(),
+            _ => return None,
+        };
         if !self.op_ctx.mode.edits_elements() {
             // One past the largest key in the scene. Keys are arena indices, so
             // they outrun the object *count* as soon as anything has been
@@ -3556,7 +3701,7 @@ impl App {
                 .map(|(id, _)| shell::object_key(id) + 1)
                 .max()
                 .unwrap_or(0);
-            return Some((drag.shape(), kreate_render::Collect::Objects { count }));
+            return Some((shape, kreate_render::Collect::Objects { count }));
         }
 
         // The object being edited, and how many elements its *cage* has in the
@@ -3570,7 +3715,7 @@ impl App {
             _ => mesh.num_faces(),
         };
         Some((
-            drag.shape(),
+            shape,
             kreate_render::Collect::Elements {
                 object: shell::object_key(id),
                 count,
@@ -4334,6 +4479,13 @@ impl App {
         // projection, the ray queries and the interface all ask for it.
         self.advance_camera();
         self.read_picks();
+        if self.circle.as_ref().is_some_and(|c| c.stroke.is_some()) {
+            self.drive_circle_stroke();
+            // The reduction answers a frame or two late; keep frames coming
+            // while the button is down, or the last stretch of a stroke that
+            // ends without moving would never land.
+            self.redraw.set(RedrawReason::HOVER_CHANGED);
+        }
         self.evaluate_scene();
         self.sync_gpu();
         // Before the interface borrows anything: the panel reads this, and it
@@ -4537,7 +4689,8 @@ impl App {
             };
             Some(kreate_render::PreviewSelection {
                 domain: self.pick_domain(),
-                deselect: self.drag_select.as_ref().is_some_and(|d| d.deselect),
+                deselect: self.drag_select.as_ref().is_some_and(|d| d.deselect)
+                    || self.circle.as_ref().and_then(|c| c.stroke.as_ref()).is_some_and(|s| s.deselect),
                 elements: *count,
             })
         });
@@ -5196,6 +5349,10 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
+        if self.circle.is_some() && matches!(code, KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) {
+            self.end_circle_select();
+            return;
+        }
         if self.knife.is_some() {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
@@ -5324,6 +5481,7 @@ impl App {
             "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
+            "view.circle_select" => self.toggle_circle_select(),
             // The 3D cursor.
             "view.cursor_place" => self.place_cursor(),
             "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),
@@ -5857,6 +6015,24 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // C: left strokes the brush, right stops it.
+                if self.circle.is_some() {
+                    match (button, pressed) {
+                        (MouseButton::Left, true) if self.press_belongs_to_viewport() => {
+                            self.begin_circle_stroke();
+                            return;
+                        }
+                        (MouseButton::Left, false) => {
+                            self.finish_circle_stroke();
+                            return;
+                        }
+                        (MouseButton::Right, true) => {
+                            self.end_circle_select();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // K drawing a cut: left adds a point, right gives up.
                 if self.knife.is_some() && pressed {
                     match button {
@@ -5976,6 +6152,9 @@ impl ApplicationHandler for App {
                 if self.knife.is_some() {
                     self.update_knife();
                 }
+                if self.circle.is_some() {
+                    self.redraw.set(RedrawReason::HOVER_CHANGED);
+                }
                 // The brush circle follows the pointer.
                 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
@@ -5998,7 +6177,10 @@ impl ApplicationHandler for App {
                 // wheel for its radius. Zooming mid-transform would move the
                 // camera the selection is being dragged relative to, which is
                 // not what a hand reaching for the wheel means here.
-                if !self.adjust_loop_cuts(y as f32) && !self.adjust_proportional(y as f32) {
+                if let Some(c) = &mut self.circle {
+                    c.radius = (c.radius * 1.15f32.powf(y as f32)).clamp(4.0, 800.0);
+                    self.show_circle();
+                } else if !self.adjust_loop_cuts(y as f32) && !self.adjust_proportional(y as f32) {
                     self.apply_wheel(x, y);
                 }
             }
@@ -6520,6 +6702,27 @@ mod tests {
             !app.input.alt_down,
             "a modifier held when focus was lost never gets its key-up"
         );
+    }
+
+    #[test]
+    fn c_turns_the_selection_brush_on_and_off_and_a_stroke_over_nothing_leaves_no_step() {
+        let mut app = app();
+        app.toggle_circle_select();
+        assert!(app.circle.is_some());
+        assert!(app.ui.circle_select.is_some(), "the brush is not drawn");
+        let depth = app.history.entries().len();
+        app.begin_circle_stroke();
+        app.drive_circle_stroke();
+        app.finish_circle_stroke();
+        assert_eq!(app.history.entries().len(), depth);
+        if let Some(c) = &mut app.circle {
+            c.radius = 90.0;
+        }
+        app.toggle_circle_select();
+        assert!(app.circle.is_none() && app.ui.circle_select.is_none());
+        // The next one starts the size the last one ended.
+        app.toggle_circle_select();
+        assert_eq!(app.circle.as_ref().map(|c| c.radius), Some(90.0));
     }
 
     #[test]

@@ -620,6 +620,9 @@ fn common() -> Vec<Binding> {
         .with_modifiers(Modifiers::alt()),
         key("edit.copy", "C", Context::ObjectMode, Action::new("edit.copy"))
             .with_modifiers(Modifiers::ctrl()),
+        // Blender's C: circle select, a brush that selects what it passes over.
+        key("object.circle_select", "C", Context::ObjectMode, Action::new("view.circle_select")),
+        key("mesh.circle_select", "C", Context::EditMesh, Action::new("view.circle_select")),
         key("edit.paste", "V", Context::ObjectMode, Action::new("edit.paste"))
             .with_modifiers(Modifiers::ctrl()),
         // --- edit mode -----------------------------------------------------
