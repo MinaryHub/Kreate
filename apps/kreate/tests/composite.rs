@@ -2224,6 +2224,69 @@ fn shot_pose_mode() {
     }
 }
 
+/// The Animation workspace on a keyed rig: the dope sheet with its folds and
+/// the timeline under it, the outliner and properties beside; then the dope
+/// sheet turned into the graph editor, with its channel list.
+#[test]
+fn shot_animation_workspace() {
+    use kreate_scene::animation::{bone_path, Action, Interpolation};
+    for (label, graph) in [("animation-workspace", false), ("graph-channels", true)] {
+        let mut doc = doc_with_cube();
+        let cube = doc.objects().next().map(|(id, _)| id).expect("a cube");
+        let mut cube_action = Action::new("CubeAction");
+        for (frame, x) in [(1.0, 0.0), (24.0, 2.0), (48.0, 0.5)] {
+            for i in 0..3u8 {
+                cube_action.curve_mut("location", i).insert(frame, if i == 0 { x } else { 0.0 }, Interpolation::Bezier);
+            }
+        }
+        let cube_action = doc.add_action(cube_action);
+        doc.object_mut(cube).unwrap().action = Some(cube_action);
+        let id = doc.add_armature(kreate_scene::armature::Armature::new("Arm"));
+        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id)));
+        let mut action = Action::new("RigAction");
+        for (frame, w) in [(1.0, 1.0), (12.0, 0.8), (36.0, 1.0)] {
+            let q = [w, (1.0f64 - w * w).max(0.0).sqrt(), 0.0, 0.0];
+            for (i, v) in q.into_iter().enumerate() {
+                action.curve_mut(&bone_path("Bone", "rotation_quaternion"), i as u8).insert(frame, v, Interpolation::Bezier);
+            }
+        }
+        let action = doc.add_action(action);
+        doc.object_mut(rig).unwrap().action = Some(action);
+        doc.selection.clear();
+        doc.selection.add(cube);
+        doc.selection.add(rig);
+        doc.playback.frame = 12.0;
+        let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
+            state.switch_workspace(4);
+            let _ = graph;
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+        if !graph {
+            continue;
+        }
+        // The graph editor in the Layout workspace's timeline area, where the
+        // switch is not deferred.
+        let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
+            let timelines: Vec<_> = state
+                .screen()
+                .areas()
+                .into_iter()
+                .filter(|(_, k)| *k == kreate_ui::EditorId::TIMELINE)
+                .map(|(a, _)| a)
+                .collect();
+            for area in timelines {
+                state.screen_mut().set_editor(area, kreate_ui::EditorId::GRAPH);
+            }
+        }) else {
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
 /// A picture of the Material tab with keyed values, the diamonds lit.
 #[test]
 fn shot_keyed_material() {

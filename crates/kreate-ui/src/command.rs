@@ -15,6 +15,10 @@ use kreate_reflect::PropertyMap;
 /// Something the user asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// Select a bone of an armature object, by the object's outliner key and
+    /// the bone's name: the outliner's bone rows. The application turns it
+    /// into the pick of whatever mode it is in.
+    SelectBone { object: u32, bone: String, extend: bool },
     /// Run an operator. The only way the UI causes a document change.
     RunOperator {
         op_id: String,

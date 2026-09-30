@@ -76,6 +76,10 @@ pub struct OutlinerRow {
     /// Whether the rows after this one, at greater depth, are this object's
     /// children — which is what earns it an expander.
     pub has_children: bool,
+    /// An armature's bones, under its data row: name, depth in the bone
+    /// hierarchy, and whether selected — Blender lists them there, and a rig
+    /// of eighty bones is found by name, not by clicking in the viewport.
+    pub bones: Vec<(String, usize, bool)>,
 }
 
 impl OutlinerRow {
@@ -91,6 +95,7 @@ impl OutlinerRow {
             mesh_users: 1,
             data_name: None,
             materials: Vec::new(),
+            bones: Vec::new(),
             has_children: false,
         }
     }
@@ -108,6 +113,8 @@ pub enum TreeRow {
     Data(usize),
     /// The material in this slot, under the object at this position.
     Material(usize, usize),
+    /// A bone of the armature at this position, by its place in the list.
+    Bone(usize, usize),
 }
 
 /// The rows on screen, given which objects are expanded.
@@ -141,6 +148,9 @@ pub fn visible_rows(
                 }
                 for slot in 0..r.materials.len() {
                     out.push(TreeRow::Material(index, slot));
+                }
+                for bone in 0..r.bones.len() {
+                    out.push(TreeRow::Bone(index, bone));
                 }
             }
         } else {
@@ -268,6 +278,11 @@ pub fn outliner(
                     TreeRow::Material(index, slot) => {
                         if let Some(data) = row(index) {
                             draw_material_row(ui, &data, slot);
+                        }
+                    }
+                    TreeRow::Bone(index, bone) => {
+                        if let Some(data) = row(index) {
+                            draw_bone_row(ui, &data, bone, queue);
                         }
                     }
                 }
@@ -414,6 +429,21 @@ fn draw_material_row(ui: &mut Ui, row: &OutlinerRow, slot: usize) {
         // The material's sphere, the same mark the properties tab wears.
         ui.painter().circle_filled(rect.center(), 4.0, theme.text_dim);
         ui.weak(name);
+    });
+}
+
+/// One bone under an expanded armature. A click selects it, as a click on
+/// the bone in the viewport would.
+fn draw_bone_row(ui: &mut Ui, row: &OutlinerRow, bone: usize, queue: &mut CommandQueue) {
+    let Some((name, depth, selected)) = row.bones.get(bone) else { return };
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT * (row.depth as f32 + 3.0 + *depth as f32) + 12.0);
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        object_icon(ui, RowKind::Armature, rect, true);
+        if ui.selectable_label(*selected, name).clicked() {
+            let extend = ui.input(|i| i.modifiers.shift);
+            queue.push(crate::Command::SelectBone { object: row.id, bone: name.clone(), extend });
+        }
     });
 }
 
@@ -728,6 +758,27 @@ mod tests {
             ],
             "the grandchild under the collapsed child must not show"
         );
+    }
+
+    #[test]
+    fn an_expanded_armature_lists_its_bones_under_its_data() {
+        let rows = visible_rows(
+            &[0u16],
+            |_| true,
+            |_| {
+                let mut r = OutlinerRow::new(9, "Rig", RowKind::Armature);
+                r.data_name = Some("Arm".into());
+                r.bones = vec![("Upper".into(), 0, false), ("Forearm".into(), 1, true)];
+                Some(r)
+            },
+        );
+        assert_eq!(
+            rows,
+            vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Data(0), TreeRow::Bone(0, 0), TreeRow::Bone(0, 1)]
+        );
+        // Folded, no bones.
+        let rows = visible_rows(&[0u16], |_| false, |_| None);
+        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0)]);
     }
 
     #[test]

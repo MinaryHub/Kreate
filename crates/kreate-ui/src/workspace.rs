@@ -142,17 +142,24 @@ fn shading_screen() -> Screen {
     screen
 }
 
-/// Blender's Animation workspace: the scene above, every key below, the
-/// properties at the side for the object being animated.
+/// Blender's Animation workspace: the scene above, every key below with the
+/// clock under it, and the outliner and properties at the side — the tree to
+/// pick what is animated and the panel with its diamonds.
 fn animation_screen() -> Screen {
     let mut screen = Screen::single(EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
-    screen
-        .split(viewport, Axis::Horizontal, 0.62, EditorId::DOPE_SHEET)
+    let outliner = screen
+        .split(viewport, Axis::Vertical, 0.8, EditorId::OUTLINER)
         .expect("the screen has one area to split");
     screen
-        .split(viewport, Axis::Vertical, 0.8, EditorId::PROPERTIES)
+        .split(outliner, Axis::Horizontal, 0.35, EditorId::PROPERTIES)
+        .expect("the outliner was just created");
+    let sheet = screen
+        .split(viewport, Axis::Horizontal, 0.55, EditorId::DOPE_SHEET)
         .expect("the viewport is still there to split");
+    screen
+        .split(sheet, Axis::Horizontal, 0.66, EditorId::TIMELINE)
+        .expect("the dope sheet was just created");
     screen
 }
 

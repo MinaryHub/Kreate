@@ -173,8 +173,87 @@ pub fn property_editor_keyed(
     mark: impl Fn(&str) -> Option<KeyMark>,
     key_tip: &str,
 ) -> (bool, Option<&'static str>) {
-    let mut changed = false;
-    let mut clicked = None;
+    let out = property_editor_full(
+        ui,
+        catalog,
+        op_id,
+        schema,
+        values,
+        keep,
+        mark,
+        key_tip,
+        |_| None,
+        &FieldMenuText::default(),
+    );
+    (out.changed, out.keyed)
+}
+
+/// What a value's right-click menu can offer: the caller says, per field,
+/// since only it knows what is animatable or driven.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FieldMenu {
+    /// It can be keyed: Insert and Delete Keyframe.
+    pub animatable: bool,
+    /// It has a key on this frame, so Delete Keyframe does something.
+    pub keyed_here: bool,
+    /// Whether each component is driven, one per component; empty for a
+    /// value drivers cannot reach.
+    pub driven: Vec<bool>,
+    /// Reset to Default is offered.
+    pub resettable: bool,
+}
+
+/// What was chosen from a value's right-click menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldAction {
+    InsertKey,
+    DeleteKey,
+    AddDriver(u8),
+    RemoveDriver(u8),
+    Reset,
+}
+
+/// The menu's words, and each component's name (X, Y, Z…).
+#[derive(Clone, Debug, Default)]
+pub struct FieldMenuText {
+    pub insert_key: String,
+    pub delete_key: String,
+    pub add_driver: String,
+    pub remove_driver: String,
+    pub reset: String,
+    pub components: [String; 4],
+}
+
+/// What a panel drawn by [`property_editor_full`] asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EditorOutcome {
+    pub changed: bool,
+    /// A diamond was clicked on this field.
+    pub keyed: Option<&'static str>,
+    /// A right-click menu entry was chosen on this field.
+    pub action: Option<(&'static str, FieldAction)>,
+}
+
+/// The purple Blender marks a driven value with.
+pub const DRIVEN: egui::Color32 = egui::Color32::from_rgb(0xB5, 0x86, 0xF0);
+
+/// The whole decorated editor: diamonds, and a right-click menu on each
+/// field's name and diamond — Blender's, where keying, driving and resetting
+/// a value all start. A driven value's name is purple.
+#[allow(clippy::too_many_arguments)]
+pub fn property_editor_full(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    op_id: &str,
+    schema: &[PropertyDesc],
+    values: &mut PropertyMap,
+    keep: impl Fn(&str) -> bool,
+    mark: impl Fn(&str) -> Option<KeyMark>,
+    key_tip: &str,
+    menu: impl Fn(&str) -> Option<FieldMenu>,
+    text: &FieldMenuText,
+) -> EditorOutcome {
+    let mut out = EditorOutcome::default();
     let decorated = schema.iter().any(|d| mark(d.name).is_some());
     egui::Grid::new(("props", op_id))
         .num_columns(if decorated { 3 } else { 2 })
@@ -184,21 +263,40 @@ pub fn property_editor_keyed(
             // replayed, never drawn. See `PropertyDesc::hidden`.
             for desc in schema.iter().filter(|d| !d.hidden && keep(d.name)) {
                 let (name, tip) = labels(catalog, op_id, desc);
-                let label = ui.label(name);
-                if !tip.is_empty() {
+                let field_menu = menu(desc.name);
+                let driven = field_menu.as_ref().is_some_and(|m| m.driven.iter().any(|d| *d));
+                let label = if driven {
+                    ui.label(egui::RichText::new(name).color(DRIVEN))
+                } else {
+                    ui.label(name)
+                };
+                let label = if !tip.is_empty() {
                     // Wrapped here rather than by the layout engine: a tooltip
                     // is prose, and `epaint` finds no break opportunity in a
                     // Korean sentence — see `crate::text`.
-                    label.on_hover_text(crate::text::wrap_tooltip(ui, &tip));
+                    label.on_hover_text(crate::text::wrap_tooltip(ui, &tip))
+                } else {
+                    label
+                };
+                if let Some(m) = &field_menu {
+                    let label = label.interact(egui::Sense::click());
+                    if let Some(a) = field_context_menu(&label, m, text) {
+                        out.action = Some((desc.name, a));
+                    }
                 }
-                changed |= property_widget(ui, desc, values);
+                out.changed |= property_widget(ui, desc, values);
                 if decorated {
                     match mark(desc.name) {
                         Some(m) => {
                             let response = key_diamond(ui, m);
                             let response = if key_tip.is_empty() { response } else { response.on_hover_text(key_tip) };
                             if response.clicked() {
-                                clicked = Some(desc.name);
+                                out.keyed = Some(desc.name);
+                            }
+                            if let Some(fm) = &field_menu {
+                                if let Some(a) = field_context_menu(&response, fm, text) {
+                                    out.action = Some((desc.name, a));
+                                }
                             }
                         }
                         None => {
@@ -209,7 +307,51 @@ pub fn property_editor_keyed(
                 ui.end_row();
             }
         });
-    (changed, clicked)
+    out
+}
+
+/// The right-click menu of one field.
+fn field_context_menu(response: &egui::Response, m: &FieldMenu, text: &FieldMenuText) -> Option<FieldAction> {
+    let mut chosen = None;
+    response.context_menu(|ui| {
+        if m.animatable {
+            if ui.button(&text.insert_key).clicked() {
+                chosen = Some(FieldAction::InsertKey);
+                ui.close();
+            }
+            if ui.add_enabled(m.keyed_here, egui::Button::new(&text.delete_key)).clicked() {
+                chosen = Some(FieldAction::DeleteKey);
+                ui.close();
+            }
+        }
+        if !m.driven.is_empty() {
+            ui.separator();
+            let one = m.driven.len() == 1;
+            let name = |i: usize, base: &str| {
+                // i18n-exempt: a translated verb and a component's letter
+                if one { base.to_string() } else { format!("{base} ({})", text.components[i.min(3)]) }
+            };
+            for (i, driven) in m.driven.iter().enumerate() {
+                let (label, action) = if *driven {
+                    (name(i, &text.remove_driver), FieldAction::RemoveDriver(i as u8))
+                } else {
+                    (name(i, &text.add_driver), FieldAction::AddDriver(i as u8))
+                };
+                if ui.button(label).clicked() {
+                    chosen = Some(action);
+                    ui.close();
+                }
+            }
+        }
+        if m.resettable {
+            ui.separator();
+            if ui.button(&text.reset).clicked() {
+                chosen = Some(FieldAction::Reset);
+                ui.close();
+            }
+        }
+    });
+    chosen
 }
 
 /// A keyframe diamond, painted: hollow, dim or lit.

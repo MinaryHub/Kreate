@@ -2166,6 +2166,31 @@ impl App {
                     }
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
+                Command::SelectBone { object, bone, extend } => {
+                    // The pick of whatever mode this is, on the armature being
+                    // posed or edited; in object mode the armature is simply
+                    // selected, which is what clicking its bone there does.
+                    let Some(id) = shell::object_from_key(&self.doc, object) else { continue };
+                    let mut params = PropertyMap::new();
+                    params.set("bone", PropertyValue::Text(bone));
+                    params.set("extend", PropertyValue::Bool(extend));
+                    match self.op_ctx.mode.acts_on() {
+                        kreate_ops::mode::ActsOn::Bones if kreate_ops::ops::pose::posed_object(&self.doc) == Some(id) => {
+                            self.run_op("pose.select_pick", params)
+                        }
+                        kreate_ops::mode::ActsOn::BoneJoints
+                            if kreate_ops::ops::armature::edited_object(&self.doc) == Some(id) =>
+                        {
+                            params.set("part", PropertyValue::Enum(0));
+                            self.run_op("armature.select_pick", params)
+                        }
+                        _ => {
+                            self.doc.selection.clear();
+                            self.doc.selection.add(id);
+                            self.redraw.set(RedrawReason::SCENE_CHANGED);
+                        }
+                    }
+                }
                 Command::FrameSelection => self.frame_all(),
                 Command::NewDocument => self.new_document(),
                 Command::OpenDocument => self.open_document(),

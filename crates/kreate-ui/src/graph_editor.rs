@@ -100,6 +100,9 @@ enum Menu {
 #[derive(Clone, Debug, Default)]
 pub struct GraphState {
     pub rect: Option<Rect>,
+    /// Curves hidden from the plot, by target: the channel list's eyes.
+    /// Hidden is a view setting, as in Blender — the curve still plays.
+    hidden: std::collections::BTreeSet<String>,
     /// The frames and values on screen: `(frame0, frame1, value0, value1)`.
     view: Option<(f64, f64, f64, f64)>,
     drag: Drag,
@@ -216,7 +219,77 @@ pub fn handle_at(view: &GraphView, layout: &Layout, p: Pos2) -> Option<(usize, u
 }
 
 /// Draws the graph editor. Returns what was asked for.
+/// How wide the channel list is.
+const CHANNELS: f32 = 170.0;
+
+/// The graph editor: the channel list on the left, the curves on the right.
+///
+/// Blender's channel region, its core: a row per curve with its colour, its
+/// name and an eye. A hidden curve is left out of the plot, so its keys can be
+/// neither seen nor picked — the way to work on one curve among twelve.
+/// Clicking a row selects that curve's keys, Shift adding to what is selected.
 pub fn graph_editor(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &GraphText) -> Vec<GraphEdit> {
+    let full = ui.available_rect_before_wrap();
+    // A narrow editor keeps the whole width for the curves.
+    let list_width = if full.width() > CHANNELS * 2.5 { CHANNELS } else { 0.0 };
+    let mut out = Vec::new();
+    if list_width > 0.0 && !view.curves.is_empty() {
+        let list = Rect::from_min_max(full.min, Pos2::new(full.min.x + list_width, full.max.y));
+        let theme = crate::theme::from_ui(ui);
+        ui.painter().rect_filled(list, 0.0, theme.base);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(list.shrink2(egui::vec2(4.0, 2.0))), |ui| {
+            ui.add_space(RULER - 2.0);
+            egui::ScrollArea::vertical().id_salt("graph-channels").show(ui, |ui| {
+                for curve in &view.curves {
+                    let hidden = state.hidden.contains(&curve.target);
+                    ui.horizontal(|ui| {
+                        // The eye: a filled dot shown, a ring hidden.
+                        let (eye, eye_response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+                        let ink = if hidden { theme.text_faint } else { theme.text_dim };
+                        if hidden {
+                            ui.painter().circle_stroke(eye.center(), 4.0, Stroke::new(1.2, ink));
+                        } else {
+                            ui.painter().circle_filled(eye.center(), 4.0, ink);
+                        }
+                        if eye_response.clicked() {
+                            if hidden {
+                                state.hidden.remove(&curve.target);
+                            } else {
+                                state.hidden.insert(curve.target.clone());
+                            }
+                        }
+                        let (swatch, _) = ui.allocate_exact_size(egui::vec2(4.0, 14.0), Sense::hover());
+                        ui.painter().rect_filled(swatch, 1.0, curve.color);
+                        let label = egui::RichText::new(&curve.label).size(11.0);
+                        let label = if hidden { label.color(theme.text_faint) } else { label };
+                        let row = ui.add(egui::Label::new(label).truncate().sense(Sense::click()));
+                        if row.clicked() {
+                            let extend = ui.input(|i| i.modifiers.shift);
+                            out.push(GraphEdit::Select {
+                                targets: vec![curve.target.clone()],
+                                frames: (f64::MIN, f64::MAX),
+                                values: (f64::MIN, f64::MAX),
+                                extend,
+                            });
+                        }
+                    });
+                }
+            });
+        });
+    }
+    let plot = Rect::from_min_max(Pos2::new(full.min.x + list_width, full.min.y), full.max);
+    let shown = GraphView {
+        curves: view.curves.iter().filter(|c| !state.hidden.contains(&c.target)).cloned().collect(),
+        ..view.clone()
+    };
+    let edits = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(plot), |ui| graph_plot(ui, &shown, state, text))
+        .inner;
+    out.extend(edits);
+    out
+}
+
+fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &GraphText) -> Vec<GraphEdit> {
     let mut out = Vec::new();
     let theme = crate::theme::from_ui(ui);
     let rect = ui.available_rect_before_wrap();

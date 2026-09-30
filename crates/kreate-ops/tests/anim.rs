@@ -418,3 +418,21 @@ fn a_handle_can_be_set_by_hand_and_given_back_to_auto() {
     doc.animate(6.0);
     assert!(doc.object(id).unwrap().transform.translation.z.abs() < 1e-9);
 }
+
+#[test]
+fn the_object_tab_diamond_keys_one_property_of_the_object() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let id = a_selected_empty(&mut doc);
+    doc.object_mut(id).unwrap().transform.translation = DVec3::new(1.0, 2.0, 3.0);
+    let mut p = PropertyMap::new();
+    p.set("frame", PropertyValue::Float(5.0));
+    p.set("datablock", PropertyValue::Enum(2));
+    p.set("property", PropertyValue::Text("location".into()));
+    history.dispatch(&registry, &mut doc, &ctx, "anim.keyframe_insert_property", &p).expect("ran");
+    let action = doc.object(id).unwrap().action.expect("keying made the object's action");
+    let a = doc.action(action).unwrap();
+    assert_eq!(a.curves.len(), 3, "location only");
+    assert_eq!(a.curves[1].keys[0].value, 2.0);
+    history.dispatch(&registry, &mut doc, &ctx, "anim.keyframe_delete_property", &p).expect("ran");
+    assert!(doc.action(action).unwrap().curves.is_empty());
+}

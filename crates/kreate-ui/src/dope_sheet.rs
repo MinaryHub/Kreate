@@ -90,6 +90,9 @@ pub struct SheetState {
     drag: Drag,
     /// Where the interpolation menu is open, if it is.
     menu: Option<Pos2>,
+    /// Object rows folded shut, by target: their property rows are hidden and
+    /// their summary row stands for them, as in Blender.
+    collapsed: std::collections::BTreeSet<String>,
 }
 
 /// How wide the column of row names is.
@@ -158,6 +161,32 @@ fn rows_between(layout: &Layout, a: f32, b: f32, count: usize) -> std::ops::Rang
 
 /// Draws the dope sheet. Returns what was asked for.
 pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &SheetText) -> Vec<SheetEdit> {
+    // Which object rows have rows under them, and the rows left once the
+    // folded ones' children are taken out.
+    let parents: std::collections::BTreeSet<String> = view
+        .rows
+        .windows(2)
+        .filter(|w| w[0].depth == 0 && w[1].depth > 0)
+        .map(|w| w[0].target.clone())
+        .collect();
+    let mut folded = false;
+    let folded_view = SheetView {
+        rows: view
+            .rows
+            .iter()
+            .filter(|r| {
+                if r.depth == 0 {
+                    folded = state.collapsed.contains(&r.target);
+                    true
+                } else {
+                    !folded
+                }
+            })
+            .cloned()
+            .collect(),
+        ..view.clone()
+    };
+    let view = &folded_view;
     let mut out = Vec::new();
     let theme = crate::theme::from_ui(ui);
     let rect = ui.available_rect_before_wrap();
@@ -230,8 +259,19 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
                 Color32::from_white_alpha(6),
             );
         }
+        // The fold: a triangle pointing right when shut, down when open.
+        if row.depth == 0 && parents.contains(&row.target) {
+            let c = Pos2::new(names.min.x + 9.0, y);
+            let shut = state.collapsed.contains(&row.target);
+            let points = if shut {
+                vec![c + Vec2::new(-2.5, -4.0), c + Vec2::new(3.5, 0.0), c + Vec2::new(-2.5, 4.0)]
+            } else {
+                vec![c + Vec2::new(-4.0, -2.5), c + Vec2::new(4.0, -2.5), c + Vec2::new(0.0, 3.5)]
+            };
+            painter.add(egui::Shape::convex_polygon(points, theme.text_dim, Stroke::NONE));
+        }
         painter.text(
-            Pos2::new(names.min.x + 8.0 + row.depth as f32 * 12.0, y),
+            Pos2::new(names.min.x + 18.0 + row.depth as f32 * 12.0, y),
             egui::Align2::LEFT_CENTER,
             &row.label,
             egui::FontId::proportional(12.0),
@@ -285,6 +325,13 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
         if let Some(p) = pointer {
             if p.y < layout.keys.min.y && p.x >= layout.keys.min.x {
                 state.drag = Drag::Scrub;
+            } else if p.x < layout.keys.min.x {
+                // A click on an object's name folds it open or shut.
+                if let Some(row) = layout.row_at(p.y).and_then(|i| view.rows.get(i)) {
+                    if row.depth == 0 && parents.contains(&row.target) && !state.collapsed.remove(&row.target) {
+                        state.collapsed.insert(row.target.clone());
+                    }
+                }
             } else if let Some((row, frame)) = key_at(view, &layout, p) {
                 let already = view.rows[row].keys.iter().any(|k| k.frame == frame && k.selected);
                 if !already || shift {
@@ -532,4 +579,22 @@ mod tests {
         assert!(!frames.is_empty() && frames.iter().all(|f| f.fract() == 0.0), "{frames:?}");
         assert_eq!(*frames.last().unwrap(), 30.0);
     }
+
+    #[test]
+    fn clicking_an_objects_name_folds_its_rows_and_a_click_on_the_fold_opens_it() {
+        let mut rig = Rig::new(view());
+        let name = Pos2::new(rig.state.rect.unwrap().min.x + 20.0, rig.layout().row_y(0));
+        rig.drag(name, name, false);
+        assert!(rig.state.collapsed.contains("7/"), "the click did not fold the object");
+        // Folded, the second row is gone: a click where Location's key was
+        // lands on nothing and selects nothing.
+        let edits = rig.drag(rig.at(1, 1.0), rig.at(1, 1.0), false);
+        assert!(
+            !edits.iter().any(|e| matches!(e, SheetEdit::Select { targets, .. } if targets == &vec!["7/location".to_string()])),
+            "a folded row can still be clicked: {edits:?}"
+        );
+        rig.drag(name, name, false);
+        assert!(rig.state.collapsed.is_empty());
+    }
 }
+

@@ -686,6 +686,24 @@ impl OutlinerOrder {
             data_name,
             materials,
             has_children,
+            // Each bone at its depth under its parent, the active one lit.
+            bones: doc
+                .armature_of(id)
+                .map(|(_, a)| {
+                    a.bones
+                        .iter()
+                        .map(|b| {
+                            let mut depth = 0;
+                            let mut at = b.parent;
+                            while let Some(p) = at {
+                                depth += 1;
+                                at = a.bones.get(p).and_then(|b| b.parent);
+                            }
+                            (b.name.clone(), depth, object.pose.active.as_deref() == Some(b.name.as_str()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             mesh_users: object
                 .mesh()
                 .and_then(|m| self.mesh_users.get(m.index() as usize))
@@ -3846,15 +3864,8 @@ fn draw_item_sidebar(
                 kreate_reflect::PropertyValue::Vec3(t.scale.to_array()),
             );
 
-            if kreate_ui::property_editor::property_editor(
-                ui,
-                &state.catalog,
-                info.id,
-                info.schema,
-                &mut params,
-            ) {
-                state.queue.run("object.set_transform", params);
-            }
+            let object = doc.selection.active.expect("an active object was just read");
+            draw_object_transform(ui, state, doc, info, object, params, l);
         },
     );
 }
@@ -3875,7 +3886,11 @@ fn draw_workspace_tabs(ui: &mut Ui, state: &mut ShellState) {
         .map(|space| space.name.clone())
         .collect();
     for (index, name) in names.iter().enumerate() {
-        if ui.selectable_label(index == active, name).clicked() {
+        // The built-in layouts' names are the program's words and are
+        // translated; a name the user gave one is theirs and is not.
+        let key = format!("workspace-{}", name.to_lowercase().replace(' ', "-"));
+        let shown = if state.catalog.has(&key) { state.catalog.get(&key) } else { name.clone() };
+        if ui.selectable_label(index == active, shown).clicked() {
             state.switch_workspace(index);
         }
     }
@@ -4579,18 +4594,133 @@ fn draw_object_tab(
     // In a panel, the way Blender's Object tab is a stack of them. One today;
     // the shape is what lets the next — relations, visibility — arrive as a
     // title rather than as more rows.
+    let object = doc.selection.active.expect("an active object was just read");
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
-        if kreate_ui::property_editor::property_editor(
-            ui,
-            &state.catalog,
-            info.id,
-            info.schema,
-            &mut params,
-        ) {
-            let dragging = ui.ctx().input(|i| i.pointer.any_down());
-            send_edit(state, "object.set_transform", params, dragging);
-        }
+        draw_object_transform(ui, state, doc, info, object, params, l);
     });
+}
+
+/// The transform of the active object, with Blender's diamonds and the
+/// right-click menu on each value: keys, drivers, reset. The Object tab and
+/// the sidebar both draw it, so the two cannot come to offer different things.
+fn draw_object_transform(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    info: &kreate_ops::OperatorInfo,
+    object: ObjectId,
+    mut params: PropertyMap,
+    l: &Labels,
+) {
+    let Some(o) = doc.object(object) else { return };
+    let text = field_menu_text(&state.catalog);
+    let out = kreate_ui::property_editor_full(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+        |_| true,
+        |name| object_animated(name).map(|p| key_mark(doc, o.action, p)),
+        &l.key_property,
+        |name| {
+            let property = object_animated(name)?;
+            Some(kreate_ui::FieldMenu {
+                animatable: true,
+                keyed_here: key_mark(doc, o.action, property) == kreate_ui::KeyMark::Keyed,
+                driven: (0..3u8)
+                    .map(|i| o.drivers.iter().any(|d| d.property.as_ref() == property && d.index == i))
+                    .collect(),
+                resettable: true,
+            })
+        },
+        &text,
+    );
+    if out.changed {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "object.set_transform", params.clone(), dragging);
+    }
+    if let Some(property) = out.keyed.and_then(object_animated) {
+        toggle_key(state, doc, o.action, 2, 0, property);
+    }
+    if let Some((field, action)) = out.action {
+        let uid = doc.object_uid(object).map(|u| u.raw()).unwrap_or(0);
+        field_action(state, info, params, field, action, FieldOwner::Object(uid));
+    }
+}
+
+/// The animatable property an object transform field drives.
+fn object_animated(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "location" => "location",
+        "rotation" => "rotation_euler",
+        "scale" => "scale",
+        _ => return None,
+    })
+}
+
+/// The words of a value's right-click menu.
+fn field_menu_text(catalog: &Catalog) -> kreate_ui::FieldMenuText {
+    let t = |key: &str| catalog.get(key);
+    kreate_ui::FieldMenuText {
+        insert_key: t("field-insert-key"),
+        delete_key: t("field-delete-key"),
+        add_driver: t("field-add-driver"),
+        remove_driver: t("field-remove-driver"),
+        reset: t("field-reset"),
+        components: ["X".into(), "Y".into(), "Z".into(), "W".into()],
+    }
+}
+
+/// Whose value a right-click menu acted on.
+enum FieldOwner {
+    /// The active object, by its uid: what a driver's target names.
+    Object(u64),
+    /// A material slot of the active object.
+    Material(u32),
+    /// The active object's light.
+    Light,
+}
+
+/// Does what a value's right-click menu chose.
+fn field_action(
+    state: &mut ShellState,
+    info: &kreate_ops::OperatorInfo,
+    mut params: PropertyMap,
+    field: &'static str,
+    action: kreate_ui::FieldAction,
+    owner: FieldOwner,
+) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::FieldAction as A;
+    let (datablock, slot, animated) = match owner {
+        FieldOwner::Object(_) => (2u32, 0u32, object_animated(field)),
+        FieldOwner::Material(slot) => (0, slot, material_animated(field)),
+        FieldOwner::Light => (1, 0, light_animated(field)),
+    };
+    match action {
+        A::InsertKey | A::DeleteKey => {
+            let Some(property) = animated else { return };
+            let mut p = PropertyMap::new();
+            p.set("datablock", V::Enum(datablock));
+            p.set("slot", V::Int(slot as i64));
+            p.set("property", V::Text(property.to_string()));
+            let op = if action == A::InsertKey { "anim.keyframe_insert_property" } else { "anim.keyframe_delete_property" };
+            state.queue.dispatch(op, p);
+        }
+        A::AddDriver(i) | A::RemoveDriver(i) => {
+            let (FieldOwner::Object(uid), Some(property)) = (owner, animated) else { return };
+            let mut p = PropertyMap::new();
+            p.set("target", V::Text(kreate_ops::ops::driver::driver_target(uid, property, i)));
+            let op = if matches!(action, A::AddDriver(_)) { "anim.driver_add" } else { "anim.driver_remove" };
+            state.queue.run(op, p);
+        }
+        A::Reset => {
+            let Some(default) = info.defaults().get(field).cloned() else { return };
+            params.set(field, default);
+            state.queue.run(info.id, params);
+        }
+    }
 }
 
 /// The camera half of the Data tab.
@@ -4826,7 +4956,8 @@ fn draw_material_tab(
     let mut params = kreate_reflect::OpParams::to_map(
         &kreate_ops::ops::object::material_params(material, slot),
     );
-    let (changed, keyed) = kreate_ui::property_editor::property_editor_keyed(
+    let text = field_menu_text(&state.catalog);
+    let out = kreate_ui::property_editor_full(
         ui,
         &state.catalog,
         info.id,
@@ -4844,13 +4975,26 @@ fn draw_material_tab(
         },
         |name| material_animated(name).map(|p| key_mark(doc, material.action, p)),
         &l.key_property,
+        |name| {
+            Some(kreate_ui::FieldMenu {
+                animatable: material_animated(name).is_some(),
+                keyed_here: material_animated(name)
+                    .is_some_and(|p| key_mark(doc, material.action, p) == kreate_ui::KeyMark::Keyed),
+                driven: Vec::new(),
+                resettable: true,
+            })
+        },
+        &text,
     );
-    if changed {
+    if out.changed {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        send_edit(state, "material.set_properties", params, dragging);
+        send_edit(state, "material.set_properties", params.clone(), dragging);
     }
-    if let Some(property) = keyed.and_then(material_animated) {
+    if let Some(property) = out.keyed.and_then(material_animated) {
         toggle_key(state, doc, material.action, 0, slot, property);
+    }
+    if let Some((field, action)) = out.action {
+        field_action(state, info, params, field, action, FieldOwner::Material(slot));
     }
     });
 }
@@ -5066,7 +5210,8 @@ fn draw_light_data(
         _ => 0,
     };
     kreate_ui::panel::section(ui, &l.panel_light, true, |ui| {
-        let (changed, keyed) = kreate_ui::property_editor::property_editor_keyed(
+        let text = field_menu_text(&state.catalog);
+        let out = kreate_ui::property_editor_full(
             ui,
             &state.catalog,
             info.id,
@@ -5075,13 +5220,26 @@ fn draw_light_data(
             |name| kreate_ops::ops::object::light_param_applies(kind, name),
             |name| light_animated(name).map(|p| key_mark(doc, light.action, p)),
             &l.key_property,
+            |name| {
+                Some(kreate_ui::FieldMenu {
+                    animatable: light_animated(name).is_some(),
+                    keyed_here: light_animated(name)
+                        .is_some_and(|p| key_mark(doc, light.action, p) == kreate_ui::KeyMark::Keyed),
+                    driven: Vec::new(),
+                    resettable: true,
+                })
+            },
+            &text,
         );
-        if changed {
+        if out.changed {
             let dragging = ui.ctx().input(|i| i.pointer.any_down());
-            send_edit(state, "light.set_properties", params, dragging);
+            send_edit(state, "light.set_properties", params.clone(), dragging);
         }
-        if let Some(property) = keyed.and_then(light_animated) {
+        if let Some(property) = out.keyed.and_then(light_animated) {
             toggle_key(state, doc, light.action, 1, 0, property);
+        }
+        if let Some((field, action)) = out.action {
+            field_action(state, info, params, field, action, FieldOwner::Light);
         }
     });
 }
@@ -5365,6 +5523,17 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+workspace-layout = Layout
+workspace-modeling = Modeling
+workspace-uv-editing = UV Editing
+workspace-shading = Shading
+workspace-animation = Animation
+workspace-scripting = Scripting
+field-insert-key = Insert Keyframe
+field-delete-key = Delete Keyframe
+field-add-driver = Add Driver
+field-remove-driver = Remove Driver
+field-reset = Reset to Default
 tab-bone = Bone
 panel-pose = Pose
 panel-bone-rest = Bone
@@ -5852,6 +6021,17 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
 sidebar-item = 항목
+workspace-layout = 레이아웃
+workspace-modeling = 모델링
+workspace-uv-editing = UV 편집
+workspace-shading = 셰이딩
+workspace-animation = 애니메이션
+workspace-scripting = 스크립팅
+field-insert-key = 키프레임 넣기
+field-delete-key = 키프레임 지우기
+field-add-driver = 드라이버 추가
+field-remove-driver = 드라이버 제거
+field-reset = 기본값으로
 tab-bone = 뼈
 panel-pose = 포즈
 panel-bone-rest = 뼈

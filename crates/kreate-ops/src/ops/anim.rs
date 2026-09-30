@@ -628,6 +628,7 @@ impl Operator for SetKeyInterpolation {
 fn datablock_of(which: u32) -> kreate_scene::DatablockKind {
     match which {
         0 => kreate_scene::DatablockKind::Material,
+        2 => kreate_scene::DatablockKind::Object,
         _ => kreate_scene::DatablockKind::Light,
     }
 }
@@ -636,7 +637,7 @@ fn datablock_of(which: u32) -> kreate_scene::DatablockKind {
 pub struct KeyPropertyParams {
     pub frame: f64,
     /// A material of the active object, or its light.
-    #[param(variants("material", "light"))]
+    #[param(variants("material", "light", "object"))]
     pub datablock: u32,
     /// Which of the active object's material slots, for a material.
     #[param(min = 0.0)]
@@ -668,6 +669,20 @@ fn property_action(
     let kind = datablock_of(params_datablock);
     let object = d.selection.active?;
     match kind {
+        // The active object's own transform: a diamond in the Object tab.
+        kreate_scene::DatablockKind::Object => {
+            let o = d.object(object)?;
+            let value = animation::read_object(&o.transform, property)?.to_array().to_vec();
+            let action = match o.action.filter(|a| d.action(*a).is_some()) {
+                Some(a) => a,
+                None => {
+                    let a = d.add_action(Action::new(format!("{}Action", o.name)));
+                    d.object_mut(object)?.action = Some(a);
+                    a
+                }
+            };
+            Some((action, value))
+        }
         kreate_scene::DatablockKind::Material => {
             let id = d.material_id_at(object, slot as usize)?;
             let m = d.material(id)?;
@@ -744,7 +759,7 @@ impl Operator for KeyProperty {
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct UnkeyPropertyParams {
     pub frame: f64,
-    #[param(variants("material", "light"))]
+    #[param(variants("material", "light", "object"))]
     pub datablock: u32,
     #[param(min = 0.0)]
     pub slot: u32,
@@ -785,6 +800,7 @@ impl Operator for UnkeyProperty {
             kreate_scene::DatablockKind::Material => {
                 d.material_at(object, params.slot as usize).and_then(|m| m.action)
             }
+            kreate_scene::DatablockKind::Object => d.object(object).and_then(|o| o.action),
             _ => match d.object(object).map(|o| &o.data) {
                 Some(kreate_scene::document::ObjectData::Light(l)) => d.light(*l).and_then(|l| l.action),
                 _ => None,
