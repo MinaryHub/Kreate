@@ -183,6 +183,9 @@ pub struct Object {
     /// How this object holds its armature's bones. Empty for anything that is
     /// not an armature, and for one at rest.
     pub pose: crate::armature::Pose,
+    /// The armature object this mesh follows, by identity — what Blender's
+    /// Armature modifier names. See [`crate::skin`].
+    pub skin: Option<Uid>,
 }
 
 impl Object {
@@ -203,6 +206,7 @@ impl Object {
             action: None,
             drivers: Vec::new(),
             pose: crate::armature::Pose::default(),
+            skin: None,
         }
     }
 
@@ -1107,9 +1111,40 @@ impl Document {
                     }
                 }
             }
+            // And the weight layers of every mesh that follows this armature:
+            // a vertex group is named after its bone, and one left behind is
+            // a mesh that stops moving with it.
+            let Some(uid) = self.object_uid(id) else { continue };
+            let meshes: Vec<MeshId> = self
+                .objects
+                .iter()
+                .filter(|(_, o)| o.skin == Some(uid))
+                .filter_map(|(_, o)| o.mesh())
+                .collect();
+            for mesh in meshes {
+                let (from, to) = (crate::skin::weight_layer(old), crate::skin::weight_layer(new));
+                if self.mesh(mesh).is_some_and(|m| m.attributes().contains(&from)) {
+                    if let Some(m) = self.mesh_mut(mesh) {
+                        if let Some(layer) = m.attributes_mut().remove(&from) {
+                            m.attributes_mut().insert(&to, layer.domain, layer.data);
+                        }
+                    }
+                }
+            }
         }
         self.touch();
         true
+    }
+
+    /// The armature a bound mesh object follows, and the matrices its bones
+    /// move its vertices by, in its own space — or `None` when it follows
+    /// nothing, or something that is no longer an armature.
+    pub fn skin_matrices(&self, object: ObjectId) -> Option<(ArmatureId, Vec<DAffine3>)> {
+        let target = self.object_by_uid(self.object(object)?.skin?)?;
+        let (id, armature) = self.armature_of(target)?;
+        let mesh_to_armature = self.world_transform(target).inverse() * self.world_transform(object);
+        let pose = &self.object(target)?.pose;
+        Some((id, crate::skin::skin_matrices(armature, pose, mesh_to_armature)))
     }
 
     /// An armature object's bones, posed, in world space.

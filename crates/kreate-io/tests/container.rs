@@ -1067,3 +1067,30 @@ fn an_armature_and_its_pose_come_back() {
         assert!(x.matrix3.abs_diff_eq(y.matrix3, 1e-12));
     }
 }
+
+#[test]
+fn a_bound_mesh_still_follows_its_armature_after_a_save() {
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let arm = doc.add_armature(kreate_scene::armature::Armature::new("Arm"));
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
+    let mut mesh = kreate_mesh::primitives::cube(1.0);
+    let n = mesh.num_verts() as usize;
+    mesh.attributes_mut().insert(
+        "weight:Bone",
+        kreate_mesh::attribute::Domain::Point,
+        kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(vec![1.0; n])),
+    );
+    let mesh = doc.add_mesh(mesh);
+    let mut body = Object::new("Body", ObjectData::Mesh(mesh));
+    body.skin = doc.object_uid(rig);
+    doc.add_object(body);
+
+    let loaded = round_trip(&doc);
+    let after = &loaded.document;
+    let (rig_after, _) = after.objects().find(|(_, o)| o.name == "Rig").unwrap();
+    let (body_after, body) = after.objects().find(|(_, o)| o.name == "Body").unwrap();
+    assert_eq!(body.skin, after.object_uid(rig_after));
+    assert!(after.mesh(body.mesh().unwrap()).unwrap().attributes().contains("weight:Bone"), "the weights did not survive");
+    assert!(after.skin_matrices(body_after).is_some());
+}

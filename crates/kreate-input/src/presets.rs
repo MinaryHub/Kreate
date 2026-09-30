@@ -536,6 +536,15 @@ fn common() -> Vec<Binding> {
         // `Ctrl+J` to join and `P` to separate, where every modeller's hand
         // expects them. `P` is free in edit mode; in the UV editor it packs,
         // which is a different context and therefore not a conflict.
+        // Blender's Ctrl+P, its most-used choice: bind the selected meshes to
+        // the active armature with automatic weights. The menu has the rest.
+        key(
+            "object.bind_armature",
+            "P",
+            Context::ObjectMode,
+            enum_param(Action::new("object.bind_armature"), "weights", 0),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         key(
             "object.join",
             "J",

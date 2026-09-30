@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod armature;
+pub mod skin;
 pub mod camera;
 pub mod clipboard;
 pub mod document;

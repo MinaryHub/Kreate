@@ -243,6 +243,15 @@ fn is_identity(stack: &[ModifierInstance]) -> bool {
     !stack.iter().any(|m| m.enabled)
 }
 
+/// A skinned mesh, and the input and bone matrices it was made from.
+#[derive(Clone, Debug)]
+struct SkinEntry {
+    input: Arc<MeshData>,
+    matrices: Vec<kreate_math::DAffine3>,
+    output: Arc<MeshData>,
+    used: u64,
+}
+
 struct Entry {
     input: Arc<MeshData>,
     stack: Vec<ModifierInstance>,
@@ -266,6 +275,8 @@ struct Entry {
 #[derive(Default)]
 pub struct ModifierCache {
     entries: Vec<Entry>,
+    /// Skinned meshes, one per bound input: see `ModifierCache::skinned`.
+    skins: Vec<SkinEntry>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -291,7 +302,42 @@ impl ModifierCache {
     ) -> Option<Arc<MeshData>> {
         let object = doc.object(id)?;
         let input = doc.mesh_arc(object.mesh()?)?;
-        Some(self.evaluate(input, &object.modifiers, ctx))
+        // A mesh bound to an armature is skinned first, as Blender's Armature
+        // modifier usually sits at the top of the stack, and the stack runs on
+        // what the bones made of it.
+        let skinned = match doc.skin_matrices(id) {
+            Some((armature, matrices)) => self.skinned(doc, input, armature, matrices),
+            None => input.clone(),
+        };
+        Some(self.evaluate(&skinned, &object.modifiers, ctx))
+    }
+
+    /// The skinned mesh, from the cache while the input and the bones' matrices
+    /// are the same ones. One entry per input: a new pose replaces the old,
+    /// for the memory reason a time-dependent stack gives.
+    fn skinned(
+        &mut self,
+        doc: &Document,
+        input: &Arc<MeshData>,
+        armature: crate::document::ArmatureId,
+        matrices: Vec<kreate_math::DAffine3>,
+    ) -> Arc<MeshData> {
+        if let Some(entry) = self
+            .skins
+            .iter_mut()
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.matrices == matrices)
+        {
+            entry.used = self.generation;
+            return entry.output.clone();
+        }
+        let output = doc
+            .armature(armature)
+            .and_then(|a| crate::skin::skin(input, a, &matrices))
+            .map(Arc::new)
+            .unwrap_or_else(|| input.clone());
+        self.skins.retain(|e| !Arc::ptr_eq(&e.input, input));
+        self.skins.push(SkinEntry { input: input.clone(), matrices, output: output.clone(), used: self.generation });
+        output
     }
 
     /// The evaluated result of applying `stack` to `input` at `ctx`'s time.
@@ -400,6 +446,7 @@ impl ModifierCache {
     pub fn sweep(&mut self) {
         let generation = self.generation;
         self.entries.retain(|e| e.used == generation);
+        self.skins.retain(|e| e.used == generation);
         self.generation += 1;
     }
 
@@ -420,7 +467,8 @@ impl ModifierCache {
     ///
     /// Only the outputs: the inputs are the document's and are counted there.
     pub fn memory_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.output.memory_bytes()).sum()
+        self.entries.iter().map(|e| e.output.memory_bytes()).sum::<usize>()
+            + self.skins.iter().map(|e| e.output.memory_bytes()).sum::<usize>()
     }
 }
 

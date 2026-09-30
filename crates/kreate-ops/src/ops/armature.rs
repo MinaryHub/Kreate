@@ -33,6 +33,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddBone>();
     registry.register::<SetDisplay>();
     registry.register::<SetBone>();
+    registry.register::<Bind>();
+    registry.register::<Unbind>();
 }
 
 /// The armature object being edited.
@@ -610,6 +612,131 @@ impl Operator for SetBone {
         }
         if renaming {
             d.rename_bone(id, &params.bone, &params.name);
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- binding a mesh to the skeleton -------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct BindParams {
+    /// With weights worked out from distance, or with the mesh's own — empty
+    /// groups made for the bones that have none.
+    #[param(variants("automatic", "empty"))]
+    pub weights: u32,
+}
+
+/// Parents the selected meshes to the active armature and makes them follow
+/// its bones — Blender's Ctrl+P, With Automatic Weights or With Empty Groups.
+///
+/// One step: the parent, the binding and the weights undo together, as they
+/// were one choice.
+pub struct Bind;
+
+impl Operator for Bind {
+    type Params = BindParams;
+    fn id() -> &'static str {
+        "object.bind_armature"
+    }
+    fn label() -> &'static str {
+        "Parent with Armature Deform"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_armature(doc).is_some() && !meshes_to_bind(doc).is_empty()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some((rig, armature_id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let meshes = meshes_to_bind(doc.document());
+        if meshes.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(rig_uid) = doc.document().object_uid(rig) else { return Ok(OpResult::Cancelled) };
+        let d = doc.document_mut();
+        for object in meshes {
+            // Refused only for a loop, which a mesh under an armature cannot
+            // be — but the object is left unbound then rather than bound to a
+            // rig it is not under.
+            if d.set_parent(object, Some(rig)).is_err() {
+                continue;
+            }
+            let Some(mesh_id) = d.object(object).and_then(|o| o.mesh()) else { continue };
+            let to_armature = d.world_transform(rig).inverse() * d.world_transform(object);
+            let (Some(armature), Some(mesh)) = (d.armature(armature_id).cloned(), d.mesh(mesh_id)) else { continue };
+            let layers: Vec<(String, Vec<f32>)> = if params.weights == 0 {
+                kreate_scene::skin::automatic_weights(mesh, &armature, to_armature)
+            } else {
+                armature
+                    .bones
+                    .iter()
+                    .map(|b| kreate_scene::skin::weight_layer(&b.name))
+                    .filter(|name| !mesh.attributes().contains(name))
+                    .map(|name| (name, vec![0.0; mesh.num_verts() as usize]))
+                    .collect()
+            };
+            if let Some(mesh) = d.mesh_mut(mesh_id) {
+                for (name, weights) in layers {
+                    mesh.attributes_mut().insert(
+                        &name,
+                        kreate_mesh::attribute::Domain::Point,
+                        kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(weights)),
+                    );
+                }
+            }
+            if let Some(o) = d.object_mut(object) {
+                o.skin = Some(rig_uid);
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+/// The selected mesh objects other than the active one.
+fn meshes_to_bind(doc: &Document) -> Vec<ObjectId> {
+    doc.selection
+        .objects
+        .iter()
+        .copied()
+        .filter(|id| Some(*id) != doc.selection.active && doc.object(*id).is_some_and(|o| o.mesh().is_some()))
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct UnbindParams {}
+
+/// Stops the selected meshes following their armature. Their weights stay:
+/// binding again gives the same deformation back, as removing and re-adding
+/// Blender's modifier does.
+pub struct Unbind;
+
+impl Operator for Unbind {
+    type Params = UnbindParams;
+    fn id() -> &'static str {
+        "object.unbind_armature"
+    }
+    fn label() -> &'static str {
+        "Remove Armature Deform"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.objects.iter().any(|id| doc.object(*id).is_some_and(|o| o.skin.is_some()))
+    }
+    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let bound: Vec<ObjectId> = doc
+            .document()
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| doc.document().object(*id).is_some_and(|o| o.skin.is_some()))
+            .collect();
+        if bound.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in bound {
+            if let Some(o) = d.object_mut(id) {
+                o.skin = None;
+            }
         }
         Ok(OpResult::Finished)
     }

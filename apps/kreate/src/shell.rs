@@ -1037,6 +1037,10 @@ struct Labels {
     add_empty: String,
     add_armature: String,
     menu_pose: String,
+    menu_parent: String,
+    bind_automatic: String,
+    bind_empty: String,
+    unbind: String,
     menu_armature: String,
     armature_add_bone: String,
     armature_extrude: String,
@@ -1206,6 +1210,10 @@ impl Labels {
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
+            menu_parent: t("menu-parent"),
+            bind_automatic: t("bind-automatic"),
+            bind_empty: t("bind-empty"),
+            unbind: t("unbind-armature"),
             menu_armature: t("menu-armature"),
             armature_add_bone: t("armature-add-bone"),
             armature_extrude: t("armature-extrude"),
@@ -2541,6 +2549,27 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
             vec![
                 entry("anim.keyframe_insert", &l.anim_insert, dispatch("anim.keyframe_insert")),
                 entry("anim.keyframe_delete", &l.anim_delete, dispatch("anim.keyframe_delete")),
+            ],
+        ),
+        // Blender's Parent menu, its armature half: select the meshes, then
+        // the rig, and bind them with weights or with empty groups to paint.
+        MenuNode::Sub(
+            l.menu_parent.clone(),
+            vec![
+                MenuNode::Entry(
+                    MenuEntry::new(
+                        "object.bind_armature",
+                        &l.bind_automatic,
+                        op("object.bind_armature", &[("weights", V::Enum(0))]),
+                    )
+                    .variant("weights", V::Enum(0)),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new("object.bind_armature", &l.bind_empty, op("object.bind_armature", &[("weights", V::Enum(1))]))
+                        .variant("weights", V::Enum(1)),
+                ),
+                MenuNode::Separator,
+                entry("object.unbind_armature", &l.unbind, op("object.unbind_armature", &[])),
             ],
         ),
         MenuNode::Separator,
@@ -4675,6 +4704,34 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    // What the object hangs from and what bends it: Blender's Relations
+    // panel, and the Armature modifier's one field.
+    let parent = active.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone());
+    let skin = active.skin.and_then(|u| doc.object_by_uid(u)).and_then(|id| doc.object(id)).map(|o| o.name.clone());
+    if parent.is_some() || skin.is_some() {
+        let title = state.catalog.get("panel-relations");
+        kreate_ui::panel::section(ui, &title, true, |ui| {
+            egui::Grid::new("relations").num_columns(2).show(ui, |ui| {
+                if let Some(parent) = &parent {
+                    ui.label(state.catalog.get("relations-parent"));
+                    // i18n-exempt: an object's name is the user's own text
+                    ui.label(parent);
+                    ui.end_row();
+                }
+                if let Some(skin) = &skin {
+                    ui.label(state.catalog.get("relations-armature"));
+                    ui.horizontal(|ui| {
+                        // i18n-exempt: an object's name is the user's own text
+                        ui.label(skin);
+                        if ui.small_button(REMOVE_GLYPH).on_hover_text(state.catalog.get("unbind-armature")).clicked() {
+                            state.queue.run("object.unbind_armature", PropertyMap::new());
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+    }
 }
 
 /// The transform of the active object, with Blender's diamonds and the
@@ -5705,6 +5762,17 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+menu-parent = Parent
+bind-automatic = With Automatic Weights
+bind-empty = With Empty Groups
+unbind-armature = Remove Armature Deform
+panel-relations = Relations
+relations-parent = Parent
+relations-armature = Armature
+op-object-bind-armature-desc = Parents the selected meshes to the active armature, and makes them follow its bones.
+op-object-bind-armature-weights-0-desc = Parents the selected meshes to the active armature, with weights from how near each vertex is to each bone.
+op-object-bind-armature-weights-1-desc = Parents the selected meshes to the active armature, with an empty group per bone to paint.
+op-object-unbind-armature-desc = Stops the selected meshes following their armature; their weights are kept.
 bone-parent = Parent
 workspace-layout = Layout
 workspace-modeling = Modeling
@@ -6204,6 +6272,17 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
 sidebar-item = 항목
+menu-parent = 부모
+bind-automatic = 자동 웨이트로
+bind-empty = 빈 그룹으로
+unbind-armature = 아마튜어 변형 제거
+panel-relations = 관계
+relations-parent = 부모
+relations-armature = 아마튜어
+op-object-bind-armature-desc = 선택한 메시를 활성 아마튜어의 자식으로 만들고 뼈를 따라 움직이게 합니다.
+op-object-bind-armature-weights-0-desc = 선택한 메시를 활성 아마튜어에 붙이고, 각 정점이 뼈에 얼마나 가까운지로 웨이트를 정합니다.
+op-object-bind-armature-weights-1-desc = 선택한 메시를 활성 아마튜어에 붙이고, 뼈마다 칠할 빈 그룹을 만듭니다.
+op-object-unbind-armature-desc = 선택한 메시가 아마튜어를 따르지 않게 합니다. 웨이트는 남깁니다.
 bone-parent = 부모
 workspace-layout = 레이아웃
 workspace-modeling = 모델링

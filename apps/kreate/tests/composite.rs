@@ -314,37 +314,25 @@ fn composite_with(
     );
 
     // --- render the 3D into its target, then the interface over the surface ---
-    let mut uploaded = Vec::new();
-    for (_, object) in doc.objects() {
-        let Some(mesh_id) = object.mesh() else {
-            continue;
-        };
-        if uploaded.iter().any(|(m, _)| *m == mesh_id) {
-            continue;
-        }
-        let Some(mesh) = doc.mesh(mesh_id) else {
-            continue;
-        };
-        let cpu = kreate_render::RenderMeshCpu::extract(mesh);
-        uploaded.push((
-            mesh_id,
-            kreate_render::GpuMesh::upload(
-                &gpu.device,
-                &viewport.layouts,
-                &cpu,
-                glam::Vec4::new(0.75, 0.72, 0.68, 1.0),
-            ),
-        ));
-    }
-    let mut draws: Vec<kreate_render::Draw> = doc
+    // The evaluated meshes, as the application draws them: modifiers applied
+    // and bound meshes skinned. Uploading the document's own would picture a
+    // posed character standing at rest.
+    let mut cache = kreate_scene::modifier::ModifierCache::new();
+    let uploaded: Vec<(kreate_scene::ObjectId, kreate_render::GpuMesh)> = doc
         .objects()
-        .filter_map(|(id, o)| {
-            let mesh_id = o.mesh()?;
-            let (_, m) = uploaded.iter().find(|(mid, _)| *mid == mesh_id)?;
-            Some(
-                kreate_render::Draw::new(m, doc.world_transform(id))
-                    .selected(!edit_mode && doc.selection.contains(id)),
-            )
+        .filter_map(|(id, _)| {
+            let mesh = cache.evaluated(doc, id, &kreate_scene::modifier::EvalCtx::still())?;
+            let cpu = kreate_render::RenderMeshCpu::extract(&mesh);
+            Some((
+                id,
+                kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::new(0.75, 0.72, 0.68, 1.0)),
+            ))
+        })
+        .collect();
+    let mut draws: Vec<kreate_render::Draw> = uploaded
+        .iter()
+        .map(|(id, m)| {
+            kreate_render::Draw::new(m, doc.world_transform(*id)).selected(!edit_mode && doc.selection.contains(*id))
         })
         .collect();
 
@@ -2285,6 +2273,48 @@ fn shot_animation_workspace() {
         };
         shot.dump(label);
     }
+}
+
+/// A capsule bound to a two-bone arm with automatic weights, the lower bone
+/// bent: the mesh follows the bones.
+#[test]
+fn shot_skinned() {
+    use kreate_scene::armature::{Armature, Bone};
+    let mut doc = Document::new();
+    let mut body = kreate_mesh::primitives::uv_sphere(0.3, 16, 24);
+    for p in body.positions_mut() {
+        p.z = p.z * 3.7 + 1.1;
+    }
+    let mut arm = Armature::new("Arm");
+    arm.bones[0].name = "Upper".into();
+    arm.bones[0].tail = kreate_math::DVec3::new(0.0, 0.0, 1.1);
+    arm.add_bone(Bone {
+        name: "Lower".into(),
+        parent: Some(0),
+        head: kreate_math::DVec3::new(0.0, 0.0, 1.1),
+        tail: kreate_math::DVec3::new(0.0, 0.0, 2.2),
+        connected: true,
+        ..Default::default()
+    });
+    arm.in_front = true;
+    for (name, w) in kreate_scene::skin::automatic_weights(&body, &arm, kreate_math::DAffine3::IDENTITY) {
+        body.attributes_mut().insert(&name, kreate_mesh::attribute::Domain::Point, kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(w)));
+    }
+    let arm = doc.add_armature(arm);
+    let mut rig = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(arm));
+    rig.pose.entry("Lower").transform.rotation = kreate_math::DQuat::from_rotation_x(-1.1);
+    let rig = doc.add_object(rig);
+    let body = doc.add_mesh(body);
+    let mut object = kreate_scene::document::Object::new("Body", kreate_scene::document::ObjectData::Mesh(body));
+    object.skin = doc.object_uid(rig);
+    let body = doc.add_object(object);
+    doc.set_parent(body, Some(rig)).unwrap();
+    doc.selection.add(rig);
+    let Some(shot) = composite_with(&doc, "ko-KR", false, |_| {}) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("skinned");
 }
 
 /// A picture of the Material tab with keyed values, the diamonds lit.
