@@ -1041,11 +1041,17 @@ pub struct PaintSettings {
     pub radius: f32,
     /// How far towards the weight one stroke goes.
     pub strength: f32,
+    /// Only what faces the view — Blender's Front Faces Only — so a stroke
+    /// on the front of an arm does not paint the back of it.
+    pub front_only: bool,
+    /// Softer towards the rim, as Blender's Smooth falloff; off, the whole
+    /// disc paints at full strength.
+    pub falloff: bool,
 }
 
 impl Default for PaintSettings {
     fn default() -> Self {
-        Self { weight: 1.0, radius: 40.0, strength: 0.5 }
+        Self { weight: 1.0, radius: 40.0, strength: 0.5, front_only: true, falloff: true }
     }
 }
 
@@ -2341,6 +2347,8 @@ fn draw_area_header(
                             ui.add(egui::DragValue::new(&mut p.radius).range(2.0..=400.0).speed(1.0).suffix(" px"));
                             ui.label(state.catalog.get("paint-strength"));
                             ui.add(egui::DragValue::new(&mut p.strength).range(0.0..=1.0).speed(0.01).max_decimals(2));
+                            ui.checkbox(&mut p.front_only, state.catalog.get("paint-front-only"));
+                            ui.checkbox(&mut p.falloff, state.catalog.get("paint-falloff"));
                         }
                     }
                 });
@@ -6397,6 +6405,8 @@ groups-none = No vertex groups
 paint-weight = Weight
 paint-radius = Radius
 paint-strength = Strength
+paint-front-only = Front Faces Only
+paint-falloff = Soft Edge
 menu-parent = Parent
 bind-automatic = With Automatic Weights
 bind-empty = With Empty Groups
@@ -7001,6 +7011,8 @@ groups-none = 버텍스 그룹 없음
 paint-weight = 웨이트
 paint-radius = 반경
 paint-strength = 세기
+paint-front-only = 앞면만
+paint-falloff = 부드러운 가장자리
 menu-parent = 부모
 bind-automatic = 자동 웨이트로
 bind-empty = 빈 그룹으로

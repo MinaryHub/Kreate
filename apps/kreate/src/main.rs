@@ -338,6 +338,15 @@ impl ViewportTarget {
 /// identical until the pointer moves. Deciding on release is what lets one
 /// gesture be both without either a spurious history step or a selection that
 /// flickers to something else mid-drag.
+/// A weight-paint stroke in progress: its modal session, what it has
+/// painted and how much, and the surface's vertex normals in the world — for
+/// Front Faces Only, worked out once because a stroke does not move the mesh.
+struct PaintStroke {
+    session: kreate_ops::ModalSession,
+    touched: std::collections::BTreeMap<u32, f32>,
+    normals: Vec<DVec3>,
+}
+
 /// Blender's circle select: a brush that selects what it passes over.
 struct CircleSelect {
     /// Its radius in the viewport's own pixels.
@@ -654,7 +663,7 @@ struct App {
     playing: Option<std::time::Instant>,
     /// The weight-paint brush stroke in progress: its modal session and the
     /// vertices it has crossed so far.
-    paint_stroke: Option<(kreate_ops::ModalSession, std::collections::BTreeSet<u32>)>,
+    paint_stroke: Option<PaintStroke>,
     /// The painted mesh as the screen shows it in weight paint mode, with the
     /// active group's weights where the renderer's ramp reads them — kept, so
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
@@ -4096,12 +4105,33 @@ impl App {
         params.set("strength", PropertyValue::Float(paint.strength as f64));
         match self.history.begin_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, "paint.weight_stroke", &params) {
             Ok(Some(session)) => {
-                self.paint_stroke = Some((session, std::collections::BTreeSet::new()));
+                self.paint_stroke = Some(PaintStroke { session, touched: Default::default(), normals: self.paint_normals(object) });
                 self.drive_paint_stroke();
             }
             Ok(None) => {}
             Err(e) => self.status(&format!("paint: {e}")),
         }
+    }
+
+    /// The painted mesh's vertex normals, in the world, as it is drawn.
+    fn paint_normals(&self, object: kreate_scene::document::ObjectId) -> Vec<DVec3> {
+        let Some(mesh) = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone()) else {
+            return Vec::new();
+        };
+        let p = mesh.positions();
+        let mut normals = vec![DVec3::ZERO; p.len()];
+        for f in 0..mesh.num_faces() {
+            let ring = mesh.face_verts(f);
+            let mut n = DVec3::ZERO;
+            for i in 0..ring.len() {
+                n += p[ring[i] as usize].as_dvec3().cross(p[ring[(i + 1) % ring.len()] as usize].as_dvec3());
+            }
+            for v in ring {
+                normals[*v as usize] += n;
+            }
+        }
+        let to_world = self.doc.world_transform(object).matrix3.inverse().transpose();
+        normals.into_iter().map(|n| (to_world * n).normalize_or_zero()).collect()
     }
 
     /// Adds the vertices under the brush to the stroke and re-applies it.
@@ -4130,22 +4160,44 @@ impl App {
             Some(m) => m.positions().to_vec(),
             None => cage.positions().to_vec(),
         };
-        let Some((session, touched)) = self.paint_stroke.as_mut() else { return };
-        let before = touched.len();
+        let paint = self.ui.paint;
+        let eye = self.camera.eye();
+        let Some(stroke) = self.paint_stroke.as_mut() else { return };
+        let mut grew = stroke.touched.is_empty();
         for (v, p) in positions.iter().enumerate() {
             let w = world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
-            if projector.project(w).is_some_and(|s| s.distance(at) <= radius) {
-                touched.insert(v as u32);
+            let Some(d) = projector.project(w).map(|s| s.distance(at)).filter(|d| *d <= radius) else { continue };
+            // Only when the normals are this mesh's: a stack that changed the
+            // vertex count paints the cage, and has none here.
+            let facing_away = stroke.normals.len() == positions.len()
+                && stroke.normals.get(v).is_some_and(|n| n.dot(eye - w) <= 0.0);
+            if paint.front_only && facing_away {
+                continue;
+            }
+            // Blender's Smooth falloff: full in the middle, nothing at the rim.
+            let amount = if paint.falloff {
+                let t = 1.0 - d / radius.max(1e-3);
+                t * t * (3.0 - 2.0 * t)
+            } else {
+                1.0
+            };
+            let slot = stroke.touched.entry(v as u32).or_insert(0.0);
+            if amount > *slot + 1e-3 {
+                *slot = amount;
+                grew = true;
             }
         }
-        if touched.len() == before && before > 0 {
+        if !grew {
             return;
         }
+        let touched = &stroke.touched;
+        let session = &mut stroke.session;
         let paint = self.ui.paint;
         let group = self.doc.object(object).and_then(|o| o.active_group.clone()).unwrap_or_default();
         let mut params = PropertyMap::new();
         params.set("group", PropertyValue::Text(group));
-        params.set("vertices", PropertyValue::Ints(touched.iter().copied().collect()));
+        params.set("vertices", PropertyValue::Ints(touched.keys().copied().collect()));
+        params.set("amounts", PropertyValue::Floats(touched.values().map(|a| *a as f64).collect()));
         params.set("weight", PropertyValue::Float(paint.weight as f64));
         params.set("strength", PropertyValue::Float(paint.strength as f64));
         if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, session, &params) {
@@ -4162,7 +4214,7 @@ impl App {
     fn end_mouse_drag(&mut self, slot: usize) {
         // A stroke ends where the button comes up: one step to undo.
         if slot == 0 {
-            if let Some((session, _)) = self.paint_stroke.take() {
+            if let Some(PaintStroke { session, .. }) = self.paint_stroke.take() {
                 self.history.commit_modal(session);
                 if let Some(entry) = self.history.last() {
                     println!("{}", entry.to_script_call());

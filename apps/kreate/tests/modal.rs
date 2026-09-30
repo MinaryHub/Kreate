@@ -1518,3 +1518,19 @@ fn a_loop_cut_begun_on_a_hovered_edge_names_it() {
     // Without one, the operator's own default — the selection — stands.
     assert_eq!(at(&mut pulled(Kind::LoopCut), (600.0, 300.0)).get("edge"), None);
 }
+
+#[test]
+fn ctrl_during_an_inset_holds_the_thickness_and_drives_the_depth() {
+    let mut g = pulled(Kind::Inset);
+    let thick = float(&at(&mut g, (500.0, 300.0)), "thickness");
+    assert!(thick > 0.1);
+    g.set_snap_inverted(true);
+    // Out from the middle while held: the thickness stays, the face comes out.
+    let p = at(&mut g, (560.0, 300.0));
+    assert_eq!(float(&p, "thickness"), thick);
+    let depth = float(&p, "depth");
+    assert!(depth > 0.1, "{depth}");
+    // Released: the depth stays where it was left.
+    g.set_snap_inverted(false);
+    assert!((float(&at(&mut g, (560.0, 300.0)), "depth") - depth).abs() < 1e-9);
+}

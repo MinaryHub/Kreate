@@ -315,6 +315,12 @@ pub struct Gesture {
     /// The edge a loop cut runs across when the pointer chose it rather than
     /// the selection — passed on to the operator, so the cut replays.
     pub edge: Option<u32>,
+    /// An inset's depth, Blender's Ctrl: while Ctrl is held the thickness
+    /// stays where it was and the pointer pushes the inset face in or out.
+    /// The thickness it was held at, the pull it was held from, and the depth
+    /// banked from earlier holds.
+    depth_hold: Option<(f64, f64)>,
+    depth: f64,
 }
 
 impl Gesture {
@@ -377,6 +383,8 @@ impl Gesture {
             slide: None,
             cuts: 1,
             edge: None,
+            depth_hold: None,
+            depth: 0.0,
         };
         // Seeded from the starting position, so the *first* motion counts. Left
         // unseeded, the first increment has nothing to measure against and is
@@ -501,7 +509,28 @@ impl Gesture {
 
     /// Inverts the snap setting for this drag, as a held `Ctrl` does.
     pub fn set_snap_inverted(&mut self, inverted: bool) {
+        // An inset has another use for Ctrl: depth, as in Blender.
+        if self.kind == Kind::Inset {
+            match (inverted, self.depth_hold) {
+                (true, None) => self.depth_hold = Some((self.inset_thickness(), self.pull())),
+                (false, Some(_)) => {
+                    self.depth = self.inset_depth();
+                    self.depth_hold = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         self.snap_inverted = inverted;
+    }
+
+    /// The inset's depth: what earlier holds banked, plus this hold's pull —
+    /// the pointer moving out from the middle pushes the face out.
+    fn inset_depth(&self) -> f64 {
+        match self.depth_hold {
+            Some((_, from)) => self.depth + (from - self.pull()),
+            None => self.depth,
+        }
     }
 
     /// Turns snapping on, or off again, for the rest of this drag — `B`.
@@ -632,7 +661,12 @@ impl Gesture {
                 params.set("offset", PropertyValue::Float(self.extrude_distance(dx, dy)));
             }
             Kind::Inset => {
-                params.set("thickness", PropertyValue::Float(self.inset_thickness()));
+                let thickness = match self.depth_hold {
+                    Some((held, _)) => held,
+                    None => self.inset_thickness(),
+                };
+                params.set("thickness", PropertyValue::Float(thickness));
+                params.set("depth", PropertyValue::Float(self.inset_depth()));
             }
             Kind::Bevel => {
                 params.set("width", PropertyValue::Float(self.bevel_width()));
@@ -920,7 +954,10 @@ impl Gesture {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 format!("{:.3}", self.extrude_distance(dx, dy))
             }
-            Kind::Inset => format!("thickness {:.3}", self.inset_thickness()),
+            Kind::Inset => {
+                let thickness = self.depth_hold.map(|(held, _)| held).unwrap_or_else(|| self.inset_thickness());
+                format!("thickness {thickness:.3}  depth {:.3}  (Ctrl: depth)", self.inset_depth())
+            }
             Kind::Bevel => format!("width {:.3}", self.bevel_width()),
             Kind::LoopCut => {
                 let (dx, dy) = self.effective_delta(self.cursor);

@@ -92,3 +92,19 @@ fn normalize_makes_each_vertex_sum_to_one() {
     assert_eq!(weights(&doc, mesh, "A")[1], 0.0, "a vertex with no weight got some");
     assert!(!run(&registry, &mut history, &mut doc, "paint.weights_normalize", &[]), "normalizing twice changed something");
 }
+
+#[test]
+fn a_soft_brush_paints_its_rim_less_than_its_middle() {
+    let (registry, mut history, mut doc, mesh) = wired();
+    let stroke = [
+        ("group", text("Arm")),
+        ("vertices", PropertyValue::Ints(vec![0, 1, 1])),
+        ("weight", PropertyValue::Float(1.0)),
+        ("strength", PropertyValue::Float(1.0)),
+        // Vertex 1 crossed twice: the stronger pass counts, once.
+        ("amounts", PropertyValue::Floats(vec![1.0, 0.25, 0.5])),
+    ];
+    assert!(run(&registry, &mut history, &mut doc, "paint.weight_stroke", &stroke));
+    let w = weights(&doc, mesh, "Arm");
+    assert_eq!((w[0], w[1]), (1.0, 0.5));
+}

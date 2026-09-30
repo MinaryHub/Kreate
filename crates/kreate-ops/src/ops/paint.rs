@@ -179,11 +179,15 @@ pub struct StrokeParams {
     /// How far towards it: one sets it, a half goes halfway.
     #[param(min = 0.0, max = 1.0)]
     pub strength: f64,
+    /// How much of the strength each vertex gets, parallel to `vertices` —
+    /// the brush's falloff, less towards its edge. Empty for all of it.
+    #[param(hidden)]
+    pub amounts: Vec<f64>,
 }
 
 impl Default for StrokeParams {
     fn default() -> Self {
-        Self { group: String::new(), vertices: Vec::new(), weight: 1.0, strength: 1.0 }
+        Self { group: String::new(), vertices: Vec::new(), weight: 1.0, strength: 1.0, amounts: Vec::new() }
     }
 }
 
@@ -213,12 +217,18 @@ impl Operator for Stroke {
         }
         let mut w = weights(doc.document(), mesh, &params.group);
         let (target, k) = (params.weight.clamp(0.0, 1.0) as f32, params.strength.clamp(0.0, 1.0) as f32);
-        let mut once: Vec<u32> = params.vertices.clone();
-        once.sort_unstable();
-        once.dedup();
-        for v in once {
+        // Each vertex once, with the most the brush gave it.
+        let mut once: Vec<(u32, f32)> = params
+            .vertices
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (*v, params.amounts.get(i).map(|a| a.clamp(0.0, 1.0) as f32).unwrap_or(1.0)))
+            .collect();
+        once.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+        once.dedup_by_key(|(v, _)| *v);
+        for (v, amount) in once {
             if let Some(x) = w.get_mut(v as usize) {
-                *x += (target - *x) * k;
+                *x += (target - *x) * k * amount;
             }
         }
         let Some(m) = doc.document_mut().mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
