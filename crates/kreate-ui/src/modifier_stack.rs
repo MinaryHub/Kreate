@@ -34,6 +34,9 @@ pub struct ModifierRow {
     pub schema: &'static [PropertyDesc],
     /// The entry's current parameters, in that operator's terms.
     pub params: PropertyMap,
+    /// For a kind that names another object (a boolean's `object`): the
+    /// objects it may name, offered as a list rather than typed.
+    pub choices: Vec<String>,
 }
 
 /// Labels for the panel, resolved once per frame.
@@ -49,6 +52,7 @@ pub struct ModifierText {
     pub move_up: String,
     pub move_down: String,
     pub enabled: String,
+    pub apply: String,
     /// One entry per addable kind, in the order the operator expects.
     pub kinds: Vec<String>,
 }
@@ -64,6 +68,7 @@ impl ModifierText {
             move_up: catalog.format("modifier-move-up", TextKind::Tooltip, &[]),
             move_down: catalog.format("modifier-move-down", TextKind::Tooltip, &[]),
             enabled: catalog.format("modifier-enabled", TextKind::Tooltip, &[]),
+            apply: catalog.format("modifier-apply", TextKind::Tooltip, &[]),
             kinds: kind_keys.iter().map(|k| ui(k)).collect(),
         }
     }
@@ -139,6 +144,11 @@ fn header(
             {
                 queue.run("object.modifier_remove", index_params(row.index));
             }
+            // Apply: baked into the mesh, off the stack.
+            // i18n-exempt: geometric glyphs standing in for icons
+            if ui.small_button("\u{2713}").on_hover_text(&text.apply).clicked() {
+                queue.run("object.modifier_apply", index_params(row.index));
+            }
             // i18n-exempt: geometric glyphs standing in for icons
             if ui
                 .add_enabled(position > 0, egui::Button::new("\u{25B2}").small())
@@ -162,12 +172,37 @@ fn header(
 fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut CommandQueue) {
     // `index` says which entry the setter writes to; it is not a parameter of
     // the modifier and editing it would move the change to another entry.
+    let picks_object = !row.choices.is_empty() && row.schema.iter().any(|d| d.name == "object");
     let editable: Vec<PropertyDesc> = row
         .schema
         .iter()
-        .filter(|d| d.name != "index")
+        .filter(|d| d.name != "index" && !(picks_object && d.name == "object"))
         .cloned()
         .collect();
+    // The other object, from a list of the ones there are.
+    if picks_object {
+        let current = match row.params.get("object") {
+            Some(PropertyValue::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
+        let mut chosen = current.clone();
+        ui.horizontal(|ui| {
+            ui.label(catalog.format(&format!("{}-object", row.op_id.replace(['.', '_'], "-")), TextKind::Ui, &[]));
+            egui::ComboBox::from_id_salt(("modifier-object", row.index))
+                .selected_text(if current.is_empty() { "\u{2014}".to_string() } else { current.clone() })
+                .show_ui(ui, |ui| {
+                    for name in &row.choices {
+                        ui.selectable_value(&mut chosen, name.clone(), name.as_str());
+                    }
+                });
+        });
+        if chosen != current {
+            let mut params = row.params.clone();
+            params.set("object", PropertyValue::Text(chosen));
+            params.set("index", PropertyValue::Int(row.index as i64));
+            queue.push(Command::RunOperator { op_id: row.op_id.clone(), params });
+        }
+    }
 
     let changed = crate::property_editor::property_editor(
         ui,
@@ -245,6 +280,7 @@ mod tests {
             op_id: "object.modifier_set_subdivide".into(),
             schema: SCHEMA,
             params,
+            choices: Vec::new(),
         }
     }
 

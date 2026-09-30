@@ -821,6 +821,15 @@ pub fn modifier_rows(
                 op_id: op_id.to_string(),
                 schema: info.schema,
                 params: setter_params(doc, index as u32, &entry.kind),
+                // A boolean names another mesh object: offer them.
+                choices: match entry.kind {
+                    ModifierKind::Boolean(_) => doc
+                        .objects()
+                        .filter(|(other, o)| *other != id && o.mesh().is_some())
+                        .map(|(_, o)| o.name.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                },
             })
         })
         .collect()
@@ -6531,7 +6540,11 @@ modifier-add = Add Modifier
 modifier-remove = Remove
 modifier-move-up = Move towards the input
 modifier-move-down = Move towards the result
-modifier-enabled = Apply this modifier
+modifier-enabled = Use this modifier
+modifier-apply = Apply: bake into the mesh and remove from the stack
+op-object-modifier-set-boolean-object = Object
+op-object-modifier-apply = Apply Modifier
+op-object-modifier-apply-desc = Bakes the modifier into the mesh and takes it off the stack.
 modifier-mirror = Mirror
 modifier-subdivide = Subdivision
 modifier-array = Array
@@ -7131,7 +7144,11 @@ modifier-add = 모디파이어 추가
 modifier-remove = 제거
 modifier-move-up = 입력 쪽으로 이동
 modifier-move-down = 결과 쪽으로 이동
-modifier-enabled = 이 모디파이어 적용
+modifier-enabled = 이 모디파이어 사용
+modifier-apply = 적용: 메시에 굳히고 스택에서 뺍니다
+op-object-modifier-set-boolean-object = 오브젝트
+op-object-modifier-apply = 모디파이어 적용
+op-object-modifier-apply-desc = 모디파이어를 메시에 굳히고 스택에서 뺍니다.
 modifier-mirror = 미러
 modifier-subdivide = 서브디비전
 modifier-array = 배열

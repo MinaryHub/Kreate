@@ -148,6 +148,51 @@ impl Operator for Remove {
     }
 }
 
+/// Bakes one modifier into the mesh and takes it off the stack — Blender's
+/// Apply. Only in object mode, and not for a mesh another object shares: the
+/// other object would change too, which Blender refuses the same way.
+pub struct Apply;
+
+impl Operator for Apply {
+    type Params = IndexParams;
+
+    fn id() -> &'static str {
+        "object.modifier_apply"
+    }
+    fn label() -> &'static str {
+        "Apply Modifier"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        ctx.mode.acts_on() == crate::mode::ActsOn::Objects && target(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document();
+        let Some(mesh) = d.object(id).and_then(|o| o.mesh()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if d.mesh_users(mesh) > 1 {
+            return Err(OpError::Failed("a mesh used by more than one object cannot have a modifier applied".into()));
+        }
+        let Some(result) = kreate_scene::modifier::apply_one(d, id, params.index as usize) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document_mut();
+        if let Some(m) = d.mesh_mut(mesh) {
+            *m = result;
+        }
+        d.object_mut(id).expect("target checked").modifiers.remove(params.index as usize);
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Switches one modifier on or off, keeping its parameters.
 pub struct Toggle;
 
@@ -588,6 +633,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetBevel>();
     registry.register::<SetBoolean>();
     registry.register::<Add>();
+    registry.register::<Apply>();
     registry.register::<Remove>();
     registry.register::<Toggle>();
     registry.register::<Move>();
@@ -922,6 +968,7 @@ mod tests {
             "object.modifier_set_solidify",
             "object.modifier_set_bevel",
             "object.modifier_set_boolean",
+            "object.modifier_apply",
         ] {
             assert!(r.get(id).is_some(), "{id} is not registered");
         }
@@ -974,4 +1021,27 @@ mod tests {
         p.set("object", PropertyValue::Text("Nobody".into()));
         assert!(h.dispatch(&r, &mut d, &c, "object.modifier_set_boolean", &p).is_err());
     }
+
+    #[test]
+    fn apply_bakes_the_modifier_into_the_mesh_and_takes_it_off() {
+        let (r, mut h, mut d, id, c) = setup();
+        run(&r, &mut h, &mut d, &c, "object.modifier_add", &[("kind", PropertyValue::Enum(3))]);
+        let mut cache = ModifierCache::new();
+        let drawn = cache.evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still()).unwrap().num_faces();
+        run(&r, &mut h, &mut d, &c, "object.modifier_apply", &[("index", PropertyValue::Int(0))]);
+        let o = d.object(id).unwrap();
+        assert!(o.modifiers.is_empty());
+        assert_eq!(d.mesh(o.mesh().unwrap()).unwrap().num_faces(), drawn, "the mesh is not what was drawn");
+        // One step to undo, and it all comes back.
+        assert!(h.undo(&mut d));
+        assert_eq!(d.object(id).unwrap().modifiers.len(), 1);
+        assert_eq!(d.mesh(d.object(id).unwrap().mesh().unwrap()).unwrap().num_faces(), 6);
+        // A shared mesh is refused.
+        let mesh = d.object(id).unwrap().mesh().unwrap();
+        d.add_object(Object::new("Twin", ObjectData::Mesh(mesh)));
+        let mut p = PropertyMap::new();
+        p.set("index", PropertyValue::Int(0));
+        assert!(h.dispatch(&r, &mut d, &c, "object.modifier_apply", &p).is_err());
+    }
 }
+

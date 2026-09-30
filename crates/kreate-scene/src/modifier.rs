@@ -286,6 +286,18 @@ pub fn apply_stack_with(
     current.unwrap_or_else(|| input.clone())
 }
 
+/// The mesh `object`'s modifier at `index` would make of its datablock on its
+/// own — what Apply bakes. Blender's rule: the one modifier, on the mesh as
+/// stored, whatever sits below it in the stack. `None` for no such modifier.
+pub fn apply_one(doc: &Document, object: ObjectId, index: usize) -> Option<MeshData> {
+    let o = doc.object(object)?;
+    let modifier = *o.modifiers.get(index)?;
+    let input = doc.mesh(o.mesh()?)?;
+    let one = [ModifierInstance { enabled: true, ..modifier }];
+    let operands = operands_of(doc, object, &one);
+    Some(apply_stack_with(input, &one, &EvalCtx::still(), &operands))
+}
+
 /// The other objects `id`'s booleans read, resolved now: each one's mesh and
 /// where it is relative to `id`. An operand that is `id` itself, or not a mesh,
 /// is left out, and its boolean passes its input through.
