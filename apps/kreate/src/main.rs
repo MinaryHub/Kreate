@@ -760,7 +760,7 @@ impl App {
     }
 
     fn run_op(&mut self, op_id: &str, params: PropertyMap) {
-        let params = with_autokey(self.autokey_frame(), op_id, &params);
+        let params = self.app_params().apply(op_id, &params);
         // Recorded before it runs, not after. The operator that panics is the one
         // most worth having in the report, and an entry written on success would
         // be missing exactly that one.
@@ -1340,6 +1340,7 @@ impl App {
             ("mesh.hide", &[("unselected", PropertyValue::Bool(false))]),
             ("mesh.hide", &[("unselected", PropertyValue::Bool(true))]),
             ("mesh.reveal", &[]),
+            ("view.cursor_place", &[]),
             ("object.select_all", &[("action", PropertyValue::Enum(0))]),
             ("object.select_all", &[("action", PropertyValue::Enum(1))]),
             ("object.select_all", &[("action", PropertyValue::Enum(3))]),
@@ -1599,7 +1600,7 @@ impl App {
             .filter(|_| kind == kreate::modal::Kind::LoopCut)
             .and_then(|(edge, _)| kreate_ops::ops::mesh::edge_in_world(&self.doc, edge))
             .map(|(a, b)| (a + b) * 0.5);
-        let Some(pivot) = hovered_edge.or_else(|| self.selection_pivot()) else {
+        let Some(pivot) = hovered_edge.or_else(|| self.pivot_override(kind)).or_else(|| self.selection_pivot()) else {
             self.status("nothing selected");
             return;
         };
@@ -1675,7 +1676,7 @@ impl App {
         let op_id = kind.op_id(mode);
         // Started with the identity parameters, so pressing the key alone moves
         // nothing. The first pointer motion is what does anything.
-        let start = with_autokey(self.autokey_frame(), op_id, &gesture.params());
+        let start = self.app_params().apply(op_id, &gesture.params());
         match self.history.begin_modal(
             &self.registry,
             &mut self.doc,
@@ -1772,7 +1773,8 @@ impl App {
         }
         // An object flattened by a zero scale has no way back from world space.
         // The operator skips the same case, so this mesh would not move anyway.
-        let Some(place) = kreate_render::Placement::new(to_world, weighing.pivot) else {
+        let pivot = if self.ui.pivot == 3 { self.doc.cursor } else { weighing.pivot };
+        let Some(place) = kreate_render::Placement::new(to_world, pivot) else {
             return;
         };
         // The one expensive thing a preview costs, and it is paid once per drag
@@ -1965,11 +1967,11 @@ impl App {
 
         // Restore and re-apply from the original — §2.2's rule. `update_modal`
         // owns that; nothing here is incremental.
-        let key = self.autokey_frame();
+        let fill = self.app_params();
         let Some((_, session)) = &mut self.gesture else {
             return;
         };
-        let params = with_autokey(key, session.op_id(), &params);
+        let params = fill.apply(session.op_id(), &params);
         if let Err(e) = self.history.update_modal(
             &self.registry,
             &mut self.doc,
@@ -1986,7 +1988,7 @@ impl App {
 
     /// Confirms the gesture: one history entry, carrying the final parameters.
     fn confirm_gesture(&mut self) {
-        let key = self.autokey_frame();
+        let fill = self.app_params();
         let Some((gesture, mut session)) = self.gesture.take() else {
             return;
         };
@@ -1999,7 +2001,7 @@ impl App {
         // The preview is dropped rather than restored: this run rewrites the
         // positions, which makes a new handle, which `gpu_sync` repositions. One
         // extraction, at mouse-up, instead of one per frame.
-        let final_params = with_autokey(key, session.op_id(), &gesture.params());
+        let final_params = fill.apply(session.op_id(), &gesture.params());
         if self
             .gfx
             .as_mut()
@@ -2049,6 +2051,70 @@ impl App {
     /// the transform and the other hand is on the modifiers. Multiplicative
     /// rather than additive, so one notch feels the same whether the radius is a
     /// centimetre or ten metres.
+    /// The application's additions to an operator's parameters, as of now.
+    fn app_params(&self) -> AppParams {
+        AppParams { key: self.autokey_frame(), pivot: self.ui.pivot, cursor: self.doc.cursor }
+    }
+
+    /// Where a rotation or scale turns about, on screen as in the operator:
+    /// the header's pivot point, or `None` for the selection's own middle.
+    fn pivot_override(&self, kind: kreate::modal::Kind) -> Option<DVec3> {
+        if !matches!(kind, kreate::modal::Kind::Rotate | kreate::modal::Kind::Scale) {
+            return None;
+        }
+        match self.ui.pivot {
+            3 => Some(self.doc.cursor),
+            2 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects => {
+                self.doc.selection.active.map(|a| self.doc.world_transform(a).translation)
+            }
+            _ => None,
+        }
+    }
+
+    /// Shift+Right-click: the 3D cursor onto whatever is under the pointer, or
+    /// onto the plane through where it is now, facing the view.
+    fn place_cursor(&mut self) {
+        let Some(ndc) = self.cursor_ndc() else { return };
+        let aspect = self.viewport_aspect();
+        self.evaluate_scene();
+        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+        let at = match hit {
+            Some(hit) => hit.point,
+            None => {
+                let eye = self.camera.eye();
+                let dir = self.camera.ray_direction(ndc, aspect).as_dvec3();
+                let normal = self.camera.forward();
+                let denom = dir.dot(normal);
+                if denom.abs() < 1e-9 {
+                    return;
+                }
+                eye + dir * ((self.doc.cursor - eye).dot(normal) / denom)
+            }
+        };
+        self.set_cursor(at);
+    }
+
+    fn set_cursor(&mut self, at: DVec3) {
+        let mut params = PropertyMap::new();
+        params.set("location", PropertyValue::Vec3(at.to_array()));
+        self.run_op("scene.cursor_set", params);
+    }
+
+    /// Shift+S ▸ Selection to Cursor: the selection moved so its middle is on
+    /// the cursor, by the mode's own move — one step, and the move a script
+    /// would write.
+    fn selection_to_cursor(&mut self) {
+        let Some(from) = self.selection_pivot() else {
+            self.status("nothing selected");
+            return;
+        };
+        let op = self.op_ctx.mode.info().transform[0];
+        let delta = self.doc.cursor - from;
+        let mut params = PropertyMap::new();
+        params.set("translation", PropertyValue::Vec3(delta.to_array()));
+        self.run_op(op, params);
+    }
+
     /// `Ctrl+R`: from here until a click, the edge under the pointer shows the
     /// loops that would be cut across it. Blender's way — no need to select
     /// the edge first.
@@ -5048,6 +5114,14 @@ impl App {
             "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),
             "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
+            // The 3D cursor.
+            "view.cursor_place" => self.place_cursor(),
+            "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),
+            "view.cursor_to_selected" => match self.selection_pivot() {
+                Some(at) => self.set_cursor(at),
+                None => self.status("nothing selected"),
+            },
+            "view.selection_to_cursor" => self.selection_to_cursor(),
             "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "armature.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
@@ -5613,6 +5687,19 @@ impl ApplicationHandler for App {
                     self.open_context_menu();
                     return;
                 }
+                // A press the keymap names — Shift+Right-click for the 3D
+                // cursor. Drags are resolved when they start moving.
+                if pressed && button == MouseButton::Right && self.gesture.is_none() && self.press_belongs_to_viewport() {
+                    if let Some(action) = self.keymap.resolve(
+                        self.key_context(),
+                        &KeyInput::Mouse(KeyMouse::Right),
+                        self.modifiers(),
+                        EventKind::Press,
+                    ) {
+                        self.dispatch(&action);
+                        return;
+                    }
+                }
                 if let Some(slot) = slot {
                     let mapped = [KeyMouse::Left, KeyMouse::Middle, KeyMouse::Right][slot];
                     if pressed && !self.buttons[slot] {
@@ -5965,6 +6052,46 @@ fn install_panic_hook() {
 ///
 /// Not when the caller already named them: a script line or a replayed step
 /// that says `autokey=False` means it, whatever the record button says now.
+/// What the application adds to an operator's parameters from its own state:
+/// the auto-key frame, the pivot point, and the 3D cursor for a new object.
+/// Taken as a copy, so it can be read before a gesture's session is borrowed.
+#[derive(Clone, Copy, Debug)]
+struct AppParams {
+    key: Option<f64>,
+    pivot: u32,
+    cursor: DVec3,
+}
+
+impl AppParams {
+    fn apply(&self, op_id: &str, params: &PropertyMap) -> PropertyMap {
+        let mut out = with_autokey(self.key, op_id, params);
+        // The header's pivot point, in each operator's own numbering; a
+        // parameter already given — a replay, a script — wins.
+        let pivot = match op_id {
+            "object.rotate" | "object.scale" => Some([0, 1, 2, 4][self.pivot.min(3) as usize]),
+            "mesh.rotate" | "mesh.scale" => Some(u32::from(self.pivot == 3)),
+            _ => None,
+        };
+        if let (Some(pivot), None) = (pivot, out.get("pivot")) {
+            out.set("pivot", PropertyValue::Enum(pivot));
+        }
+        // New objects appear at the 3D cursor. A lamp and a camera keep their
+        // own offset from it — above and back — so a new one lights and sees
+        // the thing at the cursor rather than sitting inside it.
+        let offset = match op_id {
+            "object.add_primitive" | "object.add_empty" | "object.add_armature" => Some(DVec3::ZERO),
+            "object.add_light" => Some(DVec3::new(0.0, 0.0, 4.0)),
+            "object.add_camera" => Some(DVec3::new(0.0, -8.0, 2.0)),
+            _ => None,
+        };
+        if let (Some(offset), None) = (offset, out.get("location")) {
+            let at = self.cursor + offset;
+            out.set("location", PropertyValue::Vec3(at.to_array()));
+        }
+        out
+    }
+}
+
 fn with_autokey(frame: Option<f64>, op_id: &str, params: &PropertyMap) -> PropertyMap {
     let mut out = params.clone();
     let transforms = matches!(
@@ -6015,6 +6142,25 @@ fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_pivot_point_and_the_cursor_reach_the_operators() {
+        use super::*;
+        let fill = AppParams { key: None, pivot: 3, cursor: DVec3::new(1.0, 2.0, 3.0) };
+        let none = PropertyMap::new();
+        assert_eq!(fill.apply("object.rotate", &none).get("pivot"), Some(&PropertyValue::Enum(4)));
+        assert_eq!(fill.apply("mesh.scale", &none).get("pivot"), Some(&PropertyValue::Enum(1)));
+        assert_eq!(fill.apply("mesh.translate", &none).get("pivot"), None);
+        // A given pivot is not overruled.
+        let mut given = PropertyMap::new();
+        given.set("pivot", PropertyValue::Enum(0));
+        assert_eq!(fill.apply("object.scale", &given).get("pivot"), Some(&PropertyValue::Enum(0)));
+        // New things at the cursor; a lamp above it.
+        assert_eq!(fill.apply("object.add_primitive", &none).get("location"), Some(&PropertyValue::Vec3([1.0, 2.0, 3.0])));
+        assert_eq!(fill.apply("object.add_light", &none).get("location"), Some(&PropertyValue::Vec3([1.0, 2.0, 7.0])));
+        let median = AppParams { pivot: 0, ..fill };
+        assert_eq!(median.apply("mesh.rotate", &none).get("pivot"), Some(&PropertyValue::Enum(0)));
+    }
+
     #[test]
     fn every_key_that_opens_a_pie_can_be_watched_for_its_release() {
         // The pie closes when its key is let go, which it can only see if the

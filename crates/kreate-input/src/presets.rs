@@ -347,6 +347,23 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             enum_param(Action::new("view.select_mode"), "mode", 2),
         ),
+        // Blender's Shift+S: the snap pie — the 3D cursor to the selection or
+        // the world's origin, or the selection to the cursor.
+        key(
+            "view.snap_pie",
+            "S",
+            Context::Viewport,
+            Action::new("app.pie").with("menu", PropertyValue::Text("snap".into())),
+        )
+        .with_modifiers(Modifiers::shift()),
+        // Shift+Right-click puts the 3D cursor on what is under the pointer.
+        Binding::new(
+            "view.cursor_place",
+            Context::Viewport,
+            Input::Mouse(MouseButton::Right),
+            Action::new("view.cursor_place"),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "object.add_next",
             "A",

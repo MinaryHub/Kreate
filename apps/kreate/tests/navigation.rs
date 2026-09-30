@@ -288,6 +288,12 @@ fn the_pick_cache_survives_an_edit_between_queries() {
 
 /// Ids the application handles itself rather than sending to the registry.
 const APP_ACTIONS: &[&str] = &[
+    // The 3D cursor: placed from the pointer and the selection, which the
+    // application knows and the operator (`scene.cursor_set`) is handed.
+    "view.cursor_place",
+    "view.cursor_to_origin",
+    "view.cursor_to_selected",
+    "view.selection_to_cursor",
     // File commands are the application's, not the document's: there is no
     // undo step for "the document you had open is gone".
     "file.new",

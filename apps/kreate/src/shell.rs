@@ -238,6 +238,10 @@ pub struct ShellState {
     /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
     /// polyline per loop. Empty otherwise.
     pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
+    /// What a rotation or a scale turns about — Blender's Pivot Point:
+    /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
+    /// 3D cursor.
+    pub pivot: u32,
     /// What is being typed in each Drivers editor, per area.
     driver_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::drivers::DriversState>,
     /// The clock, published by the application each frame.
@@ -539,6 +543,7 @@ impl Default for ShellState {
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
             loop_cut_preview: Vec::new(),
+            pivot: 0,
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -1111,6 +1116,26 @@ struct Labels {
     panel_surface: String,
     panel_light: String,
     menu_object: String,
+    pie_snap: String,
+    cursor_to_selected: String,
+    cursor_to_origin: String,
+    selection_to_cursor: String,
+    menu_apply: String,
+    apply_location: String,
+    apply_rotation: String,
+    apply_scale: String,
+    apply_all: String,
+    apply_rotation_scale: String,
+    menu_set_origin: String,
+    origin_to_geometry: String,
+    origin_to_cursor: String,
+    geometry_to_origin: String,
+    menu_snap: String,
+    pivot_label: String,
+    pivot_median: String,
+    pivot_individual: String,
+    pivot_active: String,
+    pivot_cursor: String,
     menu_mesh: String,
     menu_edge: String,
     menu_face: String,
@@ -1302,6 +1327,26 @@ impl Labels {
             panel_surface: t("panel-surface"),
             panel_light: t("panel-light"),
             menu_object: t("menu-object"),
+            pie_snap: t("pie-snap"),
+            cursor_to_selected: t("op-view-cursor-to-selected"),
+            cursor_to_origin: t("op-view-cursor-to-origin"),
+            selection_to_cursor: t("op-view-selection-to-cursor"),
+            menu_apply: t("menu-apply"),
+            apply_location: t("apply-location"),
+            apply_rotation: t("apply-rotation"),
+            apply_scale: t("apply-scale"),
+            apply_all: t("apply-all"),
+            apply_rotation_scale: t("apply-rotation-scale"),
+            menu_set_origin: t("menu-set-origin"),
+            origin_to_geometry: t("origin-to-geometry"),
+            origin_to_cursor: t("origin-to-cursor"),
+            geometry_to_origin: t("geometry-to-origin"),
+            menu_snap: t("menu-snap"),
+            pivot_label: t("pivot-point"),
+            pivot_median: t("pivot-median"),
+            pivot_individual: t("pivot-individual"),
+            pivot_active: t("pivot-active"),
+            pivot_cursor: t("pivot-cursor"),
             menu_mesh: t("menu-mesh"),
             menu_edge: t("menu-edge"),
             menu_face: t("menu-face"),
@@ -1631,8 +1676,72 @@ fn pie_entries(
                 })
                 .collect(),
         ),
+        // Blender's Shift+S, the three a modeller reaches for.
+        "snap" => (
+            l.pie_snap.clone(),
+            vec![
+                (MenuEntry::new("view.cursor_to_selected", &l.cursor_to_selected, dispatch("view.cursor_to_selected")), false),
+                (MenuEntry::new("view.selection_to_cursor", &l.selection_to_cursor, dispatch("view.selection_to_cursor")), false),
+                (MenuEntry::new("view.cursor_to_origin", &l.cursor_to_origin, dispatch("view.cursor_to_origin")), false),
+            ],
+        ),
         _ => return None,
     })
+}
+
+/// The object menu's Apply, Set Origin and Snap submenus — Blender's, in the
+/// Object menu where it keeps them.
+fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    let apply = |label: &str, location: bool, rotation: bool, scale: bool| {
+        MenuNode::Entry(
+            MenuEntry::new(
+                "object.transform_apply",
+                label,
+                op(
+                    "object.transform_apply",
+                    &[("location", V::Bool(location)), ("rotation", V::Bool(rotation)), ("scale", V::Bool(scale))],
+                ),
+            )
+            .variant("location", V::Bool(location))
+            .variant("rotation", V::Bool(rotation))
+            .variant("scale", V::Bool(scale)),
+        )
+    };
+    let origin = |label: &str, kind: u32| {
+        MenuNode::Entry(
+            MenuEntry::new("object.origin_set", label, op("object.origin_set", &[("kind", V::Enum(kind))]))
+                .variant("kind", V::Enum(kind)),
+        )
+    };
+    vec![
+        MenuNode::Sub(
+            l.menu_apply.clone(),
+            vec![
+                apply(&l.apply_location, true, false, false),
+                apply(&l.apply_rotation, false, true, false),
+                apply(&l.apply_scale, false, false, true),
+                apply(&l.apply_all, true, true, true),
+                apply(&l.apply_rotation_scale, false, true, true),
+            ],
+        ),
+        MenuNode::Sub(
+            l.menu_set_origin.clone(),
+            vec![
+                origin(&l.origin_to_geometry, 0),
+                origin(&l.origin_to_cursor, 1),
+                origin(&l.geometry_to_origin, 2),
+            ],
+        ),
+        MenuNode::Sub(
+            l.menu_snap.clone(),
+            vec![
+                entry("view.cursor_to_selected", &l.cursor_to_selected, dispatch("view.cursor_to_selected")),
+                entry("view.selection_to_cursor", &l.selection_to_cursor, dispatch("view.selection_to_cursor")),
+                entry("view.cursor_to_origin", &l.cursor_to_origin, dispatch("view.cursor_to_origin")),
+            ],
+        ),
+    ]
 }
 
 /// Draws the open pie, and runs what it chooses.
@@ -1822,6 +1931,32 @@ fn draw_area(
                             ui.painter()
                                 .with_clip_rect(inner)
                                 .circle_stroke(p, state.paint.radius, egui::Stroke::new(1.2, theme.text));
+                        }
+                    }
+                    // The 3D cursor: Blender's red and white ring with a cross.
+                    if let Some(at) = state.projector.and_then(|p| p.project(doc.cursor)).filter(|p| inner.contains(*p)) {
+                        let painter = ui.painter().with_clip_rect(inner);
+                        let r = 9.0;
+                        for i in 0..8 {
+                            let a0 = i as f32 * std::f32::consts::TAU / 8.0;
+                            let a1 = a0 + std::f32::consts::TAU / 8.0;
+                            let colour = if i % 2 == 0 {
+                                egui::Color32::from_rgb(230, 60, 60)
+                            } else {
+                                egui::Color32::WHITE
+                            };
+                            let arc: Vec<egui::Pos2> = (0..=6)
+                                .map(|k| {
+                                    let t = a0 + (a1 - a0) * k as f32 / 6.0;
+                                    at + egui::vec2(t.cos(), t.sin()) * r
+                                })
+                                .collect();
+                            painter.add(egui::Shape::line(arc, egui::Stroke::new(1.5, colour)));
+                        }
+                        let cross = egui::Stroke::new(1.0, egui::Color32::from_gray(20));
+                        for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
+                            painter.line_segment([at + d * (r - 4.0), at + d * (r + 5.0)], cross);
+                            painter.line_segment([at - d * (r - 4.0), at - d * (r + 5.0)], cross);
                         }
                     }
                     // The loops `Ctrl+R` would cut, in Blender's yellow.
@@ -2043,6 +2178,26 @@ fn draw_area_header(
                                 }
                             }
                             ui.spacing_mut().item_spacing.x = spacing;
+                        }
+                        // Blender's Pivot Point, where it keeps it: in the
+                        // header, for the modes G/R/S work on objects or mesh
+                        // elements in.
+                        if matches!(
+                            mode.acts_on(),
+                            kreate_ops::mode::ActsOn::Objects | kreate_ops::mode::ActsOn::MeshElements
+                        ) {
+                            ui.separator();
+                            let names = [&l.pivot_median, &l.pivot_individual, &l.pivot_active, &l.pivot_cursor];
+                            let current = names[state.pivot.min(3) as usize].clone();
+                            egui::ComboBox::from_id_salt(("pivot", area.id.0))
+                                .selected_text(current)
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in names.iter().enumerate() {
+                                        ui.selectable_value(&mut state.pivot, i as u32, name.as_str());
+                                    }
+                                })
+                                .response
+                                .on_hover_text(&l.pivot_label);
                         }
                         // The brush, where Blender keeps it: in the header of
                         // the mode that uses it.
@@ -2387,7 +2542,12 @@ fn viewport_menus(
         match menu {
             kreate_ops::mode::Menu::Object => out.push(TopMenu {
                 label: l.menu_object.clone(),
-                nodes: object_nodes(l),
+                nodes: {
+                    let mut nodes = object_nodes(l);
+                    nodes.push(MenuNode::Separator);
+                    nodes.extend(transform_nodes(l));
+                    nodes
+                },
             }),
             kreate_ops::mode::Menu::Mesh => out.extend(mesh_menus(l, select_mode)),
             kreate_ops::mode::Menu::Pose => out.push(TopMenu {
@@ -5906,6 +6066,37 @@ menu-bevel = Bevel
 menu-merge = Merge
 menu-weld = Weld
 menu-select-loop = Loop
+pie-snap = Snap
+menu-snap = Snap
+menu-apply = Apply
+apply-location = Location
+apply-rotation = Rotation
+apply-scale = Scale
+apply-all = All Transforms
+apply-rotation-scale = Rotation & Scale
+menu-set-origin = Set Origin
+origin-to-geometry = Origin to Geometry
+origin-to-cursor = Origin to 3D Cursor
+geometry-to-origin = Geometry to Origin
+pivot-point = Pivot Point
+pivot-median = Median Point
+pivot-individual = Individual Origins
+pivot-active = Active Element
+pivot-cursor = 3D Cursor
+op-view-cursor-to-selected = Cursor to Selected
+op-view-cursor-to-selected-desc = Puts the 3D cursor in the middle of the selection.
+op-view-cursor-to-origin = Cursor to World Origin
+op-view-cursor-to-origin-desc = Puts the 3D cursor back at the world's origin.
+op-view-selection-to-cursor = Selection to Cursor
+op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
+op-view-cursor-place = Place 3D Cursor
+op-view-cursor-place-desc = Puts the 3D cursor on the surface under the pointer.
+op-scene-cursor-set = Set 3D Cursor
+op-scene-cursor-set-desc = Moves the 3D cursor, where new objects appear.
+op-object-origin-set = Set Origin
+op-object-origin-set-desc = Moves the origin of the selected meshes without moving what is drawn.
+op-object-transform-apply = Apply Transform
+op-object-transform-apply-desc = Bakes the transform into the mesh and resets it, leaving everything in place.
 menu-select-more = More
 menu-select-less = Less
 menu-select-linked = Linked
@@ -6444,6 +6635,37 @@ menu-bevel = 베벨
 menu-merge = 병합
 menu-weld = 용접
 menu-select-loop = 루프
+pie-snap = 스냅
+menu-snap = 스냅
+menu-apply = 적용
+apply-location = 위치
+apply-rotation = 회전
+apply-scale = 크기
+apply-all = 모든 트랜스폼
+apply-rotation-scale = 회전과 크기
+menu-set-origin = 원점 설정
+origin-to-geometry = 원점을 형상 중심으로
+origin-to-cursor = 원점을 3D 커서로
+geometry-to-origin = 형상을 원점으로
+pivot-point = 기준점
+pivot-median = 중앙점
+pivot-individual = 개별 원점
+pivot-active = 활성 요소
+pivot-cursor = 3D 커서
+op-view-cursor-to-selected = 커서를 선택으로
+op-view-cursor-to-selected-desc = 3D 커서를 선택의 가운데에 둡니다.
+op-view-cursor-to-origin = 커서를 월드 원점으로
+op-view-cursor-to-origin-desc = 3D 커서를 월드 원점으로 되돌립니다.
+op-view-selection-to-cursor = 선택을 커서로
+op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
+op-view-cursor-place = 3D 커서 놓기
+op-view-cursor-place-desc = 포인터 아래 표면에 3D 커서를 둡니다.
+op-scene-cursor-set = 3D 커서 설정
+op-scene-cursor-set-desc = 새 물체가 생기는 3D 커서를 옮깁니다.
+op-object-origin-set = 원점 설정
+op-object-origin-set-desc = 그려진 모양은 그대로 두고 선택한 메시의 원점을 옮깁니다.
+op-object-transform-apply = 트랜스폼 적용
+op-object-transform-apply-desc = 트랜스폼을 메시에 굳히고 초기화합니다. 화면의 모습은 그대로입니다.
 menu-select-more = 넓히기
 menu-select-less = 좁히기
 menu-select-linked = 연결된 것
@@ -7938,7 +8160,7 @@ mod tests {
         }
         names.sort();
         names.dedup();
-        assert_eq!(names, vec!["mode", "shading", "view"]);
+        assert_eq!(names, vec!["mode", "shading", "snap", "view"]);
         for name in &names {
             let (_, entries) = pie_entries(name, &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING)
                 .unwrap_or_else(|| panic!("no pie called {name}"));

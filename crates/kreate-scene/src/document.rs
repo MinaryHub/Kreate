@@ -489,6 +489,10 @@ pub struct Document {
     armatures: Arena<ArmatureId, Arc<crate::armature::Armature>>,
     /// The scene's clock: the frame it is on, the range it plays, how fast.
     pub playback: crate::animation::Playback,
+    /// The 3D cursor, in the world: where new objects appear, what a rotation
+    /// can turn about, and where Set Origin can put an origin. The scene's, as
+    /// Blender keeps it, so it is saved with the file.
+    pub cursor: kreate_math::DVec3,
     /// Which world is lighting the scene.
     ///
     /// A pointer and not the world itself, so that swapping a lighting setup is

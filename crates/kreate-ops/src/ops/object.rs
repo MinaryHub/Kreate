@@ -1573,7 +1573,7 @@ impl Operator for Paste {
 }
 
 /// Which point a rotation or scale happens about.
-pub const PIVOTS: &[&str] = &["median", "individual", "active", "world_origin"];
+pub const PIVOTS: &[&str] = &["median", "individual", "active", "world_origin", "cursor"];
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct TranslateParams {
@@ -1751,7 +1751,7 @@ pub struct RotateParams {
     #[param(variants("x", "y", "z"))]
     pub axis: u32,
     /// What the rotation happens about.
-    #[param(variants("median", "individual", "active", "world_origin"))]
+    #[param(variants("median", "individual", "active", "world_origin", "cursor"))]
     pub pivot: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
@@ -1827,7 +1827,7 @@ pub struct ScaleParams {
     /// Scale factor per axis.
     pub scale: [f64; 3],
     /// What the scaling happens about.
-    #[param(variants("median", "individual", "active", "world_origin"))]
+    #[param(variants("median", "individual", "active", "world_origin", "cursor"))]
     pub pivot: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
@@ -1924,6 +1924,9 @@ fn pivot_point(doc: &Document, targets: &[ObjectId], mode: u32) -> Option<DVec3>
             .active
             .and_then(|a| doc.object(a))
             .map(|o| o.transform.translation),
+        // The 3D cursor, which is in the world; exact for objects without a
+        // parent, as the median is.
+        4 => Some(doc.cursor),
         _ => Some(DVec3::ZERO),
     }
 }

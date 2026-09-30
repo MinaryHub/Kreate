@@ -1107,3 +1107,22 @@ fn a_loop_cut_can_name_its_edge_and_needs_no_selection() {
     let r = run(&mut doc, &ctx, "mesh.loop_cut", &[("edge", PropertyValue::Int(999))]).unwrap();
     assert_eq!(r, kreate_ops::OpResult::Cancelled);
 }
+
+#[test]
+fn a_rotation_can_turn_about_the_3d_cursor() {
+    // Even a lone vertex, which about its own middle would not move at all.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[0]);
+    doc.cursor = DVec3::new(3.0, 0.0, 0.0);
+    let p0 = positions(&doc)[0].as_dvec3();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.rotate",
+        &[("angle", PropertyValue::Float(std::f64::consts::PI)), ("axis", PropertyValue::Enum(2)), ("pivot", PropertyValue::Enum(1))],
+    )
+    .unwrap();
+    let p1 = positions(&doc)[0].as_dvec3();
+    let expected = doc.cursor + DQuat::from_rotation_z(std::f64::consts::PI) * (p0 - doc.cursor);
+    assert!((p1 - expected).length() < 1e-5, "{p1:?} vs {expected:?}");
+}

@@ -763,6 +763,7 @@ fn run_transform(
     doc: &mut DocMut<'_>,
     radius: f64,
     needs_extent: bool,
+    pivot: Option<glam::DVec3>,
     place: impl Fn(glam::DVec3, f32, glam::DVec3) -> glam::DVec3,
 ) -> Result<OpResult, OpError> {
     if edit_targets(doc.document()).is_empty() {
@@ -774,8 +775,9 @@ fn run_transform(
         return Ok(OpResult::Cancelled);
     };
     // Rotate and scale refuse a selection occupying a single place: every
-    // affected vertex is then the pivot, so the operation is the identity.
-    if needs_extent && weighing.one_place.is_some() {
+    // affected vertex is then the pivot, so the operation is the identity —
+    // unless it turns about somewhere else, the 3D cursor.
+    if needs_extent && pivot.is_none() && weighing.one_place.is_some() {
         return Ok(OpResult::Cancelled);
     }
 
@@ -802,7 +804,7 @@ fn run_transform(
                 "a weight was paired with the wrong vertex"
             );
             let world = to_world.transform_point3(p.as_dvec3());
-            let placed = place(world, part.weights[next], weighing.pivot);
+            let placed = place(world, part.weights[next], pivot.unwrap_or(weighing.pivot));
             *p = to_local.transform_point3(placed).as_vec3();
             next += 1;
         })
@@ -847,7 +849,7 @@ impl Operator for TranslateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let offset = glam::DVec3::from_array(params.translation);
-        run_transform(doc, params.proportional_size, false, |p, weight, _| {
+        run_transform(doc, params.proportional_size, false, None, |p, weight, _| {
             p + offset * weight as f64
         })
     }
@@ -863,6 +865,9 @@ pub struct MeshRotateParams {
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
+    /// What it turns about: the selection's median, or the 3D cursor.
+    #[param(variants("median", "cursor"))]
+    pub pivot: u32,
 }
 
 /// Rotates the selected vertices, edges or faces about their median.
@@ -892,7 +897,8 @@ impl Operator for RotateSelection {
             _ => glam::DVec3::Z,
         };
         let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
-        run_transform(doc, params.proportional_size, true, |p, weight, about| {
+        let pivot = (params.pivot == 1).then_some(doc.document().cursor);
+        run_transform(doc, params.proportional_size, true, pivot, |p, weight, about| {
             // The rotation is interpolated towards the identity rather than the
             // *result* being interpolated towards the original. The two differ:
             // blending positions drags a partly-weighted vertex along the chord
@@ -912,6 +918,9 @@ pub struct MeshScaleParams {
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
+    /// What it scales about: the selection's median, or the 3D cursor.
+    #[param(variants("median", "cursor"))]
+    pub pivot: u32,
 }
 
 impl Default for MeshScaleParams {
@@ -919,6 +928,7 @@ impl Default for MeshScaleParams {
         Self {
             scale: [1.0; 3],
             proportional_size: 0.0,
+            pivot: 0,
         }
     }
 }
@@ -954,7 +964,8 @@ impl Operator for ScaleSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let factor = glam::DVec3::from_array(params.scale);
-        run_transform(doc, params.proportional_size, true, |p, weight, about| {
+        let pivot = (params.pivot == 1).then_some(doc.document().cursor);
+        run_transform(doc, params.proportional_size, true, pivot, |p, weight, about| {
             // The factor is interpolated towards one.
             //
             // Unlike the rotation, this is *not* a correction: scaling is

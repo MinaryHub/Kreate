@@ -751,6 +751,9 @@ pub struct SceneFile {
     /// never touched the timeline reads as it did before there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback: Option<PlaybackRecord>,
+    /// The 3D cursor, when it is anywhere but the world origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<[f64; 3]>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -1110,7 +1113,8 @@ pub fn write(
                     .collect(),
             })
             .collect();
-        scene.playback = (document.playback != kreate_scene::animation::Playback::default()).then(|| {
+        scene.cursor = (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
+    scene.playback = (document.playback != kreate_scene::animation::Playback::default()).then(|| {
             let p = document.playback;
             PlaybackRecord { frame: p.frame, start: p.start, end: p.end, fps: p.fps }
         });
@@ -1639,6 +1643,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         document.set_active_world(Some(*id));
     }
 
+    if let Some(c) = scene.cursor.map(kreate_math::DVec3::from_array).filter(|c| c.is_finite()) {
+        document.cursor = c;
+    }
     if let Some(p) = scene.playback {
         // Refused rather than trusted: an fps of zero divides every playback
         // step by nothing, and a file can say anything.
