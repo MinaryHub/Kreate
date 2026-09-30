@@ -42,3 +42,34 @@ fn collections_are_saved_with_what_is_in_them_and_whether_hidden() {
     assert_eq!(c.objects.len(), 1);
     assert_eq!(back.object(c.objects[0]).unwrap().name, "A");
 }
+
+#[test]
+fn every_modifier_is_saved_and_a_boolean_still_finds_its_cutter() {
+    use kreate_mesh::modifiers::*;
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let cutter = doc.add_object(Object::new("Cutter", ObjectData::Mesh(mesh)));
+    let target = doc.add_object(Object::new("Target", ObjectData::Mesh(mesh)));
+    let operand = doc.object_uid(cutter).unwrap();
+    let stack = vec![
+        ModifierInstance::new(ModifierKind::Mirror(MirrorParams { x: false, y: true, z: true, merge_threshold: 0.01 })),
+        ModifierInstance::new(ModifierKind::Subdivide(SubdivideParams { levels: 2, smooth: false })),
+        ModifierInstance::new(ModifierKind::Array(ArrayParams {
+            count: 3,
+            relative: kreate_math::Vec3::Y,
+            constant: kreate_math::Vec3::new(0.5, 0.0, 0.0),
+        })),
+        ModifierInstance::new(ModifierKind::Solidify(SolidifyParams { thickness: 0.3, offset: 0.5 })),
+        ModifierInstance { kind: ModifierKind::Bevel(BevelParams { width: 0.05, angle: 0.4 }), enabled: false },
+        ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Intersect })),
+    ];
+    doc.object_mut(target).unwrap().modifiers = stack.clone();
+    let back = round_trip(&doc);
+    let t = back.objects().find(|(_, o)| o.name == "Target").map(|(id, _)| id).unwrap();
+    assert_eq!(back.object(t).unwrap().modifiers, stack);
+    let ModifierKind::Boolean(b) = back.object(t).unwrap().modifiers[5].kind else { unreachable!() };
+    let found = back.object_by_uid(b.operand).and_then(|id| back.object(id)).map(|o| o.name.clone());
+    assert_eq!(found.as_deref(), Some("Cutter"));
+}

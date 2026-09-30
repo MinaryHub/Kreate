@@ -55,8 +55,10 @@ use std::sync::Arc;
 
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
-    array, mirror, subdivide, ArrayParams, MirrorParams, SubdivideParams,
+    array, bevel, boolean, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp, MirrorParams,
+    SolidifyParams, SubdivideParams,
 };
+use kreate_reflect::Uid;
 use kreate_mesh::MeshData;
 
 use crate::document::{Document, ObjectId};
@@ -104,6 +106,11 @@ pub enum ModifierKind {
     Mirror(MirrorParams),
     Subdivide(SubdivideParams),
     Array(ArrayParams),
+    Solidify(SolidifyParams),
+    Bevel(BevelParams),
+    /// Combined with another object's mesh — the one thing in the stack that
+    /// reads beyond its own input, so the cache keys it on that object too.
+    Boolean(BooleanModifier),
     /// A modifier that moves the mesh according to the clock.
     ///
     /// Exists so that the cache's time-keyed path can be driven, and only in a
@@ -128,6 +135,9 @@ impl ModifierKind {
             ModifierKind::Mirror(_) => "mirror",
             ModifierKind::Subdivide(_) => "subdivide",
             ModifierKind::Array(_) => "array",
+            ModifierKind::Solidify(_) => "solidify",
+            ModifierKind::Bevel(_) => "bevel",
+            ModifierKind::Boolean(_) => "boolean",
             #[cfg(test)]
             ModifierKind::Drift(_) => "drift",
         }
@@ -142,6 +152,9 @@ impl ModifierKind {
             ModifierKind::Mirror(_) => "modifier-mirror",
             ModifierKind::Subdivide(_) => "modifier-subdivide",
             ModifierKind::Array(_) => "modifier-array",
+            ModifierKind::Solidify(_) => "modifier-solidify",
+            ModifierKind::Bevel(_) => "modifier-bevel",
+            ModifierKind::Boolean(_) => "modifier-boolean",
             #[cfg(test)]
             ModifierKind::Drift(_) => "modifier-drift",
         }
@@ -159,13 +172,18 @@ impl ModifierKind {
     /// cache does the right thing without being told again.
     pub fn depends_on_time(&self) -> bool {
         match self {
-            ModifierKind::Mirror(_) | ModifierKind::Subdivide(_) | ModifierKind::Array(_) => false,
+            ModifierKind::Mirror(_)
+            | ModifierKind::Subdivide(_)
+            | ModifierKind::Array(_)
+            | ModifierKind::Solidify(_)
+            | ModifierKind::Bevel(_)
+            | ModifierKind::Boolean(_) => false,
             #[cfg(test)]
             ModifierKind::Drift(_) => true,
         }
     }
 
-    fn apply(&self, input: &MeshData, ctx: &EvalCtx) -> MeshData {
+    fn apply(&self, input: &MeshData, ctx: &EvalCtx, operands: &[Operand]) -> MeshData {
         // Taken and not read, by every modifier that ships so far. The
         // parameter is the point: it is the one place a time-dependent modifier
         // needs it, and threading it through afterwards is the change §5 calls
@@ -175,6 +193,20 @@ impl ModifierKind {
             ModifierKind::Mirror(p) => mirror(input, p),
             ModifierKind::Subdivide(p) => subdivide(input, p),
             ModifierKind::Array(p) => array(input, p),
+            ModifierKind::Solidify(p) => solidify(input, p),
+            ModifierKind::Bevel(p) => bevel(input, p),
+            ModifierKind::Boolean(b) => match operands.iter().find(|o| o.uid == b.operand) {
+                Some(operand) => {
+                    let mut cutter = (*operand.mesh).clone();
+                    for p in cutter.positions_mut() {
+                        *p = operand.to_local.transform_point3(p.as_dvec3()).as_vec3();
+                    }
+                    boolean(input, &cutter, b.op)
+                }
+                // Nothing to combine with — no object picked yet, or it is
+                // gone: the input as it was, not nothing.
+                None => input.clone(),
+            },
             #[cfg(test)]
             ModifierKind::Drift(per_second) => {
                 let mut moved = input.clone();
@@ -185,6 +217,29 @@ impl ModifierKind {
                 moved
             }
         }
+    }
+}
+
+/// A boolean modifier's settings: the other object, by its identity so a
+/// rename does not break it, and what to do with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BooleanModifier {
+    pub operand: Uid,
+    pub op: BooleanOp,
+}
+
+/// Another object's mesh, as a boolean reads it: its datablock, and the
+/// transform from its space into the space of the object being evaluated.
+#[derive(Clone, Debug)]
+pub struct Operand {
+    pub uid: Uid,
+    pub mesh: Arc<MeshData>,
+    pub to_local: kreate_math::DAffine3,
+}
+
+impl PartialEq for Operand {
+    fn eq(&self, other: &Self) -> bool {
+        self.uid == other.uid && Arc::ptr_eq(&self.mesh, &other.mesh) && self.to_local == other.to_local
     }
 }
 
@@ -213,12 +268,40 @@ impl ModifierInstance {
 /// mirror-then-subdivide and subdivide-then-mirror are different results, and a
 /// stack whose order did not matter would be hiding that from the user.
 pub fn apply_stack(input: &MeshData, stack: &[ModifierInstance], ctx: &EvalCtx) -> MeshData {
+    apply_stack_with(input, stack, ctx, &[])
+}
+
+/// The same, with the other objects a boolean in the stack reads.
+pub fn apply_stack_with(
+    input: &MeshData,
+    stack: &[ModifierInstance],
+    ctx: &EvalCtx,
+    operands: &[Operand],
+) -> MeshData {
     let mut current: Option<MeshData> = None;
     for modifier in stack.iter().filter(|m| m.enabled) {
-        let next = modifier.kind.apply(current.as_ref().unwrap_or(input), ctx);
+        let next = modifier.kind.apply(current.as_ref().unwrap_or(input), ctx, operands);
         current = Some(next);
     }
     current.unwrap_or_else(|| input.clone())
+}
+
+/// The other objects `id`'s booleans read, resolved now: each one's mesh and
+/// where it is relative to `id`. An operand that is `id` itself, or not a mesh,
+/// is left out, and its boolean passes its input through.
+fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<Operand> {
+    let mut out: Vec<Operand> = Vec::new();
+    let to_local = doc.world_transform(id).inverse();
+    for m in stack.iter().filter(|m| m.enabled) {
+        let ModifierKind::Boolean(b) = m.kind else { continue };
+        if out.iter().any(|o| o.uid == b.operand) {
+            continue;
+        }
+        let Some(other) = doc.object_by_uid(b.operand).filter(|o| *o != id) else { continue };
+        let Some(mesh) = doc.object(other).and_then(|o| o.mesh()).and_then(|m| doc.mesh_arc(m)) else { continue };
+        out.push(Operand { uid: b.operand, mesh: mesh.clone(), to_local: to_local * doc.world_transform(other) });
+    }
+    out
 }
 
 /// Whether any enabled modifier in a stack reads the clock.
@@ -255,6 +338,9 @@ struct SkinEntry {
 struct Entry {
     input: Arc<MeshData>,
     stack: Vec<ModifierInstance>,
+    /// The other objects a boolean read, and where they were: a cutter that
+    /// moves is a different result from the same stack.
+    operands: Vec<Operand>,
     output: Arc<MeshData>,
     /// The time this entry was evaluated at, when its stack reads the clock.
     ///
@@ -309,7 +395,8 @@ impl ModifierCache {
             Some((armature, matrices)) => self.skinned(doc, input, armature, matrices),
             None => input.clone(),
         };
-        Some(self.evaluate(&skinned, &object.modifiers, ctx))
+        let operands = operands_of(doc, id, &object.modifiers);
+        Some(self.evaluate_with(&skinned, &object.modifiers, ctx, &operands))
     }
 
     /// The skinned mesh, from the cache while the input and the bones' matrices
@@ -347,6 +434,17 @@ impl ModifierCache {
         stack: &[ModifierInstance],
         ctx: &EvalCtx,
     ) -> Arc<MeshData> {
+        self.evaluate_with(input, stack, ctx, &[])
+    }
+
+    /// The same, with the other objects its booleans read.
+    pub fn evaluate_with(
+        &mut self,
+        input: &Arc<MeshData>,
+        stack: &[ModifierInstance],
+        ctx: &EvalCtx,
+        operands: &[Operand],
+    ) -> Arc<MeshData> {
         if is_identity(stack) {
             return input.clone();
         }
@@ -362,14 +460,14 @@ impl ModifierCache {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|e| Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at)
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at && e.operands == operands)
         {
             entry.used = self.generation;
             self.hits += 1;
             return entry.output.clone();
         }
 
-        let output = Arc::new(apply_stack(input, stack, ctx));
+        let output = Arc::new(apply_stack_with(input, stack, ctx, operands));
         self.misses += 1;
         // A time-dependent entry replaces the one for the previous instant
         // rather than joining it. This is §2.4's memory decision: a result per
@@ -385,6 +483,7 @@ impl ModifierCache {
         self.entries.push(Entry {
             input: input.clone(),
             stack: stack.to_vec(),
+            operands: operands.to_vec(),
             output: output.clone(),
             at,
             used: self.generation,
@@ -1030,5 +1129,34 @@ mod time_tests {
         // The same mesh, because nothing in the stack reads the clock.
         assert!(Arc::ptr_eq(&early[0].1, &late[0].1));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_boolean_follows_its_cutter_and_is_cached_while_it_stays() {
+        use kreate_mesh::modifiers::BooleanOp;
+        let mut doc = Document::new();
+        let target = doc.add_mesh_object("Target", kreate_mesh::primitives::cube(2.0));
+        let cutter = doc.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+        doc.object_mut(cutter).unwrap().transform.translation = kreate_math::DVec3::new(1.0, 0.0, 0.0);
+        let operand = doc.object_uid(cutter).unwrap();
+        doc.object_mut(target)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Difference })));
+        let mut cache = ModifierCache::new();
+        let ctx = EvalCtx::still();
+        let a = cache.evaluated(&doc, target, &ctx).unwrap();
+        assert!(a.num_faces() > 6, "nothing was cut");
+        let b = cache.evaluated(&doc, target, &ctx).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "an unchanged cutter evaluated again");
+        // The cutter moves away: a whole cube again.
+        doc.object_mut(cutter).unwrap().transform.translation = kreate_math::DVec3::new(9.0, 0.0, 0.0);
+        let c = cache.evaluated(&doc, target, &ctx).unwrap();
+        assert!(!Arc::ptr_eq(&a, &c), "the moved cutter was not noticed");
+        assert!((c.bounds().max.x - 1.0).abs() < 1e-5);
+        // No cutter picked: the input as it was.
+        doc.object_mut(target).unwrap().modifiers[0].kind =
+            ModifierKind::Boolean(BooleanModifier { operand: kreate_reflect::Uid::NONE, op: BooleanOp::Difference });
+        assert_eq!(cache.evaluated(&doc, target, &ctx).unwrap().num_faces(), 6);
     }
 }

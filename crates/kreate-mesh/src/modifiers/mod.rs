@@ -24,11 +24,17 @@
 //! [`gather_edges_by_pair`] does the pairing instead.
 
 pub mod array;
+pub mod bevel;
+pub mod boolean;
 pub mod catmull_clark;
 pub mod mirror;
+pub mod solidify;
 pub mod subdivide;
 
 pub use array::{array, ArrayParams};
+pub use bevel::{bevel, BevelParams};
+pub use boolean::{boolean, BooleanOp};
+pub use solidify::{solidify, SolidifyParams};
 pub use mirror::{mirror, MirrorParams};
 pub use subdivide::{subdivide, SubdivideParams};
 

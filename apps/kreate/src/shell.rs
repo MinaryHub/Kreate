@@ -820,7 +820,7 @@ pub fn modifier_rows(
                 enabled: entry.enabled,
                 op_id: op_id.to_string(),
                 schema: info.schema,
-                params: setter_params(index as u32, &entry.kind),
+                params: setter_params(doc, index as u32, &entry.kind),
             })
         })
         .collect()
@@ -832,6 +832,9 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Mirror(_) => "object.modifier_set_mirror",
         ModifierKind::Subdivide(_) => "object.modifier_set_subdivide",
         ModifierKind::Array(_) => "object.modifier_set_array",
+        ModifierKind::Solidify(_) => "object.modifier_set_solidify",
+        ModifierKind::Bevel(_) => "object.modifier_set_bevel",
+        ModifierKind::Boolean(_) => "object.modifier_set_boolean",
     }
 }
 
@@ -840,7 +843,7 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
 /// The panel edits this and hands it straight back to the operator, so the
 /// values shown are the values applied — there is no third representation to
 /// drift out of step.
-fn setter_params(index: u32, kind: &ModifierKind) -> PropertyMap {
+fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> PropertyMap {
     let mut p = PropertyMap::new();
     p.set("index", PropertyValue::Int(index as i64));
     match kind {
@@ -856,6 +859,30 @@ fn setter_params(index: u32, kind: &ModifierKind) -> PropertyMap {
         ModifierKind::Subdivide(sub) => {
             p.set("levels", PropertyValue::Int(sub.levels as i64));
             p.set("smooth", PropertyValue::Bool(sub.smooth));
+        }
+        ModifierKind::Solidify(s) => {
+            p.set("thickness", PropertyValue::Float(s.thickness as f64));
+            p.set("offset", PropertyValue::Float(s.offset as f64));
+        }
+        ModifierKind::Bevel(b) => {
+            p.set("width", PropertyValue::Float(b.width as f64));
+            p.set("angle", PropertyValue::Float(b.angle as f64));
+        }
+        ModifierKind::Boolean(b) => {
+            let name = doc
+                .object_by_uid(b.operand)
+                .and_then(|id| doc.object(id))
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            p.set("object", PropertyValue::Text(name));
+            p.set(
+                "operation",
+                PropertyValue::Enum(match b.op {
+                    kreate_mesh::modifiers::BooleanOp::Difference => 0,
+                    kreate_mesh::modifiers::BooleanOp::Union => 1,
+                    kreate_mesh::modifiers::BooleanOp::Intersect => 2,
+                }),
+            );
         }
         ModifierKind::Array(a) => {
             p.set("count", PropertyValue::Int(a.count as i64));
@@ -6076,7 +6103,7 @@ fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_u
 /// operator's enum expects.
 ///
 /// Two lists that have to agree; a test holds them to it.
-const KIND_KEYS: &[&str] = &["modifier-mirror", "modifier-subdivide", "modifier-array"];
+const KIND_KEYS: &[&str] = &["modifier-mirror", "modifier-subdivide", "modifier-array", "modifier-solidify", "modifier-bevel", "modifier-boolean"];
 
 /// The built-in English catalog.
 ///
@@ -6508,6 +6535,9 @@ modifier-enabled = Apply this modifier
 modifier-mirror = Mirror
 modifier-subdivide = Subdivision
 modifier-array = Array
+modifier-solidify = Solidify
+modifier-bevel = Bevel
+modifier-boolean = Boolean
 
 # --- right-click menu groups ---
 menu-group-transform = Transform
@@ -7105,6 +7135,9 @@ modifier-enabled = 이 모디파이어 적용
 modifier-mirror = 미러
 modifier-subdivide = 서브디비전
 modifier-array = 배열
+modifier-solidify = 두께
+modifier-bevel = 베벨
+modifier-boolean = 불리언
 
 # --- 오른클릭 메뉴 그룹 ---
 menu-group-transform = 변형

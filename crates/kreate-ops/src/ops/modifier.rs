@@ -19,20 +19,23 @@
 //! object would be a different operation and a surprising default: the user is
 //! looking at one stack.
 
-use kreate_mesh::modifiers::{ArrayParams, MirrorParams, SubdivideParams};
+use kreate_mesh::modifiers::{ArrayParams, BevelParams, BooleanOp, MirrorParams, SolidifyParams, SubdivideParams};
 use kreate_ops_derive::OpParams;
-use kreate_scene::modifier::{ModifierInstance, ModifierKind};
+use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
 use kreate_scene::{DocMut, Document, ObjectId};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
 
 /// The modifier kinds, in the order the "add" menu offers them.
-pub const KINDS: &[&str] = &["mirror", "subdivide", "array"];
+pub const KINDS: &[&str] = &["mirror", "subdivide", "array", "solidify", "bevel", "boolean"];
 
 fn kind_of(index: u32) -> ModifierKind {
     match index {
         0 => ModifierKind::Mirror(MirrorParams::default()),
         1 => ModifierKind::Subdivide(SubdivideParams::default()),
+        3 => ModifierKind::Solidify(SolidifyParams::default()),
+        4 => ModifierKind::Bevel(BevelParams::default()),
+        5 => ModifierKind::Boolean(BooleanModifier::default()),
         _ => ModifierKind::Array(ArrayParams::default()),
     }
 }
@@ -61,7 +64,7 @@ fn has(doc: &Document, id: ObjectId, index: u32) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct AddParams {
     /// Which modifier to add.
-    #[param(variants("mirror", "subdivide", "array"))]
+    #[param(variants("mirror", "subdivide", "array", "solidify", "bevel", "boolean"))]
     pub kind: u32,
 }
 
@@ -447,7 +450,143 @@ impl Operator for SetArray {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetSolidifyParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// How thick.
+    #[param(soft_min = -1.0, soft_max = 1.0, unit = "length")]
+    pub thickness: f64,
+    /// Where the surface sits in the thickness: −1 inside it, 1 outside.
+    #[param(min = -1.0, max = 1.0, step = 0.05)]
+    pub offset: f64,
+}
+
+impl Default for SetSolidifyParams {
+    fn default() -> Self {
+        let d = SolidifyParams::default();
+        Self { index: 0, thickness: d.thickness as f64, offset: d.offset as f64 }
+    }
+}
+
+/// Sets a solidify modifier's parameters.
+pub struct SetSolidify;
+
+impl Operator for SetSolidify {
+    type Params = SetSolidifyParams;
+    fn id() -> &'static str {
+        "object.modifier_set_solidify"
+    }
+    fn label() -> &'static str {
+        "Solidify Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Solidify(SolidifyParams { thickness: params.thickness as f32, offset: params.offset as f32 }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetBevelParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// How wide the chamfer is.
+    #[param(min = 0.0, soft_max = 1.0, unit = "length")]
+    pub width: f64,
+    /// Edges sharper than this are bevelled.
+    #[param(min = 0.0, max = 3.0, unit = "angle")]
+    pub angle: f64,
+}
+
+impl Default for SetBevelParams {
+    fn default() -> Self {
+        let d = BevelParams::default();
+        Self { index: 0, width: d.width as f64, angle: d.angle as f64 }
+    }
+}
+
+/// Sets a bevel modifier's parameters.
+pub struct SetBevel;
+
+impl Operator for SetBevel {
+    type Params = SetBevelParams;
+    fn id() -> &'static str {
+        "object.modifier_set_bevel"
+    }
+    fn label() -> &'static str {
+        "Bevel Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Bevel(BevelParams { width: params.width as f32, angle: params.angle as f32 }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetBooleanParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// The other object, by name: what cuts, joins or is kept.
+    pub object: String,
+    /// What to do with it.
+    #[param(variants("difference", "union", "intersect"))]
+    pub operation: u32,
+}
+
+/// Sets a boolean modifier's object and operation. The object is named here
+/// and held by its identity, so renaming it later does not break the link.
+pub struct SetBoolean;
+
+impl Operator for SetBoolean {
+    type Params = SetBooleanParams;
+    fn id() -> &'static str {
+        "object.modifier_set_boolean"
+    }
+    fn label() -> &'static str {
+        "Boolean Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let operand = if params.object.is_empty() {
+            kreate_scene::Uid::default()
+        } else {
+            let Some(uid) = d
+                .objects()
+                .find(|(_, o)| o.name == params.object)
+                .and_then(|(id, _)| d.object_uid(id))
+            else {
+                return Err(OpError::Failed(format!("no object called {}", params.object)));
+            };
+            uid
+        };
+        let op = match params.operation {
+            1 => BooleanOp::Union,
+            2 => BooleanOp::Intersect,
+            _ => BooleanOp::Difference,
+        };
+        set_kind(doc, params.index, ModifierKind::Boolean(BooleanModifier { operand, op }))
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<SetSolidify>();
+    registry.register::<SetBevel>();
+    registry.register::<SetBoolean>();
     registry.register::<Add>();
     registry.register::<Remove>();
     registry.register::<Toggle>();
@@ -780,6 +919,9 @@ mod tests {
             "object.modifier_set_mirror",
             "object.modifier_set_subdivide",
             "object.modifier_set_array",
+            "object.modifier_set_solidify",
+            "object.modifier_set_bevel",
+            "object.modifier_set_boolean",
         ] {
             assert!(r.get(id).is_some(), "{id} is not registered");
         }
@@ -789,7 +931,7 @@ mod tests {
     fn the_add_menu_and_the_kind_list_agree() {
         // The variant list drives the dropdown; `kind_of` turns the choice into a
         // modifier. They are two lists and would otherwise drift apart silently.
-        assert_eq!(KINDS.len(), 3);
+        assert_eq!(KINDS.len(), 6);
         for (i, name) in KINDS.iter().enumerate() {
             assert_eq!(kind_of(i as u32).id(), *name);
         }
@@ -802,5 +944,34 @@ mod tests {
             kreate_reflect::PropertyKind::Enum { variants } => assert_eq!(variants, KINDS),
             other => panic!("expected an enum, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_boolean_is_given_its_cutter_by_name_and_keeps_it_through_a_rename() {
+        let (r, mut h, mut d, id, c) = setup();
+        let cutter = d.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+        run(&r, &mut h, &mut d, &c, "object.modifier_add", &[("kind", PropertyValue::Enum(5))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.modifier_set_boolean",
+            &[
+                ("index", PropertyValue::Int(0)),
+                ("object", PropertyValue::Text("Cutter".into())),
+                ("operation", PropertyValue::Enum(1)),
+            ],
+        );
+        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else { panic!("not a boolean") };
+        assert_eq!(d.object_by_uid(b.operand), Some(cutter));
+        assert_eq!(b.op, BooleanOp::Union);
+        d.object_mut(cutter).unwrap().name = "Renamed".into();
+        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else { panic!() };
+        assert_eq!(d.object_by_uid(b.operand), Some(cutter), "a rename broke the link");
+        // A name nothing has is an error, not a silent no-op.
+        let mut p = PropertyMap::new();
+        p.set("object", PropertyValue::Text("Nobody".into()));
+        assert!(h.dispatch(&r, &mut d, &c, "object.modifier_set_boolean", &p).is_err());
     }
 }

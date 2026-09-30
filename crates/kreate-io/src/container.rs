@@ -215,6 +215,9 @@ pub struct ObjectRecord {
     /// is byte for byte what it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drivers: Vec<DriverRecord>,
+    /// The modifier stack, bottom first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<ModifierRecord>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -330,6 +333,134 @@ pub struct KeyRecord {
     /// A hand-set slope, value per frame; absent for auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slope: Option<f64>,
+}
+
+/// One modifier: its kind by its stable id, whether it is on, and the
+/// parameters that kind has — the others absent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModifierRecord {
+    pub kind: String,
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axes: Option<[bool; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constant: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f32>,
+    /// A boolean's other object, by its identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operand: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
+fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<ModifierRecord> {
+    use kreate_mesh::modifiers::BooleanOp;
+    use kreate_scene::modifier::ModifierKind as K;
+    let mut r = ModifierRecord { kind: m.kind.id().to_string(), enabled: m.enabled, ..Default::default() };
+    match &m.kind {
+        K::Mirror(p) => {
+            r.axes = Some([p.x, p.y, p.z]);
+            r.merge_threshold = Some(p.merge_threshold);
+        }
+        K::Subdivide(p) => {
+            r.levels = Some(p.levels);
+            r.smooth = Some(p.smooth);
+        }
+        K::Array(p) => {
+            r.count = Some(p.count);
+            r.relative = Some(p.relative.to_array());
+            r.constant = Some(p.constant.to_array());
+        }
+        K::Solidify(p) => {
+            r.thickness = Some(p.thickness);
+            r.offset = Some(p.offset);
+        }
+        K::Bevel(p) => {
+            r.width = Some(p.width);
+            r.angle = Some(p.angle);
+        }
+        K::Boolean(b) => {
+            r.operand = Some(b.operand.raw());
+            r.operation = Some(
+                match b.op {
+                    BooleanOp::Difference => "difference",
+                    BooleanOp::Union => "union",
+                    BooleanOp::Intersect => "intersect",
+                }
+                .to_string(),
+            );
+        }
+        #[allow(unreachable_patterns)]
+        _ => return None,
+    }
+    Some(r)
+}
+
+/// A modifier back from its record; `None` for a kind this build does not
+/// know, which is dropped rather than guessed at.
+fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierInstance> {
+    use kreate_mesh::modifiers::*;
+    use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind as K};
+    let v3 = |a: Option<[f32; 3]>, d: kreate_math::Vec3| a.map(kreate_math::Vec3::from_array).unwrap_or(d);
+    let kind = match r.kind.as_str() {
+        "mirror" => {
+            let d = MirrorParams::default();
+            let [x, y, z] = r.axes.unwrap_or([d.x, d.y, d.z]);
+            K::Mirror(MirrorParams { x, y, z, merge_threshold: r.merge_threshold.unwrap_or(d.merge_threshold) })
+        }
+        "subdivide" => {
+            let d = SubdivideParams::default();
+            K::Subdivide(SubdivideParams { levels: r.levels.unwrap_or(d.levels), smooth: r.smooth.unwrap_or(d.smooth) })
+        }
+        "array" => {
+            let d = ArrayParams::default();
+            K::Array(ArrayParams {
+                count: r.count.unwrap_or(d.count),
+                relative: v3(r.relative, d.relative),
+                constant: v3(r.constant, d.constant),
+            })
+        }
+        "solidify" => {
+            let d = SolidifyParams::default();
+            K::Solidify(SolidifyParams { thickness: r.thickness.unwrap_or(d.thickness), offset: r.offset.unwrap_or(d.offset) })
+        }
+        "bevel" => {
+            let d = BevelParams::default();
+            K::Bevel(BevelParams { width: r.width.unwrap_or(d.width), angle: r.angle.unwrap_or(d.angle) })
+        }
+        "boolean" => K::Boolean(BooleanModifier {
+            operand: kreate_scene::Uid::from_raw(r.operand.unwrap_or(0)),
+            op: match r.operation.as_deref() {
+                Some("union") => BooleanOp::Union,
+                Some("intersect") => BooleanOp::Intersect,
+                _ => BooleanOp::Difference,
+            },
+        }),
+        _ => return None,
+    };
+    Some(ModifierInstance { kind, enabled: r.enabled })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1316,6 +1447,7 @@ pub fn write(
                             .collect(),
                     })
                     .collect(),
+                modifiers: object.modifiers.iter().filter_map(modifier_record).collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -1766,6 +1898,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .iter()
             .map(|s| s.and_then(|i| material_ids.get(i).copied()))
             .collect();
+        object.modifiers = record.modifiers.iter().filter_map(modifier_from).collect();
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {
