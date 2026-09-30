@@ -1334,7 +1334,7 @@ impl Operator for FillHole {
         let built: usize = each_bmesh(doc, |bm| {
             let span = (params.span > 0).then_some(params.span as usize);
             match edit::fill_selected(bm, params.grid, span) {
-                Ok(out) => Ok(out.faces.len()),
+                Ok(out) => Ok(out.faces.len() + out.edges.len()),
                 // A refusal is information, not a crash: "two borders" and "an
                 // odd border" both tell the user exactly what to change.
                 Err(e) => Err(OpError::Failed(e.to_string())),

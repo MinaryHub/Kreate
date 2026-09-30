@@ -17,7 +17,7 @@
 
 use kreate_math::Vec3;
 
-use crate::arena::{FaceId, VertId};
+use crate::arena::{ArenaIndex, EdgeId, FaceId, VertId};
 use crate::bmesh::{BMesh, BmError, SelectMode};
 
 /// Why a fill could not be done.
@@ -53,6 +53,9 @@ impl std::fmt::Display for FillError {
                 write!(f, "fill needs exactly one border, found {found}")
             }
             FillError::BorderNotClosed => write!(f, "the border does not close"),
+            FillError::TooShort { len } if *len < 3 => {
+                write!(f, "select two unjoined vertices for an edge, or three or more for a face")
+            }
             FillError::TooShort { len } => write!(f, "a border of {len} cannot be filled"),
             FillError::OddBorder { len } => write!(
                 f,
@@ -81,6 +84,8 @@ pub struct Fill {
     pub faces: Vec<FaceId>,
     /// Interior vertices a grid fill created. Empty for an n-gon fill.
     pub verts: Vec<VertId>,
+    /// The edge made between two selected vertices — `F` with nothing to close.
+    pub edges: Vec<EdgeId>,
 }
 
 /// Orients a border ring so a face built from it faces the same way as its
@@ -128,6 +133,7 @@ pub fn fill(mesh: &mut BMesh, ring: &[VertId]) -> Result<Fill, FillError> {
     let out = Fill {
         faces: vec![face],
         verts: Vec::new(),
+        edges: Vec::new(),
     };
     select(mesh, &out);
     Ok(out)
@@ -240,6 +246,104 @@ fn select(mesh: &mut BMesh, out: &Fill) {
     mesh.flush_selection(SelectMode::Face);
 }
 
+/// Blender's `F` on a selection that is not a closed border.
+///
+/// Two vertices: the edge between them. Three or more: one face through all
+/// of them, in the order the selected edges give — each run of connected
+/// edges is kept as it is, and the runs and the loose vertices are joined end
+/// to nearest end. Two parallel edges therefore become the quad between them
+/// rather than a bow tie.
+pub fn make_edge_face(mesh: &mut BMesh, edges: &[EdgeId], verts: &[VertId]) -> Result<Fill, FillError> {
+    // Runs of connected edges, as vertex lists. A vertex on three or more
+    // selected edges has no one way through it.
+    let mut runs: Vec<Vec<VertId>> = Vec::new();
+    let mut left: Vec<EdgeId> = edges.to_vec();
+    while let Some(first) = left.pop() {
+        let Some([a, b]) = mesh.edge_verts(first) else { continue };
+        let mut run = vec![a, b];
+        loop {
+            let mut grew = false;
+            for i in 0..left.len() {
+                let Some([x, y]) = mesh.edge_verts(left[i]) else { continue };
+                let (head, tail) = (run[0], *run.last().unwrap());
+                let joined = if x == tail && !run.contains(&y) {
+                    run.push(y);
+                    true
+                } else if y == tail && !run.contains(&x) {
+                    run.push(x);
+                    true
+                } else if x == head && !run.contains(&y) {
+                    run.insert(0, y);
+                    true
+                } else if y == head && !run.contains(&x) {
+                    run.insert(0, x);
+                    true
+                } else {
+                    false
+                };
+                if joined {
+                    left.swap_remove(i);
+                    grew = true;
+                    break;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        runs.push(run);
+    }
+    for v in verts {
+        if !runs.iter().any(|r| r.contains(v)) {
+            runs.push(vec![*v]);
+        }
+    }
+    // The same vertex in two runs is a fork: no single face goes through it.
+    let mut seen: Vec<VertId> = runs.concat();
+    let count = seen.len();
+    seen.sort_unstable_by_key(|v| v.index());
+    seen.dedup();
+    if seen.len() != count {
+        return Err(FillError::BorderNotClosed);
+    }
+    if count < 2 {
+        return Err(FillError::TooShort { len: count });
+    }
+    if count == 2 {
+        let all: Vec<VertId> = runs.concat();
+        if mesh.edge_between(all[0], all[1]).is_some() {
+            return Err(FillError::TooShort { len: 2 });
+        }
+        let edge = mesh.add_edge(all[0], all[1])?;
+        mesh.select_none();
+        mesh.set_edge_selected(edge, true);
+        mesh.flush_selection(SelectMode::Edge);
+        return Ok(Fill { edges: vec![edge], ..Fill::default() });
+    }
+    // Join the runs: from the end of the ring so far, the run with an end
+    // nearest to it, turned round if its far end is the nearer.
+    let at = |v: VertId| mesh.position(v).unwrap_or(Vec3::ZERO);
+    let mut ring = runs.remove(0);
+    while !runs.is_empty() {
+        let tail = at(*ring.last().unwrap());
+        let (i, flip) = runs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, r)| {
+                [(i, false, at(r[0]).distance(tail)), (i, true, at(*r.last().unwrap()).distance(tail))]
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(i, flip, _)| (i, flip))
+            .expect("runs is not empty");
+        let mut next = runs.remove(i);
+        if flip {
+            next.reverse();
+        }
+        ring.extend(next);
+    }
+    fill(mesh, &ring)
+}
+
 /// The one open border of the mesh, or a reason there is not one.
 pub fn the_only_border(mesh: &BMesh) -> Result<Vec<VertId>, FillError> {
     let Some(borders) = super::bridge::open_borders(mesh) else {
@@ -252,17 +356,28 @@ pub fn the_only_border(mesh: &BMesh) -> Result<Vec<VertId>, FillError> {
 }
 
 /// Fills the border the selected edges form, or the mesh's only open border.
+///
+/// `F` in Blender is "make edge/face", and so is this when the selection is
+/// not one closed border: two vertices get an edge between them, and anything
+/// more — two edges, an open chain, loose vertices — gets a face through all
+/// of it (see [`make_edge_face`]). A grid fill still wants a closed border.
 pub fn fill_selected(mesh: &mut BMesh, grid: bool, span: Option<usize>) -> Result<Fill, FillError> {
     let selected = mesh.selected_edges();
-    let ring = if selected.is_empty() {
+    let verts = mesh.selected_verts();
+    let ring = if selected.is_empty() && verts.is_empty() {
         the_only_border(mesh)?
     } else {
-        let Some(mut chains) = super::bridge::chain_borders(mesh, &selected) else {
-            return Err(FillError::BorderNotClosed);
-        };
-        match chains.len() {
-            1 => chains.pop().unwrap(),
-            found => return Err(FillError::NotOneBorder { found }),
+        let closed = if selected.is_empty() { None } else { super::bridge::chain_borders(mesh, &selected) };
+        let covers = |chain: &Vec<VertId>| verts.iter().all(|v| chain.contains(v));
+        match closed {
+            Some(mut chains) if chains.len() == 1 && covers(&chains[0]) => chains.pop().unwrap(),
+            _ if grid => {
+                return Err(match closed {
+                    Some(chains) => FillError::NotOneBorder { found: chains.len() },
+                    None => FillError::BorderNotClosed,
+                })
+            }
+            _ => return make_edge_face(mesh, &selected, &verts),
         }
     };
     if grid {
@@ -560,5 +675,42 @@ mod tests {
         let ring = the_only_border(&m).unwrap();
         fill(&mut m, &ring).unwrap();
         assert_eq!(m.to_mesh_data().validate(), Vec::new());
+    }
+
+    #[test]
+    fn f_makes_an_edge_between_two_vertices_and_a_face_across_two_edges() {
+        // Blender's make edge/face. A lone quad outline: pick two opposite
+        // corners and F joins them.
+        let mut m = BMesh::from_mesh_data(&primitives::plane(2.0));
+        let face = m.face_ids().next().unwrap();
+        let ring: Vec<VertId> = m.face_loops(face).into_iter().filter_map(|l| m.loop_vert(l)).collect();
+        m.remove_face(face);
+        m.select_none();
+        m.set_vert_selected(ring[0], true);
+        m.set_vert_selected(ring[2], true);
+        m.flush_selection(SelectMode::Vert);
+        let out = fill_selected(&mut m, false, None).unwrap();
+        assert_eq!(out.edges.len(), 1);
+        m.assert_valid();
+
+        // Two opposite edges of it, the other two gone: F spans them with a
+        // quad, not a bow tie.
+        let mut m = BMesh::from_mesh_data(&primitives::plane(2.0));
+        let face = m.face_ids().next().unwrap();
+        m.remove_face(face);
+        for (a, b) in [(ring[1], ring[2]), (ring[3], ring[0])] {
+            let e = m.edge_between(a, b).unwrap();
+            m.remove_edge(e);
+        }
+        m.select_none();
+        for e in m.edge_ids().collect::<Vec<_>>() {
+            m.set_edge_selected(e, true);
+        }
+        m.flush_selection(SelectMode::Edge);
+        let out = fill_selected(&mut m, false, None).unwrap();
+        assert_eq!(out.faces.len(), 1);
+        m.assert_valid();
+        let area = m.face_normal(out.faces[0]).length();
+        assert!(area > 1.0, "a bow tie has almost no area: {area}");
     }
 }
