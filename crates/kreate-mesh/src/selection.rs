@@ -613,6 +613,69 @@ pub fn select_less(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) 
     (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len()) != before
 }
 
+/// Adds — or with `deselect`, takes away — the whole piece `seed` is on:
+/// Blender's `L` and `Shift+L`, over the element under the pointer. `false`
+/// when nothing changed.
+pub fn select_linked_from(mesh: &mut MeshData, seed: &[u32], deselect: bool) -> bool {
+    ensure_layers(mesh);
+    let n = mesh.num_verts() as usize;
+    let hidden_edges = hidden_flags(mesh, Domain::Edge);
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    fn root(parent: &mut [u32], mut v: u32) -> u32 {
+        while parent[v as usize] != v {
+            parent[v as usize] = parent[parent[v as usize] as usize];
+            v = parent[v as usize];
+        }
+        v
+    }
+    for (e, [a, b]) in mesh.edges().iter().enumerate() {
+        if hidden_edges[e] {
+            continue;
+        }
+        let (ra, rb) = (root(&mut parent, *a), root(&mut parent, *b));
+        if ra != rb {
+            parent[ra as usize] = rb;
+        }
+    }
+    let mut piece = vec![false; n];
+    for v in seed {
+        if (*v as usize) < n {
+            let r = root(&mut parent, *v);
+            piece[r as usize] = true;
+        }
+    }
+    let before = (selected(mesh, Domain::Point), selected(mesh, Domain::Face));
+    let mut verts = selected_flags(mesh, Domain::Point);
+    verts.resize(n, false);
+    let mut faces = selected_flags(mesh, Domain::Face);
+    faces.resize(mesh.num_faces() as usize, false);
+    for v in 0..n {
+        if piece[root(&mut parent, v as u32) as usize] {
+            verts[v] = !deselect;
+        }
+    }
+    for (f, on) in faces.iter_mut().enumerate() {
+        let ring = mesh.face_verts(f as u32);
+        if ring.first().is_some_and(|v| piece[root(&mut parent, *v) as usize]) {
+            *on = !deselect;
+        }
+    }
+    // The piece's edges too, set directly: a flush would re-derive the rest of
+    // the selection from one domain and change what is outside the piece.
+    let mut edges = selected_flags(mesh, Domain::Edge);
+    edges.resize(mesh.num_edges() as usize, false);
+    for (e, [a, _]) in mesh.edges().iter().enumerate() {
+        if piece[root(&mut parent, *a) as usize] {
+            edges[e] = !deselect;
+        }
+    }
+    write(mesh, Domain::Point, verts);
+    write(mesh, Domain::Edge, edges);
+    write(mesh, Domain::Face, faces);
+    deselect_hidden(mesh);
+    (selected(mesh, Domain::Point), selected(mesh, Domain::Face)) != before
+}
+
 /// Selects every piece the selection touches — `Ctrl+L`: all that is joined to
 /// a selected vertex by edges, through visible edges only. `false` when
 /// nothing was added.

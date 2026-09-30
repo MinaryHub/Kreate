@@ -2089,6 +2089,110 @@ impl Operator for SelectElements {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PickPieceParams {
+    /// The element under the pointer, in the domain `mode` names.
+    #[param(min = 0, unit = "count")]
+    pub element: u32,
+    #[param(variants("vert", "edge", "face"))]
+    pub mode: u32,
+    /// Take the piece out of the selection — `Shift+L`.
+    pub deselect: bool,
+}
+
+/// Blender's `L`: the whole piece under the pointer, added to the selection.
+pub struct SelectLinkedPick;
+
+impl Operator for SelectLinkedPick {
+    type Params = PickPieceParams;
+    fn id() -> &'static str {
+        "mesh.select_linked_pick"
+    }
+    fn label() -> &'static str {
+        "Select Linked Pick"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+        let changed = with_named_mesh(doc, mesh_id, |mesh| {
+            let seed: Vec<u32> = match params.mode {
+                2 if params.element < mesh.num_faces() => mesh.face_verts(params.element).to_vec(),
+                1 => mesh.edges().get(params.element as usize).map(|e| e.to_vec()).unwrap_or_default(),
+                0 if params.element < mesh.num_verts() => vec![params.element],
+                _ => Vec::new(),
+            };
+            if seed.is_empty() {
+                return false;
+            }
+            selection::select_linked_from(mesh, &seed, params.deselect)
+        })?;
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct LoopPickParams {
+    /// The edge clicked.
+    #[param(min = 0, unit = "count")]
+    pub edge: u32,
+    /// A ring across the edge rather than the loop along it — `Ctrl+Alt`.
+    pub ring: bool,
+    /// Add to the selection — `Shift+Alt`.
+    pub extend: bool,
+    /// Faces rather than edges: in face mode a loop is a loop of faces.
+    pub faces: bool,
+}
+
+/// Blender's Alt+click: the edge loop through the edge clicked.
+pub struct SelectLoopPick;
+
+impl Operator for SelectLoopPick {
+    type Params = LoopPickParams;
+    fn id() -> &'static str {
+        "mesh.select_loop_pick"
+    }
+    fn label() -> &'static str {
+        "Select Loop"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+        // The edge by where its ends are: the stored mesh numbers its edges,
+        // and the edit structure — after a delete — may number them otherwise.
+        let ends = with_named_mesh(doc, mesh_id, |mesh| {
+            let [a, b] = *mesh.edges().get(params.edge as usize)?;
+            if !params.extend {
+                selection::select_none(mesh);
+            }
+            Some([mesh.positions()[a as usize], mesh.positions()[b as usize]])
+        })?;
+        let Some([pa, pb]) = ends else {
+            return Ok(OpResult::Cancelled);
+        };
+        let grew = with_bmesh(doc, |bm| {
+            let found = bm.edge_ids().find(|e| {
+                bm.edge_verts(*e).is_some_and(|[x, y]| {
+                    let (px, py) = (bm.position(x), bm.position(y));
+                    (px == Some(pa) && py == Some(pb)) || (px == Some(pb) && py == Some(pa))
+                })
+            });
+            let Some(e) = found else { return Ok(0) };
+            Ok(if params.faces {
+                bm.select_face_loop(e)
+            } else if params.ring {
+                bm.select_edge_ring(e)
+            } else {
+                bm.select_edge_loop(e)
+            })
+        })?;
+        Ok(if grew > 0 { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct HideParams {
     /// Hide everything that is *not* selected — `Shift+H`.
     pub unselected: bool,
@@ -2519,6 +2623,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectElements>();
     registry.register::<HideElements>();
     registry.register::<KnifeCut>();
+    registry.register::<SelectLinkedPick>();
+    registry.register::<SelectLoopPick>();
     registry.register::<RevealElements>();
     registry.register::<RecalculateNormals>();
     registry.register::<ShadeFaces>();

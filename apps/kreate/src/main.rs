@@ -617,6 +617,9 @@ struct App {
     ///   through;
     /// - a drag is one gesture, and what it does is settled by how it began.
     drag_ops: [Option<String>; 3],
+    /// How far each button has dragged since it went down, in pixels: an
+    /// Alt+click that did not move is a loop select, not an orbit.
+    drag_travel: [f64; 3],
     /// Where the camera is going. `camera` follows it.
     motion: kreate_render::CameraMotion,
     /// When the last frame was, for frame-rate-independent easing.
@@ -766,6 +769,7 @@ impl App {
             key_overrides: std::collections::BTreeMap::new(),
             buttons: [false; 3],
             drag_ops: [const { None }; 3],
+            drag_travel: [0.0; 3],
             viewport_px: None,
             ui: ShellState::with_catalog(shell::load_catalog(locale)),
             wanted_viewport: (0, 0),
@@ -2599,6 +2603,71 @@ impl App {
     /// of that face's edges is nearest the pointer on screen. On the active
     /// mesh only, and only while it is drawn as it is stored — a modifier
     /// stack numbers its faces differently.
+    /// The edge of the active mesh nearest the pointer on the face under it:
+    /// a ray finds the face, so what is behind the model is not offered, and
+    /// the edge is whichever of that face's is nearest on screen. Only while the
+    /// mesh is drawn as it is stored — a modifier stack numbers its faces
+    /// otherwise.
+    fn edge_under_cursor(&mut self) -> Option<u32> {
+        let object = kreate_ops::ops::mesh::target_object(&self.doc)?;
+        let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc)?;
+        let (ndc, projector, (x, y)) = (self.cursor_ndc()?, self.ui.projector?, self.input.cursor?);
+        let aspect = self.viewport_aspect();
+        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let mesh = self.doc.mesh_arc(mesh_id).cloned()?;
+        let drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone())?;
+        if hit.object != object || !Arc::ptr_eq(&mesh, &drawn) || hit.face >= mesh.num_faces() {
+            return None;
+        }
+        let ppp = self.egui_ctx.pixels_per_point();
+        let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+        let world = self.doc.world_transform(object);
+        let corner_edges = mesh.corner_edges();
+        let screen = |v: u32| projector.project(world.transform_point3(mesh.positions()[v as usize].as_dvec3()));
+        let mut best: Option<(f32, u32)> = None;
+        for c in mesh.face_corner_range(hit.face) {
+            let e = corner_edges[c];
+            let [a, b] = mesh.edges()[e as usize];
+            if let (Some(pa), Some(pb)) = (screen(a), screen(b)) {
+                let d = segment_distance(at, pa, pb);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, e));
+                }
+            }
+        }
+        best.map(|(_, e)| e)
+    }
+
+    /// Alt+click: the loop through the edge under the pointer — Ctrl for a
+    /// ring, Shift to add; in face mode, a loop of faces.
+    fn loop_pick(&mut self) {
+        let Some(edge) = self.edge_under_cursor() else { return };
+        let mut params = PropertyMap::new();
+        params.set("edge", PropertyValue::Int(edge as i64));
+        params.set("ring", PropertyValue::Bool(self.input.ctrl_down));
+        params.set("extend", PropertyValue::Bool(self.input.shift_down));
+        params.set("faces", PropertyValue::Bool(self.select_mode == 2 && !self.input.ctrl_down));
+        self.run_op("mesh.select_loop_pick", params);
+    }
+
+    /// L: the piece under the pointer, added — or with `deselect`, taken out.
+    fn linked_pick(&mut self, deselect: bool) {
+        let Some(hit) = self.hover else {
+            self.status("point at the mesh to select what is linked to it");
+            return;
+        };
+        let mode = match self.pick_domain() {
+            kreate_render::PickDomain::Vert => 0u32,
+            kreate_render::PickDomain::Edge => 1,
+            _ => 2,
+        };
+        let mut params = PropertyMap::new();
+        params.set("element", PropertyValue::Int(hit.element as i64));
+        params.set("mode", PropertyValue::Enum(mode));
+        params.set("deselect", PropertyValue::Bool(deselect));
+        self.run_op("mesh.select_linked_pick", params);
+    }
+
     fn update_loop_cut_hover(&mut self) {
         let Some((_, cuts)) = self.loop_cut_hover else { return };
         if self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements {
@@ -4031,6 +4100,9 @@ impl App {
     /// catches, because using it feels like the application being unreliable
     /// rather than like a bug with a shape.
     fn apply_drag_motion(&mut self, delta: (f64, f64)) {
+        for travel in &mut self.drag_travel {
+            *travel += delta.0.abs() + delta.1.abs();
+        }
         for slot in 0..self.drag_ops.len() {
             let Some(op) = self.drag_ops[slot].clone() else {
                 continue;
@@ -4060,6 +4132,7 @@ impl App {
     /// released mid-drag cannot turn an orbit into a pan, and a pointer that
     /// wanders over a panel cannot stop it.
     fn begin_mouse_drag(&mut self, slot: usize, button: KeyMouse) {
+        self.drag_travel[slot] = 0.0;
         let action = self.drag_action(button);
         if let Some(action) = action {
             // On the press, not on the first motion: by the time the pointer has
@@ -4223,6 +4296,17 @@ impl App {
             }
         }
         let was_navigating = self.drag_ops[slot].take().is_some();
+        // Alt with the left button orbits when it drags; left where it was
+        // pressed, in edit mode, it is Blender's loop select.
+        if was_navigating
+            && slot == 0
+            && self.input.alt_down
+            && self.drag_travel[0] < 4.0
+            && self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements
+        {
+            self.loop_pick();
+            return;
+        }
         if !was_navigating && slot == 0 {
             self.finish_drag_select();
         }
@@ -5710,6 +5794,10 @@ impl App {
             "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
+            "mesh.select_linked_pick" if self.op_ctx.mode.edits_elements() => {
+                let deselect = action.params.get("deselect").and_then(|v| v.as_bool()).unwrap_or(false);
+                self.linked_pick(deselect);
+            }
             "view.circle_select" => self.toggle_circle_select(),
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),

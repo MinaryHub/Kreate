@@ -1146,3 +1146,49 @@ fn k_cuts_along_its_path_and_replays_from_the_script_line() {
     assert!(outcomes.iter().all(|o| o.result.is_ok()), "{script}");
     assert_eq!(mesh(&replay), 2, "{script}");
 }
+
+#[test]
+fn l_adds_the_piece_under_the_pointer_and_shift_l_takes_it_away() {
+    use kreate_mesh::edit::join::{join, Part};
+    let a = kreate_mesh::primitives::cube(1.0);
+    let mut b = kreate_mesh::primitives::cube(1.0);
+    for p in b.positions_mut() {
+        p.x += 3.0;
+    }
+    let part = |mesh| Part { mesh, transform: glam::DAffine3::IDENTITY };
+    let (joined, _) = join(&[part(&a), part(&b)]);
+    let (mut doc, ctx) = scene(joined);
+    // Face 7 is on the second cube; one face of the first is already selected.
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    run(&mut doc, &ctx, "mesh.select_linked_pick", &[("element", PropertyValue::Int(7)), ("mode", PropertyValue::Enum(2))]).unwrap();
+    let faces = |d: &Document| flags(d, names::SELECT_FACE);
+    assert!(faces(&doc)[6..12].iter().all(|s| *s), "the second cube is not all selected");
+    assert!(faces(&doc)[0] && !faces(&doc)[1], "the first cube's selection changed");
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select_linked_pick",
+        &[("element", PropertyValue::Int(7)), ("mode", PropertyValue::Enum(2)), ("deselect", PropertyValue::Bool(true))],
+    )
+    .unwrap();
+    assert!(faces(&doc)[6..12].iter().all(|s| !*s));
+}
+
+#[test]
+fn alt_click_selects_the_loop_through_the_edge() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::grid(3.0, 3, 3));
+    // An inner edge along X in the middle row: its loop runs across the grid.
+    let mesh = doc.mesh(doc.meshes().next().unwrap().0).unwrap().clone();
+    let edge = (0..mesh.num_edges())
+        .find(|e| {
+            let [a, b] = mesh.edges()[*e as usize];
+            let (pa, pb) = (mesh.positions()[a as usize], mesh.positions()[b as usize]);
+            (pa.y - 0.5).abs() < 1e-4 && (pb.y - 0.5).abs() < 1e-4 && pa.x.abs() < 0.6 && pb.x.abs() < 0.6
+        })
+        .expect("a middle edge");
+    run(&mut doc, &ctx, "mesh.select_loop_pick", &[("edge", PropertyValue::Int(edge as i64))]).unwrap();
+    assert_eq!(flags(&doc, names::SELECT_EDGE).iter().filter(|s| **s).count(), 3);
+    // The ring instead: the edges across it.
+    run(&mut doc, &ctx, "mesh.select_loop_pick", &[("edge", PropertyValue::Int(edge as i64)), ("ring", PropertyValue::Bool(true))]).unwrap();
+    assert_eq!(flags(&doc, names::SELECT_EDGE).iter().filter(|s| **s).count(), 4);
+}

@@ -785,17 +785,14 @@ fn common() -> Vec<Binding> {
                 .with("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_6)),
         )
         .with_modifiers(Modifiers::shift()),
+        // Blender's L and Shift+L: the piece under the pointer, in or out.
+        // Loops and rings are Alt+click and Ctrl+Alt+click, as in Blender.
+        key("mesh.select_linked_pick", "L", Context::EditMesh, Action::new("mesh.select_linked_pick")),
         key(
-            "mesh.select_loop",
+            "mesh.deselect_linked_pick",
             "L",
             Context::EditMesh,
-            enum_param(Action::new("mesh.select"), "action", 3),
-        ),
-        key(
-            "mesh.select_ring",
-            "L",
-            Context::EditMesh,
-            enum_param(Action::new("mesh.select"), "action", 4),
+            Action::new("mesh.select_linked_pick").with("deselect", PropertyValue::Bool(true)),
         )
         .with_modifiers(Modifiers::shift()),
         // Blender's grow, shrink and linked: Ctrl with the numpad's plus and
