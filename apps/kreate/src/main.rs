@@ -105,7 +105,7 @@ Kreate
   Adjust     [ / ]  re-run the last operation with a smaller/larger value
   History    Ctrl+Z undo  Ctrl+Y redo  P print history as a script
   Keymap     F1 prints the resolved keymap, preset and all
-  Quit       Esc  (F1 for this list)
+  Quit       Ctrl+Q or close the window  (F1 for this list; Esc only cancels)
 
   Shortcuts stand down while a text field or an IME has the keyboard.";
 
@@ -4520,14 +4520,17 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
-        // Escape and F1 are deliberately outside the keymap: there must always
-        // be a way out and a way to ask, even from a keymap the user has broken.
+        // Quitting and F1 are deliberately outside the keymap: there must
+        // always be a way out and a way to ask, even from a keymap the user has
+        // broken.
         match code {
-            // A search box or a pie has the keyboard: `Escape` is how it
-            // closes, and it must not also end the session. Found by the
-            // search, whose Escape quit the application.
-            KeyCode::Escape if self.ui.overlay_open() => return,
-            KeyCode::Escape => {
+            // `Escape` cancels, and outside a gesture, a pie or a search there
+            // is nothing to cancel — so it does nothing, as in Blender. It used
+            // to quit, which is what a Blender user's hand does after every
+            // transform: a session lost to the key that means "never mind".
+            KeyCode::Escape => return,
+            // Quit on the key every application quits on.
+            KeyCode::KeyQ if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down => {
                 event_loop.exit();
                 return;
             }
