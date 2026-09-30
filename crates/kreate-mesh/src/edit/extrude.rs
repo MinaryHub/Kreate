@@ -178,6 +178,76 @@ pub fn extrude_selected_faces(mesh: &mut BMesh, distance: f32) -> Result<Extrusi
     extrude_faces(mesh, &faces, normal * distance)
 }
 
+/// What an edge-and-vertex extrusion produced: the new vertices, which a
+/// move then drags.
+#[derive(Clone, Debug, Default)]
+pub struct WireExtrusion {
+    pub new_verts: Vec<VertId>,
+    pub new_faces: Vec<FaceId>,
+}
+
+/// Blender's `E` on edges and vertices: each selected edge pulls out a quad
+/// behind it, each selected vertex on no selected edge an edge, and the new
+/// copies become the selection — to be moved where the pointer takes them.
+/// Nothing moves here; the copies sit on the originals.
+pub fn extrude_edges_and_verts(mesh: &mut BMesh) -> Result<WireExtrusion, BmError> {
+    let mut out = WireExtrusion::default();
+    let edges = mesh.selected_edges();
+    let mut verts: Vec<VertId> = mesh.selected_verts();
+    for e in &edges {
+        if let Some([a, b]) = mesh.edge_verts(*e) {
+            for v in [a, b] {
+                if !verts.contains(&v) {
+                    verts.push(v);
+                }
+            }
+        }
+    }
+    if verts.is_empty() {
+        return Ok(out);
+    }
+    // Read before writing: each edge's winding in the face it borders, so the
+    // new quad runs against it and faces the same way.
+    let walls: Vec<(VertId, VertId)> = edges
+        .iter()
+        .filter_map(|e| {
+            let [a, b] = mesh.edge_verts(*e)?;
+            let along = mesh
+                .edge_loops(*e)
+                .first()
+                .and_then(|l| mesh.loop_vert(*l))
+                .map(|first| first == a)
+                .unwrap_or(true);
+            // A face walks the edge a→b; the wall walks it b→a.
+            Some(if along { (b, a) } else { (a, b) })
+        })
+        .collect();
+    let mut copy: Vec<(VertId, VertId)> = Vec::with_capacity(verts.len());
+    for v in &verts {
+        let Some(p) = mesh.position(*v) else { continue };
+        let n = mesh.add_vert(p);
+        copy.push((*v, n));
+        out.new_verts.push(n);
+    }
+    let copy_of = |v: VertId| copy.iter().find(|(o, _)| *o == v).map(|(_, n)| *n);
+    for (a, b) in walls {
+        let (Some(na), Some(nb)) = (copy_of(a), copy_of(b)) else { continue };
+        out.new_faces.push(mesh.add_face(&[a, b, nb, na])?);
+    }
+    // A vertex on no selected edge: an edge out of it.
+    for (v, n) in &copy {
+        if mesh.edge_between(*v, *n).is_none() && !edges.iter().any(|e| mesh.edge_verts(*e).is_some_and(|ends| ends.contains(v))) {
+            mesh.add_edge(*v, *n)?;
+        }
+    }
+    mesh.select_none();
+    for n in &out.new_verts {
+        mesh.set_vert_selected(*n, true);
+    }
+    mesh.flush_selection(SelectMode::Vert);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,4 +471,38 @@ mod tests {
         assert_eq!(m.num_faces(), 6, "the original faces were replaced");
         assert_eq!(m.num_verts(), 8, "and their vertices reclaimed");
     }
+
+    #[test]
+    fn e_on_an_open_edge_pulls_out_a_quad_that_faces_with_its_neighbour() {
+        let mut m = BMesh::from_mesh_data(&primitives::plane(2.0));
+        let e = m.edge_ids().next().unwrap();
+        m.select_none();
+        m.set_edge_selected(e, true);
+        m.flush_selection(SelectMode::Edge);
+        let out = extrude_edges_and_verts(&mut m).unwrap();
+        m.assert_valid();
+        assert_eq!(out.new_verts.len(), 2);
+        assert_eq!(m.num_faces(), 2);
+        // The two faces walk the shared edge in opposite directions: the wall
+        // is wound as its neighbour is, not flipped.
+        let loops = m.edge_loops(e);
+        assert_eq!(loops.len(), 2);
+        assert_ne!(m.loop_vert(loops[0]), m.loop_vert(loops[1]));
+        assert_eq!(m.selected_verts().len(), 2);
+    }
+
+    #[test]
+    fn e_on_a_lone_vertex_makes_an_edge_out_of_it() {
+        let mut m = BMesh::from_mesh_data(&primitives::plane(2.0));
+        let v = m.vert_ids().next().unwrap();
+        m.select_none();
+        m.set_vert_selected(v, true);
+        let edges_before = m.num_edges();
+        let out = extrude_edges_and_verts(&mut m).unwrap();
+        m.assert_valid();
+        assert_eq!(out.new_verts.len(), 1);
+        assert_eq!(m.num_edges(), edges_before + 1);
+        assert_eq!(m.num_faces(), 1);
+    }
 }
+

@@ -1192,3 +1192,27 @@ fn alt_click_selects_the_loop_through_the_edge() {
     run(&mut doc, &ctx, "mesh.select_loop_pick", &[("edge", PropertyValue::Int(edge as i64)), ("ring", PropertyValue::Bool(true))]).unwrap();
     assert_eq!(flags(&doc, names::SELECT_EDGE).iter().filter(|s| **s).count(), 4);
 }
+
+#[test]
+fn e_on_an_edge_pulls_out_a_face_and_moves_it() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::plane(2.0));
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[0]);
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[]);
+    let mesh = doc.mesh(doc.meshes().next().unwrap().0).unwrap().clone();
+    let [a, b] = mesh.edges()[0];
+    {
+        let id = doc.meshes().next().unwrap().0;
+        let m = doc.mesh_mut(id).unwrap();
+        let verts = m.attributes_mut().make_mut_bool(names::SELECT_VERT).unwrap();
+        verts[a as usize] = true;
+        verts[b as usize] = true;
+    }
+    run(&mut doc, &ctx, "mesh.extrude_move", &[("translation", PropertyValue::Vec3([0.0, 0.0, 1.0]))]).unwrap();
+    let after = doc.mesh(doc.meshes().next().unwrap().0).unwrap();
+    assert_eq!(after.num_faces(), 2);
+    assert_eq!(after.positions().iter().filter(|p| (p.z - 1.0).abs() < 1e-6).count(), 2);
+    // Nothing selected: nothing to extrude.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::plane(2.0));
+    select(&mut doc, names::SELECT_VERT, Domain::Point, &[]);
+    assert_eq!(run(&mut doc, &ctx, "mesh.extrude_move", &[]).unwrap(), kreate_ops::OpResult::Cancelled);
+}

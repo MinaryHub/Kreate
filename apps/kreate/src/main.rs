@@ -4867,7 +4867,7 @@ impl App {
                     kreate::modal::Kind::Move => kreate_ui::toolbar::Tool::Move,
                     kreate::modal::Kind::Rotate => kreate_ui::toolbar::Tool::Rotate,
                     kreate::modal::Kind::Scale => kreate_ui::toolbar::Tool::Scale,
-                    kreate::modal::Kind::Extrude => kreate_ui::toolbar::Tool::Extrude,
+                    kreate::modal::Kind::Extrude | kreate::modal::Kind::ExtrudeFree => kreate_ui::toolbar::Tool::Extrude,
                     kreate::modal::Kind::Inset => kreate_ui::toolbar::Tool::Inset,
                     kreate::modal::Kind::Bevel => kreate_ui::toolbar::Tool::Bevel,
                     kreate::modal::Kind::LoopCut => kreate_ui::toolbar::Tool::LoopCut,
@@ -5786,8 +5786,14 @@ impl App {
             "object.scale" | "mesh.scale" | "pose.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
             // Blender's E: extrude, then drag the new faces out along their
             // normal with the pointer, rather than by a fixed amount.
+            // Faces go out along their normal; edges and vertices, with no
+            // face to give a direction, move freely.
             "mesh.extrude_region" if self.op_ctx.mode.edits_elements() => {
-                self.begin_gesture(kreate::modal::Kind::Extrude)
+                if kreate_ops::ops::mesh::selected_faces_normal(&self.doc).is_some() {
+                    self.begin_gesture(kreate::modal::Kind::Extrude)
+                } else {
+                    self.begin_gesture(kreate::modal::Kind::ExtrudeFree)
+                }
             }
             // I, Ctrl+B and Ctrl+R the same way: the pointer sets how much.
             "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),

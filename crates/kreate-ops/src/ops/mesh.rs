@@ -1688,6 +1688,44 @@ impl Operator for LoopCut {
     }
 }
 
+// --- extrude edges and vertices ---------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ExtrudeMoveParams {
+    /// Where the new copies go, as a move in the world.
+    #[param(unit = "length")]
+    pub translation: [f64; 3],
+}
+
+/// Blender's `E` on edges and vertices: the selection pulled out into new
+/// faces behind the edges and new edges behind lone vertices, and the copies
+/// moved.
+pub struct ExtrudeMove;
+
+impl Operator for ExtrudeMove {
+    type Params = ExtrudeMoveParams;
+    fn id() -> &'static str {
+        "mesh.extrude_move"
+    }
+    fn label() -> &'static str {
+        "Extrude"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let made = with_bmesh(doc, |bm| edit::extrude_edges_and_verts(bm).map_err(|e| OpError::Failed(e.to_string())))?;
+        if made.new_verts.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let offset = glam::DVec3::from_array(params.translation);
+        if offset != glam::DVec3::ZERO {
+            run_transform(doc, 0.0, false, None, |p, weight, _| p + offset * weight as f64)?;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 // --- knife ------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -2623,6 +2661,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectElements>();
     registry.register::<HideElements>();
     registry.register::<KnifeCut>();
+    registry.register::<ExtrudeMove>();
     registry.register::<SelectLinkedPick>();
     registry.register::<SelectLoopPick>();
     registry.register::<RevealElements>();

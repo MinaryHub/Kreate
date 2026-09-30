@@ -83,6 +83,8 @@ pub enum Kind {
     /// along their normal — the extrude's own `offset`, so the whole gesture is
     /// one operator and one step to undo.
     Extrude,
+    /// `E` on edges or vertices: pulled out and moved freely, as `G` moves.
+    ExtrudeFree,
     /// Blender's `I`: the pointer moving in towards the selection's middle
     /// makes the inset thicker.
     Inset,
@@ -109,6 +111,7 @@ impl Kind {
             Kind::Scale => scale,
             // Not the mode's: only a mesh's faces extrude.
             Kind::Extrude => "mesh.extrude_region",
+            Kind::ExtrudeFree => "mesh.extrude_move",
             Kind::Inset => "mesh.inset",
             Kind::Bevel => "mesh.bevel",
             Kind::LoopCut => "mesh.loop_cut",
@@ -121,7 +124,7 @@ impl Kind {
             Kind::Move => "Move",
             Kind::Rotate => "Rotate",
             Kind::Scale => "Scale",
-            Kind::Extrude => "Extrude",
+            Kind::Extrude | Kind::ExtrudeFree => "Extrude",
             Kind::Inset => "Inset",
             Kind::Bevel => "Bevel",
             Kind::LoopCut => "Loop Cut",
@@ -130,7 +133,7 @@ impl Kind {
 
     /// Whether the gesture is one of the three transforms, which take an axis.
     pub fn transforms(self) -> bool {
-        matches!(self, Kind::Move | Kind::Rotate | Kind::Scale)
+        matches!(self, Kind::Move | Kind::Rotate | Kind::Scale | Kind::ExtrudeFree)
     }
 }
 
@@ -634,7 +637,7 @@ impl Gesture {
     /// suffix are read.
     fn unit(&self) -> crate::expr::Unit {
         match self.kind {
-            Kind::Move | Kind::Extrude | Kind::Inset | Kind::Bevel => crate::expr::Unit::Length,
+            Kind::Move | Kind::ExtrudeFree | Kind::Extrude | Kind::Inset | Kind::Bevel => crate::expr::Unit::Length,
             Kind::Rotate => crate::expr::Unit::Angle,
             Kind::Scale | Kind::LoopCut => crate::expr::Unit::Factor,
         }
@@ -650,7 +653,7 @@ impl Gesture {
         let (dx, dy) = self.effective_delta(self.cursor);
 
         match self.kind {
-            Kind::Move => {
+            Kind::Move | Kind::ExtrudeFree => {
                 let offset = self.offset(dx, dy);
                 params.set(
                     "translation",
@@ -963,7 +966,7 @@ impl Gesture {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 format!("cuts {}  position {:.3}  (wheel: cuts)", self.loop_cuts(), self.slide_position(dx, dy))
             }
-            Kind::Move => {
+            Kind::Move | Kind::ExtrudeFree => {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 let v = self.offset(dx, dy);
                 format!("{:.3} {:.3} {:.3}", v.x, v.y, v.z)

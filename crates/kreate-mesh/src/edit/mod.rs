@@ -31,7 +31,7 @@ pub mod walk;
 pub use bevel::{bevel_edges, bevel_selected, Bevel};
 pub use bridge::{bridge_loops, bridge_selected, open_borders, Bridge, BridgeError};
 pub use delete::{delete, dissolve_edges, dissolve_faces, dissolve_verts, DeleteMode, Dissolution};
-pub use extrude::{extrude_faces, extrude_selected_faces, Extrusion};
+pub use extrude::{extrude_edges_and_verts, extrude_faces, extrude_selected_faces, Extrusion, WireExtrusion};
 pub use fill::{fill, fill_selected, grid_fill, the_only_border, Fill, FillError};
 pub use inset::{inset_individual, inset_region, inset_selected, Inset};
 pub use knife::{knife, Knife};

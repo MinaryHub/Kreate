@@ -901,7 +901,7 @@ fn every_operator_a_gesture_names_exists() {
     // Every mode, from `Mode::ALL` rather than a list written here: a mode
     // added without an operator behind it is exactly the failure this test is
     // for, and a hardcoded pair would not see it.
-    for kind in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::Inset, Kind::Bevel, Kind::LoopCut] {
+    for kind in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::ExtrudeFree, Kind::Inset, Kind::Bevel, Kind::LoopCut] {
         for mode in kreate_ops::operator::Mode::ALL {
             let id = kind.op_id(mode);
             assert!(
@@ -951,7 +951,7 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
     let mut registry = kreate_ops::OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
 
-    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::Inset, Kind::Bevel, Kind::LoopCut]
+    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::ExtrudeFree, Kind::Inset, Kind::Bevel, Kind::LoopCut]
         .into_iter()
         .flat_map(|kind| {
             kreate_ops::operator::Mode::ALL
