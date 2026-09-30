@@ -1381,3 +1381,55 @@ fn the_status_line_reports_the_new_modes() {
     assert!(status.contains("snap"), "{status}");
     assert!(status.contains("falloff"), "{status}");
 }
+
+/// An extrude gesture whose faces face screen-up: world Z, in this camera.
+fn extrude() -> Gesture {
+    let mut g = Gesture::begin(
+        Kind::Extrude,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        // What the application hands over: the faces' normal as local Z.
+        [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z],
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.axis = Some(Axis::Z);
+    g.orientation = Orientation::Local;
+    g
+}
+
+fn offset(params: &kreate_ops::PropertyMap) -> f64 {
+    match params.get("offset") {
+        Some(PropertyValue::Float(f)) => *f,
+        other => panic!("expected an offset, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_extrude_follows_the_pointer_along_the_normal_and_only_along_it() {
+    // Blender's E: the new faces come out under the pointer, along their
+    // normal. Starting at nothing, so pressing E moves nothing.
+    let mut g = extrude();
+    assert_eq!(offset(&at(&mut g, (400.0, 300.0))), 0.0);
+    let up = offset(&at(&mut g, (400.0, 200.0)));
+    assert!(up > 0.5, "dragging towards the normal did not pull the faces out: {up}");
+    let down = offset(&at(&mut g, (400.0, 400.0)));
+    assert!(down < -0.5, "dragging away did not push them in: {down}");
+    let across = offset(&at(&mut g, (500.0, 300.0)));
+    assert!(across.abs() < 1e-6, "a drag across the normal moved along it: {across}");
+    // Axis keys do not take it off the normal.
+    g.cycle_axis(Axis::X);
+    assert_eq!(g.axis, Some(Axis::Z));
+    assert_eq!(g.orientation, Orientation::Local);
+}
+
+#[test]
+fn a_typed_extrude_distance_is_exact() {
+    let mut g = extrude();
+    for c in "0.25".chars() {
+        assert!(g.type_character(c));
+    }
+    assert_eq!(offset(&at(&mut g, (430.0, 170.0))), 0.25);
+}

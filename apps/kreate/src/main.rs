@@ -1581,16 +1581,41 @@ impl App {
         };
 
         let mode = self.op_ctx.mode;
+        // An extrude's frame: the selected faces' normal as its local Z, which
+        // the gesture is then held to.
+        let extrude_normal = if kind == kreate::modal::Kind::Extrude {
+            match kreate_ops::ops::mesh::selected_faces_normal(&self.doc) {
+                Some(n) => Some(n),
+                None => {
+                    self.status("select faces to extrude");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let basis = match extrude_normal {
+            Some(n) => {
+                let n = n.as_vec3();
+                let t = n.any_orthonormal_vector();
+                [t, n.cross(t), n]
+            }
+            None => self.selection_basis(),
+        };
         let mut gesture = kreate::modal::Gesture::begin(
             kind,
             cursor,
             pivot,
             &self.camera,
             (w, h),
-            self.selection_basis(),
+            basis,
             self.snap,
             self.build_snap_world(),
         );
+        if extrude_normal.is_some() {
+            gesture.axis = Some(kreate::modal::Axis::Z);
+            gesture.orientation = kreate::modal::Orientation::Local;
+        }
         // Ctrl inverts snapping, and it may already be held when the gesture
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
@@ -3945,6 +3970,7 @@ impl App {
                     kreate::modal::Kind::Move => kreate_ui::toolbar::Tool::Move,
                     kreate::modal::Kind::Rotate => kreate_ui::toolbar::Tool::Rotate,
                     kreate::modal::Kind::Scale => kreate_ui::toolbar::Tool::Scale,
+                    kreate::modal::Kind::Extrude => kreate_ui::toolbar::Tool::Extrude,
                 }),
             })
             .or_else(|| {
@@ -4827,6 +4853,11 @@ impl App {
             }
             "object.rotate" | "mesh.rotate" | "pose.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "object.scale" | "mesh.scale" | "pose.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            // Blender's E: extrude, then drag the new faces out along their
+            // normal with the pointer, rather than by a fixed amount.
+            "mesh.extrude_region" if self.op_ctx.mode.edits_elements() => {
+                self.begin_gesture(kreate::modal::Kind::Extrude)
+            }
             "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "armature.scale" => self.begin_gesture(kreate::modal::Kind::Scale),

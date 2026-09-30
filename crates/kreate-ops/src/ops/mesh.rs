@@ -2340,6 +2340,37 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Separate>();
 }
 
+/// The selected faces' shared normal in the world, across every mesh in edit
+/// mode — the direction `E` drags an extrusion along. Each face's Newell normal,
+/// area-weighted as Newell's is, through its object's normal matrix; `None`
+/// when no face is selected or they cancel out.
+pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
+    let mut sum = glam::DVec3::ZERO;
+    for target in edit_targets(doc) {
+        let Some(mesh) = doc.mesh(target.mesh) else { continue };
+        let Some(selected) = mesh.attributes().get_bool(kreate_mesh::attribute::names::SELECT_FACE) else { continue };
+        let offsets = mesh.face_offsets();
+        let corners = mesh.corner_verts();
+        let positions = mesh.positions();
+        let normal_matrix = target.to_world.matrix3.inverse().transpose();
+        for (face, on) in selected.iter().enumerate() {
+            if !*on || face + 1 >= offsets.len() {
+                continue;
+            }
+            let ring = &corners[offsets[face] as usize..offsets[face + 1] as usize];
+            let mut n = glam::DVec3::ZERO;
+            for (i, &a) in ring.iter().enumerate() {
+                let p = positions[a as usize].as_dvec3();
+                let q = positions[ring[(i + 1) % ring.len()] as usize].as_dvec3();
+                n += glam::DVec3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y));
+            }
+            sum += normal_matrix * n;
+        }
+    }
+    let n = sum.normalize_or_zero();
+    (n != glam::DVec3::ZERO).then_some(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

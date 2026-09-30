@@ -992,3 +992,30 @@ fn an_object_flattened_to_nothing_is_refused_rather_than_written_as_nan() {
         "the mesh has NaN in it"
     );
 }
+
+#[test]
+fn e_drags_along_the_selected_faces_normal_in_the_world() {
+    // A cube turned a quarter about X: its top face's normal, which is +Z in
+    // the mesh, points along −Y in the world — and that is the line E pulls
+    // the new faces out along.
+    let (mut doc, _) = scene(kreate_mesh::primitives::cube(1.0));
+    let top = {
+        let mesh = doc.meshes().next().unwrap().1;
+        let offsets = mesh.face_offsets();
+        let corners = mesh.corner_verts();
+        (0..mesh.num_faces() as usize)
+            .find(|f| corners[offsets[*f] as usize..offsets[f + 1] as usize].iter().all(|v| mesh.positions()[*v as usize].z > 0.0))
+            .expect("a top face")
+    };
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[top]);
+    let object = doc.selection.active.unwrap();
+    doc.object_mut(object).unwrap().transform = DTransform {
+        rotation: DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2),
+        scale: DVec3::splat(3.0),
+        ..DTransform::IDENTITY
+    };
+    let n = kreate_ops::ops::mesh::selected_faces_normal(&doc).expect("a face is selected");
+    assert!((n - DVec3::NEG_Y).length() < 1e-9, "{n:?}");
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
+    assert!(kreate_ops::ops::mesh::selected_faces_normal(&doc).is_none());
+}

@@ -79,6 +79,10 @@ pub enum Kind {
     Move,
     Rotate,
     Scale,
+    /// Blender's `E`: the selected faces extruded, and the new ones dragged out
+    /// along their normal — the extrude's own `offset`, so the whole gesture is
+    /// one operator and one step to undo.
+    Extrude,
 }
 
 impl Kind {
@@ -94,6 +98,8 @@ impl Kind {
             Kind::Move => translate,
             Kind::Rotate => rotate,
             Kind::Scale => scale,
+            // Not the mode's: only a mesh's faces extrude.
+            Kind::Extrude => "mesh.extrude_region",
         }
     }
 
@@ -103,6 +109,7 @@ impl Kind {
             Kind::Move => "Move",
             Kind::Rotate => "Rotate",
             Kind::Scale => "Scale",
+            Kind::Extrude => "Extrude",
         }
     }
 }
@@ -381,6 +388,11 @@ impl Gesture {
     /// rather than inheriting the previous one's orientation — the second press
     /// is a new request, not a continuation.
     pub fn cycle_axis(&mut self, axis: Axis) {
+        // An extrude travels along its faces' normal and nowhere else, as
+        // Blender's does; X, Y and Z would take it off the line.
+        if self.kind == Kind::Extrude {
+            return;
+        }
         match (self.axis, self.orientation) {
             (Some(current), Orientation::Global) if current == axis => {
                 self.orientation = Orientation::Local;
@@ -542,7 +554,7 @@ impl Gesture {
     /// suffix are read.
     fn unit(&self) -> crate::expr::Unit {
         match self.kind {
-            Kind::Move => crate::expr::Unit::Length,
+            Kind::Move | Kind::Extrude => crate::expr::Unit::Length,
             Kind::Rotate => crate::expr::Unit::Angle,
             Kind::Scale => crate::expr::Unit::Factor,
         }
@@ -564,6 +576,9 @@ impl Gesture {
                     "translation",
                     PropertyValue::Vec3([offset.x, offset.y, offset.z]),
                 );
+            }
+            Kind::Extrude => {
+                params.set("offset", PropertyValue::Float(self.extrude_distance(dx, dy)));
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
@@ -692,6 +707,17 @@ impl Gesture {
         }
     }
 
+    /// How far along the normal an extrude has gone: a typed number as it is,
+    /// otherwise the constrained move's offset measured along the normal — the
+    /// normal being the local Z the gesture was begun with.
+    fn extrude_distance(&self, dx: f32, dy: f32) -> f64 {
+        if let Some(value) = self.typed() {
+            return value;
+        }
+        let normal = self.basis[2].normalize_or(Vec3::Z).as_dvec3();
+        self.offset(dx, dy).dot(normal)
+    }
+
     /// A screen displacement as a world vector across the view plane.
     fn screen_to_world(&self, dx: f32, dy: f32) -> Vec3 {
         // Y is negated because window coordinates grow downwards and the
@@ -772,6 +798,10 @@ impl Gesture {
             format!("  [{}]", self.numeric)
         };
         let value = match self.kind {
+            Kind::Extrude => {
+                let (dx, dy) = self.effective_delta(self.cursor);
+                format!("{:.3}", self.extrude_distance(dx, dy))
+            }
             Kind::Move => {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 let v = self.offset(dx, dy);

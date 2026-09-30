@@ -2973,11 +2973,9 @@ fn draw_toolbar(
                             // Through the key's door, so the drag that places
                             // the new bones starts as E starts it.
                             Tool::Extrude if bones => state.queue.dispatch("armature.extrude", PropertyMap::new()),
-                            Tool::Extrude => {
-                                let mut p = PropertyMap::new();
-                                p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
-                                state.queue.run("mesh.extrude_region", p);
-                            }
+                            // Through the key's door, so the tool drags the new
+                            // faces out as E does.
+                            Tool::Extrude => state.queue.dispatch("mesh.extrude_region", PropertyMap::new()),
                             Tool::Inset => {
                                 let mut p = PropertyMap::new();
                                 p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
