@@ -411,10 +411,14 @@ impl Material {
     }
 }
 
+/// A named group of objects — Blender's collection, one level under the
+/// scene. An object is in at most one; one in none is in the scene itself.
 #[derive(Clone, Debug, Default)]
 pub struct Collection {
     pub name: String,
     pub objects: Vec<ObjectId>,
+    /// Hidden in the viewport, and everything in it with it.
+    pub hide: bool,
 }
 
 /// What is currently selected.
@@ -754,6 +758,9 @@ impl Document {
         }
         self.roots.retain(|r| *r != id);
         self.selection.remove(id);
+        for (_, c) in self.collections.iter_mut() {
+            c.objects.retain(|o| *o != id);
+        }
         self.touch();
         Some(removed)
     }
@@ -1450,7 +1457,7 @@ impl Document {
     /// off has to turn its light off — anything else makes the eye icon a lie.
     pub fn lit_by(&self) -> impl Iterator<Item = (ObjectId, &Light, DAffine3)> + '_ {
         self.objects.iter().filter_map(move |(id, object)| {
-            if !object.visible {
+            if !self.is_shown(id) {
                 return None;
             }
             let ObjectData::Light(light) = object.data else {
@@ -1656,6 +1663,53 @@ impl Document {
         self.collections.get(id)
     }
 
+    pub fn collection_mut(&mut self, id: CollectionId) -> Option<&mut Collection> {
+        self.touch();
+        self.collections.get_mut(id)
+    }
+
+    /// Every collection, in the order they were made.
+    pub fn collections(&self) -> impl Iterator<Item = (CollectionId, &Collection)> {
+        self.collections.iter()
+    }
+
+    /// The collection called `name`, if there is one.
+    pub fn find_collection(&self, name: &str) -> Option<CollectionId> {
+        self.collections.iter().find(|(_, c)| c.name == name).map(|(id, _)| id)
+    }
+
+    /// The collection `object` is in, if any.
+    pub fn collection_of(&self, object: ObjectId) -> Option<CollectionId> {
+        self.collections.iter().find(|(_, c)| c.objects.contains(&object)).map(|(id, _)| id)
+    }
+
+    /// Puts `object` in `into` — out of whichever it was in — or, with
+    /// `None`, in the scene itself.
+    pub fn move_to_collection(&mut self, object: ObjectId, into: Option<CollectionId>) {
+        self.touch();
+        for (_, c) in self.collections.iter_mut() {
+            c.objects.retain(|o| *o != object);
+        }
+        if let Some(c) = into.and_then(|id| self.collections.get_mut(id)) {
+            c.objects.push(object);
+        }
+    }
+
+    /// Removes a collection; what was in it goes back to the scene.
+    pub fn remove_collection(&mut self, id: CollectionId) -> Option<Collection> {
+        self.touch();
+        self.collections.remove(id)
+    }
+
+    /// Whether `object` is drawn: its own eye, and its collection's.
+    ///
+    /// Linear in the members of the hidden collections — nothing at all when
+    /// none is hidden, which is the ordinary case.
+    pub fn is_shown(&self, object: ObjectId) -> bool {
+        self.objects.get(object).is_some_and(|o| o.visible)
+            && !self.collections.iter().any(|(_, c)| c.hide && c.objects.contains(&object))
+    }
+
     // --- convenience --------------------------------------------------------
 
     /// Adds a mesh object in one step.
@@ -1701,7 +1755,7 @@ impl Document {
     pub fn world_bounds(&self) -> kreate_math::Aabb {
         let mut bounds = kreate_math::Aabb::EMPTY;
         for (id, object) in self.objects.iter() {
-            if !object.visible {
+            if !self.is_shown(id) {
                 continue;
             }
             let world = self.world_transform(id);

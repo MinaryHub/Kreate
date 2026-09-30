@@ -79,7 +79,7 @@ pub fn markers_only(
     dim[3] = 0.85;
 
     for (id, object) in doc.objects() {
-        if !object.visible || only.is_some_and(|keep| !keep.contains(&id)) {
+        if !doc.is_shown(id) || only.is_some_and(|keep| !keep.contains(&id)) {
             continue;
         }
         let color = if doc.selection.contains(id) { accent } else { dim };

@@ -378,6 +378,13 @@ fn common() -> Vec<Binding> {
             Action::new("app.menu").with("menu", PropertyValue::Text("add".into())),
         )
         .with_modifiers(Modifiers::shift()),
+        // Blender's M: Move to Collection, a menu of them under the pointer.
+        key(
+            "object.move_to_collection",
+            "M",
+            Context::ObjectMode,
+            Action::new("app.menu").with("menu", PropertyValue::Text("collection".into())),
+        ),
         // Blender's Ctrl+A: the Apply menu.
         key(
             "object.apply_menu",
@@ -980,16 +987,12 @@ mod tests {
             .expect("M merges");
         assert_eq!(plain.op_id, "mesh.merge");
         assert!(plain.params.get("distance").is_none());
-        // And nothing answers `M` in object mode, where merge has no meaning —
-        // rather than object mode quietly inheriting edit mode's merge.
-        assert!(k
-            .resolve(
-                Context::ObjectMode,
-                &Input::key("M"),
-                Modifiers::NONE,
-                EventKind::Press
-            )
-            .is_none());
+        // And `M` in object mode is its own — Move to Collection, as in
+        // Blender — rather than object mode quietly inheriting edit mode's merge.
+        let object = k
+            .resolve(Context::ObjectMode, &Input::key("M"), Modifiers::NONE, EventKind::Press)
+            .expect("M is bound in object mode");
+        assert_eq!(object.op_id, "app.menu");
     }
 
     #[test]

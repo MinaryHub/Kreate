@@ -30,6 +30,8 @@ pub enum Command {
     },
     Undo,
     Redo,
+    /// Undo or redo until this many steps are applied — Edit ▸ Undo History.
+    UndoTo(usize),
     /// Replace the object selection.
     SetSelection {
         objects: Vec<u32>,

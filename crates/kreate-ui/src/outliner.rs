@@ -107,6 +107,8 @@ impl OutlinerRow {
 pub enum TreeRow {
     /// "Scene Collection", Blender's root. Not an object; not selectable.
     Root,
+    /// A collection's heading, by its place in the groups.
+    Collection(usize),
     /// The object at this position in the order.
     Object(usize),
     /// The datablock under the object at this position.
@@ -130,10 +132,40 @@ pub fn visible_rows(
     expanded: impl Fn(usize) -> bool,
     row: impl Fn(usize) -> Option<OutlinerRow>,
 ) -> Vec<TreeRow> {
+    visible_rows_grouped(depths, &[], expanded, row)
+}
+
+/// A collection in the outliner: where its objects start in the order, its
+/// name, and whether it is hidden. Its objects follow it, one level in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlinerGroup {
+    pub start: usize,
+    pub name: String,
+    pub hidden: bool,
+}
+
+/// [`visible_rows`], with a heading row before each collection's objects.
+/// `starts` are where each group begins in the order, ascending; an empty
+/// collection starts where the next thing does.
+pub fn visible_rows_grouped(
+    depths: &[u16],
+    starts: &[usize],
+    expanded: impl Fn(usize) -> bool,
+    row: impl Fn(usize) -> Option<OutlinerRow>,
+) -> Vec<TreeRow> {
     let mut out = vec![TreeRow::Root];
     // The depth below which rows are hidden by a collapsed ancestor, if any.
     let mut hidden_below: Option<u16> = None;
+    let mut next_group = 0;
+    let mut heading = |index: usize, out: &mut Vec<TreeRow>, hidden_below: &mut Option<u16>| {
+        while next_group < starts.len() && starts[next_group] <= index {
+            out.push(TreeRow::Collection(next_group));
+            *hidden_below = None;
+            next_group += 1;
+        }
+    };
     for (index, depth) in depths.iter().enumerate() {
+        heading(index, &mut out, &mut hidden_below);
         if let Some(limit) = hidden_below {
             if *depth > limit {
                 continue;
@@ -157,6 +189,7 @@ pub fn visible_rows(
             hidden_below = Some(*depth);
         }
     }
+    heading(usize::MAX, &mut out, &mut hidden_below);
     out
 }
 
@@ -237,6 +270,7 @@ pub fn outliner(
     catalog: &Catalog,
     order: &[u32],
     depths: &[u16],
+    groups: &[OutlinerGroup],
     selected: &[u32],
     active: Option<u32>,
     row: impl Fn(usize) -> Option<OutlinerRow>,
@@ -247,8 +281,10 @@ pub fn outliner(
     let expanded: std::collections::HashSet<u32> =
         ui.data(|d| d.get_temp(expanded_id)).unwrap_or_default();
 
-    let rows = visible_rows(
+    let starts: Vec<usize> = groups.iter().map(|g| g.start).collect();
+    let rows = visible_rows_grouped(
         depths,
+        &starts,
         |index| order.get(index).is_some_and(|key| expanded.contains(key)),
         &row,
     );
@@ -263,6 +299,11 @@ pub fn outliner(
             for at in visible {
                 match rows[at] {
                     TreeRow::Root => draw_root(ui, catalog),
+                    TreeRow::Collection(g) => {
+                        if let Some(group) = groups.get(g) {
+                            draw_collection_row(ui, catalog, group, queue);
+                        }
+                    }
                     TreeRow::Object(index) => {
                         let Some(data) = row(index) else { continue };
                         let open = expanded.contains(&data.id);
@@ -306,6 +347,35 @@ fn draw_root(ui: &mut Ui, catalog: &Catalog) {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
         ui.label(egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[])).strong());
+    });
+}
+
+/// A collection's heading: its icon, its name, and its eye.
+fn draw_collection_row(ui: &mut Ui, catalog: &Catalog, group: &OutlinerGroup, queue: &mut CommandQueue) {
+    ui.horizontal(|ui| {
+        ui.add_space(INDENT);
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+        collection_icon(ui, rect);
+        let mut label = egui::RichText::new(&group.name);
+        if group.hidden {
+            label = label.weak();
+        }
+        ui.label(label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (eye, response) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+            eye_icon(ui, eye, !group.hidden, response.hovered());
+            let response = response.on_hover_text(catalog.format(
+                if group.hidden { "outliner-show" } else { "outliner-hide" },
+                TextKind::Tooltip,
+                &[],
+            ));
+            if response.clicked() {
+                let mut params = kreate_reflect::PropertyMap::new();
+                params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
+                params.set("visible", kreate_reflect::PropertyValue::Bool(group.hidden));
+                queue.push(Command::RunOperator { op_id: "collection.set_visible".into(), params });
+            }
+        });
     });
 }
 
@@ -810,5 +880,26 @@ mod tests {
     fn an_empty_has_no_data_row_even_when_expanded() {
         let rows = visible_rows(&[0u16], |_| true, |_| Some(leaf(1)));
         assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0)]);
+    }
+
+    #[test]
+    fn a_collection_heading_comes_before_its_objects_and_an_empty_one_still_shows() {
+        // Objects 0 and 1 in the first collection, the second empty, 2 loose.
+        let depths = [1u16, 1, 0];
+        let rows = visible_rows_grouped(&depths, &[0, 2], |_| false, |_| None);
+        assert_eq!(
+            rows,
+            vec![
+                TreeRow::Root,
+                TreeRow::Collection(0),
+                TreeRow::Object(0),
+                TreeRow::Object(1),
+                TreeRow::Collection(1),
+                TreeRow::Object(2),
+            ]
+        );
+        // A collection with nothing after it at all.
+        let rows = visible_rows_grouped(&[0u16], &[1], |_| false, |_| None);
+        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Collection(0)]);
     }
 }

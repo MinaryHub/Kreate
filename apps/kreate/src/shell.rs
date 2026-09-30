@@ -245,6 +245,10 @@ pub struct ShellState {
     pub circle_select: Option<f32>,
     /// Blender's Statistics overlay: counts in the viewport's corner.
     pub show_stats: bool,
+    /// The history's step names and how many are applied, for the Undo
+    /// History menu.
+    pub history_steps: Vec<String>,
+    pub history_at: usize,
     /// What a rotation or a scale turns about — Blender's Pivot Point:
     /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
     /// 3D cursor.
@@ -553,6 +557,8 @@ impl Default for ShellState {
             knife_preview: Vec::new(),
             circle_select: None,
             show_stats: false,
+            history_steps: Vec::new(),
+            history_at: 0,
             pivot: 0,
             timeline: Default::default(),
             uv: None,
@@ -606,6 +612,8 @@ pub struct OutlinerOrder {
     /// How many objects use each mesh, by mesh slot. Counted once for the whole
     /// scene rather than asked per row, which would be quadratic.
     mesh_users: Vec<u32>,
+    /// The collections, as headings: where each one's objects start.
+    groups: Vec<kreate_ui::outliner::OutlinerGroup>,
     /// The document version this was built from.
     version: Option<u64>,
 }
@@ -619,11 +627,37 @@ impl OutlinerOrder {
         let hierarchy = doc.hierarchy();
         self.ids.clear();
         self.depths.clear();
+        self.groups.clear();
         self.ids.reserve(hierarchy.len());
         self.depths.reserve(hierarchy.len());
+        // Each collection's objects under its heading, one level in; what is
+        // in none after them, in the scene itself. A child goes where the top
+        // of its family goes, so a hierarchy is never split across headings.
+        let collections: Vec<_> = doc.collections().map(|(id, c)| (id, c.name.clone(), c.hide)).collect();
+        let mut buckets: Vec<Vec<(u32, u16)>> = vec![Vec::new(); collections.len() + 1];
+        let mut bucket = collections.len();
         for (id, depth) in hierarchy {
-            self.ids.push(object_key(id));
-            self.depths.push(depth.min(u16::MAX as usize) as u16);
+            if depth == 0 {
+                bucket = doc
+                    .collection_of(id)
+                    .and_then(|c| collections.iter().position(|(x, _, _)| *x == c))
+                    .unwrap_or(collections.len());
+            }
+            let indent = depth + usize::from(bucket < collections.len());
+            buckets[bucket].push((object_key(id), indent.min(u16::MAX as usize) as u16));
+        }
+        for (i, rows) in buckets.into_iter().enumerate() {
+            if let Some((_, name, hide)) = collections.get(i) {
+                self.groups.push(kreate_ui::outliner::OutlinerGroup {
+                    start: self.ids.len(),
+                    name: name.clone(),
+                    hidden: *hide,
+                });
+            }
+            for (key, depth) in rows {
+                self.ids.push(key);
+                self.depths.push(depth);
+            }
         }
         self.mesh_users = doc.mesh_user_counts();
         self.version = Some(doc.version());
@@ -636,6 +670,11 @@ impl OutlinerOrder {
     /// Indentation per row, parallel to `ids`, for the tree's collapsing.
     pub fn depths(&self) -> &[u16] {
         &self.depths
+    }
+
+    /// The collection headings.
+    pub fn groups(&self) -> &[kreate_ui::outliner::OutlinerGroup] {
+        &self.groups
     }
 
     pub fn len(&self) -> usize {
@@ -1144,6 +1183,8 @@ struct Labels {
     geometry_to_origin: String,
     menu_snap: String,
     pivot_label: String,
+    undo_history: String,
+    undo_original: String,
     stats_objects: String,
     stats_vertices: String,
     stats_edges: String,
@@ -1363,6 +1404,8 @@ impl Labels {
             geometry_to_origin: t("geometry-to-origin"),
             menu_snap: t("menu-snap"),
             pivot_label: t("pivot-point"),
+            undo_history: t("menu-undo-history"),
+            undo_original: t("undo-original"),
             stats_objects: t("stats-objects"),
             stats_vertices: t("stats-vertices"),
             stats_edges: t("stats-edges"),
@@ -1491,6 +1534,9 @@ pub fn draw(
             // live under Edit rather than as buttons on the row, which is
             // both Blender's arrangement and the honest one: they are reached
             // by keystroke a hundred times for every once by pointer.
+            // The steps, for Edit ▸ Undo History.
+            state.history_steps = history.entries().iter().map(|e| e.label.clone()).collect();
+            state.history_at = history.cursor();
             for menu in top_bar_menus(&l, history.can_undo(), history.can_redo()) {
                 ui.menu_button(&menu.label, |ui| draw_nodes(ui, state, &l, &menu.nodes));
             }
@@ -2030,6 +2076,7 @@ fn draw_area(
                         &state.catalog,
                         order.ids(),
                         order.depths(),
+                        order.groups(),
                         selected,
                         active,
                         |index| order.row(doc, index),
@@ -2480,6 +2527,9 @@ pub enum MenuNode {
     Entry(MenuEntry),
     Sub(String, Vec<MenuNode>),
     Separator,
+    /// Edit ▸ Undo History: every step, the current one marked — drawn by
+    /// `draw_undo_history`, from the history of the moment, and not searched.
+    UndoHistory,
     /// File ▸ Recover, whose entries are the recoverable documents of the
     /// moment — drawn by `draw_recover_menu`, and not searched.
     Recover,
@@ -2542,6 +2592,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 MenuNode::Entry(
                     MenuEntry::new("edit.redo", &l.redo, Run::Command(Command::Redo)).enabled(can_redo),
                 ),
+                MenuNode::UndoHistory,
                 Separator,
                 entry("app.search", &l.menu_search, dispatch("app.search")),
                 // The history, as the script it already is — Blender's "Copy
@@ -2647,7 +2698,7 @@ pub fn flatten(menus: &[TopMenu]) -> Vec<(String, MenuEntry)> {
             match node {
                 MenuNode::Entry(e) => out.push((path.to_string(), e.clone())),
                 MenuNode::Sub(label, children) => walk(&format!("{path} / {label}"), children, out),
-                MenuNode::Separator | MenuNode::Recover => {}
+                MenuNode::Separator | MenuNode::Recover | MenuNode::UndoHistory => {}
             }
         }
     }
@@ -2674,8 +2725,36 @@ fn draw_nodes(ui: &mut Ui, state: &mut ShellState, l: &Labels, nodes: &[MenuNode
                 ui.separator();
             }
             MenuNode::Recover => draw_recover_menu(ui, state, l),
+            MenuNode::UndoHistory => draw_undo_history(ui, state, l),
         }
     }
+}
+
+/// Edit ▸ Undo History: Blender's list of steps. Clicking one undoes or redoes
+/// to just after it; "Original" is before the first.
+fn draw_undo_history(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.undo_history, |ui| {
+        let at = state.history_at;
+        // The most recent at the bottom, as in Blender, and only the last
+        // several dozen — a history of thousands is not a menu.
+        const SHOWN: usize = 40;
+        let total = state.history_steps.len();
+        let first = total.saturating_sub(SHOWN);
+        egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+            if first == 0 && ui.selectable_label(at == 0, &l.undo_original).clicked() {
+                state.queue.push(Command::UndoTo(0));
+                ui.close();
+            }
+            for (i, label) in state.history_steps.iter().enumerate().skip(first) {
+                let applied = i + 1;
+                let text = if applied > at { egui::RichText::new(label).weak() } else { egui::RichText::new(label) };
+                if ui.selectable_label(applied == at, text).clicked() {
+                    state.queue.push(Command::UndoTo(applied));
+                    ui.close();
+                }
+            }
+        });
+    });
 }
 
 /// Does what choosing `entry` does — from a menu or from the search.
@@ -3018,7 +3097,7 @@ pub fn glyph_under(
 ) -> Option<ObjectId> {
     let mut best: Option<(f32, ObjectId)> = None;
     for (id, object) in doc.objects() {
-        if !object.visible {
+        if !doc.is_shown(id) {
             continue;
         }
         if matches!(object.data, kreate_scene::document::ObjectData::Armature(_)) {
@@ -3337,8 +3416,8 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
         ];
     }
     let (mut v, mut e, mut f, mut t, mut objects) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    for (_, object) in doc.objects() {
-        if !object.visible {
+    for (id, object) in doc.objects() {
+        if !doc.is_shown(id) {
             continue;
         }
         objects += 1;
@@ -6201,7 +6280,20 @@ op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
 op-mesh-knife = Knife
+menu-move-to-collection = Move to Collection
+collection-scene = Scene Collection
+collection-new = New Collection
+op-object-move-to-collection = Move to Collection
+op-object-move-to-collection-desc = Moves the selected objects into a collection.
+op-collection-set-visible = Show or Hide Collection
+op-collection-set-visible-desc = Hides a collection and everything in it, or shows it again.
+op-collection-remove = Remove Collection
+op-collection-remove-desc = Removes a collection; what was in it stays in the scene.
+op-collection-rename = Rename Collection
+op-collection-rename-desc = Renames a collection.
 overlay-face-orientation = Face Orientation
+menu-undo-history = Undo History
+undo-original = Original
 overlay-statistics = Statistics
 op-view-toggle-face-orientation = Face Orientation
 op-view-toggle-face-orientation-desc = Colours faces blue from the front and red from the back.
@@ -6785,7 +6877,20 @@ op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
 op-mesh-knife = 나이프
+menu-move-to-collection = 컬렉션으로 이동
+collection-scene = 씬 컬렉션
+collection-new = 새 컬렉션
+op-object-move-to-collection = 컬렉션으로 이동
+op-object-move-to-collection-desc = 선택한 오브젝트를 컬렉션으로 옮깁니다.
+op-collection-set-visible = 컬렉션 표시/숨기기
+op-collection-set-visible-desc = 컬렉션과 그 안의 모든 것을 숨기거나 다시 보이게 합니다.
+op-collection-remove = 컬렉션 제거
+op-collection-remove-desc = 컬렉션을 없앱니다. 안에 있던 것은 씬에 남습니다.
+op-collection-rename = 컬렉션 이름 바꾸기
+op-collection-rename-desc = 컬렉션 이름을 바꿉니다.
 overlay-face-orientation = 면 방향
+menu-undo-history = 되돌리기 기록
+undo-original = 처음 상태
 overlay-statistics = 통계
 op-view-toggle-face-orientation = 면 방향
 op-view-toggle-face-orientation-desc = 면의 앞쪽은 파랑, 뒤쪽은 빨강으로 칠합니다.

@@ -26,3 +26,19 @@ fn a_cursor_at_the_origin_writes_nothing() {
     assert!(!text.contains("\"cursor\""));
     assert_eq!(round_trip(&doc).cursor, DVec3::ZERO);
 }
+
+#[test]
+fn collections_are_saved_with_what_is_in_them_and_whether_hidden() {
+    use kreate_scene::document::{Collection, Object, ObjectData};
+    let mut doc = Document::new();
+    let a = doc.add_object(Object::new("A", ObjectData::Empty));
+    let _b = doc.add_object(Object::new("B", ObjectData::Empty));
+    let set = doc.add_collection(Collection { name: "Set".into(), hide: true, ..Default::default() });
+    doc.move_to_collection(a, Some(set));
+    let back = round_trip(&doc);
+    let id = back.find_collection("Set").expect("the collection came back");
+    let c = back.collection(id).unwrap();
+    assert!(c.hide);
+    assert_eq!(c.objects.len(), 1);
+    assert_eq!(back.object(c.objects[0]).unwrap().name, "A");
+}

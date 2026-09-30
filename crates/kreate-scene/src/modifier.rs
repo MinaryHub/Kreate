@@ -424,7 +424,7 @@ impl ModifierCache {
     ) -> Vec<(ObjectId, Arc<MeshData>)> {
         let ids: Vec<ObjectId> = doc
             .objects()
-            .filter(|(_, o)| o.visible && o.mesh().is_some())
+            .filter(|(id, o)| doc.is_shown(*id) && o.mesh().is_some())
             .map(|(id, _)| id)
             .collect();
         ids.into_iter()

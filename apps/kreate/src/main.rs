@@ -1358,6 +1358,20 @@ impl App {
                     Group { title: String::new(), entries: other },
                 ]
             }
+            "collection" => {
+                let mut entries = vec![row(self, t("collection-scene"), "object.move_to_collection", &[("collection", PropertyValue::Text(String::new()))])];
+                let names: Vec<String> = self.doc.collections().map(|(_, c)| c.name.clone()).collect();
+                for name in names {
+                    entries.push(row(self, name.clone(), "object.move_to_collection", &[("collection", PropertyValue::Text(name))]));
+                }
+                entries.push(row(
+                    self,
+                    t("collection-new"),
+                    "object.move_to_collection",
+                    &[("collection", PropertyValue::Text("Collection".into())), ("new", PropertyValue::Bool(true))],
+                ));
+                vec![Group { title: t("menu-move-to-collection"), entries }]
+            }
             "apply" => {
                 let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
                     row(
@@ -1660,7 +1674,7 @@ impl App {
         for (id, mesh) in &self.evaluated {
             let object = self.doc.object(*id);
             let Some(object) = object else { continue };
-            if !object.visible {
+            if !self.doc.is_shown(*id) {
                 continue;
             }
             let to_world = self.doc.world_transform(*id);
@@ -2870,6 +2884,16 @@ impl App {
                 }
                 Command::Undo => self.undo(),
                 Command::Redo => self.redo(),
+                Command::UndoTo(target) => {
+                    while self.history.cursor() > target && self.history.undo(&mut self.doc) {}
+                    while self.history.cursor() < target {
+                        match self.history.redo(&self.registry, &mut self.doc, &self.op_ctx) {
+                            Ok(true) => {}
+                            _ => break,
+                        }
+                    }
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
                 Command::SetSelection { objects, active } => {
                     // Selection from the outliner arrives as opaque keys, which
                     // are resolved against the *current* document: a row from a

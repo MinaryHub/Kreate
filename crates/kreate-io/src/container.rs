@@ -332,6 +332,15 @@ pub struct KeyRecord {
     pub slope: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionRecord {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide: bool,
+    #[serde(default)]
+    pub objects: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlaybackRecord {
     pub frame: f64,
@@ -754,6 +763,10 @@ pub struct SceneFile {
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
+    /// Collections, when there are any: names, whether hidden, and which
+    /// objects by their place in `objects`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<CollectionRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -1114,6 +1127,14 @@ pub fn write(
             })
             .collect();
         scene.cursor = (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
+        scene.collections = document
+            .collections()
+            .map(|(_, c)| CollectionRecord {
+                name: c.name.clone(),
+                hide: c.hide,
+                objects: c.objects.iter().filter_map(|o| index_of.get(o).copied()).collect(),
+            })
+            .collect();
     scene.playback = (document.playback != kreate_scene::animation::Playback::default()).then(|| {
             let p = document.playback;
             PlaybackRecord { frame: p.frame, start: p.start, end: p.end, fps: p.fps }
@@ -1772,6 +1793,19 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     object: record.name.clone(),
                     reason: e.to_string(),
                 })?;
+        }
+    }
+
+    for record in &scene.collections {
+        let id = document.add_collection(kreate_scene::document::Collection {
+            name: record.name.clone(),
+            objects: Vec::new(),
+            hide: record.hide,
+        });
+        for index in &record.objects {
+            if let Some(object) = object_ids.get(*index) {
+                document.move_to_collection(*object, Some(id));
+            }
         }
     }
 
