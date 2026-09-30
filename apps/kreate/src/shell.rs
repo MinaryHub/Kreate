@@ -4195,7 +4195,7 @@ fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::
         return;
     };
     let mut close = false;
-    egui::Area::new(egui::Id::new("viewport-context-menu"))
+    let shown = egui::Area::new(egui::Id::new("viewport-context-menu"))
         .order(egui::Order::Foreground)
         .fixed_pos(at)
         // Kept inside the viewport, so a right-click near the bottom edge does
@@ -4220,10 +4220,19 @@ fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::
             });
         });
 
-    // Anywhere else dismisses it, which is what every menu everywhere does and
-    // what a user will try first.
+    // A press anywhere else dismisses it, which is what every menu everywhere
+    // does and what a user will try first.
+    //
+    // A *press*, not a click. The right-click that opened the menu is still
+    // coming up when the menu appears, and its release reads as a click; the
+    // viewport only draws when something happens, so that release was
+    // processed on the next pointer move — and the menu vanished the moment
+    // the mouse moved towards it. A press outside the menu is never that.
+    let menu_rect = shown.response.rect;
     if ui.ctx().input(|i| {
-        i.pointer.any_click() && !i.pointer.any_pressed() || i.key_pressed(egui::Key::Escape)
+        let outside = i.pointer.interact_pos().is_some_and(|p| !menu_rect.contains(p));
+        (i.pointer.any_pressed() && outside && !i.pointer.button_pressed(egui::PointerButton::Secondary))
+            || i.key_pressed(egui::Key::Escape)
     }) {
         close = true;
     }
