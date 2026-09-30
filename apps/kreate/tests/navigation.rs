@@ -294,6 +294,8 @@ const APP_ACTIONS: &[&str] = &[
     "view.cursor_to_origin",
     "view.cursor_to_selected",
     "view.selection_to_cursor",
+    // Shift+A and Ctrl+A: a named menu under the pointer.
+    "app.menu",
     // File commands are the application's, not the document's: there is no
     // undo step for "the document you had open is gone".
     "file.new",

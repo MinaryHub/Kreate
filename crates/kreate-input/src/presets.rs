@@ -364,13 +364,22 @@ fn common() -> Vec<Binding> {
             Action::new("view.cursor_place"),
         )
         .with_modifiers(Modifiers::shift()),
+        // Blender's Shift+A: the Add menu, under the pointer.
         key(
-            "object.add_next",
+            "object.add_menu",
             "A",
             Context::ObjectMode,
-            Action::new("object.add_next_primitive"),
+            Action::new("app.menu").with("menu", PropertyValue::Text("add".into())),
         )
         .with_modifiers(Modifiers::shift()),
+        // Blender's Ctrl+A: the Apply menu.
+        key(
+            "object.apply_menu",
+            "A",
+            Context::ObjectMode,
+            Action::new("app.menu").with("menu", PropertyValue::Text("apply".into())),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // Move, Rotate, Scale on G, R, S — the same three keys in object mode
         // and in edit mode, so the gesture does not change with the mode. `G`
         // for grab rather than `M` for move: it is what every modeller's hand
@@ -531,17 +540,25 @@ fn common() -> Vec<Binding> {
         key("armature.select_invert", "I", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 3))
             .with_modifiers(Modifiers::ctrl()),
         // --- object mode ---------------------------------------------------
-        key(
-            "object.add_cube",
-            "A",
-            Context::ObjectMode,
-            enum_param(Action::new("object.add_primitive"), "shape", 1),
-        ),
+        // Selection as in Blender: A all, Alt+A none, Ctrl+I the rest.
         key(
             "object.select_all",
             "A",
             Context::ObjectMode,
-            enum_param(Action::new("object.select_all"), "action", 2),
+            enum_param(Action::new("object.select_all"), "action", 0),
+        ),
+        key(
+            "object.select_none",
+            "A",
+            Context::ObjectMode,
+            enum_param(Action::new("object.select_all"), "action", 1),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "object.select_invert",
+            "I",
+            Context::ObjectMode,
+            enum_param(Action::new("object.select_all"), "action", 3),
         )
         .with_modifiers(Modifiers::ctrl()),
         key(
@@ -796,8 +813,7 @@ fn common() -> Vec<Binding> {
             "A",
             Context::EditMesh,
             enum_param(Action::new("mesh.select"), "action", 0),
-        )
-        .with_modifiers(Modifiers::ctrl()),
+        ),
         key(
             "mesh.select_none",
             "A",
@@ -1012,6 +1028,25 @@ mod tests {
         assert_eq!(action_of("A", Modifiers::alt()), Some(1));
         assert_eq!(action_of("I", Modifiers::ctrl()), Some(2));
         assert_eq!(action_of("L", Modifiers::NONE), Some(3));
+    }
+
+    #[test]
+    fn a_selects_all_and_the_add_and_apply_menus_are_where_blender_keeps_them() {
+        let k = load(Preset::Kreate);
+        let resolve = |context, key: &str, mods| k.resolve(context, &Input::key(key), mods, EventKind::Press);
+        for (context, op) in [(Context::ObjectMode, "object.select_all"), (Context::EditMesh, "mesh.select")] {
+            let all = resolve(context, "A", Modifiers::NONE).expect("A is bound");
+            assert_eq!((all.op_id.as_str(), all.params.get("action").and_then(|v| v.as_int())), (op, Some(0)));
+            let none = resolve(context, "A", Modifiers::alt()).expect("Alt+A is bound");
+            assert_eq!(none.params.get("action").and_then(|v| v.as_int()), Some(1));
+        }
+        let menu = |key, mods| {
+            let a = resolve(Context::ObjectMode, key, mods).expect("bound");
+            assert_eq!(a.op_id, "app.menu");
+            a.params.get("menu").cloned()
+        };
+        assert_eq!(menu("A", Modifiers::shift()), Some(PropertyValue::Text("add".into())));
+        assert_eq!(menu("A", Modifiers::ctrl()), Some(PropertyValue::Text("apply".into())));
     }
 
     #[test]

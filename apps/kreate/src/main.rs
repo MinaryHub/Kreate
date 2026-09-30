@@ -1276,6 +1276,84 @@ impl App {
         self.ui.context_menu.groups = groups;
     }
 
+    /// Opens a named menu under the pointer, in the right-click menu's place:
+    /// `add` (Shift+A) or `apply` (Ctrl+A). Each row is an operator with its
+    /// parameters, named as Blender names it.
+    fn open_popup_menu(&mut self, name: &str) {
+        use kreate_ui::context_menu::{Entry, Group};
+        let t = |key: &str| self.ui.catalog.get(key);
+        let row = |app: &App, label: String, id: &str, pairs: &[(&'static str, PropertyValue)]| {
+            let mut params = PropertyMap::new();
+            for (k, v) in pairs {
+                params.set(k, v.clone());
+            }
+            let mut info = app.command_info(id, &params);
+            info.name = label;
+            Entry::new(id, info).with_params(params)
+        };
+        let groups = match name {
+            "add" => {
+                let shapes = [
+                    "menu-add-plane",
+                    "menu-add-cube",
+                    "menu-add-grid",
+                    "menu-add-uv-sphere",
+                    "menu-add-ico-sphere",
+                    "menu-add-cylinder",
+                    "menu-add-cone",
+                    "menu-add-torus",
+                ];
+                let mesh = shapes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, key)| row(self, t(key), "object.add_primitive", &[("shape", PropertyValue::Enum(i as u32))]))
+                    .collect();
+                let lights = ["menu-add-light-point", "menu-add-light-sun", "menu-add-light-spot", "menu-add-light-area"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, key)| row(self, t(key), "object.add_light", &[("kind", PropertyValue::Enum(i as u32))]))
+                    .collect();
+                let other = vec![
+                    row(self, t("menu-add-camera"), "object.add_camera", &[]),
+                    row(self, t("menu-add-empty"), "object.add_empty", &[]),
+                    row(self, t("menu-add-armature"), "object.add_armature", &[]),
+                ];
+                vec![
+                    Group { title: t("menu-add-mesh"), entries: mesh },
+                    Group { title: t("menu-add-light"), entries: lights },
+                    Group { title: String::new(), entries: other },
+                ]
+            }
+            "apply" => {
+                let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
+                    row(
+                        app,
+                        t(key),
+                        "object.transform_apply",
+                        &[("location", PropertyValue::Bool(l)), ("rotation", PropertyValue::Bool(r)), ("scale", PropertyValue::Bool(s))],
+                    )
+                };
+                vec![Group {
+                    title: t("menu-apply"),
+                    entries: vec![
+                        apply(self, "apply-location", true, false, false),
+                        apply(self, "apply-rotation", false, true, false),
+                        apply(self, "apply-scale", false, false, true),
+                        apply(self, "apply-all", true, true, true),
+                        apply(self, "apply-rotation-scale", false, true, true),
+                    ],
+                }]
+            }
+            _ => return,
+        };
+        self.ui.context_menu.groups = groups;
+        let Some((rx, ry, _, _)) = self.viewport_px else { return };
+        let Some((x, y)) = self.input.cursor else { return };
+        let scale = self.egui_ctx.pixels_per_point().max(0.01);
+        self.ui.context_menu.at = Some(egui::pos2((x as f32 - rx) / scale + rx / scale, (y as f32 - ry) / scale + ry / scale));
+        self.redraw.set(RedrawReason::UI);
+    }
+
     /// Opens the right-click menu at the cursor.
     fn open_context_menu(&mut self) {
         let Some((rx, ry, _, _)) = self.viewport_px else {
@@ -5322,6 +5400,13 @@ impl App {
             // Navigation drags carry their motion in the input state rather than
             // in parameters, so they are handled where the deltas are.
             "view.orbit" | "view.pan" | "view.dolly" => {}
+            // Blender's Shift+A and Ctrl+A: a menu under the pointer.
+            "app.menu" => {
+                if let Some(PropertyValue::Text(name)) = action.params.get("menu") {
+                    let name = name.clone();
+                    self.open_popup_menu(&name);
+                }
+            }
             "object.add_next_primitive" => {
                 let shape = self.next_shape;
                 self.next_shape =
