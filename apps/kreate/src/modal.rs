@@ -312,6 +312,9 @@ pub struct Gesture {
     /// How many loops a loop cut makes, before anything is typed. The wheel
     /// changes it.
     pub cuts: u32,
+    /// The edge a loop cut runs across when the pointer chose it rather than
+    /// the selection — passed on to the operator, so the cut replays.
+    pub edge: Option<u32>,
 }
 
 impl Gesture {
@@ -373,6 +376,7 @@ impl Gesture {
             bearing: None,
             slide: None,
             cuts: 1,
+            edge: None,
         };
         // Seeded from the starting position, so the *first* motion counts. Left
         // unseeded, the first increment has nothing to measure against and is
@@ -635,6 +639,9 @@ impl Gesture {
             }
             Kind::LoopCut => {
                 params.set("cuts", PropertyValue::Int(self.loop_cuts() as i64));
+                if let Some(edge) = self.edge {
+                    params.set("edge", PropertyValue::Int(edge as i64));
+                }
                 params.set("position", PropertyValue::Float(self.slide_position(dx, dy)));
             }
             Kind::Rotate => {

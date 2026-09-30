@@ -322,6 +322,103 @@ pub fn preview(mesh: &BMesh, seed: EdgeId, position: f32) -> Vec<Vec3> {
         .collect()
 }
 
+/// The ring a loop cut through edge `seed` of a document mesh would cross: each
+/// ring edge with the end its cut is measured from, in walk order, and whether
+/// the ring closes on itself.
+///
+/// On the [`MeshData`] rather than the edit structure, because it runs on every
+/// pointer move while `Ctrl+R` is looking for an edge — a decode per move would
+/// be the whole cost of the hover. The same walk as the cut's: across quads to
+/// the opposite edge, stopping at anything that is not a quad or at an edge
+/// with other than two faces.
+pub fn ring_on(mesh: &crate::MeshData, seed: u32) -> (Vec<(u32, u32)>, bool) {
+    let Some(&[a, _]) = mesh.edges().get(seed as usize) else { return (Vec::new(), false) };
+    let corner_edges = mesh.corner_edges();
+    let mut faces_of: Vec<Vec<u32>> = vec![Vec::new(); mesh.num_edges() as usize];
+    for f in 0..mesh.num_faces() {
+        for c in mesh.face_corner_range(f) {
+            faces_of[corner_edges[c] as usize].push(f);
+        }
+    }
+    // One step: from `edge`, measured from `start`, across `face`.
+    let step = |edge: u32, start: u32, face: u32| -> Option<(u32, u32)> {
+        let range = mesh.face_corner_range(face);
+        if range.len() != 4 {
+            return None;
+        }
+        let verts = mesh.face_verts(face);
+        let i = range.clone().position(|c| corner_edges[c] == edge)?;
+        let next_start = if verts[i] == start { verts[(i + 3) % 4] } else { verts[(i + 2) % 4] };
+        Some((corner_edges[range.start + (i + 2) % 4], next_start))
+    };
+    let mut forward = vec![(seed, a)];
+    let mut closed = false;
+    let mut backward = Vec::new();
+    let seed_faces = faces_of[seed as usize].clone();
+    if seed_faces.len() > 2 {
+        return (forward, false);
+    }
+    for (side, &first) in seed_faces.iter().enumerate() {
+        let out = if side == 0 { &mut forward } else { &mut backward };
+        let (mut edge, mut start, mut face) = (seed, a, first);
+        while let Some((next, next_start)) = step(edge, start, face) {
+            if next == seed {
+                closed = true;
+                break;
+            }
+            // A walk that comes back on itself without closing — a ring that
+            // crosses its own path — stops where it would repeat.
+            if out.iter().any(|(e, _)| *e == next) {
+                break;
+            }
+            out.push((next, next_start));
+            let around = &faces_of[next as usize];
+            match around.iter().find(|f| **f != face) {
+                Some(f) if around.len() == 2 => {
+                    (edge, start, face) = (next, next_start, *f);
+                }
+                _ => break,
+            }
+        }
+        if closed {
+            return (forward, true);
+        }
+    }
+    backward.reverse();
+    backward.extend(forward);
+    (backward, false)
+}
+
+/// Where `cuts` loops through edge `seed` would run, one line each, in the
+/// mesh's own space: what `Ctrl+R` draws under the pointer before the click.
+/// Evenly spread along the ring's edges, as a cut at the middle places them.
+pub fn preview_lines(mesh: &crate::MeshData, seed: u32, cuts: u32) -> Vec<Vec<Vec3>> {
+    let (ring, closed) = ring_on(mesh, seed);
+    if ring.len() < 2 {
+        return Vec::new();
+    }
+    let positions = mesh.positions();
+    let edges = mesh.edges();
+    let cuts = cuts.max(1);
+    (0..cuts)
+        .map(|k| {
+            let t = (k + 1) as f32 / (cuts + 1) as f32;
+            let mut line: Vec<Vec3> = ring
+                .iter()
+                .map(|(e, start)| {
+                    let [p, q] = edges[*e as usize];
+                    let end = if p == *start { q } else { p };
+                    positions[*start as usize].lerp(positions[end as usize], t)
+                })
+                .collect();
+            if closed {
+                line.push(line[0]);
+            }
+            line
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +764,36 @@ mod tests {
                 assert_eq!(m.to_mesh_data().validate(), Vec::new());
             }
         }
+    }
+
+    #[test]
+    fn the_hover_ring_on_the_document_mesh_goes_all_the_way_round() {
+        // A cube's edge rings are four edges round, and close.
+        let cube = primitives::cube(2.0);
+        let (ring, closed) = ring_on(&cube, 0);
+        assert!(closed);
+        assert_eq!(ring.len(), 4);
+        let lines = preview_lines(&cube, 0, 2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), 5, "a closed ring returns to its start");
+        // Every point sits a third of the way along a cube edge: two
+        // coordinates at the cube's half size, one at a third between.
+        for p in &lines[0] {
+            let on_face = [p.x, p.y, p.z].iter().filter(|c| (c.abs() - 1.0).abs() < 1e-5).count();
+            assert_eq!(on_face, 2, "{p:?}");
+        }
+        // On an open grid the ring runs from border to border, both ways from
+        // the edge it started at.
+        let grid = primitives::grid(3.0, 3, 3);
+        let middle = (0..grid.num_edges())
+            .find(|e| {
+                let [a, b] = grid.edges()[*e as usize];
+                let (pa, pb) = (grid.positions()[a as usize], grid.positions()[b as usize]);
+                pa.x.abs() < 0.6 && pb.x.abs() < 0.6 && pa.y.abs() < 0.6 && pb.y.abs() < 0.6
+            })
+            .expect("an inner edge");
+        let (ring, closed) = ring_on(&grid, middle);
+        assert!(!closed);
+        assert_eq!(ring.len(), 4, "three quads across: four edges");
     }
 }

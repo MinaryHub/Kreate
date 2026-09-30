@@ -235,6 +235,9 @@ pub struct ShellState {
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
     /// The weight-paint brush: what it paints towards, how wide, how hard.
     pub paint: PaintSettings,
+    /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
+    /// polyline per loop. Empty otherwise.
+    pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
     /// What is being typed in each Drivers editor, per area.
     driver_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::drivers::DriversState>,
     /// The clock, published by the application each frame.
@@ -535,6 +538,7 @@ impl Default for ShellState {
             graph_views: std::collections::BTreeMap::new(),
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
+            loop_cut_preview: Vec::new(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -1818,6 +1822,17 @@ fn draw_area(
                             ui.painter()
                                 .with_clip_rect(inner)
                                 .circle_stroke(p, state.paint.radius, egui::Stroke::new(1.2, theme.text));
+                        }
+                    }
+                    // The loops `Ctrl+R` would cut, in Blender's yellow.
+                    if let Some(projector) = state.projector.filter(|_| !state.loop_cut_preview.is_empty()) {
+                        let painter = ui.painter().with_clip_rect(inner);
+                        let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 214, 51));
+                        for line in &state.loop_cut_preview {
+                            let points: Vec<egui::Pos2> = line.iter().filter_map(|p| projector.project(*p)).collect();
+                            if points.len() == line.len() {
+                                painter.add(egui::Shape::line(points, stroke));
+                            }
                         }
                     }
                     draw_adjust_float(ui, state, registry, history, inner);

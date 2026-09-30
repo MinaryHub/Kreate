@@ -1092,3 +1092,18 @@ fn ctrl_plus_and_ctrl_l_grow_through_the_operator() {
     run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(8))]).unwrap();
     assert!(flags(&doc, names::SELECT_FACE).iter().all(|s| *s));
 }
+
+#[test]
+fn a_loop_cut_can_name_its_edge_and_needs_no_selection() {
+    // What Ctrl+R's hover hands over: the edge under the pointer, by number,
+    // so the cut replays whatever is selected at the time.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[]);
+    let before = positions(&doc).len();
+    run(&mut doc, &ctx, "mesh.loop_cut", &[("cuts", PropertyValue::Int(2)), ("edge", PropertyValue::Int(3))]).unwrap();
+    assert_eq!(positions(&doc).len(), before + 8, "two loops of four round a cube");
+    // An edge the mesh does not have does nothing.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    let r = run(&mut doc, &ctx, "mesh.loop_cut", &[("edge", PropertyValue::Int(999))]).unwrap();
+    assert_eq!(r, kreate_ops::OpResult::Cancelled);
+}

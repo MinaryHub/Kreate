@@ -1506,3 +1506,15 @@ fn a_loop_cut_slides_along_its_edge_and_the_wheel_or_a_number_sets_how_many() {
     g.type_character('4');
     assert_eq!(cuts(&at(&mut g, (600.0, 300.0))), 4);
 }
+
+#[test]
+fn a_loop_cut_begun_on_a_hovered_edge_names_it() {
+    let mut g = pulled(Kind::LoopCut);
+    g.edge = Some(7);
+    g.cuts = 3;
+    let p = at(&mut g, (600.0, 300.0));
+    assert_eq!(p.get("edge"), Some(&PropertyValue::Int(7)));
+    assert_eq!(p.get("cuts"), Some(&PropertyValue::Int(3)));
+    // Without one, the operator's own default — the selection — stands.
+    assert_eq!(at(&mut pulled(Kind::LoopCut), (600.0, 300.0)).get("edge"), None);
+}

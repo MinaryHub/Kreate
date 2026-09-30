@@ -1610,6 +1610,11 @@ pub struct LoopCutParams {
     /// the original mesh, so dragging it is exact rather than cumulative.
     #[param(min = 0.0, max = 1.0, step = 0.01)]
     pub position: f64,
+    /// The edge of the active mesh the cut runs across, or −1 for the first
+    /// selected one. What `Ctrl+R` names when the pointer chose the edge — so
+    /// the cut replays without depending on a selection it never made.
+    #[param(hidden)]
+    pub edge: i64,
 }
 
 impl Default for LoopCutParams {
@@ -1617,6 +1622,7 @@ impl Default for LoopCutParams {
         Self {
             cuts: 1,
             position: 0.5,
+            edge: -1,
         }
     }
 }
@@ -1642,6 +1648,23 @@ impl Operator for LoopCut {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        // A named edge becomes the selection first, the way a click on it
+        // would have made it: the cut then reads it as it reads any other.
+        if params.edge >= 0 {
+            let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+            let named = with_named_mesh(doc, mesh_id, |mesh| {
+                if params.edge as u64 >= mesh.num_edges() as u64 {
+                    return false;
+                }
+                selection::select_none(mesh);
+                selection::set_selected(mesh, kreate_mesh::Domain::Edge, params.edge as u32, true);
+                selection::flush(mesh, SelectMode::Edge);
+                true
+            })?;
+            if !named {
+                return Ok(OpResult::Cancelled);
+            }
+        }
         let cut = with_bmesh(doc, |bm| {
             edit::loop_cut_selected(bm, params.cuts, params.position as f32)
                 .map_err(|e| OpError::Failed(e.to_string()))
@@ -2479,11 +2502,18 @@ pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
 /// runs — `0` at the first end, `1` at the second. What `Ctrl+R` slides the
 /// cut along with the pointer; `None` when no edge is selected.
 pub fn loop_cut_edge(doc: &Document) -> Option<(glam::DVec3, glam::DVec3)> {
-    let object = target_object(doc)?;
     let mesh = doc.mesh(target_mesh(doc)?)?;
     let selected = mesh.attributes().get_bool(kreate_mesh::attribute::names::SELECT_EDGE)?;
     let edge = selected.iter().position(|on| *on)?;
-    let [a, b] = *mesh.edges().get(edge)?;
+    edge_in_world(doc, edge as u32)
+}
+
+/// Edge `edge` of the active mesh as its two ends in the world, in the order
+/// a loop cut's `position` runs.
+pub fn edge_in_world(doc: &Document, edge: u32) -> Option<(glam::DVec3, glam::DVec3)> {
+    let object = target_object(doc)?;
+    let mesh = doc.mesh(target_mesh(doc)?)?;
+    let [a, b] = *mesh.edges().get(edge as usize)?;
     let to_world = doc.world_transform(object);
     let positions = mesh.positions();
     let at = |v: u32| to_world.transform_point3(positions[v as usize].as_dvec3());

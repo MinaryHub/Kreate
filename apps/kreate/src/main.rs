@@ -645,6 +645,11 @@ struct App {
     /// Meshes with hidden elements, as drawn outside edit mode: without the
     /// hide layers. Input handle and the copy.
     unhidden: Vec<(Arc<MeshData>, Arc<MeshData>)>,
+    /// `Ctrl+R` looking for an edge: the one under the pointer, if any, and
+    /// how many loops the wheel has asked for. Blender's loop cut hover.
+    loop_cut_hover: Option<(Option<u32>, u32)>,
+    /// The edge and loop count a hover's click hands to the slide that follows.
+    loop_cut_seed: Option<(u32, u32)>,
     /// The document version the drivers last ran against. They run again
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
@@ -741,6 +746,8 @@ impl App {
             paint_stroke: None,
             weight_display: None,
             unhidden: Vec::new(),
+            loop_cut_hover: None,
+            loop_cut_seed: None,
             autokey: false,
             shown_title: String::new(),
         }
@@ -1628,7 +1635,15 @@ impl App {
         }
         // A loop cut slides along the edge it cuts across from.
         if kind == kreate::modal::Kind::LoopCut {
-            match kreate_ops::ops::mesh::loop_cut_edge(&self.doc) {
+            let seed = match self.loop_cut_seed.take() {
+                Some((edge, cuts)) => {
+                    gesture.edge = Some(edge);
+                    gesture.cuts = cuts;
+                    kreate_ops::ops::mesh::edge_in_world(&self.doc, edge)
+                }
+                None => kreate_ops::ops::mesh::loop_cut_edge(&self.doc),
+            };
+            match seed {
                 Some((a, b)) => gesture.set_slide_edge(a, b),
                 None => {
                     self.status("select an edge to loop cut across");
@@ -2027,9 +2042,107 @@ impl App {
     /// the transform and the other hand is on the modifiers. Multiplicative
     /// rather than additive, so one notch feels the same whether the radius is a
     /// centimetre or ten metres.
+    /// `Ctrl+R`: from here until a click, the edge under the pointer shows the
+    /// loops that would be cut across it. Blender's way — no need to select
+    /// the edge first.
+    fn begin_loop_cut_hover(&mut self) {
+        if self.gesture.is_some() || self.loop_cut_hover.is_some() {
+            return;
+        }
+        self.loop_cut_hover = Some((None, 1));
+        self.update_loop_cut_hover();
+    }
+
+    /// Finds the edge under the pointer and redraws the preview.
+    ///
+    /// The face under the pointer is found the way auto-depth finds it, by a
+    /// ray, so what is behind the model is not offered; the edge is whichever
+    /// of that face's edges is nearest the pointer on screen. On the active
+    /// mesh only, and only while it is drawn as it is stored — a modifier
+    /// stack numbers its faces differently.
+    fn update_loop_cut_hover(&mut self) {
+        let Some((_, cuts)) = self.loop_cut_hover else { return };
+        if self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements {
+            self.end_loop_cut_hover();
+            return;
+        }
+        let mut found = None;
+        let object = kreate_ops::ops::mesh::target_object(&self.doc);
+        let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc);
+        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) =
+            (self.cursor_ndc(), object, mesh_id, self.ui.projector, self.input.cursor)
+        {
+            let aspect = self.viewport_aspect();
+            let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+            let stored = self.doc.mesh_arc(mesh_id).cloned();
+            let as_drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone());
+            if let (Some(hit), Some(mesh), Some(drawn)) = (hit, stored, as_drawn) {
+                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces() {
+                    let ppp = self.egui_ctx.pixels_per_point();
+                    let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+                    let world = self.doc.world_transform(object);
+                    let corner_edges = mesh.corner_edges();
+                    let screen = |v: u32| projector.project(world.transform_point3(mesh.positions()[v as usize].as_dvec3()));
+                    let mut best = f32::INFINITY;
+                    for c in mesh.face_corner_range(hit.face) {
+                        let e = corner_edges[c];
+                        let [a, b] = mesh.edges()[e as usize];
+                        if let (Some(pa), Some(pb)) = (screen(a), screen(b)) {
+                            let d = segment_distance(at, pa, pb);
+                            if d < best {
+                                best = d;
+                                found = Some(e);
+                            }
+                        }
+                    }
+                    let lines = found
+                        .map(|e| kreate_mesh::edit::loopcut::preview_lines(&mesh, e, cuts))
+                        .unwrap_or_default();
+                    self.ui.loop_cut_preview = lines
+                        .iter()
+                        .map(|line| line.iter().map(|p| world.transform_point3(p.as_dvec3())).collect())
+                        .collect();
+                }
+            }
+        }
+        if found.is_none() {
+            self.ui.loop_cut_preview.clear();
+        }
+        self.loop_cut_hover = Some((found, cuts));
+        self.status(&format!(
+            "Loop Cut  cuts {cuts}  — point at an edge, click to cut, wheel for more loops, Esc to cancel"
+        ));
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    fn end_loop_cut_hover(&mut self) {
+        self.loop_cut_hover = None;
+        self.ui.loop_cut_preview.clear();
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// The click: cut across the edge under the pointer, then slide it.
+    fn commit_loop_cut_hover(&mut self) {
+        let Some((edge, cuts)) = self.loop_cut_hover else { return };
+        self.end_loop_cut_hover();
+        let Some(edge) = edge else {
+            self.status("Loop Cut cancelled: no edge under the pointer");
+            return;
+        };
+        self.loop_cut_seed = Some((edge, cuts));
+        self.begin_gesture(kreate::modal::Kind::LoopCut);
+        self.loop_cut_seed = None;
+    }
+
     /// Adds or takes away loops from a running loop cut: the wheel, as in
     /// Blender. `false` when no loop cut is running.
     fn adjust_loop_cuts(&mut self, notches: f32) -> bool {
+        if let Some((_, cuts)) = &mut self.loop_cut_hover {
+            let step = notches.signum() as i32;
+            *cuts = (*cuts as i32 + step).clamp(1, 64) as u32;
+            self.update_loop_cut_hover();
+            return true;
+        }
         let Some((gesture, _)) = &mut self.gesture else { return false };
         if gesture.kind != kreate::modal::Kind::LoopCut {
             return false;
@@ -4821,6 +4934,11 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
+        if self.loop_cut_hover.is_some() && code == KeyCode::Escape {
+            self.end_loop_cut_hover();
+            self.status("Loop Cut cancelled");
+            return;
+        }
         // Quitting and F1 are deliberately outside the keymap: there must
         // always be a way out and a way to ask, even from a keymap the user has
         // broken.
@@ -4922,9 +5040,7 @@ impl App {
             // I, Ctrl+B and Ctrl+R the same way: the pointer sets how much.
             "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),
             "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
-            "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => {
-                self.begin_gesture(kreate::modal::Kind::LoopCut)
-            }
+            "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "armature.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
@@ -5443,6 +5559,23 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // Ctrl+R looking for an edge: left cuts, right gives up.
+                if self.loop_cut_hover.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.commit_loop_cut_hover();
+                            return;
+                        }
+                        // A click on a panel is somewhere else to be.
+                        MouseButton::Left => self.end_loop_cut_hover(),
+                        MouseButton::Right => {
+                            self.end_loop_cut_hover();
+                            self.status("Loop Cut cancelled");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if self.gesture.is_some() && pressed {
                     match button {
                         MouseButton::Left => {
@@ -5508,6 +5641,9 @@ impl ApplicationHandler for App {
                 }
                 if self.paint_stroke.is_some() {
                     self.drive_paint_stroke();
+                }
+                if self.loop_cut_hover.is_some() {
+                    self.update_loop_cut_hover();
                 }
                 // The brush circle follows the pointer.
                 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
@@ -5860,6 +5996,14 @@ fn egui_key(name: &str) -> Option<egui::Key> {
 /// build. A test holds every shipped mode's tag to a real context.
 fn mode_key_context(mode: OpMode) -> KeyContext {
     KeyContext::from_tag(mode.info().keymap).unwrap_or(KeyContext::ObjectMode)
+}
+
+/// How far `p` is from the segment `a`–`b`, on screen.
+fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    let t = if len2 > 0.0 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (a + ab * t).distance(p)
 }
 
 #[cfg(test)]
