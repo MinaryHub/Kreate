@@ -1688,6 +1688,59 @@ impl Operator for LoopCut {
     }
 }
 
+// --- knife ------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct KnifeParams {
+    /// The path the knife was drawn through: points on the active mesh's
+    /// surface, in its own space, three numbers each.
+    pub points: Vec<f64>,
+    /// The way the view looked while it was drawn, in the mesh's space: each
+    /// stroke cuts what is under it as seen from there.
+    pub view: [f64; 3],
+}
+
+/// Cuts new edges along a path drawn over the surface — Blender's `K`.
+pub struct KnifeCut;
+
+impl Operator for KnifeCut {
+    type Params = KnifeParams;
+
+    fn id() -> &'static str {
+        "mesh.knife"
+    }
+    fn label() -> &'static str {
+        "Knife"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let path: Vec<glam::Vec3> = params
+            .points
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| glam::Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+            .collect();
+        let view = glam::DVec3::from_array(params.view).as_vec3();
+        if path.len() < 2 || !path.iter().all(|p| p.is_finite()) || !view.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let cut = with_bmesh(doc, |bm| edit::knife(bm, &path, view).map_err(|e| OpError::Failed(e.to_string())))?;
+        Ok(if cut.faces.is_empty() {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
 // --- inset ------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -2465,6 +2518,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MergeVerts>();
     registry.register::<SelectElements>();
     registry.register::<HideElements>();
+    registry.register::<KnifeCut>();
     registry.register::<RevealElements>();
     registry.register::<RecalculateNormals>();
     registry.register::<ShadeFaces>();

@@ -1126,3 +1126,23 @@ fn a_rotation_can_turn_about_the_3d_cursor() {
     let expected = doc.cursor + DQuat::from_rotation_z(std::f64::consts::PI) * (p0 - doc.cursor);
     assert!((p1 - expected).length() < 1e-5, "{p1:?} vs {expected:?}");
 }
+
+#[test]
+fn k_cuts_along_its_path_and_replays_from_the_script_line() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::plane(2.0));
+    let start = doc.clone();
+    let points = vec![-1.0, 0.2, 0.0, 1.0, -0.3, 0.0];
+    let registry = registry();
+    let mut history = History::new();
+    let mut p = PropertyMap::new();
+    p.set("points", PropertyValue::Floats(points));
+    p.set("view", PropertyValue::Vec3([0.0, 0.0, -1.0]));
+    history.dispatch(&registry, &mut doc, &ctx, "mesh.knife", &p).unwrap();
+    let mesh = |d: &Document| d.mesh(d.meshes().next().unwrap().0).unwrap().num_faces();
+    assert_eq!(mesh(&doc), 2);
+    let script = history.entries()[0].to_script_call();
+    let mut replay = start;
+    let outcomes = History::new().run_script(&registry, &mut replay, None, &ctx, &script);
+    assert!(outcomes.iter().all(|o| o.result.is_ok()), "{script}");
+    assert_eq!(mesh(&replay), 2, "{script}");
+}

@@ -511,6 +511,9 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
         (PropertyKind::Ints, Some(PropertyValue::Ints(v))) => {
             ui.weak(v.len().to_string());
         }
+        (PropertyKind::Floats, Some(PropertyValue::Floats(v))) => {
+            ui.weak(v.len().to_string());
+        }
 
         // The value is missing or has the wrong type — from an older file, or a
         // schema that changed. Show it as unavailable rather than guessing, and

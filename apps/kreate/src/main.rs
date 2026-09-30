@@ -650,6 +650,9 @@ struct App {
     loop_cut_hover: Option<(Option<u32>, u32)>,
     /// The edge and loop count a hover's click hands to the slide that follows.
     loop_cut_seed: Option<(u32, u32)>,
+    /// `K` drawing a cut: the points clicked so far, in the world, and where
+    /// the next click would put one.
+    knife: Option<(Vec<DVec3>, Option<DVec3>)>,
     /// The document version the drivers last ran against. They run again
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
@@ -748,6 +751,7 @@ impl App {
             unhidden: Vec::new(),
             loop_cut_hover: None,
             loop_cut_seed: None,
+            knife: None,
             autokey: false,
             shown_title: String::new(),
         }
@@ -1419,6 +1423,7 @@ impl App {
             ("mesh.hide", &[("unselected", PropertyValue::Bool(true))]),
             ("mesh.reveal", &[]),
             ("view.cursor_place", &[]),
+            ("mesh.knife", &[]),
             ("object.select_all", &[("action", PropertyValue::Enum(0))]),
             ("object.select_all", &[("action", PropertyValue::Enum(1))]),
             ("object.select_all", &[("action", PropertyValue::Enum(3))]),
@@ -2191,6 +2196,112 @@ impl App {
         let mut params = PropertyMap::new();
         params.set("translation", PropertyValue::Vec3(delta.to_array()));
         self.run_op(op, params);
+    }
+
+    /// `K`: from here until Enter, each click adds a point to the cut.
+    fn begin_knife(&mut self) {
+        if self.gesture.is_some() || self.knife.is_some() {
+            return;
+        }
+        self.end_loop_cut_hover();
+        self.knife = Some((Vec::new(), None));
+        self.update_knife();
+    }
+
+    /// Where the next knife point would go: on the active mesh's surface under
+    /// the pointer, pulled onto a vertex or an edge of that face when the
+    /// pointer is close to one on screen — a cut that starts and ends on edges
+    /// is what splits faces.
+    fn update_knife(&mut self) {
+        let Some((points, _)) = self.knife.take() else { return };
+        if self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements {
+            self.end_knife("");
+            return;
+        }
+        let mut hover = None;
+        let object = kreate_ops::ops::mesh::target_object(&self.doc);
+        let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc);
+        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) =
+            (self.cursor_ndc(), object, mesh_id, self.ui.projector, self.input.cursor)
+        {
+            let aspect = self.viewport_aspect();
+            let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+            let stored = self.doc.mesh_arc(mesh_id).cloned();
+            let as_drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone());
+            if let (Some(hit), Some(mesh), Some(drawn)) = (hit, stored, as_drawn) {
+                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces() {
+                    let ppp = self.egui_ctx.pixels_per_point();
+                    let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+                    let world = self.doc.world_transform(object);
+                    let place = |v: u32| world.transform_point3(mesh.positions()[v as usize].as_dvec3());
+                    let ring = mesh.face_verts(hit.face).to_vec();
+                    let mut best: Option<(f32, DVec3)> = None;
+                    // A vertex within ten points wins outright.
+                    for v in &ring {
+                        let w = place(*v);
+                        if let Some(s) = projector.project(w) {
+                            let d = s.distance(at);
+                            if d < 10.0 && best.is_none_or(|(bd, _)| d < bd) {
+                                best = Some((d, w));
+                            }
+                        }
+                    }
+                    // Otherwise the nearest point of an edge within eight.
+                    if best.is_none() {
+                        for i in 0..ring.len() {
+                            let (wa, wb) = (place(ring[i]), place(ring[(i + 1) % ring.len()]));
+                            let (Some(sa), Some(sb)) = (projector.project(wa), projector.project(wb)) else { continue };
+                            let ab = sb - sa;
+                            let t = if ab.length_sq() > 0.0 { ((at - sa).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+                            let d = (sa + ab * t).distance(at);
+                            if d < 8.0 && best.is_none_or(|(bd, _)| d < bd) {
+                                best = Some((d, wa.lerp(wb, t as f64)));
+                            }
+                        }
+                    }
+                    hover = Some(best.map(|(_, w)| w).unwrap_or(hit.point));
+                }
+            }
+        }
+        let mut preview = points.clone();
+        preview.extend(hover);
+        self.ui.knife_preview = preview;
+        self.status(&format!(
+            "Knife  {} points — click on edges to cut, Enter to finish, Backspace to undo a point, Esc to cancel",
+            points.len()
+        ));
+        self.knife = Some((points, hover));
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    fn end_knife(&mut self, status: &str) {
+        self.knife = None;
+        self.ui.knife_preview.clear();
+        if !status.is_empty() {
+            self.status(status);
+        }
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// Enter: the path, in the mesh's own space, to the operator.
+    fn commit_knife(&mut self) {
+        let Some((points, _)) = self.knife.clone() else { return };
+        self.end_knife("");
+        if points.len() < 2 {
+            self.status("Knife cancelled: click at least two points");
+            return;
+        }
+        let Some(object) = kreate_ops::ops::mesh::target_object(&self.doc) else { return };
+        let to_local = self.doc.world_transform(object).inverse();
+        if !to_local.is_finite() {
+            return;
+        }
+        let flat: Vec<f64> = points.iter().flat_map(|p| to_local.transform_point3(*p).to_array()).collect();
+        let view = to_local.transform_vector3(self.camera.forward()).normalize_or_zero();
+        let mut params = PropertyMap::new();
+        params.set("points", PropertyValue::Floats(flat));
+        params.set("view", PropertyValue::Vec3(view.to_array()));
+        self.run_op("mesh.knife", params);
     }
 
     /// `Ctrl+R`: from here until a click, the edge under the pointer shows the
@@ -5085,6 +5196,26 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
+        if self.knife.is_some() {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                    self.commit_knife();
+                    return;
+                }
+                KeyCode::Escape => {
+                    self.end_knife("Knife cancelled");
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if let Some((points, _)) = &mut self.knife {
+                        points.pop();
+                    }
+                    self.update_knife();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.loop_cut_hover.is_some() && code == KeyCode::Escape {
             self.end_loop_cut_hover();
             self.status("Loop Cut cancelled");
@@ -5192,6 +5323,7 @@ impl App {
             "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),
             "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
+            "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
             // The 3D cursor.
             "view.cursor_place" => self.place_cursor(),
             "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),
@@ -5725,6 +5857,23 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // K drawing a cut: left adds a point, right gives up.
+                if self.knife.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            if let Some((points, Some(hover))) = &mut self.knife {
+                                points.push(*hover);
+                            }
+                            self.update_knife();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.end_knife("Knife cancelled");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // Ctrl+R looking for an edge: left cuts, right gives up.
                 if self.loop_cut_hover.is_some() && pressed {
                     match button {
@@ -5823,6 +5972,9 @@ impl ApplicationHandler for App {
                 }
                 if self.loop_cut_hover.is_some() {
                     self.update_loop_cut_hover();
+                }
+                if self.knife.is_some() {
+                    self.update_knife();
                 }
                 // The brush circle follows the pointer.
                 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {

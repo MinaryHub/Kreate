@@ -58,6 +58,9 @@ pub enum PropertyValue {
     /// operator depend on a camera, it cannot be replayed headlessly, and
     /// adjusting it after the view has moved silently selects something else.
     Ints(Vec<u32>),
+    /// A list of numbers — a path of points three at a time, say: what the
+    /// knife was drawn through, so the cut replays without the pointer.
+    Floats(Vec<f64>),
 }
 
 impl PropertyValue {
@@ -70,6 +73,7 @@ impl PropertyValue {
             PropertyValue::Text(_) => "text",
             PropertyValue::Enum(_) => "enum",
             PropertyValue::Ints(_) => "ints",
+            PropertyValue::Floats(_) => "floats",
         }
     }
 
@@ -118,6 +122,13 @@ impl PropertyValue {
             _ => None,
         }
     }
+
+    pub fn as_floats(&self) -> Option<&[f64]> {
+        match self {
+            PropertyValue::Floats(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// What kind of value a parameter holds, and what the UI should offer.
@@ -146,6 +157,8 @@ pub enum PropertyKind {
     /// spinners is not a way to edit a selection, and the thing that *does* edit
     /// one is the viewport.
     Ints,
+    /// A list of numbers, shown as a count like [`PropertyKind::Ints`].
+    Floats,
 }
 
 /// The physical quantity a numeric parameter represents.
@@ -381,6 +394,19 @@ fn format_value(v: &PropertyValue) -> String {
                     out.push_str(", ");
                 }
                 let _ = write!(out, "{n}");
+            }
+            out.push(']');
+            out
+        }
+        // Each written as a float (`1.0`, never `1`), so the list reads back as
+        // numbers and not as indices.
+        PropertyValue::Floats(v) => {
+            let mut out = String::from("[");
+            for (i, f) in v.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format_float(*f));
             }
             out.push(']');
             out

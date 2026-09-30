@@ -344,6 +344,11 @@ fn type_info(field: &Field) -> Result<TypeInfo, String> {
             to_value: "PropertyValue::Ints(self.FIELD.clone())",
             from_value: "v.as_ints().map(|s| s.to_vec())",
         },
+        "Vec<f64>" => TypeInfo {
+            kind: "PropertyKind::Floats".into(),
+            to_value: "PropertyValue::Floats(self.FIELD.clone())",
+            from_value: "v.as_floats().map(|s| s.to_vec())",
+        },
         other => {
             return Err(format!(
                 "`{}: {other}` is not a supported parameter type. Parameters must be \

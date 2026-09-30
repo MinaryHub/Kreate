@@ -238,6 +238,9 @@ pub struct ShellState {
     /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
     /// polyline per loop. Empty otherwise.
     pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
+    /// The knife's path while `K` is drawing it: the points clicked, then
+    /// where the next one would go. Empty otherwise.
+    pub knife_preview: Vec<kreate_math::DVec3>,
     /// What a rotation or a scale turns about — Blender's Pivot Point:
     /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
     /// 3D cursor.
@@ -543,6 +546,7 @@ impl Default for ShellState {
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
             loop_cut_preview: Vec::new(),
+            knife_preview: Vec::new(),
             pivot: 0,
             timeline: Default::default(),
             uv: None,
@@ -1181,6 +1185,7 @@ struct Labels {
     weld: String,
     select_loop: String,
     select_more: String,
+    knife: String,
     select_less: String,
     select_linked: String,
     show_hide: String,
@@ -1392,6 +1397,7 @@ impl Labels {
             weld: t("menu-weld"),
             select_loop: t("menu-select-loop"),
             select_more: t("menu-select-more"),
+            knife: t("op-mesh-knife"),
             select_less: t("menu-select-less"),
             select_linked: t("menu-select-linked"),
             show_hide: t("menu-show-hide"),
@@ -1957,6 +1963,19 @@ fn draw_area(
                         for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
                             painter.line_segment([at + d * (r - 4.0), at + d * (r + 5.0)], cross);
                             painter.line_segment([at - d * (r - 4.0), at - d * (r + 5.0)], cross);
+                        }
+                    }
+                    // The knife's path: the cut so far and the next stretch.
+                    if let Some(projector) = state.projector.filter(|_| !state.knife_preview.is_empty()) {
+                        let painter = ui.painter().with_clip_rect(inner);
+                        let green = egui::Color32::from_rgb(90, 230, 120);
+                        let points: Vec<egui::Pos2> =
+                            state.knife_preview.iter().filter_map(|p| projector.project(*p)).collect();
+                        if points.len() == state.knife_preview.len() {
+                            painter.add(egui::Shape::line(points.clone(), egui::Stroke::new(2.0, green)));
+                            for p in &points {
+                                painter.circle_filled(*p, 3.5, green);
+                            }
                         }
                     }
                     // The loops `Ctrl+R` would cut, in Blender's yellow.
@@ -4259,6 +4278,7 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                 entry("mesh.delete", &l.delete, op("mesh.delete", &[("mode", V::Enum(select_mode))])),
                 Separator,
                 entry("mesh.spin", &l.spin, op("mesh.spin", &[])),
+                entry("mesh.knife", &l.knife, dispatch("mesh.knife")),
                 Separator,
                 // Shading is a property of the mesh rather than of a selection,
                 // which is why it is here and not under Face.
@@ -6090,6 +6110,8 @@ op-view-cursor-to-origin-desc = Puts the 3D cursor back at the world's origin.
 op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
+op-mesh-knife = Knife
+op-mesh-knife-desc = Cuts new edges along a path clicked over the surface. Enter cuts, Esc gives up.
 op-view-cursor-place-desc = Puts the 3D cursor on the surface under the pointer.
 op-scene-cursor-set = Set 3D Cursor
 op-scene-cursor-set-desc = Moves the 3D cursor, where new objects appear.
@@ -6659,6 +6681,8 @@ op-view-cursor-to-origin-desc = 3D 커서를 월드 원점으로 되돌립니다
 op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
+op-mesh-knife = 나이프
+op-mesh-knife-desc = 표면 위에 클릭한 경로를 따라 새 엣지를 자릅니다. Enter로 자르고 Esc로 취소합니다.
 op-view-cursor-place-desc = 포인터 아래 표면에 3D 커서를 둡니다.
 op-scene-cursor-set = 3D 커서 설정
 op-scene-cursor-set-desc = 새 물체가 생기는 3D 커서를 옮깁니다.

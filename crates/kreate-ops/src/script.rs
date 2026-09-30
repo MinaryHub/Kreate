@@ -153,6 +153,8 @@ enum Raw {
     Float(f64),
     Tuple(Vec<f64>),
     List(Vec<i64>),
+    /// A bracketed list with a number that is not a whole one in it.
+    FloatList(Vec<f64>),
     Text(String),
 }
 
@@ -175,6 +177,10 @@ fn parse_value(raw: &str) -> Result<Raw, ScriptError> {
         return Ok(Raw::Tuple(parts?));
     }
     if let Some(inner) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        let items: Vec<&str> = inner.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        if items.iter().any(|p| p.parse::<i64>().is_err()) && items.iter().all(|p| p.parse::<f64>().is_ok()) {
+            return Ok(Raw::FloatList(items.iter().map(|p| p.parse::<f64>().unwrap_or(0.0)).collect()));
+        }
         let parts: Result<Vec<i64>, _> = inner
             .split(',')
             .map(|p| p.trim())
@@ -288,6 +294,8 @@ fn coerce(raw: Raw, kind: &PropertyKind, name: &str) -> Result<PropertyValue, Sc
         (PropertyKind::Ints, Raw::Tuple(v)) => {
             PropertyValue::Ints(v.into_iter().map(|f| f.max(0.0) as u32).collect())
         }
+        (PropertyKind::Floats, Raw::FloatList(v) | Raw::Tuple(v)) => PropertyValue::Floats(v),
+        (PropertyKind::Floats, Raw::List(v)) => PropertyValue::Floats(v.into_iter().map(|i| i as f64).collect()),
         (kind, raw) => {
             return Err(wrong(
                 match kind {
@@ -299,6 +307,7 @@ fn coerce(raw: Raw, kind: &PropertyKind, name: &str) -> Result<PropertyValue, Sc
                     PropertyKind::Text => "a quoted string",
                     PropertyKind::Enum { .. } => "a variant index or name",
                     PropertyKind::Ints => "a list of integers",
+                    PropertyKind::Floats => "a list of numbers",
                 },
                 &raw,
             ))
@@ -399,6 +408,7 @@ mod tests {
                     PropertyKind::Text => PropertyValue::Text("a \"quoted\" name\nwith a break".into()),
                     PropertyKind::Enum { .. } => PropertyValue::Enum(0),
                     PropertyKind::Ints => PropertyValue::Ints(vec![0, 7, 42]),
+                    PropertyKind::Floats => PropertyValue::Floats(vec![0.5, -1.0, 3.0, 1e-7]),
                 };
                 params.set(desc.name, value);
             }

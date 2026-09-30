@@ -752,12 +752,8 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             enum_param(Action::new("uv.project"), "mode", 1),
         ),
-        key(
-            "mesh.mark_sharp",
-            "K",
-            Context::EditMesh,
-            Action::new("mesh.mark_sharp").with("sharp", PropertyValue::Bool(true)),
-        ),
+        // Blender's K is the knife; marking sharp is in the Edge menu.
+        key("mesh.knife", "K", Context::EditMesh, Action::new("mesh.knife")),
         key(
             "mesh.clear_sharp",
             "K",
