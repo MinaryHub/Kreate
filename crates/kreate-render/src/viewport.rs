@@ -1396,6 +1396,9 @@ pub struct Viewport {
     /// Whether to draw the ground grid. A user-facing toggle, and what lets a
     /// test compare geometry without the world-anchored lattice in the way.
     pub show_grid: bool,
+    /// Colour faces blue from the front and red from the back — Blender's Face
+    /// Orientation overlay. Solid shading only.
+    pub face_orientation: bool,
     /// Display scaling, applied to the pick tolerance.
     ///
     /// A tolerance chosen in pixels is a tolerance chosen for a particular
@@ -2246,6 +2249,7 @@ impl Viewport {
             shading: ShadingMode::Studio,
             background: palette::clear(palette::VIEWPORT),
             show_grid: true,
+            face_orientation: false,
             cluster_path: false,
             lod_budget: Budget::default(),
             show_wireframe: true,
@@ -2434,7 +2438,7 @@ impl Viewport {
                     } else {
                         1.0
                     },
-                    0.0,
+                    if self.face_orientation { 1.0 } else { 0.0 },
                     0.0,
                     0.0,
                 ],

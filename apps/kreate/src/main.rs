@@ -5638,6 +5638,16 @@ impl App {
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.frame_selected" => self.frame_selected(),
+            "view.toggle_statistics" => {
+                self.ui.show_stats = !self.ui.show_stats;
+                self.redraw.set(RedrawReason::UI);
+            }
+            "view.toggle_face_orientation" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.face_orientation = !gfx.viewport.face_orientation;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
             // The 3D cursor.
             "view.cursor_place" => self.place_cursor(),
             "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),

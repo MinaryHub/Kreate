@@ -11,7 +11,7 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     // x: shading mode (0 studio, 1 flat, 2 matcap-ish)
-    // y: unused, z: unused, w: unused
+    // y: one to colour by face orientation, z: unused, w: unused
     params: vec4<f32>,
 };
 
@@ -257,7 +257,12 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
 
     // The ramp is light's reflectance like any colour: shaded, so the form
     // still reads under the weights, as Blender's weight paint does.
-    let base = select(in.base_color.rgb, weight_color(in.weight), in.ramp > 0.5);
+    var base = select(in.base_color.rgb, weight_color(in.weight), in.ramp > 0.5);
+    // Blender's Face Orientation overlay: blue where the front of a face is
+    // seen, red where its back is — a flipped normal shows at a glance.
+    if (globals.params.y > 0.5) {
+        base = select(vec3<f32>(0.8, 0.02, 0.02), vec3<f32>(0.03, 0.12, 0.8), front_facing);
+    }
     var color: vec3<f32>;
     if (globals.params.x < 0.5) {
         color = studio(n, base);

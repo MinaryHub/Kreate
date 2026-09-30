@@ -72,6 +72,17 @@ fn render_scene_full(
     show_wireframe: bool,
     configure_camera: impl FnOnce(&mut Camera),
 ) -> Option<(Rendered, [u8; 4])> {
+    render_scene_flags(meshes, shading, show_grid, show_wireframe, false, configure_camera)
+}
+
+fn render_scene_flags(
+    meshes: &[(kreate_mesh::MeshData, DAffine3)],
+    shading: ShadingMode,
+    show_grid: bool,
+    show_wireframe: bool,
+    face_orientation: bool,
+    configure_camera: impl FnOnce(&mut Camera),
+) -> Option<(Rendered, [u8; 4])> {
     let opts = GpuOptions::default();
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
@@ -97,6 +108,7 @@ fn render_scene_full(
     viewport.shading = shading;
     viewport.show_grid = show_grid;
     viewport.show_wireframe = show_wireframe;
+    viewport.face_orientation = face_orientation;
 
     let uploaded: Vec<(GpuMesh, DAffine3)> = meshes
         .iter()
@@ -526,4 +538,27 @@ fn the_grid_axes_are_drawn_in_the_shared_axis_colours() {
         (50..=90).contains(&neutral_peak),
         "the brightest lattice pixel is {neutral_peak}; the grid line colour          has drifted from the palette"
     );
+}
+
+#[test]
+fn face_orientation_is_blue_from_the_front_and_red_from_the_back() {
+    // A plane facing +Z, seen from above and then from below.
+    let plane = || vec![(kreate_mesh::primitives::plane(4.0), DAffine3::IDENTITY)];
+    let centre = |r: &Rendered| r.at(SIZE / 2, SIZE / 2);
+    let (above, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, true, |c| {
+        *c = c.looking_along(kreate_render::ViewAxis::PosZ);
+    }));
+    let p = centre(&above);
+    assert!(p[2] > p[0] + 40, "the front is not blue: {p:?}");
+    let (below, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, true, |c| {
+        *c = c.looking_along(kreate_render::ViewAxis::NegZ);
+    }));
+    let p = centre(&below);
+    assert!(p[0] > p[2] + 40, "the back is not red: {p:?}");
+    // Off, neither.
+    let (plain, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, false, |c| {
+        *c = c.looking_along(kreate_render::ViewAxis::PosZ);
+    }));
+    let p = centre(&plain);
+    assert!((p[0] as i32 - p[2] as i32).abs() < 40, "tinted with the overlay off: {p:?}");
 }

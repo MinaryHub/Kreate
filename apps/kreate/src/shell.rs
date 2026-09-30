@@ -243,6 +243,8 @@ pub struct ShellState {
     pub knife_preview: Vec<kreate_math::DVec3>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
+    /// Blender's Statistics overlay: counts in the viewport's corner.
+    pub show_stats: bool,
     /// What a rotation or a scale turns about — Blender's Pivot Point:
     /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
     /// 3D cursor.
@@ -550,6 +552,7 @@ impl Default for ShellState {
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
             circle_select: None,
+            show_stats: false,
             pivot: 0,
             timeline: Default::default(),
             uv: None,
@@ -1114,6 +1117,8 @@ struct Labels {
     overlays: String,
     overlay_grid: String,
     overlay_wireframe: String,
+    overlay_face_orientation: String,
+    overlay_statistics: String,
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
@@ -1139,6 +1144,11 @@ struct Labels {
     geometry_to_origin: String,
     menu_snap: String,
     pivot_label: String,
+    stats_objects: String,
+    stats_vertices: String,
+    stats_edges: String,
+    stats_faces: String,
+    stats_triangles: String,
     pivot_median: String,
     pivot_individual: String,
     pivot_active: String,
@@ -1326,6 +1336,8 @@ impl Labels {
             overlays: t("overlays"),
             overlay_grid: t("overlay-grid"),
             overlay_wireframe: t("overlay-wireframe"),
+            overlay_face_orientation: t("overlay-face-orientation"),
+            overlay_statistics: t("overlay-statistics"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
@@ -1351,6 +1363,11 @@ impl Labels {
             geometry_to_origin: t("geometry-to-origin"),
             menu_snap: t("menu-snap"),
             pivot_label: t("pivot-point"),
+            stats_objects: t("stats-objects"),
+            stats_vertices: t("stats-vertices"),
+            stats_edges: t("stats-edges"),
+            stats_faces: t("stats-faces"),
+            stats_triangles: t("stats-triangles"),
             pivot_median: t("pivot-median"),
             pivot_individual: t("pivot-individual"),
             pivot_active: t("pivot-active"),
@@ -2908,6 +2925,8 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         for (op, label) in [
             ("view.toggle_grid", &l.overlay_grid),
             ("view.toggle_wireframe", &l.overlay_wireframe),
+            ("view.toggle_face_orientation", &l.overlay_face_orientation),
+            ("view.toggle_statistics", &l.overlay_statistics),
         ] {
             if menu_item(ui, state, op, &[], label) {
                 state.queue.dispatch(op, PropertyMap::new());
@@ -3270,7 +3289,13 @@ fn draw_view_info(
         viewport.min.x + 12.0
     };
     let mut y = viewport.min.y + 10.0;
-    for (text, colour) in [(view.as_str(), theme.text), (second.as_str(), theme.text_dim)] {
+    let mut lines = vec![(view.clone(), theme.text), (second.clone(), theme.text_dim)];
+    if state.show_stats {
+        for line in statistics(doc, mode, l) {
+            lines.push((line, theme.text));
+        }
+    }
+    for (text, colour) in lines.iter().map(|(t, c)| (t.as_str(), *c)) {
         let galley = painter.layout_no_wrap(text.to_string(), font.clone(), colour);
         // A soft shadow rather than a box: this text sits over the picture and
         // a box would be a panel where the eye expects a scene.
@@ -3278,6 +3303,59 @@ fn draw_view_info(
         painter.galley(egui::pos2(left, y), galley.clone(), colour);
         y += galley.size().y + 2.0;
     }
+}
+
+/// Blender's Statistics overlay: how many objects, and how many vertices,
+/// edges, faces and triangles — selected of the total in edit mode.
+fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> Vec<String> {
+    use kreate_mesh::attribute::names;
+    let count = |mesh: &kreate_mesh::MeshData, layer: &str| {
+        mesh.attributes().get_bool(layer).map(|s| s.iter().filter(|x| **x).count()).unwrap_or(0)
+    };
+    let triangles = |mesh: &kreate_mesh::MeshData| -> usize {
+        (0..mesh.num_faces()).map(|f| mesh.face_verts(f).len().saturating_sub(2)).sum()
+    };
+    // i18n-exempt: a translated noun and numbers
+    let row = |name: &str, value: String| format!("{name}  {value}");
+    if mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
+        let (mut v, mut e, mut f, mut t) = ([0usize; 2], [0usize; 2], [0usize; 2], 0usize);
+        for target in kreate_ops::ops::mesh::edit_targets(doc) {
+            let Some(mesh) = doc.mesh(target.mesh) else { continue };
+            v[0] += count(mesh, names::SELECT_VERT);
+            v[1] += mesh.num_verts() as usize;
+            e[0] += count(mesh, names::SELECT_EDGE);
+            e[1] += mesh.num_edges() as usize;
+            f[0] += count(mesh, names::SELECT_FACE);
+            f[1] += mesh.num_faces() as usize;
+            t += triangles(mesh);
+        }
+        return vec![
+            row(&l.stats_vertices, format!("{}/{}", v[0], v[1])),
+            row(&l.stats_edges, format!("{}/{}", e[0], e[1])),
+            row(&l.stats_faces, format!("{}/{}", f[0], f[1])),
+            row(&l.stats_triangles, t.to_string()),
+        ];
+    }
+    let (mut v, mut e, mut f, mut t, mut objects) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for (_, object) in doc.objects() {
+        if !object.visible {
+            continue;
+        }
+        objects += 1;
+        if let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) {
+            v += mesh.num_verts() as usize;
+            e += mesh.num_edges() as usize;
+            f += mesh.num_faces() as usize;
+            t += triangles(mesh);
+        }
+    }
+    vec![
+        row(&l.stats_objects, format!("{}/{}", doc.selection.objects.len(), objects)),
+        row(&l.stats_vertices, v.to_string()),
+        row(&l.stats_edges, e.to_string()),
+        row(&l.stats_faces, f.to_string()),
+        row(&l.stats_triangles, t.to_string()),
+    ]
 }
 
 /// The console: the history as script lines, what was typed, and the answers.
@@ -6123,6 +6201,17 @@ op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
 op-mesh-knife = Knife
+overlay-face-orientation = Face Orientation
+overlay-statistics = Statistics
+op-view-toggle-face-orientation = Face Orientation
+op-view-toggle-face-orientation-desc = Colours faces blue from the front and red from the back.
+op-view-toggle-statistics = Statistics
+op-view-toggle-statistics-desc = Shows how many objects, vertices, edges and faces there are.
+stats-objects = Objects
+stats-vertices = Vertices
+stats-edges = Edges
+stats-faces = Faces
+stats-triangles = Triangles
 op-view-circle-select = Circle Select
 op-view-circle-select-desc = A brush that selects what it passes over. Shift to deselect, wheel for size, Esc or right-click to stop.
 op-mesh-knife-desc = Cuts new edges along a path clicked over the surface. Enter cuts, Esc gives up.
@@ -6696,6 +6785,17 @@ op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
 op-mesh-knife = 나이프
+overlay-face-orientation = 면 방향
+overlay-statistics = 통계
+op-view-toggle-face-orientation = 면 방향
+op-view-toggle-face-orientation-desc = 면의 앞쪽은 파랑, 뒤쪽은 빨강으로 칠합니다.
+op-view-toggle-statistics = 통계
+op-view-toggle-statistics-desc = 오브젝트·정점·엣지·면 수를 보여 줍니다.
+stats-objects = 오브젝트
+stats-vertices = 정점
+stats-edges = 엣지
+stats-faces = 면
+stats-triangles = 삼각형
 op-view-circle-select = 원형 선택
 op-view-circle-select-desc = 지나가는 것을 선택하는 브러시입니다. Shift는 해제, 휠은 크기, Esc나 우클릭으로 끝냅니다.
 op-mesh-knife-desc = 표면 위에 클릭한 경로를 따라 새 엣지를 자릅니다. Enter로 자르고 Esc로 취소합니다.
