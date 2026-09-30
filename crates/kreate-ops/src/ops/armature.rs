@@ -76,6 +76,10 @@ pub fn pivot(doc: &Document) -> Option<DVec3> {
 }
 
 /// Runs `edit` on the edited armature, then reconnects it.
+///
+/// A transform that changes nothing still finishes: `G` starts its drag with
+/// the identity, and a transform that declined it could never be dragged at
+/// all — which is what happened, to every `G`, `R`, `S` and `E` in this mode.
 fn edit_armature(
     doc: &mut DocMut<'_>,
     edit: impl FnOnce(&mut Armature, &DAffine3) -> bool,
@@ -241,7 +245,7 @@ impl Operator for Translate {
     }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         let d = DVec3::from_array(params.translation);
-        if !d.is_finite() || d == DVec3::ZERO {
+        if !d.is_finite() {
             return Ok(OpResult::Cancelled);
         }
         move_ends(doc, |p| p + d)
@@ -271,7 +275,7 @@ impl Operator for Rotate {
         in_edit_mode(ctx, doc)
     }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        if !params.angle.is_finite() || params.angle == 0.0 {
+        if !params.angle.is_finite() {
             return Ok(OpResult::Cancelled);
         }
         let Some(centre) = pivot(doc.document()) else { return Ok(OpResult::Cancelled) };
@@ -308,7 +312,7 @@ impl Operator for Scale {
     }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         let s = DVec3::from_array(params.scale);
-        if !s.is_finite() || s == DVec3::ONE {
+        if !s.is_finite() || s.min_element().abs() < 1e-9 {
             return Ok(OpResult::Cancelled);
         }
         let Some(centre) = pivot(doc.document()) else { return Ok(OpResult::Cancelled) };

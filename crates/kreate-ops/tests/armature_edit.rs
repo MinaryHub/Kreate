@@ -134,3 +134,24 @@ fn rotate_and_scale_act_about_the_selections_middle() {
     let b = &doc.armature(id).unwrap().bones[0];
     assert!((b.length() - 2.0).abs() < 1e-9);
 }
+
+#[test]
+fn a_drag_can_start_from_nothing() {
+    // `G`, `R` and `S` begin their drag with the identity. An operator that
+    // declined "no change" could never be dragged; the app said "Move is not
+    // possible here" after every E, and G never started at all.
+    let (registry, mut history) = wired();
+    let (mut doc, _) = rig();
+    run(&registry, &mut history, &mut doc, "armature.select_all", &[("action", PropertyValue::Enum(0))]);
+    for (op, key, value) in [
+        ("armature.translate", "translation", PropertyValue::Vec3([0.0; 3])),
+        ("armature.rotate", "angle", PropertyValue::Float(0.0)),
+        ("armature.scale", "scale", PropertyValue::Vec3([1.0; 3])),
+    ] {
+        let mut p = PropertyMap::new();
+        p.set(key, value);
+        let session = history.begin_modal(&registry, &mut doc, None, &edit_ctx(), op, &p).expect("ran");
+        assert!(session.is_some(), "{op} refused to start from the identity");
+        History::cancel_modal(session.unwrap(), &mut doc);
+    }
+}
