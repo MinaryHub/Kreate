@@ -24,6 +24,8 @@ struct ObjectData {
     normal_col1: vec4<f32>,
     normal_col2: vec4<f32>,
     base_color: vec4<f32>,
+    // x: one to colour by the weight in the first UV coordinate.
+    paint: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -122,6 +124,8 @@ fn vs_cluster(
         out.normal = vec3<f32>(0.0, 0.0, 1.0);
         out.view_pos = vec3<f32>(0.0);
         out.base_color = instance.base_color;
+        out.weight = 0.0;
+        out.ramp = 0.0;
         return out;
     }
 
@@ -136,6 +140,8 @@ fn vs_cluster(
     out.normal = nm * oct_decode(cluster_normals[index]);
     out.view_pos = world.xyz;
     out.base_color = instance.base_color;
+    out.weight = 0.0;
+    out.ramp = 0.0;
     return out;
 }
 
@@ -170,12 +176,34 @@ struct VsOut {
     // supply the colour from different uniforms in different vertex shaders and
     // the fragment stage cannot tell which.
     @location(2) @interpolate(flat) base_color: vec4<f32>,
+    // The weight being painted, and whether to show it — see `ramp`.
+    @location(3) weight: f32,
+    @location(4) @interpolate(flat) ramp: f32,
 };
+
+// Blender's weight ramp: blue at nothing, through green, to red at all.
+fn weight_color(w: f32) -> vec3<f32> {
+    let t = clamp(w, 0.0, 1.0);
+    let blue = vec3<f32>(0.0, 0.0, 1.0);
+    let cyan = vec3<f32>(0.0, 1.0, 1.0);
+    let green = vec3<f32>(0.0, 1.0, 0.0);
+    let yellow = vec3<f32>(1.0, 1.0, 0.0);
+    let red = vec3<f32>(1.0, 0.0, 0.0);
+    if (t < 0.25) {
+        return mix(blue, cyan, t * 4.0);
+    } else if (t < 0.5) {
+        return mix(cyan, green, (t - 0.25) * 4.0);
+    } else if (t < 0.75) {
+        return mix(green, yellow, (t - 0.5) * 4.0);
+    }
+    return mix(yellow, red, (t - 0.75) * 4.0);
+}
 
 @vertex
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) normal_packed: u32,
+    @location(2) uv: vec2<f32>,
 ) -> VsOut {
     var out: VsOut;
     let world = object.model * vec4<f32>(position, 1.0);
@@ -188,6 +216,8 @@ fn vs_main(
     out.normal = nm * oct_decode(normal_packed);
     out.view_pos = world.xyz;
     out.base_color = object.base_color;
+    out.weight = uv.x;
+    out.ramp = object.paint.x;
     return out;
 }
 
@@ -225,7 +255,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     }
     let to_eye = normalize(-in.view_pos);
 
-    let base = in.base_color.rgb;
+    // The ramp is light's reflectance like any colour: shaded, so the form
+    // still reads under the weights, as Blender's weight paint does.
+    let base = select(in.base_color.rgb, weight_color(in.weight), in.ramp > 0.5);
     var color: vec3<f32>;
     if (globals.params.x < 0.5) {
         color = studio(n, base);

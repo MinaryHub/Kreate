@@ -634,6 +634,14 @@ struct App {
     /// Application state, not the document's: a file saved mid-play opens
     /// stopped, the way every animation tool's does.
     playing: Option<std::time::Instant>,
+    /// The weight-paint brush stroke in progress: its modal session and the
+    /// vertices it has crossed so far.
+    paint_stroke: Option<(kreate_ops::ModalSession, std::collections::BTreeSet<u32>)>,
+    /// The painted mesh as the screen shows it in weight paint mode, with the
+    /// active group's weights where the renderer's ramp reads them — kept, so
+    /// an unchanged mesh is the same handle and is not uploaded again. Keyed
+    /// on the evaluated mesh it was made from and the group.
+    weight_display: Option<(Arc<MeshData>, Option<String>, Arc<MeshData>)>,
     /// The document version the drivers last ran against. They run again
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
@@ -727,6 +735,8 @@ impl App {
             dispatching_key: None,
             playing: None,
             driven_at: u64::MAX,
+            paint_stroke: None,
+            weight_display: None,
             autokey: false,
             shown_title: String::new(),
         }
@@ -2864,6 +2874,26 @@ impl App {
 
     fn evaluate_scene(&mut self) {
         self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
+        // In weight paint mode the painted mesh is shown by its weights.
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+            let active = self.doc.selection.active;
+            let group = active.and_then(|id| self.doc.object(id)).and_then(|o| o.active_group.clone());
+            if let Some((_, mesh)) = self.evaluated.iter_mut().find(|(id, _)| Some(*id) == active) {
+                let reuse = self
+                    .weight_display
+                    .as_ref()
+                    .filter(|(input, g, _)| Arc::ptr_eq(input, mesh) && *g == group)
+                    .map(|(_, _, out)| out.clone());
+                let shown = reuse.unwrap_or_else(|| {
+                    let out = Arc::new(kreate_ops::ops::paint::weight_display(mesh, group.as_deref()));
+                    self.weight_display = Some((mesh.clone(), group.clone(), out.clone()));
+                    out
+                });
+                *mesh = shown;
+            }
+        } else {
+            self.weight_display = None;
+        }
         // Both caches are keyed on handle identity, so an edit leaves the old
         // entry behind rather than replacing it — they have to be told when a
         // handle has left the scene or they grow with every edit. The modifier
@@ -3263,8 +3293,86 @@ impl App {
         // bindings, and a preset that rebinds selection has to move its variants
         // with it.
         if button == KeyMouse::Left {
+            // In weight paint mode a left drag is a brush stroke, not a box.
+            if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                self.begin_paint_stroke();
+                return;
+            }
             self.begin_drag_select();
         }
+    }
+
+    /// Starts a brush stroke on the active mesh's active group.
+    fn begin_paint_stroke(&mut self) {
+        let Some(object) = self.doc.selection.active else { return };
+        let Some(group) = self.doc.object(object).and_then(|o| o.active_group.clone()) else {
+            self.status("add a vertex group to paint (Data tab)");
+            return;
+        };
+        let paint = self.ui.paint;
+        let mut params = PropertyMap::new();
+        params.set("group", PropertyValue::Text(group));
+        params.set("vertices", PropertyValue::Ints(Vec::new()));
+        params.set("weight", PropertyValue::Float(paint.weight as f64));
+        params.set("strength", PropertyValue::Float(paint.strength as f64));
+        match self.history.begin_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, "paint.weight_stroke", &params) {
+            Ok(Some(session)) => {
+                self.paint_stroke = Some((session, std::collections::BTreeSet::new()));
+                self.drive_paint_stroke();
+            }
+            Ok(None) => {}
+            Err(e) => self.status(&format!("paint: {e}")),
+        }
+    }
+
+    /// Adds the vertices under the brush to the stroke and re-applies it.
+    ///
+    /// On the evaluated mesh, as it is on screen — a posed character is
+    /// painted where it stands — with the same vertex numbering as the
+    /// document's, which a skin or a stack that keeps the topology has; a
+    /// stack that changes it paints the cage instead.
+    fn drive_paint_stroke(&mut self) {
+        let (Some((x, y)), Some(projector), Some(object)) = (self.input.cursor, self.ui.projector, self.doc.selection.active)
+        else {
+            return;
+        };
+        let ppp = self.egui_ctx.pixels_per_point();
+        let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+        let radius = self.ui.paint.radius;
+        let Some(cage) = self.doc.object(object).and_then(|o| o.mesh()).and_then(|m| self.doc.mesh(m)) else { return };
+        let shown = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == object)
+            .map(|(_, m)| m.clone())
+            .filter(|m| m.num_verts() == cage.num_verts());
+        let world = self.doc.world_transform(object);
+        let positions: Vec<glam::Vec3> = match &shown {
+            Some(m) => m.positions().to_vec(),
+            None => cage.positions().to_vec(),
+        };
+        let Some((session, touched)) = self.paint_stroke.as_mut() else { return };
+        let before = touched.len();
+        for (v, p) in positions.iter().enumerate() {
+            let w = world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+            if projector.project(w).is_some_and(|s| s.distance(at) <= radius) {
+                touched.insert(v as u32);
+            }
+        }
+        if touched.len() == before && before > 0 {
+            return;
+        }
+        let paint = self.ui.paint;
+        let group = self.doc.object(object).and_then(|o| o.active_group.clone()).unwrap_or_default();
+        let mut params = PropertyMap::new();
+        params.set("group", PropertyValue::Text(group));
+        params.set("vertices", PropertyValue::Ints(touched.iter().copied().collect()));
+        params.set("weight", PropertyValue::Float(paint.weight as f64));
+        params.set("strength", PropertyValue::Float(paint.strength as f64));
+        if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, session, &params) {
+            tracing::warn!(error = %e, "stroke failed");
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
     /// Ends whatever that button was doing.
@@ -3273,6 +3381,16 @@ impl App {
     /// the navigation gizmo — because a button that went down has to come up. It
     /// not doing so was what made navigation stick on and then appear broken.
     fn end_mouse_drag(&mut self, slot: usize) {
+        // A stroke ends where the button comes up: one step to undo.
+        if slot == 0 {
+            if let Some((session, _)) = self.paint_stroke.take() {
+                self.history.commit_modal(session);
+                if let Some(entry) = self.history.last() {
+                    println!("{}", entry.to_script_call());
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+        }
         let was_navigating = self.drag_ops[slot].take().is_some();
         if !was_navigating && slot == 0 {
             self.finish_drag_select();
@@ -3432,6 +3550,8 @@ impl App {
                     None => {}
                 }
             }
+            // A click in weight paint mode is a stroke, handled on the press.
+            kreate_ops::mode::ActsOn::Weights => {}
             kreate_ops::mode::ActsOn::BoneJoints => {
                 let Some(object) = kreate_ops::ops::armature::edited_object(&self.doc) else {
                     return true;
@@ -4017,6 +4137,11 @@ impl App {
                 // selection, which is the only thing the user is looking at.
                 draws.push(
                     Draw::new(gpu_mesh, self.doc.world_transform(*id))
+                        // The painted mesh, by its weights.
+                        .weights(
+                            self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights
+                                && self.doc.selection.active == Some(*id),
+                        )
                         // The object's first material, which is what every
                         // slot a mesh does not name falls back to. Zero when
                         // the materials have not been compiled yet, which is
@@ -5278,6 +5403,13 @@ impl ApplicationHandler for App {
                 }
                 if self.uv_gesture.is_some() {
                     self.drive_uv_gesture();
+                }
+                if self.paint_stroke.is_some() {
+                    self.drive_paint_stroke();
+                }
+                // The brush circle follows the pointer.
+                if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                    self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }
             }
 

@@ -875,8 +875,11 @@ fn the_operator_a_gesture_runs_depends_on_the_mode() {
     // And no two answers coincide. Three keys times the modes should be that
     // many distinct operators; a `match` arm copied and not edited would
     // otherwise pass every line above.
+    // A brush mode moves nothing: its card borrows the object's three, and no
+    // key in its context reaches them.
     let mut ids: Vec<&str> = Mode::ALL
         .iter()
+        .filter(|mode| mode.acts_on() != kreate_ops::mode::ActsOn::Weights)
         .flat_map(|mode| {
             [Kind::Move, Kind::Rotate, Kind::Scale]
                 .into_iter()

@@ -55,6 +55,9 @@ struct ObjectData {
     normal_col1: [f32; 4],
     normal_col2: [f32; 4],
     base_color: [f32; 4],
+    /// x: one to colour the surface by the weight in its first UV coordinate,
+    /// Blender's weight-paint ramp, instead of by `base_color`.
+    paint: [f32; 4],
 }
 
 /// Per-draw data for the rendered pass. Matches `RenderedObject` in
@@ -598,6 +601,8 @@ pub struct Draw<'a> {
     /// not name. A mesh whose faces are all on one slot — which is nearly all
     /// of them — needs nothing else.
     pub material: u32,
+    /// Coloured by weight: see [`Draw::weights`].
+    pub weights: bool,
     /// One material per mesh material *slot*, for a mesh with more than one.
     ///
     /// **Borrowed rather than owned** so that `Draw` stays `Copy` and a frame
@@ -630,12 +635,21 @@ impl<'a> Draw<'a> {
             editing: false,
             material: 0,
             materials: &[],
+            weights: false,
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
             // failure mode of forgetting to measure is a slow frame, not a
             // missing object.
             detail: Detail::FULL,
         }
+    }
+
+    /// Colours the object by weight in the studio and flat modes: the first UV
+    /// coordinate of each vertex, through Blender's weight-paint ramp. The
+    /// application puts the weights there, on a copy made for the screen.
+    pub fn weights(mut self, on: bool) -> Self {
+        self.weights = on;
+        self
     }
 
     /// Sets which material this object is made of, for the rendered mode.
@@ -1950,6 +1964,16 @@ impl Viewport {
                             shader_location: 1,
                         }],
                     },
+                    // Surface coordinates, read only for the weight ramp.
+                    wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 2,
+                        }],
+                    },
                 ],
             },
             fragment: Some(wgpu::FragmentState {
@@ -2557,6 +2581,7 @@ impl Viewport {
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
                     base_color: draw.mesh.color.to_array(),
+                    paint: [if draw.weights { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 }),
             );
             // The shadow pass draws the same geometry from a different
@@ -3551,6 +3576,7 @@ impl Viewport {
                 pass.set_bind_group(1, &self.objects.bind, &[self.objects.offset(i as u32)]);
                 pass.set_vertex_buffer(0, mesh.positions.slice(..));
                 pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                pass.set_vertex_buffer(2, mesh.uvs.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
             }
@@ -4193,7 +4219,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ObjectData>() % 16, 0);
         assert_eq!(std::mem::size_of::<GridGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<Globals>(), 80);
-        assert_eq!(std::mem::size_of::<ObjectData>(), 128);
+        assert_eq!(std::mem::size_of::<ObjectData>(), 144);
         assert_eq!(std::mem::size_of::<GridGlobals>(), 192);
         assert_eq!(std::mem::size_of::<EdgeGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<EdgeGlobals>(), 128);

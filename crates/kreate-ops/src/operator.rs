@@ -508,7 +508,7 @@ mod mode_tests {
             );
         }
         assert_eq!(Mode::from_tag("nonesuch"), None);
-        assert_eq!(Mode::ALL.len(), 4, "ALL must list every variant");
+        assert_eq!(Mode::ALL.len(), 5, "ALL must list every variant");
     }
 
     #[test]

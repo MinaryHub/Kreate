@@ -30,6 +30,7 @@ pub enum Mode {
     EditMesh,
     EditArmature,
     Pose,
+    WeightPaint,
 }
 
 /// What a mode needs to be entered.
@@ -78,6 +79,8 @@ pub enum ActsOn {
     Bones,
     /// The heads and tails of the active armature's bones, at rest.
     BoneJoints,
+    /// The weights of the active mesh's vertex groups, with a brush.
+    Weights,
 }
 
 /// A header menu a mode offers after Add.
@@ -90,6 +93,8 @@ pub enum Menu {
     Pose,
     /// Armature: adding, extruding and deleting bones.
     Armature,
+    /// Weights: the vertex groups as a whole.
+    Weights,
 }
 
 /// Everything the application asks of a mode.
@@ -125,7 +130,7 @@ pub struct ModeInfo {
 }
 
 /// The cards, in the order the mode menu lists them.
-pub const MODES: [ModeInfo; 4] = [
+pub const MODES: [ModeInfo; 5] = [
     ModeInfo {
         mode: Mode::Object,
         tag: "object",
@@ -183,11 +188,27 @@ pub const MODES: [ModeInfo; 4] = [
         // Blender's: Tab from pose mode goes to the skeleton's edit mode.
         tab: Mode::EditArmature,
     },
+    ModeInfo {
+        mode: Mode::WeightPaint,
+        tag: "weight_paint",
+        label_key: "mode-weight-paint",
+        needs: Needs::Mesh,
+        acts_on: ActsOn::Weights,
+        keymap: "weight_paint",
+        menus: &[Menu::Weights],
+        element_buttons: false,
+        edit_tools: false,
+        shows_elements: false,
+        // A brush mode moves nothing; G, R and S are the object's, and no key
+        // in this mode's context reaches them.
+        transform: ["object.translate", "object.rotate", "object.scale"],
+        tab: Mode::Object,
+    },
 ];
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 4] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose];
+    pub const ALL: [Mode; 5] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose, Mode::WeightPaint];
 
     /// This mode's card.
     ///
@@ -199,6 +220,7 @@ impl Mode {
             Mode::EditMesh => &MODES[1],
             Mode::EditArmature => &MODES[2],
             Mode::Pose => &MODES[3],
+            Mode::WeightPaint => &MODES[4],
         }
     }
 
@@ -341,6 +363,8 @@ mod tests {
                 ActsOn::MeshElements => "mesh.",
                 ActsOn::Bones => "pose.",
                 ActsOn::BoneJoints => "armature.",
+                // See the card: nothing reaches them.
+                ActsOn::Weights => "object.",
             };
             for op in mode.info().transform {
                 assert!(op.starts_with(prefix), "{mode:?}: {op}");

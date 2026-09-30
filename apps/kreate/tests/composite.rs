@@ -322,6 +322,15 @@ fn composite_with(
         .objects()
         .filter_map(|(id, _)| {
             let mesh = cache.evaluated(doc, id, &kreate_scene::modifier::EvalCtx::still())?;
+            // In weight paint mode the painted mesh shows its weights, as the
+            // application shows it.
+            let painting = mode.acts_on() == kreate_ops::mode::ActsOn::Weights && doc.selection.active == Some(id);
+            let mesh = if painting {
+                let group = doc.object(id).and_then(|o| o.active_group.clone());
+                std::sync::Arc::new(kreate_ops::ops::paint::weight_display(&mesh, group.as_deref()))
+            } else {
+                mesh
+            };
             let cpu = kreate_render::RenderMeshCpu::extract(&mesh);
             Some((
                 id,
@@ -332,7 +341,9 @@ fn composite_with(
     let mut draws: Vec<kreate_render::Draw> = uploaded
         .iter()
         .map(|(id, m)| {
-            kreate_render::Draw::new(m, doc.world_transform(*id)).selected(!edit_mode && doc.selection.contains(*id))
+            kreate_render::Draw::new(m, doc.world_transform(*id))
+                .selected(!edit_mode && doc.selection.contains(*id))
+                .weights(mode.acts_on() == kreate_ops::mode::ActsOn::Weights && doc.selection.active == Some(*id))
         })
         .collect();
 
@@ -2315,6 +2326,20 @@ fn shot_skinned() {
         return;
     };
     shot.dump("skinned");
+
+    // The same body in weight paint mode, the lower bone's group shown.
+    doc.selection.clear();
+    doc.selection.add(body);
+    doc.object_mut(body).unwrap().active_group = Some("Lower".into());
+    let Some(shot) = composite_in_mode(&doc, "ko-KR", kreate_ops::Mode::from_tag("weight_paint").unwrap(), |state| {
+        let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+        for area in areas {
+            state.set_properties_tab(area, kreate::shell::PropertiesTab::Data);
+        }
+    }) else {
+        return;
+    };
+    shot.dump("weight-paint");
 }
 
 /// A picture of the Material tab with keyed values, the diamonds lit.

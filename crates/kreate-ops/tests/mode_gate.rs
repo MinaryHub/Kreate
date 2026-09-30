@@ -47,7 +47,7 @@ fn no_code_outside_the_mode_module_branches_on_a_mode_variant() {
         let live = text.split("#[cfg(test)]").next().unwrap_or("");
         for (number, line) in live.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
-            for variant in ["Mode::EditMesh", "Mode::Object", "Mode::Pose", "Mode::EditArmature"] {
+            for variant in ["Mode::EditMesh", "Mode::Object", "Mode::Pose", "Mode::EditArmature", "Mode::WeightPaint"] {
                 let mut at = 0;
                 while let Some(found) = code[at..].find(variant) {
                     let end = at + found + variant.len();

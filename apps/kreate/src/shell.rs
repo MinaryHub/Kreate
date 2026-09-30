@@ -233,6 +233,8 @@ pub struct ShellState {
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
     /// Each graph editor's view and drag, per area.
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
+    /// The weight-paint brush: what it paints towards, how wide, how hard.
+    pub paint: PaintSettings,
     /// What is being typed in each Drivers editor, per area.
     driver_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::drivers::DriversState>,
     /// The clock, published by the application each frame.
@@ -532,6 +534,7 @@ impl Default for ShellState {
             sheet_views: std::collections::BTreeMap::new(),
             graph_views: std::collections::BTreeMap::new(),
             driver_views: std::collections::BTreeMap::new(),
+            paint: PaintSettings::default(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -933,6 +936,25 @@ impl PropertiesTab {
     }
 }
 
+/// The weight-paint brush's settings. Application state, as Blender keeps its
+/// tool settings apart from the file's data; a stroke records the values it
+/// used, so a replay does not depend on them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintSettings {
+    /// What the brush paints towards, 0 to 1.
+    pub weight: f32,
+    /// Its radius on screen, in points.
+    pub radius: f32,
+    /// How far towards the weight one stroke goes.
+    pub strength: f32,
+}
+
+impl Default for PaintSettings {
+    fn default() -> Self {
+        Self { weight: 1.0, radius: 40.0, strength: 0.5 }
+    }
+}
+
 /// Sends a panel's edit, as a new step or as an adjustment to the last one.
 ///
 /// The whole of the rule in one place, because getting it wrong is invisible
@@ -1037,6 +1059,9 @@ struct Labels {
     add_empty: String,
     add_armature: String,
     menu_pose: String,
+    menu_weights: String,
+    group_add: String,
+    weights_normalize: String,
     menu_parent: String,
     bind_automatic: String,
     bind_empty: String,
@@ -1210,6 +1235,9 @@ impl Labels {
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
+            menu_weights: t("menu-weights"),
+            group_add: t("op-object-vertex-group-add"),
+            weights_normalize: t("op-paint-weights-normalize"),
             menu_parent: t("menu-parent"),
             bind_automatic: t("bind-automatic"),
             bind_empty: t("bind-empty"),
@@ -1417,6 +1445,8 @@ pub fn draw(
                 kreate_ops::mode::ActsOn::BoneJoints => {
                     &["armature.translate", "armature.extrude", "armature.bone_add", "armature.delete"]
                 }
+                // The brush is the mouse; there are no keys to learn yet.
+                kreate_ops::mode::ActsOn::Weights => &[],
             };
             for id in hints {
                 if let Some(info) = state.command_info.get(*id).filter(|i| !i.shortcut.is_empty()) {
@@ -1767,6 +1797,15 @@ fn draw_area(
             match area.editor.as_str() {
                 "viewport" => {
                     draw_viewport(ui, state, doc, mode, l, inner, image);
+                    // The brush's reach, as a ring under the pointer.
+                    if mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p)) {
+                            let theme = kreate_ui::theme::from_ui(ui);
+                            ui.painter()
+                                .with_clip_rect(inner)
+                                .circle_stroke(p, state.paint.radius, egui::Stroke::new(1.2, theme.text));
+                        }
+                    }
                     draw_adjust_float(ui, state, registry, history, inner);
                     if state.sidebar_open(area.id) {
                         draw_item_sidebar(ui, state, doc, registry, area.id, inner, l, mode);
@@ -1975,6 +2014,18 @@ fn draw_area_header(
                                 }
                             }
                             ui.spacing_mut().item_spacing.x = spacing;
+                        }
+                        // The brush, where Blender keeps it: in the header of
+                        // the mode that uses it.
+                        if mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                            ui.separator();
+                            let p = &mut state.paint;
+                            ui.label(state.catalog.get("paint-weight"));
+                            ui.add(egui::DragValue::new(&mut p.weight).range(0.0..=1.0).speed(0.01).max_decimals(2));
+                            ui.label(state.catalog.get("paint-radius"));
+                            ui.add(egui::DragValue::new(&mut p.radius).range(2.0..=400.0).speed(1.0).suffix(" px"));
+                            ui.label(state.catalog.get("paint-strength"));
+                            ui.add(egui::DragValue::new(&mut p.strength).range(0.0..=1.0).speed(0.01).max_decimals(2));
                         }
                     }
                 });
@@ -2293,7 +2344,8 @@ fn viewport_menus(
     // where a skeleton is being built, and nothing in pose mode — a pose adds
     // nothing, as Blender's has no Add menu there.
     match mode.acts_on() {
-        kreate_ops::mode::ActsOn::Bones => {}
+        // A pose and a brush add nothing, as in Blender.
+        kreate_ops::mode::ActsOn::Bones | kreate_ops::mode::ActsOn::Weights => {}
         kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
             label: l.add_menu.clone(),
             nodes: vec![entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[]))],
@@ -2312,6 +2364,14 @@ fn viewport_menus(
             kreate_ops::mode::Menu::Pose => out.push(TopMenu {
                 label: l.menu_pose.clone(),
                 nodes: pose_nodes(l),
+            }),
+            kreate_ops::mode::Menu::Weights => out.push(TopMenu {
+                label: l.menu_weights.clone(),
+                nodes: vec![
+                    entry("object.vertex_group_add", &l.group_add, op("object.vertex_group_add", &[])),
+                    MenuNode::Separator,
+                    entry("paint.weights_normalize", &l.weights_normalize, op("paint.weights_normalize", &[])),
+                ],
             }),
             kreate_ops::mode::Menu::Armature => out.push(TopMenu {
                 label: l.menu_armature.clone(),
@@ -4609,6 +4669,7 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         Some(kreate_scene::document::ObjectData::Light(_))
             | Some(kreate_scene::document::ObjectData::Camera(_))
             | Some(kreate_scene::document::ObjectData::Armature(_))
+            | Some(kreate_scene::document::ObjectData::Mesh(_))
     );
     // An armature with an active bone that is really there: the tab shows
     // one bone, and with none it would be an empty panel.
@@ -5221,8 +5282,53 @@ fn draw_data_tab(
             draw_camera_data(ui, state, doc, registry, l, id)
         }
         kreate_scene::document::ObjectData::Armature(id) => draw_armature_data(ui, state, doc, registry, id),
+        kreate_scene::document::ObjectData::Mesh(id) => draw_vertex_groups(ui, state, doc, id, active),
         _ => {}
     }
+}
+
+/// The mesh's vertex groups: Blender's list in the Mesh Data tab. Click one to
+/// paint and show it; add and remove below.
+fn draw_vertex_groups(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    mesh: kreate_scene::MeshId,
+    object: &kreate_scene::document::Object,
+) {
+    use kreate_reflect::PropertyValue as V;
+    let title = state.catalog.get("panel-vertex-groups");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        let groups = kreate_ops::ops::paint::groups(doc, mesh);
+        if groups.is_empty() {
+            ui.weak(state.catalog.get("groups-none"));
+        }
+        for g in &groups {
+            let active = object.active_group.as_deref() == Some(g.as_str());
+            if ui.selectable_label(active, g).clicked() && !active {
+                let mut p = PropertyMap::new();
+                p.set("name", V::Text(g.clone()));
+                state.queue.run("object.vertex_group_set_active", p);
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button(ADD_GLYPH).on_hover_text(state.catalog.get("op-object-vertex-group-add")).clicked() {
+                state.queue.run("object.vertex_group_add", PropertyMap::new());
+            }
+            let can_remove = object.active_group.is_some();
+            if ui
+                .add_enabled(can_remove, egui::Button::new(REMOVE_GLYPH).small())
+                .on_hover_text(state.catalog.get("op-object-vertex-group-remove"))
+                .clicked()
+            {
+                if let Some(g) = &object.active_group {
+                    let mut p = PropertyMap::new();
+                    p.set("name", V::Text(g.clone()));
+                    state.queue.run("object.vertex_group_remove", p);
+                }
+            }
+        });
+    });
 }
 
 /// The active bone of an armature object: its index and name.
@@ -5762,6 +5868,20 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+mode-weight-paint = Weight Paint
+keymap-context-weight-paint = Weight Paint
+op-mode-weight-paint-desc = Paints how much each vertex follows each bone.
+menu-weights = Weights
+op-object-vertex-group-add = Add Vertex Group
+op-object-vertex-group-add-desc = Adds an empty vertex group and makes it the one painted.
+op-object-vertex-group-remove = Remove Vertex Group
+op-paint-weights-normalize = Normalize All
+op-paint-weights-normalize-desc = Scales every vertex's weights so they add up to one.
+panel-vertex-groups = Vertex Groups
+groups-none = No vertex groups
+paint-weight = Weight
+paint-radius = Radius
+paint-strength = Strength
 menu-parent = Parent
 bind-automatic = With Automatic Weights
 bind-empty = With Empty Groups
@@ -6272,6 +6392,20 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
 sidebar-item = 항목
+mode-weight-paint = 웨이트 페인트
+keymap-context-weight-paint = 웨이트 페인트
+op-mode-weight-paint-desc = 각 정점이 각 뼈를 얼마나 따를지 칠합니다.
+menu-weights = 웨이트
+op-object-vertex-group-add = 버텍스 그룹 추가
+op-object-vertex-group-add-desc = 빈 버텍스 그룹을 추가하고 칠할 그룹으로 정합니다.
+op-object-vertex-group-remove = 버텍스 그룹 제거
+op-paint-weights-normalize = 모두 정규화
+op-paint-weights-normalize-desc = 각 정점의 웨이트 합이 1이 되도록 맞춥니다.
+panel-vertex-groups = 버텍스 그룹
+groups-none = 버텍스 그룹 없음
+paint-weight = 웨이트
+paint-radius = 반경
+paint-strength = 세기
 menu-parent = 부모
 bind-automatic = 자동 웨이트로
 bind-empty = 빈 그룹으로
@@ -7763,9 +7897,10 @@ mod tests {
         // with an armature, its two modes and not the mesh's Edit Mode.
         let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, Has::NOTHING).unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
-        assert_eq!(ids, vec!["mode-object", "mode-edit"]);
+        assert_eq!(ids, vec!["mode-object", "mode-edit", "mode-weight-paint"]);
         assert!(entries[0].1, "the mode you are in is not lit");
         assert!(!entries[1].0.enabled, "edit mode with nothing to edit is not greyed");
+        assert!(!entries[2].0.enabled, "weight paint with nothing to paint is not greyed");
         let armature = Has { mesh: false, armature: true };
         let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, armature).unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();

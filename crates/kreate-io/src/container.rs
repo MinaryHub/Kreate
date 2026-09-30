@@ -197,6 +197,9 @@ pub struct ObjectRecord {
     /// The armature object this mesh follows, by identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skin: Option<u64>,
+    /// The vertex group being painted, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_group: Option<String>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1262,6 +1265,7 @@ pub fn write(
                 pose,
                 active_bone: object.pose.active.clone(),
                 skin: object.skin.map(|u| u.raw()),
+                active_group: object.active_group.clone(),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -1706,6 +1710,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         // By identity, which the file restores for every object, so the
         // armature is found whatever order the two come back in.
         object.skin = record.skin.map(kreate_scene::Uid::from_raw);
+        object.active_group = record.active_group.clone();
         // Variables name their objects by identity, and every object's
         // identity is restored from the file, so these resolve whatever order
         // the objects come back in.

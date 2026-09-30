@@ -141,6 +141,8 @@ pub enum Context {
     Pose,
     /// Armature edit mode: `G` moves the ends of bones at rest.
     EditArmature,
+    /// Weight paint mode: the pointer paints.
+    WeightPaint,
     /// The pointer is over the UV editor.
     ///
     /// Its own context, and deliberately *not* inside `Viewport`: `G` in the
@@ -169,6 +171,7 @@ impl Context {
             Context::EditMesh => &[Context::EditMesh, Context::Viewport, Context::Global],
             Context::Pose => &[Context::Pose, Context::Viewport, Context::Global],
             Context::EditArmature => &[Context::EditArmature, Context::Viewport, Context::Global],
+            Context::WeightPaint => &[Context::WeightPaint, Context::Viewport, Context::Global],
             Context::UvEditor => &[Context::UvEditor, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
             // stray `S` would start a scale inside a running transform.
@@ -186,6 +189,7 @@ impl Context {
             Context::EditMesh => "edit_mesh",
             Context::Pose => "pose",
             Context::EditArmature => "edit_armature",
+            Context::WeightPaint => "weight_paint",
             Context::UvEditor => "uv_editor",
             Context::Modal => "modal",
         }
@@ -203,6 +207,7 @@ impl Context {
         Context::EditMesh,
         Context::Pose,
         Context::EditArmature,
+        Context::WeightPaint,
         Context::UvEditor,
         Context::Modal,
     ];
@@ -843,6 +848,12 @@ mod tests {
                 Context::EditArmature,
                 Input::key("G"),
                 Action::new("armature.translate"),
+            ),
+            Binding::new(
+                "weights.nothing",
+                Context::WeightPaint,
+                Input::key("G"),
+                Action::new("object.translate"),
             ),
         ]);
         let conflicts = k.conflicts();
