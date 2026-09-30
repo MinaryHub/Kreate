@@ -1053,3 +1053,42 @@ fn inset_and_bevel_start_where_their_gestures_start() {
     let bevel = run(&mut doc, &ctx, "mesh.bevel", &[("width", PropertyValue::Float(1e-4))]).unwrap();
     assert_eq!(bevel, kreate_ops::OpResult::Finished);
 }
+
+fn flags(doc: &Document, layer: &str) -> Vec<bool> {
+    let id = doc.meshes().next().expect("a mesh").0;
+    doc.mesh(id).unwrap().attributes().get_bool(layer).map(|l| l.to_vec()).unwrap_or_default()
+}
+
+#[test]
+fn h_hides_the_selected_face_and_alt_h_brings_it_back_selected() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[2]);
+    run(&mut doc, &ctx, "mesh.hide", &[("mode", PropertyValue::Enum(2))]).unwrap();
+    assert!(flags(&doc, names::HIDE_FACE)[2]);
+    assert!(!flags(&doc, names::SELECT_FACE).iter().any(|s| *s), "the hidden face stayed selected");
+    // Select all cannot reach it.
+    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(0))]).unwrap();
+    assert!(!flags(&doc, names::SELECT_FACE)[2]);
+    // Nothing more to hide is a no-op, not an error.
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
+    assert_eq!(
+        run(&mut doc, &ctx, "mesh.hide", &[("mode", PropertyValue::Enum(2))]).unwrap(),
+        kreate_ops::OpResult::Cancelled
+    );
+    run(&mut doc, &ctx, "mesh.reveal", &[]).unwrap();
+    assert!(flags(&doc, names::HIDE_FACE).is_empty(), "the hide layer outlived the reveal");
+    assert!(flags(&doc, names::SELECT_FACE)[2]);
+}
+
+#[test]
+fn ctrl_plus_and_ctrl_l_grow_through_the_operator() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(6)), ("mode", PropertyValue::Enum(2))]).unwrap();
+    // A cube's face touches every face but the opposite one.
+    assert_eq!(flags(&doc, names::SELECT_FACE).iter().filter(|s| **s).count(), 5);
+    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(7)), ("mode", PropertyValue::Enum(2))]).unwrap();
+    assert_eq!(flags(&doc, names::SELECT_FACE).iter().filter(|s| **s).count(), 1);
+    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(8))]).unwrap();
+    assert!(flags(&doc, names::SELECT_FACE).iter().all(|s| *s));
+}

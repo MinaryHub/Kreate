@@ -642,6 +642,9 @@ struct App {
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
     /// on the evaluated mesh it was made from and the group.
     weight_display: Option<(Arc<MeshData>, Option<String>, Arc<MeshData>)>,
+    /// Meshes with hidden elements, as drawn outside edit mode: without the
+    /// hide layers. Input handle and the copy.
+    unhidden: Vec<(Arc<MeshData>, Arc<MeshData>)>,
     /// The document version the drivers last ran against. They run again
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
@@ -737,6 +740,7 @@ impl App {
             driven_at: u64::MAX,
             paint_stroke: None,
             weight_display: None,
+            unhidden: Vec::new(),
             autokey: false,
             shown_title: String::new(),
         }
@@ -1323,6 +1327,12 @@ impl App {
             ("mesh.select", &[("action", PropertyValue::Enum(1))]),
             ("mesh.select", &[("action", PropertyValue::Enum(2))]),
             ("mesh.select", &[("action", PropertyValue::Enum(3))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(6))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(7))]),
+            ("mesh.select", &[("action", PropertyValue::Enum(8))]),
+            ("mesh.hide", &[("unselected", PropertyValue::Bool(false))]),
+            ("mesh.hide", &[("unselected", PropertyValue::Bool(true))]),
+            ("mesh.reveal", &[]),
             ("object.select_all", &[("action", PropertyValue::Enum(0))]),
             ("object.select_all", &[("action", PropertyValue::Enum(1))]),
             ("object.select_all", &[("action", PropertyValue::Enum(3))]),
@@ -2924,6 +2934,29 @@ impl App {
 
     fn evaluate_scene(&mut self) {
         self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
+        // What `H` hid is hidden in edit mode only: every other object, and
+        // every object outside edit mode, is drawn whole. A copy without the
+        // hide layers, kept per input so an unchanged mesh is not copied again.
+        let editing: Vec<_> = if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
+            kreate_ops::ops::mesh::edit_targets(&self.doc).into_iter().map(|t| t.object).collect()
+        } else {
+            Vec::new()
+        };
+        let mut unhidden = Vec::new();
+        for (id, mesh) in self.evaluated.iter_mut() {
+            if editing.contains(id) || !kreate_mesh::selection::any_hidden(mesh) {
+                continue;
+            }
+            let shown = self
+                .unhidden
+                .iter()
+                .find(|(input, _)| Arc::ptr_eq(input, mesh))
+                .map(|(_, out)| out.clone())
+                .unwrap_or_else(|| Arc::new(kreate_mesh::selection::without_hidden(mesh)));
+            unhidden.push((mesh.clone(), shown.clone()));
+            *mesh = shown;
+        }
+        self.unhidden = unhidden;
         // In weight paint mode the painted mesh is shown by its weights.
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
             let active = self.doc.selection.active;
@@ -5121,7 +5154,7 @@ impl App {
                     && params.get("mode").is_none()
                     && matches!(
                         action.op_id.as_str(),
-                        "mesh.delete" | "mesh.dissolve" | "mesh.select"
+                        "mesh.delete" | "mesh.dissolve" | "mesh.select" | "mesh.hide"
                     )
                 {
                     params.set("mode", PropertyValue::Enum(self.select_mode));
@@ -5216,6 +5249,10 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::F12 => "F12",
         KeyCode::BracketLeft => "BracketLeft",
         KeyCode::BracketRight => "BracketRight",
+        KeyCode::NumpadAdd => "NumpadAdd",
+        KeyCode::NumpadSubtract => "NumpadSubtract",
+        KeyCode::Equal => "Equal",
+        KeyCode::Minus => "Minus",
         _ => return None,
     })
 }

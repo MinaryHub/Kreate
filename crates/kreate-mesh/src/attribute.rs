@@ -377,6 +377,15 @@ pub mod names {
     /// the first place.
     pub const SELECT_UV: &str = ".select_uv";
 
+    /// Point, Edge and Face / `Bool`. What edit mode has put out of sight with
+    /// `H` — Blender's hide flags. Hidden elements are not drawn in edit mode,
+    /// cannot be selected, and are never left selected; object mode draws the
+    /// mesh whole. Layers like the selection's, so they survive the edit
+    /// structure, undo and the file the same way.
+    pub const HIDE_VERT: &str = ".hide_vert";
+    pub const HIDE_EDGE: &str = ".hide_edge";
+    pub const HIDE_FACE: &str = ".hide_face";
+
     /// `true` for layers that are internal bookkeeping rather than user data.
     pub fn is_internal(name: &str) -> bool {
         name.starts_with('.')

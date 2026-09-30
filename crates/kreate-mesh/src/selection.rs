@@ -116,7 +116,8 @@ pub fn any_selected(mesh: &MeshData) -> bool {
     })
 }
 
-/// Sets every element of every domain.
+/// Sets every element of every domain — every *visible* one: a hidden
+/// element is never selected.
 fn set_all(mesh: &mut MeshData, on: bool) {
     ensure_layers(mesh);
     for domain in [Domain::Point, Domain::Edge, Domain::Face] {
@@ -126,6 +127,9 @@ fn set_all(mesh: &mut MeshData, on: bool) {
         if let Some(layer) = mesh.attributes_mut().make_mut_bool(name) {
             layer.fill(on);
         }
+    }
+    if on {
+        deselect_hidden(mesh);
     }
 }
 
@@ -147,10 +151,12 @@ pub fn select_invert(mesh: &mut MeshData, mode: SelectMode) {
 pub fn select_invert_with(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) {
     ensure_layers(mesh);
     let domain = mode.domain();
+    let hidden = hidden_flags(mesh, domain);
     if let Some(name) = layer_of(domain) {
         if let Some(layer) = mesh.attributes_mut().make_mut_bool(name) {
-            for slot in layer.iter_mut() {
-                *slot = !*slot;
+            for (i, slot) in layer.iter_mut().enumerate() {
+                // What is out of sight is not part of "everything else".
+                *slot = !*slot && !hidden.get(i).copied().unwrap_or(false);
             }
         }
     }
@@ -185,6 +191,7 @@ pub fn flush_with(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) {
         SelectMode::Edge => flush_from_edges(mesh, corner_edges),
         SelectMode::Face => flush_from_faces(mesh, corner_edges),
     }
+    deselect_hidden(mesh);
 }
 
 /// An edge is selected when both endpoints are; a face when all its corners are.
@@ -283,6 +290,463 @@ fn write(mesh: &mut MeshData, domain: Domain, values: Vec<bool>) {
     let Some(name) = layer_of(domain) else { return };
     mesh.attributes_mut()
         .insert(name, domain, AttrData::Bool(Arc::new(values)));
+}
+
+// --- hiding -------------------------------------------------------------------
+
+/// The hide layer for a domain, if it has one.
+fn hide_layer_of(domain: Domain) -> Option<&'static str> {
+    match domain {
+        Domain::Point => Some(names::HIDE_VERT),
+        Domain::Edge => Some(names::HIDE_EDGE),
+        Domain::Face => Some(names::HIDE_FACE),
+        Domain::Corner => None,
+    }
+}
+
+/// Which elements of a domain are hidden, one flag each; all `false` when the
+/// mesh has hidden nothing.
+pub fn hidden_flags(mesh: &MeshData, domain: Domain) -> Vec<bool> {
+    let n = mesh.domain_len(domain);
+    hide_layer_of(domain)
+        .and_then(|name| mesh.attributes().get_bool(name))
+        .filter(|layer| layer.len() == n)
+        .map(|layer| layer.to_vec())
+        .unwrap_or_else(|| vec![false; n])
+}
+
+/// Whether anything is hidden.
+pub fn any_hidden(mesh: &MeshData) -> bool {
+    [Domain::Point, Domain::Edge, Domain::Face].iter().any(|d| {
+        hide_layer_of(*d)
+            .and_then(|name| mesh.attributes().get_bool(name))
+            .is_some_and(|layer| layer.iter().any(|on| *on))
+    })
+}
+
+/// Takes hidden elements out of the selection. A no-op on a mesh that hides
+/// nothing, which is nearly every mesh, and costs nothing there.
+pub fn deselect_hidden(mesh: &mut MeshData) {
+    if !any_hidden(mesh) {
+        return;
+    }
+    for domain in [Domain::Point, Domain::Edge, Domain::Face] {
+        let hidden = hidden_flags(mesh, domain);
+        let Some(name) = layer_of(domain) else { continue };
+        if let Some(layer) = mesh.attributes_mut().make_mut_bool(name) {
+            for (slot, h) in layer.iter_mut().zip(&hidden) {
+                *slot &= !*h;
+            }
+        }
+    }
+}
+
+fn write_hidden(mesh: &mut MeshData, domain: Domain, values: Vec<bool>) {
+    let Some(name) = hide_layer_of(domain) else { return };
+    mesh.attributes_mut().insert(name, domain, AttrData::Bool(Arc::new(values)));
+}
+
+/// Hides the selection — or with `unselected`, everything else — as `H` and
+/// `Shift+H` do, in the terms of the select mode. `false` when that hides
+/// nothing new.
+///
+/// Blender's rules, which keep what is left a whole mesh: hiding vertices
+/// hides every edge and face that touches them; hiding edges hides the faces
+/// they bound and the vertices left with no visible edge; hiding faces hides
+/// the edges left with no visible face and the vertices left with no visible
+/// edge. What is hidden is also deselected.
+pub fn hide(mesh: &mut MeshData, mode: SelectMode, unselected: bool, corner_edges: &[u32]) -> bool {
+    ensure_layers(mesh);
+    let domain = mode.domain();
+    let was = hidden_flags(mesh, domain);
+    let chosen: Vec<bool> = selected_flags(mesh, domain)
+        .iter()
+        .zip(&was)
+        .map(|(s, h)| *h || (*s != unselected))
+        .collect();
+    if chosen == was {
+        return false;
+    }
+    let mut verts = hidden_flags(mesh, Domain::Point);
+    let mut edges = hidden_flags(mesh, Domain::Edge);
+    let mut faces = hidden_flags(mesh, Domain::Face);
+    let nf = mesh.num_faces();
+    match mode {
+        SelectMode::Vert => {
+            verts = chosen;
+            for (e, [a, b]) in mesh.edges().iter().enumerate() {
+                edges[e] |= verts[*a as usize] || verts[*b as usize];
+            }
+            for f in 0..nf {
+                faces[f as usize] |= mesh.face_verts(f).iter().any(|v| verts[*v as usize]);
+            }
+        }
+        SelectMode::Edge => {
+            edges = chosen;
+            for f in 0..nf {
+                faces[f as usize] |= mesh.face_corner_range(f).any(|c| edges[corner_edges[c] as usize]);
+            }
+            verts = hide_bare_verts(mesh, &edges, verts);
+        }
+        SelectMode::Face => {
+            faces = chosen;
+            // An edge is left in sight while any face on it is, or when it
+            // bounds no face at all.
+            let mut visible_face = vec![false; edges.len()];
+            let mut any_face = vec![false; edges.len()];
+            for f in 0..nf {
+                for c in mesh.face_corner_range(f) {
+                    let e = corner_edges[c] as usize;
+                    any_face[e] = true;
+                    visible_face[e] |= !faces[f as usize];
+                }
+            }
+            for e in 0..edges.len() {
+                edges[e] |= any_face[e] && !visible_face[e];
+            }
+            verts = hide_bare_verts(mesh, &edges, verts);
+        }
+    }
+    write_hidden(mesh, Domain::Point, verts);
+    write_hidden(mesh, Domain::Edge, edges);
+    write_hidden(mesh, Domain::Face, faces);
+    deselect_hidden(mesh);
+    // What is left selected is what the mode's own elements still say: the
+    // corners a hidden face shared with nothing selected go with it.
+    if mode == SelectMode::Face {
+        let (nv, ne) = (mesh.num_verts() as usize, mesh.num_edges() as usize);
+        write(mesh, Domain::Point, vec![false; nv]);
+        write(mesh, Domain::Edge, vec![false; ne]);
+    }
+    flush_with(mesh, mode, corner_edges);
+    true
+}
+
+/// Hides the vertices whose every edge is hidden. A vertex on no edge at all is
+/// left alone.
+fn hide_bare_verts(mesh: &MeshData, edges: &[bool], mut verts: Vec<bool>) -> Vec<bool> {
+    let n = mesh.num_verts() as usize;
+    let mut visible = vec![false; n];
+    let mut any = vec![false; n];
+    for (e, [a, b]) in mesh.edges().iter().enumerate() {
+        for v in [*a as usize, *b as usize] {
+            any[v] = true;
+            visible[v] |= !edges[e];
+        }
+    }
+    for v in 0..n {
+        verts[v] |= any[v] && !visible[v];
+    }
+    verts
+}
+
+/// Brings everything hidden back, selected — `Alt+H`, which in Blender leaves
+/// what came back selected so the next key acts on it. `false` when nothing
+/// was hidden.
+pub fn reveal(mesh: &mut MeshData) -> bool {
+    if !any_hidden(mesh) {
+        return false;
+    }
+    ensure_layers(mesh);
+    for domain in [Domain::Point, Domain::Edge, Domain::Face] {
+        let hidden = hidden_flags(mesh, domain);
+        if let Some(name) = layer_of(domain) {
+            if let Some(layer) = mesh.attributes_mut().make_mut_bool(name) {
+                for (slot, h) in layer.iter_mut().zip(&hidden) {
+                    *slot |= *h;
+                }
+            }
+        }
+        if let Some(name) = hide_layer_of(domain) {
+            mesh.attributes_mut().remove(name);
+        }
+    }
+    true
+}
+
+/// The mesh without its hide layers: what object mode draws.
+pub fn without_hidden(mesh: &MeshData) -> MeshData {
+    let mut out = mesh.clone();
+    for domain in [Domain::Point, Domain::Edge, Domain::Face] {
+        if let Some(name) = hide_layer_of(domain) {
+            out.attributes_mut().remove(name);
+        }
+    }
+    out
+}
+
+// --- growing and shrinking ----------------------------------------------------
+
+/// Grows the selection by one step — `Ctrl+Numpad+`. Blender's "face step":
+/// every face touching a selected vertex comes in whole, and so does the far
+/// end of every edge that does, so a wire mesh grows too. Hidden elements stay
+/// out. `false` when nothing was added.
+pub fn select_more(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) -> bool {
+    ensure_layers(mesh);
+    let verts = seed_verts(mesh, mode);
+    let hidden_faces = hidden_flags(mesh, Domain::Face);
+    let hidden_edges = hidden_flags(mesh, Domain::Edge);
+    let before = (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len());
+    match mode {
+        SelectMode::Face => {
+            let mut faces = selected_flags(mesh, Domain::Face);
+            for f in 0..mesh.num_faces() {
+                if !hidden_faces[f as usize] && mesh.face_verts(f).iter().any(|v| verts[*v as usize]) {
+                    faces[f as usize] = true;
+                }
+            }
+            write(mesh, Domain::Face, faces);
+            flush_with(mesh, SelectMode::Face, corner_edges);
+        }
+        _ => {
+            let mut grown = verts.clone();
+            for f in 0..mesh.num_faces() {
+                let ring = mesh.face_verts(f);
+                if !hidden_faces[f as usize] && ring.iter().any(|v| verts[*v as usize]) {
+                    for v in ring {
+                        grown[*v as usize] = true;
+                    }
+                }
+            }
+            for (e, [a, b]) in mesh.edges().iter().enumerate() {
+                if !hidden_edges[e] && (verts[*a as usize] || verts[*b as usize]) {
+                    grown[*a as usize] = true;
+                    grown[*b as usize] = true;
+                }
+            }
+            write(mesh, Domain::Point, grown);
+            flush_with(mesh, SelectMode::Vert, corner_edges);
+        }
+    }
+    (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len()) != before
+}
+
+/// The vertices a grow or a shrink measures from: in face mode, the corners
+/// of the selected faces — what face mode means by the selection, whatever the
+/// vertex layer happens to say.
+fn seed_verts(mesh: &MeshData, mode: SelectMode) -> Vec<bool> {
+    if mode != SelectMode::Face {
+        let mut verts = selected_flags(mesh, Domain::Point);
+        verts.resize(mesh.num_verts() as usize, false);
+        return verts;
+    }
+    let faces = selected_flags(mesh, Domain::Face);
+    let mut verts = vec![false; mesh.num_verts() as usize];
+    for f in 0..mesh.num_faces() {
+        if faces.get(f as usize).copied().unwrap_or(false) {
+            for v in mesh.face_verts(f) {
+                verts[*v as usize] = true;
+            }
+        }
+    }
+    verts
+}
+
+/// Shrinks the selection by one step — `Ctrl+Numpad-`: what is on its edge
+/// leaves. A selected vertex stays only if every face and edge around it is
+/// wholly selected and it is not on the mesh's open border; in face mode a
+/// face stays only if every face sharing a vertex with it is selected. `false` when nothing left.
+pub fn select_less(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) -> bool {
+    ensure_layers(mesh);
+    let verts = seed_verts(mesh, mode);
+    let before = (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len());
+    // A vertex on the rim: some face or edge around it has an unselected
+    // vertex. Hidden neighbours count as outside, as in Blender.
+    let mut rim = vec![false; verts.len()];
+    for f in 0..mesh.num_faces() {
+        let ring = mesh.face_verts(f);
+        if ring.iter().any(|v| !verts[*v as usize]) {
+            for v in ring {
+                rim[*v as usize] = true;
+            }
+        }
+    }
+    // The mesh's own open border is a rim too, so a whole plane shrinks.
+    let mut uses = vec![0u32; mesh.num_edges() as usize];
+    for e in corner_edges {
+        if let Some(u) = uses.get_mut(*e as usize) {
+            *u += 1;
+        }
+    }
+    for (e, [a, b]) in mesh.edges().iter().enumerate() {
+        if verts[*a as usize] != verts[*b as usize] || uses[e] == 1 {
+            rim[*a as usize] = true;
+            rim[*b as usize] = true;
+        }
+    }
+    match mode {
+        SelectMode::Face => {
+            // In faces: the rim is every corner of an unselected face.
+            let selected_faces = selected_flags(mesh, Domain::Face);
+            // The open border shrinks too, as in vertices.
+            let mut rim: Vec<bool> = vec![false; verts.len()];
+            for (e, [a, b]) in mesh.edges().iter().enumerate() {
+                if uses[e] == 1 {
+                    rim[*a as usize] = true;
+                    rim[*b as usize] = true;
+                }
+            }
+            for f in 0..mesh.num_faces() {
+                if !selected_faces.get(f as usize).copied().unwrap_or(false) {
+                    for v in mesh.face_verts(f) {
+                        rim[*v as usize] = true;
+                    }
+                }
+            }
+            let faces: Vec<bool> = selected_faces
+                .iter()
+                .enumerate()
+                .map(|(f, on)| *on && mesh.face_verts(f as u32).iter().all(|v| !rim[*v as usize]))
+                .collect();
+            let (nv, ne) = (mesh.num_verts() as usize, mesh.num_edges() as usize);
+            write(mesh, Domain::Point, vec![false; nv]);
+            write(mesh, Domain::Edge, vec![false; ne]);
+            write(mesh, Domain::Face, faces);
+            flush_with(mesh, SelectMode::Face, corner_edges);
+        }
+        _ => {
+            let kept: Vec<bool> = verts.iter().zip(&rim).map(|(s, r)| *s && !*r).collect();
+            write(mesh, Domain::Point, kept);
+            flush_with(mesh, SelectMode::Vert, corner_edges);
+        }
+    }
+    (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len()) != before
+}
+
+/// Selects every piece the selection touches — `Ctrl+L`: all that is joined to
+/// a selected vertex by edges, through visible edges only. `false` when
+/// nothing was added.
+pub fn select_linked(mesh: &mut MeshData, corner_edges: &[u32]) -> bool {
+    ensure_layers(mesh);
+    let verts = selected_flags(mesh, Domain::Point);
+    let hidden_edges = hidden_flags(mesh, Domain::Edge);
+    let n = verts.len();
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    fn root(parent: &mut [u32], mut v: u32) -> u32 {
+        while parent[v as usize] != v {
+            parent[v as usize] = parent[parent[v as usize] as usize];
+            v = parent[v as usize];
+        }
+        v
+    }
+    for (e, [a, b]) in mesh.edges().iter().enumerate() {
+        if hidden_edges[e] {
+            continue;
+        }
+        let (ra, rb) = (root(&mut parent, *a), root(&mut parent, *b));
+        if ra != rb {
+            parent[ra as usize] = rb;
+        }
+    }
+    let mut reached = vec![false; n];
+    for (v, on) in verts.iter().enumerate() {
+        if *on {
+            let r = root(&mut parent, v as u32);
+            reached[r as usize] = true;
+        }
+    }
+    let before = selected(mesh, Domain::Point).len();
+    let grown: Vec<bool> = (0..n).map(|v| reached[root(&mut parent, v as u32) as usize]).collect();
+    write(mesh, Domain::Point, grown);
+    flush_with(mesh, SelectMode::Vert, corner_edges);
+    selected(mesh, Domain::Point).len() != before
+}
+
+#[cfg(test)]
+mod hide_tests {
+    use super::*;
+    use crate::primitives;
+
+    fn grid() -> MeshData {
+        primitives::grid(3.0, 3, 3)
+    }
+
+    #[test]
+    fn hiding_a_face_hides_only_what_nothing_else_shows() {
+        let mut mesh = primitives::cube(2.0);
+        let ce = mesh.corner_edges();
+        set_selected(&mut mesh, Domain::Face, 0, true);
+        flush_with(&mut mesh, SelectMode::Face, &ce);
+        assert!(hide(&mut mesh, SelectMode::Face, false, &ce));
+        assert_eq!(hidden_flags(&mesh, Domain::Face).iter().filter(|h| **h).count(), 1);
+        // A cube's face shares every edge and vertex with its neighbours.
+        assert!(!hidden_flags(&mesh, Domain::Edge).iter().any(|h| *h));
+        assert!(!hidden_flags(&mesh, Domain::Point).iter().any(|h| *h));
+        assert!(!any_selected(&mesh), "what was hidden stayed selected");
+        // Hidden elements do not come back with select all or invert.
+        select_all(&mut mesh);
+        assert!(!is_selected(&mesh, Domain::Face, 0));
+        select_none(&mut mesh);
+        select_invert_with(&mut mesh, SelectMode::Face, &ce);
+        assert!(!is_selected(&mesh, Domain::Face, 0));
+        assert_eq!(selected(&mesh, Domain::Face).len(), 5);
+        // Alt+H brings it back, selected.
+        assert!(reveal(&mut mesh));
+        assert!(is_selected(&mesh, Domain::Face, 0));
+        assert!(!any_hidden(&mesh));
+        assert!(!reveal(&mut mesh));
+    }
+
+    #[test]
+    fn hiding_a_vertex_hides_what_touches_it_and_shift_h_hides_the_rest() {
+        let mut mesh = primitives::cube(2.0);
+        let ce = mesh.corner_edges();
+        set_selected(&mut mesh, Domain::Point, 0, true);
+        assert!(hide(&mut mesh, SelectMode::Vert, false, &ce));
+        assert_eq!(hidden_flags(&mesh, Domain::Edge).iter().filter(|h| **h).count(), 3);
+        assert_eq!(hidden_flags(&mesh, Domain::Face).iter().filter(|h| **h).count(), 3);
+
+        let mut mesh = primitives::cube(2.0);
+        set_selected(&mut mesh, Domain::Face, 0, true);
+        flush_with(&mut mesh, SelectMode::Face, &ce);
+        assert!(hide(&mut mesh, SelectMode::Face, true, &ce));
+        let hidden = hidden_flags(&mesh, Domain::Face);
+        assert!(!hidden[0] && hidden.iter().filter(|h| **h).count() == 5);
+        assert!(is_selected(&mesh, Domain::Face, 0), "the kept face lost its selection");
+    }
+
+    #[test]
+    fn more_and_less_step_out_and_back() {
+        let mut mesh = grid();
+        let ce = mesh.corner_edges();
+        // The middle face of a 3 by 3 grid.
+        let middle = (0..mesh.num_faces())
+            .find(|f| mesh.face_verts(*f).iter().all(|v| mesh.positions()[*v as usize].x.abs() < 1.0 && mesh.positions()[*v as usize].y.abs() < 1.0))
+            .expect("a middle face");
+        set_selected(&mut mesh, Domain::Face, middle, true);
+        flush_with(&mut mesh, SelectMode::Face, &ce);
+        assert!(select_more(&mut mesh, SelectMode::Face, &ce));
+        assert_eq!(selected(&mesh, Domain::Face).len(), 9);
+        assert!(!select_more(&mut mesh, SelectMode::Face, &ce), "there was nothing more");
+        assert!(select_less(&mut mesh, SelectMode::Face, &ce));
+        assert_eq!(selected(&mesh, Domain::Face), vec![middle]);
+        assert_eq!(selected(&mesh, Domain::Point).len(), 4);
+        // In vertex mode too: one vertex grows to its faces' corners.
+        select_none(&mut mesh);
+        let centre_vert = mesh.face_verts(middle)[0];
+        set_selected(&mut mesh, Domain::Point, centre_vert, true);
+        select_more(&mut mesh, SelectMode::Vert, &ce);
+        assert_eq!(selected(&mesh, Domain::Point).len(), 9);
+        select_less(&mut mesh, SelectMode::Vert, &ce);
+        assert_eq!(selected(&mesh, Domain::Point), vec![centre_vert]);
+    }
+
+    #[test]
+    fn linked_takes_the_whole_piece_and_nothing_else() {
+        let mut a = primitives::cube(1.0);
+        let b = primitives::cube(1.0);
+        let n = a.num_verts();
+        let part = |mesh| crate::edit::join::Part { mesh, transform: glam::DAffine3::IDENTITY };
+        a = crate::edit::join::join(&[part(&a), part(&b)]).0;
+        let ce = a.corner_edges();
+        set_selected(&mut a, Domain::Point, 0, true);
+        assert!(select_linked(&mut a, &ce));
+        let sel = selected(&a, Domain::Point);
+        assert_eq!(sel.len() as u32, n, "{sel:?}");
+        assert!(sel.iter().all(|v| *v < n));
+        assert_eq!(selected(&a, Domain::Face).len(), 6);
+        assert!(!select_linked(&mut a, &ce));
+    }
 }
 
 #[cfg(test)]

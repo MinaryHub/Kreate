@@ -45,6 +45,10 @@ struct IdObject {
 @group(1) @binding(2) var<storage, read> tri_to_face: array<u32>;
 @group(1) @binding(3) var<storage, read> edge_verts: array<u32>;
 @group(1) @binding(4) var<storage, read> vert_to_render: array<u32>;
+// The mesh's vertex flags, for the one that matters here: a vertex hidden in
+// edit mode is not there to click. (Hidden faces have no triangles at all.)
+@group(1) @binding(5) var<storage, read> vert_flags: array<u32>;
+const FLAG_HIDDEN: u32 = 4u;
 
 // Group 2 is the *draw*, bound by dynamic offset so two linked duplicates of one
 // mesh each get their own transform and their own object id.
@@ -159,6 +163,11 @@ fn vs_edge(@builtin(vertex_index) vi: u32, @builtin(instance_index) ei: u32) -> 
 fn vs_vert(@builtin(vertex_index) vi: u32, @builtin(instance_index) pi: u32) -> VsOut {
     var out: VsOut;
     out.element = pi;
+    if ((vert_flags[pi] & FLAG_HIDDEN) != 0u) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.offset_px = vec2<f32>(0.0, 0.0);
+        return out;
+    }
 
     let world = object.model * vec4<f32>(position_of(vert_to_render[pi]), 1.0);
     var clip = offset_toward_viewer(g.view_proj * world);

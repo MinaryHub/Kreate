@@ -88,6 +88,7 @@ fn selected_with_preview(selected: bool, index: u32, domain: u32, applies: f32) 
 
 
 const FLAG_SELECTED: u32 = 1u;
+const FLAG_HIDDEN: u32 = 4u;
 
 fn position_of(i: u32) -> vec3<f32> {
     let b = 3u * i;
@@ -167,6 +168,13 @@ struct PointOut {
 @vertex
 fn vs_point(@builtin(vertex_index) vi: u32, @builtin(instance_index) pi: u32) -> PointOut {
     var out: PointOut;
+    // Hidden in edit mode: a quad of no size draws nothing.
+    if ((vert_flags[pi] & FLAG_HIDDEN) != 0u) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.selected = 0u;
+        out.offset_px = vec2<f32>(0.0);
+        return out;
+    }
     let selected = selected_with_preview(
         (vert_flags[pi] & FLAG_SELECTED) != 0u,
         pi,

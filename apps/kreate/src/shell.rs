@@ -1151,6 +1151,13 @@ struct Labels {
     merge: String,
     weld: String,
     select_loop: String,
+    select_more: String,
+    select_less: String,
+    select_linked: String,
+    show_hide: String,
+    hide_selected: String,
+    hide_unselected: String,
+    reveal: String,
 }
 
 impl Labels {
@@ -1335,6 +1342,13 @@ impl Labels {
             merge: t("menu-merge"),
             weld: t("menu-weld"),
             select_loop: t("menu-select-loop"),
+            select_more: t("menu-select-more"),
+            select_less: t("menu-select-less"),
+            select_linked: t("menu-select-linked"),
+            show_hide: t("menu-show-hide"),
+            hide_selected: t("menu-hide-selected"),
+            hide_unselected: t("menu-hide-unselected"),
+            reveal: t("menu-reveal"),
         }
     }
 }
@@ -2471,6 +2485,17 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
         }
     } else if mode.edits_elements() {
         for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (2, &l.select_invert)] {
+            out.push(MenuNode::Entry(
+                MenuEntry::new(
+                    "mesh.select",
+                    label,
+                    op("mesh.select", &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))]),
+                )
+                .variant("action", V::Enum(action)),
+            ));
+        }
+        out.push(MenuNode::Separator);
+        for (action, label) in [(6u32, &l.select_more), (7, &l.select_less), (8, &l.select_linked)] {
             out.push(MenuNode::Entry(
                 MenuEntry::new(
                     "mesh.select",
@@ -4071,6 +4096,30 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                         .variant("smooth", V::Bool(false)),
                 ),
                 entry("mesh.normals", &l.recalc_normals, op("mesh.normals", &[("action", V::Enum(0))])),
+                Separator,
+                // Blender's Mesh ▸ Show/Hide.
+                MenuNode::Sub(
+                    l.show_hide.clone(),
+                    vec![
+                        entry("mesh.reveal", &l.reveal, op("mesh.reveal", &[])),
+                        MenuNode::Entry(
+                            MenuEntry::new(
+                                "mesh.hide",
+                                &l.hide_selected,
+                                op("mesh.hide", &[("unselected", V::Bool(false)), ("mode", V::Enum(select_mode))]),
+                            )
+                            .variant("unselected", V::Bool(false)),
+                        ),
+                        MenuNode::Entry(
+                            MenuEntry::new(
+                                "mesh.hide",
+                                &l.hide_unselected,
+                                op("mesh.hide", &[("unselected", V::Bool(true)), ("mode", V::Enum(select_mode))]),
+                            )
+                            .variant("unselected", V::Bool(true)),
+                        ),
+                    ],
+                ),
             ],
         },
         TopMenu {
@@ -5833,6 +5882,17 @@ menu-bevel = Bevel
 menu-merge = Merge
 menu-weld = Weld
 menu-select-loop = Loop
+menu-select-more = More
+menu-select-less = Less
+menu-select-linked = Linked
+menu-show-hide = Show/Hide
+menu-hide-selected = Hide Selected
+menu-hide-unselected = Hide Unselected
+menu-reveal = Reveal Hidden
+op-mesh-hide = Hide
+op-mesh-hide-desc = Puts the selection out of sight in edit mode.
+op-mesh-reveal = Reveal Hidden
+op-mesh-reveal-desc = Brings back everything hidden, selected.
 mode-object = Object Mode
 mode-edit = Edit Mode
 select-mode-vert = Vertex
@@ -6062,6 +6122,9 @@ op-mesh-select-action-0-desc = Selects every element of the mesh.
 op-mesh-select-action-1-desc = Deselects everything.
 op-mesh-select-action-2-desc = Selects what is not selected and deselects what is.
 op-mesh-select-action-3-desc = Extends the selection along the edge loop it lies on.
+op-mesh-select-action-6-desc = Grows the selection by one step.
+op-mesh-select-action-7-desc = Shrinks the selection by one step.
+op-mesh-select-action-8-desc = Selects every piece the selection touches.
 op-object-select-all-action-0-desc = Selects every object.
 op-object-select-all-action-1-desc = Deselects every object.
 op-object-select-all-action-3-desc = Selects the objects that are not selected and deselects the rest.
@@ -6357,6 +6420,17 @@ menu-bevel = 베벨
 menu-merge = 병합
 menu-weld = 용접
 menu-select-loop = 루프
+menu-select-more = 넓히기
+menu-select-less = 좁히기
+menu-select-linked = 연결된 것
+menu-show-hide = 표시/숨기기
+menu-hide-selected = 선택 숨기기
+menu-hide-unselected = 선택 안 된 것 숨기기
+menu-reveal = 숨긴 것 보이기
+op-mesh-hide = 숨기기
+op-mesh-hide-desc = 편집 모드에서 선택한 것을 안 보이게 합니다.
+op-mesh-reveal = 숨긴 것 보이기
+op-mesh-reveal-desc = 숨긴 것을 모두 다시 보이게 하고 선택합니다.
 mode-object = 오브젝트 모드
 mode-edit = 편집 모드
 select-mode-vert = 정점
@@ -6577,6 +6651,9 @@ op-mesh-select-action-0-desc = 메시의 모든 요소를 선택합니다.
 op-mesh-select-action-1-desc = 모두 선택 해제합니다.
 op-mesh-select-action-2-desc = 선택된 것은 해제하고, 안 된 것은 선택합니다.
 op-mesh-select-action-3-desc = 선택이 놓인 모서리 루프를 따라 선택을 넓힙니다.
+op-mesh-select-action-6-desc = 선택을 한 칸 넓힙니다.
+op-mesh-select-action-7-desc = 선택을 한 칸 좁힙니다.
+op-mesh-select-action-8-desc = 선택이 닿은 조각 전체를 선택합니다.
 op-object-select-all-action-0-desc = 모든 물체를 선택합니다.
 op-object-select-all-action-1-desc = 모든 물체를 선택 해제합니다.
 op-object-select-all-action-3-desc = 선택되지 않은 물체를 선택하고 나머지는 해제합니다.

@@ -1879,9 +1879,9 @@ pub enum SelectAction {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct SelectParams {
     /// What to do to the selection.
-    #[param(variants("all", "none", "invert", "loop", "ring", "face_loop"))]
+    #[param(variants("all", "none", "invert", "loop", "ring", "face_loop", "more", "less", "linked"))]
     pub action: u32,
-    /// Which element type an inversion works on.
+    /// Which element type an inversion, a grow or a shrink works in.
     #[param(variants("vert", "edge", "face"))]
     pub mode: u32,
 }
@@ -1949,6 +1949,23 @@ impl Operator for SelectElements {
             });
         }
 
+        // More, less and linked: layer writes too, over the mesh's own
+        // adjacency, and every mesh in edit mode like select all.
+        if params.action >= 6 {
+            return Ok(if for_each_edit_mesh(doc, |_, mesh| {
+                let corner_edges = mesh.corner_edges();
+                match params.action {
+                    6 => selection::select_more(mesh, mode, &corner_edges),
+                    7 => selection::select_less(mesh, mode, &corner_edges),
+                    _ => selection::select_linked(mesh, &corner_edges),
+                }
+            })? {
+                OpResult::Finished
+            } else {
+                OpResult::Cancelled
+            });
+        }
+
         let grew = each_bmesh(doc, |bm| {
             // Loop, ring and face-loop grow from what is already selected.
             // Without a click to start from they have no seed, so an empty
@@ -1968,11 +1985,95 @@ impl Operator for SelectElements {
         })?
         .into_iter()
         .any(|g| g);
+        // A walk goes wherever the mesh goes, hidden or not; what is hidden
+        // does not stay selected.
+        if grew {
+            for_each_edit_mesh(doc, |_, mesh| {
+                selection::deselect_hidden(mesh);
+                true
+            })?;
+        }
         Ok(if grew {
             OpResult::Finished
         } else {
             OpResult::Cancelled
         })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct HideParams {
+    /// Hide everything that is *not* selected — `Shift+H`.
+    pub unselected: bool,
+    /// Which element type the selection is read in.
+    #[param(variants("vert", "edge", "face"))]
+    pub mode: u32,
+}
+
+/// Puts the selection out of sight in edit mode — Blender's `H`.
+///
+/// Hidden elements are not drawn, cannot be picked or selected, and so no
+/// operator reaches them; object mode shows the mesh whole. The state is
+/// layers on the mesh, so it is undone, saved and replayed like a selection.
+pub struct HideElements;
+
+impl Operator for HideElements {
+    type Params = HideParams;
+
+    fn id() -> &'static str {
+        "mesh.hide"
+    }
+    fn label() -> &'static str {
+        "Hide"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let mode = match params.mode {
+            1 => SelectMode::Edge,
+            2 => SelectMode::Face,
+            _ => SelectMode::Vert,
+        };
+        let any = for_each_edit_mesh(doc, |_, mesh| {
+            let corner_edges = mesh.corner_edges();
+            selection::hide(mesh, mode, params.unselected, &corner_edges)
+        })?;
+        Ok(if any { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RevealParams {}
+
+/// Brings back everything hidden, selected — Blender's `Alt+H`.
+pub struct RevealElements;
+
+impl Operator for RevealElements {
+    type Params = RevealParams;
+
+    fn id() -> &'static str {
+        "mesh.reveal"
+    }
+    fn label() -> &'static str {
+        "Reveal Hidden"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let any = for_each_edit_mesh(doc, |_, mesh| selection::reveal(mesh))?;
+        Ok(if any { OpResult::Finished } else { OpResult::Cancelled })
     }
 }
 
@@ -2329,6 +2430,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MarkSharp>();
     registry.register::<MergeVerts>();
     registry.register::<SelectElements>();
+    registry.register::<HideElements>();
+    registry.register::<RevealElements>();
     registry.register::<RecalculateNormals>();
     registry.register::<ShadeFaces>();
     registry.register::<SpinFaces>();

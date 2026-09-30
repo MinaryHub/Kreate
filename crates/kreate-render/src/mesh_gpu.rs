@@ -180,6 +180,19 @@ impl ElementFlags {
                 set_bit(f, flags::SELECTED, *s);
             }
         }
+        // What edit mode has hidden: the overlays skip it. The faces
+        // themselves are left out of the triangles, see `group_by_material`.
+        for (layer, flags) in [
+            (names::HIDE_VERT, &mut self.vert_flags),
+            (names::HIDE_EDGE, &mut self.edge_flags),
+            (names::HIDE_FACE, &mut self.face_flags),
+        ] {
+            if let Some(hidden) = attrs.get_bool(layer) {
+                for (f, h) in flags.iter_mut().zip(hidden) {
+                    set_bit(f, flags::HIDDEN, *h);
+                }
+            }
+        }
         if let Some(sharp) = attrs.get_bool(names::SHARP_EDGE) {
             for (f, s) in self.edge_flags.iter_mut().zip(sharp) {
                 set_bit(f, flags::SHARP, *s);
@@ -374,6 +387,24 @@ fn group_by_material(
     indices: Vec<u32>,
     tri_to_face: Vec<u32>,
 ) -> (Vec<u32>, Vec<u32>, Vec<Submesh>) {
+    // Hidden faces have no triangles: not drawn, not shaded, not clickable.
+    // Taken out here, before the regrouping, so every pass that reads the
+    // index buffer and `tri_to_face` agrees about it — and the element
+    // numbering the flag buffers use is untouched.
+    let (indices, tri_to_face) = match mesh.attributes().get_bool(names::HIDE_FACE) {
+        Some(hidden) if hidden.iter().any(|h| *h) => {
+            let mut kept_indices = Vec::with_capacity(indices.len());
+            let mut kept_faces = Vec::with_capacity(tri_to_face.len());
+            for (t, face) in tri_to_face.iter().enumerate() {
+                if !hidden.get(*face as usize).copied().unwrap_or(false) {
+                    kept_indices.extend_from_slice(&indices[t * 3..t * 3 + 3]);
+                    kept_faces.push(*face);
+                }
+            }
+            (kept_indices, kept_faces)
+        }
+        _ => (indices, tri_to_face),
+    };
     let triangles = tri_to_face.len();
     let whole = |slot: u32, indices: &[u32]| {
         vec![Submesh {
@@ -961,6 +992,25 @@ mod tests {
         assert_eq!(r.vert_flags[3] & flags::SELECTED, flags::SELECTED);
         assert_eq!(r.vert_flags[0] & flags::SELECTED, 0);
         assert_eq!(r.face_flags[1] & flags::SELECTED, flags::SELECTED);
+    }
+
+    #[test]
+    fn a_hidden_face_has_no_triangles_and_its_elements_say_so() {
+        let mut m = primitives::cube(2.0);
+        let full = RenderMeshCpu::extract(&m).tri_to_face.len();
+        let mut hidden = vec![false; m.num_faces() as usize];
+        hidden[1] = true;
+        m.attributes_mut().insert(names::HIDE_FACE, kreate_mesh::Domain::Face, kreate_mesh::AttrData::Bool(hidden.into()));
+        let mut verts = vec![false; m.num_verts() as usize];
+        verts[0] = true;
+        m.attributes_mut().insert(names::HIDE_VERT, kreate_mesh::Domain::Point, kreate_mesh::AttrData::Bool(verts.into()));
+        let r = RenderMeshCpu::extract(&m);
+        assert_eq!(r.tri_to_face.len(), full - 2, "a quad is two triangles");
+        assert!(!r.tri_to_face.contains(&1));
+        assert_eq!(r.indices.len(), r.tri_to_face.len() * 3);
+        assert_ne!(r.face_flags[1] & flags::HIDDEN, 0);
+        assert_ne!(r.vert_flags[0] & flags::HIDDEN, 0);
+        assert_eq!(r.vert_flags[1] & flags::HIDDEN, 0);
     }
 
     #[test]

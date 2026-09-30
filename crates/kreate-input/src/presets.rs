@@ -752,6 +752,28 @@ fn common() -> Vec<Binding> {
             enum_param(Action::new("mesh.select"), "action", 4),
         )
         .with_modifiers(Modifiers::shift()),
+        // Blender's grow, shrink and linked: Ctrl with the numpad's plus and
+        // minus, and the main row's for a keyboard without one.
+        key("mesh.select_more", "NumpadAdd", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 6))
+            .with_modifiers(Modifiers::ctrl()),
+        key("mesh.select_more_main", "Equal", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 6))
+            .with_modifiers(Modifiers::ctrl()),
+        key("mesh.select_less", "NumpadSubtract", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 7))
+            .with_modifiers(Modifiers::ctrl()),
+        key("mesh.select_less_main", "Minus", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 7))
+            .with_modifiers(Modifiers::ctrl()),
+        key("mesh.select_linked", "L", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 8))
+            .with_modifiers(Modifiers::ctrl()),
+        // H hides the selection, Shift+H everything else, Alt+H brings it back.
+        key("mesh.hide", "H", Context::EditMesh, Action::new("mesh.hide")),
+        key(
+            "mesh.hide_unselected",
+            "H",
+            Context::EditMesh,
+            Action::new("mesh.hide").with("unselected", PropertyValue::Bool(true)),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key("mesh.reveal", "H", Context::EditMesh, Action::new("mesh.reveal")).with_modifiers(Modifiers::alt()),
         key(
             "mesh.select_all",
             "A",

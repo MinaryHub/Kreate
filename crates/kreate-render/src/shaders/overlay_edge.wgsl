@@ -98,6 +98,7 @@ const FLAG_SHARP: u32 = 8u;
 const FLAG_SEAM: u32 = 16u;
 const FLAG_BOUNDARY: u32 = 32u;
 const FLAG_NON_MANIFOLD: u32 = 64u;
+const FLAG_HIDDEN: u32 = 4u;
 
 fn position_of(i: u32) -> vec3<f32> {
     let b = 3u * i;
@@ -122,6 +123,12 @@ fn vs_main(
 ) -> VsOut {
     var out: VsOut;
     out.flags = edge_flags[ei];
+    // Hidden in edit mode: every corner at one point, so nothing rasterises.
+    if ((out.flags & FLAG_HIDDEN) != 0u) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.across_px = 0.0;
+        return out;
+    }
     // The preview is folded into the flag rather than carried alongside it, so
     // everything downstream — the colour rules, the diagnostic states — treats a
     // previewed edge exactly as it treats a selected one.
