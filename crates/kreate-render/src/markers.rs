@@ -33,6 +33,9 @@ pub struct OverlayLine {
     /// Six pixels on, four off, along the screen. For the line a lamp drops
     /// to the ground, which reads as a measurement whatever the distance.
     pub dashed: bool,
+    /// Drawn over everything, whatever is in front — Blender's In Front, for
+    /// bones inside the mesh they move.
+    pub on_top: bool,
 }
 
 /// The shape a marker's outline is.
@@ -53,6 +56,8 @@ pub struct OverlayPoint {
     /// A dot at the centre, which is what says "a point light" rather than
     /// "a circle".
     pub dot: bool,
+    /// Drawn over everything; see [`OverlayLine::on_top`].
+    pub on_top: bool,
 }
 
 #[repr(C)]
@@ -80,7 +85,7 @@ impl GpuLine {
             a: [a.x, a.y, a.z, if line.dashed { 1.0 } else { 0.0 }],
             b: [b.x, b.y, b.z, 0.0],
             color: line.color,
-            style: [line.width_px, 0.0, 0.0, 0.0],
+            style: [line.width_px, if line.on_top { 1.0 } else { 0.0 }, 0.0, 0.0],
         }
     }
 }
@@ -98,7 +103,7 @@ impl GpuPoint {
                     MarkerShape::Square => 1.0,
                 },
                 if point.dot { 1.0 } else { 0.0 },
-                0.0,
+                if point.on_top { 1.0 } else { 0.0 },
             ],
         }
     }
@@ -197,6 +202,7 @@ mod tests {
             color: [1.0; 4],
             width_px: 1.0,
             dashed: true,
+            on_top: false,
         };
         let packed = GpuLine::pack(&line, eye);
         assert_eq!(packed.a[0], 0.25);
@@ -212,6 +218,7 @@ mod tests {
             radius_px: 7.0,
             shape: MarkerShape::Square,
             dot: true,
+            on_top: false,
         };
         let packed = GpuPoint::pack(&p, DVec3::ZERO);
         assert_eq!(packed.style, [7.0, 1.0, 1.0, 0.0]);

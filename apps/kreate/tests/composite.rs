@@ -84,6 +84,25 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
     composite_with(doc, locale, edit_mode, |_| {})
 }
 
+thread_local! {
+    /// A mode for `composite_with` to draw in instead of object or mesh edit
+    /// mode — set by `composite_in_mode` for the one call it wraps.
+    static FORCED_MODE: std::cell::Cell<Option<kreate_ops::operator::Mode>> = const { std::cell::Cell::new(None) };
+}
+
+/// `composite_with` in any mode: pose mode, armature edit mode.
+fn composite_in_mode(
+    doc: &Document,
+    locale: &str,
+    mode: kreate_ops::operator::Mode,
+    arrange: impl FnOnce(&mut kreate::shell::ShellState),
+) -> Option<Composited> {
+    FORCED_MODE.with(|m| m.set(Some(mode)));
+    let out = composite_with(doc, locale, false, arrange);
+    FORCED_MODE.with(|m| m.set(None));
+    out
+}
+
 /// The same, with a chance to arrange the interface state first.
 ///
 /// For anything that is *opened* rather than always drawn — the right-click
@@ -198,11 +217,11 @@ fn composite_with(
             .and_then(|mesh| doc.mesh(mesh))
             .map(|mesh| kreate::uvview::from_bmesh(&mesh.to_bmesh()).unwrap_or_default());
     }
-    let mode = if edit_mode {
+    let mode = FORCED_MODE.with(|m| m.get()).unwrap_or(if edit_mode {
         kreate_ops::operator::Mode::EditMesh
     } else {
         kreate_ops::operator::Mode::Object
-    };
+    });
     arrange(&mut state);
     if state.context_menu.at.is_some() {
         label = format!("menu-{label}");
@@ -335,7 +354,12 @@ fn composite_with(
             label: Some("composite"),
         });
     // The lamp and camera glyphs, the way the frame loop hands them over.
-    let (marker_lines, marker_points) = kreate::glyphs::markers_for(doc);
+    let shown = match mode.acts_on() {
+        kreate_ops::mode::ActsOn::Bones => doc.selection.active.map(|id| (id, kreate::glyphs::Bones::Pose)),
+        kreate_ops::mode::ActsOn::BoneJoints => doc.selection.active.map(|id| (id, kreate::glyphs::Bones::Edit)),
+        _ => None,
+    };
+    let (marker_lines, marker_points) = kreate::glyphs::markers_with(doc, shown);
     viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.render(&mut encoder, &vp_view, &draws);
@@ -2143,6 +2167,55 @@ fn shot_pose_keys() {
         doc.selection.add(rig);
         let Some(shot) = composite_with(&doc, locale, false, |state| {
             state.switch_workspace(4);
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
+/// Pose mode on a three-bone arm: the Bone tab, the sidebar on the active
+/// bone, the Pose menu and the corner naming the bone.
+#[test]
+fn shot_pose_mode() {
+    use kreate_scene::armature::{Armature, Bone};
+    for (label, locale, mode) in [
+        ("pose-mode", "en", "pose"),
+        ("pose-mode-ko", "ko-KR", "pose"),
+        ("armature-edit", "en", "edit_armature"),
+    ] {
+        let mut doc = doc_with_cube();
+        let mut arm = Armature::new("Arm");
+        arm.bones[0].name = "Upper".into();
+        arm.bones[0].tail = kreate_math::DVec3::new(0.0, 0.0, 1.2);
+        arm.bones[0].select_tail = true;
+        arm.add_bone(Bone {
+            name: "Forearm".into(),
+            parent: Some(0),
+            head: kreate_math::DVec3::new(0.0, 0.0, 1.2),
+            tail: kreate_math::DVec3::new(0.0, 0.0, 2.2),
+            connected: true,
+            select_tail: true,
+            ..Default::default()
+        });
+        arm.in_front = true;
+        let id = doc.add_armature(arm);
+        let mut object = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id));
+        object.transform.translation = kreate_math::DVec3::new(0.6, -2.0, 0.0);
+        let lower = object.pose.entry("Forearm");
+        lower.transform.rotation = kreate_math::DQuat::from_rotation_x(-0.9);
+        lower.selected = true;
+        object.pose.active = Some("Forearm".into());
+        let rig = doc.add_object(object);
+        doc.selection.clear();
+        doc.selection.add(rig);
+        let Some(shot) = composite_in_mode(&doc, locale, kreate_ops::Mode::from_tag(mode).unwrap(), |state| {
+            let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+            for area in areas {
+                state.set_properties_tab(area, kreate::shell::PropertiesTab::Bone);
+            }
+            state.toggle_sidebar();
         }) else {
             eprintln!("no GPU; skipping");
             return;

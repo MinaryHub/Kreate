@@ -84,6 +84,21 @@ pub struct Armature {
     pub uid: Uid,
     /// Parents before children.
     pub bones: Vec<Bone>,
+    /// Drawn over everything, so a skeleton inside its mesh can be seen and
+    /// picked — Blender's In Front.
+    pub in_front: bool,
+    /// How the bones are drawn.
+    pub display: BoneDisplay,
+}
+
+/// How an armature's bones are drawn: Blender's first two.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoneDisplay {
+    /// A diamond a tenth of the way up, joined to both ends.
+    #[default]
+    Octahedral,
+    /// A line from head to tail, for when the diamonds are in the way.
+    Stick,
 }
 
 impl Armature {
@@ -101,7 +116,43 @@ impl Armature {
                 tail: DVec3::Z,
                 ..Bone::default()
             }],
+            in_front: false,
+            display: BoneDisplay::Octahedral,
         }
+    }
+
+    /// Puts parents before children again after a parent changed, keeping
+    /// every other bone in its order. `None` when the parents loop, which an
+    /// edit must refuse before it gets here.
+    pub fn sort_parents_first(&mut self) -> Option<()> {
+        let n = self.bones.len();
+        let mut order: Vec<usize> = Vec::with_capacity(n);
+        let mut placed = vec![false; n];
+        while order.len() < n {
+            let before = order.len();
+            for i in 0..n {
+                if !placed[i] && self.bones[i].parent.is_none_or(|p| placed[p]) {
+                    placed[i] = true;
+                    order.push(i);
+                }
+            }
+            if order.len() == before {
+                return None;
+            }
+        }
+        let mut new_index = vec![0; n];
+        for (k, &i) in order.iter().enumerate() {
+            new_index[i] = k;
+        }
+        self.bones = order
+            .iter()
+            .map(|&i| {
+                let mut b = self.bones[i].clone();
+                b.parent = b.parent.map(|p| new_index[p]);
+                b
+            })
+            .collect();
+        Some(())
     }
 
     /// Adds a bone and returns its index. A parent that is not an earlier

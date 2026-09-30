@@ -1107,7 +1107,48 @@ impl App {
         }
 
         let t = |key: &str| self.ui.catalog.get(key);
-        let groups = if self.op_ctx.mode.edits_elements() {
+        // Bones first: pose mode and armature edit mode act on neither
+        // objects nor mesh elements, and their menu is their own.
+        let bone_groups = match self.op_ctx.mode.acts_on() {
+            kreate_ops::mode::ActsOn::Bones => Some(vec![
+                group(
+                    &t("menu-group-transform"),
+                    &[("pose.translate", &[]), ("pose.rotate", &[]), ("pose.scale", &[])],
+                    self,
+                ),
+                group(
+                    &t("menu-group-keys"),
+                    &[("anim.keyframe_insert", &[]), ("anim.keyframe_delete", &[])],
+                    self,
+                ),
+                group(
+                    &t("menu-group-clear"),
+                    &[
+                        ("pose.clear_transform", &[("what", PropertyValue::Enum(1))]),
+                        ("pose.clear_transform", &[("what", PropertyValue::Enum(2))]),
+                        ("pose.clear_transform", &[("what", PropertyValue::Enum(3))]),
+                        ("pose.clear_transform", &[("what", PropertyValue::Enum(0))]),
+                    ],
+                    self,
+                ),
+            ]),
+            kreate_ops::mode::ActsOn::BoneJoints => Some(vec![
+                group(
+                    &t("menu-group-transform"),
+                    &[("armature.translate", &[]), ("armature.rotate", &[]), ("armature.scale", &[])],
+                    self,
+                ),
+                group(
+                    &t("menu-group-bones"),
+                    &[("armature.extrude", &[]), ("armature.bone_add", &[]), ("armature.delete", &[])],
+                    self,
+                ),
+            ]),
+            _ => None,
+        };
+        let groups = if let Some(groups) = bone_groups {
+            groups
+        } else if self.op_ctx.mode.edits_elements() {
             vec![
                 group(
                     &t("menu-group-transform"),

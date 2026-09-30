@@ -874,6 +874,8 @@ pub enum PropertiesTab {
     Object,
     /// What the active object *is*: its datablock.
     Data,
+    /// The active bone of an armature: its pose, and the bone as built.
+    Bone,
     /// What it is made of.
     Material,
     /// The light arriving from no object in particular.
@@ -903,6 +905,7 @@ impl PropertiesTab {
             Self::Tool => "▢",
             Self::Object => "■",
             Self::Data => "◇",
+            Self::Bone => "▲",
             Self::Material => "●",
             Self::World => "○",
             Self::Modifiers => "◆",
@@ -914,6 +917,7 @@ impl PropertiesTab {
             Self::Tool => "tab-tool",
             Self::Object => "tab-object",
             Self::Data => "tab-data",
+            Self::Bone => "tab-bone",
             Self::Material => "tab-material",
             Self::World => "tab-world",
             Self::Modifiers => "tab-modifiers",
@@ -1523,8 +1527,11 @@ fn pie_entries(
         // beside its name in the catalog.
         "mode" => (
             l.pie_mode.clone(),
+            // This object's modes, greyed where they cannot be entered yet;
+            // see `Mode::offered`.
             kreate_ops::Mode::ALL
                 .iter()
+                .filter(|m| **m == mode || m.offered(has))
                 .map(|m| {
                     let info = m.info();
                     let label = l.mode_names.get(info.tag).cloned().unwrap_or_default();
@@ -1721,7 +1728,7 @@ fn draw_area(
                 "viewport" => {
                     draw_viewport(ui, state, doc, mode, l, inner, image);
                     if state.sidebar_open(area.id) {
-                        draw_item_sidebar(ui, state, doc, registry, area.id, inner, l);
+                        draw_item_sidebar(ui, state, doc, registry, area.id, inner, l, mode);
                     }
                 }
                 "outliner" => {
@@ -2240,10 +2247,18 @@ fn viewport_menus(
     mode: kreate_ops::operator::Mode,
     select_mode: u32,
 ) -> Vec<TopMenu> {
-    let mut out = vec![
-        TopMenu { label: l.menu_select.clone(), nodes: select_nodes(l, mode, select_mode) },
-        TopMenu { label: l.add_menu.clone(), nodes: add_nodes(l) },
-    ];
+    let mut out = vec![TopMenu { label: l.menu_select.clone(), nodes: select_nodes(l, mode, select_mode) }];
+    // What Add adds is the mode's: objects where objects are acted on, a bone
+    // where a skeleton is being built, and nothing in pose mode — a pose adds
+    // nothing, as Blender's has no Add menu there.
+    match mode.acts_on() {
+        kreate_ops::mode::ActsOn::Bones => {}
+        kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
+            label: l.add_menu.clone(),
+            nodes: vec![entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[]))],
+        }),
+        _ => out.push(TopMenu { label: l.add_menu.clone(), nodes: add_nodes(l) }),
+    }
     // What the menus after Add are is the mode's to say, because what you can
     // act on is. Object mode acts on whole objects; edit mode on the parts of one.
     for menu in mode.info().menus {
@@ -2886,10 +2901,19 @@ fn draw_view_info(
         .active
         .and_then(|id| doc.object(id))
         .map(|o| o.name.as_str());
-    // i18n-exempt: composed from translated parts and the user's own object name
-    let second = match active {
-        Some(name) => format!("{mode_name} | {name}"),
-        None => mode_name,
+    // Blender's "Object : Bone" where bones are what is acted on.
+    let bone = matches!(
+        mode.acts_on(),
+        kreate_ops::mode::ActsOn::Bones | kreate_ops::mode::ActsOn::BoneJoints
+    )
+    .then(|| doc.selection.active.and_then(|id| active_bone(doc, id)))
+    .flatten()
+    .map(|(_, name)| name);
+    // i18n-exempt: composed from translated parts and the user's own names
+    let second = match (active, bone) {
+        (Some(name), Some(bone)) => format!("{mode_name} | {name} : {bone}"),
+        (Some(name), None) => format!("{mode_name} | {name}"),
+        (None, _) => mode_name,
     };
     let left = if toolbar.is_positive() {
         toolbar.max.x + 12.0
@@ -3724,6 +3748,7 @@ fn draw_item_sidebar(
     area: kreate_ui::AreaId,
     viewport: egui::Rect,
     l: &Labels,
+    mode: kreate_ops::operator::Mode,
 ) {
     let width = SIDEBAR_WIDTH.min(viewport.width() * 0.5);
     if width <= 0.0 {
@@ -3766,6 +3791,37 @@ fn draw_item_sidebar(
             };
             // i18n-exempt: an object's name is the user's own text
             ui.label(&active.name);
+
+            // In pose mode and the skeleton's edit mode the item is the active
+            // bone, as in Blender: its pose, or its head, tail and roll.
+            let bone_op = match mode.acts_on() {
+                kreate_ops::mode::ActsOn::Bones => Some("pose.set_bone"),
+                kreate_ops::mode::ActsOn::BoneJoints => Some("armature.bone_set"),
+                _ => None,
+            };
+            if let Some(op_id) = bone_op {
+                let object = doc.selection.active.expect("an active object was just read");
+                let (Some((index, name)), Some((_, armature)), Some(info)) =
+                    (active_bone(doc, object), doc.armature_of(object), registry.get(op_id))
+                else {
+                    ui.weak(&l.sidebar_nothing);
+                    return;
+                };
+                // i18n-exempt: a bone's name is the user's own text
+                ui.strong(&name);
+                let params = if op_id == "pose.set_bone" {
+                    Some(kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&active.pose, &name)))
+                } else {
+                    kreate_ops::ops::armature::bone_params(armature, index).map(|p| kreate_reflect::OpParams::to_map(&p))
+                };
+                if let Some(mut params) = params {
+                    if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                        send_edit(state, op_id, params, dragging);
+                    }
+                }
+                return;
+            }
 
             let Some(info) = registry.get("object.set_transform") else {
                 return;
@@ -3857,9 +3913,9 @@ fn draw_mode_menu(
     egui::ComboBox::from_id_salt("mode")
         .selected_text(current)
         .show_ui(ui, |ui| {
-            for (kind, name) in &names {
-                let available = kind.can_enter(has);
-                ui.add_enabled_ui(available, |ui| {
+            // This object's modes; see `Mode::offered`.
+            for (kind, name) in names.iter().filter(|(k, _)| *k == mode || k.offered(has)) {
+                ui.add_enabled_ui(kind.can_enter(has), |ui| {
                     if ui.selectable_label(*kind == mode, name).clicked() {
                         state.queue.push(Command::SetMode(kind.tag().to_string()));
                     }
@@ -4411,6 +4467,7 @@ fn draw_properties(
                     PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
                     PropertiesTab::Object => draw_object_tab(ui, state, doc, registry, l),
                     PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
+                    PropertiesTab::Bone => draw_bone_tab(ui, state, doc, registry),
                     PropertiesTab::Material => draw_material_tab(ui, state, doc, registry, l),
                     PropertiesTab::World => draw_world_tab(ui, state, doc, registry, l),
                     PropertiesTab::Modifiers => {
@@ -4434,11 +4491,16 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         active.map(|o| &o.data),
         Some(kreate_scene::document::ObjectData::Light(_))
             | Some(kreate_scene::document::ObjectData::Camera(_))
+            | Some(kreate_scene::document::ObjectData::Armature(_))
     );
+    // An armature with an active bone that is really there: the tab shows
+    // one bone, and with none it would be an empty panel.
+    let has_bone = doc.selection.active.is_some_and(|id| active_bone(doc, id).is_some());
     [
         PropertiesTab::Tool,
         PropertiesTab::Object,
         PropertiesTab::Data,
+        PropertiesTab::Bone,
         PropertiesTab::Material,
         PropertiesTab::World,
         PropertiesTab::Modifiers,
@@ -4447,6 +4509,7 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
     .filter(|tab| match tab {
         PropertiesTab::Object => active.is_some(),
         PropertiesTab::Data => has_data,
+        PropertiesTab::Bone => has_bone,
         // Whenever the active object is a *mesh*, not whenever it already has
         // a material. Offering the tab only once a material exists made the
         // whole material system unreachable: nothing else creates one, so a
@@ -4879,7 +4942,75 @@ fn draw_data_tab(
         kreate_scene::document::ObjectData::Camera(id) => {
             draw_camera_data(ui, state, doc, registry, l, id)
         }
+        kreate_scene::document::ObjectData::Armature(id) => draw_armature_data(ui, state, doc, registry, id),
         _ => {}
+    }
+}
+
+/// The active bone of an armature object: its index and name.
+fn active_bone(doc: &Document, object: ObjectId) -> Option<(usize, String)> {
+    let (_, armature) = doc.armature_of(object)?;
+    let name = doc.object(object)?.pose.active.clone()?;
+    armature.bone_index(&name).map(|i| (i, name))
+}
+
+/// The Armature tab: how the skeleton is drawn.
+fn draw_armature_data(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    id: kreate_scene::ArmatureId,
+) {
+    let (Some(armature), Some(info)) = (doc.armature(id), registry.get("armature.set_display")) else {
+        return;
+    };
+    // i18n-exempt: the datablock's name is the user's own text
+    ui.heading(&armature.name);
+    ui.separator();
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::armature::display_params(armature));
+    let title = state.catalog.get("panel-viewport-display");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+            send_edit(state, "armature.set_display", params, false);
+        }
+    });
+}
+
+/// The Bone tab: the active bone's pose, then the bone as built.
+///
+/// Both at once rather than one per mode: the pose is what an animator
+/// changes, the rest is what a rigger changes, and seeing the one while
+/// changing the other is how a person finds out which they meant.
+fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry) {
+    let Some(object) = doc.selection.active else { return };
+    let (Some((index, name)), Some((_, armature)), Some(o)) =
+        (active_bone(doc, object), doc.armature_of(object), doc.object(object))
+    else {
+        return;
+    };
+    // i18n-exempt: the bone's name is the user's own text
+    ui.heading(&name);
+    ui.separator();
+    if let Some(info) = registry.get("pose.set_bone") {
+        let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&o.pose, &name));
+        let title = state.catalog.get("panel-pose");
+        kreate_ui::panel::section(ui, &title, true, |ui| {
+            if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                send_edit(state, "pose.set_bone", params, dragging);
+            }
+        });
+    }
+    if let (Some(info), Some(bone)) = (registry.get("armature.bone_set"), kreate_ops::ops::armature::bone_params(armature, index)) {
+        let mut params = kreate_reflect::OpParams::to_map(&bone);
+        let title = state.catalog.get("panel-bone-rest");
+        kreate_ui::panel::section(ui, &title, true, |ui| {
+            if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                send_edit(state, "armature.bone_set", params, dragging);
+            }
+        });
     }
 }
 
@@ -5234,6 +5365,10 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+tab-bone = Bone
+panel-pose = Pose
+panel-bone-rest = Bone
+panel-viewport-display = Viewport Display
 sidebar-nothing = Nothing is active. Select an object to see where it is.
 area-split-vertical = Split left / right
 area-split-horizontal = Split top / bottom
@@ -5480,6 +5615,28 @@ op-uv-pack = Pack Islands
 op-uv-pack-desc = Rearranges the pieces already there to fit the map, leaving the cuts alone.
 op-object-translate = Move
 op-object-translate-desc = Moves the selected objects.
+op-pose-translate = Move
+op-pose-translate-desc = Moves the selected bones.
+op-pose-rotate = Rotate
+op-pose-rotate-desc = Turns the selected bones about their heads' middle.
+op-pose-scale = Scale
+op-pose-scale-desc = Scales the selected bones along their own axes.
+op-pose-clear-transform-what-0 = Clear Transform
+op-pose-clear-transform-what-1 = Clear Location
+op-pose-clear-transform-what-2 = Clear Rotation
+op-pose-clear-transform-what-3 = Clear Scale
+op-armature-translate = Move
+op-armature-translate-desc = Moves the selected bone ends.
+op-armature-rotate = Rotate
+op-armature-rotate-desc = Turns the selected bone ends about their middle.
+op-armature-scale = Scale
+op-armature-scale-desc = Scales the selected bone ends about their middle.
+op-armature-extrude = Extrude
+op-armature-bone-add = Add Bone
+op-armature-delete = Delete Bones
+menu-group-keys = Keyframes
+menu-group-clear = Clear
+menu-group-bones = Bones
 op-object-rotate = Rotate
 op-object-rotate-desc = Turns the selected objects.
 op-object-scale = Scale
@@ -5695,6 +5852,10 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
 sidebar-item = 항목
+tab-bone = 뼈
+panel-pose = 포즈
+panel-bone-rest = 뼈
+panel-viewport-display = 뷰포트 표시
 sidebar-nothing = 활성 오버젝트가 없습니다. 오버젝트를 선택하면 위치가 보입니다.
 area-split-vertical = 종으로 나누기
 area-split-horizontal = 가로로 나누기
@@ -5932,6 +6093,28 @@ op-uv-pack = 아일랜드 배치
 op-uv-pack-desc = 자른 자리는 그대로 두고, 이미 있는 조각들만 맵 안에 다시 정렬합니다.
 op-object-translate = 이동
 op-object-translate-desc = 선택한 오브젝트를 옮깁니다.
+op-pose-translate = 이동
+op-pose-translate-desc = 선택한 뼈를 옮깁니다.
+op-pose-rotate = 회전
+op-pose-rotate-desc = 선택한 뼈를 머리들의 가운데를 중심으로 돌립니다.
+op-pose-scale = 크기
+op-pose-scale-desc = 선택한 뼈를 각자의 축으로 늘이거나 줄입니다.
+op-pose-clear-transform-what-0 = 트랜스폼 지우기
+op-pose-clear-transform-what-1 = 위치 지우기
+op-pose-clear-transform-what-2 = 회전 지우기
+op-pose-clear-transform-what-3 = 크기 지우기
+op-armature-translate = 이동
+op-armature-translate-desc = 선택한 뼈 끝을 옮깁니다.
+op-armature-rotate = 회전
+op-armature-rotate-desc = 선택한 뼈 끝을 가운데를 중심으로 돌립니다.
+op-armature-scale = 크기
+op-armature-scale-desc = 선택한 뼈 끝을 가운데를 중심으로 늘이거나 줄입니다.
+op-armature-extrude = 돌출
+op-armature-bone-add = 뼈 추가
+op-armature-delete = 뼈 삭제
+menu-group-keys = 키프레임
+menu-group-clear = 지우기
+menu-group-bones = 뼈
 op-object-rotate = 회전
 op-object-rotate-desc = 선택한 오브젝트를 돌립니다.
 op-object-scale = 크기
@@ -6810,10 +6993,11 @@ mod tests {
     // --- what the chrome can actually draw -------------------------------
 
     /// Every tab, so that a new one cannot be added without a glyph.
-    const ALL_TABS: [PropertiesTab; 6] = [
+    const ALL_TABS: [PropertiesTab; 7] = [
         PropertiesTab::Tool,
         PropertiesTab::Object,
         PropertiesTab::Data,
+        PropertiesTab::Bone,
         PropertiesTab::Material,
         PropertiesTab::World,
         PropertiesTab::Modifiers,
@@ -7128,11 +7312,21 @@ mod tests {
     fn the_mode_pie_lights_the_mode_you_are_in_and_greys_what_you_cannot_enter() {
         let catalog = load_catalog("en");
         let l = Labels::new(&catalog);
-        let nothing = kreate_ops::mode::Has::NOTHING;
-        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, nothing).unwrap();
-        for ((entry, current), mode) in entries.iter().zip(kreate_ops::Mode::ALL) {
-            assert_eq!(*current, mode == kreate_ops::Mode::RESTING);
-            assert_eq!(entry.enabled, mode.can_enter(nothing), "{mode:?}");
+        use kreate_ops::mode::Has;
+        // With nothing, object mode and a greyed Edit Mode to learn from;
+        // with an armature, its two modes and not the mesh's Edit Mode.
+        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, Has::NOTHING).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
+        assert_eq!(ids, vec!["mode-object", "mode-edit"]);
+        assert!(entries[0].1, "the mode you are in is not lit");
+        assert!(!entries[1].0.enabled, "edit mode with nothing to edit is not greyed");
+        let armature = Has { mesh: false, armature: true };
+        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, armature).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
+        assert_eq!(ids, vec!["mode-object", "mode-edit-armature", "mode-pose"]);
+        for (entry, current) in &entries {
+            assert!(entry.enabled);
+            assert_eq!(*current, entry.id == "mode-object");
         }
     }
 

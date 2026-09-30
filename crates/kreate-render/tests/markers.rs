@@ -133,6 +133,7 @@ fn ring_at(position: glam::DVec3) -> OverlayPoint {
         radius_px: 7.0,
         shape: MarkerShape::Ring,
         dot: true,
+        on_top: false,
     }
 }
 
@@ -194,6 +195,7 @@ fn a_line_is_hidden_only_where_geometry_is_in_front_of_it() {
         color: INK,
         width_px: 2.0,
         dashed: false,
+        on_top: false,
     };
     let (hidden_middle, _) = shoot(&gpu, &[line(behind)], &[]);
     let (clear, _) = shoot(&gpu, &[line(toward * 1.5)], &[]);

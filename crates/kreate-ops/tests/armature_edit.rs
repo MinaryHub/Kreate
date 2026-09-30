@@ -155,3 +155,123 @@ fn a_drag_can_start_from_nothing() {
         History::cancel_modal(session.unwrap(), &mut doc);
     }
 }
+
+/// A three-bone chain, extruded from the one bone.
+fn chain(registry: &OperatorRegistry, history: &mut History, doc: &mut Document) {
+    run(registry, history, doc, "armature.select_pick", &[("bone", text("Bone")), ("part", PropertyValue::Enum(2))]);
+    run(registry, history, doc, "armature.extrude", &[]);
+    run(registry, history, doc, "armature.extrude", &[]);
+}
+
+fn set_bone(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    id: kreate_scene::ArmatureId,
+    bone: &str,
+    change: impl FnOnce(&mut kreate_ops::ops::armature::SetBoneParams),
+) -> bool {
+    let a = doc.armature(id).unwrap();
+    let mut p = kreate_ops::ops::armature::bone_params(a, a.bone_index(bone).unwrap()).unwrap();
+    change(&mut p);
+    let map = kreate_reflect::OpParams::to_map(&p);
+    let depth = history.entries().len();
+    history.dispatch(registry, doc, &edit_ctx(), "armature.bone_set", &map).expect("ran");
+    history.entries().len() > depth
+}
+
+#[test]
+fn renaming_a_bone_carries_its_pose_and_its_curves() {
+    let (registry, mut history) = wired();
+    let (mut doc, id) = rig();
+    chain(&registry, &mut history, &mut doc);
+    let rig_object = doc.selection.active.unwrap();
+    {
+        let o = doc.object_mut(rig_object).unwrap();
+        o.pose.entry("Bone.001").transform.translation.x = 0.5;
+        o.pose.active = Some("Bone.001".into());
+    }
+    let mut action = kreate_scene::animation::Action::new("A");
+    action
+        .curve_mut(&kreate_scene::animation::bone_path("Bone.001", "location"), 0)
+        .insert(1.0, 0.5, kreate_scene::animation::Interpolation::Linear);
+    let action = doc.add_action(action);
+    doc.object_mut(rig_object).unwrap().action = Some(action);
+
+    assert!(set_bone(&registry, &mut history, &mut doc, id, "Bone.001", |p| p.name = "Forearm".into()));
+    assert_eq!(doc.armature(id).unwrap().bones[1].name, "Forearm");
+    let o = doc.object(rig_object).unwrap();
+    assert_eq!(o.pose.transform("Forearm").translation.x, 0.5, "the pose stayed with the old name");
+    assert_eq!(o.pose.active.as_deref(), Some("Forearm"));
+    let path = &doc.action(action).unwrap().curves[0].path.property;
+    assert_eq!(path.as_ref(), kreate_scene::animation::bone_path("Forearm", "location"));
+
+    // A name another bone has is refused, and so is an empty one.
+    assert!(!set_bone(&registry, &mut history, &mut doc, id, "Forearm", |p| p.name = "Bone".into()));
+    assert!(!set_bone(&registry, &mut history, &mut doc, id, "Forearm", |p| p.name = " ".into()));
+    // And undo gives the old name back everywhere.
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc.armature(id).unwrap().bones[1].name, "Bone.001");
+    assert_eq!(doc.object(rig_object).unwrap().pose.transform("Bone.001").translation.x, 0.5);
+}
+
+#[test]
+fn a_parent_below_the_bone_is_refused_and_a_new_one_reorders_the_list() {
+    let (registry, mut history) = wired();
+    let (mut doc, id) = rig();
+    chain(&registry, &mut history, &mut doc);
+    // Bone under its own grandchild: a loop.
+    assert!(!set_bone(&registry, &mut history, &mut doc, id, "Bone", |p| p.parent = "Bone.002".into()));
+    // A free bone added last, made the parent of the first: it has to move up.
+    run(&registry, &mut history, &mut doc, "armature.bone_add", &[("head", PropertyValue::Vec3([0.0, 0.0, -1.0]))]);
+    assert!(set_bone(&registry, &mut history, &mut doc, id, "Bone", |p| p.parent = "Bone.003".into()));
+    let a = doc.armature(id).unwrap();
+    assert_eq!(a.bones[0].name, "Bone.003", "a parent after its child");
+    let bone = a.bone_index("Bone").unwrap();
+    assert_eq!(a.bones[bone].parent, Some(0));
+    for (i, b) in a.bones.iter().enumerate() {
+        assert!(b.parent.is_none_or(|p| p < i), "{} comes before its parent", b.name);
+    }
+    // Connected: the head jumps to the new parent's tail.
+    assert!(set_bone(&registry, &mut history, &mut doc, id, "Bone", |p| p.connected = true));
+    let a = doc.armature(id).unwrap();
+    let bone = a.bone_index("Bone").unwrap();
+    assert_eq!(a.bones[bone].head, a.bones[0].tail);
+}
+
+#[test]
+fn the_armature_tab_and_the_pose_fields() {
+    let (registry, mut history) = wired();
+    let (mut doc, id) = rig();
+    let mut p = PropertyMap::new();
+    p.set("in_front", PropertyValue::Bool(true));
+    p.set("display", PropertyValue::Enum(1));
+    history.dispatch(&registry, &mut doc, &edit_ctx(), "armature.set_display", &p).expect("ran");
+    let a = doc.armature(id).unwrap();
+    assert!(a.in_front);
+    assert_eq!(a.display, kreate_scene::armature::BoneDisplay::Stick);
+
+    let rig_object = doc.selection.active.unwrap();
+    let mut p = kreate_ops::ops::pose::pose_bone_params(&doc.object(rig_object).unwrap().pose, "Bone");
+    p.rotation = [0.0, 0.0, 0.5];
+    p.location = [1.0, 0.0, 0.0];
+    history
+        .dispatch(&registry, &mut doc, &Context::default(), "pose.set_bone", &kreate_reflect::OpParams::to_map(&p))
+        .expect("ran");
+    let t = doc.object(rig_object).unwrap().pose.transform("Bone");
+    assert_eq!(t.translation, DVec3::X);
+    assert!((kreate_scene::animation::to_euler(t.rotation).z - 0.5).abs() < 1e-12);
+    // And the fields read back what was set.
+    let back = kreate_ops::ops::pose::pose_bone_params(&doc.object(rig_object).unwrap().pose, "Bone");
+    assert!((back.rotation[2] - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn clicking_a_bone_in_edit_mode_makes_it_the_active_one() {
+    let (registry, mut history) = wired();
+    let (mut doc, _) = rig();
+    chain(&registry, &mut history, &mut doc);
+    run(&registry, &mut history, &mut doc, "armature.select_pick", &[("bone", text("Bone.001"))]);
+    let rig_object = doc.selection.active.unwrap();
+    assert_eq!(doc.object(rig_object).unwrap().pose.active.as_deref(), Some("Bone.001"));
+}

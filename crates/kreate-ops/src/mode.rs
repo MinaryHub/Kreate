@@ -242,6 +242,21 @@ impl Mode {
         }
     }
 
+    /// Whether a mode list shows this mode at all, given what there is.
+    ///
+    /// Greyed rather than hidden is the rule — a menu whose entries come and
+    /// go cannot be learnt — except for another kind of object's modes. An
+    /// armature's Edit Mode and a mesh's are both called Edit Mode, and a
+    /// greyed twin beside the one you can enter is a riddle; Blender lists an
+    /// object's own modes and no one else's.
+    pub fn offered(self, has: Has) -> bool {
+        match self.info().needs {
+            Needs::Nothing => true,
+            Needs::Mesh => !has.armature,
+            Needs::Armature => has.armature,
+        }
+    }
+
     /// Where `Tab` goes from here, given what there is.
     ///
     /// The card's answer when it can be entered. Otherwise the first mode

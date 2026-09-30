@@ -1061,6 +1061,57 @@ impl Document {
         }
     }
 
+    /// Renames a bone everywhere it is named: the skeleton, the pose of every
+    /// object that holds it, and the curves of those objects' actions.
+    ///
+    /// Blender's behaviour, and the reason a pose and a curve name bones by
+    /// name is bearable: a rename that left them behind would silently drop
+    /// the bone's pose and animation. Returns false, changing nothing, if the
+    /// new name is taken or the old one is not there.
+    pub fn rename_bone(&mut self, armature: ArmatureId, old: &str, new: &str) -> bool {
+        let Some(a) = self.armature(armature) else { return false };
+        if old == new || new.is_empty() || a.bone_index(new).is_some() {
+            return false;
+        }
+        let Some(i) = a.bone_index(old) else { return false };
+        if let Some(a) = self.armature_mut(armature) {
+            a.bones[i].name = new.to_string();
+        }
+        let holders: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.data == ObjectData::Armature(armature))
+            .map(|(id, _)| id)
+            .collect();
+        let (old_prefix, new_prefix) = (
+            crate::animation::bone_path(old, ""),
+            crate::animation::bone_path(new, ""),
+        );
+        for id in holders {
+            let action = {
+                let Some(o) = self.objects.get_mut(id) else { continue };
+                for b in &mut o.pose.bones {
+                    if b.name == old {
+                        b.name = new.to_string();
+                    }
+                }
+                if o.pose.active.as_deref() == Some(old) {
+                    o.pose.active = Some(new.to_string());
+                }
+                o.action
+            };
+            if let Some(action) = action.and_then(|a| self.action_mut(a)) {
+                for curve in &mut action.curves {
+                    if let Some(rest) = curve.path.property.strip_prefix(old_prefix.as_str()) {
+                        curve.path.property = format!("{new_prefix}{rest}").into();
+                    }
+                }
+            }
+        }
+        self.touch();
+        true
+    }
+
     /// An armature object's bones, posed, in world space.
     pub fn posed_bones(&self, object: ObjectId) -> Vec<DAffine3> {
         let Some((_, armature)) = self.armature_of(object) else { return Vec::new() };

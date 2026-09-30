@@ -123,6 +123,13 @@ fn armature_glyph(
     points: &mut Vec<OverlayPoint>,
 ) {
     let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else { return };
+    // In pose and edit mode an unselected bone is a darker grey than the
+    // object colour, so the selected ones and the white active one stand out
+    // against it — the light grey everything else wears was too close to
+    // white to tell the active bone from the rest.
+    // Through the palette's conversion like every other mark: a raw number
+    // here is read as linear light and comes out half again as bright.
+    let dim = if how == Bones::Object { dim } else { palette::display_rgba(0x5A_5C_63) };
     // Edit mode shows the skeleton as built, which is what is being edited;
     // the others show it as it stands.
     let frames = if how == Bones::Edit {
@@ -140,6 +147,7 @@ fn armature_glyph(
                 radius_px: 4.0,
                 shape: MarkerShape::Ring,
                 dot: selected,
+                on_top: armature.in_front,
             });
         };
         for (i, bone) in armature.bones.iter().enumerate() {
@@ -163,11 +171,25 @@ fn armature_glyph(
             dim
         };
         let [head, a, b, c, d, tail] = kreate_scene::armature::octahedron(frame, bone.length());
-        let ring = [a, b, c, d];
-        for i in 0..4 {
-            lines.push(line(head, ring[i], tint, false));
-            lines.push(line(ring[i], ring[(i + 1) % 4], tint, false));
-            lines.push(line(ring[i], tail, tint, false));
+        let bone_line = |from, to| {
+            let mut l = line(from, to, tint, false);
+            l.on_top = armature.in_front;
+            l
+        };
+        match armature.display {
+            kreate_scene::armature::BoneDisplay::Stick => {
+                let mut l = bone_line(head, tail);
+                l.width_px = 3.0;
+                lines.push(l);
+            }
+            kreate_scene::armature::BoneDisplay::Octahedral => {
+                let ring = [a, b, c, d];
+                for i in 0..4 {
+                    lines.push(bone_line(head, ring[i]));
+                    lines.push(bone_line(ring[i], ring[(i + 1) % 4]));
+                    lines.push(bone_line(ring[i], tail));
+                }
+            }
         }
     }
 }
@@ -179,6 +201,7 @@ fn line(a: DVec3, b: DVec3, color: [f32; 4], dashed: bool) -> OverlayLine {
         color,
         width_px: LINE_PX,
         dashed,
+        on_top: false,
     }
 }
 
@@ -208,6 +231,7 @@ fn lamp(
             _ => MarkerShape::Ring,
         },
         dot: !matches!(kind, LightKind::Area { .. }),
+        on_top: false,
     });
 
     // The line to the ground: straight down to z = 0, dashed, which is how the
@@ -345,6 +369,20 @@ mod armature_tests {
         assert_eq!(points.len(), 3, "the shared joint was drawn twice, or not at all");
         assert_eq!(points.iter().filter(|p| p.dot).count(), 1, "one joint is selected");
         assert!(lines.iter().all(|l| l.a.x.abs() < 1.0), "edit mode drew the pose");
+    }
+
+    #[test]
+    fn a_stick_is_one_line_and_in_front_reaches_every_mark() {
+        let mut arm = kreate_scene::armature::Armature::new("Rig");
+        arm.display = kreate_scene::armature::BoneDisplay::Stick;
+        arm.in_front = true;
+        let mut doc = Document::new();
+        let a = doc.add_armature(arm);
+        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        let (lines, _) = markers_for(&doc);
+        assert_eq!(lines.len(), 1);
+        let (lines, points) = markers_with(&doc, Some((rig, Bones::Edit)));
+        assert!(lines.iter().all(|l| l.on_top) && points.iter().all(|p| p.on_top));
     }
 }
 

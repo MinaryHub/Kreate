@@ -225,6 +225,11 @@ pub struct ArmatureRecord {
     #[serde(default)]
     pub uid: u64,
     pub bones: Vec<BoneRecord>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_front: bool,
+    /// `stick`, or absent for octahedral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 /// One bone at rest, in the armature's space. Its parent by index into the
@@ -1047,6 +1052,11 @@ pub fn write(
                         select_tail: b.select_tail,
                     })
                     .collect(),
+                in_front: a.in_front,
+                display: match a.display {
+                    kreate_scene::armature::BoneDisplay::Octahedral => None,
+                    kreate_scene::armature::BoneDisplay::Stick => Some("stick".into()),
+                },
             })
             .collect();
 
@@ -1595,6 +1605,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     select_tail: b.select_tail,
                 });
             }
+            armature.in_front = record.in_front;
+            armature.display = match record.display.as_deref() {
+                Some("stick") => kreate_scene::armature::BoneDisplay::Stick,
+                _ => kreate_scene::armature::BoneDisplay::Octahedral,
+            };
             document.restore_armature(armature, kreate_scene::Uid::from_raw(record.uid))
         })
         .collect();

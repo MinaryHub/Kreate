@@ -91,6 +91,11 @@ fn vs_line(@builtin(vertex_index) vi: u32, @builtin(instance_index) li: u32) -> 
     clip.x += offset.x / (0.5 * viewport.x) * w;
     clip.y += offset.y / (0.5 * viewport.y) * w;
 
+    // In front: the nearest depth there is, so the depth test always passes.
+    // Reversed-Z puts the near plane at one.
+    if (l.style.y > 0.5) {
+        clip.z = clip.w;
+    }
     out.clip = clip;
     out.across_px = side * expand;
     out.along_px = select(0.0, length_px, at_end);
@@ -139,6 +144,9 @@ fn vs_point(@builtin(vertex_index) vi: u32, @builtin(instance_index) pi: u32) ->
     );
     clip.x += corner.x * expand / (0.5 * viewport.x) * w;
     clip.y += corner.y * expand / (0.5 * viewport.y) * w;
+    if (p.style.w > 0.5) {
+        clip.z = clip.w;
+    }
     out.clip = clip;
     out.offset_px = corner * expand;
     return out;

@@ -31,6 +31,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Extrude>();
     registry.register::<Delete>();
     registry.register::<AddBone>();
+    registry.register::<SetDisplay>();
+    registry.register::<SetBone>();
 }
 
 /// The armature object being edited.
@@ -179,6 +181,17 @@ impl Operator for SelectPick {
                 a.bones[i].select_tail = on;
             }
             *a != before
+        })
+        .inspect(|result| {
+            // The active bone is one thing in both modes, as in Blender: the
+            // one the Bone tab shows.
+            if *result == OpResult::Finished {
+                if let Some(object) = edited_object(doc.document()) {
+                    if let Some(o) = doc.document_mut().object_mut(object) {
+                        o.pose.active = Some(params.bone.clone());
+                    }
+                }
+            }
         })
     }
 }
@@ -445,5 +458,159 @@ impl Operator for AddBone {
             });
             true
         })
+    }
+}
+
+// --- the Bone and Armature tabs ---------------------------------------------
+
+fn active_armature(doc: &Document) -> Option<(ObjectId, kreate_scene::ArmatureId)> {
+    let object = doc.selection.active?;
+    doc.armature_of(object).map(|(id, _)| (object, id))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetDisplayParams {
+    /// Drawn over everything, so a skeleton inside its mesh can be seen.
+    pub in_front: bool,
+    #[param(variants("octahedral", "stick"))]
+    pub display: u32,
+}
+
+/// What the Armature tab shows now, as the operator's parameters.
+pub fn display_params(armature: &Armature) -> SetDisplayParams {
+    SetDisplayParams {
+        in_front: armature.in_front,
+        display: match armature.display {
+            kreate_scene::armature::BoneDisplay::Octahedral => 0,
+            kreate_scene::armature::BoneDisplay::Stick => 1,
+        },
+    }
+}
+
+/// Sets how the active armature is drawn.
+pub struct SetDisplay;
+
+impl Operator for SetDisplay {
+    type Params = SetDisplayParams;
+    fn id() -> &'static str {
+        "armature.set_display"
+    }
+    fn label() -> &'static str {
+        "Armature Display"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_armature(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some((_, id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let display = if params.display == 1 {
+            kreate_scene::armature::BoneDisplay::Stick
+        } else {
+            kreate_scene::armature::BoneDisplay::Octahedral
+        };
+        let Some(a) = doc.document().armature(id) else { return Ok(OpResult::Cancelled) };
+        if a.in_front == params.in_front && a.display == display {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(a) = doc.document_mut().armature_mut(id) else { return Ok(OpResult::Cancelled) };
+        a.in_front = params.in_front;
+        a.display = display;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetBoneParams {
+    /// Which bone, by the name it has now.
+    #[param(hidden)]
+    pub bone: String,
+    pub name: String,
+    /// Its parent's name; empty for none.
+    pub parent: String,
+    /// Its head held on its parent's tail.
+    pub connected: bool,
+    #[param(unit = "length")]
+    pub head: [f64; 3],
+    #[param(unit = "length")]
+    pub tail: [f64; 3],
+    #[param(unit = "angle")]
+    pub roll: f64,
+}
+
+/// What the Bone tab shows for `bone`, as the operator's parameters.
+pub fn bone_params(armature: &Armature, bone: usize) -> Option<SetBoneParams> {
+    let b = armature.bones.get(bone)?;
+    Some(SetBoneParams {
+        bone: b.name.clone(),
+        name: b.name.clone(),
+        parent: b.parent.map(|p| armature.bones[p].name.clone()).unwrap_or_default(),
+        connected: b.connected,
+        head: b.head.to_array(),
+        tail: b.tail.to_array(),
+        roll: b.roll,
+    })
+}
+
+/// Sets everything about one bone at rest: the Bone tab's fields.
+///
+/// A rename reaches the pose and the curves that name the bone, as it does in
+/// Blender; a new parent that is the bone or below it is refused, because the
+/// hierarchy would loop.
+pub struct SetBone;
+
+impl Operator for SetBone {
+    type Params = SetBoneParams;
+    fn id() -> &'static str {
+        "armature.bone_set"
+    }
+    fn label() -> &'static str {
+        "Set Bone"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_armature(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some((_, id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(original) = doc.document().armature(id).cloned() else { return Ok(OpResult::Cancelled) };
+        let Some(i) = original.bone_index(&params.bone) else { return Ok(OpResult::Cancelled) };
+        let renaming = params.name != params.bone;
+        if renaming && (params.name.trim().is_empty() || original.bone_index(&params.name).is_some()) {
+            return Ok(OpResult::Cancelled);
+        }
+        let parent = match params.parent.as_str() {
+            "" => None,
+            name => match original.bone_index(name) {
+                Some(p) if !kreate_scene::armature::is_ancestor(&original, i, p) => Some(p),
+                _ => return Ok(OpResult::Cancelled),
+            },
+        };
+        let (head, tail) = (DVec3::from_array(params.head), DVec3::from_array(params.tail));
+        if !head.is_finite() || !tail.is_finite() || !params.roll.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let mut edited = original.clone();
+        {
+            let b = &mut edited.bones[i];
+            b.parent = parent;
+            b.connected = params.connected && parent.is_some();
+            b.head = head;
+            b.tail = tail;
+            b.roll = params.roll;
+        }
+        if edited.sort_parents_first().is_none() {
+            return Ok(OpResult::Cancelled);
+        }
+        edited.reconnect();
+        if edited == original && !renaming {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        if let Some(a) = d.armature_mut(id) {
+            *a = edited;
+        }
+        if renaming {
+            d.rename_bone(id, &params.bone, &params.name);
+        }
+        Ok(OpResult::Finished)
     }
 }

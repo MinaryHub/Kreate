@@ -32,6 +32,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Rotate>();
     registry.register::<Scale>();
     registry.register::<ClearTransform>();
+    registry.register::<SetPoseBone>();
 }
 
 /// The armature object pose mode acts on.
@@ -426,6 +427,73 @@ impl Operator for ClearTransform {
         for b in o.pose.bones.iter_mut().filter(|b| b.selected) {
             b.transform = cleared(b.transform);
         }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetPoseBoneParams {
+    /// Which bone.
+    #[param(hidden)]
+    pub bone: String,
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// As XYZ Euler angles, the numbers a person types; stored as the
+    /// quaternion the pose keeps.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+    pub scale: [f64; 3],
+}
+
+impl Default for SetPoseBoneParams {
+    fn default() -> Self {
+        Self { bone: String::new(), location: [0.0; 3], rotation: [0.0; 3], scale: [1.0; 3] }
+    }
+}
+
+/// What the Bone tab shows for a posed bone, as the operator's parameters.
+pub fn pose_bone_params(pose: &kreate_scene::armature::Pose, bone: &str) -> SetPoseBoneParams {
+    let t = pose.transform(bone);
+    SetPoseBoneParams {
+        bone: bone.to_string(),
+        location: t.translation.to_array(),
+        rotation: kreate_scene::animation::to_euler(t.rotation).to_array(),
+        scale: t.scale.to_array(),
+    }
+}
+
+/// Places one bone's pose exactly: the Bone tab in pose mode.
+pub struct SetPoseBone;
+
+impl Operator for SetPoseBone {
+    type Params = SetPoseBoneParams;
+    fn id() -> &'static str {
+        "pose.set_bone"
+    }
+    fn label() -> &'static str {
+        "Set Bone Pose"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let exists = doc.document().armature_of(object).is_some_and(|(_, a)| a.bone_index(&params.bone).is_some());
+        let (l, r, s) = (
+            DVec3::from_array(params.location),
+            DVec3::from_array(params.rotation),
+            DVec3::from_array(params.scale),
+        );
+        if !exists || !l.is_finite() || !r.is_finite() || !s.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let wanted = DTransform { translation: l, rotation: kreate_scene::animation::from_euler(r).normalize(), scale: s };
+        let now = doc.document().object(object).map(|o| o.pose.transform(&params.bone));
+        if now == Some(wanted) {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        o.pose.entry(&params.bone).transform = wanted;
         Ok(OpResult::Finished)
     }
 }
