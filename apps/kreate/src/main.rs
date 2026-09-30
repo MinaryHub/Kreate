@@ -1616,6 +1616,16 @@ impl App {
             gesture.axis = Some(kreate::modal::Axis::Z);
             gesture.orientation = kreate::modal::Orientation::Local;
         }
+        // A loop cut slides along the edge it cuts across from.
+        if kind == kreate::modal::Kind::LoopCut {
+            match kreate_ops::ops::mesh::loop_cut_edge(&self.doc) {
+                Some((a, b)) => gesture.set_slide_edge(a, b),
+                None => {
+                    self.status("select an edge to loop cut across");
+                    return;
+                }
+            }
+        }
         // Ctrl inverts snapping, and it may already be held when the gesture
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
@@ -1627,7 +1637,7 @@ impl App {
         // Asked of the mode, because that is the claim: proportional editing
         // falls off towards neighbouring *geometry*, and only a mode that has
         // the elements on screen has any.
-        if mode.edits_elements() {
+        if mode.edits_elements() && kind.transforms() {
             gesture.set_proportional(self.proportional);
         }
         let op_id = kind.op_id(mode);
@@ -2007,6 +2017,21 @@ impl App {
     /// the transform and the other hand is on the modifiers. Multiplicative
     /// rather than additive, so one notch feels the same whether the radius is a
     /// centimetre or ten metres.
+    /// Adds or takes away loops from a running loop cut: the wheel, as in
+    /// Blender. `false` when no loop cut is running.
+    fn adjust_loop_cuts(&mut self, notches: f32) -> bool {
+        let Some((gesture, _)) = &mut self.gesture else { return false };
+        if gesture.kind != kreate::modal::Kind::LoopCut {
+            return false;
+        }
+        let step = notches.signum() as i32;
+        if step != 0 {
+            gesture.add_cuts(step);
+            self.drive_gesture();
+        }
+        true
+    }
+
     fn adjust_proportional(&mut self, notches: f32) -> bool {
         if self.gesture.is_none() || self.proportional.is_none() {
             return false;
@@ -3971,6 +3996,9 @@ impl App {
                     kreate::modal::Kind::Rotate => kreate_ui::toolbar::Tool::Rotate,
                     kreate::modal::Kind::Scale => kreate_ui::toolbar::Tool::Scale,
                     kreate::modal::Kind::Extrude => kreate_ui::toolbar::Tool::Extrude,
+                    kreate::modal::Kind::Inset => kreate_ui::toolbar::Tool::Inset,
+                    kreate::modal::Kind::Bevel => kreate_ui::toolbar::Tool::Bevel,
+                    kreate::modal::Kind::LoopCut => kreate_ui::toolbar::Tool::LoopCut,
                 }),
             })
             .or_else(|| {
@@ -4858,6 +4886,12 @@ impl App {
             "mesh.extrude_region" if self.op_ctx.mode.edits_elements() => {
                 self.begin_gesture(kreate::modal::Kind::Extrude)
             }
+            // I, Ctrl+B and Ctrl+R the same way: the pointer sets how much.
+            "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),
+            "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
+            "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => {
+                self.begin_gesture(kreate::modal::Kind::LoopCut)
+            }
             "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
             "armature.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
@@ -5460,7 +5494,7 @@ impl ApplicationHandler for App {
                 // wheel for its radius. Zooming mid-transform would move the
                 // camera the selection is being dragged relative to, which is
                 // not what a hand reaching for the wheel means here.
-                if !self.adjust_proportional(y as f32) {
+                if !self.adjust_loop_cuts(y as f32) && !self.adjust_proportional(y as f32) {
                     self.apply_wheel(x, y);
                 }
             }

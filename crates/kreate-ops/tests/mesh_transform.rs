@@ -1019,3 +1019,37 @@ fn e_drags_along_the_selected_faces_normal_in_the_world() {
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
     assert!(kreate_ops::ops::mesh::selected_faces_normal(&doc).is_none());
 }
+
+#[test]
+fn ctrl_r_slides_from_the_first_end_of_the_edge_it_reports() {
+    // The gesture slides the cut along the edge `loop_cut_edge` names, so a
+    // position near 0 has to land near that edge's first end — in the world,
+    // wherever the object is.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[0]);
+    let object = doc.selection.active.unwrap();
+    doc.object_mut(object).unwrap().transform.translation = DVec3::new(5.0, 0.0, 0.0);
+    let (a, b) = kreate_ops::ops::mesh::loop_cut_edge(&doc).expect("an edge is selected");
+    run(&mut doc, &ctx, "mesh.loop_cut", &[("cuts", PropertyValue::Int(1)), ("position", PropertyValue::Float(0.2))]).unwrap();
+    let want = a.lerp(b, 0.2) - DVec3::new(5.0, 0.0, 0.0);
+    assert!(
+        positions(&doc).iter().any(|p| (p.as_dvec3() - want).length() < 1e-5),
+        "no new vertex a fifth of the way from the first end"
+    );
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[]);
+    assert!(kreate_ops::ops::mesh::loop_cut_edge(&doc).is_none());
+}
+
+#[test]
+fn inset_and_bevel_start_where_their_gestures_start() {
+    // I begins at no thickness and Ctrl+B at a hair's width; the operators
+    // must run there, or the gesture is refused before the pointer moves.
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
+    let inset = run(&mut doc, &ctx, "mesh.inset", &[("thickness", PropertyValue::Float(0.0))]).unwrap();
+    assert_eq!(inset, kreate_ops::OpResult::Finished);
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[0]);
+    let bevel = run(&mut doc, &ctx, "mesh.bevel", &[("width", PropertyValue::Float(1e-4))]).unwrap();
+    assert_eq!(bevel, kreate_ops::OpResult::Finished);
+}

@@ -901,7 +901,7 @@ fn every_operator_a_gesture_names_exists() {
     // Every mode, from `Mode::ALL` rather than a list written here: a mode
     // added without an operator behind it is exactly the failure this test is
     // for, and a hardcoded pair would not see it.
-    for kind in [Kind::Move, Kind::Rotate, Kind::Scale] {
+    for kind in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::Inset, Kind::Bevel, Kind::LoopCut] {
         for mode in kreate_ops::operator::Mode::ALL {
             let id = kind.op_id(mode);
             assert!(
@@ -951,7 +951,7 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
     let mut registry = kreate_ops::OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
 
-    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale]
+    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::Inset, Kind::Bevel, Kind::LoopCut]
         .into_iter()
         .flat_map(|kind| {
             kreate_ops::operator::Mode::ALL
@@ -1432,4 +1432,77 @@ fn a_typed_extrude_distance_is_exact() {
         assert!(g.type_character(c));
     }
     assert_eq!(offset(&at(&mut g, (430.0, 170.0))), 0.25);
+}
+
+/// A gesture of `kind` begun 200 pixels right of the pivot, which is at the
+/// middle of the screen.
+fn pulled(kind: Kind) -> Gesture {
+    Gesture::begin(kind, (600.0, 300.0), DVec3::ZERO, &camera(), VIEWPORT, WORLD_AXES, Snap::default(), SnapWorld::default())
+}
+
+fn float(params: &kreate_ops::PropertyMap, name: &str) -> f64 {
+    match params.get(name) {
+        Some(PropertyValue::Float(f)) => *f,
+        other => panic!("expected {name}, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_inset_thickens_as_the_pointer_moves_in_and_starts_at_nothing() {
+    // Blender's I: nothing at the press, thicker towards the middle.
+    let mut g = pulled(Kind::Inset);
+    assert_eq!(float(&at(&mut g, (600.0, 300.0)), "thickness"), 0.0);
+    let inward = float(&at(&mut g, (500.0, 300.0)), "thickness");
+    assert!(inward > 0.1, "moving in did not inset: {inward}");
+    let further = float(&at(&mut g, (450.0, 300.0)), "thickness");
+    assert!(further > inward);
+    // Out past where it started is nothing, not negative.
+    assert_eq!(float(&at(&mut g, (700.0, 300.0)), "thickness"), 0.0);
+    // Axis keys mean nothing to it.
+    g.cycle_axis(Axis::X);
+    assert_eq!(g.axis, None);
+}
+
+#[test]
+fn a_bevel_widens_as_the_pointer_moves_out_and_never_asks_for_nothing() {
+    // Blender's Ctrl+B. The start is not zero — the operator declines a bevel
+    // of no width, which would refuse the gesture before it began.
+    let mut g = pulled(Kind::Bevel);
+    let start = float(&at(&mut g, (600.0, 300.0)), "width");
+    assert!(start > 0.0 && start < 1e-3, "{start}");
+    let out = float(&at(&mut g, (700.0, 300.0)), "width");
+    assert!(out > 0.1, "moving out did not widen: {out}");
+    assert_eq!(float(&at(&mut g, (500.0, 300.0)), "width"), start);
+    for c in "0.2".chars() {
+        g.type_character(c);
+    }
+    assert_eq!(float(&at(&mut g, (650.0, 300.0)), "width"), 0.2);
+}
+
+#[test]
+fn a_loop_cut_slides_along_its_edge_and_the_wheel_or_a_number_sets_how_many() {
+    let mut g = pulled(Kind::LoopCut);
+    // An edge along world X, 2 units: screen right.
+    g.set_slide_edge(DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+    let cuts = |p: &kreate_ops::PropertyMap| match p.get("cuts") {
+        Some(PropertyValue::Int(n)) => *n,
+        other => panic!("expected cuts, got {other:?}"),
+    };
+    let p = at(&mut g, (600.0, 300.0));
+    assert_eq!((float(&p, "position"), cuts(&p)), (0.5, 1));
+    let right = float(&at(&mut g, (630.0, 300.0)), "position");
+    assert!(right > 0.5 && right < 1.0, "sliding towards the second end: {right}");
+    let left = float(&at(&mut g, (570.0, 300.0)), "position");
+    assert!((left - (1.0 - right)).abs() < 1e-6, "not symmetric: {left} {right}");
+    // Across the edge does not slide it; far past an end stops at the end.
+    assert_eq!(float(&at(&mut g, (600.0, 200.0)), "position"), 0.5);
+    assert_eq!(float(&at(&mut g, (2000.0, 300.0)), "position"), 1.0);
+    // The wheel adds loops, never below one.
+    g.add_cuts(2);
+    assert_eq!(cuts(&at(&mut g, (600.0, 300.0))), 3);
+    g.add_cuts(-10);
+    assert_eq!(g.cuts, 1);
+    // A typed number is how many.
+    g.type_character('4');
+    assert_eq!(cuts(&at(&mut g, (600.0, 300.0))), 4);
 }

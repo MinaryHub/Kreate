@@ -2371,6 +2371,22 @@ pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
     (n != glam::DVec3::ZERO).then_some(n)
 }
 
+/// The edge a loop cut starts from, as its two ends in the world: the first
+/// selected edge of the mesh [`LoopCut`] cuts, in the order its `position`
+/// runs — `0` at the first end, `1` at the second. What `Ctrl+R` slides the
+/// cut along with the pointer; `None` when no edge is selected.
+pub fn loop_cut_edge(doc: &Document) -> Option<(glam::DVec3, glam::DVec3)> {
+    let object = target_object(doc)?;
+    let mesh = doc.mesh(target_mesh(doc)?)?;
+    let selected = mesh.attributes().get_bool(kreate_mesh::attribute::names::SELECT_EDGE)?;
+    let edge = selected.iter().position(|on| *on)?;
+    let [a, b] = *mesh.edges().get(edge)?;
+    let to_world = doc.world_transform(object);
+    let positions = mesh.positions();
+    let at = |v: u32| to_world.transform_point3(positions[v as usize].as_dvec3());
+    Some((at(a), at(b)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

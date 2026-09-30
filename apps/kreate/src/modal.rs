@@ -83,6 +83,15 @@ pub enum Kind {
     /// along their normal — the extrude's own `offset`, so the whole gesture is
     /// one operator and one step to undo.
     Extrude,
+    /// Blender's `I`: the pointer moving in towards the selection's middle
+    /// makes the inset thicker.
+    Inset,
+    /// Blender's `Ctrl+B`: the pointer moving away from the selection's middle
+    /// makes the chamfer wider.
+    Bevel,
+    /// Blender's `Ctrl+R`: the new loop slides along the selected edge with the
+    /// pointer, and a typed number is how many loops.
+    LoopCut,
 }
 
 impl Kind {
@@ -100,6 +109,9 @@ impl Kind {
             Kind::Scale => scale,
             // Not the mode's: only a mesh's faces extrude.
             Kind::Extrude => "mesh.extrude_region",
+            Kind::Inset => "mesh.inset",
+            Kind::Bevel => "mesh.bevel",
+            Kind::LoopCut => "mesh.loop_cut",
         }
     }
 
@@ -110,7 +122,15 @@ impl Kind {
             Kind::Rotate => "Rotate",
             Kind::Scale => "Scale",
             Kind::Extrude => "Extrude",
+            Kind::Inset => "Inset",
+            Kind::Bevel => "Bevel",
+            Kind::LoopCut => "Loop Cut",
         }
+    }
+
+    /// Whether the gesture is one of the three transforms, which take an axis.
+    pub fn transforms(self) -> bool {
+        matches!(self, Kind::Move | Kind::Rotate | Kind::Scale)
     }
 }
 
@@ -158,6 +178,13 @@ impl Axis {
         }
     }
 }
+
+/// The narrowest bevel a gesture asks for: where it starts, and the least it
+/// goes back to. Far below anything visible.
+const MIN_BEVEL: f64 = 1e-4;
+
+/// The most loops one loop cut makes — the operator's own limit.
+const MAX_CUTS: u32 = 64;
 
 /// The degree sign, accepted in an angle field.
 const DEGREE_SIGN: char = '\u{b0}';
@@ -279,6 +306,12 @@ pub struct Gesture {
     /// The pointer's bearing from the pivot at the last `track`, for the next
     /// increment.
     bearing: Option<f64>,
+    /// A loop cut's edge on screen, first end to second — what the pointer
+    /// slides the cut along. `None` for every other kind.
+    slide: Option<((f32, f32), (f32, f32))>,
+    /// How many loops a loop cut makes, before anything is typed. The wheel
+    /// changes it.
+    pub cuts: u32,
 }
 
 impl Gesture {
@@ -338,6 +371,8 @@ impl Gesture {
             cursor,
             swept: 0.0,
             bearing: None,
+            slide: None,
+            cuts: 1,
         };
         // Seeded from the starting position, so the *first* motion counts. Left
         // unseeded, the first increment has nothing to measure against and is
@@ -390,7 +425,8 @@ impl Gesture {
     pub fn cycle_axis(&mut self, axis: Axis) {
         // An extrude travels along its faces' normal and nowhere else, as
         // Blender's does; X, Y and Z would take it off the line.
-        if self.kind == Kind::Extrude {
+        // An inset, a bevel and a loop cut have no direction to hold either.
+        if !self.kind.transforms() {
             return;
         }
         match (self.axis, self.orientation) {
@@ -417,6 +453,17 @@ impl Gesture {
             // constrained move on a scaled object travels the wrong distance.
             Orientation::Local => self.basis[axis.index() as usize].normalize_or(axis.direction()),
         }
+    }
+
+    /// The edge a loop cut slides along, as its two ends in the world, first
+    /// the end `position` 0 is at. Projected once, as the pivot is.
+    pub fn set_slide_edge(&mut self, a: DVec3, b: DVec3) {
+        self.slide = project(a, &self.camera, self.viewport).zip(project(b, &self.camera, self.viewport));
+    }
+
+    /// Adds `step` loops to a loop cut, one at the least — the wheel.
+    pub fn add_cuts(&mut self, step: i32) {
+        self.cuts = (self.cuts as i32 + step).clamp(1, MAX_CUTS as i32) as u32;
     }
 
     /// Updates the view the gesture resolves snaps against.
@@ -554,9 +601,9 @@ impl Gesture {
     /// suffix are read.
     fn unit(&self) -> crate::expr::Unit {
         match self.kind {
-            Kind::Move | Kind::Extrude => crate::expr::Unit::Length,
+            Kind::Move | Kind::Extrude | Kind::Inset | Kind::Bevel => crate::expr::Unit::Length,
             Kind::Rotate => crate::expr::Unit::Angle,
-            Kind::Scale => crate::expr::Unit::Factor,
+            Kind::Scale | Kind::LoopCut => crate::expr::Unit::Factor,
         }
     }
 
@@ -579,6 +626,16 @@ impl Gesture {
             }
             Kind::Extrude => {
                 params.set("offset", PropertyValue::Float(self.extrude_distance(dx, dy)));
+            }
+            Kind::Inset => {
+                params.set("thickness", PropertyValue::Float(self.inset_thickness()));
+            }
+            Kind::Bevel => {
+                params.set("width", PropertyValue::Float(self.bevel_width()));
+            }
+            Kind::LoopCut => {
+                params.set("cuts", PropertyValue::Int(self.loop_cuts() as i64));
+                params.set("position", PropertyValue::Float(self.slide_position(dx, dy)));
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
@@ -718,6 +775,60 @@ impl Gesture {
         self.offset(dx, dy).dot(normal)
     }
 
+    /// How much nearer the selection's middle the pointer is than it started,
+    /// in world units at the pivot's depth — signed, so an inset reads it as is
+    /// and a bevel the other way round.
+    fn pull(&self) -> f64 {
+        let (dx, dy) = self.effective_delta(self.cursor);
+        let then = (self.start.0 - self.pivot_px.0).hypot(self.start.1 - self.pivot_px.1);
+        let now = (self.start.0 + dx - self.pivot_px.0).hypot(self.start.1 + dy - self.pivot_px.1);
+        ((then - now) * self.units_per_pixel) as f64
+    }
+
+    /// A length the pointer made, rounded to the increment when snapping. A
+    /// typed number is taken as it is.
+    fn length_value(&self, pointer: f64) -> f64 {
+        match self.typed() {
+            Some(value) => value,
+            None if self.snapping() => Snap::round(pointer, self.snap.length),
+            None => pointer,
+        }
+    }
+
+    /// An inset's thickness: none at the start, more as the pointer moves in.
+    fn inset_thickness(&self) -> f64 {
+        self.length_value(self.pull().max(0.0)).max(0.0)
+    }
+
+    /// A bevel's width: the pointer moving out from the middle. Never quite
+    /// nothing — a bevel of no width is no bevel, and the operator declines it,
+    /// which would stop the gesture where it starts.
+    fn bevel_width(&self) -> f64 {
+        self.length_value((-self.pull()).max(0.0)).max(MIN_BEVEL)
+    }
+
+    /// How many loops: a typed whole number, otherwise what the wheel set.
+    fn loop_cuts(&self) -> u32 {
+        match self.typed() {
+            Some(n) if n.is_finite() => (n.round() as i64).clamp(1, MAX_CUTS as i64) as u32,
+            _ => self.cuts,
+        }
+    }
+
+    /// Where a loop cut sits along its edge: the middle to begin with, then
+    /// wherever the pointer has slid it — the motion along the edge on screen,
+    /// as a fraction of the edge's length there.
+    fn slide_position(&self, dx: f32, dy: f32) -> f64 {
+        let Some(((ax, ay), (bx, by))) = self.slide else { return 0.5 };
+        let (ex, ey) = (bx - ax, by - ay);
+        let length2 = ex * ex + ey * ey;
+        // An edge seen end on has no length to slide along.
+        if length2 < 1.0 {
+            return 0.5;
+        }
+        (0.5 + ((dx * ex + dy * ey) / length2) as f64).clamp(0.0, 1.0)
+    }
+
     /// A screen displacement as a world vector across the view plane.
     fn screen_to_world(&self, dx: f32, dy: f32) -> Vec3 {
         // Y is negated because window coordinates grow downwards and the
@@ -801,6 +912,12 @@ impl Gesture {
             Kind::Extrude => {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 format!("{:.3}", self.extrude_distance(dx, dy))
+            }
+            Kind::Inset => format!("thickness {:.3}", self.inset_thickness()),
+            Kind::Bevel => format!("width {:.3}", self.bevel_width()),
+            Kind::LoopCut => {
+                let (dx, dy) = self.effective_delta(self.cursor);
+                format!("cuts {}  position {:.3}  (wheel: cuts)", self.loop_cuts(), self.slide_position(dx, dy))
             }
             Kind::Move => {
                 let (dx, dy) = self.effective_delta(self.cursor);

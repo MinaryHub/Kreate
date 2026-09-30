@@ -2976,22 +2976,11 @@ fn draw_toolbar(
                             // Through the key's door, so the tool drags the new
                             // faces out as E does.
                             Tool::Extrude => state.queue.dispatch("mesh.extrude_region", PropertyMap::new()),
-                            Tool::Inset => {
-                                let mut p = PropertyMap::new();
-                                p.set("thickness", kreate_reflect::PropertyValue::Float(0.1));
-                                state.queue.run("mesh.inset", p);
-                            }
-                            Tool::Bevel => {
-                                let mut p = PropertyMap::new();
-                                p.set("width", kreate_reflect::PropertyValue::Float(0.1));
-                                state.queue.run("mesh.bevel", p);
-                            }
-                            Tool::LoopCut => {
-                                let mut p = PropertyMap::new();
-                                p.set("cuts", kreate_reflect::PropertyValue::Int(1));
-                                p.set("position", kreate_reflect::PropertyValue::Float(0.5));
-                                state.queue.run("mesh.loop_cut", p);
-                            }
+                            // Like the extrude, through the keys' door: the
+                            // pointer then sets how much.
+                            Tool::Inset => state.queue.dispatch("mesh.inset", PropertyMap::new()),
+                            Tool::Bevel => state.queue.dispatch("mesh.bevel", PropertyMap::new()),
+                            Tool::LoopCut => state.queue.dispatch("mesh.loop_cut", PropertyMap::new()),
                         }
                     }
                 }
