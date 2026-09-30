@@ -885,10 +885,11 @@ impl Default for ViewStatus {
 /// readable several entries before that.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PropertiesTab {
-    /// The last operation's parameters. Blender's F9, docked.
-    #[default]
+    /// The last operation's parameters. Blender's F9, docked; the same panel
+    /// also floats in the viewport's corner, which is where a hand looks.
     Tool,
-    /// Where the active object is.
+    /// Where the active object is. Where the editor opens, as Blender's does.
+    #[default]
     Object,
     /// What the active object *is*: its datablock.
     Data,
@@ -903,30 +904,19 @@ pub enum PropertiesTab {
 }
 
 impl PropertiesTab {
-    /// The glyph in the column.
-    ///
-    /// Geometric shapes, the same block the outliner takes its kinds from — so
-    /// a light is a `◇` in both places, which is most of what an icon set is
-    /// for. Real icons replace these; the tab column does not change when they
-    /// do.
-    /// The glyph on the tab's button in the column.
-    ///
-    /// **Every one of these has to be in the bundled font**, which is a
-    /// subset. Three of them were not, and drew as tofu boxes in the
-    /// application's own chrome. There is no system-font fallback, so a glyph
-    /// the subset lacks is not a degraded icon, it is a blank square. The
-    /// test in `kreate_ui::fonts` now checks this rather than trusting it.
-    fn glyph(self) -> &'static str {
+    /// The tab's picture. The Data tab wears the icon of what the active
+    /// object is — a bulb, a camera, a bone — as Blender's does, so the column
+    /// says what that tab is about before it is opened.
+    fn icon(self, data: kreate_ui::outliner::RowKind) -> kreate_ui::icons::Icon {
+        use kreate_ui::icons::Icon;
         match self {
-            // Solid for a thing and hollow for the space around it; the
-            // sphere is the material, which is what every renderer uses.
-            Self::Tool => "▢",
-            Self::Object => "■",
-            Self::Data => "◇",
-            Self::Bone => "▲",
-            Self::Material => "●",
-            Self::World => "○",
-            Self::Modifiers => "◆",
+            Self::Tool => Icon::Tool,
+            Self::Object => Icon::Object,
+            Self::Data => Icon::Data(data),
+            Self::Bone => Icon::Bone,
+            Self::Material => Icon::Material,
+            Self::World => Icon::World,
+            Self::Modifiers => Icon::Modifiers,
         }
     }
 
@@ -1403,6 +1393,30 @@ pub fn draw(
                 // acting on.
                 ui.colored_label(theme.accent, name);
             }
+            // The mode's everyday keys, as Blender's status bar keeps them in
+            // view: what the hand does next, without opening a menu to learn
+            // it. Read from the keymap, so a rebinding shows here too.
+            let hints: &[&str] = match mode.acts_on() {
+                kreate_ops::mode::ActsOn::Objects => {
+                    &["object.translate", "object.rotate", "object.scale", "anim.keyframe_insert"]
+                }
+                kreate_ops::mode::ActsOn::MeshElements => {
+                    &["mesh.translate", "mesh.rotate", "mesh.scale", "mesh.extrude_region"]
+                }
+                kreate_ops::mode::ActsOn::Bones => {
+                    &["pose.translate", "pose.rotate", "pose.scale", "anim.keyframe_insert"]
+                }
+                kreate_ops::mode::ActsOn::BoneJoints => {
+                    &["armature.translate", "armature.extrude", "armature.bone_add", "armature.delete"]
+                }
+            };
+            for id in hints {
+                if let Some(info) = state.command_info.get(*id).filter(|i| !i.shortcut.is_empty()) {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(&info.shortcut).strong().small());
+                    ui.weak(egui::RichText::new(&info.name).small());
+                }
+            }
             // Recovered work waiting under File ▸ Recover. Said here, quietly
             // and for as long as it waits, because a menu nobody opens is a
             // menu nobody finds — and the person this is for has just lost a
@@ -1745,6 +1759,7 @@ fn draw_area(
             match area.editor.as_str() {
                 "viewport" => {
                     draw_viewport(ui, state, doc, mode, l, inner, image);
+                    draw_adjust_float(ui, state, registry, history, inner);
                     if state.sidebar_open(area.id) {
                         draw_item_sidebar(ui, state, doc, registry, area.id, inner, l, mode);
                     }
@@ -2781,8 +2796,13 @@ fn draw_toolbar(
 ) -> egui::Rect {
     use kreate_ui::toolbar::{tool_button, Tool, WIDTH};
     let theme = kreate_ui::theme::from_ui(ui);
+    // A skeleton being built has one tool of its own after the common ones:
+    // Extrude, which is most of what building one is.
+    let bones = mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints;
     let tools: Vec<Tool> = if mode.info().edit_tools {
         Tool::COMMON.iter().chain(Tool::EDIT.iter()).copied().collect()
+    } else if bones {
+        Tool::COMMON.iter().copied().chain([Tool::Extrude]).collect()
     } else {
         Tool::COMMON.to_vec()
     };
@@ -2791,7 +2811,7 @@ fn draw_toolbar(
     let gap = 2.0;
     // A gap between the common group and the edit group, the way Blender
     // separates its tool groups: the eye finds the boundary before it reads.
-    let groups_gap = if mode.info().edit_tools { 8.0 } else { 0.0 };
+    let groups_gap = if tools.len() > Tool::COMMON.len() { 8.0 } else { 0.0 };
     let height = pad * 2.0 + tools.len() as f32 * (button + gap) - gap + groups_gap;
     let rect = egui::Rect::from_min_size(
         viewport.min + egui::vec2(8.0, 8.0),
@@ -2838,6 +2858,7 @@ fn draw_toolbar(
                         Tool::Move => Some(mode.info().transform[0]),
                         Tool::Rotate => Some(mode.info().transform[1]),
                         Tool::Scale => Some(mode.info().transform[2]),
+                        Tool::Extrude if bones => Some("armature.extrude"),
                         Tool::Extrude => Some("mesh.extrude_region"),
                         Tool::Inset => Some("mesh.inset"),
                         Tool::Bevel => Some("mesh.bevel"),
@@ -2860,6 +2881,9 @@ fn draw_toolbar(
                                     state.queue.dispatch(op, PropertyMap::new());
                                 }
                             }
+                            // Through the key's door, so the drag that places
+                            // the new bones starts as E starts it.
+                            Tool::Extrude if bones => state.queue.dispatch("armature.extrude", PropertyMap::new()),
                             Tool::Extrude => {
                                 let mut p = PropertyMap::new();
                                 p.set("offset", kreate_reflect::PropertyValue::Float(1.0));
@@ -3819,24 +3843,16 @@ fn draw_item_sidebar(
             };
             if let Some(op_id) = bone_op {
                 let object = doc.selection.active.expect("an active object was just read");
-                let (Some((index, name)), Some((_, armature)), Some(info)) =
-                    (active_bone(doc, object), doc.armature_of(object), registry.get(op_id))
-                else {
+                let Some((index, name)) = active_bone(doc, object) else {
                     ui.weak(&l.sidebar_nothing);
                     return;
                 };
                 // i18n-exempt: a bone's name is the user's own text
                 ui.strong(&name);
-                let params = if op_id == "pose.set_bone" {
-                    Some(kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&active.pose, &name)))
+                if op_id == "pose.set_bone" {
+                    draw_pose_bone_fields(ui, state, doc, registry, object, &name);
                 } else {
-                    kreate_ops::ops::armature::bone_params(armature, index).map(|p| kreate_reflect::OpParams::to_map(&p))
-                };
-                if let Some(mut params) = params {
-                    if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
-                        let dragging = ui.ctx().input(|i| i.pointer.any_down());
-                        send_edit(state, op_id, params, dragging);
-                    }
+                    draw_rest_bone_fields(ui, state, doc, registry, object, index);
                 }
                 return;
             }
@@ -4353,7 +4369,61 @@ fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
 /// not know what any operator is. Editing a value emits `AdjustLast`, and the
 /// application restores and re-runs — the same path redo takes, which is why
 /// this needs no per-operator support.
+/// Blender's Adjust Last Operation panel, in the viewport's bottom-left
+/// corner: folded to the operation's name, opened to its parameters.
+///
+/// Where the hand already is after an operation. The same panel as the Tool
+/// tab's, so the two cannot come to adjust different things.
+fn draw_adjust_float(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    registry: &OperatorRegistry,
+    history: &History,
+    viewport: egui::Rect,
+) {
+    let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) else { return };
+    // An operation with nothing to adjust — a selection, a paste — has no
+    // panel, as in Blender.
+    if info.schema.iter().all(|d| d.hidden) {
+        return;
+    }
+    let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
+    let label = if label == info.name_key() { info.label.to_string() } else { label };
+    let shown = egui::Area::new(egui::Id::new(("adjust-float", viewport.min.x as i32, viewport.min.y as i32)))
+        .order(egui::Order::Middle)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(viewport.left_bottom() + egui::vec2(10.0, -10.0))
+        .constrain_to(viewport)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(250.0);
+                egui::CollapsingHeader::new(label)
+                    .id_salt("adjust-last")
+                    .default_open(false)
+                    .show(ui, |ui| draw_adjust_fields(ui, state, registry, history));
+            });
+        });
+    // Over the picture: a click on the panel must not select what is behind.
+    state.viewport_blockers.push(shown.response.rect);
+}
+
 fn draw_adjust_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    registry: &OperatorRegistry,
+    history: &History,
+) {
+    if let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) {
+        let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
+        let label = if label == info.name_key() { info.label.to_string() } else { label };
+        ui.label(label);
+        ui.separator();
+    }
+    draw_adjust_fields(ui, state, registry, history);
+}
+
+/// The last operation's parameters, editable: what both adjust panels draw.
+fn draw_adjust_fields(
     ui: &mut Ui,
     state: &mut ShellState,
     registry: &OperatorRegistry,
@@ -4377,15 +4447,6 @@ fn draw_adjust_panel(
     if stale {
         state.adjust_params = Some((entry.op_id.clone(), entry.params.clone()));
     }
-
-    let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
-    let label = if label == info.name_key() {
-        info.label.to_string()
-    } else {
-        label
-    };
-    ui.label(label);
-    ui.separator();
 
     let Some((_, params)) = state.adjust_params.as_mut() else {
         return;
@@ -4464,11 +4525,23 @@ fn draw_properties(
                 let name = state.catalog.get(tab.label_key());
                 // The glyph is the button and the name is the tooltip, which is
                 // what keeps the column narrow enough to be a column.
-                if ui
-                    .selectable_label(*tab == current, tab.glyph())
-                    .on_hover_text(&name)
-                    .clicked()
-                {
+                // Painted, and lit like any selected button.
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+                let theme = kreate_ui::theme::from_ui(ui);
+                let visuals = ui.style().interact_selectable(&response, *tab == current);
+                if *tab == current || response.hovered() {
+                    ui.painter().rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
+                }
+                let ink = if *tab == current { theme.accent } else { theme.text_dim };
+                let data = doc.selection.active.and_then(|id| doc.object(id)).map_or(RowKind::Empty, |o| match o.data {
+                    ObjectData::Light(_) => RowKind::Light,
+                    ObjectData::Camera(_) => RowKind::Camera,
+                    ObjectData::Armature(_) => RowKind::Armature,
+                    ObjectData::Mesh(_) => RowKind::Mesh { verts: 0, faces: 0 },
+                    ObjectData::Empty => RowKind::Empty,
+                });
+                kreate_ui::icons::paint_icon(ui, rect.shrink(3.0), tab.icon(data), ink);
+                if response.on_hover_text(&name).clicked() {
                     current = *tab;
                     state.set_properties_tab(area, *tab);
                 }
@@ -4556,6 +4629,10 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
 pub fn chosen_tab(remembered: PropertiesTab, available: &[PropertiesTab]) -> PropertiesTab {
     if available.contains(&remembered) {
         remembered
+    } else if available.contains(&PropertiesTab::Object) {
+        // What there is to show about what is selected, before the last
+        // operation, which the viewport's corner already shows.
+        PropertiesTab::Object
     } else {
         PropertiesTab::Tool
     }
@@ -5128,33 +5205,138 @@ fn draw_armature_data(
 /// changing the other is how a person finds out which they meant.
 fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry) {
     let Some(object) = doc.selection.active else { return };
-    let (Some((index, name)), Some((_, armature)), Some(o)) =
-        (active_bone(doc, object), doc.armature_of(object), doc.object(object))
-    else {
-        return;
-    };
+    let Some((index, name)) = active_bone(doc, object) else { return };
     // i18n-exempt: the bone's name is the user's own text
     ui.heading(&name);
     ui.separator();
-    if let Some(info) = registry.get("pose.set_bone") {
-        let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&o.pose, &name));
-        let title = state.catalog.get("panel-pose");
-        kreate_ui::panel::section(ui, &title, true, |ui| {
-            if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
-                let dragging = ui.ctx().input(|i| i.pointer.any_down());
-                send_edit(state, "pose.set_bone", params, dragging);
-            }
-        });
+    let title = state.catalog.get("panel-pose");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        draw_pose_bone_fields(ui, state, doc, registry, object, &name);
+    });
+    let title = state.catalog.get("panel-bone-rest");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        draw_rest_bone_fields(ui, state, doc, registry, object, index);
+    });
+}
+
+/// The pose property a Bone tab field drives, as its curve names it.
+fn pose_animated(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "location" => "location",
+        "rotation" => "rotation_quaternion",
+        "scale" => "scale",
+        _ => return None,
+    })
+}
+
+/// A bone's pose, with diamonds and the right-click menu: the Bone tab and
+/// the sidebar in pose mode.
+fn draw_pose_bone_fields(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    object: ObjectId,
+    bone: &str,
+) {
+    let (Some(o), Some(info)) = (doc.object(object), registry.get("pose.set_bone")) else { return };
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&o.pose, bone));
+    let path = |field: &str| pose_animated(field).map(|p| kreate_scene::animation::bone_path(bone, p));
+    let text = field_menu_text(&state.catalog);
+    let tip = state.catalog.get("key-property");
+    let out = kreate_ui::property_editor_full(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+        |_| true,
+        |field| path(field).map(|p| key_mark(doc, o.action, &p)),
+        &tip,
+        |field| {
+            let p = path(field)?;
+            Some(kreate_ui::FieldMenu {
+                animatable: true,
+                keyed_here: key_mark(doc, o.action, &p) == kreate_ui::KeyMark::Keyed,
+                driven: Vec::new(),
+                resettable: true,
+            })
+        },
+        &text,
+    );
+    if out.changed {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "pose.set_bone", params.clone(), dragging);
     }
-    if let (Some(info), Some(bone)) = (registry.get("armature.bone_set"), kreate_ops::ops::armature::bone_params(armature, index)) {
-        let mut params = kreate_reflect::OpParams::to_map(&bone);
-        let title = state.catalog.get("panel-bone-rest");
-        kreate_ui::panel::section(ui, &title, true, |ui| {
-            if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
-                let dragging = ui.ctx().input(|i| i.pointer.any_down());
-                send_edit(state, "armature.bone_set", params, dragging);
+    if let Some(p) = out.keyed.and_then(path) {
+        toggle_key(state, doc, o.action, 2, 0, &p);
+    }
+    if let Some((field, action)) = out.action {
+        match (action, path(field)) {
+            (kreate_ui::FieldAction::InsertKey | kreate_ui::FieldAction::DeleteKey, Some(p)) => {
+                use kreate_reflect::PropertyValue as V;
+                let mut k = PropertyMap::new();
+                k.set("datablock", V::Enum(2));
+                k.set("property", V::Text(p));
+                let op = if action == kreate_ui::FieldAction::InsertKey {
+                    "anim.keyframe_insert_property"
+                } else {
+                    "anim.keyframe_delete_property"
+                };
+                state.queue.dispatch(op, k);
             }
-        });
+            (kreate_ui::FieldAction::Reset, _) => {
+                if let Some(default) = info.defaults().get(field).cloned() {
+                    params.set(field, default);
+                    state.queue.run(info.id, params);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A bone as built, with its parent picked from the armature's other bones:
+/// the Bone tab and the sidebar in the skeleton's edit mode.
+fn draw_rest_bone_fields(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    object: ObjectId,
+    index: usize,
+) {
+    let (Some((_, armature)), Some(info)) = (doc.armature_of(object), registry.get("armature.bone_set")) else { return };
+    let Some(bone) = kreate_ops::ops::armature::bone_params(armature, index) else { return };
+    let mut params = kreate_reflect::OpParams::to_map(&bone);
+    let mut changed =
+        kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut params, |name| name != "parent");
+    // The parent from a list, as Blender's is: every bone that would not make
+    // a loop, and none.
+    let none = state.catalog.get("drivers-none");
+    let current = if bone.parent.is_empty() { none.clone() } else { bone.parent.clone() };
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("bone-parent"));
+        egui::ComboBox::from_id_salt(("bone-parent", index))
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                let mut pick = |value: &str, shown: &str| {
+                    if ui.selectable_label(bone.parent == value, shown).clicked() && bone.parent != value {
+                        params.set("parent", kreate_reflect::PropertyValue::Text(value.to_string()));
+                        changed = true;
+                    }
+                };
+                pick("", &none);
+                for (i, b) in armature.bones.iter().enumerate() {
+                    if !kreate_scene::armature::is_ancestor(armature, index, i) {
+                        pick(&b.name, &b.name);
+                    }
+                }
+            });
+    });
+    if changed {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "armature.bone_set", params, dragging);
     }
 }
 
@@ -5523,6 +5705,7 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+bone-parent = Parent
 workspace-layout = Layout
 workspace-modeling = Modeling
 workspace-uv-editing = UV Editing
@@ -6021,6 +6204,7 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 여역
 sidebar-item = 항목
+bone-parent = 부모
 workspace-layout = 레이아웃
 workspace-modeling = 모델링
 workspace-uv-editing = UV 편집
@@ -6835,6 +7019,11 @@ mod tests {
             chosen_tab(PropertiesTab::Data, &tabs),
             PropertiesTab::Tool
         );
+        // With something selected, the Object tab rather than the last
+        // operation.
+        let (lit, _) = a_light_document();
+        let tabs = available_tabs(&lit);
+        assert_eq!(chosen_tab(PropertiesTab::Material, &tabs), PropertiesTab::Object);
         // And one that is still there is kept, or the panel would jump back to
         // Tool every time the selection changed at all.
         let (lit, _) = a_light_document();
@@ -7186,11 +7375,10 @@ mod tests {
     #[test]
     fn every_glyph_the_chrome_draws_is_in_the_bundled_font() {
         // The font is a subset and there is no system fallback, so a symbol
-        // outside it is a blank box rather than a substituted icon. Three of
-        // the six tab glyphs were exactly that, in the application's own
-        // chrome, and no test could see it: the layout was right, the click
-        // worked, the tooltip was correct and the button was empty.
-        let mut drawn: String = ALL_TABS.iter().map(|t| t.glyph()).collect();
+        // outside it is a blank box rather than a substituted icon. The tab
+        // column was exactly that once; it is painted now, and these are the
+        // symbols still set in type.
+        let mut drawn = String::new();
         drawn.push_str(CLEAR_GLYPH);
         drawn.push_str(ADD_GLYPH);
         drawn.push_str(REMOVE_GLYPH);
@@ -7202,15 +7390,14 @@ mod tests {
     }
 
     #[test]
-    fn no_two_tabs_wear_the_same_glyph() {
-        // The glyph *is* the button — the name is only a tooltip — so two tabs
+    fn no_two_tabs_wear_the_same_icon() {
+        // The icon *is* the button — the name is only a tooltip — so two tabs
         // sharing one are two buttons a user cannot tell apart without
         // hovering both.
-        let mut seen: Vec<&str> = ALL_TABS.iter().map(|t| t.glyph()).collect();
-        seen.sort_unstable();
-        let count = seen.len();
-        seen.dedup();
-        assert_eq!(count, seen.len(), "two property tabs share a glyph");
+        let icons: Vec<_> = ALL_TABS.iter().map(|t| t.icon(RowKind::Light)).collect();
+        for (i, a) in icons.iter().enumerate() {
+            assert!(!icons[i + 1..].contains(a), "two property tabs share an icon: {a:?}");
+        }
     }
 
     // --- picking a lamp by its glyph -------------------------------------

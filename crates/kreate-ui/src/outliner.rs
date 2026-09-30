@@ -489,7 +489,7 @@ fn collection_icon(ui: &Ui, rect: egui::Rect) {
 }
 
 /// The icon for what an object is.
-fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: bool) {
+pub(crate) fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: bool) {
     let theme = crate::theme::from_ui(ui);
     let ink = if visible { theme.text_dim } else { theme.text_faint };
     let p = ui.painter();

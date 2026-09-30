@@ -17,6 +17,7 @@ pub mod console;
 pub mod element_icon;
 pub mod fonts;
 pub mod graph_editor;
+pub mod icons;
 pub mod object_glyph;
 pub mod panel;
 pub mod pie_menu;

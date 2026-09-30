@@ -733,11 +733,31 @@ impl Operator for KeyProperty {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let kind = datablock_of(params.datablock);
+        if !params.frame.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        // A bone's property of the active object's pose — the Bone tab's
+        // diamond — goes through the one place bone keys are written, which
+        // keeps a quaternion on the curve's side of the sphere.
+        if kind == kreate_scene::DatablockKind::Object {
+            if let Some((bone, property)) = animation::parse_bone_path(&params.property) {
+                let d = doc.document();
+                let Some(object) = d.selection.active.filter(|o| {
+                    d.armature_of(*o).is_some_and(|(_, a)| a.bone_index(bone).is_some())
+                }) else {
+                    return Ok(OpResult::Cancelled);
+                };
+                if !animation::BONE_ANIMATABLE.iter().any(|b| b.name == property) {
+                    return Ok(OpResult::Cancelled);
+                }
+                let (bone, property) = (bone.to_string(), property.to_string());
+                let keyed = key_bones(doc.document_mut(), object, &[bone], params.frame, &[property.as_str()]);
+                return Ok(if keyed { OpResult::Finished } else { OpResult::Cancelled });
+            }
+        }
         // Checked against what the kind declares before anything is made: a
         // misspelt property must not leave an empty action behind.
-        if !params.frame.is_finite()
-            || !animation::animatable(kind).iter().any(|d| d.name == params.property)
-        {
+        if !animation::animatable(kind).iter().any(|d| d.name == params.property) {
             return Ok(OpResult::Cancelled);
         }
         let d = doc.document_mut();

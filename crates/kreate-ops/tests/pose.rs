@@ -301,3 +301,24 @@ fn a_bone_with_a_space_in_its_name_can_be_picked_in_the_dope_sheet() {
         .collect();
     assert_eq!(selected, vec![path.clone(), path.clone(), path]);
 }
+
+#[test]
+fn the_bone_tabs_diamond_keys_one_property_of_one_bone() {
+    let (registry, mut history) = wired();
+    let (mut doc, rig) = arm();
+    let path = kreate_scene::animation::bone_path("Lower", "rotation_quaternion");
+    let mut p = PropertyMap::new();
+    p.set("frame", PropertyValue::Float(3.0));
+    p.set("datablock", PropertyValue::Enum(2));
+    p.set("property", PropertyValue::Text(path.clone()));
+    history.dispatch(&registry, &mut doc, &Context::default(), "anim.keyframe_insert_property", &p).expect("ran");
+    let action = doc.object(rig).unwrap().action.expect("an action");
+    let curves: Vec<_> = doc.action(action).unwrap().curves.iter().map(|c| c.path.property.to_string()).collect();
+    assert_eq!(curves, vec![path.clone(); 4]);
+    history.dispatch(&registry, &mut doc, &Context::default(), "anim.keyframe_delete_property", &p).expect("ran");
+    assert!(doc.action(action).unwrap().curves.is_empty());
+    // A bone the armature does not have keys nothing.
+    p.set("property", PropertyValue::Text(kreate_scene::animation::bone_path("Tail", "location")));
+    assert!(history.dispatch(&registry, &mut doc, &Context::default(), "anim.keyframe_insert_property", &p).is_ok());
+    assert!(doc.action(action).unwrap().curves.is_empty());
+}
