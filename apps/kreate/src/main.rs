@@ -673,6 +673,10 @@ struct App {
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
     /// The brush size circle select last used, so the next one starts there.
     circle_radius: f32,
+    /// Local view (`/`): the objects shown, and the view to go back to.
+    local_view: Option<(Vec<kreate_scene::document::ObjectId>, kreate_render::Camera)>,
+    /// Looking through the scene camera (Numpad 0): the view to go back to.
+    camera_view: Option<kreate_render::Camera>,
     /// `C`: the selection brush, while it is on.
     circle: Option<CircleSelect>,
     /// The document version the drivers last ran against. They run again
@@ -775,6 +779,8 @@ impl App {
             loop_cut_seed: None,
             knife: None,
             circle_radius: 40.0,
+            local_view: None,
+            camera_view: None,
             circle: None,
             autokey: false,
             shown_title: String::new(),
@@ -2222,6 +2228,114 @@ impl App {
         self.run_op(op, params);
     }
 
+    /// Where the selection is and how big: the selected elements in edit mode,
+    /// the selected objects' drawn geometry otherwise.
+    fn selection_sphere(&self) -> Option<(DVec3, f64)> {
+        let mut points: Vec<DVec3> = Vec::new();
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
+            let weighing = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, 0.0)?;
+            for part in &weighing.parts {
+                let Some(mesh) = self.doc.mesh(part.target.mesh) else { continue };
+                for (i, w) in part.indices.iter().zip(&part.weights) {
+                    if *w >= 1.0 {
+                        points.push(part.target.to_world.transform_point3(mesh.positions()[*i as usize].as_dvec3()));
+                    }
+                }
+            }
+        } else {
+            for id in &self.doc.selection.objects {
+                let world = self.doc.world_transform(*id);
+                match self.evaluated.iter().find(|(o, _)| o == id) {
+                    Some((_, mesh)) => points.extend(mesh.positions().iter().map(|p| world.transform_point3(p.as_dvec3()))),
+                    None => points.push(world.translation),
+                }
+            }
+        }
+        if points.is_empty() {
+            return None;
+        }
+        let lo = points.iter().fold(DVec3::splat(f64::MAX), |a, p| a.min(*p));
+        let hi = points.iter().fold(DVec3::splat(f64::MIN), |a, p| a.max(*p));
+        let centre = (lo + hi) * 0.5;
+        // A lone point still gets a view a little way back from it.
+        Some((centre, ((hi - lo).length() * 0.5).max(0.5)))
+    }
+
+    /// Numpad `.`: the view glides to frame the selection, or everything when
+    /// nothing is selected.
+    fn frame_selected(&mut self) {
+        let Some((centre, radius)) = self.selection_sphere() else {
+            self.frame_all();
+            return;
+        };
+        let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
+        let mut destination = self.camera;
+        destination.frame_sphere(centre, radius, aspect);
+        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+    }
+
+    /// `/`: only the selected objects, framed — and again, everything back
+    /// where the view was.
+    fn toggle_local_view(&mut self) {
+        if let Some((_, before)) = self.local_view.take() {
+            self.motion.animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
+            self.status("");
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+            return;
+        }
+        let keep: Vec<_> = self.doc.selection.objects.clone();
+        if keep.is_empty() {
+            self.status("select something for local view");
+            return;
+        }
+        self.local_view = Some((keep, self.camera));
+        self.evaluate_scene();
+        self.frame_selected();
+        self.status("Local View — / to leave");
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Numpad 0: the view through the scene camera — the active object when
+    /// it is one, the first camera otherwise — and again, back.
+    fn toggle_camera_view(&mut self) {
+        if let Some(before) = self.camera_view.take() {
+            self.motion.animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
+            self.redraw.set(RedrawReason::CAMERA_MOVED);
+            return;
+        }
+        let is_camera = |id: kreate_scene::document::ObjectId| {
+            self.doc.object(id).is_some_and(|o| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
+        };
+        let chosen = self
+            .doc
+            .selection
+            .active
+            .filter(|a| is_camera(*a))
+            .or_else(|| self.doc.objects().map(|(id, _)| id).find(|id| is_camera(*id)));
+        let Some(object) = chosen else {
+            self.status("the scene has no camera");
+            return;
+        };
+        let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
+        let (_, rotation, eye) = self.doc.world_transform(object).to_scale_rotation_translation();
+        let lens = match self.doc.object(object).map(|o| &o.data) {
+            Some(kreate_scene::document::ObjectData::Camera(c)) => self.doc.camera(*c).map(|c| c.fov_y(aspect)),
+            _ => None,
+        };
+        let mut destination = self.camera;
+        destination.projection = kreate_render::Projection::Perspective;
+        destination.rotation = rotation.normalize();
+        destination.distance = self.camera.distance.max(1.0);
+        destination.pivot = eye + destination.forward() * destination.distance;
+        if let Some(fov) = lens.filter(|f| f.is_finite() && *f > 0.0) {
+            destination.fov_y = fov;
+        }
+        self.camera_view = Some(self.camera);
+        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+    }
+
     /// `C`: turns the selection brush on, or off again.
     fn toggle_circle_select(&mut self) {
         if self.circle.is_some() {
@@ -2799,7 +2913,7 @@ impl App {
                         }
                     }
                 }
-                Command::FrameSelection => self.frame_all(),
+                Command::FrameSelection => self.frame_selected(),
                 Command::NewDocument => self.new_document(),
                 Command::OpenDocument => self.open_document(),
                 Command::SaveDocument => self.save_document(false),
@@ -3051,11 +3165,16 @@ impl App {
         else {
             return;
         };
+        self.set_world_image_from(&path);
+    }
+
+    /// The world's background from an image file.
+    fn set_world_image_from(&mut self, path: &std::path::Path) {
         // Raw, and it is not a guess: an environment is an emission and §2.1's
         // working space has no upper bound, so a float file is already what a
         // shader should sample. An eight-bit one is almost always sRGB and the
         // loader only consults this for those.
-        let image = match kreate_io::load_image_file(&path, kreate_scene::ColorSpace::Srgb) {
+        let image = match kreate_io::load_image_file(path, kreate_scene::ColorSpace::Srgb) {
             Ok(image) => image,
             Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
         };
@@ -3068,6 +3187,35 @@ impl App {
         params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
         self.run_op("world.set_image", params);
         self.status(&format!("environment: {name}"));
+    }
+
+    /// A file dropped on the window, as Blender takes one: a document opens,
+    /// a scene is added to this one — through the paste operator, so it is one
+    /// step to undo and replays from its script line — and an HDR becomes the
+    /// world's light.
+    fn open_dropped(&mut self, path: &std::path::Path) {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "kreate" => {
+                if self.confirm_discarding_changes("open the dropped document") {
+                    self.load_from(path);
+                }
+            }
+            "gltf" | "glb" | "obj" | "stl" => match import_scene(path) {
+                Ok((document, _notes)) => match kreate_io::clipboard::encode(&document) {
+                    Ok(text) => {
+                        let mut params = PropertyMap::new();
+                        params.set("data", PropertyValue::Text(text));
+                        self.run_op("object.paste", params);
+                        self.status(&format!("added {}", path.display()));
+                    }
+                    Err(e) => self.status(&format!("cannot add {}: {e}", path.display())),
+                },
+                Err(e) => self.status(&format!("cannot import {}: {e}", path.display())),
+            },
+            "hdr" | "exr" => self.set_world_image_from(path),
+            _ => self.status(&format!("cannot open {} here", path.display())),
+        }
     }
 
     /// Loads an image and makes it the active material's base colour texture.
@@ -3472,6 +3620,10 @@ impl App {
             *mesh = shown;
         }
         self.unhidden = unhidden;
+        // Local view: only what it was entered with is drawn or picked.
+        if let Some((keep, _)) = &self.local_view {
+            self.evaluated.retain(|(id, _)| keep.contains(id));
+        }
         // In weight paint mode the painted mesh is shown by its weights.
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
             let active = self.doc.selection.active;
@@ -4987,7 +5139,8 @@ impl App {
             }
             _ => None,
         };
-        let (marker_lines, marker_points) = kreate::glyphs::markers_with(&self.doc, shown);
+        let (marker_lines, marker_points) =
+            kreate::glyphs::markers_only(&self.doc, shown, self.local_view.as_ref().map(|(ids, _)| ids.as_slice()));
         gfx.viewport.set_markers(
             &gfx.gpu.device,
             &gfx.gpu.queue,
@@ -5482,6 +5635,9 @@ impl App {
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
             "view.circle_select" => self.toggle_circle_select(),
+            "view.local_view" => self.toggle_local_view(),
+            "view.camera" => self.toggle_camera_view(),
+            "view.frame_selected" => self.frame_selected(),
             // The 3D cursor.
             "view.cursor_place" => self.place_cursor(),
             "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),
@@ -5822,6 +5978,10 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::BracketLeft => "BracketLeft",
         KeyCode::BracketRight => "BracketRight",
         KeyCode::NumpadAdd => "NumpadAdd",
+        KeyCode::NumpadDivide => "NumpadDivide",
+        KeyCode::NumpadDecimal => "NumpadDecimal",
+        KeyCode::Numpad0 => "Numpad0",
+        KeyCode::Slash => "Slash",
         KeyCode::NumpadSubtract => "NumpadSubtract",
         KeyCode::Equal => "Equal",
         KeyCode::Minus => "Minus",
@@ -5965,6 +6125,10 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => {
+                self.open_dropped(&path);
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
 
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_mut() {
@@ -6702,6 +6866,58 @@ mod tests {
             !app.input.alt_down,
             "a modifier held when focus was lost never gets its key-up"
         );
+    }
+
+    #[test]
+    fn local_view_shows_only_the_selection_and_comes_back() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut app = app();
+        let mesh = app.doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+        let a = app.doc.add_object(Object::new("A", ObjectData::Mesh(mesh)));
+        let b = app.doc.add_object(Object::new("B", ObjectData::Mesh(mesh)));
+        app.doc.selection.add(a);
+        app.evaluate_scene();
+        assert_eq!(app.evaluated.len(), 2);
+        app.toggle_local_view();
+        assert!(app.evaluated.iter().all(|(id, _)| *id == a), "B is still drawn");
+        app.toggle_local_view();
+        app.evaluate_scene();
+        assert!(app.evaluated.iter().any(|(id, _)| *id == b));
+        // Nothing selected: no local view to enter.
+        app.doc.selection.clear();
+        app.toggle_local_view();
+        assert!(app.local_view.is_none());
+    }
+
+    #[test]
+    fn numpad_zero_needs_a_camera_and_toggles_back() {
+        let mut app = app();
+        app.toggle_camera_view();
+        assert!(app.camera_view.is_none(), "there is no camera to look through");
+        app.run_op("object.add_camera", PropertyMap::new());
+        app.toggle_camera_view();
+        assert!(app.camera_view.is_some());
+        app.toggle_camera_view();
+        assert!(app.camera_view.is_none());
+    }
+
+    #[test]
+    fn a_dropped_scene_is_added_to_this_one_as_one_step() {
+        let mut app = app();
+        let cube = app.doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+        app.doc.add_object(kreate_scene::document::Object::new("Cube", kreate_scene::document::ObjectData::Mesh(cube)));
+        let (bytes, _) = kreate_io::write_stl(&kreate_mesh::primitives::cube(2.0), &kreate_io::StlOptions::default());
+        let dir = std::env::temp_dir().join(format!("kreate-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dropped.stl");
+        std::fs::write(&path, bytes).unwrap();
+        let (objects, steps) = (app.doc.object_count(), app.history.entries().len());
+        app.open_dropped(&path);
+        assert_eq!(app.doc.object_count(), objects + 1, "the scene was replaced or nothing came");
+        assert_eq!(app.history.entries().len(), steps + 1);
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc.object_count(), objects);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

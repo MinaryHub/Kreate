@@ -347,6 +347,12 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             enum_param(Action::new("view.select_mode"), "mode", 2),
         ),
+        // Blender's numpad views: `/` local view (on the main row too), `0`
+        // through the scene camera, `.` framing the selection.
+        key("view.local_view", "NumpadDivide", Context::Viewport, Action::new("view.local_view")),
+        key("view.local_view_main", "Slash", Context::Viewport, Action::new("view.local_view")),
+        key("view.camera", "Numpad0", Context::Viewport, Action::new("view.camera")),
+        key("view.frame_selected", "NumpadDecimal", Context::Viewport, Action::new("view.frame_selected")),
         // Blender's Shift+S: the snap pie — the 3D cursor to the selection or
         // the world's origin, or the selection to the cursor.
         key(

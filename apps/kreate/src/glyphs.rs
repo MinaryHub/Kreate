@@ -63,6 +63,15 @@ pub fn markers_with(
     doc: &Document,
     armature: Option<(kreate_scene::ObjectId, Bones)>,
 ) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
+    markers_only(doc, armature, None)
+}
+
+/// The same, for only the objects `only` names — local view's.
+pub fn markers_only(
+    doc: &Document,
+    armature: Option<(kreate_scene::ObjectId, Bones)>,
+    only: Option<&[kreate_scene::ObjectId]>,
+) -> (Vec<OverlayLine>, Vec<OverlayPoint>) {
     let mut lines = Vec::new();
     let mut points = Vec::new();
     let accent = palette::display_rgba(palette::ACCENT);
@@ -70,7 +79,7 @@ pub fn markers_with(
     dim[3] = 0.85;
 
     for (id, object) in doc.objects() {
-        if !object.visible {
+        if !object.visible || only.is_some_and(|keep| !keep.contains(&id)) {
             continue;
         }
         let color = if doc.selection.contains(id) { accent } else { dim };

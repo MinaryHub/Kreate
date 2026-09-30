@@ -298,6 +298,10 @@ const APP_ACTIONS: &[&str] = &[
     "app.menu",
     // C: the selection brush, which is the application's until a stroke ends.
     "view.circle_select",
+    // Views of the scene, which are the application's and not the document's.
+    "view.local_view",
+    "view.camera",
+    "view.frame_selected",
     // File commands are the application's, not the document's: there is no
     // undo step for "the document you had open is gone".
     "file.new",
