@@ -189,6 +189,13 @@ pub struct Object {
     /// The vertex group being painted and shown, by name — Blender's active
     /// group, on the object as Blender keeps it.
     pub active_group: Option<String>,
+    /// Shape keys, in the order they were made, and how far each is turned up.
+    pub shape_keys: Vec<crate::shape::ShapeKey>,
+    /// The key the panel shows and edit mode edits; `None` for the basis.
+    pub active_shape: Option<String>,
+    /// The key traded into the mesh's positions while edit mode edits it —
+    /// see `shape`. `None` the rest of the time.
+    pub editing_shape: Option<String>,
 }
 
 impl Object {
@@ -211,6 +218,9 @@ impl Object {
             pose: crate::armature::Pose::default(),
             skin: None,
             active_group: None,
+            shape_keys: Vec::new(),
+            active_shape: None,
+            editing_shape: None,
         }
     }
 
@@ -1397,7 +1407,10 @@ impl Document {
             // action is a character's placement and its pose together.
             let pose_before = o.pose.clone();
             crate::animation::apply_to_pose(&action, frame, &mut o.pose);
-            if o.transform != before || o.pose != pose_before {
+            // And the shape keys' values.
+            let shapes_before = o.shape_keys.clone();
+            crate::animation::apply_to_shapes(&action, frame, &mut o.shape_keys);
+            if o.transform != before || o.pose != pose_before || o.shape_keys != shapes_before {
                 moved += 1;
             }
         }

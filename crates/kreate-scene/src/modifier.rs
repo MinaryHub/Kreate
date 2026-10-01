@@ -338,6 +338,15 @@ fn is_identity(stack: &[ModifierInstance]) -> bool {
     !stack.iter().any(|m| m.enabled)
 }
 
+/// A mesh with its shape keys mixed in, and what it was mixed from.
+#[derive(Clone, Debug)]
+struct ShapeEntry {
+    input: Arc<MeshData>,
+    keys: Vec<crate::shape::ShapeKey>,
+    output: Arc<MeshData>,
+    used: u64,
+}
+
 /// A skinned mesh, and the input and bone matrices it was made from.
 #[derive(Clone, Debug)]
 struct SkinEntry {
@@ -375,6 +384,8 @@ pub struct ModifierCache {
     entries: Vec<Entry>,
     /// Skinned meshes, one per bound input: see `ModifierCache::skinned`.
     skins: Vec<SkinEntry>,
+    /// Shape-key mixes, one per input and set of values.
+    shapes: Vec<ShapeEntry>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -399,7 +410,15 @@ impl ModifierCache {
         ctx: &EvalCtx,
     ) -> Option<Arc<MeshData>> {
         let object = doc.object(id)?;
-        let input = doc.mesh_arc(object.mesh()?)?;
+        let stored = doc.mesh_arc(object.mesh()?)?;
+        // Shape keys first, as Blender's are — under the armature and the
+        // stack — and not while edit mode has a key traded into the mesh.
+        let shaped = if object.editing_shape.is_none() && object.shape_keys.iter().any(|k| k.value != 0.0) {
+            self.shaped(stored, &object.shape_keys)
+        } else {
+            stored.clone()
+        };
+        let input = &shaped;
         // A mesh bound to an armature is skinned first, as Blender's Armature
         // modifier usually sits at the top of the stack, and the stack runs on
         // what the bones made of it.
@@ -409,6 +428,19 @@ impl ModifierCache {
         };
         let operands = operands_of(doc, id, &object.modifiers);
         Some(self.evaluate_with(&skinned, &object.modifiers, ctx, &operands))
+    }
+
+    /// The mesh with its keys mixed in, from the cache while the input and the
+    /// values are the same. A new mix of one input replaces the old.
+    fn shaped(&mut self, input: &Arc<MeshData>, keys: &[crate::shape::ShapeKey]) -> Arc<MeshData> {
+        if let Some(entry) = self.shapes.iter_mut().find(|e| Arc::ptr_eq(&e.input, input) && e.keys == keys) {
+            entry.used = self.generation;
+            return entry.output.clone();
+        }
+        let output = crate::shape::mix(input, keys).map(Arc::new).unwrap_or_else(|| input.clone());
+        self.shapes.retain(|e| !Arc::ptr_eq(&e.input, input));
+        self.shapes.push(ShapeEntry { input: input.clone(), keys: keys.to_vec(), output: output.clone(), used: self.generation });
+        output
     }
 
     /// The skinned mesh, from the cache while the input and the bones' matrices
@@ -558,6 +590,7 @@ impl ModifierCache {
         let generation = self.generation;
         self.entries.retain(|e| e.used == generation);
         self.skins.retain(|e| e.used == generation);
+        self.shapes.retain(|e| e.used == generation);
         self.generation += 1;
     }
 

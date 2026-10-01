@@ -755,6 +755,28 @@ impl Operator for KeyProperty {
                 return Ok(if keyed { OpResult::Finished } else { OpResult::Cancelled });
             }
         }
+        // A shape key's value: on the object's action, under Blender's path.
+        if kind == kreate_scene::DatablockKind::Object {
+            if let Some(name) = animation::parse_shape_path(&params.property) {
+                let d = doc.document_mut();
+                let Some(object) = d.selection.active else { return Ok(OpResult::Cancelled) };
+                let Some(value) = d.object(object).and_then(|o| o.shape_keys.iter().find(|k| k.name == name)).map(|k| k.value) else {
+                    return Ok(OpResult::Cancelled);
+                };
+                let o = d.object(object).expect("active");
+                let action = match o.action.filter(|a| d.action(*a).is_some()) {
+                    Some(a) => a,
+                    None => {
+                        let a = d.add_action(Action::new(format!("{}Action", o.name)));
+                        d.object_mut(object).expect("active").action = Some(a);
+                        a
+                    }
+                };
+                let Some(action) = d.action_mut(action) else { return Ok(OpResult::Cancelled) };
+                action.curve_mut(&params.property, 0).insert(params.frame, value as f64, Interpolation::default());
+                return Ok(OpResult::Finished);
+            }
+        }
         // Checked against what the kind declares before anything is made: a
         // misspelt property must not leave an empty action behind.
         if !animation::animatable(kind).iter().any(|d| d.name == params.property) {

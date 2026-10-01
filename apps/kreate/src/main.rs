@@ -1000,7 +1000,14 @@ impl App {
         // them. Entering pose mode is not an edit of any mesh, and a history
         // step for a selection nobody can see would be one more thing to undo.
         let sweeps = self.op_ctx.mode.edits_elements() || change.to.edits_elements();
+        let meshes = |m: OpMode| m.acts_on() == kreate_ops::mode::ActsOn::MeshElements;
+        let (entering, leaving) = (!meshes(self.op_ctx.mode) && meshes(change.to), meshes(self.op_ctx.mode) && !meshes(change.to));
         self.op_ctx.mode = change.to;
+        // With a shape key active, edit mode edits that key: its shape is
+        // traded into the mesh before the session reads it.
+        if entering {
+            self.run_op_with("object.shape_key_edit", &[("enter", PropertyValue::Bool(true))]);
+        }
 
         if sweeps {
             self.run_op_with(
@@ -1023,6 +1030,10 @@ impl App {
             self.edit.open_for(&self.doc, &meshes);
         } else {
             self.edit.clear();
+        }
+        // And traded back on the way out, once the session has let go.
+        if leaving {
+            self.run_op_with("object.shape_key_edit", &[("enter", PropertyValue::Bool(false))]);
         }
 
         // The mode decides which context a shortcut resolves in, so the

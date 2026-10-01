@@ -5738,7 +5738,10 @@ fn draw_data_tab(
             draw_camera_data(ui, state, doc, registry, l, id)
         }
         kreate_scene::document::ObjectData::Armature(id) => draw_armature_data(ui, state, doc, registry, id),
-        kreate_scene::document::ObjectData::Mesh(id) => draw_vertex_groups(ui, state, doc, id, active),
+        kreate_scene::document::ObjectData::Mesh(id) => {
+            draw_vertex_groups(ui, state, doc, id, active);
+            draw_shape_keys(ui, state, active);
+        }
         _ => {}
     }
 }
@@ -5782,6 +5785,74 @@ fn draw_vertex_groups(
                     p.set("name", V::Text(g.clone()));
                     state.queue.run("object.vertex_group_remove", p);
                 }
+            }
+        });
+    });
+}
+
+/// The object's shape keys: Blender's list in the Mesh Data tab — the basis,
+/// then each key with its value; click one to make it the one edit mode
+/// edits.
+fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::document::Object) {
+    use kreate_reflect::PropertyValue as V;
+    let title = state.catalog.get("panel-shape-keys");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        let active = object.active_shape.clone();
+        if object.editing_shape.is_some() {
+            ui.weak(state.catalog.get("shape-keys-editing"));
+        }
+        if !object.shape_keys.is_empty() && ui.selectable_label(active.is_none(), state.catalog.get("shape-key-basis")).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("name", V::Text(String::new()));
+            state.queue.run("object.shape_key_set_active", p);
+        }
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        for key in &object.shape_keys {
+            ui.horizontal(|ui| {
+                let is_active = active.as_deref() == Some(key.name.as_str());
+                if ui.selectable_label(is_active, &key.name).clicked() && !is_active {
+                    let mut p = PropertyMap::new();
+                    p.set("name", V::Text(key.name.clone()));
+                    state.queue.run("object.shape_key_set_active", p);
+                }
+                // Blender's diamond: a key of this value at the current frame.
+                // i18n-exempt: a geometric glyph standing in for an icon
+                if ui.small_button("\u{25C6}").on_hover_text(state.catalog.get("op-anim-keyframe-insert-property")).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("datablock", V::Enum(2));
+                    p.set("property", V::Text(kreate_scene::animation::shape_path(&key.name)));
+                    // Through the keys' door, which fills in the current frame.
+                    state.queue.dispatch("anim.keyframe_insert_property", p);
+                }
+                let mut value = key.value;
+                let response = ui.add(egui::Slider::new(&mut value, 0.0..=1.0).max_decimals(3));
+                if response.changed() {
+                    let mut p = PropertyMap::new();
+                    p.set("name", V::Text(key.name.clone()));
+                    p.set("value", V::Float(value as f64));
+                    send_edit(state, "object.shape_key_set", p, pointer_down);
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button(ADD_GLYPH).on_hover_text(state.catalog.get("op-object-shape-key-add")).clicked() {
+                state.queue.run("object.shape_key_add", PropertyMap::new());
+            }
+            if ui
+                .add_enabled(active.is_some(), egui::Button::new(REMOVE_GLYPH).small())
+                .on_hover_text(state.catalog.get("op-object-shape-key-remove"))
+                .clicked()
+            {
+                if let Some(name) = &active {
+                    let mut p = PropertyMap::new();
+                    p.set("name", V::Text(name.clone()));
+                    state.queue.run("object.shape_key_remove", p);
+                }
+            }
+            if ui.small_button(state.catalog.get("shape-key-from-mix")).on_hover_text(state.catalog.get("op-object-shape-key-add-desc")).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("from_mix", V::Bool(true));
+                state.queue.run("object.shape_key_add", p);
             }
         });
     });
@@ -6392,6 +6463,17 @@ op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
 op-mesh-knife = Knife
+panel-shape-keys = Shape Keys
+shape-key-basis = Basis
+shape-key-from-mix = From Mix
+shape-keys-editing = Edit mode is editing the active key.
+op-object-shape-key-add = Add Shape Key
+op-object-shape-key-add-desc = Adds a shape key — from the basis, or from what the keys make now.
+op-object-shape-key-remove = Remove Shape Key
+op-object-shape-key-set = Set Shape Key
+op-object-shape-key-set-desc = Turns a shape key up or down.
+op-object-shape-key-set-active = Set Active Shape Key
+op-object-shape-key-edit = Edit Shape Key
 panel-bone-ik = Inverse Kinematics
 op-pose-ik-add = Add IK
 op-pose-ik-add-desc = Makes the active bone reach for the other selected bone, turning the bones above it.
@@ -7011,6 +7093,17 @@ op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
 op-mesh-knife = 나이프
+panel-shape-keys = 셰이프 키
+shape-key-basis = 기본형
+shape-key-from-mix = 현재 모양으로
+shape-keys-editing = 편집 모드가 활성 키를 편집하고 있습니다.
+op-object-shape-key-add = 셰이프 키 추가
+op-object-shape-key-add-desc = 셰이프 키를 추가합니다 — 기본형에서, 또는 지금 섞인 모양에서.
+op-object-shape-key-remove = 셰이프 키 제거
+op-object-shape-key-set = 셰이프 키 설정
+op-object-shape-key-set-desc = 셰이프 키 값을 올리거나 내립니다.
+op-object-shape-key-set-active = 활성 셰이프 키 설정
+op-object-shape-key-edit = 셰이프 키 편집
 panel-bone-ik = IK (역운동학)
 op-pose-ik-add = IK 추가
 op-pose-ik-add-desc = 활성 뼈가 선택한 다른 뼈를 향해 뻗도록, 그 위의 뼈들을 돌립니다.

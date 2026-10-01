@@ -203,6 +203,14 @@ pub struct ObjectRecord {
     /// The vertex group being painted, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_group: Option<String>,
+    /// Shape keys: name and value each, in order; the offsets are mesh layers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape_keys: Vec<(String, f32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_shape: Option<String>,
+    /// The key edit mode had traded into the mesh when this was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editing_shape: Option<String>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1449,6 +1457,9 @@ pub fn write(
                     .collect(),
                 skin: object.skin.map(|u| u.raw()),
                 active_group: object.active_group.clone(),
+                shape_keys: object.shape_keys.iter().map(|k| (k.name.clone(), k.value)).collect(),
+                active_shape: object.active_shape.clone(),
+                editing_shape: object.editing_shape.clone(),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -1937,6 +1948,13 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .map(|s| s.and_then(|i| material_ids.get(i).copied()))
             .collect();
         object.modifiers = record.modifiers.iter().filter_map(modifier_from).collect();
+        object.shape_keys = record
+            .shape_keys
+            .iter()
+            .map(|(name, value)| kreate_scene::shape::ShapeKey { name: name.clone(), value: *value })
+            .collect();
+        object.active_shape = record.active_shape.clone();
+        object.editing_shape = record.editing_shape.clone();
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {

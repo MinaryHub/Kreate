@@ -6,6 +6,7 @@
 pub mod animation;
 pub mod armature;
 pub mod skin;
+pub mod shape;
 pub mod camera;
 pub mod clipboard;
 pub mod document;

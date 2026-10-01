@@ -584,6 +584,31 @@ pub fn bone_path(bone: &str, property: &str) -> String {
     format!("pose.bones[\"{bone}\"].{property}")
 }
 
+/// A shape key's value, as a curve drives it: Blender's path,
+/// `key_blocks["Smile"].value`, on the object's action.
+pub const SHAPE_ANIMATABLE: &[AnimatableDesc] =
+    &[AnimatableDesc { name: "value", kind: PropertyKind::Float, components: 1, doc: "How far the shape key is turned up." }];
+
+pub fn shape_path(key: &str) -> String {
+    format!("key_blocks[\"{key}\"].value")
+}
+
+/// The key a shape-key path names, if it is one.
+pub fn parse_shape_path(path: &str) -> Option<&str> {
+    path.strip_prefix("key_blocks[\"")?.strip_suffix("\"].value")
+}
+
+/// Plays the shape-key curves of `action` onto `keys` at `frame`.
+pub fn apply_to_shapes(action: &Action, frame: f64, keys: &mut [crate::shape::ShapeKey]) {
+    for curve in &action.curves {
+        let Some(name) = parse_shape_path(&curve.path.property) else { continue };
+        let Some(value) = curve.evaluate(frame) else { continue };
+        if let Some(k) = keys.iter_mut().find(|k| k.name == name) {
+            k.value = value.clamp(0.0, 1.0) as f32;
+        }
+    }
+}
+
 /// The bone and the property of a pose path, if it is one.
 pub fn parse_bone_path(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("pose.bones[\"")?;
@@ -597,6 +622,9 @@ pub fn describe(kind: DatablockKind, property: &str) -> Option<&'static Animatab
     if kind == DatablockKind::Object {
         if let Some((_, p)) = parse_bone_path(property) {
             return BONE_ANIMATABLE.iter().find(|d| d.name == p);
+        }
+        if parse_shape_path(property).is_some() {
+            return SHAPE_ANIMATABLE.first();
         }
     }
     animatable(kind).iter().find(|d| d.name == property)

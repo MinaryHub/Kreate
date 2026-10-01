@@ -87,3 +87,22 @@ fn ik_is_saved_with_the_pose() {
     let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();
     assert_eq!(o.pose.ik, vec![ik]);
 }
+
+#[test]
+fn shape_keys_are_saved_with_their_offsets() {
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::shape::{add_layer, ShapeKey};
+    let mut doc = Document::new();
+    let mut mesh = kreate_mesh::primitives::cube(2.0);
+    add_layer(&mut mesh, "Tall", &[]);
+    let mesh = doc.add_mesh(mesh);
+    let id = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+    let o = doc.object_mut(id).unwrap();
+    o.shape_keys = vec![ShapeKey { name: "Tall".into(), value: 0.25 }];
+    o.active_shape = Some("Tall".into());
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
+    assert_eq!(o.shape_keys, vec![ShapeKey { name: "Tall".into(), value: 0.25 }]);
+    assert_eq!(o.active_shape.as_deref(), Some("Tall"));
+    assert!(back.mesh(o.mesh().unwrap()).unwrap().attributes().contains("shape:Tall"));
+}
