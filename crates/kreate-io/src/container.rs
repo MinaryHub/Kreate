@@ -474,6 +474,8 @@ pub struct IkRecord {
     pub chain: u32,
     #[serde(default = "enabled_default")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pole: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1437,7 +1439,13 @@ pub fn write(
                     .pose
                     .ik
                     .iter()
-                    .map(|c| IkRecord { bone: c.bone.clone(), target: c.target.clone(), chain: c.chain, enabled: c.enabled })
+                    .map(|c| IkRecord {
+                        bone: c.bone.clone(),
+                        target: c.target.clone(),
+                        chain: c.chain,
+                        enabled: c.enabled,
+                        pole: c.pole.clone(),
+                    })
                     .collect(),
                 skin: object.skin.map(|u| u.raw()),
                 active_group: object.active_group.clone(),
@@ -1879,6 +1887,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     target: r.target.clone(),
                     chain: r.chain,
                     enabled: r.enabled,
+                    pole: r.pole.clone(),
                 })
                 .collect(),
             bones: record

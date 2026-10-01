@@ -465,11 +465,13 @@ pub struct IkParams {
     #[param(min = 0, max = 64, unit = "count")]
     pub chain: u32,
     pub enabled: bool,
+    /// The bone the first joint bends towards; empty for none.
+    pub pole: String,
 }
 
 impl Default for IkParams {
     fn default() -> Self {
-        Self { bone: String::new(), target: String::new(), chain: 2, enabled: true }
+        Self { bone: String::new(), target: String::new(), chain: 2, enabled: true, pole: String::new() }
     }
 }
 
@@ -515,7 +517,7 @@ impl Operator for AddIk {
         };
         let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
         o.pose.ik.retain(|c| c.bone != bone);
-        o.pose.ik.push(IkConstraint { bone, target, chain: params.chain, enabled: params.enabled });
+        o.pose.ik.push(IkConstraint { bone, target, chain: params.chain, enabled: params.enabled, pole: params.pole.clone() });
         Ok(OpResult::Finished)
     }
 }
@@ -537,7 +539,13 @@ impl Operator for SetIk {
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
         let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else { return Ok(OpResult::Cancelled) };
-        let wanted = IkConstraint { bone: bone.clone(), target: params.target.clone(), chain: params.chain, enabled: params.enabled };
+        let wanted = IkConstraint {
+            bone: bone.clone(),
+            target: params.target.clone(),
+            chain: params.chain,
+            enabled: params.enabled,
+            pole: params.pole.clone(),
+        };
         let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
         match o.pose.ik.iter_mut().find(|c| c.bone == bone) {
             Some(c) if *c == wanted => Ok(OpResult::Cancelled),

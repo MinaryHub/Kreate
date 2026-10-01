@@ -81,7 +81,7 @@ fn ik_is_saved_with_the_pose() {
     let mut doc = Document::new();
     let arm = doc.add_armature(Armature::new("Arm"));
     let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
-    let ik = IkConstraint { bone: "Bone".into(), target: "Goal".into(), chain: 3, enabled: false };
+    let ik = IkConstraint { bone: "Bone".into(), target: "Goal".into(), chain: 3, enabled: false, pole: "Knee".into() };
     doc.object_mut(rig).unwrap().pose.ik.push(ik.clone());
     let back = round_trip(&doc);
     let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();

@@ -1124,6 +1124,9 @@ impl Document {
                     if c.target == old {
                         c.target = new.to_string();
                     }
+                    if c.pole == old {
+                        c.pole = new.to_string();
+                    }
                 }
                 o.action
             };

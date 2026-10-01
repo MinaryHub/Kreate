@@ -5848,25 +5848,26 @@ fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: O
     use kreate_reflect::PropertyValue as V;
     let Some(o) = doc.object(object) else { return };
     let Some((_, armature)) = doc.armature_of(object) else { return };
-    let send = |state: &mut ShellState, op: &str, target: &str, chain: u32, enabled: bool| {
+    let send = |state: &mut ShellState, op: &str, target: &str, chain: u32, enabled: bool, pole: &str| {
         let mut p = PropertyMap::new();
         p.set("bone", V::Text(bone.to_string()));
         p.set("target", V::Text(target.to_string()));
         p.set("chain", V::Int(chain as i64));
         p.set("enabled", V::Bool(enabled));
+        p.set("pole", V::Text(pole.to_string()));
         state.queue.run(op, p);
     };
     let Some(ik) = o.pose.ik.iter().find(|c| c.bone == bone).cloned() else {
         if ui.button(state.catalog.get("op-pose-ik-add")).clicked() {
-            send(state, "pose.ik_add", "", 2, true);
+            send(state, "pose.ik_add", "", 2, true, "");
         }
         return;
     };
-    let (mut target, mut chain, mut enabled) = (ik.target.clone(), ik.chain, ik.enabled);
+    let (mut target, mut chain, mut enabled, mut pole) = (ik.target.clone(), ik.chain, ik.enabled, ik.pole.clone());
     ui.horizontal(|ui| {
         ui.checkbox(&mut enabled, state.catalog.get("ik-enabled"));
         if ui.small_button("\u{2715}").on_hover_text(state.catalog.get("op-pose-ik-remove")).clicked() {
-            send(state, "pose.ik_remove", "", 0, true);
+            send(state, "pose.ik_remove", "", 0, true, "");
         }
     });
     ui.horizontal(|ui| {
@@ -5880,12 +5881,25 @@ fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: O
             });
     });
     ui.horizontal(|ui| {
+        ui.label(state.catalog.get("ik-pole"));
+        egui::ComboBox::from_id_salt(("ik-pole", bone))
+            .selected_text(if pole.is_empty() { "\u{2014}".to_string() } else { pole.clone() })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut pole, String::new(), "\u{2014}");
+                for b in armature.bones.iter().filter(|b| b.name != bone) {
+                    ui.selectable_value(&mut pole, b.name.clone(), b.name.as_str());
+                }
+            })
+            .response
+            .on_hover_text(state.catalog.get("ik-pole-desc"));
+    });
+    ui.horizontal(|ui| {
         ui.label(state.catalog.get("ik-chain"));
         ui.add(egui::DragValue::new(&mut chain).range(0..=64))
             .on_hover_text(state.catalog.get("ik-chain-desc"));
     });
-    if (target.as_str(), chain, enabled) != (ik.target.as_str(), ik.chain, ik.enabled) {
-        send(state, "pose.ik_set", &target, chain, enabled);
+    if (target.as_str(), chain, enabled, pole.as_str()) != (ik.target.as_str(), ik.chain, ik.enabled, ik.pole.as_str()) {
+        send(state, "pose.ik_set", &target, chain, enabled, &pole);
     }
 }
 
@@ -6388,6 +6402,8 @@ op-pose-ik-remove-desc = Takes a bone's IK off.
 ik-enabled = On
 ik-target = Target
 ik-chain = Chain
+ik-pole = Pole
+ik-pole-desc = A bone the elbow or knee bends towards.
 ik-chain-desc = How many bones turn, counting this one; 0 for all the way up.
 menu-move-to-collection = Move to Collection
 collection-scene = Scene Collection
@@ -7005,6 +7021,8 @@ op-pose-ik-remove-desc = 뼈의 IK를 없앱니다.
 ik-enabled = 켜짐
 ik-target = 목표
 ik-chain = 체인
+ik-pole = 폴
+ik-pole-desc = 팔꿈치·무릎이 굽는 쪽을 정하는 뼈.
 ik-chain-desc = 이 뼈를 포함해 몇 개의 뼈가 돌지. 0이면 맨 위까지.
 menu-move-to-collection = 컬렉션으로 이동
 collection-scene = 씬 컬렉션

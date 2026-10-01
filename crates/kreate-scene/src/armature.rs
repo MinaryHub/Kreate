@@ -301,6 +301,10 @@ pub struct IkConstraint {
     pub target: String,
     pub chain: u32,
     pub enabled: bool,
+    /// The pole: a bone whose head the chain's first joint — the elbow, the
+    /// knee — bends towards. Empty for none, and the chain bends however its
+    /// rest pose leans.
+    pub pole: String,
 }
 
 impl Pose {
@@ -384,6 +388,32 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
     let length = armature.bones[tip_bone].length();
     let tip = |frames: &[DAffine3]| frames[tip_bone].transform_point3(DVec3::Y * length);
     let reach: f64 = chain.iter().map(|b| armature.bones[*b].length()).sum::<f64>().max(1e-9);
+    // A straight chain with the goal on its own line gives the solver no
+    // side to bend to: every bone already points at it. Bend the first
+    // joint a little first — towards the pole when there is one.
+    if chain.len() >= 2 {
+        let root = frames[*chain.last().expect("not empty")].translation;
+        let line = (tip(frames) - root).normalize_or_zero();
+        let off_line = |p: DVec3| (p - root).cross(line).length();
+        let straight = chain.iter().all(|b| off_line(frames[*b].translation) < 1e-6 * reach);
+        if line != DVec3::ZERO && straight && off_line(goal) < 1e-6 * reach {
+            let side = armature
+                .bone_index(&ik.pole)
+                .map(|p| frames[p].translation - root)
+                .map(|v| v - line * v.dot(line))
+                .filter(|v| v.length_squared() > 1e-18)
+                .unwrap_or_else(|| line.any_orthonormal_vector());
+            let axis = side.normalize().cross(line).normalize_or_zero();
+            // The whole chain tipped off the line about its root: the
+            // solver then has a side to fold the joints back from.
+            let about = DAffine3::from_translation(root)
+                * DAffine3::from_quat(DQuat::from_axis_angle(axis, -0.2))
+                * DAffine3::from_translation(-root);
+            for &c in &chain {
+                frames[c] = about * frames[c];
+            }
+        }
+    }
     for _ in 0..IK_PASSES {
         if tip(frames).distance(goal) < IK_CLOSE * reach {
             break;
@@ -399,6 +429,28 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
             // Bone `j` and the chain below it, which hang from it.
             for &c in &chain[..=k] {
                 frames[c] = about * frames[c];
+            }
+        }
+    }
+    // The pole: the whole chain turned about the line from its root to the
+    // goal until its first joint is on the pole's side. The tip is on that
+    // line, so it stays on the goal.
+    if let Some(pole) = armature.bone_index(&ik.pole).filter(|p| !chain.contains(p)) {
+        if chain.len() >= 2 {
+            let root = frames[*chain.last().expect("not empty")].translation;
+            let joint = frames[chain[chain.len() - 2]].translation;
+            let axis = (goal - root).normalize_or_zero();
+            let flat = |v: DVec3| v - axis * v.dot(axis);
+            let (bend, want) = (flat(joint - root), flat(frames[pole].translation - root));
+            if axis != DVec3::ZERO && bend.length_squared() > 1e-18 && want.length_squared() > 1e-18 {
+                let (bend, want) = (bend.normalize(), want.normalize());
+                let angle = bend.cross(want).dot(axis).atan2(bend.dot(want));
+                let about = DAffine3::from_translation(root)
+                    * DAffine3::from_quat(DQuat::from_axis_angle(axis, angle))
+                    * DAffine3::from_translation(-root);
+                for &c in &chain {
+                    frames[c] = about * frames[c];
+                }
             }
         }
     }
@@ -556,7 +608,7 @@ mod tests {
     }
 
     fn ik(chain: u32) -> IkConstraint {
-        IkConstraint { bone: "Lower".into(), target: "Target".into(), chain, enabled: true }
+        IkConstraint { bone: "Lower".into(), target: "Target".into(), chain, enabled: true, pole: String::new() }
     }
 
     #[test]
@@ -595,6 +647,25 @@ mod tests {
         let dir = (frames[1].matrix3 * DVec3::Y).normalize();
         let want = (DVec3::new(1.2, 0.0, 0.9) - DVec3::Z).normalize();
         assert!(dir.dot(want) > 0.999, "{dir:?}");
+    }
+
+    #[test]
+    fn a_pole_decides_which_way_the_elbow_bends() {
+        // The target straight above-ish in X, so the arm has to bend; a pole
+        // bone out on +Y and then on -Y puts the elbow on that side.
+        let mut a = rig();
+        a.bones[3].head = DVec3::new(0.0, 0.0, 1.5);
+        a.bones[3].tail = DVec3::new(0.0, 0.0, 1.8);
+        for side in [1.0, -1.0] {
+            let mut rig = a.clone();
+            rig.add_bone(Bone { name: "Pole".into(), head: DVec3::new(0.0, 3.0 * side, 1.0), tail: DVec3::new(0.0, 3.0 * side, 1.3), ..Default::default() });
+            let pose = Pose { ik: vec![IkConstraint { pole: "Pole".into(), ..ik(2) }], ..Default::default() };
+            let frames = posed(&rig, &pose);
+            let elbow = frames[1].translation;
+            assert!(elbow.y * side > 0.3, "side {side}: elbow at {elbow:?}");
+            let tip = frames[1].transform_point3(DVec3::Y * rig.bones[1].length());
+            assert!(tip.distance(DVec3::new(0.0, 0.0, 1.5)) < 1e-3, "the pole pulled the tip off the target: {tip:?}");
+        }
     }
 }
 
