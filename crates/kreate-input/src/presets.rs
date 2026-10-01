@@ -531,6 +531,8 @@ fn common() -> Vec<Binding> {
         key("pose.select_all", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 0)),
         key("pose.select_none", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 1))
             .with_modifiers(Modifiers::alt()),
+        // Blender's Shift+I: IK on the active bone, to the other selected one.
+        key("pose.ik_add", "I", Context::Pose, Action::new("pose.ik_add")).with_modifiers(Modifiers::shift()),
         key("pose.select_invert", "I", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 3))
             .with_modifiers(Modifiers::ctrl()),
         key("pose.clear_location", "G", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 1))

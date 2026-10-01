@@ -191,6 +191,9 @@ pub struct ObjectRecord {
     /// How it holds its bones: the ones not at rest or selected, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pose: Vec<PoseBoneRecord>,
+    /// IK constraints on the pose's bones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ik: Vec<IkRecord>,
     /// The active bone, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_bone: Option<String>,
@@ -461,6 +464,16 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
         _ => return None,
     };
     Some(ModifierInstance { kind, enabled: r.enabled })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IkRecord {
+    pub bone: String,
+    pub target: String,
+    #[serde(default)]
+    pub chain: u32,
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1420,6 +1433,12 @@ pub fn write(
                 armature,
                 pose,
                 active_bone: object.pose.active.clone(),
+                ik: object
+                    .pose
+                    .ik
+                    .iter()
+                    .map(|c| IkRecord { bone: c.bone.clone(), target: c.target.clone(), chain: c.chain, enabled: c.enabled })
+                    .collect(),
                 skin: object.skin.map(|u| u.raw()),
                 active_group: object.active_group.clone(),
                 material_overrides: object
@@ -1852,6 +1871,16 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.selectable = record.selectable;
         object.action = record.action.and_then(|i| action_ids.get(i).copied());
         object.pose = kreate_scene::armature::Pose {
+            ik: record
+                .ik
+                .iter()
+                .map(|r| kreate_scene::armature::IkConstraint {
+                    bone: r.bone.clone(),
+                    target: r.target.clone(),
+                    chain: r.chain,
+                    enabled: r.enabled,
+                })
+                .collect(),
             bones: record
                 .pose
                 .iter()

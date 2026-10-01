@@ -322,3 +322,48 @@ fn the_bone_tabs_diamond_keys_one_property_of_one_bone() {
     assert!(history.dispatch(&registry, &mut doc, &Context::default(), "anim.keyframe_insert_property", &p).is_ok());
     assert!(doc.action(action).unwrap().curves.is_empty());
 }
+
+#[test]
+fn shift_i_puts_ik_on_the_active_bone_toward_the_other_selected_one() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+    use kreate_scene::armature::{Armature, Bone};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut doc = kreate_scene::Document::new();
+    let mut a = Armature::new("Arm");
+    a.bones[0].name = "Upper".into();
+    a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: kreate_math::DVec3::Z, tail: kreate_math::DVec3::new(0.0, 0.0, 2.0), connected: true, ..Default::default() });
+    a.add_bone(Bone { name: "Goal".into(), head: kreate_math::DVec3::new(1.2, 0.0, 0.9), tail: kreate_math::DVec3::new(1.2, 0.0, 1.3), ..Default::default() });
+    let arm = doc.add_armature(a);
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
+    doc.selection.add(rig);
+    {
+        let pose = &mut doc.object_mut(rig).unwrap().pose;
+        pose.entry("Goal").selected = true;
+        pose.entry("Lower").selected = true;
+        pose.active = Some("Lower".into());
+    }
+    let mut history = History::new();
+    let ctx = kreate_ops::operator::Context::default();
+    history.dispatch(&registry, &mut doc, &ctx, "pose.ik_add", &PropertyMap::new()).unwrap();
+    let ik = doc.object(rig).unwrap().pose.ik.clone();
+    assert_eq!(ik.len(), 1);
+    assert_eq!((ik[0].bone.as_str(), ik[0].target.as_str(), ik[0].chain), ("Lower", "Goal", 2));
+    // The forearm's tip is on the goal now.
+    let frames = doc.posed_bones(rig);
+    let tip = frames[1].transform_point3(kreate_math::DVec3::Y);
+    assert!(tip.distance(kreate_math::DVec3::new(1.2, 0.0, 0.9)) < 1e-3, "{tip:?}");
+    // Off, then gone.
+    let mut p = PropertyMap::new();
+    p.set("target", PropertyValue::Text("Goal".into()));
+    p.set("enabled", PropertyValue::Bool(false));
+    history.dispatch(&registry, &mut doc, &ctx, "pose.ik_set", &p).unwrap();
+    assert!(!doc.object(rig).unwrap().pose.ik[0].enabled);
+    history.dispatch(&registry, &mut doc, &ctx, "pose.ik_remove", &PropertyMap::new()).unwrap();
+    assert!(doc.object(rig).unwrap().pose.ik.is_empty());
+    // Renaming the goal follows into the constraint.
+    history.dispatch(&registry, &mut doc, &ctx, "pose.ik_add", &PropertyMap::new()).unwrap();
+    assert!(doc.rename_bone(arm, "Goal", "Hand_IK"));
+    assert_eq!(doc.object(rig).unwrap().pose.ik[0].target, "Hand_IK");
+}

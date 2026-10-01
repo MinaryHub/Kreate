@@ -1117,6 +1117,14 @@ impl Document {
                 if o.pose.active.as_deref() == Some(old) {
                     o.pose.active = Some(new.to_string());
                 }
+                for c in &mut o.pose.ik {
+                    if c.bone == old {
+                        c.bone = new.to_string();
+                    }
+                    if c.target == old {
+                        c.target = new.to_string();
+                    }
+                }
                 o.action
             };
             if let Some(action) = action.and_then(|a| self.action_mut(a)) {

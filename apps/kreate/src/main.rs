@@ -1480,6 +1480,7 @@ impl App {
             ("mesh.hide", &[("unselected", PropertyValue::Bool(true))]),
             ("mesh.reveal", &[]),
             ("view.cursor_place", &[]),
+            ("pose.ik_add", &[]),
             ("mesh.knife", &[]),
             ("object.select_all", &[("action", PropertyValue::Enum(0))]),
             ("object.select_all", &[("action", PropertyValue::Enum(1))]),

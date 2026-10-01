@@ -18,13 +18,16 @@
 
 use kreate_math::{DAffine3, DQuat, DTransform, DVec3};
 use kreate_ops_derive::OpParams;
-use kreate_scene::armature::{self, Armature};
+use kreate_scene::armature::{self, Armature, IkConstraint};
 use kreate_scene::document::{Object, ObjectData, ObjectId};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<AddIk>();
+    registry.register::<SetIk>();
+    registry.register::<RemoveIk>();
     registry.register::<AddArmature>();
     registry.register::<SelectPick>();
     registry.register::<SelectAll>();
@@ -448,6 +451,126 @@ pub struct SetPoseBoneParams {
 impl Default for SetPoseBoneParams {
     fn default() -> Self {
         Self { bone: String::new(), location: [0.0; 3], rotation: [0.0; 3], scale: [1.0; 3] }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct IkParams {
+    /// The bone whose tip reaches; empty for the active bone.
+    pub bone: String,
+    /// The bone it reaches for; empty for the other selected bone, as
+    /// Blender's Shift+I takes it — or none yet, to pick in the Bone tab.
+    pub target: String,
+    /// How many bones turn, counting the bone itself; zero for all the way up.
+    #[param(min = 0, max = 64, unit = "count")]
+    pub chain: u32,
+    pub enabled: bool,
+}
+
+impl Default for IkParams {
+    fn default() -> Self {
+        Self { bone: String::new(), target: String::new(), chain: 2, enabled: true }
+    }
+}
+
+/// The named bone, or the active one.
+fn bone_or_active(doc: &Document, object: ObjectId, bone: &str) -> Option<String> {
+    let (_, armature) = doc.armature_of(object)?;
+    let name = if bone.is_empty() { doc.object(object)?.pose.active.clone()? } else { bone.to_string() };
+    armature.bone_index(&name).map(|_| name)
+}
+
+/// Blender's Shift+I: an IK constraint on the active bone, reaching for the
+/// other selected bone. One per bone; adding again replaces it.
+pub struct AddIk;
+
+impl Operator for AddIk {
+    type Params = IkParams;
+    fn id() -> &'static str {
+        "pose.ik_add"
+    }
+    fn label() -> &'static str {
+        "Add IK"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let d = doc.document();
+        let Some(bone) = bone_or_active(d, object, &params.bone) else {
+            return Err(OpError::Failed("no active bone to put IK on".into()));
+        };
+        let target = if params.target.is_empty() {
+            let (_, armature) = d.armature_of(object).expect("posed");
+            let pose = &d.object(object).expect("posed").pose;
+            armature
+                .bones
+                .iter()
+                .map(|b| b.name.clone())
+                .find(|n| *n != bone && pose.is_selected(n))
+                .unwrap_or_default()
+        } else {
+            params.target.clone()
+        };
+        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        o.pose.ik.retain(|c| c.bone != bone);
+        o.pose.ik.push(IkConstraint { bone, target, chain: params.chain, enabled: params.enabled });
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Changes a bone's IK: its target, chain, whether it is on.
+pub struct SetIk;
+
+impl Operator for SetIk {
+    type Params = IkParams;
+    fn id() -> &'static str {
+        "pose.ik_set"
+    }
+    fn label() -> &'static str {
+        "Set IK"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else { return Ok(OpResult::Cancelled) };
+        let wanted = IkConstraint { bone: bone.clone(), target: params.target.clone(), chain: params.chain, enabled: params.enabled };
+        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        match o.pose.ik.iter_mut().find(|c| c.bone == bone) {
+            Some(c) if *c == wanted => Ok(OpResult::Cancelled),
+            Some(c) => {
+                *c = wanted;
+                Ok(OpResult::Finished)
+            }
+            None => Ok(OpResult::Cancelled),
+        }
+    }
+}
+
+/// Takes a bone's IK off.
+pub struct RemoveIk;
+
+impl Operator for RemoveIk {
+    type Params = IkParams;
+    fn id() -> &'static str {
+        "pose.ik_remove"
+    }
+    fn label() -> &'static str {
+        "Remove IK"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let before = o.pose.ik.len();
+        o.pose.ik.retain(|c| c.bone != bone);
+        Ok(if o.pose.ik.len() < before { OpResult::Finished } else { OpResult::Cancelled })
     }
 }
 

@@ -73,3 +73,17 @@ fn every_modifier_is_saved_and_a_boolean_still_finds_its_cutter() {
     let found = back.object_by_uid(b.operand).and_then(|id| back.object(id)).map(|o| o.name.clone());
     assert_eq!(found.as_deref(), Some("Cutter"));
 }
+
+#[test]
+fn ik_is_saved_with_the_pose() {
+    use kreate_scene::armature::{Armature, IkConstraint};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let arm = doc.add_armature(Armature::new("Arm"));
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
+    let ik = IkConstraint { bone: "Bone".into(), target: "Goal".into(), chain: 3, enabled: false };
+    doc.object_mut(rig).unwrap().pose.ik.push(ik.clone());
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();
+    assert_eq!(o.pose.ik, vec![ik]);
+}

@@ -1159,6 +1159,7 @@ struct Labels {
     add_empty: String,
     add_armature: String,
     menu_pose: String,
+    pose_ik_add: String,
     menu_weights: String,
     group_add: String,
     weights_normalize: String,
@@ -1372,6 +1373,7 @@ impl Labels {
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
+            pose_ik_add: t("op-pose-ik-add"),
             menu_weights: t("menu-weights"),
             group_add: t("op-object-vertex-group-add"),
             weights_normalize: t("op-paint-weights-normalize"),
@@ -2872,7 +2874,8 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
 /// The Pose menu: putting what was done to the selected bones back.
 fn pose_nodes(l: &Labels) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
-    [
+    let mut out: Vec<MenuNode> = vec![entry("pose.ik_add", &l.pose_ik_add, op("pose.ik_add", &[])), MenuNode::Separator];
+    out.extend([
         (0u32, &l.pose_clear_all),
         (1, &l.pose_clear_location),
         (2, &l.pose_clear_rotation),
@@ -2884,8 +2887,8 @@ fn pose_nodes(l: &Labels) -> Vec<MenuNode> {
             MenuEntry::new("pose.clear_transform", label, op("pose.clear_transform", &[("what", V::Enum(what))]))
                 .variant("what", V::Enum(what)),
         )
-    })
-    .collect()
+    }));
+    out
 }
 
 /// The Add menu, in Blender's shape: Mesh, Light, Camera, Empty.
@@ -5833,6 +5836,57 @@ fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: 
     kreate_ui::panel::section(ui, &title, true, |ui| {
         draw_rest_bone_fields(ui, state, doc, registry, object, index);
     });
+    let title = state.catalog.get("panel-bone-ik");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        draw_ik_fields(ui, state, doc, object, &name);
+    });
+}
+
+/// The bone's IK constraint: which bone it reaches for, how many bones turn,
+/// whether it is on — or a button to give it one.
+fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: ObjectId, bone: &str) {
+    use kreate_reflect::PropertyValue as V;
+    let Some(o) = doc.object(object) else { return };
+    let Some((_, armature)) = doc.armature_of(object) else { return };
+    let send = |state: &mut ShellState, op: &str, target: &str, chain: u32, enabled: bool| {
+        let mut p = PropertyMap::new();
+        p.set("bone", V::Text(bone.to_string()));
+        p.set("target", V::Text(target.to_string()));
+        p.set("chain", V::Int(chain as i64));
+        p.set("enabled", V::Bool(enabled));
+        state.queue.run(op, p);
+    };
+    let Some(ik) = o.pose.ik.iter().find(|c| c.bone == bone).cloned() else {
+        if ui.button(state.catalog.get("op-pose-ik-add")).clicked() {
+            send(state, "pose.ik_add", "", 2, true);
+        }
+        return;
+    };
+    let (mut target, mut chain, mut enabled) = (ik.target.clone(), ik.chain, ik.enabled);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut enabled, state.catalog.get("ik-enabled"));
+        if ui.small_button("\u{2715}").on_hover_text(state.catalog.get("op-pose-ik-remove")).clicked() {
+            send(state, "pose.ik_remove", "", 0, true);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("ik-target"));
+        egui::ComboBox::from_id_salt(("ik-target", bone))
+            .selected_text(if target.is_empty() { "\u{2014}".to_string() } else { target.clone() })
+            .show_ui(ui, |ui| {
+                for b in armature.bones.iter().filter(|b| b.name != bone) {
+                    ui.selectable_value(&mut target, b.name.clone(), b.name.as_str());
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("ik-chain"));
+        ui.add(egui::DragValue::new(&mut chain).range(0..=64))
+            .on_hover_text(state.catalog.get("ik-chain-desc"));
+    });
+    if (target.as_str(), chain, enabled) != (ik.target.as_str(), ik.chain, ik.enabled) {
+        send(state, "pose.ik_set", &target, chain, enabled);
+    }
 }
 
 /// The pose property a Bone tab field drives, as its curve names it.
@@ -6324,6 +6378,17 @@ op-view-selection-to-cursor = Selection to Cursor
 op-view-selection-to-cursor-desc = Moves the selection so its middle is on the 3D cursor.
 op-view-cursor-place = Place 3D Cursor
 op-mesh-knife = Knife
+panel-bone-ik = Inverse Kinematics
+op-pose-ik-add = Add IK
+op-pose-ik-add-desc = Makes the active bone reach for the other selected bone, turning the bones above it.
+op-pose-ik-set = Set IK
+op-pose-ik-set-desc = Changes a bone's IK target, chain or whether it is on.
+op-pose-ik-remove = Remove IK
+op-pose-ik-remove-desc = Takes a bone's IK off.
+ik-enabled = On
+ik-target = Target
+ik-chain = Chain
+ik-chain-desc = How many bones turn, counting this one; 0 for all the way up.
 menu-move-to-collection = Move to Collection
 collection-scene = Scene Collection
 collection-new = New Collection
@@ -6930,6 +6995,17 @@ op-view-selection-to-cursor = 선택을 커서로
 op-view-selection-to-cursor-desc = 선택의 가운데가 3D 커서에 오도록 옮깁니다.
 op-view-cursor-place = 3D 커서 놓기
 op-mesh-knife = 나이프
+panel-bone-ik = IK (역운동학)
+op-pose-ik-add = IK 추가
+op-pose-ik-add-desc = 활성 뼈가 선택한 다른 뼈를 향해 뻗도록, 그 위의 뼈들을 돌립니다.
+op-pose-ik-set = IK 설정
+op-pose-ik-set-desc = 뼈의 IK 목표·체인·켜짐을 바꿉니다.
+op-pose-ik-remove = IK 제거
+op-pose-ik-remove-desc = 뼈의 IK를 없앱니다.
+ik-enabled = 켜짐
+ik-target = 목표
+ik-chain = 체인
+ik-chain-desc = 이 뼈를 포함해 몇 개의 뼈가 돌지. 0이면 맨 위까지.
 menu-move-to-collection = 컬렉션으로 이동
 collection-scene = 씬 컬렉션
 collection-new = 새 컬렉션
