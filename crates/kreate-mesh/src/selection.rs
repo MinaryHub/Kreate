@@ -850,6 +850,155 @@ pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool 
     grew
 }
 
+
+/// Blender's Ctrl+click in edit mode: the shortest way from what is selected
+/// to `target`, selected — vertices and the edges between them, or faces
+/// across shared edges. Measured in distance, not in steps, so a long thin
+/// face does not count as one hop. `false` when there is nothing selected to
+/// start from or no way through.
+pub fn select_shortest_path(mesh: &mut MeshData, mode: SelectMode, target: u32) -> bool {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let p = mesh.positions().to_vec();
+    let at = |v: u32| p[v as usize].as_dvec3();
+    let edges: Vec<[u32; 2]> = mesh.edges().to_vec();
+    let hidden_v = hidden_flags(mesh, Domain::Point);
+    let hidden_f = hidden_flags(mesh, Domain::Face);
+    let is_hidden = |flags: &[bool], i: usize| flags.get(i).copied().unwrap_or(false);
+
+    // The graph: vertices along edges, or faces across shared edges.
+    let face_graph = mode == SelectMode::Face;
+    let nodes = if face_graph { mesh.num_faces() } else { mesh.num_verts() } as usize;
+    if target as usize >= if mode == SelectMode::Edge { edges.len() } else { nodes } {
+        return false;
+    }
+    let mut next: Vec<Vec<(u32, f64, u32)>> = vec![Vec::new(); nodes];
+    let centre = |f: u32| {
+        let ring = mesh.face_verts(f);
+        ring.iter().map(|v| at(*v)).sum::<glam::DVec3>() / ring.len().max(1) as f64
+    };
+    if face_graph {
+        let corner_edges = mesh.corner_edges();
+        let mut faces_of: Vec<Vec<u32>> = vec![Vec::new(); edges.len()];
+        for f in 0..mesh.num_faces() {
+            let range = mesh.face_corner_range(f);
+            for c in range {
+                faces_of[corner_edges[c] as usize].push(f);
+            }
+        }
+        let centres: Vec<_> = (0..mesh.num_faces()).map(centre).collect();
+        for (e, faces) in faces_of.iter().enumerate() {
+            for &a in faces {
+                for &b in faces {
+                    if a != b && !is_hidden(&hidden_f, b as usize) {
+                        next[a as usize].push((b, centres[a as usize].distance(centres[b as usize]), e as u32));
+                    }
+                }
+            }
+        }
+    } else {
+        for (e, [a, b]) in edges.iter().enumerate() {
+            let d = at(*a).distance(at(*b));
+            if !is_hidden(&hidden_v, *b as usize) {
+                next[*a as usize].push((*b, d, e as u32));
+            }
+            if !is_hidden(&hidden_v, *a as usize) {
+                next[*b as usize].push((*a, d, e as u32));
+            }
+        }
+    }
+
+    // Where the walk starts and where it may end. An edge is its two ends.
+    let (starts, goal): (Vec<u32>, Vec<bool>) = match mode {
+        SelectMode::Face => {
+            let mut goal = vec![false; nodes];
+            for f in selected(mesh, Domain::Face) {
+                goal[f as usize] = f != target;
+            }
+            (vec![target], goal)
+        }
+        SelectMode::Vert => {
+            let mut goal = vec![false; nodes];
+            for v in selected(mesh, Domain::Point) {
+                goal[v as usize] = v != target;
+            }
+            (vec![target], goal)
+        }
+        SelectMode::Edge => {
+            let [a, b] = edges[target as usize];
+            let mut goal = vec![false; nodes];
+            for e in selected(mesh, Domain::Edge) {
+                if e != target {
+                    for v in edges[e as usize] {
+                        goal[v as usize] = true;
+                    }
+                }
+            }
+            goal[a as usize] = false;
+            goal[b as usize] = false;
+            (vec![a, b], goal)
+        }
+    };
+    if !goal.iter().any(|g| *g) {
+        return false;
+    }
+
+    // Dijkstra, distances kept as integer micro-units for the heap.
+    let mut best = vec![f64::INFINITY; nodes];
+    let mut came: Vec<Option<(u32, u32)>> = vec![None; nodes];
+    let mut heap = BinaryHeap::new();
+    for s in &starts {
+        best[*s as usize] = 0.0;
+        heap.push(Reverse((0u64, *s)));
+    }
+    let mut reached = None;
+    while let Some(Reverse((d, n))) = heap.pop() {
+        let d = d as f64 / 1e6;
+        if d > best[n as usize] {
+            continue;
+        }
+        if goal[n as usize] {
+            reached = Some(n);
+            break;
+        }
+        for &(m, w, via) in &next[n as usize] {
+            let nd = d + w;
+            if nd < best[m as usize] {
+                best[m as usize] = nd;
+                came[m as usize] = Some((n, via));
+                heap.push(Reverse(((nd * 1e6) as u64, m)));
+            }
+        }
+    }
+    let Some(mut n) = reached else { return false };
+
+    let domain = match mode {
+        SelectMode::Face => Domain::Face,
+        _ => Domain::Point,
+    };
+    set_selected(mesh, domain, n, true);
+    while let Some((prev, via)) = came[n as usize] {
+        set_selected(mesh, domain, prev, true);
+        if !face_graph {
+            set_selected(mesh, Domain::Edge, via, true);
+        }
+        n = prev;
+    }
+    if mode == SelectMode::Edge {
+        set_selected(mesh, Domain::Edge, target, true);
+        let [a, b] = edges[target as usize];
+        set_selected(mesh, Domain::Point, a, true);
+        set_selected(mesh, Domain::Point, b, true);
+    }
+    match mode {
+        SelectMode::Face => flush(mesh, SelectMode::Face),
+        // The path's own edges are already on; flushing from vertices would
+        // add the chords between path vertices that happen to share an edge.
+        _ => deselect_hidden(mesh),
+    }
+    true
+}
+
 #[cfg(test)]
 mod hide_tests {
     use super::*;
@@ -1156,5 +1305,28 @@ mod tests {
         set_selected(&mut m, Domain::Edge, 0, true);
         assert!(select_similar(&mut m, 5, 0.01));
         assert_eq!(selected(&m, Domain::Edge).len(), 12);
+    }
+
+    /// Ctrl+click: from a selected corner of a grid to the far corner, the
+    /// path is selected and nothing off it.
+    #[test]
+    fn shortest_path_runs_from_the_selection_to_the_click() {
+        let mut m = crate::primitives::grid(4.0, 4, 4);
+        select_none(&mut m);
+        let p = m.positions().to_vec();
+        let corner = |x: f32, y: f32| p.iter().position(|q| (q.x - x).abs() < 1e-4 && (q.y - y).abs() < 1e-4).unwrap() as u32;
+        let (a, b) = (corner(-2.0, -2.0), corner(2.0, -2.0));
+        set_selected(&mut m, Domain::Point, a, true);
+        assert!(select_shortest_path(&mut m, SelectMode::Vert, b));
+        // Along the bottom edge: five vertices, four edges.
+        assert_eq!(selected(&m, Domain::Point).len(), 5);
+        assert_eq!(selected(&m, Domain::Edge).len(), 4);
+        assert!(selected(&m, Domain::Point).iter().all(|v| (p[*v as usize].y + 2.0).abs() < 1e-4));
+
+        // Faces: from one corner face to the next along the row.
+        select_none(&mut m);
+        set_selected(&mut m, Domain::Face, 0, true);
+        assert!(select_shortest_path(&mut m, SelectMode::Face, 3));
+        assert_eq!(selected(&m, Domain::Face).len(), 4);
     }
 }

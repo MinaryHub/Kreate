@@ -4715,6 +4715,22 @@ impl App {
             return;
         };
         if !drag.moved {
+            // Blender's Ctrl+click in edit mode: the shortest path from the
+            // selection to what was clicked.
+            if drag.deselect && self.op_ctx.mode.edits_elements() {
+                if let Some(hit) = self.hover {
+                    let mode = match self.pick_domain() {
+                        kreate_render::PickDomain::Vert => 0u32,
+                        kreate_render::PickDomain::Edge => 1,
+                        _ => 2,
+                    };
+                    let mut params = PropertyMap::new();
+                    params.set("element", PropertyValue::Int(hit.element as i64));
+                    params.set("mode", PropertyValue::Enum(mode));
+                    self.run_op("mesh.select_shortest_path", params);
+                }
+                return;
+            }
             self.click_select(drag.extend);
             return;
         }

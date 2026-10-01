@@ -2129,6 +2129,43 @@ impl Default for SelectSimilarParams {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectShortestPathParams {
+    /// The element clicked, in the domain `mode` names.
+    #[param(min = 0, unit = "count")]
+    pub element: u32,
+    #[param(variants("vert", "edge", "face"))]
+    pub mode: u32,
+}
+
+/// Blender's Ctrl+click in edit mode: the shortest way from the selection to
+/// the clicked element joins the selection.
+pub struct SelectShortestPath;
+
+impl Operator for SelectShortestPath {
+    type Params = SelectShortestPathParams;
+
+    fn id() -> &'static str {
+        "mesh.select_shortest_path"
+    }
+    fn label() -> &'static str {
+        "Select Shortest Path"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let mode = match params.mode {
+            1 => SelectMode::Edge,
+            2 => SelectMode::Face,
+            _ => SelectMode::Vert,
+        };
+        let found = with_mesh(doc, |mesh| selection::select_shortest_path(mesh, mode, params.element))?;
+        Ok(if found { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
 /// Blender's Shift+G: everything like what is selected joins it.
 pub struct SelectSimilar;
 
@@ -2802,6 +2839,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MergeVerts>();
     registry.register::<SelectElements>();
     registry.register::<SelectSimilar>();
+    registry.register::<SelectShortestPath>();
     registry.register::<HideElements>();
     registry.register::<KnifeCut>();
     registry.register::<MarkSeam>();
