@@ -879,7 +879,7 @@ fn the_operator_a_gesture_runs_depends_on_the_mode() {
     // key in its context reaches them.
     let mut ids: Vec<&str> = Mode::ALL
         .iter()
-        .filter(|mode| mode.acts_on() != kreate_ops::mode::ActsOn::Weights)
+        .filter(|mode| !matches!(mode.acts_on(), kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt))
         .flat_map(|mode| {
             [Kind::Move, Kind::Rotate, Kind::Scale]
                 .into_iter()

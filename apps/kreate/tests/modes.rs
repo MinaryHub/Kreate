@@ -47,6 +47,7 @@ fn the_header_offers_what_the_mode_acts_on() {
             ActsOn::Bones => Menu::Pose,
             ActsOn::BoneJoints => Menu::Armature,
             ActsOn::Weights => Menu::Weights,
+            ActsOn::Sculpt => Menu::Sculpt,
         };
         assert!(info.menus.contains(&want), "{mode:?} does not offer {want:?}");
     }

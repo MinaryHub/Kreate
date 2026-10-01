@@ -531,6 +531,11 @@ fn common() -> Vec<Binding> {
         key("pose.select_all", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 0)),
         key("pose.select_none", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 1))
             .with_modifiers(Modifiers::alt()),
+        // Blender's sculpt brushes on their letters.
+        key("sculpt.draw", "X", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(0))),
+        key("sculpt.smooth", "S", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(1))),
+        key("sculpt.grab", "G", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(2))),
+        key("sculpt.inflate", "I", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(3))),
         // Blender's Shift+I: IK on the active bone, to the other selected one.
         key("pose.ik_add", "I", Context::Pose, Action::new("pose.ik_add")).with_modifiers(Modifiers::shift()),
         key("pose.select_invert", "I", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 3))

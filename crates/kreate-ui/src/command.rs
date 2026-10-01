@@ -57,6 +57,8 @@ pub enum Command {
     SetMode(String),
     /// Chooses which element type edit-mode selection acts on.
     SetSelectMode(u32),
+    /// Picks the sculpt brush: draw, smooth, grab, inflate.
+    SetSculptBrush(u32),
     /// Choose how the viewport shades.
     ///
     /// Carries the mode rather than a tag, unlike [`Command::SetMode`]: the

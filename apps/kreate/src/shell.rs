@@ -235,6 +235,8 @@ pub struct ShellState {
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
     /// The weight-paint brush: what it paints towards, how wide, how hard.
     pub paint: PaintSettings,
+    /// The sculpt brush.
+    pub sculpt: SculptSettings,
     /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
     /// polyline per loop. Empty otherwise.
     pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
@@ -553,6 +555,7 @@ impl Default for ShellState {
             graph_views: std::collections::BTreeMap::new(),
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
+            sculpt: SculptSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
             circle_select: None,
@@ -1055,6 +1058,23 @@ impl Default for PaintSettings {
     }
 }
 
+/// The sculpt brush's settings, the application's as the paint brush's are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SculptSettings {
+    /// Draw, smooth, grab, inflate.
+    pub brush: u32,
+    /// Its radius on screen, in points.
+    pub radius: f32,
+    pub strength: f32,
+    pub mirror_x: bool,
+}
+
+impl Default for SculptSettings {
+    fn default() -> Self {
+        Self { brush: 0, radius: 50.0, strength: 0.5, mirror_x: false }
+    }
+}
+
 /// Sends a panel's edit, as a new step or as an adjustment to the last one.
 ///
 /// The whole of the rule in one place, because getting it wrong is invisible
@@ -1159,6 +1179,11 @@ struct Labels {
     add_empty: String,
     add_armature: String,
     menu_pose: String,
+    menu_sculpt: String,
+    sculpt_draw: String,
+    sculpt_smooth: String,
+    sculpt_grab: String,
+    sculpt_inflate: String,
     pose_ik_add: String,
     menu_weights: String,
     group_add: String,
@@ -1375,6 +1400,11 @@ impl Labels {
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
+            menu_sculpt: t("menu-sculpt"),
+            sculpt_draw: t("sculpt-draw"),
+            sculpt_smooth: t("sculpt-smooth"),
+            sculpt_grab: t("sculpt-grab"),
+            sculpt_inflate: t("sculpt-inflate"),
             pose_ik_add: t("op-pose-ik-add"),
             menu_weights: t("menu-weights"),
             group_add: t("op-object-vertex-group-add"),
@@ -1629,7 +1659,7 @@ pub fn draw(
                     &["armature.translate", "armature.extrude", "armature.bone_add", "armature.delete"]
                 }
                 // The brush is the mouse; there are no keys to learn yet.
-                kreate_ops::mode::ActsOn::Weights => &[],
+                kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => &[],
             };
             for id in hints {
                 if let Some(info) = state.command_info.get(*id).filter(|i| !i.shortcut.is_empty()) {
@@ -2045,12 +2075,17 @@ fn draw_area(
                 "viewport" => {
                     draw_viewport(ui, state, doc, mode, l, inner, image);
                     // The brush's reach, as a ring under the pointer.
-                    if mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                    let brush = match mode.acts_on() {
+                        kreate_ops::mode::ActsOn::Weights => Some(state.paint.radius),
+                        kreate_ops::mode::ActsOn::Sculpt => Some(state.sculpt.radius),
+                        _ => None,
+                    };
+                    if let Some(radius) = brush {
                         if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p)) {
                             let theme = kreate_ui::theme::from_ui(ui);
                             ui.painter()
                                 .with_clip_rect(inner)
-                                .circle_stroke(p, state.paint.radius, egui::Stroke::new(1.2, theme.text));
+                                .circle_stroke(p, radius, egui::Stroke::new(1.2, theme.text));
                         }
                     }
                     // The 3D cursor: Blender's red and white ring with a cross.
@@ -2341,6 +2376,24 @@ fn draw_area_header(
                                 })
                                 .response
                                 .on_hover_text(&l.pivot_label);
+                        }
+                        // The sculpt brush, in its header.
+                        if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+                            ui.separator();
+                            let names = [&l.sculpt_draw, &l.sculpt_smooth, &l.sculpt_grab, &l.sculpt_inflate];
+                            let s = &mut state.sculpt;
+                            egui::ComboBox::from_id_salt(("sculpt-brush", area.id.0))
+                                .selected_text(names[s.brush.min(3) as usize].as_str())
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in names.iter().enumerate() {
+                                        ui.selectable_value(&mut s.brush, i as u32, name.as_str());
+                                    }
+                                });
+                            ui.label(state.catalog.get("paint-radius"));
+                            ui.add(egui::DragValue::new(&mut state.sculpt.radius).range(4.0..=400.0).speed(1.0).suffix(" px"));
+                            ui.label(state.catalog.get("paint-strength"));
+                            ui.add(egui::DragValue::new(&mut state.sculpt.strength).range(0.0..=1.0).speed(0.01).max_decimals(2));
+                            ui.checkbox(&mut state.sculpt.mirror_x, state.catalog.get("sculpt-mirror-x"));
                         }
                         // The brush, where Blender keeps it: in the header of
                         // the mode that uses it.
@@ -2678,7 +2731,7 @@ fn viewport_menus(
     // nothing, as Blender's has no Add menu there.
     match mode.acts_on() {
         // A pose and a brush add nothing, as in Blender.
-        kreate_ops::mode::ActsOn::Bones | kreate_ops::mode::ActsOn::Weights => {}
+        kreate_ops::mode::ActsOn::Bones | kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => {}
         kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
             label: l.add_menu.clone(),
             nodes: vec![entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[]))],
@@ -2702,6 +2755,19 @@ fn viewport_menus(
             kreate_ops::mode::Menu::Pose => out.push(TopMenu {
                 label: l.menu_pose.clone(),
                 nodes: pose_nodes(l),
+            }),
+            kreate_ops::mode::Menu::Sculpt => out.push(TopMenu {
+                label: l.menu_sculpt.clone(),
+                nodes: [&l.sculpt_draw, &l.sculpt_smooth, &l.sculpt_grab, &l.sculpt_inflate]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, label)| {
+                        MenuNode::Entry(
+                            MenuEntry::new("sculpt.brush", label, Run::Command(Command::SetSculptBrush(i as u32)))
+                                .variant("brush", kreate_reflect::PropertyValue::Enum(i as u32)),
+                        )
+                    })
+                    .collect(),
             }),
             kreate_ops::mode::Menu::Weights => out.push(TopMenu {
                 label: l.menu_weights.clone(),
@@ -6570,6 +6636,20 @@ area-menu = Area
 sidebar-item = Item
 mode-weight-paint = Weight Paint
 keymap-context-weight-paint = Weight Paint
+keymap-context-sculpt = Sculpt
+mode-sculpt = Sculpt Mode
+op-mode-sculpt-desc = Pushes and pulls the surface with brushes.
+menu-sculpt = Sculpt
+sculpt-brush = Brush
+sculpt-draw = Draw
+sculpt-smooth = Smooth
+sculpt-grab = Grab
+sculpt-inflate = Inflate
+sculpt-mirror-x = X Symmetry
+op-sculpt-stroke = Sculpt
+op-sculpt-stroke-desc = One stroke of a sculpt brush.
+op-sculpt-brush = Sculpt Brush
+op-sculpt-brush-desc = Picks the sculpt brush.
 op-mode-weight-paint-desc = Paints how much each vertex follows each bone.
 menu-weights = Weights
 op-object-vertex-group-add = Add Vertex Group
@@ -7206,6 +7286,20 @@ area-menu = 여역
 sidebar-item = 항목
 mode-weight-paint = 웨이트 페인트
 keymap-context-weight-paint = 웨이트 페인트
+keymap-context-sculpt = 스컬프트
+mode-sculpt = 스컬프트 모드
+op-mode-sculpt-desc = 붓으로 표면을 밀고 당깁니다.
+menu-sculpt = 스컬프트
+sculpt-brush = 붓
+sculpt-draw = 그리기
+sculpt-smooth = 매끄럽게
+sculpt-grab = 잡기
+sculpt-inflate = 부풀리기
+sculpt-mirror-x = X 대칭
+op-sculpt-stroke = 스컬프트
+op-sculpt-stroke-desc = 스컬프트 붓의 한 획.
+op-sculpt-brush = 스컬프트 붓
+op-sculpt-brush-desc = 스컬프트 붓을 고릅니다.
 op-mode-weight-paint-desc = 각 정점이 각 뼈를 얼마나 따를지 칠합니다.
 menu-weights = 웨이트
 op-object-vertex-group-add = 버텍스 그룹 추가
@@ -8727,7 +8821,7 @@ mod tests {
         // with an armature, its two modes and not the mesh's Edit Mode.
         let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, Has::NOTHING).unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
-        assert_eq!(ids, vec!["mode-object", "mode-edit", "mode-weight-paint"]);
+        assert_eq!(ids, vec!["mode-object", "mode-edit", "mode-weight-paint", "mode-sculpt"]);
         assert!(entries[0].1, "the mode you are in is not lit");
         assert!(!entries[1].0.enabled, "edit mode with nothing to edit is not greyed");
         assert!(!entries[2].0.enabled, "weight paint with nothing to paint is not greyed");

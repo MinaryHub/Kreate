@@ -347,6 +347,21 @@ struct PaintStroke {
     normals: Vec<DVec3>,
 }
 
+/// A sculpt stroke in progress: the dabs laid so far in the mesh's space, the
+/// brush it started as, and — once anything has changed — its modal session.
+struct SculptStroke {
+    object: kreate_scene::document::ObjectId,
+    brush: u32,
+    invert: bool,
+    dabs: Vec<f64>,
+    /// Where the last dab went, in the world, to space the next one.
+    last: DVec3,
+    radius_world: f64,
+    /// For a grab: where it took hold, and the plane facing the view through it.
+    hold: DVec3,
+    session: Option<kreate_ops::ModalSession>,
+}
+
 /// Blender's circle select: a brush that selects what it passes over.
 struct CircleSelect {
     /// Its radius in the viewport's own pixels.
@@ -667,6 +682,8 @@ struct App {
     /// The weight-paint brush stroke in progress: its modal session and the
     /// vertices it has crossed so far.
     paint_stroke: Option<PaintStroke>,
+    /// A sculpt stroke in progress.
+    sculpt_stroke: Option<SculptStroke>,
     /// The painted mesh as the screen shows it in weight paint mode, with the
     /// active group's weights where the renderer's ramp reads them — kept, so
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
@@ -786,6 +803,7 @@ impl App {
             playing: None,
             driven_at: u64::MAX,
             paint_stroke: None,
+            sculpt_stroke: None,
             weight_display: None,
             unhidden: Vec::new(),
             loop_cut_hover: None,
@@ -2916,6 +2934,10 @@ impl App {
                     }
                 }
                 Command::SetSelectMode(mode) => self.set_select_mode(mode),
+                Command::SetSculptBrush(brush) => {
+                    self.ui.sculpt.brush = brush.min(3);
+                    self.redraw.set(RedrawReason::UI);
+                }
                 Command::SnapToAxis(axis) => {
                     let destination = self.camera.looking_along(axis);
                     self.motion.animate_to(
@@ -4173,6 +4195,10 @@ impl App {
                 self.begin_paint_stroke();
                 return;
             }
+            if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+                self.begin_sculpt_stroke();
+                return;
+            }
             self.begin_drag_select();
         }
     }
@@ -4198,6 +4224,103 @@ impl App {
             Ok(None) => {}
             Err(e) => self.status(&format!("paint: {e}")),
         }
+    }
+
+    /// Where the pointer meets the active mesh, in the world, if it does.
+    fn sculpt_hit(&mut self) -> Option<DVec3> {
+        let object = self.doc.selection.active?;
+        let ndc = self.cursor_ndc()?;
+        let aspect = self.viewport_aspect();
+        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        (hit.object == object).then_some(hit.point)
+    }
+
+    /// A press in sculpt mode: a stroke starts where the pointer meets the
+    /// mesh. Shift smooths whatever the brush is; Ctrl inverts it.
+    fn begin_sculpt_stroke(&mut self) {
+        let Some(object) = self.doc.selection.active.filter(|a| self.doc.object(*a).and_then(|o| o.mesh()).is_some()) else {
+            return;
+        };
+        let Some(at) = self.sculpt_hit() else { return };
+        let settings = self.ui.sculpt;
+        let brush = if self.input.shift_down { 1 } else { settings.brush };
+        // The brush's screen radius as a world length at the depth it touched.
+        let height = self.viewport_px.map(|(_, _, _, h)| h as f64).unwrap_or(1.0).max(1.0);
+        let ppp = self.egui_ctx.pixels_per_point() as f64;
+        let distance = (at - self.camera.eye()).length();
+        let per_pixel = 2.0 * (self.camera.fov_y * 0.5).tan() * distance / height;
+        let radius_world = settings.radius as f64 * ppp * per_pixel;
+        self.sculpt_stroke = Some(SculptStroke {
+            object,
+            brush,
+            invert: self.input.ctrl_down,
+            dabs: Vec::new(),
+            last: at,
+            radius_world,
+            hold: at,
+            session: None,
+        });
+        self.add_sculpt_dab(at);
+        self.drive_sculpt_stroke();
+    }
+
+    fn add_sculpt_dab(&mut self, at: DVec3) {
+        let Some(stroke) = self.sculpt_stroke.as_mut() else { return };
+        let to_local = self.doc.world_transform(stroke.object).inverse();
+        let local = to_local.transform_point3(at);
+        let radius = to_local.transform_vector3(DVec3::X * stroke.radius_world).length();
+        stroke.dabs.extend([local.x, local.y, local.z, radius]);
+        stroke.last = at;
+    }
+
+    /// The pointer moved during a stroke: a new dab once it has gone a
+    /// quarter of the brush, or for a grab the drag so far — then the stroke
+    /// re-run from where it began.
+    fn drive_sculpt_stroke(&mut self) {
+        let Some(stroke) = self.sculpt_stroke.as_ref() else { return };
+        let (object, brush, last, radius, hold) = (stroke.object, stroke.brush, stroke.last, stroke.radius_world, stroke.hold);
+        let to_local = self.doc.world_transform(object).inverse();
+        let mut grab = DVec3::ZERO;
+        if brush == 2 {
+            // The pointer on the plane through where it took hold, facing the view.
+            if let Some(ndc) = self.cursor_ndc() {
+                let aspect = self.viewport_aspect();
+                let eye = self.camera.eye();
+                let dir = self.camera.ray_direction(ndc, aspect).as_dvec3();
+                let n = self.camera.forward();
+                let denom = dir.dot(n);
+                if denom.abs() > 1e-9 {
+                    let on = eye + dir * ((hold - eye).dot(n) / denom);
+                    grab = to_local.transform_vector3(on - hold);
+                }
+            }
+        } else if let Some(at) = self.sculpt_hit() {
+            if at.distance(last) >= radius * 0.25 {
+                self.add_sculpt_dab(at);
+            }
+        }
+        let settings = self.ui.sculpt;
+        let Some(stroke) = self.sculpt_stroke.as_mut() else { return };
+        let mut params = PropertyMap::new();
+        params.set("brush", PropertyValue::Enum(stroke.brush));
+        params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
+        params.set("strength", PropertyValue::Float(settings.strength as f64));
+        params.set("invert", PropertyValue::Bool(stroke.invert));
+        params.set("grab", PropertyValue::Vec3(grab.to_array()));
+        params.set("mirror_x", PropertyValue::Bool(settings.mirror_x));
+        match stroke.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, None, &self.op_ctx, session, &params) {
+                    tracing::warn!(error = %e, "sculpt failed");
+                }
+            }
+            None => {
+                if let Ok(Some(session)) = self.history.begin_modal(&self.registry, &mut self.doc, None, &self.op_ctx, "sculpt.stroke", &params) {
+                    stroke.session = Some(session);
+                }
+            }
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
     /// The painted mesh's vertex normals, in the world, as it is drawn.
@@ -4301,6 +4424,10 @@ impl App {
     fn end_mouse_drag(&mut self, slot: usize) {
         // A stroke ends where the button comes up: one step to undo.
         if slot == 0 {
+            if let Some(SculptStroke { session: Some(session), .. }) = self.sculpt_stroke.take() {
+                self.history.commit_modal(session);
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
             if let Some(PaintStroke { session, .. }) = self.paint_stroke.take() {
                 self.history.commit_modal(session);
                 if let Some(entry) = self.history.last() {
@@ -4479,8 +4606,9 @@ impl App {
                     None => {}
                 }
             }
-            // A click in weight paint mode is a stroke, handled on the press.
-            kreate_ops::mode::ActsOn::Weights => {}
+            // A click in weight paint or sculpt mode is a stroke, handled on
+            // the press.
+            kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => {}
             kreate_ops::mode::ActsOn::BoneJoints => {
                 let Some(object) = kreate_ops::ops::armature::edited_object(&self.doc) else {
                     return true;
@@ -5819,6 +5947,11 @@ impl App {
                 self.linked_pick(deselect);
             }
             "view.circle_select" => self.toggle_circle_select(),
+            "sculpt.brush" => {
+                if let Some(PropertyValue::Enum(b)) = action.params.get("brush") {
+                    self.ui.sculpt.brush = (*b).min(3);
+                }
+            }
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.frame_selected" => self.frame_selected(),
@@ -6504,6 +6637,9 @@ impl ApplicationHandler for App {
                 if self.paint_stroke.is_some() {
                     self.drive_paint_stroke();
                 }
+                if self.sculpt_stroke.is_some() {
+                    self.drive_sculpt_stroke();
+                }
                 if self.loop_cut_hover.is_some() {
                     self.update_loop_cut_hover();
                 }
@@ -6514,7 +6650,7 @@ impl ApplicationHandler for App {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }
                 // The brush circle follows the pointer.
-                if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+                if matches!(self.op_ctx.mode.acts_on(), kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt) {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }
             }

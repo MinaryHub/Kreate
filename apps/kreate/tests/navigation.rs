@@ -298,6 +298,8 @@ const APP_ACTIONS: &[&str] = &[
     "app.menu",
     // C: the selection brush, which is the application's until a stroke ends.
     "view.circle_select",
+    // The sculpt brush is the application's setting, not the document's.
+    "sculpt.brush",
     // Views of the scene, which are the application's and not the document's.
     "view.local_view",
     "view.camera",

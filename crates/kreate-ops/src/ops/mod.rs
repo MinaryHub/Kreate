@@ -16,6 +16,7 @@ pub mod object;
 pub mod origin;
 pub mod paint;
 pub mod pose;
+pub mod sculpt;
 pub mod shape;
 pub mod uv;
 
@@ -32,6 +33,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     origin::register(registry);
     paint::register(registry);
     pose::register(registry);
+    sculpt::register(registry);
     shape::register(registry);
     uv::register(registry);
 }

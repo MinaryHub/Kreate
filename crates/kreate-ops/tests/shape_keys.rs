@@ -88,3 +88,32 @@ fn a_keyed_shape_value_plays_back() {
     doc.animate(11.0);
     assert_eq!(doc.object(id).unwrap().shape_keys[0].value, 1.0);
 }
+
+#[test]
+fn a_sculpt_stroke_raises_the_surface_and_replays_from_its_line() {
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::grid(4.0, 16, 16));
+    let id = doc.add_object(Object::new("Grid", ObjectData::Mesh(mesh)));
+    doc.selection.add(id);
+    let start = doc.clone();
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "sculpt.stroke",
+        &[
+            ("dabs", PropertyValue::Floats(vec![0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 1.0])),
+            ("strength", PropertyValue::Float(1.0)),
+        ],
+    );
+    let top = |d: &Document| d.mesh(mesh).unwrap().positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+    assert!(top(&doc) > 0.1);
+    let script = history.entries()[0].to_script_call();
+    let mut replay = start;
+    let out = History::new().run_script(&registry, &mut replay, None, &Context::default(), &script);
+    assert!(out.iter().all(|o| o.result.is_ok()), "{script}");
+    assert_eq!(top(&replay), top(&doc));
+}

@@ -13,6 +13,7 @@ pub mod edit;
 pub mod mesh_data;
 pub mod modifiers;
 pub mod primitives;
+pub mod sculpt;
 pub mod selection;
 pub mod tessellate;
 

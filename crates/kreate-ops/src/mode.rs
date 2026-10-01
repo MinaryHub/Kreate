@@ -31,6 +31,7 @@ pub enum Mode {
     EditArmature,
     Pose,
     WeightPaint,
+    Sculpt,
 }
 
 /// What a mode needs to be entered.
@@ -81,6 +82,8 @@ pub enum ActsOn {
     BoneJoints,
     /// The weights of the active mesh's vertex groups, with a brush.
     Weights,
+    /// The active mesh's surface, pushed and pulled with a brush.
+    Sculpt,
 }
 
 /// A header menu a mode offers after Add.
@@ -95,6 +98,8 @@ pub enum Menu {
     Armature,
     /// Weights: the vertex groups as a whole.
     Weights,
+    /// Sculpt: the brushes.
+    Sculpt,
 }
 
 /// Everything the application asks of a mode.
@@ -130,7 +135,7 @@ pub struct ModeInfo {
 }
 
 /// The cards, in the order the mode menu lists them.
-pub const MODES: [ModeInfo; 5] = [
+pub const MODES: [ModeInfo; 6] = [
     ModeInfo {
         mode: Mode::Object,
         tag: "object",
@@ -204,11 +209,26 @@ pub const MODES: [ModeInfo; 5] = [
         transform: ["object.translate", "object.rotate", "object.scale"],
         tab: Mode::Object,
     },
+    ModeInfo {
+        mode: Mode::Sculpt,
+        tag: "sculpt",
+        label_key: "mode-sculpt",
+        needs: Needs::Mesh,
+        acts_on: ActsOn::Sculpt,
+        keymap: "sculpt",
+        menus: &[Menu::Sculpt],
+        element_buttons: false,
+        edit_tools: false,
+        shows_elements: false,
+        // A brush mode, like weight paint: G picks the grab brush here.
+        transform: ["object.translate", "object.rotate", "object.scale"],
+        tab: Mode::Object,
+    },
 ];
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 5] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose, Mode::WeightPaint];
+    pub const ALL: [Mode; 6] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose, Mode::WeightPaint, Mode::Sculpt];
 
     /// This mode's card.
     ///
@@ -221,6 +241,7 @@ impl Mode {
             Mode::EditArmature => &MODES[2],
             Mode::Pose => &MODES[3],
             Mode::WeightPaint => &MODES[4],
+            Mode::Sculpt => &MODES[5],
         }
     }
 
@@ -364,7 +385,7 @@ mod tests {
                 ActsOn::Bones => "pose.",
                 ActsOn::BoneJoints => "armature.",
                 // See the card: nothing reaches them.
-                ActsOn::Weights => "object.",
+                ActsOn::Weights | ActsOn::Sculpt => "object.",
             };
             for op in mode.info().transform {
                 assert!(op.starts_with(prefix), "{mode:?}: {op}");
