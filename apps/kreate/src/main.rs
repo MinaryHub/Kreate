@@ -7171,10 +7171,10 @@ fn main() {
         )
         .init();
 
-    // `--lang ko` / `--lang en`, defaulting to Korean because that is who this
-    // is being built for. A real preference file replaces this.
+    // The interface is in English. `--lang ko` still switches it, for the
+    // Korean catalogue that is kept and tested.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut locale = "ko-KR".to_string();
+    let mut locale = "en-US".to_string();
     let mut path = None;
     let mut i = 0;
     while i < args.len() {
