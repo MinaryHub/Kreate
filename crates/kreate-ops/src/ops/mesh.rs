@@ -1726,6 +1726,61 @@ impl Operator for ExtrudeMove {
     }
 }
 
+// --- seams ------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MarkSeamParams {
+    /// Take the seam off instead.
+    pub clear: bool,
+}
+
+/// Marks the selected edges as seams — where Unwrap cuts the surface open.
+pub struct MarkSeam;
+
+impl Operator for MarkSeam {
+    type Params = MarkSeamParams;
+    fn id() -> &'static str {
+        "mesh.mark_seam"
+    }
+    fn label() -> &'static str {
+        "Mark Seam"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let changed = for_each_edit_mesh(doc, |_, mesh| {
+            let selected = selection::selected(mesh, kreate_mesh::Domain::Edge);
+            if selected.is_empty() {
+                return false;
+            }
+            let n = mesh.num_edges() as usize;
+            let mut seams = mesh
+                .attributes()
+                .get_bool(kreate_mesh::attribute::names::SEAM)
+                .filter(|s| s.len() == n)
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|| vec![false; n]);
+            let mut any = false;
+            for e in selected {
+                if let Some(s) = seams.get_mut(e as usize) {
+                    any |= *s == params.clear;
+                    *s = !params.clear;
+                }
+            }
+            if any {
+                mesh.attributes_mut().insert(
+                    kreate_mesh::attribute::names::SEAM,
+                    kreate_mesh::Domain::Edge,
+                    kreate_mesh::AttrData::Bool(std::sync::Arc::new(seams)),
+                );
+            }
+            any
+        })?;
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
 // --- knife ------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -2661,6 +2716,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectElements>();
     registry.register::<HideElements>();
     registry.register::<KnifeCut>();
+    registry.register::<MarkSeam>();
     registry.register::<ExtrudeMove>();
     registry.register::<SelectLinkedPick>();
     registry.register::<SelectLoopPick>();

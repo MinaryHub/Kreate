@@ -568,7 +568,55 @@ impl Operator for Pack {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct UnwrapParams {
+    /// The gap left between islands, as a fraction of the map.
+    #[param(min = 0.0, soft_max = 0.05)]
+    pub margin: f64,
+    /// Which UV set to write. Empty means the default set.
+    pub layer: String,
+}
+
+impl Default for UnwrapParams {
+    fn default() -> Self {
+        Self { margin: f64::from(uv_pack::DEFAULT_MARGIN), layer: String::new() }
+    }
+}
+
+/// Blender's Unwrap: the selected faces cut along their seams and laid flat
+/// with the least stretch they allow (LSCM), then packed. Every face when
+/// none is selected.
+pub struct Unwrap;
+
+impl Operator for Unwrap {
+    type Params = UnwrapParams;
+
+    fn id() -> &'static str {
+        "uv.unwrap"
+    }
+    fn label() -> &'static str {
+        "Unwrap"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let layer = layer_or_default(&params.layer).to_string();
+        let margin = params.margin as f32;
+        let written = with_bmesh(doc, |bm| {
+            let mut faces = bm.selected_faces();
+            if faces.is_empty() {
+                faces = bm.face_ids().collect::<Vec<FaceId>>();
+            }
+            Ok(kreate_mesh::edit::uv_unwrap::unwrap(bm, &faces, &layer, margin))
+        })?;
+        Ok(if written == 0 { OpResult::Cancelled } else { OpResult::Finished })
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<Unwrap>();
     registry.register::<Project>();
     registry.register::<Select>();
     registry.register::<SelectSet>();

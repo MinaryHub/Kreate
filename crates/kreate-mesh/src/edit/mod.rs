@@ -26,6 +26,7 @@ pub mod subdivide;
 pub mod uv_edit;
 pub mod uv_pack;
 pub mod uv_project;
+pub mod uv_unwrap;
 pub mod walk;
 
 pub use bevel::{bevel_edges, bevel_selected, Bevel};

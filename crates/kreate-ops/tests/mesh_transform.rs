@@ -1216,3 +1216,20 @@ fn e_on_an_edge_pulls_out_a_face_and_moves_it() {
     select(&mut doc, names::SELECT_VERT, Domain::Point, &[]);
     assert_eq!(run(&mut doc, &ctx, "mesh.extrude_move", &[]).unwrap(), kreate_ops::OpResult::Cancelled);
 }
+
+#[test]
+fn seams_marked_then_u_unwraps_into_the_map() {
+    let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(2.0));
+    let n = doc.mesh(doc.meshes().next().unwrap().0).unwrap().num_edges() as usize;
+    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &(0..n).collect::<Vec<_>>());
+    run(&mut doc, &ctx, "mesh.mark_seam", &[]).unwrap();
+    assert!(flags(&doc, names::SEAM).iter().all(|s| *s));
+    // Marking again is nothing; clearing one edge is something.
+    assert_eq!(run(&mut doc, &ctx, "mesh.mark_seam", &[]).unwrap(), kreate_ops::OpResult::Cancelled);
+    select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
+    run(&mut doc, &ctx, "uv.unwrap", &[]).unwrap();
+    let mesh = doc.mesh(doc.meshes().next().unwrap().0).unwrap();
+    let uvs = mesh.attributes().get_f32x2(kreate_mesh::attribute::names::UV).expect("a UV layer");
+    assert_eq!(uvs.len(), 24);
+    assert!(uvs.iter().all(|p| p.x >= -1e-4 && p.x <= 1.0001 && p.y >= -1e-4 && p.y <= 1.0001));
+}

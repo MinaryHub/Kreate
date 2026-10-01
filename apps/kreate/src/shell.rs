@@ -1283,6 +1283,8 @@ struct Labels {
     select_loop: String,
     select_more: String,
     knife: String,
+    mark_seam: String,
+    clear_seam: String,
     select_less: String,
     select_linked: String,
     show_hide: String,
@@ -1505,6 +1507,8 @@ impl Labels {
             select_loop: t("menu-select-loop"),
             select_more: t("menu-select-more"),
             knife: t("op-mesh-knife"),
+            mark_seam: t("menu-mark-seam"),
+            clear_seam: t("menu-clear-seam"),
             select_less: t("menu-select-less"),
             select_linked: t("menu-select-linked"),
             show_hide: t("menu-show-hide"),
@@ -4558,6 +4562,16 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                     &l.mark_sharp,
                     op("mesh.mark_sharp", &[("angle", V::Float(30f64.to_radians()))]),
                 ),
+                Separator,
+                // Where Unwrap cuts the surface open.
+                MenuNode::Entry(
+                    MenuEntry::new("mesh.mark_seam", &l.mark_seam, op("mesh.mark_seam", &[("clear", V::Bool(false))]))
+                        .variant("clear", V::Bool(false)),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new("mesh.mark_seam", &l.clear_seam, op("mesh.mark_seam", &[("clear", V::Bool(true))]))
+                        .variant("clear", V::Bool(true)),
+                ),
             ],
         },
         TopMenu {
@@ -6848,6 +6862,12 @@ op-uv-project-mode-3-desc = Wraps the selection around an axis, leaving height a
 op-uv-project = Project UVs
 op-uv-project-desc = Lays the selection out on the texture map by projection.
 op-uv-smart-project = Smart UV Project
+op-uv-unwrap = Unwrap
+op-uv-unwrap-desc = Cuts the selected faces open along their seams and lays them flat with the least stretch, then packs them.
+op-mesh-mark-seam = Mark Seam
+op-mesh-mark-seam-desc = Marks the selected edges as seams, where Unwrap cuts the surface open.
+menu-mark-seam = Mark Seam
+menu-clear-seam = Clear Seam
 op-uv-smart-project-desc = Groups faces that face the same way, unwraps each group, and lays the pieces out on the map.
 op-uv-pack = Pack Islands
 op-uv-pack-desc = Rearranges the pieces already there to fit the map, leaving the cuts alone.
@@ -7469,6 +7489,12 @@ op-uv-project-mode-3-desc = 높이는 그대로 둔 채 축 둘레로 감습니�
 op-uv-project = UV 펼치기
 op-uv-project-desc = 선택 영역을 투사로 텍스처 맵 위에 배열합니다.
 op-uv-smart-project = 스마트 UV 펼치기
+op-uv-unwrap = 펼치기
+op-uv-unwrap-desc = 선택한 면을 심을 따라 잘라 늘어남이 가장 적게 평평하게 편 뒤 배치합니다.
+op-mesh-mark-seam = 심 표시
+op-mesh-mark-seam-desc = 선택한 엣지를 심으로 표시합니다. 펼치기가 여기서 표면을 자릅니다.
+menu-mark-seam = 심 표시
+menu-clear-seam = 심 지우기
 op-uv-smart-project-desc = 각도가 비슷한 면끼리 묶어 조각별로 펼친 뒤, 조각들을 맵 안에 배치합니다.
 op-uv-pack = 아일랜드 배치
 op-uv-pack-desc = 자른 자리는 그대로 두고, 이미 있는 조각들만 맵 안에 다시 정렬합니다.

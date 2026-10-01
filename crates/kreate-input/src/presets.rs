@@ -764,12 +764,9 @@ fn common() -> Vec<Binding> {
         // a camera. The view-dependent variant lives on the right-click menu,
         // which is the only place that has a view to pass. `U` for unwrap, as
         // every modeller's hand expects.
-        key(
-            "uv.project",
-            "U",
-            Context::EditMesh,
-            enum_param(Action::new("uv.project"), "mode", 1),
-        ),
+        // Blender's U ▸ Unwrap, its first entry and the one reached for; the
+        // projections are on the right-click menu and the UV menu.
+        key("uv.unwrap", "U", Context::EditMesh, Action::new("uv.unwrap")),
         // Blender's K is the knife; marking sharp is in the Edge menu.
         key("mesh.knife", "K", Context::EditMesh, Action::new("mesh.knife")),
         key(
