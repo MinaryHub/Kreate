@@ -412,16 +412,35 @@ pub fn selection_vertices(mesh: &kreate_mesh::MeshData) -> Vec<u32> {
 /// Smooth by default. A modeller reaches for proportional editing to shape a
 /// surface, and a linear falloff leaves a visible cone with a crease at its rim
 /// — the very artefact the tool exists to avoid.
-fn falloff(distance: f64, radius: f64) -> f32 {
+fn falloff(distance: f64, radius: f64, curve: u32) -> f32 {
     if radius <= 0.0 {
         return 0.0;
     }
     let t = (distance / radius).clamp(0.0, 1.0);
-    // Smoothstep, flipped: 1 at the centre, 0 at the rim, and flat at both ends
-    // so the moved region joins the rest of the mesh without a crease.
+    // 1 at the centre, 0 at the rim.
     let s = 1.0 - t;
-    (s * s * (3.0 - 2.0 * s)) as f32
+    let w = match curve {
+        // Sphere: a dome, round at the top and steep at the rim.
+        1 => (s * (2.0 - s)).sqrt(),
+        // Root: a quick rise near the rim, a broad top.
+        2 => s.sqrt(),
+        // Sharp: a point at the centre.
+        3 => s * s,
+        // Linear: a cone.
+        4 => s,
+        // Constant: everything in reach moves fully.
+        5 if t < 1.0 => 1.0,
+        5 => 0.0,
+        // Smooth, the default — smoothstep, flat at both ends, so the moved
+        // region joins the rest of the mesh without a crease.
+        _ => s * s * (3.0 - 2.0 * s),
+    };
+    w as f32
 }
+
+/// Blender's proportional falloff curves, in its order; the index is what
+/// `proportional_falloff` carries.
+pub const FALLOFF_CURVES: [&str; 6] = ["smooth", "sphere", "root", "sharp", "linear", "constant"];
 
 /// The one place a set of world positions occupies, or `None` for more.
 ///
@@ -512,6 +531,7 @@ fn weigh_neighbourhood(
     positions: &[glam::Vec3],
     selected: &[u32],
     radius: f64,
+    curve: u32,
 ) -> (Vec<u32>, Vec<f32>) {
     let limit = radius as f32;
 
@@ -534,7 +554,7 @@ fn weigh_neighbourhood(
         let Some(nearest) = tree.nearest(*p, limit) else {
             continue;
         };
-        let weight = falloff(nearest.distance as f64, radius);
+        let weight = falloff(nearest.distance as f64, radius, curve);
         if weight > 0.0 {
             indices.push(v);
             weights.push(weight);
@@ -616,6 +636,11 @@ pub struct EditWeighting {
 /// every drag. Same argument as §2.3's one-graph-two-consumers rule, applied to
 /// arithmetic rather than to shading.
 pub fn weigh_edit_selection(doc: &Document, radius: f64) -> Option<EditWeighting> {
+    weigh_edit_selection_with(doc, radius, 0)
+}
+
+/// [`weigh_edit_selection`], with one of [`FALLOFF_CURVES`].
+pub fn weigh_edit_selection_with(doc: &Document, radius: f64, curve: u32) -> Option<EditWeighting> {
     let targets = edit_targets(doc);
     if targets.is_empty() {
         return None;
@@ -695,7 +720,7 @@ pub fn weigh_edit_selection(doc: &Document, radius: f64) -> Option<EditWeighting
     let mut parts = Vec::with_capacity(gathered.len());
     for g in gathered {
         let (indices, weights) = match &tree {
-            Some(tree) => weigh_neighbourhood(tree, &g.world, &g.selected, radius),
+            Some(tree) => weigh_neighbourhood(tree, &g.world, &g.selected, radius, curve),
             // Proportional editing off, which is the default and the common
             // case: nothing outside the selection moves.
             None => {
@@ -762,6 +787,7 @@ pub fn weigh_edit_selection(doc: &Document, radius: f64) -> Option<EditWeighting
 fn run_transform(
     doc: &mut DocMut<'_>,
     radius: f64,
+    curve: u32,
     needs_extent: bool,
     pivot: Option<glam::DVec3>,
     place: impl Fn(glam::DVec3, f32, glam::DVec3) -> glam::DVec3,
@@ -771,7 +797,7 @@ fn run_transform(
     }
     // The whole selection at once, because the pivot and the falloff are both
     // properties of all of it and nothing can be written until they are known.
-    let Some(weighing) = weigh_edit_selection(doc.document(), radius) else {
+    let Some(weighing) = weigh_edit_selection_with(doc.document(), radius, curve) else {
         return Ok(OpResult::Cancelled);
     };
     // Rotate and scale refuse a selection occupying a single place: every
@@ -825,6 +851,9 @@ pub struct MeshTranslateParams {
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
+    /// The shape the influence falls off in. See [`FALLOFF_CURVES`].
+    #[param(variants("smooth", "sphere", "root", "sharp", "linear", "constant"))]
+    pub proportional_falloff: u32,
 }
 
 /// Moves the selected vertices, edges or faces.
@@ -849,7 +878,7 @@ impl Operator for TranslateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let offset = glam::DVec3::from_array(params.translation);
-        run_transform(doc, params.proportional_size, false, None, |p, weight, _| {
+        run_transform(doc, params.proportional_size, params.proportional_falloff, false, None, |p, weight, _| {
             p + offset * weight as f64
         })
     }
@@ -865,6 +894,9 @@ pub struct MeshRotateParams {
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
+    /// The shape the influence falls off in. See [`FALLOFF_CURVES`].
+    #[param(variants("smooth", "sphere", "root", "sharp", "linear", "constant"))]
+    pub proportional_falloff: u32,
     /// What it turns about: the selection's median, or the 3D cursor.
     #[param(variants("median", "cursor"))]
     pub pivot: u32,
@@ -898,7 +930,7 @@ impl Operator for RotateSelection {
         };
         let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(doc, params.proportional_size, true, pivot, |p, weight, about| {
+        run_transform(doc, params.proportional_size, params.proportional_falloff, true, pivot, |p, weight, about| {
             // The rotation is interpolated towards the identity rather than the
             // *result* being interpolated towards the original. The two differ:
             // blending positions drags a partly-weighted vertex along the chord
@@ -918,6 +950,9 @@ pub struct MeshScaleParams {
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
+    /// The shape the influence falls off in. See [`FALLOFF_CURVES`].
+    #[param(variants("smooth", "sphere", "root", "sharp", "linear", "constant"))]
+    pub proportional_falloff: u32,
     /// What it scales about: the selection's median, or the 3D cursor.
     #[param(variants("median", "cursor"))]
     pub pivot: u32,
@@ -928,6 +963,7 @@ impl Default for MeshScaleParams {
         Self {
             scale: [1.0; 3],
             proportional_size: 0.0,
+            proportional_falloff: 0,
             pivot: 0,
         }
     }
@@ -965,7 +1001,7 @@ impl Operator for ScaleSelection {
     ) -> Result<OpResult, OpError> {
         let factor = glam::DVec3::from_array(params.scale);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(doc, params.proportional_size, true, pivot, |p, weight, about| {
+        run_transform(doc, params.proportional_size, params.proportional_falloff, true, pivot, |p, weight, about| {
             // The factor is interpolated towards one.
             //
             // Unlike the rotation, this is *not* a correction: scaling is
@@ -1720,7 +1756,7 @@ impl Operator for ExtrudeMove {
         }
         let offset = glam::DVec3::from_array(params.translation);
         if offset != glam::DVec3::ZERO {
-            run_transform(doc, 0.0, false, None, |p, weight, _| p + offset * weight as f64)?;
+            run_transform(doc, 0.0, 0, false, None, |p, weight, _| p + offset * weight as f64)?;
         }
         Ok(OpResult::Finished)
     }
@@ -2788,6 +2824,19 @@ pub fn edge_in_world(doc: &Document, edge: u32) -> Option<(glam::DVec3, glam::DV
 
 #[cfg(test)]
 mod tests {
+
+    /// Blender's falloff curves, halfway out and at the rim.
+    #[test]
+    fn the_falloff_curves_have_their_shapes() {
+        let half = |curve| super::falloff(0.5, 1.0, curve);
+        let expect = [0.5, 0.75f32.sqrt(), 0.5f32.sqrt(), 0.25, 0.5, 1.0];
+        for (curve, want) in expect.iter().enumerate() {
+            assert!((half(curve as u32) - want).abs() < 1e-5, "{}: {}", super::FALLOFF_CURVES[curve], half(curve as u32));
+            assert_eq!(super::falloff(1.0, 1.0, curve as u32), 0.0, "{} at the rim", super::FALLOFF_CURVES[curve]);
+            assert_eq!(super::falloff(0.0, 1.0, curve as u32), 1.0, "{} at the centre", super::FALLOFF_CURVES[curve]);
+        }
+    }
+
     use super::*;
     use crate::{History, Mode, OperatorRegistry, PropertyMap, PropertyValue};
     use kreate_scene::document::{Object, ObjectData};

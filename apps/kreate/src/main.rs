@@ -400,6 +400,8 @@ struct DragSelect {
     extend: bool,
     /// Remove from the selection instead.
     deselect: bool,
+    /// The lasso's path, when the tool is Lasso; a box otherwise.
+    lasso: Option<Vec<(f32, f32)>>,
 }
 
 /// Viewport pixels one wheel notch pans.
@@ -425,9 +427,12 @@ const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 impl DragSelect {
     fn shape(&self) -> kreate_render::SelectShape {
-        kreate_render::SelectShape::Box {
-            from: self.origin,
-            to: self.current,
+        match &self.lasso {
+            Some(path) if path.len() >= 3 => kreate_render::SelectShape::lasso(path),
+            _ => kreate_render::SelectShape::Box {
+                from: self.origin,
+                to: self.current,
+            },
         }
     }
 }
@@ -741,6 +746,11 @@ struct App {
     /// it is: without it every vertex move is a spike, and shaping a surface
     /// means moving each vertex individually.
     proportional: Option<f64>,
+    /// Its falloff curve, one of `kreate_ops::ops::mesh::FALLOFF_CURVES`.
+    proportional_falloff: u32,
+    /// Whether circle select is on because the header's tool is Circle, and
+    /// so goes off when the tool changes.
+    circle_from_tool: bool,
     /// The interactive transform in progress, if any.
     ///
     /// While this is `Some`, the gesture owns the keyboard and the pointer:
@@ -807,6 +817,8 @@ impl App {
             next_shape: 1,
             snap: kreate::modal::Snap::default(),
             proportional: None,
+            proportional_falloff: 0,
+            circle_from_tool: false,
             gesture: None,
             file: DocumentFile::new(),
             // Collected once, at startup. This is the only moment a recovery
@@ -1916,6 +1928,11 @@ impl App {
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
         gesture.set_snap_inverted(self.input.ctrl_down);
+        gesture.set_first_orientation(if self.ui.tools.orientation == 1 {
+            kreate::modal::Orientation::Local
+        } else {
+            kreate::modal::Orientation::Global
+        });
         // Proportional editing is meaningless in object mode: there is no
         // neighbouring geometry to fall off towards, only other objects, and
         // dragging one object part-way because another is near it is not
@@ -1925,6 +1942,7 @@ impl App {
         // the elements on screen has any.
         if mode.edits_elements() && kind.transforms() {
             gesture.set_proportional(self.proportional);
+            gesture.set_proportional_falloff(self.proportional_falloff);
         }
         let op_id = kind.op_id(mode);
         // Started with the identity parameters, so pressing the key alone moves
@@ -2009,7 +2027,7 @@ impl App {
         // the mesh moving at the end of every drag.
         let radius = self.proportional.unwrap_or(0.0);
         let to_world = self.doc.world_transform(active);
-        let Some(weighing) = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, radius) else {
+        let Some(weighing) = kreate_ops::ops::mesh::weigh_edit_selection_with(&self.doc, radius, self.proportional_falloff) else {
             return;
         };
         // One `Deform` covers one mesh, so a drag reaching several takes the CPU
@@ -2139,7 +2157,7 @@ impl App {
         let to_world = kreate_ops::ops::mesh::target_object(&self.doc)
             .map(|id| self.doc.world_transform(id))
             .unwrap_or(kreate_math::glam::DAffine3::IDENTITY);
-        let weighing = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, radius);
+        let weighing = kreate_ops::ops::mesh::weigh_edit_selection_with(&self.doc, radius, self.proportional_falloff);
         let Some(gfx) = self.gfx.as_mut() else { return };
         // A wider radius can reach a *second* mesh, and one `Deform` cannot
         // follow it there. Giving the preview up is the honest answer: the drag
@@ -4291,7 +4309,38 @@ impl App {
                 self.begin_sculpt_stroke();
                 return;
             }
+            // The header's Circle tool: a press paints, as C's brush does.
+            if self.ui.tools.select_tool == 2 {
+                if self.circle.is_none() {
+                    self.toggle_circle_select();
+                    self.circle_from_tool = self.circle.is_some();
+                }
+                if self.circle.is_some() {
+                    self.begin_circle_stroke();
+                    return;
+                }
+            }
             self.begin_drag_select();
+        }
+    }
+
+    /// The header's tool settings, taken into the application's own.
+    fn adopt_tool_settings(&mut self) {
+        let t = self.ui.tools;
+        self.snap.enabled = t.snap;
+        self.snap.mode = kreate::snap::Mode::ALL[(t.snap_mode as usize).min(kreate::snap::Mode::ALL.len() - 1)];
+        self.proportional = match (t.proportional, self.proportional) {
+            (false, _) => None,
+            (true, None) => Some(1.0),
+            (true, radius) => radius,
+        };
+        self.proportional_falloff = t.falloff;
+        // Circle select that the Circle tool turned on goes off with it.
+        if t.select_tool != 2 && self.circle_from_tool {
+            self.circle_from_tool = false;
+            if self.circle.is_some() {
+                self.end_circle_select();
+            }
         }
     }
 
@@ -4558,6 +4607,7 @@ impl App {
             moved: false,
             extend: self.input.shift_down,
             deselect: self.input.ctrl_down,
+            lasso: (self.ui.tools.select_tool == 1).then(|| vec![origin]),
         });
     }
 
@@ -4574,6 +4624,13 @@ impl App {
             return;
         };
         drag.current = at;
+        // A lasso keeps the path, a point every couple of pixels.
+        if let Some(path) = drag.lasso.as_mut() {
+            let last = *path.last().unwrap_or(&at);
+            if (at.0 - last.0).hypot(at.1 - last.1) > 2.0 {
+                path.push(at);
+            }
+        }
         let moved = (at.0 - drag.origin.0).abs() > DRAG_THRESHOLD_PX
             || (at.1 - drag.origin.1).abs() > DRAG_THRESHOLD_PX;
         if moved && !drag.moved {
@@ -5079,11 +5136,21 @@ impl App {
         // Viewport pixels back into points: the drag is tracked against the id
         // buffer, which is the offscreen texture's size, and egui lays out in
         // logical points.
-        self.ui.select_band = self.drag_select.as_ref().filter(|d| d.moved).map(|d| {
+        self.ui.select_band = self.drag_select.as_ref().filter(|d| d.moved && d.lasso.is_none()).map(|d| {
             let scale = self.egui_ctx.pixels_per_point();
             let to_points = |p: (f32, f32)| egui::pos2(p.0 / scale, p.1 / scale);
             (to_points(d.origin), to_points(d.current))
         });
+        self.ui.select_lasso = self
+            .drag_select
+            .as_ref()
+            .filter(|d| d.moved)
+            .and_then(|d| d.lasso.as_ref())
+            .map(|path| {
+                let scale = self.egui_ctx.pixels_per_point();
+                path.iter().map(|p| egui::pos2(p.0 / scale, p.1 / scale)).collect()
+            })
+            .unwrap_or_default();
         self.ui.select_band_deselect = self.drag_select.as_ref().is_some_and(|d| d.deselect);
         // Rebuilt every frame rather than pushed on change: a gesture's numbers
         // move continuously, and a header a frame behind the drag would be
@@ -5149,6 +5216,11 @@ impl App {
                 ),
             }
         });
+        // The header's tool settings show what the keys last set.
+        self.ui.tools.snap = self.snap.enabled;
+        self.ui.tools.snap_mode = kreate::snap::Mode::ALL.iter().position(|m| *m == self.snap.mode).unwrap_or(0) as u32;
+        self.ui.tools.proportional = self.proportional.is_some();
+        self.ui.tools.falloff = self.proportional_falloff;
         let mut viewport_rect = egui::Rect::ZERO;
         let output = {
             let ui_state = &mut self.ui;
@@ -5171,6 +5243,8 @@ impl App {
             })
         };
         state.handle_platform_output(&window, output.platform_output.clone());
+        // And take back what the header changed.
+        self.adopt_tool_settings();
         // The interface's own request to be drawn again, and when. A long delay
         // is egui saying "never" in a number.
         let delay = output
@@ -7253,6 +7327,22 @@ mod tests {
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
 
+    /// The Lasso tool's drag selects with its path; without one, a box.
+    #[test]
+    fn a_lasso_drag_selects_with_its_path() {
+        let mut drag = DragSelect {
+            origin: (0.0, 0.0),
+            current: (40.0, 30.0),
+            moved: true,
+            extend: false,
+            deselect: false,
+            lasso: Some(vec![(0.0, 0.0), (40.0, 0.0), (40.0, 30.0)]),
+        };
+        assert!(matches!(drag.shape(), kreate_render::SelectShape::Lasso(p) if p.len() == 3));
+        drag.lasso = None;
+        assert!(matches!(drag.shape(), kreate_render::SelectShape::Box { .. }));
+    }
+
     /// Blender's Ctrl+P and Alt+P menus: plain parenting first, the armature
     /// binds after; clearing the parent, and the armature.
     #[test]
@@ -7445,6 +7535,7 @@ mod tests {
             moved: true,
             extend: false,
             deselect: false,
+            lasso: None,
         });
 
         app.cancel_all_drags();

@@ -48,6 +48,21 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Every mode, in the order the header lists them.
+    pub const ALL: [Mode; 6] = [Mode::Increment, Mode::Element, Mode::Vertex, Mode::Edge, Mode::EdgeMidpoint, Mode::Face];
+
+    /// The catalog key for the header's name of it.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Mode::Increment => "snap-increment",
+            Mode::Element => "snap-element",
+            Mode::Vertex => "snap-vertex",
+            Mode::Edge => "snap-edge",
+            Mode::EdgeMidpoint => "snap-midpoint",
+            Mode::Face => "snap-face",
+        }
+    }
+
     /// Whether this mode needs a [`SnapWorld`] to resolve.
     pub fn needs_geometry(self) -> bool {
         !matches!(self, Mode::Increment)

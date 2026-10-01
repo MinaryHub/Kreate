@@ -266,6 +266,9 @@ pub struct Gesture {
     pub axis: Option<Axis>,
     /// Which axes the constraint is in. Only meaningful while `axis` is set.
     pub orientation: Orientation,
+    /// What the first press of an axis key means — the header's Transform
+    /// Orientation. The second press is the other one, the third lets go.
+    first_orientation: Orientation,
     /// The selection's own axes, for a local constraint.
     ///
     /// Captured at the start rather than read per frame: the transform may be
@@ -294,6 +297,8 @@ pub struct Gesture {
     viewport: (f32, f32),
     /// Proportional editing radius in world units, or `None` for off.
     pub proportional: Option<f64>,
+    /// Its falloff curve.
+    falloff: u32,
     /// Where precision mode was engaged, if it is engaged.
     precise_from: Option<(f32, f32)>,
     /// Motion accumulated before precision mode was engaged.
@@ -374,6 +379,7 @@ impl Gesture {
             up: camera.up().as_vec3(),
             axis: None,
             orientation: Orientation::Global,
+            first_orientation: Orientation::Global,
             basis,
             snap,
             snap_inverted: false,
@@ -382,6 +388,7 @@ impl Gesture {
             camera: *camera,
             viewport,
             proportional: None,
+            falloff: 0,
             precise_from: None,
             coarse: (0.0, 0.0),
             numeric: String::new(),
@@ -449,19 +456,35 @@ impl Gesture {
         if !self.kind.transforms() {
             return;
         }
-        match (self.axis, self.orientation) {
-            (Some(current), Orientation::Global) if current == axis => {
-                self.orientation = Orientation::Local;
+        let first = self.first_orientation;
+        let second = match first {
+            Orientation::Global => Orientation::Local,
+            Orientation::Local => Orientation::Global,
+        };
+        match self.axis {
+            Some(current) if current == axis && self.orientation == first => {
+                self.orientation = second;
             }
-            (Some(current), Orientation::Local) if current == axis => {
+            Some(current) if current == axis => {
                 self.axis = None;
-                self.orientation = Orientation::Global;
+                self.orientation = first;
             }
             _ => {
                 self.axis = Some(axis);
-                self.orientation = Orientation::Global;
+                self.orientation = first;
             }
         }
+    }
+
+    /// Sets what the first press of an axis key constrains to.
+    pub fn set_first_orientation(&mut self, orientation: Orientation) {
+        self.first_orientation = orientation;
+    }
+
+    /// The proportional falloff curve, one of
+    /// `kreate_ops::ops::mesh::FALLOFF_CURVES`.
+    pub fn set_proportional_falloff(&mut self, curve: u32) {
+        self.falloff = curve;
     }
 
     /// The constrained direction in world space.
@@ -792,6 +815,7 @@ impl Gesture {
         // defaults to anyway.
         if let Some(radius) = self.proportional {
             params.set("proportional_size", PropertyValue::Float(radius));
+            params.set("proportional_falloff", PropertyValue::Enum(self.falloff));
         }
         params
     }

@@ -81,6 +81,45 @@ pub fn tool_button(ui: &mut Ui, tool: Tool, active: bool) -> Response {
     response
 }
 
+/// The Select tool's button, showing which shape a drag selects with: 0 a
+/// box, 1 a lasso, 2 a circle — Blender's three select tools, in one place.
+pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
+    let size = Vec2::splat(WIDTH - 6.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let theme = crate::theme::from_ui(ui);
+    let visuals = ui.style().interact_selectable(&response, active);
+    if active || response.hovered() {
+        ui.painter().rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
+    }
+    let ink = if active { theme.accent } else { theme.text };
+    let area = Rect::from_center_size(rect.center(), Vec2::splat(GLYPH));
+    let at = |x: f32, y: f32| Pos2::new(area.min.x + x * area.width(), area.min.y + y * area.height());
+    let thin = Stroke::new(1.0, ink.gamma_multiply(0.55));
+    match shape {
+        // A loose loop.
+        1 => {
+            let points: Vec<Pos2> = (0..=28)
+                .map(|i| {
+                    let t = i as f32 / 28.0 * std::f32::consts::TAU;
+                    let r = 0.32 + 0.06 * (3.0 * t).sin();
+                    at(0.42 + r * t.cos(), 0.4 + r * 0.8 * t.sin())
+                })
+                .collect();
+            ui.painter().add(egui::Shape::line(points, thin));
+        }
+        // A ring.
+        2 => {
+            ui.painter().circle_stroke(at(0.42, 0.42), area.width() * 0.32, thin);
+        }
+        _ => dashed_rect(ui, Rect::from_min_max(at(0.08, 0.08), at(0.72, 0.72)), thin),
+    }
+    arrow_cursor(ui, at(0.55, 0.55), area.width() * 0.42, ink);
+    response
+}
+
 /// The picture for each tool, in a unit square scaled to `area`.
 fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
     let p = ui.painter();

@@ -259,6 +259,11 @@ pub struct ShellState {
     /// 0 the median, 1 each object's own origin, 2 the active object, 3 the
     /// 3D cursor.
     pub pivot: u32,
+    /// The header's tool settings: snapping, proportional editing, the
+    /// transform orientation and the selection tool.
+    pub tools: ToolSettings,
+    /// A lasso being drawn, in interface points from the viewport's corner.
+    pub select_lasso: Vec<egui::Pos2>,
     /// What is being typed in each Drivers editor, per area.
     driver_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::drivers::DriversState>,
     /// The clock, published by the application each frame.
@@ -569,6 +574,8 @@ impl Default for ShellState {
             history_steps: Vec::new(),
             history_at: 0,
             pivot: 0,
+            tools: ToolSettings::default(),
+            select_lasso: Vec::new(),
             timeline: Default::default(),
             uv: None,
             modal: None,
@@ -972,6 +979,24 @@ pub struct ViewStatus {
     pub orthographic: bool,
     /// Which overlays are on, for the menu's check marks.
     pub overlays: Overlays,
+}
+
+/// The header's tool settings. The application owns snapping and
+/// proportional editing (keys change them too) and copies them in before the
+/// interface is drawn and back out after; the orientation and the selection
+/// tool live here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolSettings {
+    pub snap: bool,
+    /// An index into `crate::snap::Mode::ALL`.
+    pub snap_mode: u32,
+    pub proportional: bool,
+    /// An index into `kreate_ops::ops::mesh::FALLOFF_CURVES`.
+    pub falloff: u32,
+    /// 0 global, 1 local: what the first X, Y or Z press constrains to.
+    pub orientation: u32,
+    /// 0 box, 1 lasso, 2 circle: what a left drag in the viewport selects with.
+    pub select_tool: u32,
 }
 
 /// The viewport's on-off settings, as the Overlays menu shows them.
@@ -2440,6 +2465,7 @@ fn draw_area_header(
                             let names = [&l.pivot_median, &l.pivot_individual, &l.pivot_active, &l.pivot_cursor];
                             let current = names[state.pivot.min(3) as usize].clone();
                             egui::ComboBox::from_id_salt(("pivot", area.id.0))
+                                .width(80.0)
                                 .selected_text(current)
                                 .show_ui(ui, |ui| {
                                     for (i, name) in names.iter().enumerate() {
@@ -2448,6 +2474,7 @@ fn draw_area_header(
                                 })
                                 .response
                                 .on_hover_text(&l.pivot_label);
+                            draw_tool_settings(ui, state, area.id.0, mode);
                         }
                         // The sculpt brush, in its header.
                         if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
@@ -3546,10 +3573,20 @@ fn draw_toolbar(
                         }
                         _ => name.clone(),
                     };
-                    let response = tool_button(ui, *tool, *tool == active).on_hover_text(tip);
+                    let response = if *tool == Tool::Select {
+                        // Which shape a drag selects with, and a click for
+                        // the next: box, lasso, circle.
+                        let shape = state.tools.select_tool.min(2);
+                        let names = ["select-tool-box", "select-tool-lasso", "select-tool-circle"];
+                        // i18n-exempt: translated names joined
+                        let tip = format!("{}\n{}", state.catalog.get(names[shape as usize]), state.catalog.get("select-tool-hint"));
+                        kreate_ui::toolbar::select_button(ui, shape, *tool == active).on_hover_text(tip)
+                    } else {
+                        tool_button(ui, *tool, *tool == active).on_hover_text(tip)
+                    };
                     if response.clicked() {
                         match tool {
-                            Tool::Select => {}
+                            Tool::Select => state.tools.select_tool = (state.tools.select_tool + 1) % 3,
                             Tool::Move | Tool::Rotate | Tool::Scale => {
                                 if let Some(op) = op {
                                     state.queue.dispatch(op, PropertyMap::new());
@@ -4897,7 +4934,78 @@ fn keymap_text(catalog: &Catalog, changed: usize, shadowed: usize) -> kreate_ui:
 /// geometry behind it, and egui already owns the layer above the viewport image.
 /// What it *selects* is decided by a compute pass over the id buffer from the
 /// same rectangle, so the outline and the result cannot disagree.
+/// Blender's header tool settings: transform orientation, snapping and
+/// proportional editing. The selection tool is the toolbar's.
+fn draw_tool_settings(ui: &mut Ui, state: &mut ShellState, area: u32, mode: kreate_ops::operator::Mode) {
+    let get = |state: &ShellState, key: &str| state.catalog.get(key);
+    let mut tools = state.tools;
+
+    // Transform orientation.
+    let orientations = [get(state, "orientation-global"), get(state, "orientation-local")];
+    egui::ComboBox::from_id_salt(("orientation", area))
+        .width(58.0)
+        .selected_text(orientations[tools.orientation.min(1) as usize].as_str())
+        .show_ui(ui, |ui| {
+            for (i, name) in orientations.iter().enumerate() {
+                ui.selectable_value(&mut tools.orientation, i as u32, name.as_str());
+            }
+        })
+        .response
+        .on_hover_text(get(state, "orientation-hint"));
+
+    ui.separator();
+    // Snapping: on or off, and to what.
+    if ui.selectable_label(tools.snap, get(state, "snap-toggle")).on_hover_text(get(state, "snap-hint")).clicked() {
+        tools.snap = !tools.snap;
+    }
+    let modes: Vec<String> = crate::snap::Mode::ALL.iter().map(|m| get(state, m.label_key())).collect();
+    egui::ComboBox::from_id_salt(("snap-mode", area))
+        .width(80.0)
+        .selected_text(modes[(tools.snap_mode as usize).min(modes.len() - 1)].as_str())
+        .show_ui(ui, |ui| {
+            for (i, name) in modes.iter().enumerate() {
+                ui.selectable_value(&mut tools.snap_mode, i as u32, name.as_str());
+            }
+        });
+
+    // Proportional editing: elements only, as the key.
+    if mode.edits_elements() {
+        ui.separator();
+        if ui
+            .selectable_label(tools.proportional, get(state, "proportional-toggle"))
+            .on_hover_text(get(state, "proportional-hint"))
+            .clicked()
+        {
+            tools.proportional = !tools.proportional;
+        }
+        let curves: Vec<String> = kreate_ops::ops::mesh::FALLOFF_CURVES
+            .iter()
+            .map(|c| get(state, &format!("falloff-{c}")))
+            .collect();
+        egui::ComboBox::from_id_salt(("falloff", area))
+        .width(70.0)
+            .selected_text(curves[(tools.falloff as usize).min(curves.len() - 1)].as_str())
+            .show_ui(ui, |ui| {
+                for (i, name) in curves.iter().enumerate() {
+                    ui.selectable_value(&mut tools.falloff, i as u32, name.as_str());
+                }
+            });
+    }
+
+    state.tools = tools;
+}
+
 fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
+    // A lasso: its path, closed back to where it began.
+    if state.select_lasso.len() >= 2 {
+        let theme = kreate_ui::theme::from_ui(ui);
+        let colour = if state.select_band_deselect { theme.info } else { theme.accent };
+        let mut points: Vec<egui::Pos2> = state.select_lasso.iter().map(|p| viewport.min + p.to_vec2()).collect();
+        points.push(points[0]);
+        ui.painter()
+            .with_clip_rect(viewport)
+            .add(egui::Shape::line(points, egui::Stroke::new(1.5, colour)));
+    }
     let Some((from, to)) = state.select_band else {
         return;
     };
@@ -6731,6 +6839,29 @@ origin-to-cursor = Origin to 3D Cursor
 geometry-to-origin = Geometry to Origin
 pivot-point = Pivot Point
 pivot-median = Median Point
+orientation-global = Global
+orientation-local = Local
+orientation-hint = Transform orientation: what the first X, Y or Z press constrains to
+snap-toggle = Snap
+snap-hint = Snap while moving (Shift+Tab); Ctrl turns it the other way for one drag, B mid-drag too
+snap-increment = Increment
+snap-element = Vertex, Edge, Face
+snap-vertex = Vertex
+snap-edge = Edge
+snap-midpoint = Edge Midpoint
+snap-face = Face
+proportional-toggle = Proportional
+proportional-hint = Proportional editing (O): the selection pulls its neighbours along; the wheel sets how far
+falloff-smooth = Smooth
+falloff-sphere = Sphere
+falloff-root = Root
+falloff-sharp = Sharp
+falloff-linear = Linear
+falloff-constant = Constant
+select-tool-box = Select Box
+select-tool-lasso = Select Lasso
+select-tool-circle = Select Circle
+select-tool-hint = Click for the next: box, lasso, circle
 pivot-individual = Individual Origins
 pivot-active = Active Element
 pivot-cursor = 3D Cursor
@@ -7414,6 +7545,29 @@ origin-to-cursor = 원점을 3D 커서로
 geometry-to-origin = 형상을 원점으로
 pivot-point = 기준점
 pivot-median = 중앙점
+orientation-global = 월드
+orientation-local = 로컬
+orientation-hint = 방향 기준: X·Y·Z를 처음 누를 때 따르는 축
+snap-toggle = 스냅
+snap-hint = 이동할 때 달라붙기 (Shift+Tab). Ctrl은 한 번만 반대로, 이동 중 B도 됩니다
+snap-increment = 간격
+snap-element = 점·선·면
+snap-vertex = 점
+snap-edge = 선
+snap-midpoint = 선의 가운데
+snap-face = 면
+proportional-toggle = 비례
+proportional-hint = 비례 편집 (O): 선택한 것이 주변까지 끌고 갑니다. 휠로 범위를 정합니다
+falloff-smooth = 부드럽게
+falloff-sphere = 구
+falloff-root = 루트
+falloff-sharp = 뾰족하게
+falloff-linear = 직선
+falloff-constant = 일정
+select-tool-box = 네모 선택
+select-tool-lasso = 올가미 선택
+select-tool-circle = 원 선택
+select-tool-hint = 누르면 다음 모양으로: 네모, 올가미, 원
 pivot-individual = 개별 원점
 pivot-active = 활성 요소
 pivot-cursor = 3D 커서
