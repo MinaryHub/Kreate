@@ -111,6 +111,7 @@ fn render_scene_flags(
     viewport.face_orientation = face_orientation;
     viewport.antialias = ANTIALIAS.with(|a| a.get());
     viewport.ambient_occlusion = OCCLUSION.with(|a| a.get());
+    viewport.xray = XRAY.with(|a| a.get());
 
     let uploaded: Vec<(GpuMesh, DAffine3)> = meshes
         .iter()
@@ -205,6 +206,8 @@ thread_local! {
     /// Whether the studio view darkens corners. Off unless a test asks: the
     /// tone-counting tests measure the lighting, and occlusion is tones too.
     static OCCLUSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the surfaces are see-through.
+    static XRAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Skips the test body when no GPU is present, so a CI runner without one does
@@ -726,4 +729,19 @@ fn occlusion_darkens_where_the_cube_meets_the_floor() {
     // The open floor, far from the cube, is left alone.
     let corner = (8, SIZE - 8);
     assert!((lum(with.at(corner.0, corner.1)) - lum(without.at(corner.0, corner.1))).abs() <= 3);
+}
+
+/// X-ray: the surfaces are see-through — the middle of the cube is part way
+/// between the surface and the background.
+#[test]
+fn xray_shows_what_is_behind_the_surfaces() {
+    let (solid, bg) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, true, false, |_| {}));
+    XRAY.with(|a| a.set(true));
+    let seen = render_scene_flags(&cube_scene(), ShadingMode::Studio, false, true, false, |_| {});
+    XRAY.with(|a| a.set(false));
+    let (xray, _) = gpu_or_skip!(seen);
+    save_shot(&xray, "xray");
+    let middle = (SIZE / 2 + 5, SIZE / 2 + 9);
+    let (s, x, b) = (lum(solid.at(middle.0, middle.1)), lum(xray.at(middle.0, middle.1)), lum(bg));
+    assert!(x < s - 20 && x > b + 10, "x-ray {x} between background {b} and surface {s}");
 }

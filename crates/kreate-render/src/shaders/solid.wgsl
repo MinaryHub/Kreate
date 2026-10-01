@@ -298,5 +298,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
 
     // The surface is written to an sRGB target, so the hardware does the
     // encoding; shading stays in linear space.
-    return vec4<f32>(color, in.base_color.a);
+    // X-ray: see-through, by the amount the globals say.
+    let alpha = select(in.base_color.a, globals.params.z, globals.params.z > 0.0);
+    return vec4<f32>(color, alpha);
 }

@@ -21,6 +21,10 @@ use crate::palette;
 use crate::picking::PickDomain;
 use kreate_math::Aabb;
 
+/// How opaque a surface is in X-ray: Blender's default half, a little less so
+/// an edge behind two surfaces still reads.
+const XRAY_ALPHA: f32 = 0.4;
+
 /// How the solid pass shades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadingMode {
@@ -1363,6 +1367,9 @@ pub struct Viewport {
     /// Where the surfaces go to have their edges smoothed, when
     /// [`Viewport::antialias`] is on.
     aa: crate::fxaa::Fxaa,
+    /// The surfaces see-through, Blender's X-ray: every edge behind shows.
+    pub xray: bool,
+    solid_xray: wgpu::RenderPipeline,
     /// Darkens the studio view's corners and creases.
     ao: crate::ao::Ao,
     /// Whether the studio view darkens corners and creases.
@@ -1958,8 +1965,11 @@ impl Viewport {
         );
         let screen_bind_0 = screen_0.bind_group(device, hdr_0.view(), &screen_params_buf);
 
-        let solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("solid"),
+        // Two of them: the opaque one, and X-ray's — blended over what is
+        // behind and writing no depth, so every surface and every edge behind
+        // it shows through, as Blender's Alt+Z does.
+        let solid_pipeline = |label: &str, blend: Option<wgpu::BlendState>, depth: wgpu::DepthStencilState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&solid_pl),
             vertex: wgpu::VertexState {
                 module: &solid_shader,
@@ -2004,7 +2014,7 @@ impl Viewport {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -2018,11 +2028,17 @@ impl Viewport {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(gpu::depth_write_state()),
+            depth_stencil: Some(depth),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
         });
+        let solid = solid_pipeline("solid", None, gpu::depth_write_state());
+        let solid_xray = solid_pipeline(
+            "solid x-ray",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            gpu::depth_read_state(),
+        );
 
         // The cluster path: same shader module, same fragment entry point, no
         // vertex buffers at all. Everything comes from storage, indexed through
@@ -2159,6 +2175,8 @@ impl Viewport {
 
         Self {
             solid,
+            solid_xray,
+            xray: false,
             grid,
             globals_buf,
             globals_bind,
@@ -2477,7 +2495,8 @@ impl Viewport {
                         1.0
                     },
                     if self.face_orientation { 1.0 } else { 0.0 },
-                    0.0,
+                    // How opaque the surfaces are in X-ray; zero when off.
+                    if self.xray { XRAY_ALPHA } else { 0.0 },
                     0.0,
                 ],
                 camera_right: right.extend(0.0).to_array(),
@@ -3628,7 +3647,7 @@ impl Viewport {
                 pass.draw_indirect(self.cull.args_buffer(), slot.args_offset as u64);
             }
         } else {
-            pass.set_pipeline(&self.solid);
+            pass.set_pipeline(if self.xray { &self.solid_xray } else { &self.solid });
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
@@ -3889,7 +3908,7 @@ impl Viewport {
     /// which is lit to show shape, and only through the smoothing path — the
     /// occlusion goes into the surfaces' own image, never onto the overlays.
     fn occluding(&self) -> bool {
-        self.ambient_occlusion && self.shading == ShadingMode::Studio && self.smoothing()
+        self.ambient_occlusion && !self.xray && self.shading == ShadingMode::Studio && self.smoothing()
     }
 
     /// The rendered mode, in three passes.

@@ -352,6 +352,8 @@ fn common() -> Vec<Binding> {
         key("view.local_view", "NumpadDivide", Context::Viewport, Action::new("view.local_view")),
         key("view.local_view_main", "Slash", Context::Viewport, Action::new("view.local_view")),
         key("view.camera", "Numpad0", Context::Viewport, Action::new("view.camera")),
+        // Blender's Alt+Z: see through the surfaces, and select through them.
+        key("view.xray", "Z", Context::Viewport, Action::new("view.toggle_xray")).with_modifiers(Modifiers::alt()),
         key("view.frame_selected", "NumpadDecimal", Context::Viewport, Action::new("view.frame_selected")),
         // Blender's Shift+S: the snap pie — the 3D cursor to the selection or
         // the world's origin, or the selection to the cursor.

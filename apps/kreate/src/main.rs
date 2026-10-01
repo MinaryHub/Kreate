@@ -5374,6 +5374,15 @@ impl App {
         // Only in the mode that reads them: packing is cheap but not free, and
         // a scene with three hundred lamps should not pay for them while the
         // user is modelling under the studio lights.
+        // The overlays as they are, for the menu's check marks.
+        let overlays = kreate::shell::Overlays {
+            grid: gfx.viewport.show_grid,
+            wireframe: gfx.viewport.show_wireframe,
+            face_orientation: gfx.viewport.face_orientation,
+            statistics: self.ui.show_stats,
+            ambient_occlusion: gfx.viewport.ambient_occlusion,
+            xray: gfx.viewport.xray,
+        };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
                 .set_world(scenelights::world_radiance(&self.doc));
@@ -5490,6 +5499,7 @@ impl App {
             // What the header reports, from the same answer the picture was
             // made with.
             self.ui.view_status = kreate::shell::ViewStatus {
+                overlays,
                 shading: gfx.viewport.shading,
                 exposure: shot.exposure as f32,
                 metered: shot.metered,
@@ -5502,6 +5512,7 @@ impl App {
             // The other modes light themselves, so there is no exposure to
             // report and the header says nothing rather than a stale number.
             self.ui.view_status = kreate::shell::ViewStatus {
+                overlays,
                 shading: gfx.viewport.shading,
                 orthographic: matches!(
                     self.camera.projection,
@@ -6041,6 +6052,15 @@ impl App {
             "view.toggle_statistics" => {
                 self.ui.show_stats = !self.ui.show_stats;
                 self.redraw.set(RedrawReason::UI);
+            }
+            "view.toggle_xray" => {
+                // One switch for both halves, as Blender's: what shows through
+                // can be picked through.
+                self.xray = !self.xray;
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.xray = self.xray;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             "view.toggle_ao" => {
                 if let Some(gfx) = self.gfx.as_mut() {

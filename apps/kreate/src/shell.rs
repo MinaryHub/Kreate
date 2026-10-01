@@ -967,6 +967,19 @@ pub struct ViewStatus {
     /// the viewport's corner, which is where Blender says it and where a user
     /// looks when a picture has stopped having depth.
     pub orthographic: bool,
+    /// Which overlays are on, for the menu's check marks.
+    pub overlays: Overlays,
+}
+
+/// The viewport's on-off settings, as the Overlays menu shows them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Overlays {
+    pub grid: bool,
+    pub wireframe: bool,
+    pub face_orientation: bool,
+    pub statistics: bool,
+    pub ambient_occlusion: bool,
+    pub xray: bool,
 }
 
 impl Default for ViewStatus {
@@ -976,6 +989,7 @@ impl Default for ViewStatus {
             exposure: 0.0,
             metered: false,
             orthographic: false,
+            overlays: Overlays::default(),
         }
     }
 }
@@ -1232,6 +1246,7 @@ struct Labels {
     overlay_face_orientation: String,
     overlay_statistics: String,
     overlay_ao: String,
+    overlay_xray: String,
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
@@ -1464,6 +1479,7 @@ impl Labels {
             overlay_face_orientation: t("overlay-face-orientation"),
             overlay_statistics: t("overlay-statistics"),
             overlay_ao: t("overlay-ao"),
+            overlay_xray: t("overlay-xray"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
@@ -2561,7 +2577,24 @@ fn menu_item_enabled(
     for (name, value) in params {
         map.set(name, value.clone());
     }
-    let variant = kreate_ui::command_info::variant_id(id, &map);
+    let tooltip = menu_tooltip(state, id, &map);
+    let response = ui.add_enabled(enabled, egui::Button::new(label));
+    let response = if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(kreate_ui::text::wrap_tooltip(ui, &tooltip))
+    };
+    if response.clicked() {
+        ui.close();
+        true
+    } else {
+        false
+    }
+}
+
+/// What a menu entry's tooltip says: its description and its key.
+fn menu_tooltip(state: &ShellState, id: &str, map: &PropertyMap) -> String {
+    let variant = kreate_ui::command_info::variant_id(id, map);
     let description = [variant.as_str(), id]
         .iter()
         .map(|key| kreate_ui::command_info::description_key(key))
@@ -2581,18 +2614,7 @@ fn menu_item_enabled(
         // i18n-exempt: a translated sentence over a key name
         (false, false) => format!("{description}\n{shortcut}"),
     };
-    let response = ui.add_enabled(enabled, egui::Button::new(label));
-    let response = if tooltip.is_empty() {
-        response
-    } else {
-        response.on_hover_text(kreate_ui::text::wrap_tooltip(ui, &tooltip))
-    };
-    if response.clicked() {
-        ui.close();
-        true
-    } else {
-        false
-    }
+    tooltip
 }
 
 // --- the menus, as data ------------------------------------------------------
@@ -3157,15 +3179,28 @@ fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 /// grow — Blender's has two dozen — and a header full of toggles is a header
 /// nobody can read. Each entry says which key does the same thing.
 fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let on = state.view_status.overlays;
     ui.menu_button(&l.overlays, |ui| {
-        for (op, label) in [
-            ("view.toggle_grid", &l.overlay_grid),
-            ("view.toggle_wireframe", &l.overlay_wireframe),
-            ("view.toggle_face_orientation", &l.overlay_face_orientation),
-            ("view.toggle_statistics", &l.overlay_statistics),
-            ("view.toggle_ao", &l.overlay_ao),
+        for (op, label, checked) in [
+            ("view.toggle_grid", &l.overlay_grid, on.grid),
+            ("view.toggle_wireframe", &l.overlay_wireframe, on.wireframe),
+            ("view.toggle_face_orientation", &l.overlay_face_orientation, on.face_orientation),
+            ("view.toggle_statistics", &l.overlay_statistics, on.statistics),
+            ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
+            ("view.toggle_xray", &l.overlay_xray, on.xray),
         ] {
-            if menu_item(ui, state, op, &[], label) {
+            // A check box per setting, as Blender's popover: what is on is
+            // readable without toggling it to find out. The menu stays open,
+            // so several can be set in one visit.
+            let mut ticked = checked;
+            let tip = menu_tooltip(state, op, &PropertyMap::new());
+            let response = ui.checkbox(&mut ticked, label.as_str());
+            let response = if tip.is_empty() {
+                response
+            } else {
+                response.on_hover_text(kreate_ui::text::wrap_tooltip(ui, &tip))
+            };
+            if response.clicked() {
                 state.queue.dispatch(op, PropertyMap::new());
             }
         }
@@ -6626,6 +6661,9 @@ menu-undo-history = Undo History
 undo-original = Original
 overlay-statistics = Statistics
 overlay-ao = Ambient Occlusion
+overlay-xray = X-Ray
+op-view-toggle-xray = X-Ray
+op-view-toggle-xray-desc = See through the surfaces, and select what is behind them (Alt+Z).
 op-view-toggle-ao = Ambient Occlusion
 op-view-toggle-ao-desc = Darkens corners and creases in the studio view, so the shape reads.
 op-view-toggle-face-orientation = Face Orientation
@@ -7283,6 +7321,9 @@ menu-undo-history = 되돌리기 기록
 undo-original = 처음 상태
 overlay-statistics = 통계
 overlay-ao = 앰비언트 오클루전
+overlay-xray = 투시
+op-view-toggle-xray = 투시
+op-view-toggle-xray-desc = 표면을 비쳐 보이게 하고, 뒤에 있는 것도 선택되게 합니다 (Alt+Z).
 op-view-toggle-ao = 앰비언트 오클루전
 op-view-toggle-ao-desc = 스튜디오 보기에서 모서리와 틈을 어둡게 해 형태가 잘 보이게 합니다.
 op-view-toggle-face-orientation = 면 방향
