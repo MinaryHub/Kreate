@@ -581,6 +581,8 @@ pub struct Draw<'a> {
     /// Highlights the object's wireframe. Object-mode selection; element
     /// selection travels in the mesh's own flags buffer.
     pub selected: bool,
+    /// The active object: outlined lighter than the rest of the selection.
+    pub active: bool,
     /// What the id pass writes for this draw, so a pick names the object rather
     /// than the geometry.
     ///
@@ -643,6 +645,7 @@ impl<'a> Draw<'a> {
             mesh,
             transform,
             selected: false,
+            active: false,
             object_id: 0,
             preview: false,
             editing: false,
@@ -714,6 +717,12 @@ impl<'a> Draw<'a> {
 
     pub fn selected(mut self, yes: bool) -> Self {
         self.selected = yes;
+        self
+    }
+
+    /// Marks the active object, whose outline is lighter.
+    pub fn active(mut self, yes: bool) -> Self {
+        self.active = yes;
         self
     }
 
@@ -1367,6 +1376,10 @@ pub struct Viewport {
     /// Where the surfaces go to have their edges smoothed, when
     /// [`Viewport::antialias`] is on.
     aa: crate::fxaa::Fxaa,
+    /// The orange line around selected objects.
+    outline: crate::outline::Outline,
+    /// Whether selected objects are outlined.
+    pub show_outline: bool,
     /// The surfaces see-through, Blender's X-ray: every edge behind shows.
     pub xray: bool,
     solid_xray: wgpu::RenderPipeline,
@@ -1951,6 +1964,14 @@ impl Viewport {
         });
 
         let depth_0 = gpu::create_depth_texture(device, width, height);
+        let outline_0 = crate::outline::Outline::new(
+            device,
+            color_format,
+            &globals_layout,
+            &object_layout,
+            width.max(1),
+            height.max(1),
+        );
         let hdr_0 = crate::display::HdrTarget::new(device, width.max(1), height.max(1));
         let screen_0 = crate::display::ScreenResolve::new(device, color_format);
         let screen_params_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -2284,6 +2305,8 @@ impl Viewport {
             ambient_occlusion: true,
             depth: depth_0,
             aa: crate::fxaa::Fxaa::new(device, color_format, width.max(1), height.max(1)),
+            outline: outline_0,
+            show_outline: true,
             antialias: true,
             size: (width.max(1), height.max(1)),
             render_size: (width.max(1), height.max(1)),
@@ -2312,6 +2335,7 @@ impl Viewport {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
             self.aa.resize(device, size.0, size.1);
+            self.outline.resize(device, size.0, size.1);
             self.ao.resize(device, &self.depth, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
@@ -2645,7 +2669,19 @@ impl Viewport {
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
                     base_color: draw.mesh.color.to_array(),
-                    paint: [if draw.weights { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    paint: [
+                        if draw.weights { 1.0 } else { 0.0 },
+                        // How the outline marks it: see `outline.wgsl`.
+                        if !draw.selected {
+                            0.0
+                        } else if draw.active {
+                            1.0
+                        } else {
+                            0.5
+                        },
+                        0.0,
+                        0.0,
+                    ],
                 }),
             );
             // The shadow pass draws the same geometry from a different
@@ -3576,11 +3612,13 @@ impl Viewport {
                 self.ao.apply(encoder, self.aa.view(), self.render_size);
             }
             self.aa.resolve(encoder, target, self.render_size);
-            let mut pass = self.begin_pass(encoder, target, false);
-            self.encode_overlays(&mut pass, draws);
         } else {
             let mut pass = self.begin_pass(encoder, target, false);
             self.encode_solid(&mut pass, draws, Pass::Second);
+        }
+        self.draw_outline(encoder, target, draws);
+        {
+            let mut pass = self.begin_pass(encoder, target, false);
             self.encode_overlays(&mut pass, draws);
         }
         // For the next frame first pass. Skipping it would leave the pyramid
@@ -3888,14 +3926,34 @@ impl Viewport {
                 self.ao.apply(encoder, self.aa.view(), self.render_size);
             }
             self.aa.resolve(encoder, target, self.render_size);
-            let mut pass = self.begin_pass(encoder, target, false);
-            self.encode_overlays(&mut pass, draws);
+        } else {
+            let mut pass = self.begin_pass(encoder, target, true);
+            // Opaque geometry first, so the grid can be depth-tested against it.
+            self.encode_solid(&mut pass, draws, Pass::First);
+        }
+        self.draw_outline(encoder, target, draws);
+        let mut pass = self.begin_pass(encoder, target, false);
+        self.encode_overlays(&mut pass, draws);
+    }
+
+    /// The selection outline, over the surfaces and under the overlays.
+    fn draw_outline(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, draws: &[Draw]) {
+        if !self.show_outline || !draws.iter().any(|d| d.selected) {
             return;
         }
-        let mut pass = self.begin_pass(encoder, target, true);
-        // Opaque geometry first, so the grid can be depth-tested against it.
-        self.encode_solid(&mut pass, draws, Pass::First);
-        self.encode_overlays(&mut pass, draws);
+        self.outline.draw(
+            encoder,
+            target,
+            &self.depth,
+            self.render_size,
+            &self.globals_bind,
+            &self.objects.bind,
+            draws
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.selected && d.detail.draw && d.mesh.counts.triangles > 0)
+                .map(|(i, d)| (self.objects.offset(i as u32), &d.mesh.positions, &d.mesh.indices, d.mesh.counts.triangles)),
+        );
     }
 
     /// Whether the surfaces go through the smoothing pass: on, and there are
@@ -4067,6 +4125,7 @@ impl Viewport {
         }
 
         self.screen.draw_with(encoder, &self.screen_bind, target);
+        self.draw_outline(encoder, target, draws);
 
         {
             let mut pass = self.begin_pass(encoder, target, false);

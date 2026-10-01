@@ -5483,6 +5483,7 @@ impl App {
                             self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
                                 && self.doc.selection.contains(*id),
                         )
+                        .active(self.doc.selection.active == Some(*id))
                         // The same key the outliner round-trips, so a pick and a
                         // row in the tree name the object the same way.
                         .object_id(shell::object_key(*id))
@@ -5550,6 +5551,7 @@ impl App {
             statistics: self.ui.show_stats,
             ambient_occlusion: gfx.viewport.ambient_occlusion,
             xray: gfx.viewport.xray,
+            outline: gfx.viewport.show_outline,
         };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
@@ -6236,6 +6238,12 @@ impl App {
                 self.xray = !self.xray;
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.xray = self.xray;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_outline" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.show_outline = !gfx.viewport.show_outline;
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }

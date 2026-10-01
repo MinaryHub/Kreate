@@ -1011,6 +1011,7 @@ pub struct Overlays {
     pub statistics: bool,
     pub ambient_occlusion: bool,
     pub xray: bool,
+    pub outline: bool,
 }
 
 impl Default for ViewStatus {
@@ -1293,6 +1294,7 @@ struct Labels {
     overlay_statistics: String,
     overlay_ao: String,
     overlay_xray: String,
+    overlay_outline: String,
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
@@ -1543,6 +1545,7 @@ impl Labels {
             overlay_statistics: t("overlay-statistics"),
             overlay_ao: t("overlay-ao"),
             overlay_xray: t("overlay-xray"),
+            overlay_outline: t("overlay-outline"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
@@ -3298,6 +3301,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             ("view.toggle_statistics", &l.overlay_statistics, on.statistics),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
+            ("view.toggle_outline", &l.overlay_outline, on.outline),
         ] {
             // A check box per setting, as Blender's popover: what is on is
             // readable without toggling it to find out. The menu stays open,
@@ -6992,6 +6996,9 @@ undo-original = Original
 overlay-statistics = Statistics
 overlay-ao = Ambient Occlusion
 overlay-xray = X-Ray
+overlay-outline = Outline Selected
+op-view-toggle-outline = Outline Selected
+op-view-toggle-outline-desc = Draws an orange line around the selected objects, lighter around the active one.
 op-view-toggle-xray = X-Ray
 op-view-toggle-xray-desc = See through the surfaces, and select what is behind them (Alt+Z).
 op-view-toggle-ao = Ambient Occlusion
@@ -7722,6 +7729,9 @@ undo-original = 처음 상태
 overlay-statistics = 통계
 overlay-ao = 앰비언트 오클루전
 overlay-xray = 투시
+overlay-outline = 선택 외곽선
+op-view-toggle-outline = 선택 외곽선
+op-view-toggle-outline-desc = 선택한 오브젝트 둘레에 주황 선을 그립니다. 활성 오브젝트는 더 밝게.
 op-view-toggle-xray = 투시
 op-light-set_properties-param-kind-name = 종류
 op-light-set_properties-param-color-name = 색

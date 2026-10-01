@@ -126,7 +126,11 @@ fn render_scene_flags(
             (gpu_mesh, *xform)
         })
         .collect();
-    let mut refs: Vec<Draw> = uploaded.iter().map(|(m, t)| Draw::new(m, *t)).collect();
+    let selected = SELECTED.with(|a| a.get());
+    let mut refs: Vec<Draw> = uploaded
+        .iter()
+        .map(|(m, t)| Draw::new(m, *t).selected(selected).active(selected))
+        .collect();
 
     let mut camera = Camera::default();
     configure_camera(&mut camera);
@@ -208,6 +212,8 @@ thread_local! {
     static OCCLUSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether the surfaces are see-through.
     static XRAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether every draw is selected, and active.
+    static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Skips the test body when no GPU is present, so a CI runner without one does
@@ -744,4 +750,26 @@ fn xray_shows_what_is_behind_the_surfaces() {
     let middle = (SIZE / 2 + 5, SIZE / 2 + 9);
     let (s, x, b) = (lum(solid.at(middle.0, middle.1)), lum(xray.at(middle.0, middle.1)), lum(bg));
     assert!(x < s - 20 && x > b + 10, "x-ray {x} between background {b} and surface {s}");
+}
+
+/// Orange: the selection outline's colour, and nothing else in these scenes.
+fn orange(p: &[u8; 4]) -> bool {
+    p[0] > 150 && p[0] as i32 > p[1] as i32 + 40 && p[2] < 110
+}
+
+/// A selected object gets Blender's orange line around it; an unselected one
+/// none.
+#[test]
+fn a_selected_object_is_outlined() {
+    let (plain, _) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {}));
+    SELECTED.with(|a| a.set(true));
+    let picked = render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {});
+    SELECTED.with(|a| a.set(false));
+    let (picked, _) = gpu_or_skip!(picked);
+    save_shot(&picked, "outline");
+    let lines = picked.pixels.iter().filter(|p| orange(p)).count();
+    assert_eq!(plain.pixels.iter().filter(|p| orange(p)).count(), 0);
+    assert!(lines > 200, "{lines} outline pixels");
+    // Around the shape, not over it: the middle of the cube is not orange.
+    assert!(!orange(&picked.at(SIZE / 2 + 5, SIZE / 2 + 9)));
 }

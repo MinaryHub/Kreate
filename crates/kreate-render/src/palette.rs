@@ -94,6 +94,11 @@ pub fn display(hex: u32) -> DisplayRgb {
     Srgb::from_hex(hex).decode()
 }
 
+/// The selection outline around selected objects — Blender's orange.
+pub const OUTLINE_SELECTED: u32 = 0xED_57_00;
+/// And around the active one, lighter.
+pub const OUTLINE_ACTIVE: u32 = 0xFF_AA_40;
+
 /// A palette entry as an opaque RGBA, for a uniform block.
 pub fn display_rgba(hex: u32) -> [f32; 4] {
     display(hex).to_rgba(1.0)

@@ -20,6 +20,7 @@ pub mod markers;
 pub use markers::{MarkerShape, OverlayLine, OverlayPoint};
 pub mod material;
 pub mod lod;
+pub mod outline;
 pub mod mesh_gpu;
 pub mod motion;
 pub mod palette;
