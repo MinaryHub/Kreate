@@ -1154,6 +1154,9 @@ struct Labels {
     file_new: String,
     file_open: String,
     file_open_recent: String,
+    menu_select_similar: String,
+    /// One per `kreate_mesh::selection::SIMILAR`.
+    similar: Vec<String>,
     recent_none: String,
     menu_show_hide: String,
     reveal_hidden: String,
@@ -1389,6 +1392,11 @@ impl Labels {
             file_new: t("menu-file-new"),
             file_open: t("menu-file-open"),
             file_open_recent: t("menu-file-open-recent"),
+            menu_select_similar: t("menu-select-similar"),
+            similar: kreate_mesh::selection::SIMILAR
+                .iter()
+                .map(|(name, _)| t(&format!("similar-{}", name.replace('_', "-"))))
+                .collect(),
             recent_none: t("recent-none"),
             menu_show_hide: t("menu-show-hide"),
             reveal_hidden: t("reveal-hidden"),
@@ -3046,6 +3054,28 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
                 .variant("action", V::Enum(action)),
             ));
         }
+        // Blender's Select Similar, for the element type in use (Shift+G).
+        let mode = match select_mode {
+            1 => kreate_mesh::bmesh::SelectMode::Edge,
+            2 => kreate_mesh::bmesh::SelectMode::Face,
+            _ => kreate_mesh::bmesh::SelectMode::Vert,
+        };
+        let similar: Vec<MenuNode> = kreate_mesh::selection::SIMILAR
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, m))| *m == mode)
+            .map(|(i, _)| {
+                MenuNode::Entry(
+                    MenuEntry::new(
+                        "mesh.select_similar",
+                        &l.similar[i],
+                        op("mesh.select_similar", &[("kind", V::Enum(i as u32))]),
+                    )
+                    .variant("kind", V::Enum(i as u32)),
+                )
+            })
+            .collect();
+        out.push(MenuNode::Sub(l.menu_select_similar.clone(), similar));
         out.push(MenuNode::Separator);
         out.push(MenuNode::Entry(
             MenuEntry::new("mesh.select", &l.select_loop, op("mesh.select", &[("action", V::Enum(3))]))
@@ -7048,6 +7078,18 @@ paint-strength = Strength
 paint-front-only = Front Faces Only
 paint-falloff = Soft Edge
 menu-parent = Parent
+menu-select-similar = Select Similar
+similar-face-normal = Normal
+similar-face-area = Area
+similar-face-coplanar = Coplanar
+similar-face-material = Material
+similar-face-sides = Number of Sides
+similar-edge-length = Length
+similar-edge-direction = Direction
+similar-vert-normal = Normal
+similar-vert-faces = Number of Faces
+op-mesh-select-similar = Select Similar
+op-mesh-select-similar-desc = Selects everything like what is selected (Shift+G).
 menu-file-open-recent = Open Recent
 recent-none = Nothing opened yet
 menu-show-hide = Show/Hide
@@ -7057,8 +7099,8 @@ op-object-hide-desc = Hides the selected objects (H).
 op-object-hide-unselected-desc = Hides everything not selected (Shift+H).
 op-object-reveal = Reveal Hidden
 op-object-reveal-desc = Shows every hidden object, and selects them (Alt+H).
-op-object-parent_one = Parent
-op-object-parent_one-desc = Parents one object to another, by name — the outliner's drag and drop.
+op-object-parent-one = Parent
+op-object-parent-one-desc = Parents one object to another, by name — the outliner's drag and drop.
 menu-parent-to = Set Parent To
 parent-object = Object
 parent-clear = Clear Parent
@@ -7780,6 +7822,18 @@ paint-strength = 세기
 paint-front-only = 앞면만
 paint-falloff = 부드러운 가장자리
 menu-parent = 부모
+menu-select-similar = 비슷한 것 선택
+similar-face-normal = 같은 방향
+similar-face-area = 같은 넓이
+similar-face-coplanar = 같은 평면
+similar-face-material = 같은 재질
+similar-face-sides = 같은 변의 수
+similar-edge-length = 같은 길이
+similar-edge-direction = 같은 방향
+similar-vert-normal = 같은 방향
+similar-vert-faces = 같은 면 수
+op-mesh-select-similar = 비슷한 것 선택
+op-mesh-select-similar-desc = 선택한 것과 비슷한 것을 모두 선택합니다 (Shift+G).
 menu-file-open-recent = 최근 파일 열기
 recent-none = 아직 연 파일이 없습니다
 reveal-hidden = 숨긴 것 보이기
@@ -7788,8 +7842,8 @@ op-object-hide-desc = 선택한 오브젝트를 숨깁니다 (H).
 op-object-hide-unselected-desc = 선택하지 않은 것을 모두 숨깁니다 (Shift+H).
 op-object-reveal = 숨긴 것 보이기
 op-object-reveal-desc = 숨긴 오브젝트를 모두 보이고 선택합니다 (Alt+H).
-op-object-parent_one = 부모 지정
-op-object-parent_one-desc = 한 오브젝트를 다른 오브젝트의 자식으로 만듭니다 — 아웃라이너의 끌어다 놓기.
+op-object-parent-one = 부모 지정
+op-object-parent-one-desc = 한 오브젝트를 다른 오브젝트의 자식으로 만듭니다 — 아웃라이너의 끌어다 놓기.
 menu-parent-to = 부모 지정
 parent-object = 오브젝트
 parent-clear = 부모 해제

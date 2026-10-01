@@ -2102,6 +2102,57 @@ pub struct SelectParams {
     pub mode: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SelectSimilarParams {
+    /// What to compare. See `kreate_mesh::selection::SIMILAR`.
+    #[param(variants(
+        "face_normal",
+        "face_area",
+        "face_coplanar",
+        "face_material",
+        "face_sides",
+        "edge_length",
+        "edge_direction",
+        "vert_normal",
+        "vert_faces"
+    ))]
+    pub kind: u32,
+    /// How close counts: radians for a direction, a fraction for a size, a
+    /// length for a plane's offset.
+    #[param(min = 0.0, soft_max = 1.0)]
+    pub threshold: f64,
+}
+
+impl Default for SelectSimilarParams {
+    fn default() -> Self {
+        Self { kind: 0, threshold: 0.01 }
+    }
+}
+
+/// Blender's Shift+G: everything like what is selected joins it.
+pub struct SelectSimilar;
+
+impl Operator for SelectSimilar {
+    type Params = SelectSimilarParams;
+
+    fn id() -> &'static str {
+        "mesh.select_similar"
+    }
+    fn label() -> &'static str {
+        "Select Similar"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let grew = for_each_edit_mesh(doc, |_, mesh| {
+            selection::select_similar(mesh, params.kind as usize, params.threshold)
+        })?;
+        Ok(if grew { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
 /// Changes the mesh element selection.
 pub struct SelectElements;
 
@@ -2750,6 +2801,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MarkSharp>();
     registry.register::<MergeVerts>();
     registry.register::<SelectElements>();
+    registry.register::<SelectSimilar>();
     registry.register::<HideElements>();
     registry.register::<KnifeCut>();
     registry.register::<MarkSeam>();

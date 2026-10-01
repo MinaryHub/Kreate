@@ -715,6 +715,141 @@ pub fn select_linked(mesh: &mut MeshData, corner_edges: &[u32]) -> bool {
     selected(mesh, Domain::Point).len() != before
 }
 
+
+/// What Select Similar compares — Blender's Shift+G, per element type.
+///
+/// The index is what `mesh.select_similar` carries, so entries are only ever
+/// appended.
+pub const SIMILAR: [(&str, SelectMode); 9] = [
+    ("face_normal", SelectMode::Face),
+    ("face_area", SelectMode::Face),
+    ("face_coplanar", SelectMode::Face),
+    ("face_material", SelectMode::Face),
+    ("face_sides", SelectMode::Face),
+    ("edge_length", SelectMode::Edge),
+    ("edge_direction", SelectMode::Edge),
+    ("vert_normal", SelectMode::Vert),
+    ("vert_faces", SelectMode::Vert),
+];
+
+/// Selects every element like a selected one, by `SIMILAR[kind]`, within
+/// `threshold`: radians for a direction, a fraction for a size, a length for
+/// a plane's offset. Adds to the selection; `false` when nothing new matched.
+pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool {
+    let Some(&(_, mode)) = SIMILAR.get(kind) else { return false };
+    let domain = match mode {
+        SelectMode::Vert => Domain::Point,
+        SelectMode::Edge => Domain::Edge,
+        SelectMode::Face => Domain::Face,
+    };
+    let picked = selected(mesh, domain);
+    if picked.is_empty() {
+        return false;
+    }
+    let t = threshold.max(0.0);
+    let p = mesh.positions();
+    let at = |v: u32| p[v as usize].as_dvec3();
+    // A face's normal (unit) and area, Newell's way, so a bent quad counts.
+    let face_shape = |f: u32| {
+        let ring = mesh.face_verts(f);
+        let mut n = glam::DVec3::ZERO;
+        for k in 0..ring.len() {
+            n += at(ring[k]).cross(at(ring[(k + 1) % ring.len()]));
+        }
+        (n.normalize_or_zero(), n.length() * 0.5, at(ring[0]))
+    };
+    let same_size = |a: f64, b: f64| (a - b).abs() <= t * a.abs().max(b.abs()) + 1e-9;
+    let same_direction = |a: glam::DVec3, b: glam::DVec3| a.angle_between(b) <= t + 1e-6;
+    let count = match domain {
+        Domain::Point => mesh.num_verts(),
+        Domain::Edge => mesh.num_edges(),
+        _ => mesh.num_faces(),
+    } as usize;
+    // One number or direction per element, by kind; compared against every
+    // selected one's.
+    let matches: Vec<bool> = match kind {
+        0..=4 => {
+            let shapes: Vec<_> = (0..mesh.num_faces()).map(face_shape).collect();
+            let materials = mesh.attributes().get_i32(names::MATERIAL_INDEX).map(|m| m.to_vec());
+            let material = |f: usize| materials.as_ref().and_then(|m| m.get(f).copied()).unwrap_or(0);
+            let sides = |f: usize| mesh.face_verts(f as u32).len();
+            (0..count)
+                .map(|f| {
+                    picked.iter().any(|&r| {
+                        let r = r as usize;
+                        let (n, area, point) = shapes[f];
+                        let (rn, rarea, rpoint) = shapes[r];
+                        match kind {
+                            0 => same_direction(n, rn),
+                            1 => same_size(area, rarea),
+                            // The same plane: the same facing, and no further
+                            // off it than the threshold as a length.
+                            2 => same_direction(n, rn) && (point - rpoint).dot(rn).abs() <= t + 1e-6,
+                            3 => material(f) == material(r),
+                            _ => sides(f) == sides(r),
+                        }
+                    })
+                })
+                .collect()
+        }
+        5 | 6 => {
+            let edges = mesh.edges();
+            let vector = |e: usize| at(edges[e][1]) - at(edges[e][0]);
+            (0..count)
+                .map(|e| {
+                    picked.iter().any(|&r| {
+                        let (v, rv) = (vector(e), vector(r as usize));
+                        if kind == 5 {
+                            same_size(v.length(), rv.length())
+                        } else {
+                            // Either way along it: an edge has no direction of
+                            // its own.
+                            let a = v.normalize_or_zero();
+                            let b = rv.normalize_or_zero();
+                            same_direction(a, b) || same_direction(a, -b)
+                        }
+                    })
+                })
+                .collect()
+        }
+        _ => {
+            let mut normals = vec![glam::DVec3::ZERO; count];
+            let mut faces = vec![0u32; count];
+            for f in 0..mesh.num_faces() {
+                let (n, area, _) = face_shape(f);
+                for v in mesh.face_verts(f) {
+                    normals[*v as usize] += n * area;
+                    faces[*v as usize] += 1;
+                }
+            }
+            (0..count)
+                .map(|v| {
+                    picked.iter().any(|&r| {
+                        let r = r as usize;
+                        if kind == 7 {
+                            same_direction(normals[v].normalize_or_zero(), normals[r].normalize_or_zero())
+                        } else {
+                            faces[v] == faces[r]
+                        }
+                    })
+                })
+                .collect()
+        }
+    };
+    let hidden = hidden_flags(mesh, domain);
+    let mut grew = false;
+    for (i, on) in matches.into_iter().enumerate() {
+        if on && !hidden.get(i).copied().unwrap_or(false) && !is_selected(mesh, domain, i as u32) {
+            set_selected(mesh, domain, i as u32, true);
+            grew = true;
+        }
+    }
+    if grew {
+        flush(mesh, mode);
+    }
+    grew
+}
+
 #[cfg(test)]
 mod hide_tests {
     use super::*;
@@ -1003,5 +1138,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Shift+G on a cube: one face's normal finds only that face, its area
+    /// finds all six; an edge's length finds all twelve.
+    #[test]
+    fn select_similar_finds_faces_and_edges_like_the_selected_one() {
+        let mut m = crate::primitives::cube(2.0);
+        select_none(&mut m);
+        set_selected(&mut m, Domain::Face, 0, true);
+        flush(&mut m, SelectMode::Face);
+        assert!(!select_similar(&mut m, 0, 0.01), "no other face faces that way");
+        assert!(select_similar(&mut m, 1, 0.01));
+        assert_eq!(selected(&m, Domain::Face).len(), 6);
+
+        select_none(&mut m);
+        set_selected(&mut m, Domain::Edge, 0, true);
+        assert!(select_similar(&mut m, 5, 0.01));
+        assert_eq!(selected(&m, Domain::Edge).len(), 12);
     }
 }

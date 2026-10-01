@@ -836,6 +836,14 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::ctrl()),
         // H hides the selection, Shift+H everything else, Alt+H brings it back.
         key("mesh.hide", "H", Context::EditMesh, Action::new("mesh.hide")),
+        // Blender's Shift+G: Select Similar, a menu of what to compare.
+        key(
+            "mesh.select_similar",
+            "G",
+            Context::EditMesh,
+            Action::new("app.menu").with("menu", PropertyValue::Text("similar".into())),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "mesh.hide_unselected",
             "H",
@@ -975,24 +983,18 @@ mod tests {
                 );
             }
 
-            // And the grid toggle is still reachable, from both modes. It used
+            // And the grid toggle is still reachable from object mode. It used
             // to be on bare `G`, where taking that key for Move would have
             // killed it outright rather than merely moved it: the inner
             // contexts are searched first and the application is always in one
-            // of them.
-            for context in [Context::ObjectMode, Context::EditMesh] {
-                assert_eq!(
-                    k.resolve(
-                        context,
-                        &Input::key("G"),
-                        Modifiers::shift(),
-                        EventKind::Press
-                    )
+            // of them. In edit mode Shift+G is Blender's Select Similar, and
+            // the grid is in the Overlays menu.
+            assert_eq!(
+                k.resolve(Context::ObjectMode, &Input::key("G"), Modifiers::shift(), EventKind::Press)
                     .map(|a| a.op_id),
-                    Some("view.toggle_grid".to_string()),
-                    "{preset:?}: the grid toggle is unreachable from {context:?}"
-                );
-            }
+                Some("view.toggle_grid".to_string()),
+                "{preset:?}: the grid toggle is unreachable from object mode"
+            );
         }
     }
 

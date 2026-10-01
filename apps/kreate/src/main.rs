@@ -1446,6 +1446,25 @@ impl App {
                 ));
                 vec![Group { title: t("menu-move-to-collection"), entries }]
             }
+            // Blender's Shift+G: what to compare, for the element type in use.
+            "similar" => {
+                let entries = kreate_mesh::selection::SIMILAR
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, mode))| {
+                        *mode
+                            == match self.ui.select_mode {
+                                1 => kreate_mesh::bmesh::SelectMode::Edge,
+                                2 => kreate_mesh::bmesh::SelectMode::Face,
+                                _ => kreate_mesh::bmesh::SelectMode::Vert,
+                            }
+                    })
+                    .map(|(i, (name, _))| {
+                        row(self, t(&format!("similar-{}", name.replace('_', "-"))), "mesh.select_similar", &[("kind", PropertyValue::Enum(i as u32))])
+                    })
+                    .collect();
+                vec![Group { title: t("menu-select-similar"), entries }]
+            }
             // Blender's Ctrl+P: what to parent to.
             "parent" => vec![Group {
                 title: t("menu-parent-to"),
