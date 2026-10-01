@@ -245,6 +245,8 @@ pub struct ShellState {
     pub knife_preview: Vec<kreate_math::DVec3>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
+    /// What a snapping drag has caught, for a marker on it.
+    pub snap_target: Option<(kreate_math::DVec3, crate::snap::Element)>,
     /// Blender's Statistics overlay: counts in the viewport's corner.
     pub show_stats: bool,
     /// The history's step names and how many are applied, for the Undo
@@ -559,6 +561,7 @@ impl Default for ShellState {
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
             circle_select: None,
+            snap_target: None,
             show_stats: false,
             history_steps: Vec::new(),
             history_at: 0,
@@ -2121,6 +2124,31 @@ fn draw_area(
                             ui.painter()
                                 .with_clip_rect(inner)
                                 .circle_stroke(p, radius, egui::Stroke::new(1.2, theme.text));
+                        }
+                    }
+                    // What a snapping drag caught, Blender's marker on it: a
+                    // square for a vertex, a ring for an edge, a ring with a
+                    // dot for a face.
+                    if let Some((at, element)) = state.snap_target {
+                        if let Some(p) = state.projector.and_then(|pr| pr.project(at)).filter(|p| inner.contains(*p)) {
+                            let painter = ui.painter().with_clip_rect(inner);
+                            let colour = egui::Color32::WHITE;
+                            let outline = egui::Stroke::new(3.5, egui::Color32::from_black_alpha(160));
+                            let stroke = egui::Stroke::new(1.5, colour);
+                            match element {
+                                crate::snap::Element::Vertex => {
+                                    let r = egui::Rect::from_center_size(p, egui::vec2(11.0, 11.0));
+                                    painter.rect_stroke(r, 0.0, outline, egui::StrokeKind::Middle);
+                                    painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
+                                }
+                                crate::snap::Element::Edge | crate::snap::Element::Face => {
+                                    painter.circle_stroke(p, 6.0, outline);
+                                    painter.circle_stroke(p, 6.0, stroke);
+                                    if element == crate::snap::Element::Face {
+                                        painter.circle_filled(p, 2.0, colour);
+                                    }
+                                }
+                            }
                         }
                     }
                     // The knife's path: the cut so far and the next stretch.

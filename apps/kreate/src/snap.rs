@@ -36,6 +36,9 @@ pub enum Mode {
     /// Round the *change* to an increment. Needs no geometry.
     #[default]
     Increment,
+    /// Whatever is under the cursor: a vertex if one is near, else an edge,
+    /// else the face — Blender's Vertex + Edge + Face, what `B` turns on.
+    Element,
     Vertex,
     Edge,
     /// The middle of an edge, which is what centring something on a face wants.
@@ -53,6 +56,7 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Increment => "increment",
+            Mode::Element => "vertex/edge/face",
             Mode::Vertex => "vertex",
             Mode::Edge => "edge",
             Mode::EdgeMidpoint => "midpoint",
@@ -63,7 +67,8 @@ impl Mode {
     /// The next mode, for a key that cycles through them.
     pub fn next(self) -> Self {
         match self {
-            Mode::Increment => Mode::Vertex,
+            Mode::Increment => Mode::Element,
+            Mode::Element => Mode::Vertex,
             Mode::Vertex => Mode::Edge,
             Mode::Edge => Mode::EdgeMidpoint,
             Mode::EdgeMidpoint => Mode::Face,
@@ -136,10 +141,29 @@ impl SnapWorld {
     }
 }
 
+/// What kind of thing a snap caught, for drawing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Element {
+    Vertex,
+    Edge,
+    Face,
+}
+
+impl Element {
+    pub fn label(self) -> &'static str {
+        match self {
+            Element::Vertex => "vertex",
+            Element::Edge => "edge",
+            Element::Face => "face",
+        }
+    }
+}
+
 /// A point a drag can snap to.
 #[derive(Clone, Copy, Debug)]
 pub struct Hit {
     pub point: DVec3,
+    pub element: Element,
     /// Distance from the cursor in pixels, for choosing between candidates.
     pub distance_px: f32,
 }
@@ -154,13 +178,20 @@ pub fn resolve(
 ) -> Option<Hit> {
     match mode {
         Mode::Increment => None,
+        // A vertex beats the edges it ends and an edge beats the faces it
+        // borders: the smaller thing is the more deliberate aim, and a vertex
+        // could never be caught if the face around it always won.
+        Mode::Element => nearest_point(world.verts.iter().copied(), cursor, camera, viewport)
+            .or_else(|| nearest_on_edges(world, cursor, camera, viewport))
+            .or_else(|| under_cursor(world, cursor, camera, viewport)),
         Mode::Vertex => nearest_point(world.verts.iter().copied(), cursor, camera, viewport),
         Mode::EdgeMidpoint => nearest_point(
             world.edges.iter().map(|e| (e[0] + e[1]) * 0.5),
             cursor,
             camera,
             viewport,
-        ),
+        )
+        .map(|hit| Hit { element: Element::Edge, ..hit }),
         Mode::Edge => nearest_on_edges(world, cursor, camera, viewport),
         Mode::Face => under_cursor(world, cursor, camera, viewport),
     }
@@ -185,6 +216,7 @@ fn nearest_point(
         if best.is_none_or(|b| distance < b.distance_px) {
             best = Some(Hit {
                 point,
+                element: Element::Vertex,
                 distance_px: distance,
             });
         }
@@ -233,6 +265,7 @@ fn nearest_on_edges(
         if best.is_none_or(|best| distance < best.distance_px) {
             best = Some(Hit {
                 point,
+                element: Element::Edge,
                 distance_px: distance,
             });
         }
@@ -266,6 +299,7 @@ fn under_cursor(
     }
     nearest.map(|(_, point)| Hit {
         point,
+        element: Element::Face,
         // A face hit is under the cursor by construction, so there is no
         // distance to rank it by. Zero, which also means it beats nothing.
         distance_px: 0.0,

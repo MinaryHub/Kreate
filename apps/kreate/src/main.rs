@@ -91,10 +91,11 @@ Kreate
                X X            press again for the object's own axes (ZZ, YY)
                Shift (hold)   ten times finer, from where you pressed it
                Ctrl (hold)    the other way round on snapping
+               B              snap to the vertex, edge or face under the pointer
                type a value   2*3.5, 1.4/8, 50cm, 30deg; Backspace to correct
                wheel          proportional falloff radius, while it is on
   Settings   ` snapping on/off (Ctrl inverts it for one drag)
-             Shift+` what it snaps to: increment, vertex, edge, midpoint, face
+             Shift+` what it snaps to: increment, vertex/edge/face, vertex, edge, midpoint, face
                      Element modes land the selection *on* what the cursor is
                      over; increment rounds how far it went.
              O proportional editing on/off, in edit mode
@@ -1700,9 +1701,9 @@ impl App {
     /// Built from the *evaluated* scene, so a drag snaps to what is on screen —
     /// including geometry a modifier produced, which is what the user is
     /// looking at and aiming for.
-    fn build_snap_world(&self) -> kreate::snap::SnapWorld {
+    fn build_snap_world(&self, mode: kreate::snap::Mode) -> kreate::snap::SnapWorld {
         let mut world = kreate::snap::SnapWorld::default();
-        if !self.snap.mode.needs_geometry() {
+        if !mode.needs_geometry() {
             // Increment snapping needs no candidates, and gathering a scene's
             // worth of them to ignore would be the whole cost for none of the
             // benefit.
@@ -1743,6 +1744,49 @@ impl App {
             world.add_mesh(mesh, &to_world, &moving);
         }
         world
+    }
+
+    /// The points of what a drag is about to move, in the world: the
+    /// selected vertices in edit mode, the selected objects' vertices (or
+    /// origins) in object mode. A snap lands the one nearest its target.
+    ///
+    /// Taken at the start, because the drag moves them. Left empty past a
+    /// size where looking through them every frame would be felt — the
+    /// pivot lands instead.
+    fn snap_sources(&self) -> Vec<DVec3> {
+        const MAX: usize = 200_000;
+        let mut out = Vec::new();
+        let point = |to_world: &glam::DAffine3, p: glam::Vec3| to_world.transform_point3(p.as_dvec3());
+        if self.op_ctx.mode.edits_elements() {
+            let Some(edited) = kreate_ops::ops::mesh::target_mesh(&self.doc) else {
+                return out;
+            };
+            for (id, mesh) in &self.evaluated {
+                if self.doc.object(*id).and_then(|o| o.mesh()) != Some(edited) {
+                    continue;
+                }
+                let to_world = self.doc.world_transform(*id);
+                let selected = kreate_ops::ops::mesh::selection_vertices(mesh);
+                if out.len() + selected.len() > MAX {
+                    return Vec::new();
+                }
+                out.extend(selected.iter().map(|v| point(&to_world, mesh.positions()[*v as usize])));
+            }
+        } else if self.op_ctx.mode.info().acts_on == kreate_ops::mode::ActsOn::Objects {
+            for id in &self.doc.selection.objects {
+                let to_world = self.doc.world_transform(*id);
+                match self.evaluated.iter().find(|(e, _)| e == id) {
+                    Some((_, mesh)) => {
+                        if out.len() + mesh.positions().len() > MAX {
+                            return Vec::new();
+                        }
+                        out.extend(mesh.positions().iter().map(|p| point(&to_world, *p)));
+                    }
+                    None => out.push(to_world.translation),
+                }
+            }
+        }
+        out
     }
 
     /// Starts an interactive transform.
@@ -1807,8 +1851,14 @@ impl App {
             (w, h),
             basis,
             self.snap,
-            self.build_snap_world(),
+            self.build_snap_world(self.snap.mode),
         );
+        if matches!(
+            kind,
+            kreate::modal::Kind::Move | kreate::modal::Kind::ExtrudeFree | kreate::modal::Kind::Extrude
+        ) {
+            gesture.set_sources(self.snap_sources());
+        }
         if extrude_normal.is_some() {
             gesture.axis = Some(kreate::modal::Axis::Z);
             gesture.orientation = kreate::modal::Orientation::Local;
@@ -2118,6 +2168,7 @@ impl App {
             gesture.track(cursor);
             (gesture.params(), gesture.status())
         };
+        self.ui.snap_target = self.gesture.as_ref().and_then(|(g, _)| g.snap_point());
 
         // The GPU preview, when there is one: a 64-byte uniform and three
         // dispatches, and the document is not written at all.
@@ -2164,6 +2215,7 @@ impl App {
         let Some((gesture, mut session)) = self.gesture.take() else {
             return;
         };
+        self.ui.snap_target = None;
         // A previewed drag never wrote the document, so the operator has to run
         // now — once, with the final parameters. Which is exactly the shape
         // §1.6 wants anyway: the history entry, the adjust panel and the script
@@ -2204,6 +2256,7 @@ impl App {
         let Some((gesture, session)) = self.gesture.take() else {
             return;
         };
+        self.ui.snap_target = None;
         // The preview has to be undone explicitly, and this is the one place
         // where that is not obvious. A cancel puts the document back to the very
         // handle the GPU cache is already holding — that is what makes it free
@@ -2867,6 +2920,14 @@ impl App {
             KeyCode::KeyB => {
                 if let Some((gesture, _)) = &mut self.gesture {
                     gesture.toggle_snap();
+                }
+                // A drag that began with increment snapping gathered nothing
+                // to catch on. What is not moving is still where it was.
+                if self.gesture.as_ref().is_some_and(|(g, _)| g.wants_world()) {
+                    let world = self.build_snap_world(kreate::snap::Mode::Element);
+                    if let Some((gesture, _)) = &mut self.gesture {
+                        gesture.set_world(world);
+                    }
                 }
                 self.drive_gesture();
                 true

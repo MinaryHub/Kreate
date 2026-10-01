@@ -1215,9 +1215,12 @@ fn b_turns_snapping_on_for_the_rest_of_the_drag_and_off_again() {
     let free = translation(&at(&mut g, free_pointer))[0];
     assert!(!on_increment(free), "the fixture pointer must land off the grid: {free}");
 
+    // With the header on increment, B snaps to geometry instead (see
+    // `b_snaps_the_move_to_the_vertex_under_the_pointer`); with nothing under
+    // the pointer the move stays free.
     g.toggle_snap();
     let snapped = translation(&at(&mut g, free_pointer))[0];
-    assert!(on_increment(snapped), "B did not turn snapping on: {snapped}");
+    assert_eq!(snapped, free, "nothing is near, so nothing is caught");
     assert!(
         g.status().contains("snap"),
         "the header does not say snapping is on: {}",
@@ -1227,6 +1230,7 @@ fn b_turns_snapping_on_for_the_rest_of_the_drag_and_off_again() {
     g.toggle_snap();
     let released = translation(&at(&mut g, free_pointer))[0];
     assert_eq!(released, free, "a second B did not turn snapping off again");
+    assert!(!g.status().contains("snap"));
 }
 
 #[test]
@@ -1533,4 +1537,85 @@ fn ctrl_during_an_inset_holds_the_thickness_and_drives_the_depth() {
     // Released: the depth stays where it was left.
     g.set_snap_inverted(false);
     assert!((float(&at(&mut g, (560.0, 300.0)), "depth") - depth).abs() < 1e-9);
+}
+
+
+/// `B` mid-drag, Blender's: the drag began with nothing to catch on, and from
+/// the press on it lands on the vertex under the pointer.
+#[test]
+fn b_snaps_the_move_to_the_vertex_under_the_pointer() {
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    let target = DVec3::new(2.0, 0.0, 1.0);
+    let on_it = kreate::snap::project(target, &camera(), VIEWPORT).unwrap();
+    let near = (on_it.0 + 3.0, on_it.1 - 2.0);
+    let unsnapped = translation(&at(&mut g, near));
+    assert!((DVec3::from_array(unsnapped) - target).length() > 1e-3, "nothing to snap to yet");
+
+    g.toggle_snap();
+    assert!(g.wants_world(), "increment snapping gathered no geometry");
+    g.set_world(SnapWorld { verts: vec![DVec3::new(-3.0, 0.0, 0.0), target], ..SnapWorld::default() });
+    assert!(!g.wants_world());
+    let snapped = translation(&at(&mut g, near));
+    assert!((DVec3::from_array(snapped) - target).length() < 1e-9, "{snapped:?}");
+    let (point, element) = g.snap_point().expect("a marker to draw");
+    assert_eq!(element, kreate::snap::Element::Vertex);
+    assert!((point - target).length() < 1e-9);
+
+    // And again lets go.
+    g.toggle_snap();
+    let free = translation(&at(&mut g, near));
+    assert!((DVec3::from_array(free) - DVec3::from_array(unsnapped)).length() < 1e-9);
+    assert!(g.snap_point().is_none());
+}
+
+/// The point of the selection nearest the target is what lands on it —
+/// Blender's snap base "Closest" — not the selection's middle, which would
+/// sink a cube halfway into what it was put on.
+#[test]
+fn the_nearest_moving_point_lands_on_the_target() {
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.set_sources(vec![DVec3::new(0.5, 0.0, 0.5), DVec3::new(-0.2, 0.0, -0.9)]);
+    g.toggle_snap();
+    let target = DVec3::new(2.0, 0.0, 1.0);
+    g.set_world(SnapWorld { verts: vec![target], ..SnapWorld::default() });
+    let on_it = kreate::snap::project(target, &camera(), VIEWPORT).unwrap();
+    let moved = translation(&at(&mut g, on_it));
+    assert!((DVec3::from_array(moved) - DVec3::new(1.5, 0.0, 0.5)).length() < 1e-9, "{moved:?}");
+}
+
+/// A rotation has no destination, so `B` there means its increments, as
+/// before, and nothing is marked.
+#[test]
+fn a_rotation_is_not_snapped_to_elements() {
+    let mut g = Gesture::begin(
+        Kind::Rotate,
+        (500.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld { verts: vec![DVec3::new(1.0, 0.0, 0.0)], ..SnapWorld::default() },
+    );
+    g.toggle_snap();
+    at(&mut g, kreate::snap::project(DVec3::new(1.0, 0.0, 0.0), &camera(), VIEWPORT).unwrap());
+    assert!(g.snap_point().is_none());
 }

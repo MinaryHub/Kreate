@@ -302,17 +302,17 @@ fn candidates_are_in_world_space() {
 fn the_snap_modes_cycle_back_to_where_they_started() {
     let mut mode = Mode::Increment;
     let mut seen = vec![mode];
-    for _ in 0..4 {
+    for _ in 0..5 {
         mode = mode.next();
         seen.push(mode);
     }
-    assert_eq!(seen[4], Mode::Face);
+    assert_eq!(seen[5], Mode::Face);
     assert_eq!(mode.next(), Mode::Increment, "the cycle should close");
     // And every mode is reachable exactly once.
     let mut sorted: Vec<&str> = seen.iter().map(|m| m.label()).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    assert_eq!(sorted.len(), 5);
+    assert_eq!(sorted.len(), 6);
 }
 
 #[test]
@@ -342,4 +342,35 @@ fn projection_is_camera_relative() {
         (px.0 - VIEWPORT.0 * 0.5).abs() < 1.0 && (px.1 - VIEWPORT.1 * 0.5).abs() < 1.0,
         "the camera's own pivot did not project to the centre: {px:?}"
     );
+}
+
+
+/// Vertex, then edge, then face: the smaller thing is the more deliberate aim.
+#[test]
+fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
+    let a = DVec3::new(-1.0, 0.0, -1.0);
+    let b = DVec3::new(1.0, 0.0, -1.0);
+    let c = DVec3::new(0.0, 0.0, 1.0);
+    let world = SnapWorld {
+        verts: vec![a, b, c],
+        edges: vec![[a, b], [b, c], [c, a]],
+        tris: vec![[a, b, c]],
+    };
+    let hit = |p: DVec3| snap::resolve(&world, Mode::Element, at_point(p), &camera(), VIEWPORT).unwrap();
+
+    let vertex = hit(c);
+    assert_eq!(vertex.element, snap::Element::Vertex);
+    assert!((vertex.point - c).length() < 1e-9);
+
+    let edge = hit((a + b) * 0.5);
+    assert_eq!(edge.element, snap::Element::Edge);
+    assert!((edge.point - (a + b) * 0.5).length() < 1e-6);
+
+    let middle = DVec3::new(0.0, 0.0, -0.3);
+    let face = hit(middle);
+    assert_eq!(face.element, snap::Element::Face);
+    assert!((face.point - middle).length() < 1e-6, "{:?}", face.point);
+
+    let far = at_point(DVec3::new(4.0, 0.0, 3.0));
+    assert!(snap::resolve(&world, Mode::Element, far, &camera(), VIEWPORT).is_none());
 }

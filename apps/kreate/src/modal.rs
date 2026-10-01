@@ -281,6 +281,10 @@ pub struct Gesture {
     /// transform, so the set cannot change — rebuilding it per frame would be
     /// the same answer at a hundred times the cost.
     world: crate::snap::SnapWorld,
+    /// The points of what is moving, in the world, where they were when the
+    /// drag began — Blender's snap base "Closest": the one nearest the target
+    /// is what lands on it. Empty means the pivot does.
+    sources: Vec<DVec3>,
     /// The camera and viewport, for resolving a snap in screen space.
     ///
     /// Held rather than passed, so that `params` stays a function of the
@@ -374,6 +378,7 @@ impl Gesture {
             snap,
             snap_inverted: false,
             world,
+            sources: Vec::new(),
             camera: *camera,
             viewport,
             proportional: None,
@@ -497,7 +502,11 @@ impl Gesture {
     /// `None` for increment snapping, which adjusts the value rather than
     /// choosing a destination, and for a cursor that is not near anything.
     fn snap_target(&self) -> Option<DVec3> {
-        if !self.snapping() || !self.snap.mode.needs_geometry() {
+        self.snap_hit().map(|hit| hit.point)
+    }
+
+    fn snap_hit(&self) -> Option<crate::snap::Hit> {
+        if !self.snapping() || !self.snap.mode.needs_geometry() || !matches!(self.kind, Kind::Move | Kind::ExtrudeFree | Kind::Extrude) {
             return None;
         }
         crate::snap::resolve(
@@ -507,7 +516,44 @@ impl Gesture {
             &self.camera,
             self.viewport,
         )
-        .map(|hit| hit.point)
+    }
+
+    /// What a snap caught, for drawing a marker on it.
+    pub fn snap_point(&self) -> Option<(DVec3, crate::snap::Element)> {
+        if self.typed().is_some() {
+            return None;
+        }
+        self.snap_hit().map(|hit| (hit.point, hit.element))
+    }
+
+    /// Whether snapping wants geometry it has not been given yet — `B` in a
+    /// drag that began with increment snapping has no candidates.
+    pub fn wants_world(&self) -> bool {
+        self.snapping() && self.snap.mode.needs_geometry() && self.world.is_empty()
+    }
+
+    /// The geometry to snap to, given after the start.
+    pub fn set_world(&mut self, world: crate::snap::SnapWorld) {
+        self.world = world;
+    }
+
+    /// The moving points a snap may land, where they were at the start.
+    pub fn set_sources(&mut self, sources: Vec<DVec3>) {
+        self.sources = sources;
+    }
+
+    /// The point of the selection that lands on `target`: the moving point
+    /// nearest it as the pointer has carried things so far, or the pivot.
+    fn snap_source(&self, target: DVec3, free: DVec3) -> DVec3 {
+        self.sources
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                let da = (*a + free).distance_squared(target);
+                let db = (*b + free).distance_squared(target);
+                da.total_cmp(&db)
+            })
+            .unwrap_or(self.pivot)
     }
 
     /// Inverts the snap setting for this drag, as a held `Ctrl` does.
@@ -543,7 +589,16 @@ impl Gesture {
     /// panels down on the grid holds `Ctrl` for one and presses `B` for
     /// twenty, and it is the drag that remembers, not the scene — the setting
     /// in the header is what the next drag starts from.
+    ///
+    /// Turning it on when the setting is increment snaps to geometry instead —
+    /// the vertex, edge or face under the pointer, as Blender's `B` does.
     pub fn toggle_snap(&mut self) {
+        let on = !self.snapping();
+        if on && self.snap.mode == crate::snap::Mode::Increment {
+            self.snap.mode = crate::snap::Mode::Element;
+        }
+        // Ctrl may be inverting it; flip what decides, so B always flips
+        // what the user sees.
         self.snap.enabled = !self.snap.enabled;
     }
 
@@ -771,7 +826,8 @@ impl Gesture {
         // be moved somewhere else.
         if self.typed().is_none() {
             if let Some(target) = self.snap_target() {
-                let to_target = target - self.pivot;
+                let free = self.screen_to_world(dx, dy).as_dvec3();
+                let to_target = target - self.snap_source(target, free);
                 return match self.axis {
                     None => to_target,
                     Some(axis) => {
@@ -986,7 +1042,12 @@ impl Gesture {
             } else {
                 ""
             };
-            format!("  snap {}{caught}", self.snap.mode.label())
+            match self.snap_hit() {
+                Some(hit) if self.snap.mode == crate::snap::Mode::Element => {
+                    format!("  snap {}{caught}", hit.element.label())
+                }
+                _ => format!("  snap {}{caught}", self.snap.mode.label()),
+            }
         } else {
             String::new()
         };
