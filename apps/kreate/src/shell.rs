@@ -1223,6 +1223,7 @@ struct Labels {
     select_invert: String,
     view_frame_all: String,
     view_frame_selected: String,
+    view_camera: String,
     view_perspective: String,
     view_sidebar: String,
     overlays: String,
@@ -1453,6 +1454,7 @@ impl Labels {
             select_invert: t("select-invert"),
             view_frame_all: t("view-frame-all"),
             view_frame_selected: t("view-frame-selected"),
+            view_camera: t("view-camera"),
             view_perspective: t("view-perspective"),
             view_sidebar: t("view-sidebar"),
             overlays: t("overlays"),
@@ -1805,7 +1807,9 @@ fn pie_entries(
                 axis("view.axis_top", &l.view_top, ViewAxis::PosZ),
                 axis("view.axis_front", &l.view_front, ViewAxis::NegY),
                 axis("view.axis_back", &l.view_back, ViewAxis::PosY),
-                (MenuEntry::new("view.frame_all", &l.view_frame_all, dispatch("view.frame_all")), false),
+                // Blender's pie: View Camera and View Selected on the last
+                // two slots. Frame All is Home and the View menu.
+                (MenuEntry::new("view.camera", &l.view_camera, dispatch("view.camera")), false),
                 (MenuEntry::new("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)), false),
             ],
         ),
@@ -2741,6 +2745,9 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
     vec![
         entry("view.frame_all", &l.view_frame_all, dispatch("view.frame_all")),
         entry("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)),
+        // Numpad 0 is the key, and a keyboard without a numpad has no other
+        // way through the camera.
+        entry("view.camera", &l.view_camera, dispatch("view.camera")),
         MenuNode::Separator,
         entry("view.toggle_projection", &l.view_perspective, dispatch("view.toggle_projection")),
         entry("view.toggle_sidebar", &l.view_sidebar, dispatch("view.toggle_sidebar")),
@@ -6801,6 +6808,7 @@ select-none = None
 select-invert = Invert
 view-frame-all = Frame All
 view-frame-selected = Frame Selected
+view-camera = Camera
 view-perspective = Perspective/Orthographic
 view-sidebar = Sidebar
 overlays = Overlays
@@ -6887,6 +6895,7 @@ op-recover-discard-desc = Deletes this autosave.
 op-recover-discard-all-desc = Deletes every autosave listed here.
 op-view-frame-all-desc = Moves the view so the whole scene fits.
 op-view-frame-selected-desc = Moves the view so the selection fills it.
+op-view-camera-desc = Looks through the active camera, or the scene's first; again to come back.
 op-view-toggle-projection-desc = Switches between perspective and orthographic views.
 op-view-toggle-sidebar-desc = Shows or hides the sidebar with the selection's placement.
 op-view-toggle-grid-desc = Shows or hides the floor grid and the axis lines.
@@ -7453,6 +7462,7 @@ select-none = 없음
 select-invert = 반전
 view-frame-all = 전체 보기
 view-frame-selected = 선택 항목 보기
+view-camera = 카메라 시점
 view-perspective = 원근/직교
 view-sidebar = 사이드바
 overlays = 오버레이
@@ -7530,6 +7540,7 @@ op-recover-discard-desc = 이 자동 저장을 삭제합니다.
 op-recover-discard-all-desc = 여기 있는 자동 저장을 모두 삭제합니다.
 op-view-frame-all-desc = 장면 전체가 들어오게 시점을 옮깁니다.
 op-view-frame-selected-desc = 선택한 것이 화면을 채우게 시점을 옮깁니다.
+op-view-camera-desc = 활성 카메라(없으면 첫 카메라)로 봅니다. 다시 누르면 돌아옵니다.
 op-view-toggle-projection-desc = 원근 시점과 직교 시점을 전환합니다.
 op-view-toggle-sidebar-desc = 선택 항목의 위치를 보여주는 사이드바를 켜거나 끕니다.
 op-view-toggle-grid-desc = 바닥 격자와 축 선을 켜거나 끕니다.
@@ -8410,6 +8421,7 @@ mod tests {
             "select-invert",
             "view-frame-all",
             "view-frame-selected",
+            "view-camera",
             "view-perspective",
             "view-sidebar",
             "overlays",
@@ -8846,6 +8858,9 @@ mod tests {
         // And the first two slots are left and right, Blender's order.
         assert_eq!(entries[0].0.id, "view.axis_left");
         assert_eq!(entries[1].0.id, "view.axis_right");
+        // The camera is reachable without a numpad: from the pie and the menu.
+        assert!(entries.iter().any(|(e, _)| e.id == "view.camera"));
+        assert!(view_nodes(&l).iter().any(|n| matches!(n, MenuNode::Entry(e) if e.id == "view.camera")));
     }
 
     #[test]
