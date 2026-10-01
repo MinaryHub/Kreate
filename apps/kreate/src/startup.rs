@@ -1,6 +1,6 @@
 //! What a new document contains.
 
-use kreate_math::DVec3;
+use kreate_math::{DMat3, DQuat, DVec3};
 use kreate_scene::document::{Object, ObjectData};
 use kreate_scene::Document;
 
@@ -31,6 +31,9 @@ pub fn starting_scene(doc: &mut Document) {
     ));
     let mut lamp = Object::new("Lamp", ObjectData::Light(bulb));
     lamp.transform.translation = DVec3::new(3.0, -3.0, 5.0);
+    // Turned to the cube: a bulb shines every way, but a lamp switched to a
+    // spot or a sun keeps the aim, and its glyph points where it lights.
+    lamp.transform.rotation = looking_at(lamp.transform.translation, DVec3::ZERO);
     doc.add_object(lamp);
 
     // A dim grey sky. Not for the look of it: without a world the only thing
@@ -44,9 +47,52 @@ pub fn starting_scene(doc: &mut Document) {
     let camera = doc.add_camera(kreate_scene::Camera::new("Camera"));
     let mut eye = Object::new("Camera", ObjectData::Camera(camera));
     eye.transform.translation = DVec3::new(7.0, -7.0, 5.0);
+    // Looking at the cube, so the view through it (Numpad 0) and a render
+    // show the scene rather than the floor beneath the camera.
+    eye.transform.rotation = looking_at(eye.transform.translation, DVec3::ZERO);
     doc.add_object(eye);
 
     // The cube, because that is what somebody opening the application is going
     // to do something to.
     doc.selection.add(cube);
+}
+
+/// The rotation that points an object's −Z at `target` from `from`, with its
+/// +Y as near world up as it can be — Blender's convention for where a camera
+/// and a lamp look.
+pub fn looking_at(from: DVec3, target: DVec3) -> DQuat {
+    let forward = (target - from).normalize_or_zero();
+    if forward == DVec3::ZERO {
+        return DQuat::IDENTITY;
+    }
+    // Straight up or down has no "right" from world up; any will do.
+    let right = forward.cross(DVec3::Z).try_normalize().unwrap_or(DVec3::X);
+    let up = right.cross(forward);
+    DQuat::from_mat3(&DMat3::from_cols(right, up, -forward)).normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The camera and the lamp of a new document both point at the cube.
+    #[test]
+    fn the_camera_and_the_lamp_look_at_the_cube() {
+        let mut doc = Document::new();
+        starting_scene(&mut doc);
+        let mut aimed = 0;
+        for (_, object) in doc.objects() {
+            if !matches!(object.data, ObjectData::Camera(_) | ObjectData::Light(_)) {
+                continue;
+            }
+            let t = &object.transform;
+            let forward = t.rotation * DVec3::NEG_Z;
+            let to_cube = (DVec3::ZERO - t.translation).normalize();
+            assert!(forward.dot(to_cube) > 0.9999, "{} looks along {forward:?}", object.name);
+            // Upright: the camera's up has a positive world Z.
+            assert!((t.rotation * DVec3::Y).z > 0.0, "{} is upside down", object.name);
+            aimed += 1;
+        }
+        assert_eq!(aimed, 2);
+    }
 }
