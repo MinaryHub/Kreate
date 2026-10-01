@@ -109,6 +109,7 @@ fn render_scene_flags(
     viewport.show_grid = show_grid;
     viewport.show_wireframe = show_wireframe;
     viewport.face_orientation = face_orientation;
+    viewport.antialias = ANTIALIAS.with(|a| a.get());
 
     let uploaded: Vec<(GpuMesh, DAffine3)> = meshes
         .iter()
@@ -196,6 +197,12 @@ fn render_scene_flags(
     Some((Rendered { pixels }, background))
 }
 
+thread_local! {
+    /// Whether the frames this thread renders smooth their edges. On, as the
+    /// application has it; one test turns it off to compare.
+    static ANTIALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 /// Skips the test body when no GPU is present, so a CI runner without one does
 /// not report a failure it cannot do anything about.
 macro_rules! gpu_or_skip {
@@ -274,6 +281,10 @@ fn a_cube_shades_as_flat_faces_not_as_a_rounded_lump() {
     //
     // Splitting the shading at edges sharper than the auto-smooth threshold
     // leaves each face a single tone.
+    //
+    // Counted without edge smoothing, whose blends along the silhouette are
+    // tones of their own and say nothing about the faces.
+    ANTIALIAS.with(|a| a.set(false));
     let (img, bg) = gpu_or_skip!(render_scene_opts(
         &cube_scene(),
         ShadingMode::Studio,
@@ -591,6 +602,9 @@ fn object_tones(img: &Rendered, background: [u8; 4]) -> usize {
 /// one colour — and studio models the form with a range of tones.
 #[test]
 fn flat_is_one_colour_and_studio_models_the_form() {
+    // Tones counted without edge smoothing, whose blends along the outline
+    // are tones too.
+    ANTIALIAS.with(|a| a.set(false));
     let (flat, bg) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Flat, false, |_| {}));
     let (studio, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |_| {}));
     save_shot(&flat, "shading-flat");
@@ -631,4 +645,32 @@ fn wireframe_mode_draws_edges_and_no_surfaces() {
     // The middle of the front face is empty in wireframe: no surface there.
     let centre = wire.at(SIZE / 2 + 3, SIZE / 2 + 7);
     assert!((0..3).all(|i| (centre[i] as i32 - bg[i] as i32).abs() <= 8), "{centre:?} against {bg:?}");
+}
+
+/// Pixels part way between the background and the darkest face: the blend a
+/// smoothed edge is made of. A jagged edge has almost none — every pixel is
+/// one side of it or the other.
+fn blended(img: &Rendered, background: [u8; 4]) -> usize {
+    let lum = |p: [u8; 4]| (p[0] as i32 * 30 + p[1] as i32 * 59 + p[2] as i32 * 11) / 100;
+    let floor = lum(background);
+    img.pixels.iter().filter(|p| (floor + 20..floor + 90).contains(&lum(**p))).count()
+}
+
+/// The edges of the surfaces are smoothed, and nothing else changes: a face
+/// is the same colour in its middle either way.
+#[test]
+fn surface_edges_are_smoothed() {
+    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.3))];
+    let (smooth, _) = gpu_or_skip!(render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {}));
+    ANTIALIAS.with(|a| a.set(false));
+    let rough = render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {});
+    ANTIALIAS.with(|a| a.set(true));
+    let (rough, _) = gpu_or_skip!(rough);
+    save_shot(&smooth, "aa-on");
+    save_shot(&rough, "aa-off");
+    let (_, bg) = gpu_or_skip!(render_scene_opts(&[], ShadingMode::Studio, false, |_| {}));
+    let (s, r) = (blended(&smooth, bg), blended(&rough, bg));
+    assert!(s > r * 3 + 40, "{s} blended pixels smoothed against {r} rough: the edges are not smoothed");
+    let middle = (SIZE / 2, SIZE / 2);
+    assert_eq!(smooth.at(middle.0, middle.1), rough.at(middle.0, middle.1), "a flat face changed");
 }

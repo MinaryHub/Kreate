@@ -1360,6 +1360,11 @@ pub struct Viewport {
     cluster_globals_bind: wgpu::BindGroup,
     cluster_instance_bind: wgpu::BindGroup,
     cluster_generation: u64,
+    /// Where the surfaces go to have their edges smoothed, when
+    /// [`Viewport::antialias`] is on.
+    aa: crate::fxaa::Fxaa,
+    /// Smooths the surfaces' edges in the studio, flat and wireframe views.
+    pub antialias: bool,
     depth: wgpu::TextureView,
     /// Allocated size of the render targets.
     size: (u32, u32),
@@ -2253,6 +2258,8 @@ impl Viewport {
             cluster_globals_layout,
             cluster_instance_layout,
             depth: gpu::create_depth_texture(device, width, height),
+            aa: crate::fxaa::Fxaa::new(device, color_format, width.max(1), height.max(1)),
+            antialias: true,
             size: (width.max(1), height.max(1)),
             render_size: (width.max(1), height.max(1)),
             shading: ShadingMode::Studio,
@@ -2279,6 +2286,7 @@ impl Viewport {
         if size != self.size {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
+            self.aa.resize(device, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
             // reallocated every frame is a stall — and the bind group holds
@@ -2435,6 +2443,7 @@ impl Viewport {
             }
         }
         let view_proj = camera.view_projection(aspect);
+        self.aa.set_region(queue, self.render_size);
 
         let right = camera.right().as_vec3();
         let up = camera.up().as_vec3();
@@ -3512,15 +3521,25 @@ impl Viewport {
             return;
         }
 
+        let smooth = self.smoothing();
         self.cull_pass(encoder, Pass::First, draws);
         {
-            let mut pass = self.begin_pass(encoder, target, true);
+            let surfaces = if smooth { self.aa.view() } else { target };
+            let mut pass = self.begin_pass(encoder, surfaces, true);
             self.encode_solid(&mut pass, draws, Pass::First);
         }
         self.build_depth_pyramid(device, queue, encoder);
 
         self.cull_pass(encoder, Pass::Second, draws);
-        {
+        if smooth {
+            {
+                let mut pass = self.begin_pass(encoder, self.aa.view(), false);
+                self.encode_solid(&mut pass, draws, Pass::Second);
+            }
+            self.aa.resolve(encoder, target, self.render_size);
+            let mut pass = self.begin_pass(encoder, target, false);
+            self.encode_overlays(&mut pass, draws);
+        } else {
             let mut pass = self.begin_pass(encoder, target, false);
             self.encode_solid(&mut pass, draws, Pass::Second);
             self.encode_overlays(&mut pass, draws);
@@ -3819,10 +3838,28 @@ impl Viewport {
             self.render_lit(encoder, target, draws);
             return;
         }
+        if self.smoothing() {
+            // The surfaces into their own image, smoothed onto the target, and
+            // the overlays over that — testing the depth the surfaces wrote.
+            {
+                let mut pass = self.begin_pass(encoder, self.aa.view(), true);
+                self.encode_solid(&mut pass, draws, Pass::First);
+            }
+            self.aa.resolve(encoder, target, self.render_size);
+            let mut pass = self.begin_pass(encoder, target, false);
+            self.encode_overlays(&mut pass, draws);
+            return;
+        }
         let mut pass = self.begin_pass(encoder, target, true);
         // Opaque geometry first, so the grid can be depth-tested against it.
         self.encode_solid(&mut pass, draws, Pass::First);
         self.encode_overlays(&mut pass, draws);
+    }
+
+    /// Whether the surfaces go through the smoothing pass: on, and there are
+    /// surfaces — a wireframe has none, and its lines smooth themselves.
+    fn smoothing(&self) -> bool {
+        self.antialias && self.shading != ShadingMode::Wireframe
     }
 
     /// The rendered mode, in three passes.
