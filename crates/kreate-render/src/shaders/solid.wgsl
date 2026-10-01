@@ -13,6 +13,11 @@ struct Globals {
     // x: shading mode (0 studio, 1 flat, 2 matcap-ish)
     // y: one to colour by face orientation, z: unused, w: unused
     params: vec4<f32>,
+    // The camera's right, up and back in the world: the studio lights are
+    // placed in these, so they turn with the view.
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
+    camera_back: vec4<f32>,
 };
 
 struct ObjectData {
@@ -221,20 +226,39 @@ fn vs_main(
     return out;
 }
 
-// Three camera-relative lights: a key above and to the left, a dimmer fill from
-// the opposite side, and a rim from behind. Camera-relative rather than
-// world-fixed so a surface never goes fully black as the model is orbited —
-// unlit geometry reads as a modelling mistake rather than as lighting.
-const KEY_DIR: vec3<f32> = vec3<f32>(-0.45, 0.35, 0.82);
-const FILL_DIR: vec3<f32> = vec3<f32>(0.6, -0.2, 0.5);
-const RIM_DIR: vec3<f32> = vec3<f32>(0.1, 0.9, -0.4);
+// Three lights in the camera's frame — x right, y up, z towards the viewer: a
+// key above and to the left, a dimmer fill from the opposite side, and a rim
+// from behind. Camera-relative rather than world-fixed so a surface never goes
+// fully black as the model is orbited — unlit geometry reads as a modelling
+// mistake rather than as lighting.
+const KEY_DIR: vec3<f32> = vec3<f32>(-0.45, 0.55, 0.70);
+const FILL_DIR: vec3<f32> = vec3<f32>(0.65, -0.15, 0.55);
+const RIM_DIR: vec3<f32> = vec3<f32>(0.2, 0.6, -0.75);
 
-fn studio(n: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
-    let key = max(dot(n, normalize(KEY_DIR)), 0.0);
-    let fill = max(dot(n, normalize(FILL_DIR)), 0.0);
-    let rim = pow(max(dot(n, normalize(RIM_DIR)), 0.0), 2.0);
-    let ambient = 0.22;
-    return base * (ambient + key * 0.75 + fill * 0.28) + vec3<f32>(rim * 0.12);
+fn camera_dir(d: vec3<f32>) -> vec3<f32> {
+    let v = globals.camera_right.xyz * d.x + globals.camera_up.xyz * d.y + globals.camera_back.xyz * d.z;
+    return normalize(v);
+}
+
+fn studio(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
+    let key_dir = camera_dir(KEY_DIR);
+    // Wrapped diffuse on the key, so the terminator is soft as under a big
+    // studio softbox rather than the hard edge of a point light.
+    let key = max((dot(n, key_dir) + 0.25) / 1.25, 0.0);
+    let fill = max(dot(n, camera_dir(FILL_DIR)), 0.0);
+    // Sky above, floor below, in the camera's frame: the upward faces of a
+    // model read lighter than the downward ones, which is half of how a shape
+    // is seen.
+    let hemi = dot(n, globals.camera_up.xyz) * 0.5 + 0.5;
+    let ambient = mix(0.10, 0.30, hemi);
+    let diffuse = base * (ambient + key * 0.72 + fill * 0.22);
+    // A broad highlight from the key, and a rim where the surface turns away
+    // — the two cues that say "round" and "edge" at a glance.
+    let h = normalize(key_dir + v);
+    let spec = pow(max(dot(n, h), 0.0), 40.0) * 0.22;
+    let rim = pow(max(dot(n, camera_dir(RIM_DIR)), 0.0), 2.0) * 0.10;
+    let fresnel = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.12;
+    return diffuse + vec3<f32>(spec + rim + fresnel);
 }
 
 @fragment
@@ -265,11 +289,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     }
     var color: vec3<f32>;
     if (globals.params.x < 0.5) {
-        color = studio(n, base);
+        color = studio(n, to_eye, base);
     } else {
-        // Flat: a single camera-facing term. Useful for reading silhouette and
-        // topology without lighting getting in the way.
-        color = base * (0.35 + 0.65 * max(dot(n, to_eye), 0.0));
+        // Flat: no light at all, Blender's — the plain colour. It reads the
+        // silhouette, and the material colours as they were picked.
+        color = base;
     }
 
     // The surface is written to an sRGB target, so the hardware does the

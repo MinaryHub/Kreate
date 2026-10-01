@@ -562,3 +562,73 @@ fn face_orientation_is_blue_from_the_front_and_red_from_the_back() {
     let p = centre(&plain);
     assert!((p[0] as i32 - p[2] as i32).abs() < 40, "tinted with the overlay off: {p:?}");
 }
+
+/// Writes the picture where `KREATE_SHOT_DIR` says, to look at by eye.
+fn save_shot(img: &Rendered, name: &str) {
+    let Ok(dir) = std::env::var("KREATE_SHOT_DIR") else { return };
+    let bytes: Vec<u8> = img.pixels.iter().flatten().copied().collect();
+    if let Some(buffer) = image::RgbaImage::from_raw(SIZE, SIZE, bytes) {
+        let _ = buffer.save(std::path::Path::new(&dir).join(format!("{name}.png")));
+    }
+}
+
+fn sphere_scene() -> Vec<(kreate_mesh::MeshData, DAffine3)> {
+    let sphere = kreate_mesh::primitives::uv_sphere(1.5, 32, 16);
+    vec![(sphere, DAffine3::IDENTITY)]
+}
+
+/// The distinct tones on the object, finely: one luminance step per bucket.
+fn object_tones(img: &Rendered, background: [u8; 4]) -> usize {
+    let differs = |p: &[u8; 4]| (0..3).any(|i| (p[i] as i32 - background[i] as i32).abs() > 8);
+    let mut seen = std::collections::HashSet::new();
+    for p in img.pixels.iter().filter(|p| differs(p)) {
+        seen.insert((p[0] as u32 * 30 + p[1] as u32 * 59 + p[2] as u32 * 11) / 100);
+    }
+    seen.len()
+}
+
+/// The report: studio and flat looked the same. Flat is Blender's — no light,
+/// one colour — and studio models the form with a range of tones.
+#[test]
+fn flat_is_one_colour_and_studio_models_the_form() {
+    let (flat, bg) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Flat, false, |_| {}));
+    let (studio, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |_| {}));
+    save_shot(&flat, "shading-flat");
+    save_shot(&studio, "shading-studio");
+    let (f, s) = (object_tones(&flat, bg), object_tones(&studio, bg));
+    // Edge pixels blend into the background, so a few stray tones remain.
+    assert!(f <= 6, "flat should be one colour, found {f} tones");
+    assert!(s >= 40, "studio should model the sphere, found {s} tones");
+}
+
+/// Studio lights turn with the camera: a sphere looks the same from any side,
+/// so its picture must not change as the view goes round it.
+#[test]
+fn studio_lights_follow_the_camera() {
+    let (front, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |_| {}));
+    let (behind, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |c| {
+        c.rotation = kreate_math::DQuat::from_rotation_z(std::f64::consts::PI) * c.rotation;
+    }));
+    let differ = front
+        .pixels
+        .iter()
+        .zip(&behind.pixels)
+        .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 6))
+        .count();
+    assert!(differ < front.pixels.len() / 50, "{differ} pixels changed going round a sphere");
+}
+
+/// The report: wireframe showed the faces too. Wireframe mode draws edges
+/// only — and with no surfaces in front, the back edges show through.
+#[test]
+fn wireframe_mode_draws_edges_and_no_surfaces() {
+    let (wire, bg) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Wireframe, false, false, false, |_| {}));
+    let (solid, _) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {}));
+    save_shot(&wire, "shading-wireframe");
+    let (w, s) = (wire.covered_fraction(bg), solid.covered_fraction(bg));
+    assert!(w > 0.002, "nothing drawn: {w}");
+    assert!(w < s * 0.3, "wireframe covers {w} against solid {s}: the faces are drawn");
+    // The middle of the front face is empty in wireframe: no surface there.
+    let centre = wire.at(SIZE / 2 + 3, SIZE / 2 + 7);
+    assert!((0..3).all(|i| (centre[i] as i32 - bg[i] as i32).abs() <= 8), "{centre:?} against {bg:?}");
+}

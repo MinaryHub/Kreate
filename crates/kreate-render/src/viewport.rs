@@ -30,7 +30,11 @@ pub enum ShadingMode {
     /// *shape* is the right light — a scene lit for a render is often a scene
     /// you cannot model in, and §4.13 judged this correctly the first time.
     Studio,
+    /// No light at all: every surface its plain colour, Blender's Flat.
     Flat,
+    /// Edges only, every one of them — the surfaces are not drawn, so the
+    /// back of the model shows through, as Blender's Wireframe does.
+    Wireframe,
     /// The scene's own lights, one BRDF, through the display transform.
     ///
     /// Shades into a linear `Rgba16Float` target and resolves it in a
@@ -45,6 +49,11 @@ pub enum ShadingMode {
 struct Globals {
     view_proj: [[f32; 4]; 4],
     params: [f32; 4],
+    /// The camera's right, up and back in the world, for lights that turn
+    /// with the view.
+    camera_right: [f32; 4],
+    camera_up: [f32; 4],
+    camera_back: [f32; 4],
 }
 
 #[repr(C)]
@@ -2427,6 +2436,9 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
 
+        let right = camera.right().as_vec3();
+        let up = camera.up().as_vec3();
+        let back = right.cross(up).normalize_or_zero();
         queue.write_buffer(
             &self.globals_buf,
             0,
@@ -2442,6 +2454,9 @@ impl Viewport {
                     0.0,
                     0.0,
                 ],
+                camera_right: right.extend(0.0).to_array(),
+                camera_up: up.extend(0.0).to_array(),
+                camera_back: back.extend(0.0).to_array(),
             }),
         );
 
@@ -3523,6 +3538,10 @@ impl Viewport {
     /// pyramid build in between. `which` selects the cull results to draw and is
     /// ignored by the direct path, which has none.
     fn encode_solid(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw], which: Pass) {
+        // Wireframe draws no surfaces, so nothing hides the edges behind.
+        if self.shading == ShadingMode::Wireframe {
+            return;
+        }
         if self.cluster_path {
             // A mesh uploaded without `RenderMeshCpu::with_clusters` has no
             // clusters to draw, and the loop below skips it on the count — so
@@ -3682,7 +3701,7 @@ impl Viewport {
 
         // Wireframe over the solid pass, before the grid, so geometry occludes
         // the grid but its own edges sit on top of it.
-        if self.show_wireframe {
+        if self.show_wireframe || self.shading == ShadingMode::Wireframe {
             pass.set_pipeline(&self.edges);
             pass.set_bind_group(0, &self.edge_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
@@ -4222,7 +4241,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Globals>() % 16, 0);
         assert_eq!(std::mem::size_of::<ObjectData>() % 16, 0);
         assert_eq!(std::mem::size_of::<GridGlobals>() % 16, 0);
-        assert_eq!(std::mem::size_of::<Globals>(), 80);
+        assert_eq!(std::mem::size_of::<Globals>(), 128);
         assert_eq!(std::mem::size_of::<ObjectData>(), 144);
         assert_eq!(std::mem::size_of::<GridGlobals>(), 192);
         assert_eq!(std::mem::size_of::<EdgeGlobals>() % 16, 0);

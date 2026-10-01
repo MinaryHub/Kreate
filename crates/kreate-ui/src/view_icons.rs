@@ -39,6 +39,13 @@ pub fn shading_button(ui: &mut Ui, mode: ShadingMode, selected: bool) -> Respons
             p.circle_filled(centre + Vec2::new(-r * 0.3, -r * 0.3), r * 0.55, ink);
             p.circle_stroke(centre, r, Stroke::new(1.0, ink));
         }
+        // A wire sphere: an outline, an equator and a meridian.
+        ShadingMode::Wireframe => {
+            let s = Stroke::new(1.0, ink);
+            p.circle_stroke(centre, r, s);
+            p.add(egui::Shape::ellipse_stroke(centre, Vec2::new(r, r * 0.35), s));
+            p.add(egui::Shape::ellipse_stroke(centre, Vec2::new(r * 0.35, r), s));
+        }
         // A flat disc: no light, just the colour.
         ShadingMode::Flat => {
             p.circle_filled(centre, r, ink.gamma_multiply(0.8));

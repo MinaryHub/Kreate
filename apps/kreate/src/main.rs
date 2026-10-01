@@ -6229,9 +6229,10 @@ impl App {
                     // black, which is correct and is not what somebody
                     // pressing the key twice was after.
                     gfx.viewport.shading = match gfx.viewport.shading {
+                        ShadingMode::Wireframe => ShadingMode::Studio,
                         ShadingMode::Studio => ShadingMode::Flat,
                         ShadingMode::Flat => ShadingMode::Rendered,
-                        ShadingMode::Rendered => ShadingMode::Studio,
+                        ShadingMode::Rendered => ShadingMode::Wireframe,
                     };
                     self.redraw.set(RedrawReason::SETTINGS);
                 }

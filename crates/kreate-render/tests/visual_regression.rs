@@ -465,7 +465,16 @@ fn the_views_disagree_with_each_other() {
     // are one view, and a regression visible only from behind would slip through
     // every one of them. Checked on the cube, which is symmetric enough that a
     // broken camera would plausibly produce four identical frames.
-    let cube = &corpus()[0].mesh;
+    //
+    // Not on the cube any more: the studio lights turn with the camera, as
+    // Blender's do, so a cube seen square from the front and from the back is
+    // the same picture — correctly. A concave outline is not.
+    let specimens = corpus();
+    let cube = &specimens
+        .iter()
+        .find(|s| s.name == "concave_ngon")
+        .expect("the concave specimen")
+        .mesh;
     let Some(mut harness) = Harness::new() else {
         eprintln!("no usable GPU adapter; skipping");
         return;

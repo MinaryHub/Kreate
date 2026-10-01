@@ -1207,6 +1207,7 @@ struct Labels {
     add_shapes: [String; 8],
     shading_studio: String,
     shading_flat: String,
+    shading_wireframe: String,
     shading_rendered: String,
     shading_hint: String,
     exposure: String,
@@ -1436,6 +1437,7 @@ impl Labels {
             ],
             shading_studio: t("shading-studio"),
             shading_flat: t("shading-flat"),
+            shading_wireframe: t("shading-wireframe"),
             shading_rendered: t("shading-rendered"),
             shading_hint: t("shading-hint"),
             exposure: t("exposure"),
@@ -1786,7 +1788,7 @@ fn pie_entries(
         "shading" => (
             l.pie_shading.clone(),
             vec![
-                (MenuEntry::new("view.toggle_wireframe", &l.overlay_wireframe, dispatch("view.toggle_wireframe")), false),
+                shade("view.shading_wireframe", &l.shading_wireframe, ShadingMode::Wireframe),
                 shade("view.shading_rendered", &l.shading_rendered, ShadingMode::Rendered),
                 shade("view.shading_studio", &l.shading_studio, ShadingMode::Studio),
                 shade("view.shading_flat", &l.shading_flat, ShadingMode::Flat),
@@ -3126,6 +3128,7 @@ fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         kreate_render::ShadingMode::Rendered,
         kreate_render::ShadingMode::Flat,
         kreate_render::ShadingMode::Studio,
+        kreate_render::ShadingMode::Wireframe,
     ] {
         // i18n-exempt: a translated name and a translated hint
         let tip = format!("{}\n{}", shading_label(mode, l), l.shading_hint);
@@ -5122,6 +5125,7 @@ fn shading_label(mode: kreate_render::ShadingMode, l: &Labels) -> &str {
     match mode {
         kreate_render::ShadingMode::Studio => &l.shading_studio,
         kreate_render::ShadingMode::Flat => &l.shading_flat,
+        kreate_render::ShadingMode::Wireframe => &l.shading_wireframe,
         kreate_render::ShadingMode::Rendered => &l.shading_rendered,
     }
 }
@@ -6451,6 +6455,7 @@ view-front = Front
 view-back = Back
 op-view-shading-studio-desc = Lights that show the shape, whatever the scene's lamps are doing.
 op-view-shading-flat-desc = Every face its plain colour, with no light at all.
+op-view-shading-wireframe-desc = Only the edges, the back of the model showing through.
 op-view-shading-rendered-desc = The scene's own lamps and sky, through the camera's exposure.
 op-view-axis-left-desc = Looks at the pivot from the left, along +X.
 op-view-axis-right-desc = Looks at the pivot from the right, along -X.
@@ -6770,6 +6775,7 @@ outliner-shared-mesh = Shared by { $count } objects
 outliner-mesh-summary = { $name }: { $verts } verts, { $faces } faces
 shading-studio = Studio
 shading-flat = Flat
+shading-wireframe = Wireframe
 shading-rendered = Rendered
 shading-hint = How the viewport shades (Z)
 exposure = EV
@@ -7101,6 +7107,7 @@ view-front = 앞
 view-back = 뒤
 op-view-shading-studio-desc = 장면의 조명과 상관없이 형태가 잘 보이는 조명으로 보여줍니다.
 op-view-shading-flat-desc = 조명 없이 각 면을 원래 색 그대로 보여줍니다.
+op-view-shading-wireframe-desc = 면 없이 모서리만, 뒤쪽까지 비쳐 보여줍니다.
 op-view-shading-rendered-desc = 장면의 조명과 하늘을 카메라 노출로 보여줍니다.
 op-view-axis-left-desc = 왼쪽에서 +X 방향으로 피벗을 봅니다.
 op-view-axis-right-desc = 오른쪽에서 -X 방향으로 피벗을 봅니다.
@@ -7420,8 +7427,9 @@ outliner-shared-mesh = 오브젝트 { $count }개가 공유
 outliner-mesh-summary = { $name }: 정점 { $verts }, 면 { $faces }
 shading-studio = 스튜디오
 shading-flat = 플랫
+shading-wireframe = 와이어프레임
 shading-rendered = 렌더
-shading-hint = 뷰포트 셌이딩 방식 (Z)
+shading-hint = 뷰포트 셰이딩 방식 (Z)
 exposure = EV
 exposure-metered = 씨을 측광해 정합니다. 램프를 줄이면 이 숫자가 움직이고 그림은 그대로입니다 — 그것이 노출의 뜻입니다. 카메라에서 끄면 직접 정합니다.
 exposure-manual = 카메라의 조리개·셔터·ISO에서 나온 값입니다.
