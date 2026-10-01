@@ -1231,6 +1231,7 @@ struct Labels {
     overlay_wireframe: String,
     overlay_face_orientation: String,
     overlay_statistics: String,
+    overlay_ao: String,
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
@@ -1462,6 +1463,7 @@ impl Labels {
             overlay_wireframe: t("overlay-wireframe"),
             overlay_face_orientation: t("overlay-face-orientation"),
             overlay_statistics: t("overlay-statistics"),
+            overlay_ao: t("overlay-ao"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
@@ -3161,6 +3163,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             ("view.toggle_wireframe", &l.overlay_wireframe),
             ("view.toggle_face_orientation", &l.overlay_face_orientation),
             ("view.toggle_statistics", &l.overlay_statistics),
+            ("view.toggle_ao", &l.overlay_ao),
         ] {
             if menu_item(ui, state, op, &[], label) {
                 state.queue.dispatch(op, PropertyMap::new());
@@ -6622,6 +6625,9 @@ overlay-face-orientation = Face Orientation
 menu-undo-history = Undo History
 undo-original = Original
 overlay-statistics = Statistics
+overlay-ao = Ambient Occlusion
+op-view-toggle-ao = Ambient Occlusion
+op-view-toggle-ao-desc = Darkens corners and creases in the studio view, so the shape reads.
 op-view-toggle-face-orientation = Face Orientation
 op-view-toggle-face-orientation-desc = Colours faces blue from the front and red from the back.
 op-view-toggle-statistics = Statistics
@@ -7276,6 +7282,9 @@ overlay-face-orientation = 면 방향
 menu-undo-history = 되돌리기 기록
 undo-original = 처음 상태
 overlay-statistics = 통계
+overlay-ao = 앰비언트 오클루전
+op-view-toggle-ao = 앰비언트 오클루전
+op-view-toggle-ao-desc = 스튜디오 보기에서 모서리와 틈을 어둡게 해 형태가 잘 보이게 합니다.
 op-view-toggle-face-orientation = 면 방향
 op-view-toggle-face-orientation-desc = 면의 앞쪽은 파랑, 뒤쪽은 빨강으로 칠합니다.
 op-view-toggle-statistics = 통계

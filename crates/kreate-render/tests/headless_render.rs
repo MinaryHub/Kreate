@@ -110,6 +110,7 @@ fn render_scene_flags(
     viewport.show_wireframe = show_wireframe;
     viewport.face_orientation = face_orientation;
     viewport.antialias = ANTIALIAS.with(|a| a.get());
+    viewport.ambient_occlusion = OCCLUSION.with(|a| a.get());
 
     let uploaded: Vec<(GpuMesh, DAffine3)> = meshes
         .iter()
@@ -201,6 +202,9 @@ thread_local! {
     /// Whether the frames this thread renders smooth their edges. On, as the
     /// application has it; one test turns it off to compare.
     static ANTIALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether the studio view darkens corners. Off unless a test asks: the
+    /// tone-counting tests measure the lighting, and occlusion is tones too.
+    static OCCLUSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Skips the test body when no GPU is present, so a CI runner without one does
@@ -673,4 +677,53 @@ fn surface_edges_are_smoothed() {
     assert!(s > r * 3 + 40, "{s} blended pixels smoothed against {r} rough: the edges are not smoothed");
     let middle = (SIZE / 2, SIZE / 2);
     assert_eq!(smooth.at(middle.0, middle.1), rough.at(middle.0, middle.1), "a flat face changed");
+}
+
+/// A cube standing on a floor: the corner where they meet is what ambient
+/// occlusion is for.
+fn cube_on_floor() -> Vec<(kreate_mesh::MeshData, DAffine3)> {
+    vec![
+        (kreate_mesh::primitives::cube(2.0), DAffine3::from_translation(DVec3::new(0.0, 0.0, 1.0))),
+        (kreate_mesh::primitives::grid(12.0, 4, 4), DAffine3::IDENTITY),
+    ]
+}
+
+fn lum(p: [u8; 4]) -> i32 {
+    (p[0] as i32 * 30 + p[1] as i32 * 59 + p[2] as i32 * 11) / 100
+}
+
+/// The floor darkens where the cube stands on it, and stays as it was away
+/// from it.
+#[test]
+fn occlusion_darkens_where_the_cube_meets_the_floor() {
+    let aim = |c: &mut Camera| {
+        c.pivot = DVec3::new(0.0, 0.0, 0.5);
+        c.distance = 9.0;
+        c.rotation = kreate_math::DQuat::from_rotation_z(0.6) * kreate_math::DQuat::from_rotation_x(1.1);
+    };
+    OCCLUSION.with(|a| a.set(true));
+    let with = render_scene_opts(&cube_on_floor(), ShadingMode::Studio, false, aim);
+    OCCLUSION.with(|a| a.set(false));
+    let (with, _) = gpu_or_skip!(with);
+    let (without, _) = gpu_or_skip!(render_scene_opts(&cube_on_floor(), ShadingMode::Studio, false, aim));
+    save_shot(&with, "ao-on");
+    save_shot(&without, "ao-off");
+
+    // Darker somewhere, by enough to see, and lighter almost nowhere — a
+    // few pixels along the outline, where the edge smoothing blends a
+    // darkened edge differently.
+    let (mut darker, mut lighter) = (0, 0);
+    for (a, b) in with.pixels.iter().zip(&without.pixels) {
+        if lum(*a) + 12 < lum(*b) {
+            darker += 1;
+        }
+        if lum(*a) > lum(*b) + 3 {
+            lighter += 1;
+        }
+    }
+    assert!(lighter * 20 < darker, "{lighter} pixels lightened against {darker} darkened");
+    assert!(darker > 200, "only {darker} pixels darkened");
+    // The open floor, far from the cube, is left alone.
+    let corner = (8, SIZE - 8);
+    assert!((lum(with.at(corner.0, corner.1)) - lum(without.at(corner.0, corner.1))).abs() <= 3);
 }

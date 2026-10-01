@@ -305,6 +305,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.camera",
     "view.frame_selected",
     "view.toggle_statistics",
+    "view.toggle_ao",
     "view.toggle_face_orientation",
     // File commands are the application's, not the document's: there is no
     // undo step for "the document you had open is gone".

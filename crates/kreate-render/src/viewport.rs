@@ -1363,6 +1363,10 @@ pub struct Viewport {
     /// Where the surfaces go to have their edges smoothed, when
     /// [`Viewport::antialias`] is on.
     aa: crate::fxaa::Fxaa,
+    /// Darkens the studio view's corners and creases.
+    ao: crate::ao::Ao,
+    /// Whether the studio view darkens corners and creases.
+    pub ambient_occlusion: bool,
     /// Smooths the surfaces' edges in the studio, flat and wireframe views.
     pub antialias: bool,
     depth: wgpu::TextureView,
@@ -1939,6 +1943,7 @@ impl Viewport {
             cache: None,
         });
 
+        let depth_0 = gpu::create_depth_texture(device, width, height);
         let hdr_0 = crate::display::HdrTarget::new(device, width.max(1), height.max(1));
         let screen_0 = crate::display::ScreenResolve::new(device, color_format);
         let screen_params_buf = wgpu::util::DeviceExt::create_buffer_init(
@@ -2257,7 +2262,9 @@ impl Viewport {
             cluster_solid,
             cluster_globals_layout,
             cluster_instance_layout,
-            depth: gpu::create_depth_texture(device, width, height),
+            ao: crate::ao::Ao::new(device, color_format, &depth_0, width.max(1), height.max(1)),
+            ambient_occlusion: true,
+            depth: depth_0,
             aa: crate::fxaa::Fxaa::new(device, color_format, width.max(1), height.max(1)),
             antialias: true,
             size: (width.max(1), height.max(1)),
@@ -2287,6 +2294,7 @@ impl Viewport {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
             self.aa.resize(device, size.0, size.1);
+            self.ao.resize(device, &self.depth, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
             // reallocated every frame is a stall — and the bind group holds
@@ -2444,6 +2452,15 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
         self.aa.set_region(queue, self.render_size);
+        // A reach that follows the view: a tenth of the way to what the view
+        // is turning about, so the shading looks the same at any zoom.
+        self.ao.set_view(
+            queue,
+            camera.projection_matrix(aspect),
+            self.render_size,
+            (camera.distance * 0.1).max(1e-4) as f32,
+            1.0,
+        );
 
         let right = camera.right().as_vec3();
         let up = camera.up().as_vec3();
@@ -3536,6 +3553,9 @@ impl Viewport {
                 let mut pass = self.begin_pass(encoder, self.aa.view(), false);
                 self.encode_solid(&mut pass, draws, Pass::Second);
             }
+            if self.occluding() {
+                self.ao.apply(encoder, self.aa.view(), self.render_size);
+            }
             self.aa.resolve(encoder, target, self.render_size);
             let mut pass = self.begin_pass(encoder, target, false);
             self.encode_overlays(&mut pass, draws);
@@ -3845,6 +3865,9 @@ impl Viewport {
                 let mut pass = self.begin_pass(encoder, self.aa.view(), true);
                 self.encode_solid(&mut pass, draws, Pass::First);
             }
+            if self.occluding() {
+                self.ao.apply(encoder, self.aa.view(), self.render_size);
+            }
             self.aa.resolve(encoder, target, self.render_size);
             let mut pass = self.begin_pass(encoder, target, false);
             self.encode_overlays(&mut pass, draws);
@@ -3860,6 +3883,13 @@ impl Viewport {
     /// surfaces — a wireframe has none, and its lines smooth themselves.
     fn smoothing(&self) -> bool {
         self.antialias && self.shading != ShadingMode::Wireframe
+    }
+
+    /// Whether the surfaces are darkened in their corners: the studio view,
+    /// which is lit to show shape, and only through the smoothing path — the
+    /// occlusion goes into the surfaces' own image, never onto the overlays.
+    fn occluding(&self) -> bool {
+        self.ambient_occlusion && self.shading == ShadingMode::Studio && self.smoothing()
     }
 
     /// The rendered mode, in three passes.

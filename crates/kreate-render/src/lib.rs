@@ -9,6 +9,7 @@ pub mod capability;
 pub mod cluster;
 pub mod cluster_cull;
 pub mod deform;
+pub mod ao;
 pub mod display;
 pub mod fxaa;
 pub mod environment;

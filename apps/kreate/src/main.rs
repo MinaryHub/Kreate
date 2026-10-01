@@ -6036,6 +6036,12 @@ impl App {
                 self.ui.show_stats = !self.ui.show_stats;
                 self.redraw.set(RedrawReason::UI);
             }
+            "view.toggle_ao" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.ambient_occlusion = !gfx.viewport.ambient_occlusion;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
             "view.toggle_face_orientation" => {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.face_orientation = !gfx.viewport.face_orientation;
