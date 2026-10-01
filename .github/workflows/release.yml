@@ -1,0 +1,69 @@
+name: Build binaries
+
+# Release builds of the application for every platform, as downloadable
+# artifacts. macOS has to be built on a Mac — the Apple SDK and linker are not
+# something another platform can supply — so this is where a macOS build comes
+# from. Run it by hand from the Actions tab, or push a tag starting with `v`.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe: kreate
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            exe: kreate
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            exe: kreate
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: kreate.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libudev-dev libdbus-1-dev
+
+      - name: Build
+        run: cargo build --release -p kreate --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.exe }} dist/
+          cd dist && tar czf ../kreate-${{ matrix.name }}.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kreate-${{ matrix.name }}
+          path: kreate-${{ matrix.name }}.tar.gz
