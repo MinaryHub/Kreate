@@ -10,6 +10,12 @@
 //! the shell is what keeps undo, scripting and macro recording working without
 //! any cooperation from the UI layer.
 
+// A window application: no console window opens beside it on Windows. What
+// it prints still reaches a terminal or a pipe it is started from with its
+// output redirected; run from Explorer, there is nowhere for it to go, and
+// the crash report and autosave are files, not console output.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 // The shell lives in this package's library target so tests can drive it.
 use kreate::docfile::{self, DocumentFile};
 use kreate::{dragpreview, gpu_sync, scenelights, shell};
