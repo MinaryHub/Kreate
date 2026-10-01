@@ -6439,8 +6439,12 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        // The icon in the title bar and the taskbar: a cube with a K on it,
+        // 64 pixels square, straight RGBA so nothing has to be decoded.
+        let icon = winit::window::Icon::from_rgba(include_bytes!("../assets/kreate-64.rgba").to_vec(), 64, 64).ok();
         let attrs = Window::default_attributes()
             .with_title("Kreate")
+            .with_window_icon(icon)
             .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
