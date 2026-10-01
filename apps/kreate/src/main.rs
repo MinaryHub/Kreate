@@ -680,6 +680,13 @@ struct App {
     /// Application state, not the document's: a file saved mid-play opens
     /// stopped, the way every animation tool's does.
     playing: Option<std::time::Instant>,
+    /// When the interface asked to be drawn again, if it did.
+    ///
+    /// egui says so after a frame: a menu that opened on a click is measured
+    /// on one frame and shown on the next, a hover fades in, a tooltip waits
+    /// its delay. Ignored, the window sleeps until the next event — so a
+    /// clicked menu appeared only when the mouse moved.
+    ui_repaint_at: Option<Instant>,
     /// The weight-paint brush stroke in progress: its modal session and the
     /// vertices it has crossed so far.
     paint_stroke: Option<PaintStroke>,
@@ -802,6 +809,7 @@ impl App {
             clipboard: None,
             dispatching_key: None,
             playing: None,
+            ui_repaint_at: None,
             driven_at: u64::MAX,
             paint_stroke: None,
             sculpt_stroke: None,
@@ -5140,6 +5148,14 @@ impl App {
             })
         };
         state.handle_platform_output(&window, output.platform_output.clone());
+        // The interface's own request to be drawn again, and when. A long delay
+        // is egui saying "never" in a number.
+        let delay = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay)
+            .unwrap_or(std::time::Duration::MAX);
+        self.ui_repaint_at = (delay < std::time::Duration::from_secs(60)).then(|| Instant::now() + delay);
 
         // The single input gate. Scattered `if !typing` checks are how a rename
         // field ends up firing tool shortcuts again.
@@ -6815,7 +6831,12 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // While the user is dragging, stay on Poll so motion is continuous;
-        // otherwise Wait, so an idle window costs nothing.
+        // otherwise Wait, so an idle window costs nothing — or until the
+        // interface asked to be drawn again.
+        if self.ui_repaint_at.is_some_and(|at| at <= Instant::now()) {
+            self.ui_repaint_at = None;
+            self.redraw.set(RedrawReason::UI);
+        }
         if self.input.has_pending()
             || self.redraw.any()
             || self.motion.is_animating()
@@ -6826,6 +6847,8 @@ impl ApplicationHandler for App {
                 w.request_redraw();
             }
             event_loop.set_control_flow(ControlFlow::Poll);
+        } else if let Some(at) = self.ui_repaint_at {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
