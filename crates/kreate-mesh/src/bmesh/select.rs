@@ -87,15 +87,38 @@ impl BMesh {
         // slot happened to share its number. The next E extruded that one.
         // "Each press extrudes a different face" was the report, and it was
         // exactly right.
-        let live: [Vec<u32>; 3] = [
-            self.vert_ids().map(|v| v.index()).collect(),
-            self.edge_ids().map(|e| e.index()).collect(),
+        //
+        // Edges are not even in slot order. `to_mesh_data` rebuilds the edge
+        // array from the faces in its own canonical order, so the document's
+        // edge *n* is not the n-th live edge slot — pairing them by rank put
+        // a picked edge's selection on some other edge, and `F` then built
+        // its face from edges nobody picked. An edge is named by its two
+        // ends, so it is found by them.
+        let verts: Vec<VertId> = self.vert_ids().collect();
+        let live: [Vec<u32>; 2] = [
+            verts.iter().map(|v| v.index()).collect(),
             self.face_ids().map(|f| f.index()).collect(),
         ];
-        for (mode, slots) in [SelectMode::Vert, SelectMode::Edge, SelectMode::Face]
-            .into_iter()
-            .zip(live)
-        {
+        if let Some(source) = mesh.attributes().get_bool(SelectMode::Edge.layer()) {
+            let picked: Vec<EdgeId> = source
+                .iter()
+                .zip(mesh.edges())
+                .filter(|(on, _)| **on)
+                .filter_map(|(_, [a, b])| {
+                    let (a, b) = (*verts.get(*a as usize)?, *verts.get(*b as usize)?);
+                    self.edge_between(a, b)
+                })
+                .collect();
+            if let Some(target) = self.attributes.make_mut_bool(SelectMode::Edge.layer()) {
+                target.fill(false);
+                for e in picked {
+                    if let Some(t) = target.get_mut(e.index() as usize) {
+                        *t = true;
+                    }
+                }
+            }
+        }
+        for (mode, slots) in [SelectMode::Vert, SelectMode::Face].into_iter().zip(live) {
             let Some(source) = mesh.attributes().get_bool(mode.layer()) else {
                 continue;
             };
