@@ -302,7 +302,7 @@ pub fn outliner(
         .show_rows(ui, row_height, rows.len(), |ui, visible| {
             for at in visible {
                 match rows[at] {
-                    TreeRow::Root => draw_root(ui, catalog),
+                    TreeRow::Root => draw_root(ui, catalog, queue),
                     TreeRow::Collection(g) => {
                         if let Some(group) = groups.get(g) {
                             draw_collection_row(ui, catalog, group, queue, &mut renaming);
@@ -355,6 +355,23 @@ pub fn outliner(
 /// Indentation per level of the tree, in points.
 const INDENT: f32 = 14.0;
 
+/// An object row being dragged, by its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DraggedObject(u32);
+
+/// Outlines a row something can be dropped on while a drag hovers it.
+fn drop_highlight(ui: &Ui, response: &egui::Response) {
+    if response.dnd_hover_payload::<DraggedObject>().is_some() {
+        let theme = crate::theme::from_ui(ui);
+        ui.painter().rect_stroke(
+            response.rect.expand(1.0),
+            2.0,
+            egui::Stroke::new(1.5, theme.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
 /// What is being renamed in place, and the text typed so far.
 #[derive(Clone, Debug, PartialEq)]
 enum Renaming {
@@ -380,11 +397,16 @@ fn rename_field(ui: &mut Ui, text: &mut String) -> Option<bool> {
     None
 }
 
-fn draw_root(ui: &mut Ui, catalog: &Catalog) {
+fn draw_root(ui: &mut Ui, catalog: &Catalog, queue: &mut CommandQueue) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
-        ui.label(egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[])).strong());
+        let response = ui.label(egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[])).strong());
+        // Dropped on the scene: out of any collection.
+        drop_highlight(ui, &response);
+        if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
+            queue.push(Command::MoveObjectToCollection { object: dragged.0, collection: String::new() });
+        }
     });
 }
 
@@ -422,6 +444,11 @@ fn draw_collection_row(
             let response = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
             if response.double_clicked() {
                 *renaming = Some(Renaming::Collection(group.name.clone(), group.name.clone()));
+            }
+            // Dropped on a collection: into it, as Blender's.
+            drop_highlight(ui, &response);
+            if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
+                queue.push(Command::MoveObjectToCollection { object: dragged.0, collection: group.name.clone() });
             }
             // Blender's right-click on a collection: rename it, or take it
             // away and leave what was in it in the scene.
@@ -517,7 +544,18 @@ fn draw_object_row(
                 *renaming = None;
             }
         } else {
-            let response = ui.selectable_label(row.selected, label);
+            let response = ui.add(egui::Button::selectable(row.selected, label).sense(egui::Sense::click_and_drag()));
+            // Drag the name onto another to parent it there, or onto a
+            // collection's heading to move it in — Blender's outliner.
+            if response.drag_started() {
+                response.dnd_set_drag_payload(DraggedObject(row.id));
+            }
+            drop_highlight(ui, &response);
+            if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
+                if dragged.0 != row.id {
+                    queue.push(Command::ParentObject { child: dragged.0, parent: row.id });
+                }
+            }
             if response.clicked() {
                 let modifiers = ui.input(|i| ClickModifiers {
                     additive: i.modifiers.ctrl || i.modifiers.command,

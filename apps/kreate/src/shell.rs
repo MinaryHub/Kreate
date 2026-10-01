@@ -197,6 +197,8 @@ pub struct ShellState {
     /// application at all. A crash is already a bad moment; being unable to look
     /// at the program while deciding makes it worse.
     pub recoverable: Vec<RecoveryOffer>,
+    /// File ▸ Open Recent, newest first.
+    pub recent_files: Vec<std::path::PathBuf>,
     /// Whether the remapping panel is open.
 
     /// The binding waiting for a keystroke, if any.
@@ -553,6 +555,7 @@ impl Default for ShellState {
             command_info: std::collections::BTreeMap::new(),
             status: None,
             recoverable: Vec::new(),
+            recent_files: Vec::new(),
             capturing: None,
             palette: Default::default(),
             pie: Default::default(),
@@ -1150,6 +1153,10 @@ pub fn end_gesture(state: &mut ShellState, pointer_down: bool) {
 struct Labels {
     file_new: String,
     file_open: String,
+    file_open_recent: String,
+    recent_none: String,
+    menu_show_hide: String,
+    reveal_hidden: String,
     file_save: String,
     file_save_as: String,
     file_export: String,
@@ -1381,6 +1388,10 @@ impl Labels {
         Self {
             file_new: t("menu-file-new"),
             file_open: t("menu-file-open"),
+            file_open_recent: t("menu-file-open-recent"),
+            recent_none: t("recent-none"),
+            menu_show_hide: t("menu-show-hide"),
+            reveal_hidden: t("reveal-hidden"),
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
             file_export: t("menu-file-export"),
@@ -2741,6 +2752,8 @@ pub enum MenuNode {
     /// File ▸ Recover, whose entries are the recoverable documents of the
     /// moment — drawn by `draw_recover_menu`, and not searched.
     Recover,
+    /// File ▸ Open Recent, the documents of late — drawn from the list.
+    Recent,
 }
 
 /// A menu on a bar.
@@ -2775,6 +2788,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
             nodes: vec![
                 entry("file.new", &l.file_new, Run::Command(Command::NewDocument)),
                 entry("file.open", &l.file_open, Run::Command(Command::OpenDocument)),
+                MenuNode::Recent,
                 // Recovered work under File, where Blender keeps it and where
                 // somebody who has just lost a session looks first.
                 MenuNode::Recover,
@@ -2922,7 +2936,7 @@ pub fn flatten(menus: &[TopMenu]) -> Vec<(String, MenuEntry)> {
             match node {
                 MenuNode::Entry(e) => out.push((path.to_string(), e.clone())),
                 MenuNode::Sub(label, children) => walk(&format!("{path} / {label}"), children, out),
-                MenuNode::Separator | MenuNode::Recover | MenuNode::UndoHistory => {}
+                MenuNode::Separator | MenuNode::Recover | MenuNode::Recent | MenuNode::UndoHistory => {}
             }
         }
     }
@@ -2949,6 +2963,7 @@ fn draw_nodes(ui: &mut Ui, state: &mut ShellState, l: &Labels, nodes: &[MenuNode
                 ui.separator();
             }
             MenuNode::Recover => draw_recover_menu(ui, state, l),
+            MenuNode::Recent => draw_recent_menu(ui, state, l),
             MenuNode::UndoHistory => draw_undo_history(ui, state, l),
         }
     }
@@ -3188,6 +3203,17 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                 ),
                 MenuNode::Separator,
                 entry("object.unbind_armature", &l.unbind, op("object.unbind_armature", &[])),
+            ],
+        ),
+        MenuNode::Sub(
+            l.menu_show_hide.clone(),
+            vec![
+                entry("object.reveal", &l.reveal_hidden, op("object.reveal", &[])),
+                entry("object.hide", &l.hide_selected, op("object.hide", &[])),
+                MenuNode::Entry(
+                    MenuEntry::new("object.hide", &l.hide_unselected, op("object.hide", &[("unselected", V::Bool(true))]))
+                        .variant("unselected", V::Bool(true)),
+                ),
             ],
         ),
         MenuNode::Separator,
@@ -5077,6 +5103,28 @@ fn recovery_row_height(ui: &Ui) -> f32 {
 /// One row each in a list that scrolls after a few, the count above and a way
 /// to dismiss the lot below. A stale session directory per crashed process is
 /// normal, and a run of interrupted tests left forty-two.
+/// File ▸ Open Recent: the name, the whole path on hover, and a document that
+/// is no longer there greyed out.
+fn draw_recent_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    ui.menu_button(&l.file_open_recent, |ui| {
+        if state.recent_files.is_empty() {
+            ui.add_enabled(false, egui::Button::new(&l.recent_none));
+            return;
+        }
+        let files = state.recent_files.clone();
+        for path in files {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let response = ui
+                .add_enabled(path.exists(), egui::Button::new(name))
+                .on_hover_text(path.display().to_string());
+            if response.clicked() {
+                state.queue.push(Command::OpenPath(path));
+                ui.close();
+            }
+        }
+    });
+}
+
 fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     ui.menu_button(&l.recover_menu, |ui| {
         let count = state.recoverable.len();
@@ -6940,7 +6988,6 @@ op-object-transform-apply-desc = Bakes the transform into the mesh and resets it
 menu-select-more = More
 menu-select-less = Less
 menu-select-linked = Linked
-menu-show-hide = Show/Hide
 menu-hide-selected = Hide Selected
 menu-hide-unselected = Hide Unselected
 menu-reveal = Reveal Hidden
@@ -7001,6 +7048,17 @@ paint-strength = Strength
 paint-front-only = Front Faces Only
 paint-falloff = Soft Edge
 menu-parent = Parent
+menu-file-open-recent = Open Recent
+recent-none = Nothing opened yet
+menu-show-hide = Show/Hide
+reveal-hidden = Reveal Hidden
+op-object-hide = Hide
+op-object-hide-desc = Hides the selected objects (H).
+op-object-hide-unselected-desc = Hides everything not selected (Shift+H).
+op-object-reveal = Reveal Hidden
+op-object-reveal-desc = Shows every hidden object, and selects them (Alt+H).
+op-object-parent_one = Parent
+op-object-parent_one-desc = Parents one object to another, by name — the outliner's drag and drop.
 menu-parent-to = Set Parent To
 parent-object = Object
 parent-clear = Clear Parent
@@ -7722,6 +7780,16 @@ paint-strength = 세기
 paint-front-only = 앞면만
 paint-falloff = 부드러운 가장자리
 menu-parent = 부모
+menu-file-open-recent = 최근 파일 열기
+recent-none = 아직 연 파일이 없습니다
+reveal-hidden = 숨긴 것 보이기
+op-object-hide = 숨기기
+op-object-hide-desc = 선택한 오브젝트를 숨깁니다 (H).
+op-object-hide-unselected-desc = 선택하지 않은 것을 모두 숨깁니다 (Shift+H).
+op-object-reveal = 숨긴 것 보이기
+op-object-reveal-desc = 숨긴 오브젝트를 모두 보이고 선택합니다 (Alt+H).
+op-object-parent_one = 부모 지정
+op-object-parent_one-desc = 한 오브젝트를 다른 오브젝트의 자식으로 만듭니다 — 아웃라이너의 끌어다 놓기.
 menu-parent-to = 부모 지정
 parent-object = 오브젝트
 parent-clear = 부모 해제

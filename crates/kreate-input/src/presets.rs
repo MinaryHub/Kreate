@@ -610,6 +610,16 @@ fn common() -> Vec<Binding> {
             Action::new("app.menu").with("menu", PropertyValue::Text("parent_clear".into())),
         )
         .with_modifiers(Modifiers::alt()),
+        // Blender's H, Shift+H and Alt+H, in object mode as in edit mode.
+        key("object.hide", "H", Context::ObjectMode, Action::new("object.hide")),
+        key(
+            "object.hide_unselected",
+            "H",
+            Context::ObjectMode,
+            Action::new("object.hide").with("unselected", PropertyValue::Bool(true)),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key("object.reveal", "H", Context::ObjectMode, Action::new("object.reveal")).with_modifiers(Modifiers::alt()),
         // Blender's F2: rename the active object.
         key("object.rename", "F2", Context::ObjectMode, Action::new("app.rename")),
         key(

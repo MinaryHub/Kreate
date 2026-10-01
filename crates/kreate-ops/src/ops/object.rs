@@ -2181,6 +2181,126 @@ impl Operator for SelectAll {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ParentOneParams {
+    /// The child's identity, in decimal.
+    pub child: String,
+    /// The parent's, or empty to clear.
+    pub parent: String,
+}
+
+/// One object parented to another, by identity — the outliner's drag and
+/// drop, which names both and leaves the selection alone. The child stays
+/// where it is.
+pub struct ParentOne;
+
+impl Operator for ParentOne {
+    type Params = ParentOneParams;
+
+    fn id() -> &'static str {
+        "object.parent_one"
+    }
+    fn label() -> &'static str {
+        "Parent"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let find = |text: &str| {
+            text.trim()
+                .parse::<u64>()
+                .ok()
+                .and_then(|raw| doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)))
+        };
+        let Some(child) = find(&params.child) else { return Ok(OpResult::Cancelled) };
+        let parent = if params.parent.trim().is_empty() {
+            None
+        } else {
+            match find(&params.parent) {
+                Some(p) => Some(p),
+                None => return Ok(OpResult::Cancelled),
+            }
+        };
+        if parent == Some(child) || doc.document().object(child).map(|o| o.parent) == Some(parent) {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut()
+            .set_parent(child, parent)
+            .map_err(|_| OpError::Failed("that would make an object its own ancestor".into()))?;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct HideObjectsParams {
+    /// Hide what is *not* selected instead — Blender's Shift+H.
+    pub unselected: bool,
+}
+
+/// Blender's H in object mode: the selected objects disappear, and leave the
+/// selection — a hidden object that stays selected is moved by the next G.
+pub struct HideObjects;
+
+impl Operator for HideObjects {
+    type Params = HideObjectsParams;
+
+    fn id() -> &'static str {
+        "object.hide"
+    }
+    fn label() -> &'static str {
+        "Hide"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let targets: Vec<ObjectId> = d
+            .objects()
+            .filter(|(id, o)| o.visible && d.selection.objects.contains(id) != params.unselected)
+            .map(|(id, _)| id)
+            .collect();
+        if targets.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in &targets {
+            if let Some(o) = d.object_mut(*id) {
+                o.visible = false;
+            }
+            d.selection.remove(*id);
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Blender's Alt+H in object mode: every hidden object back, and selected, so
+/// what came back is what the next action acts on.
+pub struct RevealObjects;
+
+impl Operator for RevealObjects {
+    type Params = crate::ops::mesh::EmptyParams;
+
+    fn id() -> &'static str {
+        "object.reveal"
+    }
+    fn label() -> &'static str {
+        "Reveal Hidden"
+    }
+
+    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let hidden: Vec<ObjectId> = doc.document().objects().filter(|(_, o)| !o.visible).map(|(id, _)| id).collect();
+        if hidden.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in &hidden {
+            if let Some(o) = d.object_mut(*id) {
+                o.visible = true;
+            }
+            d.selection.add(*id);
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct RenameParams {
     pub name: String,
 }
@@ -2441,6 +2561,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectAll>();
     registry.register::<Parent>();
     registry.register::<Rename>();
+    registry.register::<ParentOne>();
+    registry.register::<HideObjects>();
+    registry.register::<RevealObjects>();
     registry.register::<Join>();
 }
 
@@ -2514,6 +2637,55 @@ mod tests {
         p.set("uid", crate::PropertyValue::Text(uid));
         h.dispatch(&r, &mut doc, &Context::default(), "material.link", &p).unwrap();
         assert_eq!(doc.mesh_slots(mesh)[0], Some(red));
+    }
+
+    /// H hides the selection and takes it out of the selection; Shift+H hides
+    /// the rest; Alt+H brings everything back, selected.
+    #[test]
+    fn hide_and_reveal_objects() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let a = doc.add_object(Object::new("A", ObjectData::Empty));
+        let b = doc.add_object(Object::new("B", ObjectData::Empty));
+        doc.selection.add(a);
+        let mut h = History::new();
+        let ctx = Context::default();
+        h.dispatch(&r, &mut doc, &ctx, "object.hide", &crate::PropertyMap::new()).unwrap();
+        assert!(!doc.object(a).unwrap().visible && doc.object(b).unwrap().visible);
+        assert!(!doc.selection.objects.contains(&a));
+        let mut p = crate::PropertyMap::new();
+        p.set("unselected", crate::PropertyValue::Bool(true));
+        h.dispatch(&r, &mut doc, &ctx, "object.hide", &p).unwrap();
+        assert!(!doc.object(b).unwrap().visible);
+        h.dispatch(&r, &mut doc, &ctx, "object.reveal", &crate::PropertyMap::new()).unwrap();
+        assert!(doc.object(a).unwrap().visible && doc.object(b).unwrap().visible);
+        assert!(doc.selection.objects.contains(&a) && doc.selection.objects.contains(&b));
+    }
+
+    /// The outliner's drop: one object parented to another by identity, the
+    /// selection untouched; a loop refused.
+    #[test]
+    fn parent_one_by_identity() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let a = doc.add_object(Object::new("A", ObjectData::Empty));
+        let b = doc.add_object(Object::new("B", ObjectData::Empty));
+        let uid = |doc: &Document, id| crate::PropertyValue::Text(doc.object_uid(id).unwrap().raw().to_string());
+        let mut h = History::new();
+        let mut p = crate::PropertyMap::new();
+        p.set("child", uid(&doc, b));
+        p.set("parent", uid(&doc, a));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.parent_one", &p).unwrap();
+        assert_eq!(doc.object(b).unwrap().parent, Some(a));
+        assert!(doc.selection.objects.is_empty());
+        let mut back = crate::PropertyMap::new();
+        back.set("child", uid(&doc, a));
+        back.set("parent", uid(&doc, b));
+        assert!(h.dispatch(&r, &mut doc, &Context::default(), "object.parent_one", &back).is_err());
     }
 
     #[test]

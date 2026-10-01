@@ -78,6 +78,33 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
 }
 
 /// The workspace file's path.
+/// File ▸ Open Recent's list, one path per line, newest first.
+pub fn recent_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("recent.txt"))
+}
+
+/// How many documents Open Recent remembers.
+pub const RECENT_LIMIT: usize = 12;
+
+/// The recent documents, newest first. Missing or unreadable is none.
+pub fn load_recent(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).take(RECENT_LIMIT).collect())
+        .unwrap_or_default()
+}
+
+/// `opened` to the front of `list`, once, and the list cut to the limit.
+pub fn note_recent(list: &mut Vec<PathBuf>, opened: &Path) {
+    list.retain(|p| p != opened);
+    list.insert(0, opened.to_path_buf());
+    list.truncate(RECENT_LIMIT);
+}
+
+pub fn save_recent(path: &Path, list: &[PathBuf]) -> Result<(), std::io::Error> {
+    let text: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
+    write_atomic(path, &text)
+}
+
 pub fn workspace_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("workspaces.toml"))
 }
@@ -390,5 +417,32 @@ mod tests {
         assert!(text.contains("kreate"), "{dir:?}");
         assert!(dir.is_absolute(), "{dir:?}");
         assert_eq!(keymap_path().unwrap().file_name().unwrap(), "keymap.toml");
+    }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn a_document_opened_again_moves_to_the_front_once() {
+        let mut list = vec![PathBuf::from("a.kreate"), PathBuf::from("b.kreate")];
+        note_recent(&mut list, Path::new("b.kreate"));
+        assert_eq!(list, vec![PathBuf::from("b.kreate"), PathBuf::from("a.kreate")]);
+        for i in 0..20 {
+            note_recent(&mut list, &PathBuf::from(format!("{i}.kreate")));
+        }
+        assert_eq!(list.len(), RECENT_LIMIT);
+        assert_eq!(list[0], PathBuf::from("19.kreate"));
+    }
+
+    #[test]
+    fn the_list_survives_a_save_and_a_load() {
+        let dir = std::env::temp_dir().join(format!("kreate-recent-{}", std::process::id()));
+        let path = dir.join("recent.txt");
+        let list = vec![PathBuf::from("C:/x/one.kreate"), PathBuf::from("/y/two.kreate")];
+        save_recent(&path, &list).unwrap();
+        assert_eq!(load_recent(&path), list);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

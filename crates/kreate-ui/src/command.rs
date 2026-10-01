@@ -15,6 +15,14 @@ use kreate_reflect::PropertyMap;
 /// Something the user asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// The outliner's drag and drop onto an object: `child` parented to
+    /// `parent`, both outliner keys. The selection is left alone.
+    ParentObject { child: u32, parent: u32 },
+    /// The outliner's drag and drop onto a collection's heading; an empty
+    /// name is the scene itself.
+    MoveObjectToCollection { object: u32, collection: String },
+    /// File ▸ Open Recent.
+    OpenPath(std::path::PathBuf),
     /// Select a bone of an armature object, by the object's outliner key and
     /// the bone's name: the outliner's bone rows. The application turns it
     /// into the pick of whatever mode it is in.

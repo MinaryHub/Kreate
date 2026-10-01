@@ -770,6 +770,10 @@ impl App {
         let mut registry = OperatorRegistry::new();
         kreate_ops::register_builtin(&mut registry);
         let mut app = Self::empty(doc, locale, registry);
+        // File ▸ Open Recent, as the last session left it.
+        app.ui.recent_files = kreate::prefs::recent_path()
+            .map(|p| kreate::prefs::load_recent(&p))
+            .unwrap_or_default();
         app.load_keymap();
         app.load_workspaces();
         app
@@ -3025,6 +3029,29 @@ impl App {
                 // The outliner's key resolved against the *current* document,
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.
+                Command::ParentObject { child, parent } => {
+                    let uid = |key| shell::object_from_key(&self.doc, key).and_then(|id| self.doc.object_uid(id));
+                    if let (Some(c), Some(p)) = (uid(child), uid(parent)) {
+                        let mut params = PropertyMap::new();
+                        params.set("child", PropertyValue::Text(c.raw().to_string()));
+                        params.set("parent", PropertyValue::Text(p.raw().to_string()));
+                        self.run_op("object.parent_one", params);
+                    }
+                }
+                Command::MoveObjectToCollection { object, collection } => {
+                    let uid = shell::object_from_key(&self.doc, object).and_then(|id| self.doc.object_uid(id));
+                    if let Some(uid) = uid {
+                        let mut params = PropertyMap::new();
+                        params.set("uid", PropertyValue::Text(uid.raw().to_string()));
+                        params.set("collection", PropertyValue::Text(collection));
+                        self.run_op("object.move_to_collection", params);
+                    }
+                }
+                Command::OpenPath(path) => {
+                    if self.confirm_discarding_changes("open another document") {
+                        self.load_from(&path);
+                    }
+                }
                 Command::SetVisible { object, visible } => {
                     let uid = shell::object_from_key(&self.doc, object)
                         .and_then(|id| self.doc.object_uid(id));
@@ -3255,12 +3282,24 @@ impl App {
             Ok((document, file)) => {
                 self.adopt(document);
                 self.file = file;
+                self.remember_recent(path);
                 self.status(&format!("opened {}", path.display()));
             }
             // Reported, never fatal. A file that will not open is the most
             // ordinary thing a user can hand an application, and losing the
             // session they already have over it would be indefensible.
             Err(e) => self.status(&format!("cannot open {}: {e}", path.display())),
+        }
+    }
+
+    /// Puts a document at the top of File ▸ Open Recent, and keeps the list.
+    fn remember_recent(&mut self, path: &std::path::Path) {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        kreate::prefs::note_recent(&mut self.ui.recent_files, &path);
+        if let Some(file) = kreate::prefs::recent_path() {
+            if let Err(e) = kreate::prefs::save_recent(&file, &self.ui.recent_files) {
+                tracing::warn!(error = %e, "could not keep the recent files");
+            }
         }
     }
 
@@ -3296,7 +3335,10 @@ impl App {
             path
         };
         match self.file.save(&path, &self.doc) {
-            Ok(()) => self.status(&format!("saved {}", path.display())),
+            Ok(()) => {
+                self.remember_recent(&path);
+                self.status(&format!("saved {}", path.display()));
+            }
             Err(e) => self.status(&format!("cannot save {}: {e}", path.display())),
         }
     }

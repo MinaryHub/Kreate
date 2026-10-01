@@ -38,6 +38,10 @@ pub struct MoveToCollectionParams {
     /// Make a new collection — called `collection`, numbered if taken — and
     /// move into that.
     pub new: bool,
+    /// One object, by identity in decimal, instead of the selection — the
+    /// outliner's drag and drop. Empty for the selection.
+    #[param(hidden)]
+    pub uid: String,
 }
 
 /// Moves the selected objects into a collection — Blender's `M`.
@@ -51,11 +55,16 @@ impl Operator for MoveToCollection {
     fn label() -> &'static str {
         "Move to Collection"
     }
-    fn poll(ctx: &Context, doc: &Document) -> bool {
-        ctx.mode.acts_on() == crate::mode::ActsOn::Objects && !doc.selection.is_empty()
+    fn poll(ctx: &Context, _doc: &Document) -> bool {
+        ctx.mode.acts_on() == crate::mode::ActsOn::Objects
     }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let selected = doc.document().selection.objects.clone();
+        let selected = if params.uid.is_empty() {
+            doc.document().selection.objects.clone()
+        } else {
+            let Ok(raw) = params.uid.trim().parse::<u64>() else { return Ok(OpResult::Cancelled) };
+            doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)).into_iter().collect()
+        };
         if selected.is_empty() {
             return Ok(OpResult::Cancelled);
         }
