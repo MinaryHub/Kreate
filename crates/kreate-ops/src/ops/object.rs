@@ -2000,6 +2000,55 @@ impl Operator for SelectAll {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RenameParams {
+    pub name: String,
+}
+
+/// Renames the active object — F2, or a double-click in the outliner.
+///
+/// Numbered (`.001`) when another object has the name, as Blender does: a
+/// name is how a person and a script find an object, and two of the same is
+/// one neither can find. Animation, drivers and links hold the object by
+/// identity, so nothing that points at it is broken by the new name.
+pub struct Rename;
+
+impl Operator for Rename {
+    type Params = RenameParams;
+
+    fn id() -> &'static str {
+        "object.rename"
+    }
+    fn label() -> &'static str {
+        "Rename"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.active.is_some()
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(id) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let base = params.name.trim();
+        if base.is_empty() || d.object(id).is_some_and(|o| o.name == base) {
+            return Ok(OpResult::Cancelled);
+        }
+        let taken = |name: &str| d.objects().any(|(other, o)| other != id && o.name == name);
+        let name = if taken(base) {
+            (1..)
+                .map(|i| format!("{base}.{i:03}"))
+                .find(|n| !taken(n))
+                .expect("names run out after integers")
+        } else {
+            base.to_string()
+        };
+        if let Some(object) = doc.document_mut().object_mut(id) {
+            object.name = name;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct ParentParams {
     /// Clear the parent instead of setting it to the active object.
     pub clear: bool,
@@ -2207,11 +2256,34 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Scale>();
     registry.register::<SelectAll>();
     registry.register::<Parent>();
+    registry.register::<Rename>();
     registry.register::<Join>();
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rename_names_the_active_object_and_numbers_a_taken_name() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        use kreate_scene::document::{Object, ObjectData};
+        let _a = doc.add_object(Object::new("Lamp", ObjectData::Empty));
+        let b = doc.add_object(Object::new("Cube", ObjectData::Empty));
+        doc.selection.add(b);
+        let mut h = History::new();
+        let mut p = crate::PropertyMap::new();
+        p.set("name", crate::PropertyValue::Text("Lamp".into()));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p).unwrap();
+        assert_eq!(doc.object(b).unwrap().name, "Lamp.001");
+        p.set("name", crate::PropertyValue::Text("  Box ".into()));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p).unwrap();
+        assert_eq!(doc.object(b).unwrap().name, "Box");
+        assert!(h.undo(&mut doc));
+        assert_eq!(doc.object(b).unwrap().name, "Lamp.001");
+    }
+
     use super::*;
     use crate::history::History;
     use crate::operator::OperatorRegistry;

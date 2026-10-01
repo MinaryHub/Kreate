@@ -1430,6 +1430,23 @@ impl App {
                 ));
                 vec![Group { title: t("menu-move-to-collection"), entries }]
             }
+            // Blender's Ctrl+P: what to parent to.
+            "parent" => vec![Group {
+                title: t("menu-parent-to"),
+                entries: vec![
+                    row(self, t("parent-object"), "object.parent", &[]),
+                    row(self, t("bind-automatic"), "object.bind_armature", &[("weights", PropertyValue::Enum(0))]),
+                    row(self, t("bind-empty"), "object.bind_armature", &[("weights", PropertyValue::Enum(1))]),
+                ],
+            }],
+            // Blender's Alt+P.
+            "parent_clear" => vec![Group {
+                title: t("parent-clear"),
+                entries: vec![
+                    row(self, t("parent-clear"), "object.parent", &[("clear", PropertyValue::Bool(true))]),
+                    row(self, t("unbind-armature"), "object.unbind_armature", &[]),
+                ],
+            }],
             "apply" => {
                 let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
                     row(
@@ -6053,6 +6070,15 @@ impl App {
                 self.ui.show_stats = !self.ui.show_stats;
                 self.redraw.set(RedrawReason::UI);
             }
+            "app.rename" => {
+                // The active object's name, in a field under the pointer.
+                let name = self.doc.selection.active.and_then(|a| self.doc.object(a)).map(|o| o.name.clone());
+                if let (Some(name), Some((x, y))) = (name, self.input.cursor) {
+                    let scale = self.egui_ctx.pixels_per_point().max(0.01);
+                    self.ui.rename = Some((egui::pos2(x as f32 / scale, y as f32 / scale), name));
+                    self.redraw.set(RedrawReason::UI);
+                }
+            }
             "view.toggle_xray" => {
                 // One switch for both halves, as Blender's: what shows through
                 // can be picked through.
@@ -7226,6 +7252,20 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// Blender's Ctrl+P and Alt+P menus: plain parenting first, the armature
+    /// binds after; clearing the parent, and the armature.
+    #[test]
+    fn the_parent_menus_offer_object_and_armature() {
+        let mut app = app();
+        let ops = |app: &App| -> Vec<String> {
+            app.ui.context_menu.groups.iter().flat_map(|g| g.entries.iter().map(|e| e.op_id.clone())).collect()
+        };
+        app.open_popup_menu("parent");
+        assert_eq!(ops(&app), ["object.parent", "object.bind_armature", "object.bind_armature"]);
+        app.open_popup_menu("parent_clear");
+        assert_eq!(ops(&app), ["object.parent", "object.unbind_armature"]);
+    }
 
     #[test]
     fn a_middle_drag_navigates() {

@@ -289,6 +289,10 @@ pub fn outliner(
         &row,
     );
     let mut toggled: Option<u32> = None;
+    // A name being typed, Blender's double-click: kept across frames until
+    // Enter, a click away, or Escape.
+    let rename_id = ui.id().with("renaming");
+    let mut renaming: Option<Renaming> = ui.data(|d| d.get_temp(rename_id));
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -301,13 +305,13 @@ pub fn outliner(
                     TreeRow::Root => draw_root(ui, catalog),
                     TreeRow::Collection(g) => {
                         if let Some(group) = groups.get(g) {
-                            draw_collection_row(ui, catalog, group, queue);
+                            draw_collection_row(ui, catalog, group, queue, &mut renaming);
                         }
                     }
                     TreeRow::Object(index) => {
                         let Some(data) = row(index) else { continue };
                         let open = expanded.contains(&data.id);
-                        if draw_object_row(ui, catalog, order, selected, active, index, &data, open, queue) {
+                        if draw_object_row(ui, catalog, order, selected, active, index, &data, open, queue, &mut renaming) {
                             toggled = Some(data.id);
                         }
                     }
@@ -330,6 +334,15 @@ pub fn outliner(
             }
         });
 
+    ui.data_mut(|d| match renaming {
+        Some(r) => {
+            d.insert_temp(rename_id, r);
+        }
+        None => {
+            d.remove::<Renaming>(rename_id);
+        }
+    });
+
     if let Some(key) = toggled {
         let mut set = expanded;
         if !set.remove(&key) {
@@ -342,6 +355,31 @@ pub fn outliner(
 /// Indentation per level of the tree, in points.
 const INDENT: f32 = 14.0;
 
+/// What is being renamed in place, and the text typed so far.
+#[derive(Clone, Debug, PartialEq)]
+enum Renaming {
+    Object(u32, String),
+    /// By its current name, which is how the operators find a collection.
+    Collection(String, String),
+}
+
+/// The field a name is typed into. `Some(true)` to keep what was typed —
+/// Enter, or a click elsewhere, as Blender takes it — `Some(false)` on
+/// Escape, `None` while typing.
+fn rename_field(ui: &mut Ui, text: &mut String) -> Option<bool> {
+    let response = ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        return Some(false);
+    }
+    if response.lost_focus() {
+        return Some(true);
+    }
+    if !response.has_focus() {
+        response.request_focus();
+    }
+    None
+}
+
 fn draw_root(ui: &mut Ui, catalog: &Catalog) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
@@ -351,16 +389,55 @@ fn draw_root(ui: &mut Ui, catalog: &Catalog) {
 }
 
 /// A collection's heading: its icon, its name, and its eye.
-fn draw_collection_row(ui: &mut Ui, catalog: &Catalog, group: &OutlinerGroup, queue: &mut CommandQueue) {
+fn draw_collection_row(
+    ui: &mut Ui,
+    catalog: &Catalog,
+    group: &OutlinerGroup,
+    queue: &mut CommandQueue,
+    renaming: &mut Option<Renaming>,
+) {
     ui.horizontal(|ui| {
         ui.add_space(INDENT);
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
-        let mut label = egui::RichText::new(&group.name);
-        if group.hidden {
-            label = label.weak();
+        let typing = match renaming {
+            Some(Renaming::Collection(name, text)) if *name == group.name => Some(text),
+            _ => None,
+        };
+        if let Some(text) = typing {
+            if let Some(keep) = rename_field(ui, text) {
+                if keep {
+                    let mut params = kreate_reflect::PropertyMap::new();
+                    params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
+                    params.set("new_name", kreate_reflect::PropertyValue::Text(text.clone()));
+                    queue.push(Command::RunOperator { op_id: "collection.rename".into(), params });
+                }
+                *renaming = None;
+            }
+        } else {
+            let mut label = egui::RichText::new(&group.name);
+            if group.hidden {
+                label = label.weak();
+            }
+            let response = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+            if response.double_clicked() {
+                *renaming = Some(Renaming::Collection(group.name.clone(), group.name.clone()));
+            }
+            // Blender's right-click on a collection: rename it, or take it
+            // away and leave what was in it in the scene.
+            response.context_menu(|ui| {
+                if ui.button(catalog.format("outliner-rename", TextKind::Ui, &[])).clicked() {
+                    *renaming = Some(Renaming::Collection(group.name.clone(), group.name.clone()));
+                    ui.close();
+                }
+                if ui.button(catalog.format("outliner-remove-collection", TextKind::Ui, &[])).clicked() {
+                    let mut params = kreate_reflect::PropertyMap::new();
+                    params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
+                    queue.push(Command::RunOperator { op_id: "collection.remove".into(), params });
+                    ui.close();
+                }
+            });
         }
-        ui.label(label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (eye, response) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
             eye_icon(ui, eye, !group.hidden, response.hovered());
@@ -391,6 +468,7 @@ fn draw_object_row(
     row: &OutlinerRow,
     open: bool,
     queue: &mut CommandQueue,
+    renaming: &mut Option<Renaming>,
 ) -> bool {
     let mut toggled = false;
     ui.horizontal(|ui| {
@@ -423,17 +501,44 @@ fn draw_object_row(
             label = label.weak();
         }
 
-        let response = ui.selectable_label(row.selected, label);
-        if response.clicked() {
-            let modifiers = ui.input(|i| ClickModifiers {
-                additive: i.modifiers.ctrl || i.modifiers.command,
-                range: i.modifiers.shift,
+        let typing = match renaming {
+            Some(Renaming::Object(id, text)) if *id == row.id => Some(text),
+            _ => None,
+        };
+        if let Some(text) = typing {
+            if let Some(keep) = rename_field(ui, text) {
+                if keep {
+                    // The rename acts on the active object, which the click
+                    // that began this made this one.
+                    let mut params = kreate_reflect::PropertyMap::new();
+                    params.set("name", kreate_reflect::PropertyValue::Text(text.clone()));
+                    queue.push(Command::RunOperator { op_id: "object.rename".into(), params });
+                }
+                *renaming = None;
+            }
+        } else {
+            let response = ui.selectable_label(row.selected, label);
+            if response.clicked() {
+                let modifiers = ui.input(|i| ClickModifiers {
+                    additive: i.modifiers.ctrl || i.modifiers.command,
+                    range: i.modifiers.shift,
+                });
+                let (objects, active) = resolve_click(order, selected, active, index, modifiers);
+                queue.push(Command::SetSelection { objects, active });
+            }
+            // Blender's double-click: rename in place. Framing it is the
+            // numpad's full stop.
+            if response.double_clicked() {
+                queue.push(Command::SetSelection { objects: vec![row.id], active: Some(row.id) });
+                *renaming = Some(Renaming::Object(row.id, row.name.clone()));
+            }
+            response.context_menu(|ui| {
+                if ui.button(catalog.format("outliner-rename", TextKind::Ui, &[])).clicked() {
+                    queue.push(Command::SetSelection { objects: vec![row.id], active: Some(row.id) });
+                    *renaming = Some(Renaming::Object(row.id, row.name.clone()));
+                    ui.close();
+                }
             });
-            let (objects, active) = resolve_click(order, selected, active, index, modifiers);
-            queue.push(Command::SetSelection { objects, active });
-        }
-        if response.double_clicked() {
-            queue.push(Command::FrameSelection);
         }
 
         // A shared mesh is worth flagging in place: editing it changes every

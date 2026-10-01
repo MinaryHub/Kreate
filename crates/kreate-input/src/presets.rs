@@ -594,13 +594,24 @@ fn common() -> Vec<Binding> {
         // which is a different context and therefore not a conflict.
         // Blender's Ctrl+P, its most-used choice: bind the selected meshes to
         // the active armature with automatic weights. The menu has the rest.
+        // Blender's Ctrl+P and Alt+P: a menu of what to parent to, and of how
+        // to let go.
         key(
-            "object.bind_armature",
+            "object.parent_menu",
             "P",
             Context::ObjectMode,
-            enum_param(Action::new("object.bind_armature"), "weights", 0),
+            Action::new("app.menu").with("menu", PropertyValue::Text("parent".into())),
         )
         .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.parent_clear_menu",
+            "P",
+            Context::ObjectMode,
+            Action::new("app.menu").with("menu", PropertyValue::Text("parent_clear".into())),
+        )
+        .with_modifiers(Modifiers::alt()),
+        // Blender's F2: rename the active object.
+        key("object.rename", "F2", Context::ObjectMode, Action::new("app.rename")),
         key(
             "object.join",
             "J",

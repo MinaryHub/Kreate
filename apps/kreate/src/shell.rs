@@ -154,6 +154,8 @@ pub struct ShellState {
     pub select_band_deselect: bool,
     /// The right-click menu: what it offers and whether it is open.
     pub context_menu: ContextMenu,
+    /// F2's field: where it opened and the name typed so far.
+    pub rename: Option<(egui::Pos2, String)>,
     /// What the viewport is currently doing, for the header to report.
     ///
     /// Pushed in by the application each frame rather than read out of the
@@ -562,6 +564,7 @@ impl Default for ShellState {
             knife_preview: Vec::new(),
             circle_select: None,
             snap_target: None,
+            rename: None,
             show_stats: false,
             history_steps: Vec::new(),
             history_at: 0,
@@ -1206,6 +1209,9 @@ struct Labels {
     group_add: String,
     weights_normalize: String,
     menu_parent: String,
+    parent_object: String,
+    parent_clear: String,
+    rename: String,
     bind_automatic: String,
     bind_empty: String,
     unbind: String,
@@ -1431,6 +1437,9 @@ impl Labels {
             group_add: t("op-object-vertex-group-add"),
             weights_normalize: t("op-paint-weights-normalize"),
             menu_parent: t("menu-parent"),
+            parent_object: t("parent-object"),
+            parent_clear: t("parent-clear"),
+            rename: t("outliner-rename"),
             bind_automatic: t("bind-automatic"),
             bind_empty: t("bind-empty"),
             unbind: t("unbind-armature"),
@@ -3121,6 +3130,12 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(
             l.menu_parent.clone(),
             vec![
+                entry("object.parent", &l.parent_object, op("object.parent", &[])),
+                MenuNode::Entry(
+                    MenuEntry::new("object.parent", &l.parent_clear, op("object.parent", &[("clear", V::Bool(true))]))
+                        .variant("clear", V::Bool(true)),
+                ),
+                MenuNode::Separator,
                 MenuNode::Entry(
                     MenuEntry::new(
                         "object.bind_armature",
@@ -3138,6 +3153,7 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
             ],
         ),
         MenuNode::Separator,
+        entry("app.rename", &l.rename, dispatch("app.rename")),
         entry("object.delete", &l.delete, op("object.delete", &[])),
     ]
 }
@@ -3235,6 +3251,42 @@ fn draw_viewport(
     draw_modal_header(ui, state, rect);
     draw_nav_gizmo(ui, state, rect);
     draw_context_menu(ui, state, rect);
+    draw_rename(ui, state, rect);
+}
+
+/// F2, Blender's: the active object's name in a field under the pointer.
+/// Enter or a click away keeps it, Escape leaves it as it was.
+fn draw_rename(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::Rect) {
+    let Some((at, text)) = state.rename.as_mut() else {
+        return;
+    };
+    let mut done: Option<bool> = None;
+    let title = state.catalog.format("outliner-rename", TextKind::Ui, &[]);
+    egui::Area::new(egui::Id::new("rename-popup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(*at)
+        .constrain_to(viewport)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(title);
+                let response = ui.add(egui::TextEdit::singleline(text).desired_width(180.0));
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    done = Some(false);
+                } else if response.lost_focus() {
+                    done = Some(true);
+                } else if !response.has_focus() {
+                    response.request_focus();
+                }
+            });
+        });
+    if let Some(keep) = done {
+        if keep {
+            let mut params = PropertyMap::new();
+            params.set("name", kreate_reflect::PropertyValue::Text(text.clone()));
+            state.queue.run("object.rename", params);
+        }
+        state.rename = None;
+    }
 }
 
 /// What a click on `hit` does to an object selection.
@@ -6749,6 +6801,18 @@ paint-strength = Strength
 paint-front-only = Front Faces Only
 paint-falloff = Soft Edge
 menu-parent = Parent
+menu-parent-to = Set Parent To
+parent-object = Object
+parent-clear = Clear Parent
+outliner-rename = Rename
+outliner-remove-collection = Delete Collection
+op-app-rename = Rename
+op-app-rename-desc = Renames the active object (F2).
+op-object-parent = Parent
+op-object-parent-desc = Makes the active object the parent of the other selected objects; they stay where they are.
+op-object-parent-clear-desc = Frees the selected objects from their parent; they stay where they are.
+op-object-rename = Rename
+op-object-rename-desc = Renames the active object.
 bind-automatic = With Automatic Weights
 bind-empty = With Empty Groups
 unbind-armature = Remove Armature Deform
@@ -7409,6 +7473,18 @@ paint-strength = 세기
 paint-front-only = 앞면만
 paint-falloff = 부드러운 가장자리
 menu-parent = 부모
+menu-parent-to = 부모 지정
+parent-object = 오브젝트
+parent-clear = 부모 해제
+outliner-rename = 이름 바꾸기
+outliner-remove-collection = 컬렉션 삭제
+op-app-rename = 이름 바꾸기
+op-app-rename-desc = 활성 오브젝트의 이름을 바꿉니다 (F2).
+op-object-parent = 부모 지정
+op-object-parent-desc = 선택한 다른 오브젝트들의 부모를 활성 오브젝트로 정합니다. 위치는 그대로입니다.
+op-object-parent-clear-desc = 선택한 오브젝트를 부모에게서 떼어 냅니다. 위치는 그대로입니다.
+op-object-rename = 이름 바꾸기
+op-object-rename-desc = 활성 오브젝트의 이름을 바꿉니다.
 bind-automatic = 자동 웨이트로
 bind-empty = 빈 그룹으로
 unbind-armature = 아마튜어 변형 제거
