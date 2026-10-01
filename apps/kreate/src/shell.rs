@@ -1170,6 +1170,11 @@ struct Labels {
     material_clear_image: String,
     tab_material: String,
     material_new: String,
+    material_browse: String,
+    material_assign: String,
+    material_assign_hint: String,
+    material_select: String,
+    material_select_hint: String,
     material_none: String,
     material_base_colour: String,
     material_metallic_roughness: String,
@@ -1398,6 +1403,11 @@ impl Labels {
             material_clear_image: t("material-clear-image"),
             tab_material: t("tab-material"),
             material_new: t("material-new"),
+            material_browse: t("material-browse"),
+            material_assign: t("material-assign"),
+            material_assign_hint: t("material-assign-hint"),
+            material_select: t("material-select"),
+            material_select_hint: t("material-select-hint"),
             material_none: t("material-none"),
             material_base_colour: t("material-base-colour"),
             material_metallic_roughness: t("material-metallic-roughness"),
@@ -2238,6 +2248,7 @@ fn draw_area(
                         modifier_rows,
                         area.id,
                         l,
+                        mode,
                     );
                 }
                 "uv" => {
@@ -5268,6 +5279,7 @@ fn draw_properties(
     modifier_rows: &mut [kreate_ui::ModifierRow],
     area: kreate_ui::AreaId,
     l: &Labels,
+    mode: kreate_ops::operator::Mode,
 ) {
     let tabs = available_tabs(doc);
     let mut current = chosen_tab(state.properties_tab(area), &tabs);
@@ -5310,7 +5322,7 @@ fn draw_properties(
                     PropertiesTab::Object => draw_object_tab(ui, state, doc, registry, l),
                     PropertiesTab::Data => draw_data_tab(ui, state, doc, registry, l),
                     PropertiesTab::Bone => draw_bone_tab(ui, state, doc, registry),
-                    PropertiesTab::Material => draw_material_tab(ui, state, doc, registry, l),
+                    PropertiesTab::Material => draw_material_tab(ui, state, doc, registry, l, mode),
                     PropertiesTab::World => draw_world_tab(ui, state, doc, registry, l),
                     PropertiesTab::Modifiers => {
                         ui.heading(&l.modifiers);
@@ -5643,6 +5655,7 @@ fn draw_material_tab(
     doc: &Document,
     registry: &OperatorRegistry,
     l: &Labels,
+    mode: kreate_ops::operator::Mode,
 ) {
     let Some(object) = doc.selection.active else {
         return;
@@ -5730,6 +5743,51 @@ fn draw_material_tab(
             }
         });
     });
+
+    let slot_param = |extra: Option<(&'static str, kreate_reflect::PropertyValue)>| {
+        let mut p = PropertyMap::new();
+        p.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+        if let Some((k, v)) = extra {
+            p.set(k, v);
+        }
+        p
+    };
+    // Blender's browse button: put a material that already exists in this
+    // slot, so parts and models can share one.
+    if !slots.is_empty() && doc.materials().next().is_some() {
+        let current = slots
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .and_then(|id| doc.material(id))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| l.material_empty_slot.clone());
+        ui.horizontal(|ui| {
+            ui.label(&l.material_browse);
+            egui::ComboBox::from_id_salt("material-browse")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (_, material) in doc.materials() {
+                        // i18n-exempt: a material's name is the user's own text
+                        if ui.selectable_label(false, material.name.as_str()).clicked() {
+                            let uid = kreate_reflect::PropertyValue::Text(material.uid.raw().to_string());
+                            state.queue.run("material.link", slot_param(Some(("uid", uid))));
+                        }
+                    }
+                });
+        });
+    }
+    // Blender's Assign and Select, in edit mode: which faces are this slot.
+    if mode.edits_elements() && !slots.is_empty() {
+        ui.horizontal(|ui| {
+            if ui.button(&l.material_assign).on_hover_text(&l.material_assign_hint).clicked() {
+                state.queue.run("material.assign", slot_param(None));
+            }
+            if ui.button(&l.material_select).on_hover_text(&l.material_select_hint).clicked() {
+                state.queue.run("material.select", slot_param(None));
+            }
+        });
+    }
     ui.separator();
 
     // An empty slot, or no slots at all. Both want the same button, because
@@ -6574,6 +6632,17 @@ world-clear-image = Clear
 material-pick-image = Open Image...
 material-clear-image = Clear
 material-new = New Material
+material-browse = Material
+material-assign = Assign
+material-assign-hint = The selected faces take this slot's material.
+material-select = Select
+material-select-hint = Selects the faces on this slot.
+op-material-assign = Assign Material
+op-material-assign-desc = The selected faces take this slot's material.
+op-material-select = Select by Material
+op-material-select-desc = Selects the faces on this slot.
+op-material-link = Link Material
+op-material-link-desc = Puts an existing material in this slot.
 material-none = This object has no material.
 material-base-colour = Base Colour
 material-metallic-roughness = Metallic / Roughness
@@ -7246,6 +7315,17 @@ world-clear-image = 지우기
 material-pick-image = 이미지 열기...
 material-clear-image = 지우기
 material-new = 새 재질
+material-browse = 재질
+material-assign = 지정
+material-assign-hint = 선택한 면에 이 칸의 재질을 입힙니다.
+material-select = 선택
+material-select-hint = 이 칸의 재질을 쓰는 면을 선택합니다.
+op-material-assign = 재질 지정
+op-material-assign-desc = 선택한 면에 이 칸의 재질을 입힙니다.
+op-material-select = 재질로 선택
+op-material-select-desc = 이 칸의 재질을 쓰는 면을 선택합니다.
+op-material-link = 재질 연결
+op-material-link-desc = 이미 있는 재질을 이 칸에 넣습니다.
 material-none = 이 물체에는 재질이 없습니다.
 material-base-colour = 베이스 컬러
 material-metallic-roughness = 메탈릭 / 러프니스
@@ -7387,6 +7467,21 @@ overlay-statistics = 통계
 overlay-ao = 앰비언트 오클루전
 overlay-xray = 투시
 op-view-toggle-xray = 투시
+op-light-set_properties-param-kind-name = 종류
+op-light-set_properties-param-color-name = 색
+op-light-set_properties-param-intensity-name = 세기
+op-light-set_properties-param-exposure-name = 노출
+op-light-set_properties-param-radius-name = 반지름
+op-light-set_properties-param-angular_diameter-name = 겉보기 지름
+op-light-set_properties-param-cone_angle-name = 원뿔 각도
+op-light-set_properties-param-blend-name = 가장자리 흐림
+op-light-set_properties-param-shape-name = 모양
+op-light-set_properties-param-width-name = 너비
+op-light-set_properties-param-height-name = 높이
+op-light-set_properties-param-spread-name = 퍼짐
+op-light-set_properties-param-cast_shadow-name = 그림자
+op-light-set_properties-param-affect_diffuse-name = 확산광에 적용
+op-light-set_properties-param-affect_specular-name = 반사광에 적용
 op-view-toggle-xray-desc = 표면을 비쳐 보이게 하고, 뒤에 있는 것도 선택되게 합니다 (Alt+Z).
 op-view-toggle-ao = 앰비언트 오클루전
 op-view-toggle-ao-desc = 스튜디오 보기에서 모서리와 틈을 어둡게 해 형태가 잘 보이게 합니다.

@@ -355,6 +355,19 @@ pub struct SetLightParams {
     /// How much of that cone fades, from a hard edge at zero.
     #[param(min = 0.0, max = 1.0)]
     pub blend: f64,
+    /// An area light's outline.
+    #[param(variants("rectangle", "disc", "ellipse"))]
+    pub shape: u32,
+    /// An area light's width in metres — a disc's diameter.
+    #[param(min = 0.0, soft_max = 10.0, unit = "length")]
+    pub width: f64,
+    /// An area light's height in metres. A disc has only a width.
+    #[param(min = 0.0, soft_max = 10.0, unit = "length")]
+    pub height: f64,
+    /// How far off its face an area light reaches, in radians: a half turn
+    /// is a full hemisphere, less narrows it towards a beam.
+    #[param(min = 0.0, soft_max = 3.1, unit = "angle")]
+    pub spread: f64,
     /// Whether the light casts a shadow.
     pub cast_shadow: bool,
     /// Whether it lights the diffuse response. §2.2's lighting cheat.
@@ -374,6 +387,10 @@ impl Default for SetLightParams {
             angular_diameter: kreate_scene::LightKind::SUN_ANGULAR_DIAMETER,
             cone_angle: std::f64::consts::FRAC_PI_4,
             blend: 0.15,
+            shape: 0,
+            width: 1.0,
+            height: 1.0,
+            spread: std::f64::consts::PI,
             cast_shadow: true,
             affect_diffuse: true,
             affect_specular: true,
@@ -439,13 +456,16 @@ impl Operator for SetLight {
                 cone_angle: params.cone_angle.max(0.0),
                 blend: params.blend.clamp(0.0, 1.0),
             },
-            kreate_scene::LightKind::Area { shape, spread } => {
-                // The one kind whose own shape this operator does not carry.
-                // An area light's rectangle or disc is two more numbers and a
-                // second enum, and a panel for it wants its own row; until
-                // there is one, changing to an area light keeps whatever shape
-                // it had rather than flattening it to a default.
-                kreate_scene::LightKind::Area { shape, spread }
+            kreate_scene::LightKind::Area { .. } => {
+                let (w, h) = (params.width.max(0.0), params.height.max(0.0));
+                kreate_scene::LightKind::Area {
+                    shape: match params.shape {
+                        1 => kreate_scene::AreaShape::Disc { radius: w * 0.5 },
+                        2 => kreate_scene::AreaShape::Ellipse { width: w, height: h },
+                        _ => kreate_scene::AreaShape::Rect { width: w, height: h },
+                    },
+                    spread: params.spread.clamp(0.0, std::f64::consts::PI),
+                }
             }
         };
 
@@ -519,7 +539,20 @@ pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
             p.cone_angle = cone_angle;
             p.blend = blend;
         }
-        kreate_scene::LightKind::Area { .. } => {}
+        kreate_scene::LightKind::Area { shape, spread } => {
+            p.spread = spread;
+            match shape {
+                kreate_scene::AreaShape::Rect { width, height } => {
+                    (p.shape, p.width, p.height) = (0, width, height);
+                }
+                kreate_scene::AreaShape::Disc { radius } => {
+                    (p.shape, p.width, p.height) = (1, radius * 2.0, radius * 2.0);
+                }
+                kreate_scene::AreaShape::Ellipse { width, height } => {
+                    (p.shape, p.width, p.height) = (2, width, height);
+                }
+            }
+        }
     }
     p
 }
@@ -544,7 +577,12 @@ pub fn light_param_applies(kind: u32, param: &str) -> bool {
     let point = kind == 0;
     let sun = kind == 1;
     let spot = kind == 2;
+    let area = kind == 3;
     match param {
+        // An area light's outline. A disc's height is its width, but the
+        // field stays: hiding it as the shape changes would move the rows
+        // under the pointer.
+        "shape" | "width" | "height" | "spread" => area,
         // The size of the source, which is what makes a shadow soft. An area
         // light has its own shape instead.
         "radius" => point || spot,
@@ -1125,6 +1163,149 @@ impl Operator for RemoveMaterialSlot {
         }
         slots.remove(params.slot as usize);
         doc.document_mut().set_mesh_slots(mesh, slots);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MaterialSlotParams {
+    /// Which slot. See [`SetMaterialParams::slot`].
+    #[param(min = 0.0)]
+    pub slot: u32,
+}
+
+/// Blender's Assign: in edit mode, the selected faces take this slot.
+pub struct AssignMaterial;
+
+impl Operator for AssignMaterial {
+    type Params = MaterialSlotParams;
+
+    fn id() -> &'static str {
+        "material.assign"
+    }
+    fn label() -> &'static str {
+        "Assign Material"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        ctx.mode.edits_elements() && active_slot_count(doc) > 0
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        use kreate_mesh::attribute::{names, AttrType, Domain};
+        let slot = params.slot as i32;
+        let changed: usize = crate::ops::mesh::each_bmesh(doc, |bm| {
+            let faces = bm.selected_faces();
+            if faces.is_empty() {
+                return Ok(0);
+            }
+            let len = bm.slot_count(Domain::Face);
+            bm.attributes_mut().ensure(names::MATERIAL_INDEX, Domain::Face, AttrType::I32, len);
+            let Some(layer) = bm.attributes_mut().make_mut_i32(names::MATERIAL_INDEX) else {
+                return Ok(0);
+            };
+            let mut n = 0;
+            for f in faces {
+                if let Some(at) = layer.get_mut(kreate_mesh::arena::ArenaIndex::index(f) as usize) {
+                    if *at != slot {
+                        *at = slot;
+                        n += 1;
+                    }
+                }
+            }
+            Ok(n)
+        })?
+        .into_iter()
+        .sum();
+        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+    }
+}
+
+/// Blender's Select: in edit mode, the faces on this slot join the selection.
+pub struct SelectByMaterial;
+
+impl Operator for SelectByMaterial {
+    type Params = MaterialSlotParams;
+
+    fn id() -> &'static str {
+        "material.select"
+    }
+    fn label() -> &'static str {
+        "Select by Material"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        ctx.mode.edits_elements() && active_slot_count(doc) > 0
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        use kreate_mesh::attribute::names;
+        let slot = params.slot as i32;
+        let found: usize = crate::ops::mesh::each_bmesh(doc, |bm| {
+            // A face with no index is on the first slot, as the renderer
+            // draws it.
+            let on: Vec<_> = bm
+                .face_ids()
+                .filter(|f| {
+                    let index = bm
+                        .attributes()
+                        .get_i32(names::MATERIAL_INDEX)
+                        .and_then(|l| l.get(kreate_mesh::arena::ArenaIndex::index(*f) as usize).copied())
+                        .unwrap_or(0);
+                    index == slot
+                })
+                .collect();
+            for f in &on {
+                bm.set_face_selected(*f, true);
+            }
+            if !on.is_empty() {
+                bm.flush_selection(kreate_mesh::bmesh::SelectMode::Face);
+            }
+            Ok(on.len())
+        })?
+        .into_iter()
+        .sum();
+        Ok(if found == 0 { OpResult::Cancelled } else { OpResult::Finished })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct LinkMaterialParams {
+    /// Which slot. See [`SetMaterialParams::slot`].
+    #[param(min = 0.0)]
+    pub slot: u32,
+    /// The material's identity, in decimal: an identity rather than a name
+    /// or a position, so a script naming it survives both changing.
+    pub uid: String,
+}
+
+/// Blender's browse button: a slot takes a material that already exists, so
+/// two parts — or two models — can share one.
+pub struct LinkMaterial;
+
+impl Operator for LinkMaterial {
+    type Params = LinkMaterialParams;
+
+    fn id() -> &'static str {
+        "material.link"
+    }
+    fn label() -> &'static str {
+        "Link Material"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_slot_count(doc) > 0
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Ok(raw) = params.uid.trim().parse::<u64>() else { return Ok(OpResult::Cancelled) };
+        let Some(material) = doc.document().material_by_uid(kreate_scene::Uid::from_raw(raw)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let slot = params.slot as usize;
+        let slots = doc.document().mesh_slots(mesh);
+        if slot >= slots.len() || slots[slot] == Some(material) {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut().set_mesh_slot(mesh, slot, Some(material));
         Ok(OpResult::Finished)
     }
 }
@@ -2245,6 +2426,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Paste>();
     registry.register::<AddEmpty>();
     registry.register::<RemoveMaterialSlot>();
+    registry.register::<AssignMaterial>();
+    registry.register::<SelectByMaterial>();
+    registry.register::<LinkMaterial>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();
@@ -2262,6 +2446,75 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 
 #[cfg(test)]
 mod tests {
+
+    /// An area light's outline and spread are set from the panel and read
+    /// back the same, for each outline.
+    #[test]
+    fn an_area_light_takes_its_shape_and_spread() {
+        use kreate_scene::document::{Object, ObjectData};
+        for (shape, w, h) in [(0u32, 2.0, 0.5), (1, 1.5, 1.5), (2, 3.0, 1.0)] {
+            let mut r = OperatorRegistry::new();
+            crate::ops::register_builtin(&mut r);
+            let mut doc = Document::new();
+            let light = doc.add_light(kreate_scene::Light::of_kind("Panel", kreate_scene::LightKind::PANEL));
+            let o = doc.add_object(Object::new("Panel", ObjectData::Light(light)));
+            doc.selection.add(o);
+            let wanted = SetLightParams { kind: 3, shape, width: w, height: h, spread: 1.2, ..light_params(doc.light(light).unwrap()) };
+            let mut h_ = History::new();
+            h_.dispatch(&r, &mut doc, &Context::default(), "light.set_properties", &kreate_reflect::OpParams::to_map(&wanted)).unwrap();
+            let back = light_params(doc.light(light).unwrap());
+            assert_eq!((back.shape, back.width, back.height, back.spread), (shape, w, h, 1.2));
+        }
+    }
+
+    /// Blender's Assign, Select and browse: a face takes a slot, the faces on a
+    /// slot are found again, and a slot takes a material that exists.
+    #[test]
+    fn faces_are_assigned_to_slots_and_found_by_them() {
+        use kreate_mesh::attribute::names;
+        use kreate_scene::document::{Object, ObjectData};
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let o = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+        doc.selection.add(o);
+        let edit = Context { mode: crate::operator::Mode::EditMesh };
+        let mut h = History::new();
+        let slot = |n: i64| {
+            let mut p = crate::PropertyMap::new();
+            p.set("slot", crate::PropertyValue::Int(n));
+            p
+        };
+        h.dispatch(&r, &mut doc, &edit, "material.add_slot", &crate::PropertyMap::new()).unwrap();
+        h.dispatch(&r, &mut doc, &edit, "material.add_slot", &crate::PropertyMap::new()).unwrap();
+        // One face selected.
+        {
+            let m = doc.mesh_mut(mesh).unwrap();
+            let mut bm = m.to_bmesh();
+            bm.select_none();
+            let f = bm.face_ids().next().unwrap();
+            bm.set_face_selected(f, true);
+            bm.flush_selection(kreate_mesh::bmesh::SelectMode::Face);
+            *m = bm.to_mesh_data();
+        }
+        h.dispatch(&r, &mut doc, &edit, "material.assign", &slot(1)).unwrap();
+        let index = doc.mesh(mesh).unwrap().attributes().get_i32(names::MATERIAL_INDEX).unwrap().to_vec();
+        assert_eq!(index.iter().filter(|i| **i == 1).count(), 1, "{index:?}");
+
+        kreate_mesh::selection::select_none(doc.mesh_mut(mesh).unwrap());
+        h.dispatch(&r, &mut doc, &edit, "material.select", &slot(1)).unwrap();
+        let picked = kreate_mesh::selection::selected(doc.mesh(mesh).unwrap(), kreate_mesh::attribute::Domain::Face);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(index[picked[0] as usize], 1);
+
+        let red = doc.add_material(kreate_scene::document::Material { name: "Red".into(), ..Default::default() });
+        let uid = doc.material(red).unwrap().uid.raw().to_string();
+        let mut p = slot(0);
+        p.set("uid", crate::PropertyValue::Text(uid));
+        h.dispatch(&r, &mut doc, &Context::default(), "material.link", &p).unwrap();
+        assert_eq!(doc.mesh_slots(mesh)[0], Some(red));
+    }
 
     #[test]
     fn rename_names_the_active_object_and_numbers_a_taken_name() {
