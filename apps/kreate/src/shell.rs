@@ -2563,10 +2563,12 @@ fn header_right_width(ui: &Ui, state: &ShellState, l: &Labels) -> f32 {
             .x
     };
     let button = |text: &str| text_width(text) + spacing.button_padding.x * 2.0;
-    // Three shading buttons at two points apart, a separator, Overlays, and
+    // Four shading buttons at two points apart, a separator, Overlays, and
     // the exposure when it is shown, each followed by the row's item spacing.
+    // Four since Wireframe joined them: counted as three, the menus were given
+    // one button's width too many and ran under Overlays.
     let icon = 14.0 + spacing.button_padding.x * 2.0;
-    let mut width = icon * 3.0 + 2.0 * 2.0 + spacing.item_spacing.x;
+    let mut width = icon * 4.0 + 2.0 * 3.0 + spacing.item_spacing.x;
     width += spacing.item_spacing.x * 2.0 + 1.0; // the separator
     width += button(&l.overlays) + spacing.item_spacing.x;
     if state.view_status.shading == kreate_render::ShadingMode::Rendered {
@@ -5014,42 +5016,49 @@ fn draw_tool_settings(ui: &mut Ui, state: &mut ShellState, area: u32, mode: krea
         .on_hover_text(get(state, "orientation-hint"));
 
     ui.separator();
-    // Snapping: on or off, and to what.
-    if ui.selectable_label(tools.snap, get(state, "snap-toggle")).on_hover_text(get(state, "snap-hint")).clicked() {
-        tools.snap = !tools.snap;
-    }
+    // Snapping, Blender's magnet: one dropdown for whether and to what, lit
+    // when on — two controls side by side did not fit a narrow viewport.
+    let theme = kreate_ui::theme::from_ui(ui);
+    let lit = |text: String, on: bool| {
+        let t = egui::RichText::new(text);
+        if on {
+            t.color(theme.accent)
+        } else {
+            t
+        }
+    };
     let modes: Vec<String> = crate::snap::Mode::ALL.iter().map(|m| get(state, m.label_key())).collect();
-    egui::ComboBox::from_id_salt(("snap-mode", area))
-        .width(80.0)
-        .selected_text(modes[(tools.snap_mode as usize).min(modes.len() - 1)].as_str())
+    egui::ComboBox::from_id_salt(("snap", area))
+        .width(56.0)
+        .selected_text(lit(get(state, "snap-toggle"), tools.snap))
         .show_ui(ui, |ui| {
+            ui.checkbox(&mut tools.snap, get(state, "snap-on"));
+            ui.separator();
             for (i, name) in modes.iter().enumerate() {
                 ui.selectable_value(&mut tools.snap_mode, i as u32, name.as_str());
             }
-        });
+        })
+        .response
+        .on_hover_text(get(state, "snap-hint"));
 
     // Proportional editing: elements only, as the key.
     if mode.edits_elements() {
-        ui.separator();
-        if ui
-            .selectable_label(tools.proportional, get(state, "proportional-toggle"))
-            .on_hover_text(get(state, "proportional-hint"))
-            .clicked()
-        {
-            tools.proportional = !tools.proportional;
-        }
         let curves: Vec<String> = kreate_ops::ops::mesh::FALLOFF_CURVES
             .iter()
             .map(|c| get(state, &format!("falloff-{c}")))
             .collect();
-        egui::ComboBox::from_id_salt(("falloff", area))
-        .width(70.0)
-            .selected_text(curves[(tools.falloff as usize).min(curves.len() - 1)].as_str())
+        egui::ComboBox::from_id_salt(("proportional", area))
+            .width(88.0)
+            .selected_text(lit(get(state, "proportional-toggle"), tools.proportional))
             .show_ui(ui, |ui| {
+                ui.checkbox(&mut tools.proportional, get(state, "proportional-on"));
+                ui.separator();
                 for (i, name) in curves.iter().enumerate() {
                     ui.selectable_value(&mut tools.falloff, i as u32, name.as_str());
                 }
-            });
+            })
+            .response
+            .on_hover_text(get(state, "proportional-hint"));
     }
 
     state.tools = tools;
@@ -6925,6 +6934,7 @@ orientation-global = Global
 orientation-local = Local
 orientation-hint = Transform orientation: what the first X, Y or Z press constrains to
 snap-toggle = Snap
+snap-on = Snapping
 snap-hint = Snap while moving (Shift+Tab); Ctrl turns it the other way for one drag, B mid-drag too
 snap-increment = Increment
 snap-element = Vertex, Edge, Face
@@ -6933,6 +6943,7 @@ snap-edge = Edge
 snap-midpoint = Edge Midpoint
 snap-face = Face
 proportional-toggle = Proportional
+proportional-on = Proportional Editing
 proportional-hint = Proportional editing (O): the selection pulls its neighbours along; the wheel sets how far
 falloff-smooth = Smooth
 falloff-sphere = Sphere
@@ -7658,6 +7669,7 @@ orientation-global = 월드
 orientation-local = 로컬
 orientation-hint = 방향 기준: X·Y·Z를 처음 누를 때 따르는 축
 snap-toggle = 스냅
+snap-on = 스냅 켜기
 snap-hint = 이동할 때 달라붙기 (Shift+Tab). Ctrl은 한 번만 반대로, 이동 중 B도 됩니다
 snap-increment = 간격
 snap-element = 점·선·면
@@ -7666,6 +7678,7 @@ snap-edge = 선
 snap-midpoint = 선의 가운데
 snap-face = 면
 proportional-toggle = 비례
+proportional-on = 비례 편집 켜기
 proportional-hint = 비례 편집 (O): 선택한 것이 주변까지 끌고 갑니다. 휠로 범위를 정합니다
 falloff-smooth = 부드럽게
 falloff-sphere = 구
