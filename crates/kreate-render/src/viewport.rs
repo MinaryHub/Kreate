@@ -2303,9 +2303,10 @@ impl Viewport {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            // The grid writes its own depth from the ray hit, so it is occluded
-            // by geometry rather than floating over or under it.
-            depth_stencil: Some(gpu::depth_write_state()),
+            // The grid's depth is its own, from the ray hit, so geometry in
+            // front of it hides it — but it is only tested, never written: an
+            // overlay drawn after it must not lose to a floor line.
+            depth_stencil: Some(gpu::depth_read_state()),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -4042,6 +4043,18 @@ impl Viewport {
         // is a copy that drifts.
         let preview = &self.preview_bind;
 
+        // The grid first, under every other overlay. It is a floor, and where
+        // the floor lies in front of a model — anything below zero, seen from
+        // above — drawing it after the wireframe painted its lines across the
+        // model's edges, and writing its depth there hid the edges and markers
+        // drawn later along every grid line: edges broken into dots. Hidden
+        // by the surfaces, never hiding an overlay.
+        if self.show_grid {
+            pass.set_pipeline(&self.grid);
+            pass.set_bind_group(0, &self.grid_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // Selected faces first among the overlays, at the layer nearest the
         // surface, so a selected face's own edges and vertices still read on top
         // of its fill.
@@ -4112,12 +4125,6 @@ impl Viewport {
                 pass.set_bind_group(3, preview, &[]);
                 pass.draw(0..4, 0..mesh.counts.verts);
             }
-        }
-
-        if self.show_grid {
-            pass.set_pipeline(&self.grid);
-            pass.set_bind_group(0, &self.grid_bind, &[]);
-            pass.draw(0..3, 0..1);
         }
 
         // The markers last, over the grid, and against the depth the solid

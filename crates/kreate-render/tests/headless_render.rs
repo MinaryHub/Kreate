@@ -812,3 +812,38 @@ fn a_still_view_refines_and_then_rests() {
     let (p, q) = (first.at(middle.0, middle.1), refined.at(middle.0, middle.1));
     assert!((0..3).all(|i| (p[i] as i32 - q[i] as i32).abs() <= 2), "{p:?} -> {q:?}");
 }
+
+/// The floor grid does not break the wireframe. A cube at the origin is half
+/// below the grid, and seen from above the floor lies in front of that half:
+/// the grid used to be drawn after the edges and to write its depth, so along
+/// every grid line it painted over them or hid them, and the lower edges
+/// showed as dotted lines.
+#[test]
+fn the_grid_does_not_break_the_wireframe() {
+    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.6))];
+    // Above, looking down at the cube: the floor plane cuts it in half.
+    let camera = |c: &mut Camera| {
+        c.frame_sphere(DVec3::ZERO, 1.8, 1.0);
+        c.rotation = glam::DQuat::from_rotation_z(0.4) * glam::DQuat::from_rotation_x(0.9);
+    };
+    let edges = |grid: bool| {
+        let plain = render_scene_full(&scene(), ShadingMode::Studio, grid, false, camera);
+        let wire = render_scene_full(&scene(), ShadingMode::Studio, grid, true, camera);
+        let (plain, wire) = (plain?.0, wire?.0);
+        save_shot(&wire, &format!("wire-grid-{grid}"));
+        Some(
+            wire.pixels
+                .iter()
+                .zip(&plain.pixels)
+                .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 40))
+                .count(),
+        )
+    };
+    let without = gpu_or_skip!(edges(false));
+    let with = edges(true).expect("the device was there a moment ago");
+    assert!(without > 100, "only {without} wireframe pixels without the grid");
+    assert!(
+        with * 100 >= without * 97,
+        "{with} wireframe pixels over the grid against {without} without it"
+    );
+}
