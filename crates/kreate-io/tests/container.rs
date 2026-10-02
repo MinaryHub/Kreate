@@ -822,6 +822,8 @@ fn every_map_and_the_normal_strength_survive_a_save() {
         normal_strength: 0.35,
         emission: kreate_math::SceneRgb::new(1.0, 0.5, 0.25),
         emission_strength: 750.0,
+        transmission: 0.6,
+        ior: 1.33,
         ..Default::default()
     });
 
@@ -837,6 +839,7 @@ fn every_map_and_the_normal_strength_survive_a_save() {
     assert_eq!(m.normal_strength, 0.35);
     assert_eq!(m.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
     assert_eq!(m.emission_strength, 750.0);
+    assert_eq!((m.transmission, m.ior), (0.6, 1.33));
 }
 
 #[test]
@@ -856,6 +859,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         normal_uid: None,
         normal_strength: None,
         emission: None,
+        transmission: None,
         graph: None,
         action: None,
         extra: Default::default(),

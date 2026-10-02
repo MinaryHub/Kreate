@@ -2074,8 +2074,40 @@ fn traced_scene(
     let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
     let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
     let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
-    one_material(gpu, &mut viewport, grey());
-    let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
+    let cube_kind = CUBE.with(|c| c.get());
+    if cube_kind == CubeKind::Glass {
+        let floor_graph = kreate_scene::shader::ShaderGraph::standard("floor", grey().base_color, 0.0, 0.5);
+        let mut glass_graph = floor_graph.clone();
+        if let kreate_scene::shader::NodeKind::Surface { base_color, transmission, roughness, .. } =
+            &mut glass_graph.nodes[0].kind
+        {
+            *base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+            *transmission = 1.0;
+            *roughness = 0.05;
+        }
+        let compiled = [
+            kreate_shader::compile(&floor_graph).expect("compiles"),
+            kreate_shader::compile(&glass_graph).expect("compiles"),
+        ];
+        let sources: Vec<_> = compiled
+            .iter()
+            .map(|c| kreate_render::viewport::MaterialSource {
+                wgsl: &c.wgsl,
+                constants: &c.constants,
+                image_slots: &c.image_slots,
+                images: &[],
+            })
+            .collect();
+        viewport.set_materials(&gpu.device, &gpu.queue, &sources);
+        viewport.set_transmissive(&[false, true]);
+    } else {
+        one_material(gpu, &mut viewport, grey());
+    }
+    let lift = if cube_kind == CubeKind::None {
+        glam::DAffine3::from_scale_rotation_translation(glam::DVec3::splat(1e-6), glam::DQuat::IDENTITY, glam::DVec3::new(0.0, 0.0, 0.5))
+    } else {
+        glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5))
+    };
     let camera = Camera {
         pivot: glam::DVec3::new(0.0, 0.0, 0.3),
         distance: 5.0,
@@ -2106,14 +2138,28 @@ fn traced_scene(
             surface: 0,
         })
         .collect();
+    let mut meshes = meshes;
+    if cube_kind == CubeKind::Glass {
+        meshes[0].surface = 1;
+    }
+    let glass = kreate_render::pathtrace::PtSurface {
+        base_color: [1.0, 1.0, 1.0],
+        roughness: 0.05,
+        transmission: 1.0,
+        ior: 1.5,
+        ..Default::default()
+    };
     viewport.set_path_trace_scene(
         &gpu.device,
         &gpu.queue,
         &meshes,
-        &[surface],
+        &[surface, glass],
         images,
     );
     let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    if cube_kind == CubeKind::Glass {
+        draws[0].material = 1;
+    }
     let mut out = Vec::new();
     for _ in 0..frames {
         // Faint lamps far off first, when a test asks: each takes a shadow
@@ -2277,4 +2323,66 @@ fn contact_shadows_darken_where_things_touch_and_nowhere_brighten() {
     let brighter = with.iter().zip(&without).filter(|(a, b)| lum(a) > lum(b) + 0.03).count();
     assert!(darker > 0, "contact shadows changed nothing");
     assert!(brighter <= darker / 20, "{brighter} pixels brighter against {darker} darker");
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CubeKind {
+    None,
+    Solid,
+    Glass,
+}
+
+thread_local! {
+    /// What `traced_scene` stands on its floor.
+    static CUBE: std::cell::Cell<CubeKind> = const { std::cell::Cell::new(CubeKind::Solid) };
+}
+
+/// The cube as `kind`, rasterised or traced.
+fn cube_shot(gpu: &Gpu, kind: CubeKind, traced: bool, frames: u32) -> Vec<[f32; 4]> {
+    CUBE.with(|c| c.set(kind));
+    let shot = traced_shot_with(gpu, traced, frames, None, traced);
+    CUBE.with(|c| c.set(CubeKind::Solid));
+    shot
+}
+
+fn distance(a: &[[f32; 4]], b: &[[f32; 4]]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>()).sum()
+}
+
+/// Glass lets the light through: where a solid cube throws its shadow, a
+/// glass one throws none — in the rasterised view and the path tracer. And
+/// in the rasterised view, where glass is screen-space refraction, a clear
+/// cube looks far more like the floor with no cube than a solid one does.
+///
+/// Not that last for the path tracer, because there it is false and should
+/// be: through the cube's lower front face, total internal reflection turns
+/// the view up into the sky — black here — as it would in a real block.
+#[test]
+fn a_glass_cube_lets_the_light_through() {
+    let gpu = gpu_or_skip!(gpu());
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    for (traced, frames) in [(false, 1), (true, 48)] {
+        let none = cube_shot(&gpu, CubeKind::None, traced, frames);
+        let solid = cube_shot(&gpu, CubeKind::Solid, traced, frames);
+        let glass = cube_shot(&gpu, CubeKind::Glass, traced, frames);
+        if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+            for (name, img) in [("none", &none), ("solid", &solid), ("glass", &glass)] {
+                let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
+                let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                    .map(|i| i.save(std::path::Path::new(&dir).join(format!("glass-{traced}-{name}.png"))));
+            }
+        }
+        assert!(glass.iter().all(|p| p.iter().all(|v| v.is_finite())));
+        // The solid's shadow: floor that is lit with no cube and dark with one.
+        let shadow: Vec<usize> = (0..none.len()).filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i])).collect();
+        assert!(shadow.len() > 20, "traced {traced}: the solid cube casts no shadow to test against");
+        let lit = shadow.iter().filter(|&&i| lum(&glass[i]) > 0.6 * lum(&none[i])).count();
+        assert!(lit * 10 > shadow.len() * 8, "traced {traced}: {lit} of {} shadow pixels lit through glass", shadow.len());
+        let to_glass = distance(&glass, &none);
+        assert!(to_glass > 0.0, "traced {traced}: the glass cube is invisible");
+        if !traced {
+            let to_solid = distance(&solid, &none);
+            assert!(to_glass < to_solid * 0.6, "the glass cube is {to_glass} from no cube, the solid one {to_solid}");
+        }
+    }
 }

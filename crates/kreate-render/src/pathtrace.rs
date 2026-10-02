@@ -66,6 +66,9 @@ pub struct PtSurface {
     pub metallic_roughness_image: Option<usize>,
     /// Light the surface emits by itself, in nits.
     pub emission: [f32; 3],
+    /// How much passes through, zero to one, and how it bends.
+    pub transmission: f32,
+    pub ior: f32,
 }
 
 /// An image a surface reads: four bytes a pixel, row by row; sRGB-encoded for
@@ -382,8 +385,8 @@ impl PathTracer {
             .flat_map(|s| {
                 [
                     [s.base_color[0], s.base_color[1], s.base_color[2], s.metallic],
-                    [s.roughness, layer(s.base_color_image), layer(s.metallic_roughness_image), 0.0],
-                    [s.emission[0], s.emission[1], s.emission[2], 0.0],
+                    [s.roughness, layer(s.base_color_image), layer(s.metallic_roughness_image), s.transmission],
+                    [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
                 ]
             })
             .collect();

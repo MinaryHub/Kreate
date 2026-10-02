@@ -100,7 +100,13 @@ fn pt_box(origin: vec3<f32>, inv_dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, l
 }
 
 // The nearest hit, or `t` < 0. `any` stops at the first: a shadow ray.
-fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool) -> PtHit {
+// `skip` is a triangle the ray leaves from and must not meet again, or
+// `PT_NONE`. With one, the ray may start exactly on its surface — and so meet
+// a surface lying flush against it, the floor under a glass on a table, which
+// any offset would step past.
+const PT_NONE: u32 = 0xffffffffu;
+
+fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: u32) -> PtHit {
     var best = PtHit(-1.0, 0u, 0.0, 0.0);
     var nearest = limit;
     let inv_dir = 1.0 / select(dir, vec3<f32>(1e-12), abs(dir) < vec3<f32>(1e-12));
@@ -118,7 +124,11 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool) -> PtHit {
         }
         if (node.count > 0u) {
             for (var k = 0u; k < node.count; k++) {
-                let tri = pt_triangles[pt_order[node.first + k]];
+                let index = pt_order[node.first + k];
+                if (index == skip) {
+                    continue;
+                }
+                let tri = pt_triangles[index];
                 let a = pt_positions[tri.x].xyz;
                 let e1 = pt_positions[tri.y].xyz - a;
                 let e2 = pt_positions[tri.z].xyz - a;
@@ -139,9 +149,17 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool) -> PtHit {
                     continue;
                 }
                 let t = f * dot(e2, q);
-                if (t > 1e-4 && t < nearest) {
+                // A shadow ray passes through glass: what it lights is behind
+                // it, tinted by nothing — the caustic a real block would focus
+                // is a path no shadow ray can find, and a black shadow under a
+                // window is the worse of the two errors.
+                if (any && pt_surfaces[tri.w * 3u + 1u].w >= 0.5) {
+                    continue;
+                }
+                let near = select(1e-4, -1e-5, skip != PT_NONE);
+                if (t > near && t < nearest) {
                     nearest = t;
-                    best = PtHit(t, pt_order[node.first + k], u, v);
+                    best = PtHit(max(t, 0.0), index, u, v);
                     if (any) {
                         return best;
                     }
@@ -209,8 +227,19 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
-    for (var bounce = 0u; bounce <= pt.max_bounces; bounce++) {
-        let hit = pt_trace(origin, dir, 1e30, false);
+    // Glass is not counted against the bounces: a path through a block of it
+    // crosses two faces and, at the steep angles total internal reflection
+    // traps, several more — counted, it would run out inside and come back
+    // black. Its own, larger budget instead.
+    var bounce = 0u;
+    var crossings = 0u;
+    var skip = PT_NONE;
+    loop {
+        if (bounce > pt.max_bounces || crossings > 16u) {
+            break;
+        }
+        let hit = pt_trace(origin, dir, 1e30, false, skip);
+        skip = PT_NONE;
         if (hit.t < 0.0) {
             radiance += throughput * pt_environment(dir);
             break;
@@ -221,6 +250,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let a = pt_positions[tri.x].xyz;
         var geometric = normalize(cross(pt_positions[tri.y].xyz - a, pt_positions[tri.z].xyz - a));
         var n = normalize(pt_normals[tri.x].xyz * w + pt_normals[tri.y].xyz * hit.u + pt_normals[tri.z].xyz * hit.v);
+        // Which side the path arrived from, before the normals are turned to
+        // face it: glass bends the other way on the way out. Asked of the
+        // mesh's normal, which points out of the solid; the winding of one
+        // triangle says nothing about which side is inside.
+        let entering = dot(n, dir) < 0.0;
         // Both sides lit, as the rasteriser's are.
         if (dot(geometric, dir) > 0.0) {
             geometric = -geometric;
@@ -254,6 +288,56 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         s.roughness = max(s.roughness, 0.02);
         let v = -dir;
         let start = p + geometric * 1e-3 * max(1.0, length(p - pt.eye.xyz) * 0.01);
+        let transmission = extra.w;
+
+        // Glass, chosen as often as the surface is glass: the path reflects
+        // or goes through by Fresnel, bent by the index of refraction, and
+        // tinted by the colour on the way in. Its weight is one either way —
+        // the choice is the distribution — so the throughput only takes the
+        // tint. Lights are not sampled here: a smooth dielectric's lobes are
+        // too narrow for a lamp to land in.
+        if (transmission > 0.0 && pt_random() < transmission) {
+            let ior = pt_surfaces[m + 2u].w;
+            let eta = select(ior, 1.0 / ior, entering);
+            // Rough glass bends about a microfacet, as rough metal reflects
+            // about one.
+            let alpha = s.roughness * s.roughness;
+            let r1 = pt_random();
+            let r2 = pt_random();
+            let cos_h = sqrt((1.0 - r1) / (1.0 + (alpha * alpha - 1.0) * r1));
+            let sin_h = sqrt(max(1.0 - cos_h * cos_h, 0.0));
+            let phi = 6.2831853 * r2;
+            var h = pt_orthonormal(n) * vec3<f32>(sin_h * cos(phi), sin_h * sin(phi), cos_h);
+            let cos_i = clamp(dot(v, h), 0.0, 1.0);
+            let f0 = (1.0 - eta) / (1.0 + eta);
+            let fresnel = f0 * f0 + (1.0 - f0 * f0) * pow(1.0 - cos_i, 5.0);
+            let bent = refract(dir, h, eta);
+            var next = reflect(dir, h);
+            var through = false;
+            if (dot(bent, bent) > 0.0 && pt_random() >= fresnel) {
+                next = bent;
+                through = true;
+            }
+            if (through) {
+                if (entering) {
+                    throughput *= s.base_color;
+                }
+                // From the surface itself, leaving this triangle behind: an
+                // offset through would step past whatever lies flush against
+                // the far side.
+                origin = p;
+                skip = hit.triangle;
+            } else {
+                if (dot(next, geometric) <= 0.0) {
+                    break;
+                }
+                origin = start;
+            }
+            dir = normalize(next);
+            crossings += 1u;
+            continue;
+        }
+        bounce += 1u;
 
         // One light, chosen at random, its share scaled by how many there are.
         if (pt.light_count > 0u) {
@@ -286,7 +370,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                     reach = length(offset) * 0.999;
                     aim = offset / max(length(offset), 1e-6);
                 }
-                let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true).t < 0.0;
+                let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true, PT_NONE).t < 0.0;
                 if (lit) {
                     radiance += throughput
                         * brdf_shade(s, n, v, to_light, e, lights_diffuse(light), lights_specular(light));
@@ -337,7 +421,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         // Paths that carry little are ended, the survivors made heavier so the
         // sum stays right.
-        if (bounce >= 2u) {
+        if (bounce >= 3u) {
             let keep = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 0.95);
             if (pt_random() > keep) {
                 break;

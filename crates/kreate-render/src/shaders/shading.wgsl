@@ -21,9 +21,9 @@ struct Shading {
     tiles_across: u32,
     /// How many light indices one tile's list can hold.
     tile_capacity: u32,
-    /// The drawn region in pixels, for contact shadows; zero when they are
-    /// off, which is every pass but the rendered view's.
-    contact_region: vec2<u32>,
+    /// The drawn region in pixels: where a point projected onto the screen
+    /// lands. Zero outside the rendered view.
+    region: vec2<u32>,
     /// rgb: the world's radiance, linear. w: nonzero when an environment cube
     /// is bound and this colour is not what lights the scene.
     ///
@@ -52,6 +52,8 @@ struct Shading {
     /// The camera, eye-relative and nudged as this frame's sample is: where a
     /// point lands in the depth contact shadows march through.
     view_proj: mat4x4<f32>,
+    /// x: nonzero when contact shadows are on.
+    flags: vec4<f32>,
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;
@@ -72,8 +74,8 @@ struct Shading {
 // something — it cannot shadow, and over a short distance that is rarely
 // anything. The shadow maps carry everything longer.
 fn contact_shadow(position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, pixel: vec2<u32>) -> f32 {
-    let region = vec2<f32>(shading.contact_region);
-    if (region.x < 1.0 || dot(normal, to_light) <= 0.0) {
+    let region = vec2<f32>(shading.region);
+    if (shading.flags.x <= 0.0 || region.x < 1.0 || dot(normal, to_light) <= 0.0) {
         return 1.0;
     }
     let distance = length(position);

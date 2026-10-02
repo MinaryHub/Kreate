@@ -82,6 +82,10 @@ pub const MATERIAL_GROUP: u32 = 3;
 /// What a compiled material needs alongside its code.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compiled {
+    /// Which constant holds the transmission (x) and the index of
+    /// refraction (y): what a renderer reads to know the material is glass,
+    /// which decides when it is drawn.
+    pub transmission_slot: usize,
     /// The function `material_sample(uv, uv_dx, uv_dy) -> MaterialSample`
     /// and its struct, and nothing else: no entry point, no library. A pass
     /// appends this to the shading library and calls it.
@@ -212,7 +216,7 @@ pub fn compile_with(
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32> }}"
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
     );
     let _ = writeln!(wgsl);
     let _ = writeln!(
@@ -238,9 +242,16 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    out.normal = {normal};");
     // In the roughness's slot, beside it: emitted light, in nits.
     let _ = writeln!(wgsl, "    out.emission = material.values[{}].yzw;", surface_slot + 1);
+    // The third slot: how much passes through, and how it bends.
+    let _ = writeln!(
+        wgsl,
+        "    out.transmission = clamp(material.values[{0}].x, 0.0, 1.0);\n    out.ior = max(material.values[{0}].y, 1.0);",
+        surface_slot + 2
+    );
     let _ = writeln!(wgsl, "    return out;\n}}");
 
     Ok(Compiled {
+        transmission_slot: surface_slot + 2,
         wgsl,
         constants: out.constants,
         images: out.images,
@@ -393,12 +404,13 @@ impl Emitter<'_> {
                     "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
                 );
             }
-            NodeKind::Surface { base_color, metallic, roughness, emission } => {
+            NodeKind::Surface { base_color, metallic, roughness, emission, transmission, ior } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
                 // the graph's shape — see the comment where they are read.
                 self.constants.push([base_color.r, base_color.g, base_color.b, metallic]);
                 self.constants.push([roughness, emission.r, emission.g, emission.b]);
+                self.constants.push([transmission, ior, 0.0, 0.0]);
             }
         }
         self.emitted[node] = Some(slot);
@@ -503,7 +515,7 @@ mod tests {
         parses(&compiled);
         assert_eq!(
             compiled.constants,
-            vec![[0.8, 0.7, 0.6, 0.25], [0.4, 0.0, 0.0, 0.0]]
+            vec![[0.8, 0.7, 0.6, 0.25], [0.4, 0.0, 0.0, 0.0], [0.0, 1.5, 0.0, 0.0]]
         );
         assert!(compiled.images.is_empty());
         assert!(compiled.notes.is_empty());
@@ -923,5 +935,12 @@ mod map_tests {
             compile(&graph).expect("compiles"),
             compile_with(&graph, |_| ColorSpace::Srgb).expect("compiles")
         );
+    }
+}
+
+impl Compiled {
+    /// Whether light passes through: drawn after the solids, over them.
+    pub fn transmissive(&self) -> bool {
+        self.constants.get(self.transmission_slot).is_some_and(|c| c[0] > 0.0)
     }
 }

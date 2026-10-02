@@ -102,6 +102,7 @@ struct Shading {
     inv_view_proj: [[f32; 4]; 4],
     /// The camera for contact shadows, which the probe leaves off.
     view_proj: [[f32; 4]; 4],
+    flags: [f32; 4],
 }
 
 /// Runs the composed probe over `points` against `lights`.
@@ -184,6 +185,7 @@ fn on_gpu_under(
                 sh9: kreate_render::environment::sh9_bytes(environment.sh9()),
                 inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                flags: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });

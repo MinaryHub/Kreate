@@ -707,6 +707,10 @@ pub struct MaterialRecord {
     /// The glow's colour and strength (nits), written only when it glows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emission: Option<[f32; 4]>,
+    /// Transmission and index of refraction, written only for a material
+    /// that is not the default solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<[f32; 2]>,
     /// The material's own node graph, when it uses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphRecord>,
@@ -1326,6 +1330,8 @@ pub fn write(
                         m.emission.b,
                         m.emission_strength,
                     ]),
+                    transmission: (m.transmission != 0.0 || m.ior != 1.5)
+                        .then_some([m.transmission, m.ior]),
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
                     extra: BTreeMap::new(),
@@ -1777,6 +1783,8 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .emission
                 .map_or(kreate_math::SceneRgb::new(1.0, 1.0, 1.0), |e| kreate_math::SceneRgb::new(e[0], e[1], e[2])),
             emission_strength: record.emission.map_or(0.0, |e| e[3]),
+            transmission: record.transmission.map_or(0.0, |t| t[0]),
+            ior: record.transmission.map_or(1.5, |t| t[1]),
             graph: record
                 .graph
                 .as_ref()

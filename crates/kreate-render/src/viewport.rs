@@ -104,8 +104,8 @@ struct ShadingGlobals {
     /// written every frame and read by nobody.
     tiles_across: u32,
     tile_capacity: u32,
-    /// The drawn region, for contact shadows; zero when they are off.
-    contact_region: [u32; 2],
+    /// The drawn region in the rendered view, zero outside it.
+    region: [u32; 2],
     /// rgb: the world's radiance, linear. w: nonzero when an environment cube
     /// is bound. See `shading.wgsl`.
     world: [f32; 4],
@@ -117,6 +117,8 @@ struct ShadingGlobals {
     inv_view_proj: [[f32; 4]; 4],
     /// This frame's camera, for contact shadows. See `shading.wgsl`.
     view_proj: [[f32; 4]; 4],
+    /// x: contact shadows on.
+    flags: [f32; 4],
 }
 
 #[repr(C)]
@@ -1411,6 +1413,11 @@ pub struct Viewport {
     /// The camera the rendered pass draws with this frame, sample nudge and
     /// all.
     shading_view_proj: [[f32; 4]; 4],
+    /// Which materials let light through. See `set_transmissive`.
+    material_transmissive: Vec<bool>,
+    /// The solids' picture, copied before glass is drawn over it: what glass
+    /// shows through. Linear, the picture's own format.
+    behind: (wgpu::Texture, wgpu::TextureView),
     /// How strong the glow is.
     pub bloom_intensity: f32,
     /// The running mean a still view refines itself into.
@@ -1930,6 +1937,17 @@ impl Viewport {
                     },
                     count: None,
                 },
+                // The solids' picture, for what glass shows.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // The path tracer reads the lights and the environment through the
@@ -1962,6 +1980,7 @@ impl Viewport {
         });
         let environment_0 = crate::environment::Environment::placeholder(device);
         let contact_depth_0 = gpu::create_depth_texture(device, width, height);
+        let behind_0 = behind_texture(device, width, height);
         let shading_bind = shading_bind_group(
             device,
             &shading_layout,
@@ -1973,6 +1992,7 @@ impl Viewport {
             tiles_0.buffer(),
             &environment_0,
             &contact_depth_0,
+            &behind_0.1,
         );
         // The rendered pass has no pipeline of its own any more: a material's
         // code *is* the fragment stage's second half, so the pipeline is built
@@ -2431,6 +2451,8 @@ impl Viewport {
             contact_depth: contact_depth_0,
             contact_pipeline,
             shading_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            material_transmissive: Vec::new(),
+            behind: behind_0,
             bloom_intensity: 0.12,
             accum_samples: 0,
             accum_signature: 0,
@@ -2466,6 +2488,7 @@ impl Viewport {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
             self.contact_depth = gpu::create_depth_texture(device, size.0, size.1);
+            self.behind = behind_texture(device, size.0, size.1);
             self.rebuild_shading_bind(device);
             self.aa.resize(device, size.0, size.1);
             self.outline.resize(device, size.0, size.1);
@@ -2981,6 +3004,7 @@ impl Viewport {
                 self.tiles.buffer(),
                 &self.environment,
                 &self.contact_depth,
+                &self.behind.1,
             );
             // The globals carry how many tiles across the grid is, and it has
             // just changed.
@@ -3170,6 +3194,7 @@ impl Viewport {
                 self.tiles.buffer(),
                 &self.environment,
                 &self.contact_depth,
+                &self.behind.1,
             );
             // The cull pass holds the light buffer too, and it has just moved.
             self.tiles.forget_bindings();
@@ -3196,7 +3221,7 @@ impl Viewport {
         ShadingGlobals {
             tiles_across: self.tiles.across(),
             tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
-            contact_region: if self.contact_applies() {
+            region: if self.shading == ShadingMode::Rendered {
                 [self.render_size.0, self.render_size.1]
             } else {
                 [0, 0]
@@ -3219,7 +3244,26 @@ impl Viewport {
             sh9: crate::environment::sh9_bytes(self.environment.sh9()),
             inv_view_proj: self.inv_view_proj,
             view_proj: self.shading_view_proj,
+            flags: [if self.contact_applies() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         }
+    }
+
+    /// Says which materials let light through: drawn after the solids, over
+    /// a copy of them. Parallel to what `set_materials` was given.
+    pub fn set_transmissive(&mut self, transmissive: &[bool]) {
+        self.material_transmissive.clear();
+        self.material_transmissive.extend_from_slice(transmissive);
+    }
+
+    fn transmissive(&self, material: u32) -> bool {
+        self.material_transmissive.get(material as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether every run of a draw is glass: such a draw casts no shadow and
+    /// marks no contact.
+    fn all_transmissive(&self, draw: &Draw) -> bool {
+        !draw.mesh.submeshes.is_empty()
+            && draw.mesh.submeshes.iter().all(|run| self.transmissive(draw.material_for(run.slot)))
     }
 
     /// Whether this frame's rendered view darkens where things touch: on, the
@@ -3370,6 +3414,7 @@ impl Viewport {
             self.tiles.buffer(),
             &self.environment,
             &self.contact_depth,
+            &self.behind.1,
         );
     }
 
@@ -4338,7 +4383,7 @@ impl Viewport {
                     // and an object that stopped casting when it got small
                     // would have its shadow blink out as the camera pulled
                     // back.
-                    if draw.mesh.counts.triangles == 0 {
+                    if draw.mesh.counts.triangles == 0 || self.all_transmissive(draw) {
                         return None;
                     }
                     Some((
@@ -4372,7 +4417,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                if mesh.counts.triangles == 0 || !draw.detail.draw || self.all_transmissive(draw) {
                     continue;
                 }
                 pass.set_bind_group(1, &self.rendered_objects.bind, &[self.rendered_objects.offset(i as u32)]);
@@ -4382,6 +4427,7 @@ impl Viewport {
             }
         }
 
+        let glass;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport rendered"),
@@ -4465,6 +4511,54 @@ impl Viewport {
             // than by sorting: a draw order that follows the material would put
             // the objects in an order the depth pre-pass and the id buffer do
             // not share, and those have to agree about what is in front.
+            glass = self.draw_rendered_runs(&mut pass, draws, false);
+        }
+
+        // Then what lets light through, over a copy of the solids: glass
+        // shows what was there before it, so it is drawn after everything it
+        // can show and reads the picture as it stood.
+        if glass {
+            encoder.copy_texture_to_texture(
+                self.hdr.texture().as_image_copy(),
+                self.behind.0.as_image_copy(),
+                wgpu::Extent3d { width: self.render_size.0, height: self.render_size.1, depth_or_array_layers: 1 },
+            );
+            let load = |view| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport rendered glass"),
+                color_attachments: &[
+                    load(self.hdr.view()),
+                    load(&self.ssr.gbuffer()[0]),
+                    load(&self.ssr.gbuffer()[1]),
+                    load(&self.ssr.gbuffer()[2]),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, self.render_size.0 as f32, self.render_size.1 as f32, 0.0, 1.0);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(2, &self.shading_bind, &[]);
+            self.draw_rendered_runs(&mut pass, draws, true);
+        }
+    }
+
+    /// The rendered pass's draws: the solid runs, or the glass ones. Returns
+    /// whether a run of the other kind was passed over.
+    fn draw_rendered_runs(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw<'_>], glass: bool) -> bool {
+        let mut skipped = false;
             let mut current: Option<&str> = None;
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
@@ -4489,6 +4583,10 @@ impl Viewport {
                 // glTF exporter and never reached the screen.
                 for run in &mesh.submeshes {
                     let material = draw.material_for(run.slot);
+                    if self.transmissive(material) != glass {
+                        skipped = true;
+                        continue;
+                    }
                     // A run naming a material that was never set draws nothing.
                     // Skipped rather than substituted: a stand-in would be a
                     // grey face where the user put a red one, and a missing
@@ -4507,7 +4605,7 @@ impl Viewport {
                     pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
                 }
             }
-        }
+        skipped
     }
 
     fn render_lit(
@@ -4597,6 +4695,7 @@ fn shading_bind_group(
     tiles: &wgpu::Buffer,
     environment: &crate::environment::Environment,
     contact_depth: &wgpu::TextureView,
+    behind: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shading data"),
@@ -4637,6 +4736,10 @@ fn shading_bind_group(
             wgpu::BindGroupEntry {
                 binding: 8,
                 resource: wgpu::BindingResource::TextureView(contact_depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(behind),
             },
         ],
     })
@@ -4911,4 +5014,20 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name}.wgsl failed validation: {e:?}"));
         }
     }
+}
+
+/// The copy of the solids' picture glass reads.
+fn behind_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("behind glass"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::display::HDR_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }

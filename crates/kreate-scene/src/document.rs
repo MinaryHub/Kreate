@@ -304,6 +304,13 @@ pub struct Material {
     /// lights, because an emitting surface *is* one. Zero is no glow at all,
     /// which is the default: most surfaces only reflect.
     pub emission_strength: f32,
+    /// How much of the light that is not reflected passes through rather than
+    /// being scattered back: zero is a solid, one is glass. glTF's
+    /// `KHR_materials_transmission`.
+    pub transmission: f32,
+    /// The index of refraction, for what passes through: 1.5 for glass, 1.33
+    /// for water. glTF's `KHR_materials_ior`, and its default.
+    pub ior: f32,
     /// The material's own shading graph, once somebody has asked for one.
     ///
     /// `None` is the fast path v1 §5.6 describes: the flat fields above *are*
@@ -337,6 +344,8 @@ impl Default for Material {
             normal_strength: 1.0,
             emission: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
             emission_strength: 0.0,
+            transmission: 0.0,
+            ior: 1.5,
             graph: None,
             action: None,
             linkage: Linkage::Local,

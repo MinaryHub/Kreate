@@ -46,6 +46,9 @@ struct RenderedObject {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var<uniform> object: RenderedObject;
+/// The solids as they were shaded, before anything that passes light was drawn
+/// over them: what is seen through glass. See `Viewport::encode_lit_scene`.
+@group(2) @binding(9) var behind: texture_2d<f32>;
 
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
@@ -147,7 +150,10 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // is decides which lights this fragment sees.
     // What the surface emits, added to what it reflects: a glow is light the
     // surface makes, so no light, shadow or occlusion has a say in it.
-    let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + sample.emission;
+    var lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + sample.emission;
+    if (sample.transmission > 0.0) {
+        lit = mix(lit, through_glass(surface, sample, in.world, normal, view, in.clip.xy), sample.transmission);
+    }
     // Linear and unbounded. The display transform is a later pass.
     var out: RenderedOut;
     out.light = vec4<f32>(lit, 1.0);
@@ -157,6 +163,47 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     out.share = vec4<f32>(specular_share(surface_f0(surface), nov, roughness), 1.0);
     out.environment = vec4<f32>(environment_specular(surface, normal, view), 1.0);
     return out;
+}
+
+// What a transmissive surface shows: its reflection, which is a clear
+// dielectric's — no diffuse at all — and what is behind it, bent.
+//
+// Screen-space refraction, the way EEVEE does it: the ray is bent at the
+// surface by the index of refraction, followed a short way on, and wherever
+// that lands on the screen is what the solids' picture had there. It is not
+// what a ray through a real block of glass would meet — that is the path
+// tracer's — but it bends by the right amount in the right direction, which is
+// what reads as glass.
+fn through_glass(
+    surface: Surface,
+    sample: MaterialSample,
+    world: vec3<f32>,
+    normal: vec3<f32>,
+    view: vec3<f32>,
+    pixel: vec2<f32>,
+) -> vec3<f32> {
+    var clear = surface;
+    clear.base_color = vec3<f32>(0.0);
+    clear.metallic = 0.0;
+    let reflected = shade_point(clear, world, normal, view, vec2<u32>(pixel));
+    let region = vec2<f32>(shading.region);
+    var at = pixel;
+    let bent = refract(-view, normal, 1.0 / sample.ior);
+    if (dot(bent, bent) > 0.0 && region.x >= 1.0) {
+        let ahead = world + bent * (length(world) * 0.05);
+        let clip = shading.view_proj * vec4<f32>(ahead, 1.0);
+        if (clip.w > 0.0) {
+            let ndc = clip.xy / clip.w;
+            at = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * region;
+        }
+    }
+    let last = max(region - vec2<f32>(1.0), vec2<f32>(0.0));
+    let seen = textureLoad(behind, vec2<i32>(clamp(at, vec2<f32>(0.0), last)), 0).rgb;
+    // What is not reflected goes in, tinted by the colour: Schlick's Fresnel
+    // for the dielectric the clear surface is.
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * pow(1.0 - nov, 5.0);
+    return reflected + (1.0 - f) * surface.base_color * seen + sample.emission;
 }
 
 // Tilts `n` by a tangent-space normal, with the tangent frame taken from the

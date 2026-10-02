@@ -105,6 +105,8 @@ impl Materials {
                     base_color_image: take(m.base_color_image, kreate_scene::ColorSpace::Srgb),
                     metallic_roughness_image: take(m.metallic_roughness_image, kreate_scene::ColorSpace::Raw),
                     emission: graph_emission(m),
+                    transmission: graph_glass(m).0,
+                    ior: graph_glass(m).1,
                 };
             }
         }
@@ -474,4 +476,17 @@ fn graph_emission(m: &kreate_scene::Material) -> [f32; 3] {
         })
         .unwrap_or_else(|| m.emitted());
     [e.r, e.g, e.b]
+}
+
+/// How much a material lets through and how it bends, from where the
+/// rasterised view takes them: its graph's surface, or its own fields.
+fn graph_glass(m: &kreate_scene::Material) -> (f32, f32) {
+    m.graph
+        .as_ref()
+        .and_then(|g| g.output().map(|o| &g.nodes[o].kind))
+        .and_then(|k| match k {
+            kreate_scene::shader::NodeKind::Surface { transmission, ior, .. } => Some((*transmission, *ior)),
+            _ => None,
+        })
+        .unwrap_or((m.transmission, m.ior))
 }

@@ -832,6 +832,12 @@ pub struct SetMaterialParams {
     /// How bright the glow is, in nits (cd/m²). Zero is none.
     #[param(min = 0.0, soft_max = 10000.0)]
     pub emission_strength: f64,
+    /// How much of the light passes through: zero is solid, one is glass.
+    #[param(min = 0.0, max = 1.0)]
+    pub transmission: f64,
+    /// How sharply what passes through bends: 1.5 is glass, 1.33 water.
+    #[param(min = 1.0, soft_max = 3.0)]
+    pub ior: f64,
 }
 
 impl Default for SetMaterialParams {
@@ -845,6 +851,8 @@ impl Default for SetMaterialParams {
             normal_strength: 1.0,
             emission: [1.0, 1.0, 1.0],
             emission_strength: 0.0,
+            transmission: 0.0,
+            ior: 1.5,
         }
     }
 }
@@ -902,13 +910,20 @@ impl Operator for SetMaterial {
         )
         .as_reflectance();
         material.emission_strength = params.emission_strength.max(0.0) as f32;
+        material.transmission = params.transmission.clamp(0.0, 1.0) as f32;
+        material.ior = params.ior.max(1.0) as f32;
+        let (glass, bend) = (material.transmission, material.ior);
         // The glow has no socket, so a material with its own graph takes it
         // from here too: the panel's dial is the one place it is set.
         let emitted = material.emitted();
         if let Some(graph) = material.graph.as_mut() {
             if let Some(o) = graph.output() {
-                if let kreate_scene::shader::NodeKind::Surface { emission, .. } = &mut graph.nodes[o].kind {
+                if let kreate_scene::shader::NodeKind::Surface { emission, transmission, ior, .. } =
+                    &mut graph.nodes[o].kind
+                {
                     *emission = emitted;
+                    *transmission = glass;
+                    *ior = bend;
                 }
             }
         }
@@ -1439,6 +1454,8 @@ pub fn material_params(
             [e.r as f64, e.g as f64, e.b as f64]
         },
         emission_strength: material.emission_strength as f64,
+        transmission: material.transmission as f64,
+        ior: material.ior as f64,
     }
 }
 

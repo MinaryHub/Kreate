@@ -118,6 +118,10 @@ pub enum NodeKind {
         /// What the surface emits by itself, in nits: the material's colour
         /// times its strength. A value rather than a socket for now.
         emission: SceneRgb,
+        /// How much passes through, zero to one. See `Material::transmission`.
+        transmission: f32,
+        /// The index of refraction of what passes through.
+        ior: f32,
     },
 }
 
@@ -181,10 +185,10 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
-            NodeKind::Surface { base_color, metallic, roughness, emission } => {
+            NodeKind::Surface { base_color, metallic, roughness, emission, transmission, ior } => {
                 vec![
                     base_color.r, base_color.g, base_color.b, *metallic, *roughness,
-                    emission.r, emission.g, emission.b,
+                    emission.r, emission.g, emission.b, *transmission, *ior,
                 ]
             }
             NodeKind::Image { .. }
@@ -217,6 +221,8 @@ impl NodeKind {
                 roughness: at(4, 0.5),
                 // Absent in every file written before emission: none.
                 emission: SceneRgb::new(at(5, 0.0), at(6, 0.0), at(7, 0.0)),
+                transmission: at(8, 0.0),
+                ior: at(9, 1.5),
             },
             _ => return None,
         })
@@ -342,6 +348,8 @@ impl ShaderGraph {
                     metallic,
                     roughness,
                     emission: SceneRgb::new(0.0, 0.0, 0.0),
+                    transmission: 0.0,
+                    ior: 1.5,
                 },
             )],
             links: Vec::new(),
@@ -374,8 +382,10 @@ impl ShaderGraph {
             material.metallic,
             material.roughness,
         );
-        if let NodeKind::Surface { emission, .. } = &mut graph.nodes[0].kind {
+        if let NodeKind::Surface { emission, transmission, ior, .. } = &mut graph.nodes[0].kind {
             *emission = material.emitted();
+            *transmission = material.transmission;
+            *ior = material.ior;
         }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the
@@ -798,6 +808,8 @@ mod tests {
                     metallic: 0.0,
                     roughness: 0.5,
                     emission: SceneRgb::new(0.0, 0.0, 0.0),
+                    transmission: 0.0,
+                    ior: 1.5,
                 },
             )),
             None
@@ -1006,6 +1018,8 @@ mod tests {
                 metallic: 0.6,
                 roughness: 0.3,
                 emission: SceneRgb::new(2.0, 0.5, 0.0),
+                transmission: 0.75,
+                ior: 1.33,
             },
         ];
         for kind in kinds {
