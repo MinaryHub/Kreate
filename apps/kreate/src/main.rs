@@ -139,6 +139,9 @@ impl RedrawReason {
     const HOVER_CHANGED: u32 = 1 << 5;
     /// The animation is playing, and the next frame is a new one.
     const PLAYING: u32 = 1 << 6;
+    /// A still view refining itself: the next frame adds a sample to the
+    /// mean. Stops by itself when the mean is full.
+    const ACCUMULATE: u32 = 1 << 7;
 
     fn set(&mut self, bit: u32) {
         self.0 |= bit;
@@ -7042,8 +7045,23 @@ impl ApplicationHandler for App {
                 self.apply_input();
                 self.run_drivers();
                 if self.redraw.any() {
+                    // Anything the viewport's own signature cannot see — a
+                    // mesh rewritten in place, a light, a setting — starts its
+                    // mean again.
+                    let changed = RedrawReason::SCENE_CHANGED
+                        | RedrawReason::RESIZE
+                        | RedrawReason::SETTINGS
+                        | RedrawReason::PLAYING;
+                    if self.redraw.0 & changed != 0 {
+                        if let Some(gfx) = self.gfx.as_mut() {
+                            gfx.viewport.restart_accumulation();
+                        }
+                    }
                     self.render();
                     self.redraw.clear();
+                    if self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating()) {
+                        self.redraw.set(RedrawReason::ACCUMULATE);
+                    }
                 }
             }
 

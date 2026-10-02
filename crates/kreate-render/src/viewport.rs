@@ -1378,6 +1378,22 @@ pub struct Viewport {
     aa: crate::fxaa::Fxaa,
     /// The orange line around selected objects.
     outline: crate::outline::Outline,
+    /// The running mean a still view refines itself into.
+    accum: crate::accum::Accum,
+    /// Whether a still view refines itself over the next frames.
+    pub accumulate: bool,
+    /// Frames already in the mean.
+    accum_samples: u32,
+    /// What the mean is a picture of; a different one starts it again.
+    accum_signature: u64,
+    /// Whether this frame goes through the mean at all.
+    accum_applies: bool,
+    /// This frame's place in the mean, one-based; `None` when the mean is
+    /// full and the frame only presents it.
+    frame_sample: Option<u32>,
+    /// What the lights, the world and the display transform were last set
+    /// to, for the mean's signature: a lamp moved is a different picture.
+    lighting_signature: u64,
     /// Whether selected objects are outlined.
     pub show_outline: bool,
     /// The surfaces see-through, Blender's X-ray: every edge behind shows.
@@ -2306,6 +2322,13 @@ impl Viewport {
             depth: depth_0,
             aa: crate::fxaa::Fxaa::new(device, color_format, width.max(1), height.max(1)),
             outline: outline_0,
+            accum: crate::accum::Accum::new(device, color_format, width.max(1), height.max(1)),
+            accumulate: true,
+            accum_samples: 0,
+            accum_signature: 0,
+            accum_applies: false,
+            frame_sample: None,
+            lighting_signature: 0,
             show_outline: true,
             antialias: true,
             size: (width.max(1), height.max(1)),
@@ -2336,6 +2359,7 @@ impl Viewport {
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
             self.aa.resize(device, size.0, size.1);
             self.outline.resize(device, size.0, size.1);
+            self.accum.resize(device, size.0, size.1);
             self.ao.resize(device, &self.depth, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
@@ -2493,6 +2517,7 @@ impl Viewport {
             }
         }
         let view_proj = camera.view_projection(aspect);
+        let view_proj = self.next_sample(view_proj, draws);
         self.aa.set_region(queue, self.render_size);
         // A reach that follows the view: a tenth of the way to what the view
         // is turning about, so the shading looks the same at any zoom.
@@ -2895,6 +2920,15 @@ impl Viewport {
     /// to want and is what a document with no world means.
     pub fn set_world(&mut self, radiance: [f32; 3]) {
         self.world = radiance;
+        self.note_lighting(&radiance);
+    }
+
+    /// Folds a lighting input into the mean's signature.
+    fn note_lighting(&mut self, what: &dyn std::fmt::Debug) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{what:?}").hash(&mut h);
+        self.lighting_signature = self.lighting_signature.rotate_left(7) ^ h.finish();
     }
 
     /// Widens what the shadows are fitted to, in eye-relative metres.
@@ -2930,6 +2964,7 @@ impl Viewport {
         eye: glam::DVec3,
         lights: &[crate::lights::PlacedLight],
     ) {
+        self.note_lighting(&lights);
         let before = self.lights.capacity();
         // The count is kept by `Lights` and read by the cull pass, which is
         // now the only thing that needs to know how many of the buffer is live.
@@ -3125,6 +3160,7 @@ impl Viewport {
     /// datablock, and a caller that set one and forgot the other would have a
     /// slider that works and one beside it that does not.
     pub fn set_world_shape(&mut self, queue: &wgpu::Queue, radians: f32, strength: f32) {
+        self.note_lighting(&(radians, strength));
         self.world_rotation = radians;
         self.world_strength = strength.max(0.0);
         queue.write_buffer(
@@ -3154,6 +3190,7 @@ impl Viewport {
     /// caller could set without the buffer following would show as a slider
     /// that does nothing.
     pub fn set_display(&mut self, queue: &wgpu::Queue, display: crate::display::Display) {
+        self.note_lighting(&display);
         self.display = display;
         queue.write_buffer(
             &self.screen_params,
@@ -3915,7 +3952,10 @@ impl Viewport {
             self.render_lit(encoder, target, draws);
             return;
         }
-        if self.smoothing() {
+        if self.smoothing() && self.accum_applies && self.frame_sample.is_none() {
+            // A still view whose mean is full: the mean, and nothing redrawn.
+            self.accum.present(encoder, target, self.render_size);
+        } else if self.smoothing() {
             // The surfaces into their own image, smoothed onto the target, and
             // the overlays over that — testing the depth the surfaces wrote.
             {
@@ -3925,7 +3965,15 @@ impl Viewport {
             if self.occluding() {
                 self.ao.apply(encoder, self.aa.view(), self.render_size);
             }
-            self.aa.resolve(encoder, target, self.render_size);
+            match self.frame_sample.filter(|_| self.accum_applies) {
+                // Into the mean, and the mean onto the target.
+                Some(n) => {
+                    self.aa.resolve(encoder, self.accum.frame(), self.render_size);
+                    self.accum.add(encoder, self.render_size, n);
+                    self.accum.present(encoder, target, self.render_size);
+                }
+                None => self.aa.resolve(encoder, target, self.render_size),
+            }
         } else {
             let mut pass = self.begin_pass(encoder, target, true);
             // Opaque geometry first, so the grid can be depth-tested against it.
@@ -3954,6 +4002,66 @@ impl Viewport {
                 .filter(|(_, d)| d.selected && d.detail.draw && d.mesh.counts.triangles > 0)
                 .map(|(i, d)| (self.objects.offset(i as u32), &d.mesh.positions, &d.mesh.indices, d.mesh.counts.triangles)),
         );
+    }
+
+    /// Starts the mean again: something the signature cannot see changed —
+    /// a mesh rewritten in place, a light, a material.
+    pub fn restart_accumulation(&mut self) {
+        self.accum_samples = 0;
+    }
+
+    /// Whether a still view still has frames to add, so the caller should
+    /// draw again.
+    pub fn accumulating(&self) -> bool {
+        self.accum_applies && self.accum_samples < crate::accum::SAMPLES
+    }
+
+    /// Decides this frame's place in the mean and returns the projection to
+    /// draw it with — nudged by a fraction of a pixel after the first.
+    fn next_sample(&mut self, view_proj: glam::Mat4, draws: &[Draw]) -> glam::Mat4 {
+        use std::hash::{Hash, Hasher};
+        self.accum_applies = self.accumulate
+            && (self.smoothing() || self.shading == ShadingMode::Rendered)
+            && !(self.cluster_path && self.occlusion_culling);
+        if !self.accum_applies {
+            self.accum_samples = 0;
+            self.frame_sample = None;
+            return view_proj;
+        }
+        // What the picture is of: the view, the size, how it is shaded, and
+        // each draw's mesh, place and look.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for v in view_proj.to_cols_array() {
+            v.to_bits().hash(&mut h);
+        }
+        self.render_size.hash(&mut h);
+        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation).hash(&mut h);
+        // The lighting inputs since the last frame, folded together, and
+        // started afresh for the next: the same calls with the same values
+        // give the same number.
+        self.lighting_signature.hash(&mut h);
+        self.lighting_signature = 0;
+        for d in draws {
+            (d.mesh as *const GpuMesh as usize).hash(&mut h);
+            for v in d.transform.to_cols_array() {
+                v.to_bits().hash(&mut h);
+            }
+            (d.material, d.weights, d.detail.draw).hash(&mut h);
+        }
+        let signature = h.finish();
+        if signature != self.accum_signature {
+            self.accum_signature = signature;
+            self.accum_samples = 0;
+        }
+        if self.accum_samples >= crate::accum::SAMPLES {
+            self.frame_sample = None;
+            return view_proj;
+        }
+        let (jx, jy) = crate::accum::jitter(self.accum_samples);
+        self.accum_samples += 1;
+        self.frame_sample = Some(self.accum_samples);
+        let (w, h) = (self.render_size.0.max(1) as f32, self.render_size.1.max(1) as f32);
+        glam::Mat4::from_translation(glam::Vec3::new(2.0 * jx / w, -2.0 * jy / h, 0.0)) * view_proj
     }
 
     /// Whether the surfaces go through the smoothing pass: on, and there are
@@ -3991,140 +4099,155 @@ impl Viewport {
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
-        // The shadow maps first: the geometry pass samples them, so they have
-        // to be finished before it starts. Separate passes rather than one
-        // with several attachments, because each is a different camera.
-        for layer in 0..self.shadow_views.len() {
-            self.shadows.encode(
-                encoder,
-                layer,
-                draws.iter().enumerate().filter_map(|(i, draw)| {
-                    // Detail is deliberately ignored: an object simplified out
-                    // of the picture still casts a shadow onto what is left,
-                    // and an object that stopped casting when it got small
-                    // would have its shadow blink out as the camera pulled
-                    // back.
-                    if draw.mesh.counts.triangles == 0 {
-                        return None;
-                    }
-                    Some((
-                        i as u32,
-                        &draw.mesh.positions,
-                        &draw.mesh.indices,
-                        draw.mesh.counts.triangles,
-                    ))
-                }),
-            );
-        }
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewport rendered"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.hdr.view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // The world's own radiance, which is what a direction
-                        // with no geometry in it delivers. Linear, because
-                        // this is a linear image — clearing to the interface's
-                        // grey would put display-referred paint into it, and
-                        // that is the mistake §2.1 records.
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.world[0] as f64,
-                            g: self.world[1] as f64,
-                            b: self.world[2] as f64,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        // Reversed-Z clears to 0: nothing has been drawn.
-                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
-                        store: wgpu::StoreOp::Store,
+        if self.accum_applies && self.frame_sample.is_none() {
+            // A still view whose mean is full: the mean, and nothing redrawn.
+            self.accum.present(encoder, target, self.render_size);
+        } else {
+            // The shadow maps first: the geometry pass samples them, so they have
+            // to be finished before it starts. Separate passes rather than one
+            // with several attachments, because each is a different camera.
+            for layer in 0..self.shadow_views.len() {
+                self.shadows.encode(
+                    encoder,
+                    layer,
+                    draws.iter().enumerate().filter_map(|(i, draw)| {
+                        // Detail is deliberately ignored: an object simplified out
+                        // of the picture still casts a shadow onto what is left,
+                        // and an object that stopped casting when it got small
+                        // would have its shadow blink out as the camera pulled
+                        // back.
+                        if draw.mesh.counts.triangles == 0 {
+                            return None;
+                        }
+                        Some((
+                            i as u32,
+                            &draw.mesh.positions,
+                            &draw.mesh.indices,
+                            draw.mesh.counts.triangles,
+                        ))
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // Into the region the caller will sample, like every other pass.
-            // This one did not, and the picture showed it: the geometry was
-            // projected across the whole allocation while the wireframe over
-            // it was projected across the drawn region, so whenever the two
-            // differed — a window whose size is not a multiple of the
-            // allocation step, which is most windows — the shaded object sat
-            // a few pixels off its own outline.
-            pass.set_viewport(
-                0.0,
-                0.0,
-                self.render_size.0 as f32,
-                self.render_size.1 as f32,
-                0.0,
-                1.0,
-            );
-            // The background first, at the far plane, so the geometry that
-            // follows tests against it rather than the other way round.
-            pass.set_pipeline(&self.background_pipeline);
-            pass.set_bind_group(2, &self.shading_bind, &[]);
-            pass.draw(0..3, 0..1);
-
-            pass.set_bind_group(0, &self.globals_bind, &[]);
-            pass.set_bind_group(2, &self.shading_bind, &[]);
-            // The pipeline is the material's, so it is set inside the loop.
-            // Redundant switches are avoided by remembering the last one rather
-            // than by sorting: a draw order that follows the material would put
-            // the objects in an order the depth pre-pass and the id buffer do
-            // not share, and those have to agree about what is in front.
-            let mut current: Option<&str> = None;
-            for (i, draw) in draws.iter().enumerate() {
-                let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw {
-                    continue;
-                }
-                pass.set_bind_group(
-                    1,
-                    &self.rendered_objects.bind,
-                    &[self.rendered_objects.offset(i as u32)],
                 );
-                pass.set_vertex_buffer(0, mesh.positions.slice(..));
-                pass.set_vertex_buffer(1, mesh.normals.slice(..));
-                pass.set_vertex_buffer(2, mesh.uvs.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            }
 
-                // One call per run of triangles sharing a material slot. Nearly
-                // every mesh has exactly one run, so this is the same single
-                // call it always was — the loop is what lets a mesh whose faces
-                // carry different materials draw in more than one of them,
-                // which until now it could not: `material_index` reached the
-                // glTF exporter and never reached the screen.
-                for run in &mesh.submeshes {
-                    let material = draw.material_for(run.slot);
-                    // A run naming a material that was never set draws nothing.
-                    // Skipped rather than substituted: a stand-in would be a
-                    // grey face where the user put a red one, and a missing
-                    // face is the complaint that gets reported.
-                    let Some(source) = self.material_pipeline_of.get(material as usize) else {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("viewport rendered"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: self.hdr.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // The world's own radiance, which is what a direction
+                            // with no geometry in it delivers. Linear, because
+                            // this is a linear image — clearing to the interface's
+                            // grey would put display-referred paint into it, and
+                            // that is the mistake §2.1 records.
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: self.world[0] as f64,
+                                g: self.world[1] as f64,
+                                b: self.world[2] as f64,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            // Reversed-Z clears to 0: nothing has been drawn.
+                            load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                // Into the region the caller will sample, like every other pass.
+                // This one did not, and the picture showed it: the geometry was
+                // projected across the whole allocation while the wireframe over
+                // it was projected across the drawn region, so whenever the two
+                // differed — a window whose size is not a multiple of the
+                // allocation step, which is most windows — the shaded object sat
+                // a few pixels off its own outline.
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.render_size.0 as f32,
+                    self.render_size.1 as f32,
+                    0.0,
+                    1.0,
+                );
+                // The background first, at the far plane, so the geometry that
+                // follows tests against it rather than the other way round.
+                pass.set_pipeline(&self.background_pipeline);
+                pass.set_bind_group(2, &self.shading_bind, &[]);
+                pass.draw(0..3, 0..1);
+
+                pass.set_bind_group(0, &self.globals_bind, &[]);
+                pass.set_bind_group(2, &self.shading_bind, &[]);
+                // The pipeline is the material's, so it is set inside the loop.
+                // Redundant switches are avoided by remembering the last one rather
+                // than by sorting: a draw order that follows the material would put
+                // the objects in an order the depth pre-pass and the id buffer do
+                // not share, and those have to agree about what is in front.
+                let mut current: Option<&str> = None;
+                for (i, draw) in draws.iter().enumerate() {
+                    let mesh = draw.mesh;
+                    if mesh.counts.triangles == 0 || !draw.detail.draw {
                         continue;
-                    };
-                    if current != Some(source.as_str()) {
-                        let Some(pipeline) = self.material_pipelines.peek(source) else {
+                    }
+                    pass.set_bind_group(
+                        1,
+                        &self.rendered_objects.bind,
+                        &[self.rendered_objects.offset(i as u32)],
+                    );
+                    pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                    pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                    pass.set_vertex_buffer(2, mesh.uvs.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+
+                    // One call per run of triangles sharing a material slot. Nearly
+                    // every mesh has exactly one run, so this is the same single
+                    // call it always was — the loop is what lets a mesh whose faces
+                    // carry different materials draw in more than one of them,
+                    // which until now it could not: `material_index` reached the
+                    // glTF exporter and never reached the screen.
+                    for run in &mesh.submeshes {
+                        let material = draw.material_for(run.slot);
+                        // A run naming a material that was never set draws nothing.
+                        // Skipped rather than substituted: a stand-in would be a
+                        // grey face where the user put a red one, and a missing
+                        // face is the complaint that gets reported.
+                        let Some(source) = self.material_pipeline_of.get(material as usize) else {
                             continue;
                         };
-                        pass.set_pipeline(pipeline);
-                        current = Some(source.as_str());
+                        if current != Some(source.as_str()) {
+                            let Some(pipeline) = self.material_pipelines.peek(source) else {
+                                continue;
+                            };
+                            pass.set_pipeline(pipeline);
+                            current = Some(source.as_str());
+                        }
+                        pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
+                        pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
                     }
-                    pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
-                    pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
                 }
             }
-        }
 
-        self.screen.draw_with(encoder, &self.screen_bind, target);
+            match self.frame_sample.filter(|_| self.accum_applies) {
+                // Into the mean, and the mean onto the target: the display
+                // transform's picture, averaged — which is what smooths the
+                // rendered view's edges.
+                Some(n) => {
+                    self.screen.draw_with(encoder, &self.screen_bind, self.accum.frame());
+                    self.accum.add(encoder, self.render_size, n);
+                    self.accum.present(encoder, target, self.render_size);
+                }
+                None => self.screen.draw_with(encoder, &self.screen_bind, target),
+            }
+        }
         self.draw_outline(encoder, target, draws);
 
         {

@@ -135,7 +135,16 @@ fn render_scene_flags(
     let mut camera = Camera::default();
     configure_camera(&mut camera);
 
+    // Earlier frames of a still view, for the accumulation tests: each one a
+    // frame the application would have drawn.
+    for _ in 1..FRAMES.with(|f| f.get()) {
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut refs);
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("earlier") });
+        viewport.render(&mut encoder, &view, &refs);
+        gpu.queue.submit(Some(encoder.finish()));
+    }
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut refs);
+    STILL_REFINING.with(|r| r.set(viewport.accumulating()));
 
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -212,6 +221,10 @@ thread_local! {
     static OCCLUSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether the surfaces are see-through.
     static XRAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How many frames of the same still view are drawn; the last is read.
+    static FRAMES: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    /// Whether the viewport wanted another frame after the last one.
+    static STILL_REFINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether every draw is selected, and active.
     static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -772,4 +785,30 @@ fn a_selected_object_is_outlined() {
     assert!(lines > 200, "{lines} outline pixels");
     // Around the shape, not over it: the middle of the cube is not orange.
     assert!(!orange(&picked.at(SIZE / 2 + 5, SIZE / 2 + 9)));
+}
+
+/// A still view refines itself: after sixteen frames its edges are smoother
+/// than the first frame's, its flat middle is unchanged, and it stops asking
+/// to be drawn.
+#[test]
+fn a_still_view_refines_and_then_rests() {
+    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.3))];
+    let (first, bg) = gpu_or_skip!(render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {}));
+    let still_after_one = STILL_REFINING.with(|r| r.get());
+    FRAMES.with(|f| f.set(kreate_render::accum::SAMPLES));
+    let refined = render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {});
+    FRAMES.with(|f| f.set(1));
+    let (refined, _) = gpu_or_skip!(refined);
+    let rested = !STILL_REFINING.with(|r| r.get());
+    save_shot(&first, "accum-1");
+    save_shot(&refined, "accum-16");
+    assert!(still_after_one, "one frame in, the view should want more");
+    assert!(rested, "sixteen frames in, the view should rest");
+    // More in-between tones along the outline: the edge has been sampled
+    // sixteen ways.
+    let (a, b) = (blended(&first, bg), blended(&refined, bg));
+    assert!(b > a, "{b} blended pixels after sixteen frames against {a} after one");
+    let middle = (SIZE / 2, SIZE / 2);
+    let (p, q) = (first.at(middle.0, middle.1), refined.at(middle.0, middle.1));
+    assert!((0..3).all(|i| (p[i] as i32 - q[i] as i32).abs() <= 2), "{p:?} -> {q:?}");
 }

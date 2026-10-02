@@ -112,6 +112,10 @@ fn render_sequence(
     viewport.show_wireframe = false;
     viewport.show_elements = false;
     viewport.background = wgpu::Color::BLACK;
+    // Culling against a reference, frame for frame: a still camera's frames
+    // being averaged into one another is a different claim, and the
+    // occlusion path does not accumulate.
+    viewport.accumulate = false;
 
     let meshes: Vec<GpuMesh> = items
         .iter()
