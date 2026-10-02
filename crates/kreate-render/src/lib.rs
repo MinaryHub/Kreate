@@ -12,6 +12,7 @@ pub mod deform;
 pub mod accum;
 pub mod ao;
 pub mod bloom;
+pub mod denoise;
 pub mod display;
 pub mod fxaa;
 pub mod environment;

@@ -2013,9 +2013,20 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
 /// The cube on a floor under a sun, rasterised or path traced over `frames`
 /// frames, through `lens` when it has one.
 fn traced_shot(gpu: &Gpu, traced: bool, frames: u32, lens: Option<kreate_render::pathtrace::Lens>) -> Vec<[f32; 4]> {
+    traced_shot_with(gpu, traced, frames, lens, false)
+}
+
+fn traced_shot_with(
+    gpu: &Gpu,
+    traced: bool,
+    frames: u32,
+    lens: Option<kreate_render::pathtrace::Lens>,
+    denoise: bool,
+) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.path_trace = traced;
+    viewport.path_trace_denoise = denoise;
     viewport.path_trace_lens = lens;
     viewport.show_bloom = false;
     viewport.show_reflections = false;
@@ -2105,4 +2116,25 @@ fn a_wide_lens_focused_away_blurs_the_cube() {
     let (p, b) = (sharp_steps(&pinhole), sharp_steps(&blurred));
     assert!(p > 10, "the pinhole picture has no edges to blur: {p}");
     assert!(b * 2 < p, "{b} sharp steps through the lens against {p} through a pinhole");
+}
+
+/// Denoising: eight samples, filtered, are nearer the converged picture than
+/// eight samples raw.
+#[test]
+fn a_young_mean_denoised_is_nearer_the_converged_picture() {
+    let gpu = gpu_or_skip!(gpu());
+    let converged = traced_shot_with(&gpu, true, 256, None, false);
+    let raw = traced_shot_with(&gpu, true, 8, None, false);
+    let filtered = traced_shot_with(&gpu, true, 8, None, true);
+    let error = |p: &Vec<[f32; 4]>| -> f32 {
+        p.iter().zip(&converged).map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>()).sum()
+    };
+    if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+        for (name, img) in [("dn-converged", &converged), ("dn-raw", &raw), ("dn-filtered", &filtered)] {
+            let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes).map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+        }
+    }
+    let (r, f) = (error(&raw), error(&filtered));
+    assert!(f < r * 0.7, "filtered error {f} against raw {r}");
 }

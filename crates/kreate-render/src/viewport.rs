@@ -1382,6 +1382,10 @@ pub struct Viewport {
     pathtracer: crate::pathtrace::PathTracer,
     /// Whether the rendered view is path traced rather than rasterised.
     pub path_trace: bool,
+    /// Filters the path tracer's young mean.
+    denoise: crate::denoise::Denoise,
+    /// Whether the path tracer's picture is denoised.
+    pub path_trace_denoise: bool,
     /// The path tracer's lens, when the view is through a camera with an
     /// aperture: depth of field.
     pub path_trace_lens: Option<crate::pathtrace::Lens>,
@@ -2354,6 +2358,8 @@ impl Viewport {
             pathtracer: pathtracer_0,
             path_trace: false,
             path_trace_lens: None,
+            denoise: crate::denoise::Denoise::new(device, width.max(1), height.max(1)),
+            path_trace_denoise: true,
             ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
             show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
@@ -2396,6 +2402,7 @@ impl Viewport {
             self.outline.resize(device, size.0, size.1);
             self.accum.resize(device, size.0, size.1);
             self.ssr.resize(device, size.0, size.1);
+            self.denoise.resize(device, size.0, size.1);
             self.ao.resize(device, &self.depth, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
@@ -2567,6 +2574,16 @@ impl Viewport {
                     n,
                     self.path_trace_lens,
                 );
+                if self.path_trace_denoise {
+                    self.denoise.prepare(
+                        device,
+                        queue,
+                        &self.ssr.gbuffer()[0],
+                        &self.depth,
+                        self.render_size,
+                        n,
+                    );
+                }
             }
         }
         if self.shading == ShadingMode::Rendered && self.show_reflections {
@@ -4382,6 +4399,9 @@ impl Viewport {
             if self.frame_sample.is_some() || !self.accum_applies {
                 self.encode_lit_scene(encoder, draws);
                 self.pathtracer.render(encoder, &self.shading_bind, self.hdr.view());
+                if self.path_trace_denoise {
+                    self.denoise.apply(encoder, self.hdr.texture(), self.hdr.view(), self.render_size);
+                }
                 if self.show_bloom {
                     self.bloom.apply(encoder, self.hdr.view());
                 }
