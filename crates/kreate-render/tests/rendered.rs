@@ -2386,3 +2386,26 @@ fn a_glass_cube_lets_the_light_through() {
         }
     }
 }
+
+/// A pan moves the eye and turns the view not at all, so the eye-relative
+/// projection is the same before and after — and the mean of a still view
+/// must still start over, or every frame of the drag is averaged into one
+/// smeared picture.
+#[test]
+fn a_pan_starts_the_mean_over() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    one_material(&gpu, &mut viewport, grey());
+    let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
+    let mut camera = Camera { distance: 6.0, ..Camera::default() };
+    for _ in 0..64 {
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    }
+    assert!(!viewport.accumulating(), "a still view never finished its mean");
+    camera.pivot += glam::DVec3::new(0.5, 0.0, 0.25);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    assert!(viewport.accumulating(), "the pan was averaged into the old picture");
+}

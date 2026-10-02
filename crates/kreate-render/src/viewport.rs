@@ -2652,7 +2652,7 @@ impl Viewport {
             }
         }
         let view_proj = camera.view_projection(aspect);
-        let view_proj = self.next_sample(view_proj, draws);
+        let view_proj = self.next_sample(view_proj, camera.eye(), draws);
         if self.shading == ShadingMode::Rendered {
             self.shading_view_proj = view_proj.to_cols_array_2d();
             queue.write_buffer(
@@ -4291,7 +4291,7 @@ impl Viewport {
 
     /// Decides this frame's place in the mean and returns the projection to
     /// draw it with — nudged by a fraction of a pixel after the first.
-    fn next_sample(&mut self, view_proj: glam::Mat4, draws: &[Draw]) -> glam::Mat4 {
+    fn next_sample(&mut self, view_proj: glam::Mat4, eye: glam::DVec3, draws: &[Draw]) -> glam::Mat4 {
         use std::hash::{Hash, Hasher};
         self.accum_applies = self.accumulate
             && (self.smoothing() || self.shading == ShadingMode::Rendered)
@@ -4305,6 +4305,13 @@ impl Viewport {
         // each draw's mesh, place and look.
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for v in view_proj.to_cols_array() {
+            v.to_bits().hash(&mut h);
+        }
+        // And where the eye is. The projection is eye-relative, so a pan or a
+        // dolly — the eye moving, the view turning not at all — leaves it
+        // exactly as it was; without this, frames from every position along
+        // the drag were averaged into one picture, smeared.
+        for v in eye.to_array() {
             v.to_bits().hash(&mut h);
         }
         self.render_size.hash(&mut h);
