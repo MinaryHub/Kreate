@@ -1382,6 +1382,9 @@ pub struct Viewport {
     pathtracer: crate::pathtrace::PathTracer,
     /// Whether the rendered view is path traced rather than rasterised.
     pub path_trace: bool,
+    /// The path tracer's lens, when the view is through a camera with an
+    /// aperture: depth of field.
+    pub path_trace_lens: Option<crate::pathtrace::Lens>,
     /// The rendered view's reflections of what is on screen.
     ssr: crate::ssr::Ssr,
     /// Whether the rendered view reflects what is on screen.
@@ -2350,6 +2353,7 @@ impl Viewport {
             accumulate: true,
             pathtracer: pathtracer_0,
             path_trace: false,
+            path_trace_lens: None,
             ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
             show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
@@ -2561,6 +2565,7 @@ impl Viewport {
                     self.render_size,
                     self.lights.count(),
                     n,
+                    self.path_trace_lens,
                 );
             }
         }
@@ -4149,6 +4154,7 @@ impl Viewport {
         }
         self.render_size.hash(&mut h);
         (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation, self.show_bloom, self.show_reflections, self.path_trace).hash(&mut h);
+        format!("{:?}", self.path_trace_lens).hash(&mut h);
         // The lighting inputs since the last frame, folded together, and
         // started afresh for the next: the same calls with the same values
         // give the same number.

@@ -43,6 +43,15 @@ pub struct PtMesh<'a> {
     pub surface: u32,
 }
 
+/// A thin lens: depth of field, from a camera with an aperture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lens {
+    /// The aperture's radius, in metres: half of focal length over f-number.
+    pub radius: f32,
+    /// How far away is in focus, in metres.
+    pub focus: f32,
+}
+
 /// A flat standard surface: linear base colour, metallic, roughness.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PtSurface {
@@ -56,6 +65,9 @@ pub struct PtSurface {
 struct Params {
     inv_view_proj: [[f32; 4]; 4],
     eye: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    lens: [f32; 4],
     size: [u32; 2],
     sample: u32,
     light_count: u32,
@@ -310,6 +322,7 @@ impl PathTracer {
         region: (u32, u32),
         light_count: u32,
         sample: u32,
+        lens: Option<Lens>,
     ) {
         let pixels = region.0.max(1) * region.1.max(1);
         if pixels > self.sum_pixels || self.size != region {
@@ -359,9 +372,16 @@ impl PathTracer {
             }));
         }
         self.sample = sample;
+        // The view's rows are the camera's axes in the world.
+        let world = view.inverse();
+        let (right, up) = (world.x_axis, world.y_axis);
+        let lens = lens.filter(|l| l.radius > 0.0 && l.focus > 0.0);
         let p = Params {
             inv_view_proj: (projection * view).inverse().to_cols_array_2d(),
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, 0.0],
+            right: [right.x, right.y, right.z, 0.0],
+            up: [up.x, up.y, up.z, 0.0],
+            lens: lens.map_or([0.0; 4], |l| [l.radius, l.focus, 0.0, 0.0]),
             size: [region.0, region.1],
             sample: self.sample,
             light_count,

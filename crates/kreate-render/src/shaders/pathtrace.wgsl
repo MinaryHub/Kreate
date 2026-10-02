@@ -18,6 +18,12 @@ struct PtParams {
     inv_view_proj: mat4x4<f32>,
     // xyz: the eye in world space.
     eye: vec4<f32>,
+    // The camera's right and up in the world, for the lens.
+    right: vec4<f32>,
+    up: vec4<f32>,
+    // x: the lens's radius in metres, zero for a pinhole. y: the distance in
+    // focus, in metres.
+    lens: vec4<f32>,
     // The region traced, in pixels.
     size: vec2<u32>,
     // Which sample this frame is, for the random numbers.
@@ -181,6 +187,18 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let mid = pt.inv_view_proj * vec4<f32>(ndc, 0.5, 1.0);
     var origin = near.xyz / near.w + pt.eye.xyz;
     var dir = normalize(mid.xyz / mid.w - near.xyz / near.w);
+    // A lens, when the camera has an aperture: the ray leaves a random point
+    // on it and passes through the point the pinhole ray meets at the focus
+    // distance — what is there is sharp, what is not is blurred by as much
+    // as a real lens would blur it.
+    if (pt.lens.x > 0.0) {
+        let forward = normalize(cross(pt.up.xyz, pt.right.xyz));
+        let focus = origin + dir * (pt.lens.y / max(dot(dir, forward), 1e-4));
+        let r = sqrt(pt_random()) * pt.lens.x;
+        let a = 6.2831853 * pt_random();
+        origin += pt.right.xyz * (r * cos(a)) + pt.up.xyz * (r * sin(a));
+        dir = normalize(focus - origin);
+    }
 
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
@@ -219,12 +237,33 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let to_light = direction_to(light, at);
             let e = illuminance_at(light, at) * f32(pt.light_count);
             if (dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
+                // The shadow ray goes to a random point of the source — a
+                // sphere's disc facing the surface, or the sun's disc in the
+                // sky — so a big source casts a soft shadow, as it does in the
+                // rasterised view.
+                var aim = to_light;
                 var reach = 1e30;
-                if (light.falloff != FALLOFF_PARALLEL) {
-                    reach = length(light.position.xyz - at) - light.position.w;
+                let around = pt_orthonormal(to_light);
+                if (light.falloff == FALLOFF_PARALLEL) {
+                    let spread = light.direction.w;
+                    if (spread > 0.0) {
+                        let cos_t = 1.0 - pt_random() * (1.0 - cos(spread));
+                        let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+                        let a = 6.2831853 * pt_random();
+                        aim = around * vec3<f32>(sin_t * cos(a), sin_t * sin(a), cos_t);
+                    }
+                } else {
+                    let r = sqrt(pt_random()) * light.position.w;
+                    let a = 6.2831853 * pt_random();
+                    let point = light.position.xyz + around * vec3<f32>(r * cos(a), r * sin(a), 0.0);
+                    let offset = point - at;
+                    reach = length(offset) * 0.999;
+                    aim = offset / max(length(offset), 1e-6);
                 }
-                if (pt_trace(start, to_light, reach, true).t < 0.0) {
-                    radiance += throughput * brdf_shade(s, n, v, to_light, e, true, true);
+                let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true).t < 0.0;
+                if (lit) {
+                    radiance += throughput
+                        * brdf_shade(s, n, v, to_light, e, lights_diffuse(light), lights_specular(light));
                 }
             }
         }

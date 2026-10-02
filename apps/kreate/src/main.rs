@@ -731,6 +731,9 @@ struct App {
     local_view: Option<(Vec<kreate_scene::document::ObjectId>, kreate_render::Camera)>,
     /// Looking through the scene camera (Numpad 0): the view to go back to.
     camera_view: Option<kreate_render::Camera>,
+    /// The camera object the view is through, while it is: its lens is the
+    /// path tracer's.
+    camera_view_object: Option<kreate_scene::document::ObjectId>,
     /// `C`: the selection brush, while it is on.
     circle: Option<CircleSelect>,
     /// The document version the drivers last ran against. They run again
@@ -850,6 +853,7 @@ impl App {
             circle_radius: 40.0,
             local_view: None,
             camera_view: None,
+            camera_view_object: None,
             circle: None,
             autokey: false,
             shown_title: String::new(),
@@ -2491,6 +2495,7 @@ impl App {
     /// it is one, the first camera otherwise — and again, back.
     fn toggle_camera_view(&mut self) {
         if let Some(before) = self.camera_view.take() {
+            self.camera_view_object = None;
             self.motion.animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
             self.redraw.set(RedrawReason::CAMERA_MOVED);
             return;
@@ -2508,6 +2513,7 @@ impl App {
             self.status("the scene has no camera");
             return;
         };
+        self.camera_view_object = Some(object);
         let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
         let (_, rotation, eye) = self.doc.world_transform(object).to_scale_rotation_translation();
         let lens = match self.doc.object(object).map(|o| &o.data) {
@@ -5652,6 +5658,21 @@ impl App {
                     .set_materials(&gfx.gpu.device, &gfx.gpu.queue, &sources);
             }
             self.materials = Some(materials);
+            // Through a camera with an aperture, the path tracer is that lens.
+            gfx.viewport.path_trace_lens = self
+                .camera_view
+                .and(self.camera_view_object)
+                .and_then(|id| match self.doc.object(id).map(|o| &o.data) {
+                    Some(kreate_scene::document::ObjectData::Camera(c)) => self.doc.camera(*c),
+                    _ => None,
+                })
+                .and_then(|c| {
+                    let f = c.f_stop?;
+                    Some(kreate_render::pathtrace::Lens {
+                        radius: (c.focal_length_mm / 1000.0 / f / 2.0) as f32,
+                        focus: c.focus_distance as f32,
+                    })
+                });
             // The path tracer's scene, rebuilt when what it is made of
             // changed — not when the camera moved.
             if gfx.viewport.path_trace {

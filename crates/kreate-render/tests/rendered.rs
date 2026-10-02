@@ -2010,75 +2010,99 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
     assert!(top < 8, "{top} pixels changed in the far rows");
 }
 
+/// The cube on a floor under a sun, rasterised or path traced over `frames`
+/// frames, through `lens` when it has one.
+fn traced_shot(gpu: &Gpu, traced: bool, frames: u32, lens: Option<kreate_render::pathtrace::Lens>) -> Vec<[f32; 4]> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.path_trace = traced;
+    viewport.path_trace_lens = lens;
+    viewport.show_bloom = false;
+    viewport.show_reflections = false;
+    viewport.ambient_occlusion = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    one_material(gpu, &mut viewport, grey());
+    let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
+    let camera = Camera {
+        pivot: glam::DVec3::new(0.0, 0.0, 0.3),
+        distance: 5.0,
+        rotation: glam::DQuat::from_rotation_x(1.0),
+        ..Camera::default()
+    };
+    let parts = [(&cube_cpu, lift), (&floor_cpu, glam::DAffine3::IDENTITY)];
+    let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
+        .iter()
+        .map(|(m, _)| {
+            (
+                m.positions.iter().map(|p| p.0).collect(),
+                m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
+            )
+        })
+        .collect();
+    let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = parts
+        .iter()
+        .zip(&data)
+        .map(|((m, t), (p, n))| kreate_render::pathtrace::PtMesh {
+            positions: p,
+            normals: n,
+            indices: &m.indices,
+            transform: *t,
+            surface: 0,
+        })
+        .collect();
+    viewport.set_path_trace_scene(
+        &gpu.device,
+        &meshes,
+        &[kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 }],
+    );
+    let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
+    out
+}
+
 /// The path tracer: the same scene, the same lights, the same units — so its
 /// picture is about as bright as the rasteriser's — and light reaches what the
 /// lamp does not, by bouncing off what it does.
 #[test]
 fn the_path_tracer_agrees_with_the_rasteriser_and_bounces_light() {
     let gpu = gpu_or_skip!(gpu());
-    let shot = |traced: bool, frames: u32| {
-        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-        viewport.shading = ShadingMode::Rendered;
-        viewport.path_trace = traced;
-        viewport.show_bloom = false;
-        viewport.show_reflections = false;
-        viewport.ambient_occlusion = false;
-        viewport.show_grid = false;
-        viewport.show_wireframe = false;
-        viewport.set_display(&gpu.queue, FRAMED);
-        let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
-        let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
-        let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
-        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
-        one_material(&gpu, &mut viewport, grey());
-        let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
-        let camera = Camera {
-            pivot: glam::DVec3::new(0.0, 0.0, 0.3),
-            distance: 5.0,
-            rotation: glam::DQuat::from_rotation_x(1.0),
-            ..Camera::default()
-        };
-        let parts = [(&cube_cpu, lift), (&floor_cpu, glam::DAffine3::IDENTITY)];
-        let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
-            .iter()
-            .map(|(m, _)| {
-                (
-                    m.positions.iter().map(|p| p.0).collect(),
-                    m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
-                )
-            })
-            .collect();
-        let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = parts
-            .iter()
-            .zip(&data)
-            .map(|((m, t), (p, n))| kreate_render::pathtrace::PtMesh {
-                positions: p,
-                normals: n,
-                indices: &m.indices,
-                transform: *t,
-                surface: 0,
-            })
-            .collect();
-        viewport.set_path_trace_scene(
-            &gpu.device,
-            &meshes,
-            &[kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 }],
-        );
-        let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
-        let mut out = Vec::new();
-        for _ in 0..frames {
-            viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
-            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
-            out = read_frame(&gpu, &mut viewport, &draws);
-        }
-        out
-    };
-    let raster = shot(false, 1);
-    let traced = shot(true, 64);
+    let raster = traced_shot(&gpu, false, 1, None);
+    let traced = traced_shot(&gpu, true, 64, None);
     let mean = |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / p.len() as f32;
     let (r, t) = (mean(&raster), mean(&traced));
     assert!(t > 0.05, "the traced picture is black: {t}");
     // The same light in the same units: within a factor of two overall — the
     // tracer adds the bounced light the rasteriser does not have.
     assert!(t > r * 0.5 && t < r * 2.0, "traced {t} against rasterised {r}");
+}
+
+/// Hard steps between neighbouring pixels: what a sharp edge is made of.
+fn sharp_steps(p: &[[f32; 4]]) -> usize {
+    let lum = |c: [f32; 4]| c[0] + c[1] + c[2];
+    let w = SIZE as usize;
+    (0..p.len()).filter(|i| i % w + 1 < w && (lum(p[*i]) - lum(p[i + 1])).abs() > 0.3).count()
+}
+
+/// Depth of field: through a wide lens focused far beyond it, the cube's
+/// edges blur — fewer sharp steps than through a pinhole.
+#[test]
+fn a_wide_lens_focused_away_blurs_the_cube() {
+    let gpu = gpu_or_skip!(gpu());
+    let pinhole = traced_shot(&gpu, true, 96, None);
+    let lens = kreate_render::pathtrace::Lens { radius: 0.25, focus: 40.0 };
+    let blurred = traced_shot(&gpu, true, 96, Some(lens));
+    let (p, b) = (sharp_steps(&pinhole), sharp_steps(&blurred));
+    assert!(p > 10, "the pinhole picture has no edges to blur: {p}");
+    assert!(b * 2 < p, "{b} sharp steps through the lens against {p} through a pinhole");
 }
