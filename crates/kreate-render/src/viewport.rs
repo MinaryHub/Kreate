@@ -1415,6 +1415,10 @@ pub struct Viewport {
     shading_view_proj: [[f32; 4]; 4],
     /// Which materials let light through. See `set_transmissive`.
     material_transmissive: Vec<bool>,
+    /// The camera the depth buffer was last drawn with, nudge and all — what
+    /// the id pass must draw with to agree with it. A settled view is not
+    /// redrawn, so this is the last sample's and not this frame's.
+    depth_view_proj: Option<glam::Mat4>,
     /// The solids' picture, copied before glass is drawn over it: what glass
     /// shows through. Linear, the picture's own format.
     behind: (wgpu::Texture, wgpu::TextureView),
@@ -2453,6 +2457,7 @@ impl Viewport {
             contact_pipeline,
             shading_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             material_transmissive: Vec::new(),
+            depth_view_proj: None,
             behind: behind_0,
             bloom_intensity: 0.12,
             accum_samples: 0,
@@ -2654,6 +2659,11 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
         let view_proj = self.next_sample(view_proj, camera.eye(), draws);
+        // A frame that is drawn writes depth with this camera; one that only
+        // presents the settled mean leaves the last one's.
+        if self.frame_sample.is_some() || !self.accum_applies {
+            self.depth_view_proj = Some(view_proj);
+        }
         if self.shading == ShadingMode::Rendered {
             self.shading_view_proj = view_proj.to_cols_array_2d();
             queue.write_buffer(
@@ -3500,7 +3510,14 @@ impl Viewport {
         draws: &[Draw],
         domain: PickDomain,
     ) {
-        let view_proj = camera.view_projection(self.aspect());
+        // The camera the depth was drawn with, not the bare one: the id pass
+        // tests against that depth, and the smoothing mean draws each still
+        // frame nudged by a fraction of a pixel. On a slanted face that moves
+        // the depth past the id pass's tolerance, and an un-nudged id pass lost
+        // whole faces — objects could only be clicked by their edges.
+        let view_proj = self
+            .depth_view_proj
+            .unwrap_or_else(|| camera.view_projection(self.aspect()));
         queue.write_buffer(
             &self.id_globals_buf,
             0,

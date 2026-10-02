@@ -88,6 +88,14 @@ fn pick(
     configure_camera(&mut camera);
 
     let mut target = PickTarget::new(&gpu.device, SIZE, SIZE);
+    // Earlier frames of the same still view, when a test asks: each nudged by
+    // a fraction of a pixel for the smoothing mean, as the application draws.
+    for _ in 1..STILL_FRAMES.with(|f| f.get()) {
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        viewport.render(&mut encoder, &colour_view, &draws);
+        gpu.queue.submit(Some(encoder.finish()));
+    }
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.prepare_ids(&gpu.device, &gpu.queue, &camera, &draws, domain);
 
@@ -421,3 +429,37 @@ const _: () = assert!(
     (REGION * REGION * 8) < 32 * 1024,
     "a region readback should stay in the tens of kilobytes"
 );
+
+thread_local! {
+    /// How many frames of one still view `pick` draws before it picks.
+    static STILL_FRAMES: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// A click on the middle of a slanted face picks the object on every frame of
+/// a still view — not only the first.
+///
+/// After the first, each frame is drawn nudged by a fraction of a pixel for
+/// the smoothing mean, and the id pass tests against that frame's depth. On
+/// a slanted face, half a pixel moves the depth further than the id pass's
+/// tolerance, so an id pass drawn without the nudge lost the whole face and
+/// only hit near the edges: objects could be selected by their edges alone.
+#[test]
+fn a_still_view_picks_a_slanted_face_on_every_frame() {
+    let slanted = |camera: &mut Camera| {
+        camera.pivot = DVec3::ZERO;
+        camera.distance = 8.0;
+        camera.rotation = glam::DQuat::from_rotation_z(0.7) * glam::DQuat::from_rotation_x(1.2);
+    };
+    // The first frame, a few nudged ones, and the settled view after them.
+    for frames in [1, 2, 7, 15, kreate_render::accum::SAMPLES + 1] {
+        STILL_FRAMES.with(|f| f.set(frames));
+        let hit = pick(&[cube_at(0.0, 5)], PickDomain::Object, false, CENTRE, slanted);
+        STILL_FRAMES.with(|f| f.set(1));
+        let Some(hit) = hit else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let hit = hit.unwrap_or_else(|| panic!("frame {frames}: the click on the face picked nothing"));
+        assert_eq!(hit.object, 5);
+    }
+}
