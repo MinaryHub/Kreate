@@ -310,6 +310,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_outline",
     "view.toggle_bloom",
     "view.toggle_reflections",
+    "view.toggle_contact_shadows",
     "view.toggle_path_trace",
     "app.rename",
     "view.toggle_face_orientation",

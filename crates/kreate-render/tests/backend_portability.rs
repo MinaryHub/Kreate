@@ -81,6 +81,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("pathtrace", kreate_render::pathtrace::shader_source().into()),
         ("pathtrace_resolve", kreate_render::pathtrace::resolve_source().into()),
         ("denoise", kreate_render::denoise::source().into()),
+        ("contact_depth", include_str!("../src/shaders/contact_depth.wgsl").into()),
         ("lights", include_str!("../src/shaders/lights.wgsl").into()),
         ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
         ("shadow", include_str!("../src/shaders/shadow.wgsl").into()),

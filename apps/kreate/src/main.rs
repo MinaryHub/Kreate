@@ -5567,6 +5567,7 @@ impl App {
             outline: gfx.viewport.show_outline,
             bloom: gfx.viewport.show_bloom,
             reflections: gfx.viewport.show_reflections,
+            contact_shadows: gfx.viewport.contact_shadows,
             path_trace: gfx.viewport.path_trace,
         };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
@@ -6342,6 +6343,12 @@ impl App {
             "view.toggle_reflections" => {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.show_reflections = !gfx.viewport.show_reflections;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_contact_shadows" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.contact_shadows = !gfx.viewport.contact_shadows;
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }

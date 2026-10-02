@@ -104,7 +104,8 @@ struct ShadingGlobals {
     /// written every frame and read by nobody.
     tiles_across: u32,
     tile_capacity: u32,
-    _pad: [u32; 2],
+    /// The drawn region, for contact shadows; zero when they are off.
+    contact_region: [u32; 2],
     /// rgb: the world's radiance, linear. w: nonzero when an environment cube
     /// is bound. See `shading.wgsl`.
     world: [f32; 4],
@@ -114,6 +115,8 @@ struct ShadingGlobals {
     sh9: [[f32; 4]; 9],
     /// Turns a clip position back into a world direction. See `shading.wgsl`.
     inv_view_proj: [[f32; 4]; 4],
+    /// This frame's camera, for contact shadows. See `shading.wgsl`.
+    view_proj: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -1397,6 +1400,17 @@ pub struct Viewport {
     bloom: crate::bloom::Bloom,
     /// Whether the rendered view glows around its brightest light.
     pub show_bloom: bool,
+    /// Whether the rendered view darkens where things touch, past what the
+    /// shadow maps resolve. See `shading.wgsl`'s `contact_shadow`.
+    pub contact_shadows: bool,
+    /// The rendered view's depth, drawn before it is shaded, for contact
+    /// shadows. Its own texture: the shading pass cannot read the depth it is
+    /// writing.
+    contact_depth: wgpu::TextureView,
+    contact_pipeline: wgpu::RenderPipeline,
+    /// The camera the rendered pass draws with this frame, sample nudge and
+    /// all.
+    shading_view_proj: [[f32; 4]; 4],
     /// How strong the glow is.
     pub bloom_intensity: f32,
     /// The running mean a still view refines itself into.
@@ -1905,6 +1919,17 @@ impl Viewport {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The rendered view's depth, for contact shadows.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // The path tracer reads the lights and the environment through the
@@ -1936,6 +1961,7 @@ impl Viewport {
             mapped_at_creation: false,
         });
         let environment_0 = crate::environment::Environment::placeholder(device);
+        let contact_depth_0 = gpu::create_depth_texture(device, width, height);
         let shading_bind = shading_bind_group(
             device,
             &shading_layout,
@@ -1946,6 +1972,7 @@ impl Viewport {
             shadows_0.array_view(),
             tiles_0.buffer(),
             &environment_0,
+            &contact_depth_0,
         );
         // The rendered pass has no pipeline of its own any more: a material's
         // code *is* the fragment stage's second half, so the pipeline is built
@@ -1961,6 +1988,42 @@ impl Viewport {
                 Some(&material_layout),
             ],
             immediate_size: 0,
+        });
+
+        // The depth contact shadows march through: positions only, no
+        // fragment stage, the rendered pass's camera and objects.
+        let contact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("contact depth"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/contact_depth.wgsl").into()),
+        });
+        let contact_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("contact depth layout"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&rendered_object_layout)],
+            immediate_size: 0,
+        });
+        let contact_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("contact depth"),
+            layout: Some(&contact_pl),
+            vertex: wgpu::VertexState {
+                module: &contact_shader,
+                entry_point: Some("contact_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(gpu::depth_write_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
 
         // The background. The shading library, because it reads the same
@@ -2364,6 +2427,10 @@ impl Viewport {
             show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
             show_bloom: true,
+            contact_shadows: true,
+            contact_depth: contact_depth_0,
+            contact_pipeline,
+            shading_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             bloom_intensity: 0.12,
             accum_samples: 0,
             accum_signature: 0,
@@ -2398,6 +2465,8 @@ impl Viewport {
         if size != self.size {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
+            self.contact_depth = gpu::create_depth_texture(device, size.0, size.1);
+            self.rebuild_shading_bind(device);
             self.aa.resize(device, size.0, size.1);
             self.outline.resize(device, size.0, size.1);
             self.accum.resize(device, size.0, size.1);
@@ -2561,6 +2630,14 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
         let view_proj = self.next_sample(view_proj, draws);
+        if self.shading == ShadingMode::Rendered {
+            self.shading_view_proj = view_proj.to_cols_array_2d();
+            queue.write_buffer(
+                &self.shading_globals_buf,
+                0,
+                bytemuck::bytes_of(&self.shading_globals()),
+            );
+        }
         if self.path_tracing() {
             if let Some(n) = self.frame_sample {
                 self.pathtracer.prepare(
@@ -2903,6 +2980,7 @@ impl Viewport {
                 self.shadows.array_view(),
                 self.tiles.buffer(),
                 &self.environment,
+                &self.contact_depth,
             );
             // The globals carry how many tiles across the grid is, and it has
             // just changed.
@@ -3091,6 +3169,7 @@ impl Viewport {
                 self.shadows.array_view(),
                 self.tiles.buffer(),
                 &self.environment,
+                &self.contact_depth,
             );
             // The cull pass holds the light buffer too, and it has just moved.
             self.tiles.forget_bindings();
@@ -3117,7 +3196,11 @@ impl Viewport {
         ShadingGlobals {
             tiles_across: self.tiles.across(),
             tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
-            _pad: [0; 2],
+            contact_region: if self.contact_applies() {
+                [self.render_size.0, self.render_size.1]
+            } else {
+                [0, 0]
+            },
             world: [
                 self.world[0],
                 self.world[1],
@@ -3135,7 +3218,14 @@ impl Viewport {
             ],
             sh9: crate::environment::sh9_bytes(self.environment.sh9()),
             inv_view_proj: self.inv_view_proj,
+            view_proj: self.shading_view_proj,
         }
+    }
+
+    /// Whether this frame's rendered view darkens where things touch: on, the
+    /// rendered mode, and rasterised — the path tracer's shadows are exact.
+    fn contact_applies(&self) -> bool {
+        self.contact_shadows && self.shading == ShadingMode::Rendered && !self.path_tracing()
     }
 
     /// Replaces the environment with one built from an equirectangular image.
@@ -3279,6 +3369,7 @@ impl Viewport {
             self.shadows.array_view(),
             self.tiles.buffer(),
             &self.environment,
+            &self.contact_depth,
         );
     }
 
@@ -4260,6 +4351,37 @@ impl Viewport {
             );
         }
 
+        if self.contact_applies() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("contact depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.contact_depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, self.render_size.0 as f32, self.render_size.1 as f32, 0.0, 1.0);
+            pass.set_pipeline(&self.contact_pipeline);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                    continue;
+                }
+                pass.set_bind_group(1, &self.rendered_objects.bind, &[self.rendered_objects.offset(i as u32)]);
+                pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+            }
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport rendered"),
@@ -4474,6 +4596,7 @@ fn shading_bind_group(
     maps: &wgpu::TextureView,
     tiles: &wgpu::Buffer,
     environment: &crate::environment::Environment,
+    contact_depth: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shading data"),
@@ -4510,6 +4633,10 @@ fn shading_bind_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::Sampler(environment.sampler()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(contact_depth),
             },
         ],
     })

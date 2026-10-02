@@ -1016,6 +1016,7 @@ pub struct Overlays {
     pub outline: bool,
     pub bloom: bool,
     pub reflections: bool,
+    pub contact_shadows: bool,
     pub path_trace: bool,
 }
 
@@ -1303,6 +1304,7 @@ struct Labels {
     overlay_outline: String,
     overlay_bloom: String,
     overlay_reflections: String,
+    overlay_contact_shadows: String,
     overlay_path_trace: String,
     transform_move: String,
     transform_rotate: String,
@@ -1557,6 +1559,7 @@ impl Labels {
             overlay_outline: t("overlay-outline"),
             overlay_bloom: t("overlay-bloom"),
             overlay_reflections: t("overlay-reflections"),
+            overlay_contact_shadows: t("overlay-contact-shadows"),
             overlay_path_trace: t("overlay-path-trace"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
@@ -3317,6 +3320,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             ("view.toggle_outline", &l.overlay_outline, on.outline),
             ("view.toggle_bloom", &l.overlay_bloom, on.bloom),
             ("view.toggle_reflections", &l.overlay_reflections, on.reflections),
+            ("view.toggle_contact_shadows", &l.overlay_contact_shadows, on.contact_shadows),
             ("view.toggle_path_trace", &l.overlay_path_trace, on.path_trace),
         ] {
             // A check box per setting, as Blender's popover: what is on is
@@ -7035,11 +7039,14 @@ overlay-xray = X-Ray
 overlay-outline = Outline Selected
 overlay-bloom = Bloom (Rendered)
 overlay-reflections = Reflections (Rendered)
+overlay-contact-shadows = Contact Shadows (Rendered)
 overlay-path-trace = Path Tracing (Rendered)
 op-view-toggle-path-trace = Path Tracing
 op-view-toggle-path-trace-desc = The rendered view traced with light bouncing between surfaces; it refines while the view is still.
 op-view-toggle-reflections = Reflections
 op-view-toggle-reflections-desc = In the rendered view, shiny surfaces reflect what is on screen.
+op-view-toggle-contact-shadows = Contact Shadows
+op-view-toggle-contact-shadows-desc = In the rendered view, darkens the last centimetres where things touch, finer than the shadow maps can.
 op-view-toggle-bloom = Bloom
 op-view-toggle-bloom-desc = In the rendered view, light brighter than white glows into its surroundings.
 op-view-toggle-outline = Outline Selected
@@ -7779,11 +7786,14 @@ overlay-xray = 투시
 overlay-outline = 선택 외곽선
 overlay-bloom = 블룸 (렌더)
 overlay-reflections = 반사 (렌더)
+overlay-contact-shadows = 접촉 그림자 (렌더)
 overlay-path-trace = 패스 트레이싱 (렌더)
 op-view-toggle-path-trace = 패스 트레이싱
 op-view-toggle-path-trace-desc = 렌더 보기를 빛이 면 사이를 튕기는 방식으로 그립니다. 화면이 멈추면 점점 깨끗해집니다.
 op-view-toggle-reflections = 반사
 op-view-toggle-reflections-desc = 렌더 보기에서 매끈한 면이 화면에 보이는 것을 비춥니다.
+op-view-toggle-contact-shadows = 접촉 그림자
+op-view-toggle-contact-shadows-desc = 렌더 보기에서 물체가 닿는 곳의 마지막 몇 센티미터를 그림자 맵보다 촘촘하게 어둡게 합니다.
 op-view-toggle-bloom = 블룸
 op-view-toggle-bloom-desc = 렌더 보기에서 흰색보다 밝은 빛이 주변으로 번집니다.
 op-view-toggle-outline = 선택 외곽선

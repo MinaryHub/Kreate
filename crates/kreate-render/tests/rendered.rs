@@ -2063,6 +2063,7 @@ fn traced_scene(
     viewport.path_trace = traced;
     viewport.path_trace_denoise = denoise;
     viewport.path_trace_lens = lens;
+    viewport.contact_shadows = CONTACT.with(|c| c.get());
     viewport.show_bloom = false;
     viewport.show_reflections = false;
     viewport.ambient_occlusion = false;
@@ -2115,7 +2116,18 @@ fn traced_scene(
     let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
     let mut out = Vec::new();
     for _ in 0..frames {
-        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+        // Faint lamps far off first, when a test asks: each takes a shadow
+        // map, so the sun after them is left with none.
+        let mut lights: Vec<PlacedLight> = (0..DECOYS.with(|d| d.get()))
+            .map(|i| PlacedLight {
+                falloff: Falloff::InverseSquare,
+                position: glam::DVec3::new(40.0 + i as f64, 30.0, 20.0),
+                amount: [0.01; 3],
+                ..PlacedLight::default()
+            })
+            .collect();
+        lights.push(key_light(20_000.0));
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
         out = read_frame(gpu, &mut viewport, &draws);
     }
@@ -2232,4 +2244,37 @@ fn the_path_tracer_sees_a_glow() {
     let a = traced_scene(&gpu, true, 16, None, false, plain, &[]);
     let b = traced_scene(&gpu, true, 16, None, false, glowing, &[]);
     assert!(mean(&b) > mean(&a) + 0.1, "glowing {} against plain {}", mean(&b), mean(&a));
+}
+
+thread_local! {
+    /// Whether `traced_scene`'s rasterised view has contact shadows.
+    static CONTACT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+thread_local! {
+    /// How many faint far lamps `traced_scene` puts ahead of its sun.
+    static DECOYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Contact shadows only take light away, and where the cube stands on the
+/// floor they take some.
+///
+/// With the sun's shadow map taken by lamps ahead of it in the budget, so
+/// that what darkens the floor by the cube is the march and nothing else —
+/// with a map, the two shadows land on the same pixels and the march has
+/// nothing left to add.
+#[test]
+fn contact_shadows_darken_where_things_touch_and_nowhere_brighten() {
+    let gpu = gpu_or_skip!(gpu());
+    DECOYS.with(|d| d.set(kreate_render::shadow::MAX_SHADOWS));
+    CONTACT.with(|c| c.set(false));
+    let without = traced_shot(&gpu, false, 1, None);
+    CONTACT.with(|c| c.set(true));
+    let with = traced_shot(&gpu, false, 1, None);
+    DECOYS.with(|d| d.set(0));
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    let darker = with.iter().zip(&without).filter(|(a, b)| lum(a) < lum(b) - 0.03).count();
+    let brighter = with.iter().zip(&without).filter(|(a, b)| lum(a) > lum(b) + 0.03).count();
+    assert!(darker > 0, "contact shadows changed nothing");
+    assert!(brighter <= darker / 20, "{brighter} pixels brighter against {darker} darker");
 }

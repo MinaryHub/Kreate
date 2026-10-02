@@ -21,8 +21,9 @@ struct Shading {
     tiles_across: u32,
     /// How many light indices one tile's list can hold.
     tile_capacity: u32,
-    _pad0: u32,
-    _pad1: u32,
+    /// The drawn region in pixels, for contact shadows; zero when they are
+    /// off, which is every pass but the rendered view's.
+    contact_region: vec2<u32>,
     /// rgb: the world's radiance, linear. w: nonzero when an environment cube
     /// is bound and this colour is not what lights the scene.
     ///
@@ -48,9 +49,74 @@ struct Shading {
     /// with the camera and so does everything else in this uniform — two
     /// buffers to keep in step with one camera is one too many.
     inv_view_proj: mat4x4<f32>,
+    /// The camera, eye-relative and nudged as this frame's sample is: where a
+    /// point lands in the depth contact shadows march through.
+    view_proj: mat4x4<f32>,
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;
+/// The rendered view's depth, drawn before it is shaded. See `contact_shadow`.
+@group(2) @binding(8) var contact_depth: texture_depth_2d;
+
+// Contact shadows: a short march from the point toward the light through the
+// picture's own depth.
+//
+// The shadow maps cannot do the last centimetres. Their texels are a scene's
+// width over a thousand, and the biases that keep a lit face from shadowing
+// itself push the shadow off the foot that casts it — so an object stood on a
+// floor looks set down a little above it. A march in screen space has the
+// screen's resolution, which near the camera is far finer, and it needs no
+// bias but a sliver.
+//
+// Short by design: what the march cannot see — what is off screen, or behind
+// something — it cannot shadow, and over a short distance that is rarely
+// anything. The shadow maps carry everything longer.
+fn contact_shadow(position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, pixel: vec2<u32>) -> f32 {
+    let region = vec2<f32>(shading.contact_region);
+    if (region.x < 1.0 || dot(normal, to_light) <= 0.0) {
+        return 1.0;
+    }
+    let distance = length(position);
+    // A few percent of how far away the point is: centimetres on a close-up,
+    // tens of them across a room. A fixed length in metres would be the whole
+    // screen in one and a pixel in the other.
+    let reach = clamp(distance * 0.04, 0.01, 0.6);
+    let start = position + normal * (distance * 0.002);
+    // Each pixel starts at its own fraction of a step, so the steps' banding
+    // is noise — which accumulation then averages away.
+    let jitter = fract(52.9829189 * fract(0.06711056 * f32(pixel.x) + 0.00583715 * f32(pixel.y)));
+    let steps = 12;
+    for (var i = 0; i < steps; i++) {
+        let t = (f32(i) + jitter) / f32(steps);
+        let p = start + to_light * (reach * t);
+        let clip = shading.view_proj * vec4<f32>(p, 1.0);
+        if (clip.w <= 0.0) {
+            return 1.0;
+        }
+        let ndc = clip.xy / clip.w;
+        if (abs(ndc.x) >= 1.0 || abs(ndc.y) >= 1.0) {
+            return 1.0;
+        }
+        let at = vec2<i32>(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * region);
+        let d = textureLoad(contact_depth, at, 0);
+        // Reversed-Z: nothing there.
+        if (d <= 0.0) {
+            continue;
+        }
+        // What the picture has at that pixel, back in eye-relative metres;
+        // the march is in front of it by how much nearer the eye that is.
+        let back = shading.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+        let surface = back.xyz / back.w;
+        let behind = length(p) - length(surface);
+        // Behind the surface the picture has, but not so far behind that it
+        // is a different thing altogether — a thin pole in front of a far
+        // wall does not shadow the wall.
+        if (behind > distance * 0.003 && behind < reach) {
+            return 0.0;
+        }
+    }
+    return 1.0;
+}
 
 /// One entry per light, parallel to the light array.
 ///
@@ -515,7 +581,8 @@ fn shade_point(
         let to_light = direction_to(light, position);
         var illuminance = illuminance_at(light, position);
         if casts_shadow(light) {
-            illuminance *= shadow_factor(i, position, normal, to_light);
+            illuminance *= shadow_factor(i, position, normal, to_light)
+                * contact_shadow(position, normal, to_light, pixel);
         }
         total += brdf_shade(
             s,

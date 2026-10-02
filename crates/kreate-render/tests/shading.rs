@@ -100,6 +100,8 @@ struct Shading {
     /// the field still has to be here: a uniform shorter than the struct the
     /// shader declares is a validation error three frames from the cause.
     inv_view_proj: [[f32; 4]; 4],
+    /// The camera for contact shadows, which the probe leaves off.
+    view_proj: [[f32; 4]; 4],
 }
 
 /// Runs the composed probe over `points` against `lights`.
@@ -181,6 +183,7 @@ fn on_gpu_under(
                 },
                 sh9: kreate_render::environment::sh9_bytes(environment.sh9()),
                 inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -345,6 +348,16 @@ fn on_gpu_under(
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
     let pipeline_layout = gpu
@@ -382,6 +395,19 @@ fn on_gpu_under(
             },
         ],
     });
+    let contact_depth = gpu
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("contact depth"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default());
     let shared_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("shading data"),
         layout: &shared,
@@ -417,6 +443,12 @@ fn on_gpu_under(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::Sampler(environment.sampler()),
+            },
+            // Contact shadows are off in the probe (its region is zero), and
+            // a binding still has to be there.
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&contact_depth),
             },
         ],
     });
