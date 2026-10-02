@@ -5613,7 +5613,7 @@ impl App {
             // per material and nothing else — which is the whole reason the
             // compiler keeps constants out of the text.
             let materials = kreate::materials::Materials::compile(&self.doc);
-            let transmissive: Vec<bool> = materials.compiled.iter().map(|c| c.transmissive()).collect();
+            let transmissive: Vec<f32> = materials.compiled.iter().map(|c| c.transmission()).collect();
             gfx.viewport.set_transmissive(&transmissive);
             let same = self
                 .materials

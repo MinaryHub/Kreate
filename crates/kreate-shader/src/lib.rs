@@ -939,6 +939,11 @@ mod map_tests {
 }
 
 impl Compiled {
+    /// How much light passes through, zero to one.
+    pub fn transmission(&self) -> f32 {
+        self.constants.get(self.transmission_slot).map_or(0.0, |c| c[0].clamp(0.0, 1.0))
+    }
+
     /// Whether light passes through: drawn after the solids, over them.
     pub fn transmissive(&self) -> bool {
         self.constants.get(self.transmission_slot).is_some_and(|c| c[0] > 0.0)

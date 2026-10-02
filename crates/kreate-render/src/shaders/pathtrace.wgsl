@@ -149,11 +149,13 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: u32)
                     continue;
                 }
                 let t = f * dot(e2, q);
-                // A shadow ray passes through glass: what it lights is behind
-                // it, tinted by nothing — the caustic a real block would focus
-                // is a path no shadow ray can find, and a black shadow under a
-                // window is the worse of the two errors.
-                if (any && pt_surfaces[tri.w * 3u + 1u].w >= 0.5) {
+                // A shadow ray passes through a see-through surface as
+                // often as light does: always through clear glass, a fifth of
+                // the time through a fifth-transmissive one, so its shadow is
+                // four fifths dark. Untinted — the caustic a real block would
+                // focus is a path no shadow ray can find, and a black shadow
+                // under a window is the worse of the two errors.
+                if (any && pt_random() < pt_surfaces[tri.w * 3u + 1u].w) {
                     continue;
                 }
                 let near = select(1e-4, -1e-5, skip != PT_NONE);

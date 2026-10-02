@@ -2082,7 +2082,7 @@ fn traced_scene(
             &mut glass_graph.nodes[0].kind
         {
             *base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
-            *transmission = 1.0;
+            *transmission = GLASS.with(|g| g.get());
             *roughness = 0.05;
         }
         let compiled = [
@@ -2099,7 +2099,7 @@ fn traced_scene(
             })
             .collect();
         viewport.set_materials(&gpu.device, &gpu.queue, &sources);
-        viewport.set_transmissive(&[false, true]);
+        viewport.set_transmissive(&[0.0, GLASS.with(|g| g.get())]);
     } else {
         one_material(gpu, &mut viewport, grey());
     }
@@ -2145,7 +2145,7 @@ fn traced_scene(
     let glass = kreate_render::pathtrace::PtSurface {
         base_color: [1.0, 1.0, 1.0],
         roughness: 0.05,
-        transmission: 1.0,
+        transmission: GLASS.with(|g| g.get()),
         ior: 1.5,
         ..Default::default()
     };
@@ -2333,6 +2333,8 @@ enum CubeKind {
 }
 
 thread_local! {
+    /// How much light the glass cube lets through.
+    static GLASS: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
     /// What `traced_scene` stands on its floor.
     static CUBE: std::cell::Cell<CubeKind> = const { std::cell::Cell::new(CubeKind::Solid) };
 }
@@ -2408,4 +2410,107 @@ fn a_pan_starts_the_mean_over() {
     camera.pivot += glam::DVec3::new(0.5, 0.0, 0.25);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     assert!(viewport.accumulating(), "the pan was averaged into the old picture");
+}
+
+/// The cube on the floor under a lamp beside and above it, rendered through
+/// each camera in turn as the application would frame by frame; the last
+/// frame comes back.
+fn orbit_frames(gpu: &Gpu, cameras: &[Camera]) -> Vec<[f32; 4]> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.show_bloom = false;
+    viewport.ambient_occlusion = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    one_material(gpu, &mut viewport, grey());
+    let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
+    let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    let lamp = PlacedLight {
+        falloff: Falloff::InverseSquare,
+        position: glam::DVec3::new(2.0, 1.0, 3.0),
+        amount: [3.0e5; 3],
+        radius: 0.1,
+        ..PlacedLight::default()
+    };
+    let mut out = Vec::new();
+    for camera in cameras {
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[lamp]);
+        viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
+    out
+}
+
+/// Shadows stay while the view moves: a frame drawn mid-orbit is the frame a
+/// fresh viewport draws from the same place.
+#[test]
+fn shadows_stay_while_the_view_moves() {
+    let gpu = gpu_or_skip!(gpu());
+    let at = |turn: f64| Camera {
+        pivot: glam::DVec3::new(0.0, 0.0, 0.3),
+        distance: 6.0,
+        rotation: glam::DQuat::from_rotation_z(turn) * glam::DQuat::from_rotation_x(1.0),
+        ..Camera::default()
+    };
+    let still = orbit_frames(&gpu, &[at(0.3)]);
+    let mut path: Vec<Camera> = (0..6).map(|_| at(0.0)).collect();
+    path.extend((1..=3).map(|i| at(0.1 * i as f64)));
+    let moved = orbit_frames(&gpu, &path);
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    let dark = |p: &Vec<[f32; 4]>| p.iter().filter(|c| lum(c) < 0.05).count();
+    let differ = still.iter().zip(&moved).filter(|(a, b)| (lum(a) - lum(b)).abs() > 0.1).count();
+    assert!(dark(&still) > 50, "the still frame has no shadow: {}", dark(&still));
+    assert!(differ < 40, "{differ} pixels differ mid-orbit; dark {} still against {} moving", dark(&still), dark(&moved));
+}
+
+/// The path tracer's first frame — what every frame of a moving view is —
+/// keeps the shadow: one sample, filtered, is dark where many samples are.
+#[test]
+fn one_traced_sample_filtered_keeps_the_shadow() {
+    let gpu = gpu_or_skip!(gpu());
+    let converged = traced_shot_with(&gpu, true, 128, None, true);
+    let first = traced_shot_with(&gpu, true, 1, None, true);
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    let shadow: Vec<usize> = (0..converged.len()).filter(|&i| lum(&converged[i]) < 0.2).collect();
+    let kept = shadow.iter().filter(|&&i| lum(&first[i]) < 0.4).count();
+    eprintln!("TRACED shadow {} kept {kept}", shadow.len());
+    if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+        for (name, img) in [("pt-1", &first), ("pt-128", &converged)] {
+            let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes).map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+        }
+    }
+    assert!(shadow.len() > 30, "no shadow to keep");
+    assert!(kept * 10 >= shadow.len() * 8, "{kept} of {} shadow pixels dark after one sample", shadow.len());
+}
+
+/// A cube that lets a little light through keeps most of its shadow — in the
+/// rasterised view and the path tracer. It used to lose all of it: any
+/// transmission at all and the object stopped casting.
+#[test]
+fn a_mostly_solid_cube_keeps_most_of_its_shadow() {
+    let gpu = gpu_or_skip!(gpu());
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    for (traced, frames) in [(false, 16), (true, 64)] {
+        let none = cube_shot(&gpu, CubeKind::None, traced, frames);
+        let solid = cube_shot(&gpu, CubeKind::Solid, traced, frames);
+        GLASS.with(|g| g.set(0.2));
+        let faint = cube_shot(&gpu, CubeKind::Glass, traced, frames);
+        GLASS.with(|g| g.set(1.0));
+        // The floor the solid cube shadows: dark with it, lit without.
+        let shadow: Vec<usize> = (0..none.len()).filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i])).collect();
+        assert!(shadow.len() > 20, "traced {traced}: no shadow to compare");
+        let mean = |p: &Vec<[f32; 4]>| shadow.iter().map(|&i| lum(&p[i])).sum::<f32>() / shadow.len() as f32;
+        let (dark, lit, here) = (mean(&solid), mean(&none), mean(&faint));
+        // Four fifths of the light stopped: much nearer the solid's shadow
+        // than the open floor, and not quite as dark.
+        let depth = (lit - here) / (lit - dark).max(1e-6);
+        assert!(depth > 0.6, "traced {traced}: a fifth-transmissive cube keeps {depth:.2} of the shadow");
+        assert!(depth < 0.97, "traced {traced}: its shadow is as dark as a solid's ({depth:.2})");
+    }
 }

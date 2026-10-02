@@ -740,6 +740,9 @@ pub struct ShadowMaps {
     globals_binds: Vec<wgpu::BindGroup>,
     objects: wgpu::Buffer,
     object_bind: wgpu::BindGroup,
+    /// The same pass for a see-through object: its texels drop out by its
+    /// transmission. See `shadow.wgsl`.
+    hashed: wgpu::RenderPipeline,
     object_stride: u32,
     object_capacity: u32,
 }
@@ -755,6 +758,10 @@ pub struct ShadowMaps {
 /// Sixteen at `Depth32Float` and a kilobyte square is sixty-four megabytes,
 /// which is the real reason this is not larger. Eight was enough while a point
 /// light took one layer and is not enough for a single lamp in a room.
+/// One draw's uniform: a model matrix, then how see-through it is and the
+/// frame's seed.
+const OBJECT_SIZE: u64 = 80;
+
 pub const MAX_SHADOWS: usize = 16;
 
 impl ShadowMaps {
@@ -796,7 +803,7 @@ impl ShadowMaps {
                 label: Some(label),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::FRAGMENT),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: dynamic,
@@ -807,7 +814,7 @@ impl ShadowMaps {
             })
         };
         let globals_layout = uniform("shadow globals", false, 64);
-        let object_layout = uniform("shadow object", true, 64);
+        let object_layout = uniform("shadow object", true, OBJECT_SIZE);
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow"),
@@ -818,8 +825,8 @@ impl ShadowMaps {
             bind_group_layouts: &[Some(&globals_layout), Some(&object_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("shadow"),
+        let pipeline_of = |label: &str, fragment: Option<&str>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &module,
@@ -835,8 +842,14 @@ impl ShadowMaps {
                     }],
                 }],
             },
-            // None: a shadow map is a depth buffer. See the shader's header.
-            fragment: None,
+            // None for a solid: a shadow map is a depth buffer. See the
+            // shader's header. A see-through object's texels drop out.
+            fragment: fragment.map(|entry| wgpu::FragmentState {
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
@@ -847,6 +860,8 @@ impl ShadowMaps {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = pipeline_of("shadow", None);
+        let hashed = pipeline_of("shadow see-through", Some("fs_hashed"));
 
         let stride = Self::stride(device);
         let (objects, object_bind) = Self::make_objects(device, &object_layout, stride, 8);
@@ -879,6 +894,7 @@ impl ShadowMaps {
             layers,
             array,
             pipeline,
+            hashed,
             object_layout,
             globals,
             globals_binds,
@@ -895,7 +911,7 @@ impl ShadowMaps {
     /// hardware and is not a number to assume.
     fn stride(device: &wgpu::Device) -> u32 {
         let align = device.limits().min_uniform_buffer_offset_alignment.max(1);
-        64u32.div_ceil(align) * align
+        (OBJECT_SIZE as u32).div_ceil(align) * align
     }
 
     fn make_objects(
@@ -918,7 +934,7 @@ impl ShadowMaps {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &buffer,
                     offset: 0,
-                    size: wgpu::BufferSize::new(64),
+                    size: wgpu::BufferSize::new(OBJECT_SIZE),
                 }),
             }],
         });
@@ -947,13 +963,14 @@ impl ShadowMaps {
         self.object_capacity = capacity;
     }
 
-    /// Writes one draw's model matrix.
-    pub fn set_object(&self, queue: &wgpu::Queue, index: u32, model: &glam::Mat4) {
-        queue.write_buffer(
-            &self.objects,
-            (self.object_stride * index) as u64,
-            bytemuck::cast_slice(&model.to_cols_array()),
-        );
+    /// Writes one draw's model matrix, how much light passes through it, and
+    /// the frame's seed for the texels that drop out.
+    pub fn set_object(&self, queue: &wgpu::Queue, index: u32, model: &glam::Mat4, see_through: f32, seed: u32) {
+        let mut data = [0.0f32; 20];
+        data[..16].copy_from_slice(&model.to_cols_array());
+        data[16] = see_through.clamp(0.0, 1.0);
+        data[17] = (seed % 4096) as f32;
+        queue.write_buffer(&self.objects, (self.object_stride * index) as u64, bytemuck::cast_slice(&data));
     }
 
     /// Writes the light's view-projection for one layer.
@@ -976,7 +993,7 @@ impl ShadowMaps {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         layer: usize,
-        draws: impl IntoIterator<Item = (u32, &'a wgpu::Buffer, &'a wgpu::Buffer, u32)>,
+        draws: impl IntoIterator<Item = (u32, &'a wgpu::Buffer, &'a wgpu::Buffer, u32, bool)>,
     ) {
         let Some(view) = self.layers.get(layer) else {
             return;
@@ -1003,9 +1020,14 @@ impl ShadowMaps {
             return;
         };
         pass.set_bind_group(0, globals, &[]);
-        for (index, positions, indices, triangles) in draws {
+        let mut hashing = false;
+        for (index, positions, indices, triangles, see_through) in draws {
             if triangles == 0 {
                 continue;
+            }
+            if see_through != hashing {
+                pass.set_pipeline(if see_through { &self.hashed } else { &self.pipeline });
+                hashing = see_through;
             }
             pass.set_bind_group(1, &self.object_bind, &[self.object_stride * index]);
             pass.set_vertex_buffer(0, positions.slice(..));

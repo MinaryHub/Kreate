@@ -288,6 +288,217 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
     out
 }
 
+/// The frame loop over several frames, the camera moving between them, with
+/// the light list the application hands over — culled at the subject — and
+/// the last frame read back.
+fn shoot_path(gpu: &Gpu, doc: &Document, cameras: &[Camera]) -> Vec<[f32; 4]> {
+    let camera = cameras[0];
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+
+    // The same three calls `main` makes, in the same order, from the same
+    // functions. A test that assembled the lights itself would be checking its
+    // own arithmetic.
+    viewport.set_world(scenelights::world_radiance(doc));
+    viewport.set_display(
+        &gpu.queue,
+        kreate_render::display::Display {
+            view: kreate_math::ViewTransform::AgX,
+            exposure: scenelights::shot_exposure(doc, 24.0, camera.pivot) as f32,
+        },
+    );
+    let lights = scenelights::placed_lights(doc);
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
+
+    // The materials, compiled the way the frame loop compiles them. Without
+    // this the rendered pass has nothing to shade with and draws no geometry —
+    // which is what these tests found the moment the viewport stopped carrying
+    // a built-in surface, and is the reason it has no fallback: a fallback
+    // would be a second `material_sample` for §3's fifth decision to have
+    // ruled out.
+    let materials = kreate::materials::Materials::compile(doc);
+    let pixels: Vec<Vec<kreate::materials::TextureImage>> = materials
+        .compiled
+        .iter()
+        .map(|c| kreate::materials::pixels_for(doc, c))
+        .collect();
+    let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
+        .iter()
+        .map(|set| {
+            set.iter()
+                .map(|i| i.source())
+                .collect()
+        })
+        .collect();
+    let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
+        .compiled
+        .iter()
+        .zip(&images)
+        .map(|(c, images)| kreate_render::viewport::MaterialSource {
+            wgsl: &c.wgsl,
+            constants: &c.constants,
+            image_slots: &c.image_slots,
+            images,
+        })
+        .collect();
+    viewport.set_materials(&gpu.device, &gpu.queue, &sources);
+
+    // The environment, through the same two calls the frame loop makes. A
+    // no-op for a flat world, which is most of the tests here — and present in
+    // all of them so that "the frame loop does this" stays true of the harness.
+    if let Some(image) = kreate::environment::background_image(doc) {
+        viewport.set_environment(
+            &gpu.device,
+            &gpu.queue,
+            image.width(),
+            image.height(),
+            &kreate::environment::pixels_of(image),
+        );
+    }
+    let (rotation, strength) = doc
+        .active_world()
+        .and_then(|id| doc.world(id))
+        .map(|w| (w.rotation as f32, w.strength as f32))
+        .unwrap_or((0.0, 1.0));
+    viewport.set_world_shape(&gpu.queue, rotation, strength);
+
+    // Through `world_transform`, like the frame loop: an object's own
+    // transform is its parent's space and a lamp under a rig would be placed
+    // wrongly by anything else.
+    let meshes: Vec<_> = doc
+        .objects()
+        .filter_map(|(id, o)| match o.data {
+            kreate_scene::document::ObjectData::Mesh(mesh) => Some((
+                doc.mesh(mesh)?,
+                doc.world_transform(id),
+                // Which compiled material this object wears. The harness drew
+                // everything with index zero until a texture made the
+                // difference visible — and index zero is the *default* grey, so
+                // every material the document held was being ignored while
+                // every test here passed.
+                materials.index_of(doc, id),
+                // And one per mesh slot, the way the frame loop does it, so a
+                // mesh whose faces carry different materials draws in more
+                // than one of them here too.
+                materials.slots_of(doc, id),
+            )),
+            _ => None,
+        })
+        .collect();
+    let uploaded: Vec<_> = meshes
+        .iter()
+        .map(|(mesh, transform, material, slots)| {
+            let cpu = RenderMeshCpu::extract(mesh);
+            (
+                kreate_render::GpuMesh::upload(
+                    &gpu.device,
+                    &viewport.layouts,
+                    &cpu,
+                    glam::Vec4::ONE,
+                ),
+                *transform,
+                *material,
+                slots.clone(),
+            )
+        })
+        .collect();
+    let mut draws: Vec<Draw> = uploaded
+        .iter()
+        .map(|(mesh, transform, material, slots)| {
+            Draw::new(mesh, *transform)
+                .with_material(*material)
+                .with_materials(slots)
+        })
+        .collect();
+
+    // The lamp and camera glyphs, the way the frame loop hands them over.
+    let (marker_lines, marker_points) = kreate::glyphs::markers_for(doc);
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shot"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    for (n, camera) in cameras.iter().enumerate() {
+        viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
+        let lights = scenelights::culled_lights(doc, camera.pivot);
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
+        viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
+        viewport.render(&mut encoder, &view, &draws);
+        if n + 1 < cameras.len() {
+            gpu.queue.submit([encoder.finish()]);
+            encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        }
+    }
+
+    let row = (SIZE * 4).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+
+    let mut out = Vec::with_capacity((SIZE * SIZE) as usize);
+    for y in 0..SIZE {
+        let base = (y * row) as usize;
+        let line = &data[base..base + (SIZE * 4) as usize];
+        for x in 0..SIZE as usize {
+            out.push([
+                line[x * 4] as f32 / 255.0,
+                line[x * 4 + 1] as f32 / 255.0,
+                line[x * 4 + 2] as f32 / 255.0,
+                line[x * 4 + 3] as f32 / 255.0,
+            ]);
+        }
+    }
+    out
+}
+
 macro_rules! gpu_or_skip {
     ($e:expr) => {
         match $e {
@@ -943,4 +1154,44 @@ fn one_object_can_wear_two_materials_at_once() {
         "one object drew {reddish} red pixels and {bluish} blue ones; \
          both halves have to be there, or the slots are not reaching the draw"
     );
+}
+
+/// Shadows stay while the view moves. The new document, under its own lamp,
+/// drawn frame after frame as an orbit turns it: the frame mid-orbit is the
+/// frame a still view from the same place draws.
+#[test]
+fn the_new_documents_shadow_stays_while_the_view_moves() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    // A floor under the cube, as the user's scene has: something to fall on.
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    menu(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.add_primitive",
+        &[
+            ("shape", PropertyValue::Enum(0)),
+            ("size", PropertyValue::Float(12.0)),
+            ("location", PropertyValue::Vec3([0.0, 0.0, -1.0])),
+        ],
+    );
+    let base = Camera::default();
+    let at = |turn: f64| Camera {
+        rotation: glam::DQuat::from_rotation_z(turn) * base.rotation,
+        ..base
+    };
+    let still: Vec<Camera> = (0..20).map(|_| at(0.3)).collect();
+    let still = shoot_path(&gpu, &doc, &still);
+    let mut path: Vec<Camera> = (0..20).map(|_| at(0.0)).collect();
+    path.extend((1..=6).map(|i| at(0.05 * i as f64)));
+    let moving = shoot_path(&gpu, &doc, &path);
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    let dark = |p: &Vec<[f32; 4]>| p.iter().filter(|c| lum(c) < 0.15).count();
+    eprintln!("SHADOW still {} moving {}", dark(&still), dark(&moving));
+    let differ = differing(&still, &moving);
+    assert!(differ * 20 < still.len(), "{differ} pixels differ mid-orbit; dark {} still, {} moving", dark(&still), dark(&moving));
 }

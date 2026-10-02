@@ -1413,8 +1413,8 @@ pub struct Viewport {
     /// The camera the rendered pass draws with this frame, sample nudge and
     /// all.
     shading_view_proj: [[f32; 4]; 4],
-    /// Which materials let light through. See `set_transmissive`.
-    material_transmissive: Vec<bool>,
+    /// How much light each material lets through. See `set_transmissive`.
+    material_transmissive: Vec<f32>,
     /// The camera the depth buffer was last drawn with, nudge and all — what
     /// the id pass must draw with to agree with it. A settled view is not
     /// redrawn, so this is the last sample's and not this frame's.
@@ -2920,7 +2920,7 @@ impl Viewport {
             );
             // The shadow pass draws the same geometry from a different
             // camera, so it needs the same model matrix and nothing else.
-            self.shadows.set_object(queue, i, &m);
+            self.shadows.set_object(queue, i, &m, self.see_through(draw), self.accum_samples);
             drawn = drawn.union(transformed_bounds(&m, draw.mesh.bounds));
             queue.write_buffer(
                 &self.rendered_objects.buffer,
@@ -3261,20 +3261,34 @@ impl Viewport {
 
     /// Says which materials let light through: drawn after the solids, over
     /// a copy of them. Parallel to what `set_materials` was given.
-    pub fn set_transmissive(&mut self, transmissive: &[bool]) {
+    ///
+    /// How much, zero to one, and not only whether: a shadow is darkened by
+    /// what does not pass, so a material at a tenth transmission keeps nine
+    /// tenths of its shadow.
+    pub fn set_transmissive(&mut self, transmission: &[f32]) {
         self.material_transmissive.clear();
-        self.material_transmissive.extend_from_slice(transmissive);
+        self.material_transmissive.extend_from_slice(transmission);
+    }
+
+    fn transmission(&self, material: u32) -> f32 {
+        self.material_transmissive.get(material as usize).copied().unwrap_or(0.0)
     }
 
     fn transmissive(&self, material: u32) -> bool {
-        self.material_transmissive.get(material as usize).copied().unwrap_or(false)
+        self.transmission(material) > 0.0
     }
 
-    /// Whether every run of a draw is glass: such a draw casts no shadow and
-    /// marks no contact.
-    fn all_transmissive(&self, draw: &Draw) -> bool {
-        !draw.mesh.submeshes.is_empty()
-            && draw.mesh.submeshes.iter().all(|run| self.transmissive(draw.material_for(run.slot)))
+    /// How much light passes through a whole draw: the least of its runs, so
+    /// a draw with any solid part shadows as a solid.
+    fn see_through(&self, draw: &Draw) -> f32 {
+        if draw.mesh.submeshes.is_empty() {
+            return 0.0;
+        }
+        draw.mesh
+            .submeshes
+            .iter()
+            .map(|run| self.transmission(draw.material_for(run.slot)))
+            .fold(1.0, f32::min)
     }
 
     /// Whether this frame's rendered view darkens where things touch: on, the
@@ -4414,7 +4428,10 @@ impl Viewport {
                     // and an object that stopped casting when it got small
                     // would have its shadow blink out as the camera pulled
                     // back.
-                    if draw.mesh.counts.triangles == 0 || self.all_transmissive(draw) {
+                    // A see-through object casts as much shadow as light it
+                    // stops: all of a solid's, none of clear glass's.
+                    let see_through = self.see_through(draw);
+                    if draw.mesh.counts.triangles == 0 || see_through >= 1.0 {
                         return None;
                     }
                     Some((
@@ -4422,6 +4439,7 @@ impl Viewport {
                         &draw.mesh.positions,
                         &draw.mesh.indices,
                         draw.mesh.counts.triangles,
+                        see_through > 0.0,
                     ))
                 }),
             );
@@ -4448,7 +4466,8 @@ impl Viewport {
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw || self.all_transmissive(draw) {
+                // Contact is a solid's: a mostly see-through object marks none.
+                if mesh.counts.triangles == 0 || !draw.detail.draw || self.see_through(draw) >= 0.5 {
                     continue;
                 }
                 pass.set_bind_group(1, &self.rendered_objects.bind, &[self.rendered_objects.offset(i as u32)]);
