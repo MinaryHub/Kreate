@@ -306,19 +306,30 @@ pub fn point_view(
         return None;
     }
     let near = MIN_NEAR.min(far * 0.5);
+    let fov = cube_face_fov();
     Some(ShadowView {
-        // Exactly 90°, so the six faces meet without a gap or an overlap.
-        view_proj: perspective_reversed(std::f32::consts::FRAC_PI_2, near) * view,
+        view_proj: perspective_reversed(fov, near) * view,
         near,
         far: far + MARGIN,
-        texel_world: perspective_texel(std::f32::consts::FRAC_PI_2),
-        penumbra: penumbra_scale(
-            source,
-            near,
-            far + MARGIN,
-            perspective_texel(std::f32::consts::FRAC_PI_2),
-        ),
+        texel_world: perspective_texel(fov),
+        penumbra: penumbra_scale(source, near, far + MARGIN, perspective_texel(fov)),
     })
+}
+
+/// How many texels past a cube face's 90° a face's map reaches.
+///
+/// A point is shaded from the face its direction points through, and the
+/// filter around it — the soft-shadow kernel, up to eight texels, and the
+/// normal offset — reaches past where that face stops. At exactly 90° those
+/// taps read outside the map, which is "lit": a bright line ran through every
+/// shadow along the seam between two faces. With the faces a little wider
+/// than the cube they are chosen by, every tap lands on rendered depth.
+const CUBE_FACE_OVERLAP: f32 = 24.0;
+
+/// A cube face's field of view: 90° and `CUBE_FACE_OVERLAP` texels each side.
+fn cube_face_fov() -> f32 {
+    let inner = 1.0 - 2.0 * CUBE_FACE_OVERLAP / SHADOW_RESOLUTION as f32;
+    2.0 * (1.0 / inner).atan()
 }
 
 /// The frame a packed light should render its shadow from.
@@ -1728,6 +1739,25 @@ mod tests {
                 assert!(p.x.is_finite() && p.y.is_finite() && p.z.is_finite());
                 assert!(inside(p), "{direction} left {corner} at {p}");
             }
+        }
+    }
+
+    #[test]
+    fn a_point_on_the_seam_between_two_cube_faces_is_well_inside_both_maps() {
+        // The seam is where a bright line ran through point-light shadows:
+        // the filter around a point on it read past the edge of its face's
+        // map, and past the edge is "lit". Each face reaches far enough past
+        // 90° that the widest filter still lands on rendered depth.
+        let light = glam::Vec3::new(0.0, 0.0, 3.0);
+        let scene = Aabb::new(glam::Vec3::splat(-5.0), glam::Vec3::splat(5.0));
+        // Straight down and out along +X at 45°: the edge of -Z and +X.
+        let point = light + glam::Vec3::new(1.0, 0.0, -1.0);
+        for face in [0, 5] {
+            let view = point_view(light, face, scene, SourceSize::Radius(0.1)).expect("the face sees the scene");
+            let clip = view.view_proj * point.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            let texels_in = (1.0 - ndc.x.abs().max(ndc.y.abs())) * 0.5 * SHADOW_RESOLUTION as f32;
+            assert!(texels_in >= 16.0, "face {face}: only {texels_in} texels inside the map");
         }
     }
 }
