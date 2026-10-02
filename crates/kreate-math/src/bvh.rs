@@ -164,6 +164,19 @@ impl Bvh {
     }
 
     #[inline]
+    /// Every node, flattened for a GPU walk: its bounds, then the first
+    /// index into [`Bvh::order`] for a leaf or the left child for an interior
+    /// node (the right child is the next one), then the leaf's primitive
+    /// count, zero for an interior node.
+    pub fn flat_nodes(&self) -> Vec<(Aabb, u32, u32)> {
+        self.nodes.iter().map(|n| (n.bounds, n.first, n.count)).collect()
+    }
+
+    /// The primitives in leaf order: a leaf's are a contiguous run of these.
+    pub fn order(&self) -> &[u32] {
+        &self.order
+    }
+
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }

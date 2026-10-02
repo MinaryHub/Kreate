@@ -107,8 +107,17 @@ fn oct_decode(packed: u32) -> vec3<f32> {
     return normalize(n);
 }
 
+// The light, and beside it what screen-space reflections need: the normal and
+// roughness, the specular share, and the environment's own reflection.
+struct RenderedOut {
+    @location(0) light: vec4<f32>,
+    @location(1) surface: vec4<f32>,
+    @location(2) share: vec4<f32>,
+    @location(3) environment: vec4<f32>,
+};
+
 @fragment
-fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
+fn fs_rendered(in: VertexOut) -> RenderedOut {
     // Toward the camera, which eye-relative space puts at the origin.
     let to_eye = -in.world;
     var view = vec3<f32>(0.0, 0.0, 1.0);
@@ -138,7 +147,14 @@ fn fs_rendered(in: VertexOut) -> @location(0) vec4<f32> {
     // is decides which lights this fragment sees.
     let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy));
     // Linear and unbounded. The display transform is a later pass.
-    return vec4<f32>(lit, 1.0);
+    var out: RenderedOut;
+    out.light = vec4<f32>(lit, 1.0);
+    let roughness = clamp(surface.roughness, 0.0, 1.0);
+    out.surface = vec4<f32>(normal, roughness);
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    out.share = vec4<f32>(specular_share(surface_f0(surface), nov, roughness), 1.0);
+    out.environment = vec4<f32>(environment_specular(surface, normal, view), 1.0);
+    return out;
 }
 
 // Tilts `n` by a tangent-space normal, with the tangent frame taken from the

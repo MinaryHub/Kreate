@@ -980,6 +980,8 @@ pub struct ViewStatus {
     /// the viewport's corner, which is where Blender says it and where a user
     /// looks when a picture has stopped having depth.
     pub orthographic: bool,
+    /// Samples the path tracer has summed, zero when it is not tracing.
+    pub samples: u32,
     /// Which overlays are on, for the menu's check marks.
     pub overlays: Overlays,
 }
@@ -1013,6 +1015,8 @@ pub struct Overlays {
     pub xray: bool,
     pub outline: bool,
     pub bloom: bool,
+    pub reflections: bool,
+    pub path_trace: bool,
 }
 
 impl Default for ViewStatus {
@@ -1022,6 +1026,7 @@ impl Default for ViewStatus {
             exposure: 0.0,
             metered: false,
             orthographic: false,
+            samples: 0,
             overlays: Overlays::default(),
         }
     }
@@ -1297,6 +1302,8 @@ struct Labels {
     overlay_xray: String,
     overlay_outline: String,
     overlay_bloom: String,
+    overlay_reflections: String,
+    overlay_path_trace: String,
     transform_move: String,
     transform_rotate: String,
     transform_scale: String,
@@ -1549,6 +1556,8 @@ impl Labels {
             overlay_xray: t("overlay-xray"),
             overlay_outline: t("overlay-outline"),
             overlay_bloom: t("overlay-bloom"),
+            overlay_reflections: t("overlay-reflections"),
+            overlay_path_trace: t("overlay-path-trace"),
             transform_move: t("transform-move"),
             transform_rotate: t("transform-rotate"),
             transform_scale: t("transform-scale"),
@@ -2575,8 +2584,7 @@ fn header_right_width(ui: &Ui, state: &ShellState, l: &Labels) -> f32 {
     width += spacing.item_spacing.x * 2.0 + 1.0; // the separator
     width += button(&l.overlays) + spacing.item_spacing.x;
     if state.view_status.shading == kreate_render::ShadingMode::Rendered {
-        let text = format!("{} {:+.1}", l.exposure, state.view_status.exposure);
-        width += text_width(&text) + spacing.item_spacing.x;
+        width += text_width(&exposure_text(state, l)) + spacing.item_spacing.x;
     }
     width + 6.0
 }
@@ -3308,6 +3316,8 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             ("view.toggle_xray", &l.overlay_xray, on.xray),
             ("view.toggle_outline", &l.overlay_outline, on.outline),
             ("view.toggle_bloom", &l.overlay_bloom, on.bloom),
+            ("view.toggle_reflections", &l.overlay_reflections, on.reflections),
+            ("view.toggle_path_trace", &l.overlay_path_trace, on.path_trace),
         ] {
             // A check box per setting, as Blender's popover: what is on is
             // readable without toggling it to find out. The menu stays open,
@@ -5452,11 +5462,22 @@ fn shading_label(mode: kreate_render::ShadingMode, l: &Labels) -> &str {
 /// a lamp down moves this and leaves the picture alone, and seeing it move is
 /// the difference between "exposure is doing its job" and "the slider is
 /// broken".
+/// The rendered view's readout: the exposure, and while the path tracer is
+/// summing, how far it has got.
+fn exposure_text(state: &ShellState, l: &Labels) -> String {
+    let exposure = format!("{} {:+.1}", l.exposure, state.view_status.exposure);
+    match state.view_status.samples {
+        0 => exposure,
+        // i18n-exempt: numbers
+        n => format!("{exposure}   {n}/{}", kreate_render::pathtrace::SAMPLES),
+    }
+}
+
 fn draw_exposure(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     if state.view_status.shading != kreate_render::ShadingMode::Rendered {
         return;
     }
-    let text = format!("{} {:+.1}", l.exposure, state.view_status.exposure);
+    let text = exposure_text(state, l);
     let hint = if state.view_status.metered {
         &l.exposure_metered
     } else {
@@ -7013,6 +7034,12 @@ overlay-ao = Ambient Occlusion
 overlay-xray = X-Ray
 overlay-outline = Outline Selected
 overlay-bloom = Bloom (Rendered)
+overlay-reflections = Reflections (Rendered)
+overlay-path-trace = Path Tracing (Rendered)
+op-view-toggle-path-trace = Path Tracing
+op-view-toggle-path-trace-desc = The rendered view traced with light bouncing between surfaces; it refines while the view is still.
+op-view-toggle-reflections = Reflections
+op-view-toggle-reflections-desc = In the rendered view, shiny surfaces reflect what is on screen.
 op-view-toggle-bloom = Bloom
 op-view-toggle-bloom-desc = In the rendered view, light brighter than white glows into its surroundings.
 op-view-toggle-outline = Outline Selected
@@ -7751,6 +7778,12 @@ overlay-ao = 앰비언트 오클루전
 overlay-xray = 투시
 overlay-outline = 선택 외곽선
 overlay-bloom = 블룸 (렌더)
+overlay-reflections = 반사 (렌더)
+overlay-path-trace = 패스 트레이싱 (렌더)
+op-view-toggle-path-trace = 패스 트레이싱
+op-view-toggle-path-trace-desc = 렌더 보기를 빛이 면 사이를 튕기는 방식으로 그립니다. 화면이 멈추면 점점 깨끗해집니다.
+op-view-toggle-reflections = 반사
+op-view-toggle-reflections-desc = 렌더 보기에서 매끈한 면이 화면에 보이는 것을 비춥니다.
 op-view-toggle-bloom = 블룸
 op-view-toggle-bloom-desc = 렌더 보기에서 흰색보다 밝은 빛이 주변으로 번집니다.
 op-view-toggle-outline = 선택 외곽선

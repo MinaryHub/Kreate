@@ -1940,3 +1940,145 @@ fn read_frame(gpu: &Gpu, viewport: &mut Viewport, draws: &[Draw]) -> Vec<[f32; 4
         })
         .collect()
 }
+
+/// Screen-space reflections: a mirror floor under a lit cube shows the cube
+/// in it — the floor changes where the reflection falls — and with them off
+/// it does not.
+#[test]
+fn a_mirror_floor_reflects_what_stands_on_it() {
+    let gpu = gpu_or_skip!(gpu());
+    let shot = |reflections: bool| {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Rendered;
+        viewport.show_reflections = reflections;
+        viewport.show_bloom = false;
+        viewport.ambient_occlusion = false;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.set_display(&gpu.queue, FRAMED);
+        let cube = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+        let floor = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+        let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube, glam::Vec4::ONE);
+        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor, glam::Vec4::ONE);
+        // A matte cube, lit, on a polished metal floor — whose picture is all
+        // reflection: black sky and a lit cube.
+        let compile = |base: f32, metallic: f32, roughness: f32| {
+            let graph = kreate_scene::shader::ShaderGraph::standard(
+                "test",
+                kreate_math::SceneRgb::new(base, base, base),
+                metallic,
+                roughness,
+            );
+            kreate_shader::compile(&graph).expect("compiles")
+        };
+        let (matte, mirror) = (compile(0.8, 0.0, 0.5), compile(0.95, 1.0, 0.05));
+        fn source(c: &kreate_shader::Compiled) -> kreate_render::viewport::MaterialSource<'_> {
+            kreate_render::viewport::MaterialSource {
+                wgsl: &c.wgsl,
+                constants: &c.constants,
+                image_slots: &c.image_slots,
+                images: &[],
+            }
+        }
+        viewport.set_materials(&gpu.device, &gpu.queue, &[source(&matte), source(&mirror)]);
+        let camera = Camera {
+            pivot: glam::DVec3::new(0.0, 0.0, 0.3),
+            distance: 5.0,
+            rotation: glam::DQuat::from_rotation_x(1.15),
+            ..Camera::default()
+        };
+        let mut draws = vec![
+            Draw::new(&floor, glam::DAffine3::IDENTITY).with_material(1),
+            Draw::new(&cube, glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.8))),
+        ];
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        read_frame(&gpu, &mut viewport, &draws)
+    };
+    let (without, with) = (shot(false), shot(true));
+    let changed = without
+        .iter()
+        .zip(&with)
+        .filter(|(a, b)| (0..3).any(|i| (a[i] - b[i]).abs() > 0.04))
+        .count();
+    assert!(changed > 40, "the reflection changed {changed} pixels");
+    // The top rows are the far floor and the sky behind it, which nothing is
+    // reflected into from this angle: left alone.
+    let top: usize = (0..SIZE as usize * 4)
+        .filter(|i| (0..3).any(|c| (without[*i][c] - with[*i][c]).abs() > 0.04))
+        .count();
+    assert!(top < 8, "{top} pixels changed in the far rows");
+}
+
+/// The path tracer: the same scene, the same lights, the same units — so its
+/// picture is about as bright as the rasteriser's — and light reaches what the
+/// lamp does not, by bouncing off what it does.
+#[test]
+fn the_path_tracer_agrees_with_the_rasteriser_and_bounces_light() {
+    let gpu = gpu_or_skip!(gpu());
+    let shot = |traced: bool, frames: u32| {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Rendered;
+        viewport.path_trace = traced;
+        viewport.show_bloom = false;
+        viewport.show_reflections = false;
+        viewport.ambient_occlusion = false;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.set_display(&gpu.queue, FRAMED);
+        let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+        let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+        let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+        one_material(&gpu, &mut viewport, grey());
+        let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
+        let camera = Camera {
+            pivot: glam::DVec3::new(0.0, 0.0, 0.3),
+            distance: 5.0,
+            rotation: glam::DQuat::from_rotation_x(1.0),
+            ..Camera::default()
+        };
+        let parts = [(&cube_cpu, lift), (&floor_cpu, glam::DAffine3::IDENTITY)];
+        let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
+            .iter()
+            .map(|(m, _)| {
+                (
+                    m.positions.iter().map(|p| p.0).collect(),
+                    m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
+                )
+            })
+            .collect();
+        let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = parts
+            .iter()
+            .zip(&data)
+            .map(|((m, t), (p, n))| kreate_render::pathtrace::PtMesh {
+                positions: p,
+                normals: n,
+                indices: &m.indices,
+                transform: *t,
+                surface: 0,
+            })
+            .collect();
+        viewport.set_path_trace_scene(
+            &gpu.device,
+            &meshes,
+            &[kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 }],
+        );
+        let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+            out = read_frame(&gpu, &mut viewport, &draws);
+        }
+        out
+    };
+    let raster = shot(false, 1);
+    let traced = shot(true, 64);
+    let mean = |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / p.len() as f32;
+    let (r, t) = (mean(&raster), mean(&traced));
+    assert!(t > 0.05, "the traced picture is black: {t}");
+    // The same light in the same units: within a factor of two overall — the
+    // tracer adds the bounced light the rasteriser does not have.
+    assert!(t > r * 0.5 && t < r * 2.0, "traced {t} against rasterised {r}");
+}

@@ -450,6 +450,24 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
     return ambient_from(s, nov, environment_irradiance(normal) * strength, prefiltered);
 }
 
+/// The part of [`environment_ambient`] that is the environment's mirror
+/// reflection: what screen-space reflections swap for what the screen holds.
+fn environment_specular(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
+    let nov = clamp(dot(normal, view), 1e-4, 1.0);
+    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let share = specular_share(surface_f0(s), nov, roughness);
+    if shading.world.w <= 0.0 {
+        return shading.world.rgb * share;
+    }
+    let prefiltered = textureSampleLevel(
+        environment_cube,
+        environment_sampler,
+        unrotate(reflect(-view, normal)),
+        roughness * shading.environment.z,
+    ).rgb * shading.environment.w;
+    return prefiltered * share;
+}
+
 /// The light leaving `position` toward `view`, in the working space.
 ///
 /// Scene-linear and unbounded. Nothing is clamped: a surface under a sun is in

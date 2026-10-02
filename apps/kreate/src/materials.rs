@@ -69,6 +69,26 @@ impl Materials {
             .unwrap_or(0)
     }
 
+    /// Each compiled material as the path tracer's flat surface, by compiled
+    /// index: base colour, metallic and roughness — the material's flat
+    /// fields, which is what its graph was built from unless it has one.
+    pub fn flat_surfaces(&self, doc: &Document) -> Vec<kreate_render::pathtrace::PtSurface> {
+        let mut out = vec![
+            kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 };
+            self.compiled.len()
+        ];
+        for (id, index) in &self.index {
+            if let (Some(m), Some(slot)) = (doc.material(*id), out.get_mut(*index as usize)) {
+                *slot = kreate_render::pathtrace::PtSurface {
+                    base_color: [m.base_color.r, m.base_color.g, m.base_color.b],
+                    metallic: m.metallic,
+                    roughness: m.roughness,
+                };
+            }
+        }
+        out
+    }
+
     /// One compiled material per mesh slot, in slot order.
     ///
     /// **The mapping the renderer's per-slot draws need.** A face names a

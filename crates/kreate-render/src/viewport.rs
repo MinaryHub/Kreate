@@ -1378,6 +1378,14 @@ pub struct Viewport {
     aa: crate::fxaa::Fxaa,
     /// The orange line around selected objects.
     outline: crate::outline::Outline,
+    /// The path tracer, for the rendered view when it is asked for.
+    pathtracer: crate::pathtrace::PathTracer,
+    /// Whether the rendered view is path traced rather than rasterised.
+    pub path_trace: bool,
+    /// The rendered view's reflections of what is on screen.
+    ssr: crate::ssr::Ssr,
+    /// Whether the rendered view reflects what is on screen.
+    pub show_reflections: bool,
     /// The rendered view's glow around what is brighter than white.
     bloom: crate::bloom::Bloom,
     /// Whether the rendered view glows around its brightest light.
@@ -1816,7 +1824,7 @@ impl Viewport {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -1826,7 +1834,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -1836,7 +1844,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -1846,7 +1854,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -1856,7 +1864,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -1866,7 +1874,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -1876,7 +1884,7 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::Cube,
@@ -1886,12 +1894,15 @@ impl Viewport {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
         });
+        // The path tracer reads the lights and the environment through the
+        // same group, which is why that layout is visible to compute.
+        let pathtracer_0 = crate::pathtrace::PathTracer::new(device, &shading_layout);
         let dfg_buf = wgpu::util::DeviceExt::create_buffer_init(
             device,
             &wgpu::util::BufferInitDescriptor {
@@ -1972,11 +1983,18 @@ impl Viewport {
                 module: &background_shader,
                 entry_point: Some("background_fragment"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: crate::display::HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: crate::display::HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    // The pass's reflection images, which a background does
+                    // not write: they stay clear, which is "nothing here".
+                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                ],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(gpu::depth_ignore_state()),
@@ -2330,6 +2348,10 @@ impl Viewport {
             outline: outline_0,
             accum: crate::accum::Accum::new(device, color_format, width.max(1), height.max(1)),
             accumulate: true,
+            pathtracer: pathtracer_0,
+            path_trace: false,
+            ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
+            show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
             show_bloom: true,
             bloom_intensity: 0.12,
@@ -2369,6 +2391,7 @@ impl Viewport {
             self.aa.resize(device, size.0, size.1);
             self.outline.resize(device, size.0, size.1);
             self.accum.resize(device, size.0, size.1);
+            self.ssr.resize(device, size.0, size.1);
             self.ao.resize(device, &self.depth, size.0, size.1);
             // The linear intermediate is the same size as the depth it shares
             // a pass with. Remade only on a real change, because a texture
@@ -2527,6 +2550,34 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
         let view_proj = self.next_sample(view_proj, draws);
+        if self.path_tracing() {
+            if let Some(n) = self.frame_sample {
+                self.pathtracer.prepare(
+                    device,
+                    queue,
+                    camera.projection_matrix(aspect),
+                    camera.view_rotation(),
+                    camera.eye(),
+                    self.render_size,
+                    self.lights.count(),
+                    n,
+                );
+            }
+        }
+        if self.shading == ShadingMode::Rendered && self.show_reflections {
+            // As far as the view is from what it turns about, twice: a floor
+            // reflects what stands on it, not the horizon.
+            self.ssr.prepare(
+                device,
+                queue,
+                &self.depth,
+                self.hdr.view(),
+                camera.projection_matrix(aspect),
+                camera.view_rotation(),
+                self.render_size,
+                (camera.distance * 2.0).max(1e-3) as f32,
+            );
+        }
         if self.shading == ShadingMode::Rendered && self.show_bloom {
             // Over white once exposed: the picture's own exposure, so what
             // glows is what the display cannot show.
@@ -4038,7 +4089,44 @@ impl Viewport {
     /// Whether a still view still has frames to add, so the caller should
     /// draw again.
     pub fn accumulating(&self) -> bool {
-        self.accum_applies && self.accum_samples < crate::accum::SAMPLES
+        self.accum_applies && self.accum_samples < self.sample_limit()
+    }
+
+    /// How many frames a still view takes: the raster mean's sixteen, or the
+    /// path tracer's hundreds.
+    fn sample_limit(&self) -> u32 {
+        if self.path_tracing() {
+            crate::pathtrace::SAMPLES
+        } else {
+            crate::accum::SAMPLES
+        }
+    }
+
+    /// Whether this frame is path traced: asked for, in the rendered view,
+    /// with a scene handed over.
+    pub fn path_tracing(&self) -> bool {
+        self.path_trace && self.shading == ShadingMode::Rendered && self.pathtracer.has_scene()
+    }
+
+    /// Hands the path tracer its scene: the meshes, placed, and the flat
+    /// surfaces they are made of. Starts its sum again.
+    pub fn set_path_trace_scene(
+        &mut self,
+        device: &wgpu::Device,
+        meshes: &[crate::pathtrace::PtMesh<'_>],
+        surfaces: &[crate::pathtrace::PtSurface],
+    ) {
+        self.pathtracer.set_scene(device, meshes, surfaces);
+        self.accum_samples = 0;
+    }
+
+    /// Samples the path tracer has summed, for the header.
+    pub fn path_trace_samples(&self) -> u32 {
+        if self.path_tracing() {
+            self.accum_samples
+        } else {
+            0
+        }
     }
 
     /// Decides this frame's place in the mean and returns the projection to
@@ -4060,7 +4148,7 @@ impl Viewport {
             v.to_bits().hash(&mut h);
         }
         self.render_size.hash(&mut h);
-        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation, self.show_bloom).hash(&mut h);
+        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation, self.show_bloom, self.show_reflections, self.path_trace).hash(&mut h);
         // The lighting inputs since the last frame, folded together, and
         // started afresh for the next: the same calls with the same values
         // give the same number.
@@ -4078,7 +4166,7 @@ impl Viewport {
             self.accum_signature = signature;
             self.accum_samples = 0;
         }
-        if self.accum_samples >= crate::accum::SAMPLES {
+        if self.accum_samples >= self.sample_limit() {
             self.frame_sample = None;
             return view_proj;
         }
@@ -4118,46 +4206,40 @@ impl Viewport {
     /// The depth buffer is shared across the first and third, which is what
     /// lets an overlay hide behind geometry it is behind. The resolve writes
     /// no depth and tests none.
-    fn render_lit(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        draws: &[Draw],
-    ) {
-        if self.accum_applies && self.frame_sample.is_none() {
-            // A still view whose mean is full: the mean, and nothing redrawn.
-            self.accum.present(encoder, target, self.render_size);
-        } else {
-            // The shadow maps first: the geometry pass samples them, so they have
-            // to be finished before it starts. Separate passes rather than one
-            // with several attachments, because each is a different camera.
-            for layer in 0..self.shadow_views.len() {
-                self.shadows.encode(
-                    encoder,
-                    layer,
-                    draws.iter().enumerate().filter_map(|(i, draw)| {
-                        // Detail is deliberately ignored: an object simplified out
-                        // of the picture still casts a shadow onto what is left,
-                        // and an object that stopped casting when it got small
-                        // would have its shadow blink out as the camera pulled
-                        // back.
-                        if draw.mesh.counts.triangles == 0 {
-                            return None;
-                        }
-                        Some((
-                            i as u32,
-                            &draw.mesh.positions,
-                            &draw.mesh.indices,
-                            draw.mesh.counts.triangles,
-                        ))
-                    }),
-                );
-            }
+    /// The rendered view's shadow maps and its rasterised scene, into the
+    /// linear picture, its depth and the reflection images.
+    fn encode_lit_scene(&self, encoder: &mut wgpu::CommandEncoder, draws: &[Draw]) {
+        // The shadow maps first: the geometry pass samples them, so they have
+        // to be finished before it starts. Separate passes rather than one
+        // with several attachments, because each is a different camera.
+        for layer in 0..self.shadow_views.len() {
+            self.shadows.encode(
+                encoder,
+                layer,
+                draws.iter().enumerate().filter_map(|(i, draw)| {
+                    // Detail is deliberately ignored: an object simplified out
+                    // of the picture still casts a shadow onto what is left,
+                    // and an object that stopped casting when it got small
+                    // would have its shadow blink out as the camera pulled
+                    // back.
+                    if draw.mesh.counts.triangles == 0 {
+                        return None;
+                    }
+                    Some((
+                        i as u32,
+                        &draw.mesh.positions,
+                        &draw.mesh.indices,
+                        draw.mesh.counts.triangles,
+                    ))
+                }),
+            );
+        }
 
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("viewport rendered"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport rendered"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
                         view: self.hdr.view(),
                         depth_slice: None,
                         resolve_target: None,
@@ -4175,94 +4257,141 @@ impl Viewport {
                             }),
                             store: wgpu::StoreOp::Store,
                         },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth,
-                        depth_ops: Some(wgpu::Operations {
-                            // Reversed-Z clears to 0: nothing has been drawn.
-                            load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                // Into the region the caller will sample, like every other pass.
-                // This one did not, and the picture showed it: the geometry was
-                // projected across the whole allocation while the wireframe over
-                // it was projected across the drawn region, so whenever the two
-                // differed — a window whose size is not a multiple of the
-                // allocation step, which is most windows — the shaded object sat
-                // a few pixels off its own outline.
-                pass.set_viewport(
-                    0.0,
-                    0.0,
-                    self.render_size.0 as f32,
-                    self.render_size.1 as f32,
-                    0.0,
-                    1.0,
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ssr.gbuffer()[0],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ssr.gbuffer()[1],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.ssr.gbuffer()[2],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        // Reversed-Z clears to 0: nothing has been drawn.
+                        load: wgpu::LoadOp::Clear(DEPTH_CLEAR as f32),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // Into the region the caller will sample, like every other pass.
+            // This one did not, and the picture showed it: the geometry was
+            // projected across the whole allocation while the wireframe over
+            // it was projected across the drawn region, so whenever the two
+            // differed — a window whose size is not a multiple of the
+            // allocation step, which is most windows — the shaded object sat
+            // a few pixels off its own outline.
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.render_size.0 as f32,
+                self.render_size.1 as f32,
+                0.0,
+                1.0,
+            );
+            // The background first, at the far plane, so the geometry that
+            // follows tests against it rather than the other way round.
+            pass.set_pipeline(&self.background_pipeline);
+            pass.set_bind_group(2, &self.shading_bind, &[]);
+            pass.draw(0..3, 0..1);
+
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(2, &self.shading_bind, &[]);
+            // The pipeline is the material's, so it is set inside the loop.
+            // Redundant switches are avoided by remembering the last one rather
+            // than by sorting: a draw order that follows the material would put
+            // the objects in an order the depth pre-pass and the id buffer do
+            // not share, and those have to agree about what is in front.
+            let mut current: Option<&str> = None;
+            for (i, draw) in draws.iter().enumerate() {
+                let mesh = draw.mesh;
+                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                    continue;
+                }
+                pass.set_bind_group(
+                    1,
+                    &self.rendered_objects.bind,
+                    &[self.rendered_objects.offset(i as u32)],
                 );
-                // The background first, at the far plane, so the geometry that
-                // follows tests against it rather than the other way round.
-                pass.set_pipeline(&self.background_pipeline);
-                pass.set_bind_group(2, &self.shading_bind, &[]);
-                pass.draw(0..3, 0..1);
+                pass.set_vertex_buffer(0, mesh.positions.slice(..));
+                pass.set_vertex_buffer(1, mesh.normals.slice(..));
+                pass.set_vertex_buffer(2, mesh.uvs.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
 
-                pass.set_bind_group(0, &self.globals_bind, &[]);
-                pass.set_bind_group(2, &self.shading_bind, &[]);
-                // The pipeline is the material's, so it is set inside the loop.
-                // Redundant switches are avoided by remembering the last one rather
-                // than by sorting: a draw order that follows the material would put
-                // the objects in an order the depth pre-pass and the id buffer do
-                // not share, and those have to agree about what is in front.
-                let mut current: Option<&str> = None;
-                for (i, draw) in draws.iter().enumerate() {
-                    let mesh = draw.mesh;
-                    if mesh.counts.triangles == 0 || !draw.detail.draw {
+                // One call per run of triangles sharing a material slot. Nearly
+                // every mesh has exactly one run, so this is the same single
+                // call it always was — the loop is what lets a mesh whose faces
+                // carry different materials draw in more than one of them,
+                // which until now it could not: `material_index` reached the
+                // glTF exporter and never reached the screen.
+                for run in &mesh.submeshes {
+                    let material = draw.material_for(run.slot);
+                    // A run naming a material that was never set draws nothing.
+                    // Skipped rather than substituted: a stand-in would be a
+                    // grey face where the user put a red one, and a missing
+                    // face is the complaint that gets reported.
+                    let Some(source) = self.material_pipeline_of.get(material as usize) else {
                         continue;
-                    }
-                    pass.set_bind_group(
-                        1,
-                        &self.rendered_objects.bind,
-                        &[self.rendered_objects.offset(i as u32)],
-                    );
-                    pass.set_vertex_buffer(0, mesh.positions.slice(..));
-                    pass.set_vertex_buffer(1, mesh.normals.slice(..));
-                    pass.set_vertex_buffer(2, mesh.uvs.slice(..));
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-
-                    // One call per run of triangles sharing a material slot. Nearly
-                    // every mesh has exactly one run, so this is the same single
-                    // call it always was — the loop is what lets a mesh whose faces
-                    // carry different materials draw in more than one of them,
-                    // which until now it could not: `material_index` reached the
-                    // glTF exporter and never reached the screen.
-                    for run in &mesh.submeshes {
-                        let material = draw.material_for(run.slot);
-                        // A run naming a material that was never set draws nothing.
-                        // Skipped rather than substituted: a stand-in would be a
-                        // grey face where the user put a red one, and a missing
-                        // face is the complaint that gets reported.
-                        let Some(source) = self.material_pipeline_of.get(material as usize) else {
+                    };
+                    if current != Some(source.as_str()) {
+                        let Some(pipeline) = self.material_pipelines.peek(source) else {
                             continue;
                         };
-                        if current != Some(source.as_str()) {
-                            let Some(pipeline) = self.material_pipelines.peek(source) else {
-                                continue;
-                            };
-                            pass.set_pipeline(pipeline);
-                            current = Some(source.as_str());
-                        }
-                        pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
-                        pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
+                        pass.set_pipeline(pipeline);
+                        current = Some(source.as_str());
                     }
+                    pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
+                    pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
                 }
             }
+        }
+    }
 
-            // Corners and contact darkened, then the glow on top: occlusion
-            // shades light, it does not shade a lens's flare.
+    fn render_lit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[Draw],
+    ) {
+        if self.path_tracing() {
+            // The path tracer's mean onto the picture — over the rasterised
+            // scene, which is still drawn for the depth the overlays test
+            // against. A full mean is left on the picture and shown again.
+            if self.frame_sample.is_some() || !self.accum_applies {
+                self.encode_lit_scene(encoder, draws);
+                self.pathtracer.render(encoder, &self.shading_bind, self.hdr.view());
+                if self.show_bloom {
+                    self.bloom.apply(encoder, self.hdr.view());
+                }
+            }
+            self.screen.draw_with(encoder, &self.screen_bind, target);
+        } else if self.accum_applies && self.frame_sample.is_none() {
+            // A still view whose mean is full: the mean, and nothing redrawn.
+            self.accum.present(encoder, target, self.render_size);
+        } else {
+            self.encode_lit_scene(encoder, draws);
+            // Reflections first, from the picture as lit; then corners and
+            // contact darkened, then the glow on top: occlusion shades light,
+            // it does not shade a lens's flare.
+            if self.show_reflections {
+                self.ssr.apply(encoder, self.hdr.view(), self.render_size);
+            }
             if self.ambient_occlusion && !self.xray {
                 self.ao.apply_linear(encoder, self.hdr.view(), self.render_size);
             }
@@ -4423,13 +4552,19 @@ fn rendered_pipeline(
             module: &module,
             entry_point: Some("fs_rendered"),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                // The linear intermediate, not the window: this pass writes
-                // light and the resolve writes a picture.
-                format: crate::display::HDR_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    // The linear intermediate, not the window: this pass writes
+                    // light and the resolve writes a picture.
+                    format: crate::display::HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // What the reflections need, beside it: see `Ssr`.
+                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+            ],
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,

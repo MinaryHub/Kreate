@@ -559,6 +559,9 @@ struct App {
     /// *document*, and `kreate-render` does not see one — the same reason the
     /// environment's key lives here.
     materials: Option<kreate::materials::Materials>,
+    /// What the path tracer's scene was last built from; a different scene
+    /// is built again.
+    path_trace_key: Option<u64>,
     /// Which environment the viewport is holding, so a frame does not rebuild
     /// six faces and their mips to find out that nothing changed.
     ///
@@ -795,6 +798,7 @@ impl App {
             latency: LatencyStats::default(),
             doc,
             materials: None,
+            path_trace_key: None,
             environment: None,
             registry,
             history: History::new(),
@@ -5556,6 +5560,8 @@ impl App {
             xray: gfx.viewport.xray,
             outline: gfx.viewport.show_outline,
             bloom: gfx.viewport.show_bloom,
+            reflections: gfx.viewport.show_reflections,
+            path_trace: gfx.viewport.path_trace,
         };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
@@ -5646,6 +5652,49 @@ impl App {
                     .set_materials(&gfx.gpu.device, &gfx.gpu.queue, &sources);
             }
             self.materials = Some(materials);
+            // The path tracer's scene, rebuilt when what it is made of
+            // changed — not when the camera moved.
+            if gfx.viewport.path_trace {
+                if let Some(materials) = self.materials.as_ref() {
+                    let surfaces = materials.flat_surfaces(&self.doc);
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    for (id, mesh) in &self.evaluated {
+                        (Arc::as_ptr(mesh) as usize).hash(&mut h);
+                        for v in self.doc.world_transform(*id).to_cols_array() {
+                            v.to_bits().hash(&mut h);
+                        }
+                        materials.index_of(&self.doc, *id).hash(&mut h);
+                    }
+                    format!("{surfaces:?}").hash(&mut h);
+                    let key = h.finish();
+                    if self.path_trace_key != Some(key) {
+                        self.path_trace_key = Some(key);
+                        let extracted: Vec<_> = self
+                            .evaluated
+                            .iter()
+                            .map(|(id, mesh)| {
+                                let cpu = kreate_render::RenderMeshCpu::extract(mesh);
+                                let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
+                                let normals: Vec<kreate_math::Vec3> =
+                                    cpu.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect();
+                                (positions, normals, cpu.indices, self.doc.world_transform(*id), materials.index_of(&self.doc, *id))
+                            })
+                            .collect();
+                        let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
+                            .iter()
+                            .map(|(positions, normals, indices, transform, surface)| kreate_render::pathtrace::PtMesh {
+                                positions,
+                                normals,
+                                indices,
+                                transform: *transform,
+                                surface: *surface,
+                            })
+                            .collect();
+                        gfx.viewport.set_path_trace_scene(&gfx.gpu.device, &meshes, &surfaces);
+                    }
+                }
+            }
             // With the distance each lamp is worth computing to, which is
             // what the tile pass culls against.
             let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);
@@ -5677,6 +5726,7 @@ impl App {
                 shading: gfx.viewport.shading,
                 exposure: shot.exposure as f32,
                 metered: shot.metered,
+                samples: gfx.viewport.path_trace_samples(),
                 orthographic: matches!(
                     self.camera.projection,
                     kreate_render::Projection::Orthographic
@@ -6242,6 +6292,20 @@ impl App {
                 self.xray = !self.xray;
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.xray = self.xray;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_path_trace" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.path_trace = !gfx.viewport.path_trace;
+                }
+                // Built afresh when it is next wanted.
+                self.path_trace_key = None;
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_reflections" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.show_reflections = !gfx.viewport.show_reflections;
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }

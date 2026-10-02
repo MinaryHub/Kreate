@@ -26,10 +26,12 @@ pub mod outline;
 pub mod mesh_gpu;
 pub mod motion;
 pub mod palette;
+pub mod pathtrace;
 pub mod picking;
 pub mod region_select;
 pub mod shading;
 pub mod shadow;
+pub mod ssr;
 pub mod tiles;
 pub mod viewport;
 

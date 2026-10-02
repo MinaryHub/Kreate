@@ -309,6 +309,8 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_xray",
     "view.toggle_outline",
     "view.toggle_bloom",
+    "view.toggle_reflections",
+    "view.toggle_path_trace",
     "app.rename",
     "view.toggle_face_orientation",
     // File commands are the application's, not the document's: there is no
