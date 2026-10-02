@@ -28,6 +28,8 @@ struct Params {
 pub struct Ao {
     estimate: wgpu::RenderPipeline,
     apply: wgpu::RenderPipeline,
+    /// The same, into the rendered view's linear picture.
+    apply_linear: wgpu::RenderPipeline,
     depth_layout: wgpu::BindGroupLayout,
     occlusion_layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
@@ -136,6 +138,13 @@ impl Ao {
             },
         };
         let apply = pipeline("ao apply", &[None, Some(&occlusion_layout)], "ao_apply", surfaces, Some(multiply));
+        let apply_linear = pipeline(
+            "ao apply linear",
+            &[None, Some(&occlusion_layout)],
+            "ao_apply",
+            crate::display::HDR_FORMAT,
+            Some(multiply),
+        );
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ao params"),
             size: std::mem::size_of::<Params>() as u64,
@@ -146,7 +155,7 @@ impl Ao {
         let occlusion = Self::image(device, size);
         let depth_bind = Self::depth_bind(device, &depth_layout, depth, &params);
         let occlusion_bind = Self::occlusion_bind(device, &occlusion_layout, &occlusion);
-        Self { estimate, apply, depth_layout, occlusion_layout, params, occlusion, depth_bind, occlusion_bind, size }
+        Self { estimate, apply, apply_linear, depth_layout, occlusion_layout, params, occlusion, depth_bind, occlusion_bind, size }
     }
 
     fn image(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
@@ -220,6 +229,21 @@ impl Ao {
     /// Darkens `surfaces` where geometry closes it in. Reads the depth the
     /// surfaces wrote, so it runs after them and outside their pass.
     pub fn apply(&self, encoder: &mut wgpu::CommandEncoder, surfaces: &wgpu::TextureView, region: (u32, u32)) {
+        self.apply_with(encoder, surfaces, region, &self.apply);
+    }
+
+    /// [`Ao::apply`], into the rendered view's linear picture.
+    pub fn apply_linear(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView, region: (u32, u32)) {
+        self.apply_with(encoder, picture, region, &self.apply_linear);
+    }
+
+    fn apply_with(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        surfaces: &wgpu::TextureView,
+        region: (u32, u32),
+        apply: &wgpu::RenderPipeline,
+    ) {
         {
             let mut p = begin(encoder, &self.occlusion, "ao estimate", true, region);
             p.set_pipeline(&self.estimate);
@@ -227,7 +251,7 @@ impl Ao {
             p.draw(0..3, 0..1);
         }
         let mut p = begin(encoder, surfaces, "ao apply", false, region);
-        p.set_pipeline(&self.apply);
+        p.set_pipeline(apply);
         p.set_bind_group(1, &self.occlusion_bind, &[]);
         p.draw(0..3, 0..1);
     }

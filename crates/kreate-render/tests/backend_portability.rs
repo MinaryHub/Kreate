@@ -76,6 +76,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("ao", kreate_render::ao::source().into()),
         ("outline", kreate_render::outline::source().into()),
         ("accum", kreate_render::accum::source().into()),
+        ("bloom", kreate_render::bloom::source().into()),
         ("lights", include_str!("../src/shaders/lights.wgsl").into()),
         ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
         ("shadow", include_str!("../src/shaders/shadow.wgsl").into()),

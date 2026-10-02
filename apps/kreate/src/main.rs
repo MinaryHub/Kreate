@@ -5555,6 +5555,7 @@ impl App {
             ambient_occlusion: gfx.viewport.ambient_occlusion,
             xray: gfx.viewport.xray,
             outline: gfx.viewport.show_outline,
+            bloom: gfx.viewport.show_bloom,
         };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
@@ -6241,6 +6242,12 @@ impl App {
                 self.xray = !self.xray;
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.xray = self.xray;
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_bloom" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.show_bloom = !gfx.viewport.show_bloom;
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }

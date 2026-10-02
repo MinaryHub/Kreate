@@ -1378,6 +1378,12 @@ pub struct Viewport {
     aa: crate::fxaa::Fxaa,
     /// The orange line around selected objects.
     outline: crate::outline::Outline,
+    /// The rendered view's glow around what is brighter than white.
+    bloom: crate::bloom::Bloom,
+    /// Whether the rendered view glows around its brightest light.
+    pub show_bloom: bool,
+    /// How strong the glow is.
+    pub bloom_intensity: f32,
     /// The running mean a still view refines itself into.
     accum: crate::accum::Accum,
     /// Whether a still view refines itself over the next frames.
@@ -2324,6 +2330,9 @@ impl Viewport {
             outline: outline_0,
             accum: crate::accum::Accum::new(device, color_format, width.max(1), height.max(1)),
             accumulate: true,
+            bloom: crate::bloom::Bloom::new(device),
+            show_bloom: true,
+            bloom_intensity: 0.12,
             accum_samples: 0,
             accum_signature: 0,
             accum_applies: false,
@@ -2518,6 +2527,20 @@ impl Viewport {
         }
         let view_proj = camera.view_projection(aspect);
         let view_proj = self.next_sample(view_proj, draws);
+        if self.shading == ShadingMode::Rendered && self.show_bloom {
+            // Over white once exposed: the picture's own exposure, so what
+            // glows is what the display cannot show.
+            self.bloom.prepare(
+                device,
+                queue,
+                self.hdr.view(),
+                self.render_size,
+                self.size,
+                self.display.exposure,
+                self.bloom_intensity,
+                1.0,
+            );
+        }
         self.aa.set_region(queue, self.render_size);
         // A reach that follows the view: a tenth of the way to what the view
         // is turning about, so the shading looks the same at any zoom.
@@ -2526,7 +2549,9 @@ impl Viewport {
             camera.projection_matrix(aspect),
             self.render_size,
             (camera.distance * 0.1).max(1e-4) as f32,
-            1.0,
+            // Gentler in the rendered view, where the lights already shade
+            // the form and the occlusion is grounding rather than drawing it.
+            if self.shading == ShadingMode::Rendered { 0.6 } else { 1.0 },
         );
 
         let right = camera.right().as_vec3();
@@ -4035,7 +4060,7 @@ impl Viewport {
             v.to_bits().hash(&mut h);
         }
         self.render_size.hash(&mut h);
-        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation).hash(&mut h);
+        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation, self.show_bloom).hash(&mut h);
         // The lighting inputs since the last frame, folded together, and
         // started afresh for the next: the same calls with the same values
         // give the same number.
@@ -4236,6 +4261,14 @@ impl Viewport {
                 }
             }
 
+            // Corners and contact darkened, then the glow on top: occlusion
+            // shades light, it does not shade a lens's flare.
+            if self.ambient_occlusion && !self.xray {
+                self.ao.apply_linear(encoder, self.hdr.view(), self.render_size);
+            }
+            if self.show_bloom {
+                self.bloom.apply(encoder, self.hdr.view());
+            }
             match self.frame_sample.filter(|_| self.accum_applies) {
                 // Into the mean, and the mean onto the target: the display
                 // transform's picture, averaged — which is what smooths the

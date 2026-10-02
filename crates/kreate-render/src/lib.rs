@@ -11,6 +11,7 @@ pub mod cluster_cull;
 pub mod deform;
 pub mod accum;
 pub mod ao;
+pub mod bloom;
 pub mod display;
 pub mod fxaa;
 pub mod environment;

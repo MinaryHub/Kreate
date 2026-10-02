@@ -551,6 +551,11 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
 /// test here does, can never see it.
 fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SHADOW_SIZE, SHADOW_SIZE);
+    // Shadows are measured by their edges and their light, and the glow
+    // around bright light softens edges and the occlusion darkens corners —
+    // different claims, with their own tests.
+    viewport.show_bloom = false;
+    viewport.ambient_occlusion = false;
     viewport.shading = ShadingMode::Rendered;
     viewport.set_display(&gpu.queue, FRAMED);
     viewport.show_grid = false;
@@ -1337,6 +1342,11 @@ fn only_the_rendered_mode_pays_for_shadows() {
     // count, like `cast_shadow`.
     let gpu = gpu_or_skip!(gpu());
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SHADOW_SIZE, SHADOW_SIZE);
+    // Shadows are measured by their edges and their light, and the glow
+    // around bright light softens edges and the occlusion darkens corners —
+    // different claims, with their own tests.
+    viewport.show_bloom = false;
+    viewport.ambient_occlusion = false;
     viewport.shading = ShadingMode::Studio;
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
     let cube =
@@ -1852,4 +1862,81 @@ fn more_lights_than_the_buffer_started_with_still_light_the_scene() {
         shot.brightest
     );
     assert!(shot.lit > 400, "only {} pixels were lit", shot.lit);
+}
+
+/// Bloom: light past white spills into the dark around it — the background
+/// beside a hard-lit cube is brighter with the glow than without — and a
+/// picture with nothing past white is left as it was.
+#[test]
+fn light_past_white_glows_and_the_rest_does_not() {
+    let gpu = gpu_or_skip!(gpu());
+    let shot = |bloom: bool, lux: f32| {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Rendered;
+        viewport.show_bloom = bloom;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.set_display(&gpu.queue, FRAMED);
+        let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
+        let uploaded = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+        let camera = Camera { distance: 6.0, ..Camera::default() };
+        one_material(&gpu, &mut viewport, grey());
+        let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(lux)]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        read_frame(&gpu, &mut viewport, &draws)
+    };
+    // Far past white: the glow brightens the background around the cube.
+    let (plain, glowing) = (shot(false, 2_000_000.0), shot(true, 2_000_000.0));
+    let lift: f32 = plain.iter().zip(&glowing).map(|(a, b)| (b[0] - a[0]).max(0.0)).sum();
+    assert!(lift > 1.0, "the glow reached nothing: {lift}");
+    // Nothing past white: the same picture either way.
+    let (dim_plain, dim_glow) = (shot(false, 2.0), shot(true, 2.0));
+    let most: f32 = dim_plain.iter().zip(&dim_glow).map(|(a, b)| (a[0] - b[0]).abs()).fold(0.0, f32::max);
+    assert!(most < 0.02, "a dim picture changed by {most}");
+}
+
+/// Draws the prepared viewport and reads the frame back.
+fn read_frame(gpu: &Gpu, viewport: &mut Viewport, draws: &[Draw]) -> Vec<[f32; 4]> {
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frame"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    viewport.render(&mut encoder, &view, draws);
+    let row = (SIZE * 4).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(SIZE) },
+        },
+        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+    (0..SIZE as usize)
+        .flat_map(|y| {
+            let line = data[y * row as usize..y * row as usize + (SIZE * 4) as usize].to_vec();
+            (0..SIZE as usize).map(move |x| {
+                [line[x * 4] as f32 / 255.0, line[x * 4 + 1] as f32 / 255.0, line[x * 4 + 2] as f32 / 255.0, line[x * 4 + 3] as f32 / 255.0]
+            })
+        })
+        .collect()
 }
