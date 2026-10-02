@@ -1376,20 +1376,32 @@ impl App {
                     ],
                     self,
                 ),
-                group(
-                    &t("menu-group-object"),
-                    &[
-                        ("object.add_primitive", &[]),
-                        (
-                            "object.duplicate",
+                {
+                    let mut object = group(
+                        &t("menu-group-object"),
+                        &[
+                            (
+                                "object.duplicate",
                             &[("linked", PropertyValue::Bool(false))],
                         ),
-                        ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
-                        ("object.join", &[]),
-                        ("object.delete", &[]),
-                    ],
-                    self,
-                ),
+                            ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
+                            ("object.join", &[]),
+                            ("object.delete", &[]),
+                        ],
+                        self,
+                    );
+                    // Add opens the Add menu, as Shift+A does — a shape, a
+                    // lamp, a camera. The row used to add a cube with nothing
+                    // said, which lands on the 3D cursor: on a new scene that
+                    // is inside the cube already there, and nothing appeared
+                    // to happen.
+                    let mut params = PropertyMap::new();
+                    params.set("menu", PropertyValue::Text("add".into()));
+                    let mut info = self.command_info("app.menu", &params);
+                    info.name = format!("{}...", t("menu-add"));
+                    object.entries.insert(0, Entry::new("app.menu", info).with_params(params));
+                    object
+                },
             ]
         };
         self.ui.context_menu.groups = groups;

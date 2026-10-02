@@ -91,6 +91,19 @@ pub fn command_button(ui: &mut egui::Ui, info: &CommandInfo, wide: bool) -> egui
     response
 }
 
+/// Queues what choosing `entry` does.
+///
+/// An application command (opening another menu) is not an operator, and
+/// goes the way its key does. Run as an operator it named nothing the
+/// registry knows, and the row did nothing.
+pub fn choose(entry: &Entry, queue: &mut CommandQueue) {
+    if entry.op_id.starts_with("app.") {
+        queue.dispatch(entry.op_id.clone(), entry.params.clone());
+    } else {
+        queue.run(entry.op_id.clone(), entry.params.clone());
+    }
+}
+
 /// Draws the grouped entries into an open menu, queuing whatever is chosen.
 ///
 /// Returns whether something was chosen, so the caller can close the menu. A
@@ -111,7 +124,7 @@ pub fn menu_body(ui: &mut egui::Ui, groups: &[Group], queue: &mut CommandQueue) 
         for entry in &group.entries {
             let response = command_button(ui, &entry.info, true);
             if response.clicked() {
-                queue.run(entry.op_id.clone(), entry.params.clone());
+                choose(entry, queue);
                 chosen = true;
             }
         }
@@ -141,6 +154,18 @@ mod tests {
         let entry = Entry::new("object.add_primitive", info("Cube", "A")).with_params(params);
         assert_eq!(entry.op_id, "object.add_primitive");
         assert!(entry.params.get("shape").is_some());
+    }
+
+    #[test]
+    fn an_application_row_is_dispatched_and_an_operator_row_is_run() {
+        // The right-click menu's Add opens the Add menu, which is the
+        // application's and not an operator: queued as one, it did nothing.
+        let mut queue = CommandQueue::default();
+        choose(&Entry::new("app.menu", info("Add...", "Shift A")), &mut queue);
+        choose(&Entry::new("object.delete", info("Delete", "X")), &mut queue);
+        let commands = queue.drain();
+        assert!(matches!(&commands[0], crate::Command::Dispatch { op_id, .. } if op_id == "app.menu"));
+        assert!(matches!(&commands[1], crate::Command::RunOperator { op_id, .. } if op_id == "object.delete"));
     }
 
     #[test]

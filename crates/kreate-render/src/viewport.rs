@@ -4092,6 +4092,14 @@ impl Viewport {
             pass.draw(0..3, 0..1);
         }
 
+        // Only the meshes being edited show their elements. Every other
+        // object is scenery in edit mode — it cannot be picked into, and its
+        // vertices drawn as handles were handles that did nothing. A caller
+        // that marks no draw as edited gets them on every draw, as before
+        // there was a mark to read.
+        let any_editing = draws.iter().any(|d| d.editing);
+        let shows_elements = |draw: &Draw| !any_editing || draw.editing;
+
         // Selected faces first among the overlays, at the layer nearest the
         // surface, so a selected face's own edges and vertices still read on top
         // of its fill.
@@ -4100,7 +4108,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.element_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                if mesh.counts.triangles == 0 || !draw.detail.draw || !shows_elements(draw) {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.id_bind, &[]);
@@ -4150,7 +4158,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.element_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.verts == 0 || !draw.detail.draw || draw.detail.point_alpha <= 0.0 {
+                if mesh.counts.verts == 0 || !draw.detail.draw || draw.detail.point_alpha <= 0.0 || !shows_elements(draw) {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.id_bind, &[]);

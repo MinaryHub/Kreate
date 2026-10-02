@@ -123,7 +123,15 @@ fn render(
     );
     after_upload(&gpu.queue, &uploaded);
 
-    let mut draws = vec![Draw::new(&uploaded, DAffine3::IDENTITY)];
+    let mut draws = if PAIR.with(|p| p.get()) {
+        // Two copies: the left being edited, the right only standing there.
+        vec![
+            Draw::new(&uploaded, DAffine3::from_translation(DVec3::new(-1.2, 0.0, 0.0))).editing(true),
+            Draw::new(&uploaded, DAffine3::from_translation(DVec3::new(1.2, 0.0, 0.0))),
+        ]
+    } else {
+        vec![Draw::new(&uploaded, DAffine3::IDENTITY)]
+    };
     let mut camera = Camera::default();
     camera = camera.looking_along(kreate_render::ViewAxis::PosZ);
     camera.pivot = DVec3::ZERO;
@@ -570,4 +578,38 @@ fn a_flags_update_is_refused_when_the_topology_changed() {
     if rendered.is_none() {
         eprintln!("no GPU adapter; skipping");
     }
+}
+
+thread_local! {
+    /// Whether `render` draws two copies, only the first of them edited.
+    static PAIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// In edit mode only the mesh being edited shows its vertices and faces. The
+/// object beside it is scenery: its elements cannot be picked, and drawn as
+/// handles they were handles that did nothing.
+#[test]
+fn only_the_edited_mesh_shows_its_elements() {
+    let mesh = kreate_mesh::primitives::cube(1.0);
+    PAIR.with(|p| p.set(true));
+    let plain = render(&mesh, false, |_, _| {});
+    let shown = render(&mesh, true, |_, _| {});
+    PAIR.with(|p| p.set(false));
+    let (Some(plain), Some(shown)) = (plain, shown) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let half = |pixels: &[[u8; 4]], right: bool| -> Vec<[u8; 4]> {
+        pixels
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| ((*i as u32 % SIZE) >= SIZE / 2) == right)
+            .map(|(_, p)| *p)
+            .collect()
+    };
+    let changed = |right: bool| {
+        half(&plain, right).iter().zip(&half(&shown, right)).filter(|(a, b)| a != b).count()
+    };
+    assert!(changed(false) > 20, "the edited mesh shows no elements: {}", changed(false));
+    assert_eq!(changed(true), 0, "the mesh not being edited shows its elements");
 }
