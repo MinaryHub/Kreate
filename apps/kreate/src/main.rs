@@ -5677,7 +5677,7 @@ impl App {
             // changed — not when the camera moved.
             if gfx.viewport.path_trace {
                 if let Some(materials) = self.materials.as_ref() {
-                    let surfaces = materials.flat_surfaces(&self.doc);
+                    let (surfaces, images) = materials.flat_surfaces(&self.doc);
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     for (id, mesh) in &self.evaluated {
@@ -5688,6 +5688,10 @@ impl App {
                         materials.index_of(&self.doc, *id).hash(&mut h);
                     }
                     format!("{surfaces:?}").hash(&mut h);
+                    for image in &images {
+                        (image.width, image.height, image.pixels.len()).hash(&mut h);
+                        image.pixels.iter().step_by(97).for_each(|b| b.hash(&mut h));
+                    }
                     let key = h.finish();
                     if self.path_trace_key != Some(key) {
                         self.path_trace_key = Some(key);
@@ -5697,22 +5701,33 @@ impl App {
                             .map(|(id, mesh)| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
                                 let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
+                                let uvs = cpu.uvs.clone();
                                 let normals: Vec<kreate_math::Vec3> =
                                     cpu.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect();
-                                (positions, normals, cpu.indices, self.doc.world_transform(*id), materials.index_of(&self.doc, *id))
+                                (positions, uvs, normals, cpu.indices, self.doc.world_transform(*id), materials.index_of(&self.doc, *id))
                             })
                             .collect();
                         let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
                             .iter()
-                            .map(|(positions, normals, indices, transform, surface)| kreate_render::pathtrace::PtMesh {
+                            .map(|(positions, uvs, normals, indices, transform, surface)| kreate_render::pathtrace::PtMesh {
                                 positions,
+                                uvs,
                                 normals,
                                 indices,
                                 transform: *transform,
                                 surface: *surface,
                             })
                             .collect();
-                        gfx.viewport.set_path_trace_scene(&gfx.gpu.device, &meshes, &surfaces);
+                        let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
+                            .iter()
+                            .map(|i| kreate_render::pathtrace::PtImage {
+                                width: i.width,
+                                height: i.height,
+                                pixels: &i.pixels,
+                                color: i.kind == kreate_render::material::TextureKind::Color,
+                            })
+                            .collect();
+                        gfx.viewport.set_path_trace_scene(&gfx.gpu.device, &gfx.gpu.queue, &meshes, &surfaces, &pt_images);
                     }
                 }
             }

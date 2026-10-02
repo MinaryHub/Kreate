@@ -2023,6 +2023,20 @@ fn traced_shot_with(
     lens: Option<kreate_render::pathtrace::Lens>,
     denoise: bool,
 ) -> Vec<[f32; 4]> {
+    let grey = kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5, ..Default::default() };
+    traced_scene(gpu, traced, frames, lens, denoise, grey, &[])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn traced_scene(
+    gpu: &Gpu,
+    traced: bool,
+    frames: u32,
+    lens: Option<kreate_render::pathtrace::Lens>,
+    denoise: bool,
+    surface: kreate_render::pathtrace::PtSurface,
+    images: &[kreate_render::pathtrace::PtImage<'_>],
+) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.path_trace = traced;
@@ -2047,6 +2061,7 @@ fn traced_shot_with(
         ..Camera::default()
     };
     let parts = [(&cube_cpu, lift), (&floor_cpu, glam::DAffine3::IDENTITY)];
+    let uvs: Vec<Vec<[f32; 2]>> = parts.iter().map(|(m, _)| m.uvs.clone()).collect();
     let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
         .iter()
         .map(|(m, _)| {
@@ -2059,8 +2074,10 @@ fn traced_shot_with(
     let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = parts
         .iter()
         .zip(&data)
-        .map(|((m, t), (p, n))| kreate_render::pathtrace::PtMesh {
+        .zip(&uvs)
+        .map(|(((m, t), (p, n)), uv)| kreate_render::pathtrace::PtMesh {
             positions: p,
+            uvs: uv,
             normals: n,
             indices: &m.indices,
             transform: *t,
@@ -2069,8 +2086,10 @@ fn traced_shot_with(
         .collect();
     viewport.set_path_trace_scene(
         &gpu.device,
+        &gpu.queue,
         &meshes,
-        &[kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 }],
+        &[surface],
+        images,
     );
     let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
     let mut out = Vec::new();
@@ -2137,4 +2156,25 @@ fn a_young_mean_denoised_is_nearer_the_converged_picture() {
     }
     let (r, f) = (error(&raw), error(&filtered));
     assert!(f < r * 0.7, "filtered error {f} against raw {r}");
+}
+
+/// Textures: a floor whose base colour image is red on one half and blue on
+/// the other is traced red and blue, where without it the floor is grey.
+#[test]
+fn the_path_tracer_reads_the_base_colour_image() {
+    let gpu = gpu_or_skip!(gpu());
+    // Two texels: red, then blue — sRGB-encoded, as a colour image is.
+    let pixels = [230u8, 20, 20, 255, 20, 20, 230, 255];
+    let image = kreate_render::pathtrace::PtImage { width: 2, height: 1, pixels: &pixels, color: true };
+    let white = kreate_render::pathtrace::PtSurface {
+        base_color: [1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        base_color_image: Some(0),
+        ..Default::default()
+    };
+    let shot = traced_scene(&gpu, true, 32, None, true, white, &[image]);
+    let reddish = shot.iter().filter(|p| p[0] > p[2] + 0.15).count();
+    let bluish = shot.iter().filter(|p| p[2] > p[0] + 0.15).count();
+    assert!(reddish > 100 && bluish > 100, "{reddish} red and {bluish} blue pixels");
 }

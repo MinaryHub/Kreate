@@ -4135,10 +4135,12 @@ impl Viewport {
     pub fn set_path_trace_scene(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         meshes: &[crate::pathtrace::PtMesh<'_>],
         surfaces: &[crate::pathtrace::PtSurface],
+        images: &[crate::pathtrace::PtImage<'_>],
     ) {
-        self.pathtracer.set_scene(device, meshes, surfaces);
+        self.pathtracer.set_scene(device, queue, meshes, surfaces, images);
         self.accum_samples = 0;
     }
 

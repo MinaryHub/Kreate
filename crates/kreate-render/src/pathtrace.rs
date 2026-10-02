@@ -36,6 +36,8 @@ pub const SAMPLES: u32 = 512;
 /// which of the flat surfaces it is made of.
 pub struct PtMesh<'a> {
     pub positions: &'a [[f32; 3]],
+    /// Texture coordinates, one per position.
+    pub uvs: &'a [[f32; 2]],
     /// Unit normals, one per position.
     pub normals: &'a [Vec3],
     pub indices: &'a [u32],
@@ -52,12 +54,48 @@ pub struct Lens {
     pub focus: f32,
 }
 
-/// A flat standard surface: linear base colour, metallic, roughness.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A standard surface: linear base colour, metallic, roughness, and the
+/// images that multiply them — indices into the images handed over with it.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct PtSurface {
     pub base_color: [f32; 3],
     pub metallic: f32,
     pub roughness: f32,
+    pub base_color_image: Option<usize>,
+    /// glTF's packing: roughness in green, metallic in blue.
+    pub metallic_roughness_image: Option<usize>,
+}
+
+/// An image a surface reads: four bytes a pixel, row by row; sRGB-encoded for
+/// a colour, as stored for data.
+#[derive(Clone, Copy, Debug)]
+pub struct PtImage<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'a [u8],
+    pub color: bool,
+}
+
+/// The size every image is resampled to for the tracer: one layer each of a
+/// texture array, which is what a compute pass can index by number.
+const IMAGE_SIZE: u32 = 512;
+
+/// `image` resampled to `IMAGE_SIZE` square, nearest texel.
+fn resample(image: &PtImage<'_>) -> Vec<u8> {
+    let (w, h) = (image.width.max(1), image.height.max(1));
+    let mut out = vec![255u8; (IMAGE_SIZE * IMAGE_SIZE * 4) as usize];
+    for y in 0..IMAGE_SIZE {
+        let sy = (y * h / IMAGE_SIZE).min(h - 1);
+        for x in 0..IMAGE_SIZE {
+            let sx = (x * w / IMAGE_SIZE).min(w - 1);
+            let from = ((sy * w + sx) * 4) as usize;
+            let to = ((y * IMAGE_SIZE + x) * 4) as usize;
+            if let Some(src) = image.pixels.get(from..from + 4) {
+                out[to..to + 4].copy_from_slice(src);
+            }
+        }
+    }
+    out
 }
 
 #[repr(C)]
@@ -85,6 +123,9 @@ struct GpuNode {
 }
 
 struct Scene {
+    uvs: wgpu::Buffer,
+    colour_images: wgpu::TextureView,
+    data_images: wgpu::TextureView,
     positions: wgpu::Buffer,
     normals: wgpu::Buffer,
     triangles: wgpu::Buffer,
@@ -98,6 +139,7 @@ pub struct PathTracer {
     resolve: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
+    image_sampler: wgpu::Sampler,
     params: wgpu::Buffer,
     resolve_params: wgpu::Buffer,
     scene: Option<Scene>,
@@ -145,6 +187,33 @@ impl PathTracer {
                 storage(5, true, c),
                 storage(6, true, c),
                 storage(7, false, c),
+                storage(8, true, c),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: c,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: c,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: c,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -214,7 +283,16 @@ impl PathTracer {
         );
         let resolve_params = buffer("path trace resolve params", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let sum = buffer("path trace sum", 16, wgpu::BufferUsages::STORAGE);
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("path trace images"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
+            image_sampler,
             trace,
             resolve,
             scene_layout,
@@ -239,7 +317,15 @@ impl PathTracer {
     /// Hands over the scene: its meshes, placed, and the surfaces they name.
     /// Builds the BVH, which is the part that costs; done when the scene
     /// changes, not when the camera does.
-    pub fn set_scene(&mut self, device: &wgpu::Device, meshes: &[PtMesh<'_>], surfaces: &[PtSurface]) {
+    pub fn set_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        meshes: &[PtMesh<'_>],
+        surfaces: &[PtSurface],
+        images: &[PtImage<'_>],
+    ) {
+        let mut uvs: Vec<[f32; 2]> = Vec::new();
         let mut positions: Vec<Vec3> = Vec::new();
         let mut normals: Vec<[f32; 4]> = Vec::new();
         let mut triangles: Vec<[u32; 4]> = Vec::new();
@@ -247,6 +333,7 @@ impl PathTracer {
             let base = positions.len() as u32;
             let to_world = mesh.transform;
             let normal_matrix = to_world.matrix3.inverse().transpose();
+            uvs.extend((0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])));
             for (p, n) in mesh.positions.iter().zip(mesh.normals) {
                 let w = to_world.transform_point3(glam::DVec3::from_array(p.map(|c| c as f64)));
                 positions.push(w.as_vec3());
@@ -272,17 +359,65 @@ impl PathTracer {
         if order.is_empty() {
             order.push(0);
         }
+        // Each image to a layer of the array its kind goes in, and each
+        // surface told which.
+        let mut colour_layers: Vec<Vec<u8>> = Vec::new();
+        let mut data_layers: Vec<Vec<u8>> = Vec::new();
+        let mut layer_of: Vec<i32> = Vec::with_capacity(images.len());
+        for image in images {
+            let pixels = resample(image);
+            if image.color {
+                layer_of.push(colour_layers.len() as i32);
+                colour_layers.push(pixels);
+            } else {
+                layer_of.push(data_layers.len() as i32);
+                data_layers.push(pixels);
+            }
+        }
+        let layer = |i: Option<usize>| i.and_then(|i| layer_of.get(i).copied()).unwrap_or(-1) as f32;
         let mut surface_data: Vec<[f32; 4]> = surfaces
             .iter()
             .flat_map(|s| {
                 [
                     [s.base_color[0], s.base_color[1], s.base_color[2], s.metallic],
-                    [s.roughness, 0.0, 0.0, 0.0],
+                    [s.roughness, layer(s.base_color_image), layer(s.metallic_roughness_image), 0.0],
                 ]
             })
             .collect();
+        let array = |label, format, layers: &[Vec<u8>]| {
+            let count = layers.len().max(1) as u32;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: IMAGE_SIZE, height: IMAGE_SIZE, depth_or_array_layers: count },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            for (i, pixels) in layers.iter().enumerate() {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    pixels,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IMAGE_SIZE * 4), rows_per_image: Some(IMAGE_SIZE) },
+                    wgpu::Extent3d { width: IMAGE_SIZE, height: IMAGE_SIZE, depth_or_array_layers: 1 },
+                );
+            }
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let colour_images = array("path trace colour images", wgpu::TextureFormat::Rgba8UnormSrgb, &colour_layers);
+        let data_images = array("path trace data images", wgpu::TextureFormat::Rgba8Unorm, &data_layers);
         if surface_data.is_empty() {
-            surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, 0.0, 0.0, 0.0]]);
+            surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, -1.0, -1.0, 0.0]]);
         }
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let upload = |label, bytes: &[u8]| {
@@ -293,6 +428,9 @@ impl PathTracer {
             )
         };
         self.scene = Some(Scene {
+            uvs: upload("path trace uvs", bytemuck::cast_slice(&uvs)),
+            colour_images,
+            data_images,
             positions: upload("path trace positions", bytemuck::cast_slice(&positions)),
             normals: upload("path trace normals", bytemuck::cast_slice(&normals)),
             triangles: upload("path trace triangles", bytemuck::cast_slice(&triangles)),
@@ -341,7 +479,7 @@ impl PathTracer {
             self.sample = 0;
         }
         if let (None, Some(scene)) = (&self.scene_bind, &self.scene) {
-            let entries: Vec<wgpu::BindGroupEntry> = [
+            let mut entries: Vec<wgpu::BindGroupEntry> = [
                 &self.params,
                 &scene.positions,
                 &scene.normals,
@@ -350,11 +488,15 @@ impl PathTracer {
                 &scene.order,
                 &scene.surfaces,
                 &self.sum,
+                &scene.uvs,
             ]
             .iter()
             .enumerate()
             .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
             .collect();
+            entries.push(wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&scene.colour_images) });
+            entries.push(wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&scene.data_images) });
+            entries.push(wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(&self.image_sampler) });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,

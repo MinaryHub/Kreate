@@ -52,9 +52,16 @@ struct PtNode {
 @group(0) @binding(3) var<storage, read> pt_triangles: array<vec4<u32>>;
 @group(0) @binding(4) var<storage, read> pt_nodes: array<PtNode>;
 @group(0) @binding(5) var<storage, read> pt_order: array<u32>;
-// Two per material: base colour and metallic, then roughness.
+// Two per material: base colour and metallic; then roughness, the base
+// colour image's layer and the metallic-roughness image's, -1 for none.
 @group(0) @binding(6) var<storage, read> pt_surfaces: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> pt_sum: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> pt_uvs: array<vec2<f32>>;
+// The images, one per layer at one size: colour (sRGB, decoded by the
+// sampler) and data (metallic and roughness, as stored).
+@group(0) @binding(9) var pt_colour_images: texture_2d_array<f32>;
+@group(0) @binding(10) var pt_data_images: texture_2d_array<f32>;
+@group(0) @binding(11) var pt_image_sampler: sampler;
 
 // --- random numbers -----------------------------------------------------------
 
@@ -222,10 +229,25 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             n = -n;
         }
         let m = tri.w * 2u;
+        let extra = pt_surfaces[m + 1u];
         var s: Surface;
         s.base_color = pt_surfaces[m].rgb;
         s.metallic = pt_surfaces[m].a;
-        s.roughness = max(pt_surfaces[m + 1u].x, 0.02);
+        s.roughness = extra.x;
+        // The images multiply the dials, as the rasterised material does: the
+        // same corner of the same picture, wrapped the same way.
+        if (extra.y >= 0.0 || extra.z >= 0.0) {
+            let uv = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v);
+            if (extra.y >= 0.0) {
+                s.base_color *= textureSampleLevel(pt_colour_images, pt_image_sampler, uv, i32(extra.y), 0.0).rgb;
+            }
+            if (extra.z >= 0.0) {
+                let mr = textureSampleLevel(pt_data_images, pt_image_sampler, uv, i32(extra.z), 0.0);
+                s.roughness *= mr.g;
+                s.metallic *= mr.b;
+            }
+        }
+        s.roughness = max(s.roughness, 0.02);
         let v = -dir;
         let start = p + geometric * 1e-3 * max(1.0, length(p - pt.eye.xyz) * 0.01);
 

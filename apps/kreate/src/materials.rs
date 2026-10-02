@@ -72,21 +72,42 @@ impl Materials {
     /// Each compiled material as the path tracer's flat surface, by compiled
     /// index: base colour, metallic and roughness — the material's flat
     /// fields, which is what its graph was built from unless it has one.
-    pub fn flat_surfaces(&self, doc: &Document) -> Vec<kreate_render::pathtrace::PtSurface> {
-        let mut out = vec![
-            kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5 };
-            self.compiled.len()
-        ];
-        for (id, index) in &self.index {
+    ///
+    /// With the images they read, which the surfaces name by position.
+    pub fn flat_surfaces(&self, doc: &Document) -> (Vec<kreate_render::pathtrace::PtSurface>, Vec<TextureImage>) {
+        let default = kreate_render::pathtrace::PtSurface {
+            base_color: [0.8, 0.8, 0.8],
+            metallic: 0.0,
+            roughness: 0.5,
+            ..Default::default()
+        };
+        let mut out = vec![default; self.compiled.len()];
+        let mut images: Vec<TextureImage> = Vec::new();
+        let mut take = |id: Option<kreate_scene::document::ImageId>, space: kreate_scene::ColorSpace| -> Option<usize> {
+            let image = doc.image(id?)?;
+            images.push(TextureImage {
+                width: image.width(),
+                height: image.height(),
+                kind: kind_of(space),
+                pixels: encoded_rgba(image, space),
+            });
+            Some(images.len() - 1)
+        };
+        // In a fixed order, so the same document hands over the same list.
+        let mut ids: Vec<_> = self.index.iter().collect();
+        ids.sort_by_key(|(_, index)| **index);
+        for (id, index) in ids {
             if let (Some(m), Some(slot)) = (doc.material(*id), out.get_mut(*index as usize)) {
                 *slot = kreate_render::pathtrace::PtSurface {
                     base_color: [m.base_color.r, m.base_color.g, m.base_color.b],
                     metallic: m.metallic,
                     roughness: m.roughness,
+                    base_color_image: take(m.base_color_image, kreate_scene::ColorSpace::Srgb),
+                    metallic_roughness_image: take(m.metallic_roughness_image, kreate_scene::ColorSpace::Raw),
                 };
             }
         }
-        out
+        (out, images)
     }
 
     /// One compiled material per mesh slot, in slot order.
