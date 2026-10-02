@@ -2514,3 +2514,36 @@ fn a_mostly_solid_cube_keeps_most_of_its_shadow() {
         assert!(depth < 0.97, "traced {traced}: its shadow is as dark as a solid's ({depth:.2})");
     }
 }
+
+/// A material value changed on a settled view starts its mean again, so the
+/// picture shows the new value at once and not after the next camera move.
+#[test]
+fn a_material_change_on_a_settled_view_is_drawn() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    let compiled = |r: f32| {
+        let graph = kreate_scene::shader::ShaderGraph::standard("m", kreate_math::SceneRgb::new(r, 0.5, 0.5), 0.0, 0.5);
+        kreate_shader::compile(&graph).expect("compiles")
+    };
+    let (grey, red) = (compiled(0.5), compiled(0.9));
+    graph_material(&gpu, &mut viewport, &kreate_scene::shader::ShaderGraph::standard(
+        "m",
+        kreate_math::SceneRgb::new(0.5, 0.5, 0.5),
+        0.0,
+        0.5,
+    ));
+    let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
+    let camera = Camera { distance: 6.0, ..Camera::default() };
+    // The frame loop hands the constants over every frame.
+    for _ in 0..64 {
+        viewport.set_material_constants(&gpu.queue, 0, &grey.constants, &grey.image_slots);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    }
+    assert!(!viewport.accumulating(), "the still view never settled");
+    viewport.set_material_constants(&gpu.queue, 0, &red.constants, &red.image_slots);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    assert!(viewport.accumulating(), "the new colour was not drawn");
+}

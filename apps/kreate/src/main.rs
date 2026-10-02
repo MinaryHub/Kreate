@@ -3044,6 +3044,21 @@ impl App {
         }
     }
 
+    /// Starts the still view's mean again when this frame's reasons include a
+    /// change its own signature cannot see — a mesh rewritten in place, a
+    /// light, a setting.
+    fn restart_mean_if_changed(&mut self) {
+        let changed = RedrawReason::SCENE_CHANGED
+            | RedrawReason::RESIZE
+            | RedrawReason::SETTINGS
+            | RedrawReason::PLAYING;
+        if self.redraw.0 & changed != 0 {
+            if let Some(gfx) = self.gfx.as_mut() {
+                gfx.viewport.restart_accumulation();
+            }
+        }
+    }
+
     /// Applies the commands the panels queued this frame.
     fn drain_ui_commands(&mut self) {
         for command in self.ui.queue.drain() {
@@ -5352,6 +5367,11 @@ impl App {
         self.apply_keymap_edits();
         self.save_workspaces();
         self.drain_ui_commands();
+        // Again after the panels: an edit they made this frame — a material
+        // value dragged — is drawn this frame, and the reasons are cleared
+        // when it ends. Checked only before, a settled view showed the old
+        // picture until something else asked for a frame.
+        self.restart_mean_if_changed();
         // After the commands, so a save or an open is reflected in the title on
         // the same frame it happened rather than the next one, and so the
         // autosave timer sees this frame's edits.
@@ -7161,18 +7181,7 @@ impl ApplicationHandler for App {
                 self.apply_input();
                 self.run_drivers();
                 if self.redraw.any() {
-                    // Anything the viewport's own signature cannot see — a
-                    // mesh rewritten in place, a light, a setting — starts its
-                    // mean again.
-                    let changed = RedrawReason::SCENE_CHANGED
-                        | RedrawReason::RESIZE
-                        | RedrawReason::SETTINGS
-                        | RedrawReason::PLAYING;
-                    if self.redraw.0 & changed != 0 {
-                        if let Some(gfx) = self.gfx.as_mut() {
-                            gfx.viewport.restart_accumulation();
-                        }
-                    }
+                    self.restart_mean_if_changed();
                     self.render();
                     self.redraw.clear();
                     if self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating()) {

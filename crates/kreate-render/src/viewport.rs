@@ -3266,6 +3266,7 @@ impl Viewport {
     /// what does not pass, so a material at a tenth transmission keeps nine
     /// tenths of its shadow.
     pub fn set_transmissive(&mut self, transmission: &[f32]) {
+        self.note_lighting(&transmission);
         self.material_transmissive.clear();
         self.material_transmissive.extend_from_slice(transmission);
     }
@@ -3358,6 +3359,7 @@ impl Viewport {
         self.materials.clear();
         self.material_pipeline_of.clear();
         for source in materials {
+            self.note_lighting(&(source.wgsl, source.constants));
             let layout = &self.rendered_layout;
             self.material_pipelines
                 .get(source.wgsl, |wgsl| rendered_pipeline(device, layout, wgsl));
@@ -3381,12 +3383,16 @@ impl Viewport {
     /// constants out of the text: this is a buffer write, and the alternative
     /// is a shader and an atlas per keystroke.
     pub fn set_material_constants(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         index: usize,
         constants: &[[f32; 4]],
         image_slots: &[usize],
     ) {
+        // Into the still view's signature, as a light is: a colour dragged on
+        // a settled view must start its mean again, or the picture keeps the
+        // old colour until something else moves.
+        self.note_lighting(&(index, constants));
         if let Some(material) = self.materials.get(index) {
             material.set_constants(
                 queue,
