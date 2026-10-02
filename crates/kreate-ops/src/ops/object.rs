@@ -826,6 +826,12 @@ pub struct SetMaterialParams {
     /// as painted. Does nothing without a normal map.
     #[param(min = 0.0, soft_max = 2.0)]
     pub normal_strength: f64,
+    /// The colour the surface glows with.
+    #[param(color)]
+    pub emission: [f64; 3],
+    /// How bright the glow is, in nits (cd/m²). Zero is none.
+    #[param(min = 0.0, soft_max = 10000.0)]
+    pub emission_strength: f64,
 }
 
 impl Default for SetMaterialParams {
@@ -837,6 +843,8 @@ impl Default for SetMaterialParams {
             roughness: 0.5,
             alpha: 1.0,
             normal_strength: 1.0,
+            emission: [1.0, 1.0, 1.0],
+            emission_strength: 0.0,
         }
     }
 }
@@ -887,6 +895,23 @@ impl Operator for SetMaterial {
         material.roughness = params.roughness.clamp(0.0, 1.0) as f32;
         material.normal_strength = params.normal_strength.max(0.0) as f32;
         material.alpha = params.alpha.clamp(0.0, 1.0) as f32;
+        material.emission = kreate_math::Srgb::new(
+            params.emission[0] as f32,
+            params.emission[1] as f32,
+            params.emission[2] as f32,
+        )
+        .as_reflectance();
+        material.emission_strength = params.emission_strength.max(0.0) as f32;
+        // The glow has no socket, so a material with its own graph takes it
+        // from here too: the panel's dial is the one place it is set.
+        let emitted = material.emitted();
+        if let Some(graph) = material.graph.as_mut() {
+            if let Some(o) = graph.output() {
+                if let kreate_scene::shader::NodeKind::Surface { emission, .. } = &mut graph.nodes[o].kind {
+                    *emission = emitted;
+                }
+            }
+        }
         Ok(OpResult::Finished)
     }
 }
@@ -1409,6 +1434,11 @@ pub fn material_params(
         roughness: material.roughness as f64,
         alpha: material.alpha as f64,
         normal_strength: material.normal_strength as f64,
+        emission: {
+            let e = material.emission.as_swatch();
+            [e.r as f64, e.g as f64, e.b as f64]
+        },
+        emission_strength: material.emission_strength as f64,
     }
 }
 

@@ -820,6 +820,8 @@ fn every_map_and_the_normal_strength_survive_a_save() {
         metallic_roughness_image: Some(packed),
         normal_image: Some(normal),
         normal_strength: 0.35,
+        emission: kreate_math::SceneRgb::new(1.0, 0.5, 0.25),
+        emission_strength: 750.0,
         ..Default::default()
     });
 
@@ -833,6 +835,8 @@ fn every_map_and_the_normal_strength_survive_a_save() {
     assert_eq!(name_of(m.metallic_roughness_image), Some(("ORM".into(), Raw)));
     assert_eq!(name_of(m.normal_image), Some(("Normal".into(), Raw)));
     assert_eq!(m.normal_strength, 0.35);
+    assert_eq!(m.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
+    assert_eq!(m.emission_strength, 750.0);
 }
 
 #[test]
@@ -851,12 +855,13 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         metallic_roughness_uid: None,
         normal_uid: None,
         normal_strength: None,
+        emission: None,
         graph: None,
         action: None,
         extra: Default::default(),
     };
     let text = serde_json::to_string(&record).expect("serialises");
-    for field in ["metallic_roughness_uid", "normal_uid", "normal_strength"] {
+    for field in ["metallic_roughness_uid", "normal_uid", "normal_strength", "emission"] {
         assert!(!text.contains(field), "{field} was written: {text}");
     }
 }

@@ -145,7 +145,9 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // `in.clip` is the fragment's position in pixels here — the same builtin
     // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that
     // is decides which lights this fragment sees.
-    let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy));
+    // What the surface emits, added to what it reflects: a glow is light the
+    // surface makes, so no light, shadow or occlusion has a say in it.
+    let lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + sample.emission;
     // Linear and unbounded. The display transform is a later pass.
     var out: RenderedOut;
     out.light = vec4<f32>(lit, 1.0);

@@ -212,7 +212,7 @@ pub fn compile_with(
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32> }}"
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32> }}"
     );
     let _ = writeln!(wgsl);
     let _ = writeln!(
@@ -236,6 +236,8 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    var out: MaterialSample;");
     let _ = writeln!(wgsl, "    out.surface = s;");
     let _ = writeln!(wgsl, "    out.normal = {normal};");
+    // In the roughness's slot, beside it: emitted light, in nits.
+    let _ = writeln!(wgsl, "    out.emission = material.values[{}].yzw;", surface_slot + 1);
     let _ = writeln!(wgsl, "    return out;\n}}");
 
     Ok(Compiled {
@@ -391,12 +393,12 @@ impl Emitter<'_> {
                     "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
                 );
             }
-            NodeKind::Surface { base_color, metallic, roughness } => {
+            NodeKind::Surface { base_color, metallic, roughness, emission } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
                 // the graph's shape — see the comment where they are read.
                 self.constants.push([base_color.r, base_color.g, base_color.b, metallic]);
-                self.constants.push([roughness, 0.0, 0.0, 0.0]);
+                self.constants.push([roughness, emission.r, emission.g, emission.b]);
             }
         }
         self.emitted[node] = Some(slot);
@@ -447,6 +449,21 @@ mod tests {
 
     fn flat() -> ShaderGraph {
         ShaderGraph::standard("Grey", SceneRgb::new(0.8, 0.7, 0.6), 0.25, 0.4)
+    }
+
+    #[test]
+    fn emission_rides_beside_the_roughness() {
+        // In the slot the roughness already has, so a glow changes a number
+        // and never the shape of the constants — the pipeline cache's key.
+        let mut g = flat();
+        let plain = compile(&g).expect("compiles");
+        if let NodeKind::Surface { emission, .. } = &mut g.nodes[0].kind {
+            *emission = SceneRgb::new(3.0, 2.0, 1.0);
+        }
+        let glowing = compile(&g).expect("compiles");
+        assert_eq!(plain.wgsl, glowing.wgsl);
+        assert_eq!(glowing.constants[1], [0.4, 3.0, 2.0, 1.0]);
+        assert!(glowing.wgsl.contains("out.emission = material.values[1].yzw;"));
     }
 
     /// An image identity, which only a document can hand out.

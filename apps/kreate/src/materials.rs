@@ -104,6 +104,7 @@ impl Materials {
                     roughness: m.roughness,
                     base_color_image: take(m.base_color_image, kreate_scene::ColorSpace::Srgb),
                     metallic_roughness_image: take(m.metallic_roughness_image, kreate_scene::ColorSpace::Raw),
+                    emission: graph_emission(m),
                 };
             }
         }
@@ -458,4 +459,19 @@ mod texture_tests {
         let sets = pixels_for(&doc, &materials.compiled[1]);
         assert_eq!(&sets[0].pixels[..4], &[90, 90, 90, 255]);
     }
+}
+
+/// The light a material emits: its graph's surface when it has one, which is
+/// what the rasterised view draws, and its own fields otherwise.
+fn graph_emission(m: &kreate_scene::Material) -> [f32; 3] {
+    let e = m
+        .graph
+        .as_ref()
+        .and_then(|g| g.output().map(|o| &g.nodes[o].kind))
+        .and_then(|k| match k {
+            kreate_scene::shader::NodeKind::Surface { emission, .. } => Some(*emission),
+            _ => None,
+        })
+        .unwrap_or_else(|| m.emitted());
+    [e.r, e.g, e.b]
 }

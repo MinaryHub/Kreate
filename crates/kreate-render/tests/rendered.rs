@@ -65,6 +65,23 @@ fn shoot(
     lights: &[PlacedLight],
     display: Display,
 ) -> Vec<[f32; 4]> {
+    let graph = kreate_scene::shader::ShaderGraph::standard(
+        "test",
+        surface.base_color,
+        surface.metallic,
+        surface.roughness,
+    );
+    shoot_graph(gpu, shading, &graph, lights, display)
+}
+
+/// [`shoot`], with the material a graph rather than a flat surface.
+fn shoot_graph(
+    gpu: &Gpu,
+    shading: ShadingMode,
+    graph: &kreate_scene::shader::ShaderGraph,
+    lights: &[PlacedLight],
+    display: Display,
+) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = shading;
     viewport.set_display(&gpu.queue, display);
@@ -83,7 +100,7 @@ fn shoot(
         ..Camera::default()
     };
 
-    one_material(gpu, &mut viewport, surface);
+    graph_material(gpu, &mut viewport, graph);
     let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), lights);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
@@ -195,7 +212,11 @@ fn one_material(gpu: &Gpu, viewport: &mut Viewport, surface: Surface) {
         surface.metallic,
         surface.roughness,
     );
-    let compiled = kreate_shader::compile(&graph).expect("compiles");
+    graph_material(gpu, viewport, &graph);
+}
+
+fn graph_material(gpu: &Gpu, viewport: &mut Viewport, graph: &kreate_scene::shader::ShaderGraph) {
+    let compiled = kreate_shader::compile(graph).expect("compiles");
     viewport.set_materials(
         &gpu.device,
         &gpu.queue,
@@ -2177,4 +2198,38 @@ fn the_path_tracer_reads_the_base_colour_image() {
     let reddish = shot.iter().filter(|p| p[0] > p[2] + 0.15).count();
     let bluish = shot.iter().filter(|p| p[2] > p[0] + 0.15).count();
     assert!(reddish > 100 && bluish > 100, "{reddish} red and {bluish} blue pixels");
+}
+
+/// Emission: a glowing cube is seen with no light in the scene at all, and
+/// the same cube not glowing is black.
+#[test]
+fn a_glowing_surface_is_seen_in_the_dark() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut graph = kreate_scene::shader::ShaderGraph::standard(
+        "glow",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    );
+    if let kreate_scene::shader::NodeKind::Surface { emission, .. } = &mut graph.nodes[0].kind {
+        *emission = kreate_math::SceneRgb::new(5000.0, 1000.0, 200.0);
+    }
+    let shot = shoot_graph(&gpu, ShadingMode::Rendered, &graph, &[], FRAMED);
+    let lit = shot.iter().filter(|p| p[0] > 0.2).count();
+    assert!(lit > 400, "only {lit} pixels glow");
+    // Its colour, not a grey: red over green over blue.
+    let warm = shot.iter().filter(|p| p[0] > p[1] && p[1] > p[2]).count();
+    assert!(warm > 400, "only {warm} pixels have the glow's colour");
+}
+
+/// The path tracer adds a glowing surface's light where a path meets it.
+#[test]
+fn the_path_tracer_sees_a_glow() {
+    let gpu = gpu_or_skip!(gpu());
+    let plain = kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], roughness: 0.5, ..Default::default() };
+    let glowing = kreate_render::pathtrace::PtSurface { emission: [8000.0, 2000.0, 400.0], ..plain };
+    let mean = |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] - c[2]).sum::<f32>() / p.len() as f32;
+    let a = traced_scene(&gpu, true, 16, None, false, plain, &[]);
+    let b = traced_scene(&gpu, true, 16, None, false, glowing, &[]);
+    assert!(mean(&b) > mean(&a) + 0.1, "glowing {} against plain {}", mean(&b), mean(&a));
 }

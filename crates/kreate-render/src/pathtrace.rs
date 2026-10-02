@@ -64,6 +64,8 @@ pub struct PtSurface {
     pub base_color_image: Option<usize>,
     /// glTF's packing: roughness in green, metallic in blue.
     pub metallic_roughness_image: Option<usize>,
+    /// Light the surface emits by itself, in nits.
+    pub emission: [f32; 3],
 }
 
 /// An image a surface reads: four bytes a pixel, row by row; sRGB-encoded for
@@ -381,6 +383,7 @@ impl PathTracer {
                 [
                     [s.base_color[0], s.base_color[1], s.base_color[2], s.metallic],
                     [s.roughness, layer(s.base_color_image), layer(s.metallic_roughness_image), 0.0],
+                    [s.emission[0], s.emission[1], s.emission[2], 0.0],
                 ]
             })
             .collect();

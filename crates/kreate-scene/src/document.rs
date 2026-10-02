@@ -293,6 +293,17 @@ pub struct Material {
     /// it scales the map's X and Y before the vector is renormalised, so zero
     /// is a flat surface and one is the map as painted.
     pub normal_strength: f32,
+    /// The colour the surface glows with, beside how brightly.
+    ///
+    /// Two fields rather than one radiance, the way a light keeps its tint
+    /// apart from its intensity: the colour is what somebody picks from a
+    /// swatch and the strength is the number they turn up, and a single
+    /// premultiplied colour makes "brighter, same hue" a three-field edit.
+    pub emission: kreate_math::SceneRgb,
+    /// How bright the glow is, in nits (cd/m²) — the unit §7.1 gave area
+    /// lights, because an emitting surface *is* one. Zero is no glow at all,
+    /// which is the default: most surfaces only reflect.
+    pub emission_strength: f32,
     /// The material's own shading graph, once somebody has asked for one.
     ///
     /// `None` is the fast path v1 §5.6 describes: the flat fields above *are*
@@ -324,6 +335,8 @@ impl Default for Material {
             metallic_roughness_image: None,
             normal_image: None,
             normal_strength: 1.0,
+            emission: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+            emission_strength: 0.0,
             graph: None,
             action: None,
             linkage: Linkage::Local,
@@ -381,6 +394,13 @@ impl MaterialMap {
 }
 
 impl Material {
+    /// What the surface emits on its own: the colour times the strength, in
+    /// nits. The number the renderer adds to what it reflects.
+    pub fn emitted(&self) -> kreate_math::SceneRgb {
+        let k = self.emission_strength.max(0.0);
+        kreate_math::SceneRgb::new(self.emission.r * k, self.emission.g * k, self.emission.b * k)
+    }
+
     /// The graph this material shades with: its own, or the one its flat
     /// fields are.
     ///

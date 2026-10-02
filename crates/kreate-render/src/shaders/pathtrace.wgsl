@@ -228,7 +228,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (dot(n, geometric) < 0.0) {
             n = -n;
         }
-        let m = tri.w * 2u;
+        let m = tri.w * 3u;
+        // A glowing surface adds its light wherever a path meets it. Only
+        // here: the light sampling picks among the lamps, never among the
+        // glowing faces, so nothing is counted twice.
+        radiance += throughput * pt_surfaces[m + 2u].rgb;
         let extra = pt_surfaces[m + 1u];
         var s: Surface;
         s.base_color = pt_surfaces[m].rgb;

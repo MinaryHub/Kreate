@@ -31,7 +31,8 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! Emission, transmission, clearcoat and the rest of §2.3's lobes.
+//! Transmission, clearcoat and the rest of §2.3's lobes. Emission is here as
+//! a value on the surface, not yet as a socket.
 //! They are nodes and inputs, not architecture, and adding them before anything
 //! consumes the graph would be guessing at what the compiler wants.
 
@@ -114,6 +115,9 @@ pub enum NodeKind {
         base_color: SceneRgb,
         metallic: f32,
         roughness: f32,
+        /// What the surface emits by itself, in nits: the material's colour
+        /// times its strength. A value rather than a socket for now.
+        emission: SceneRgb,
     },
 }
 
@@ -177,8 +181,11 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
-            NodeKind::Surface { base_color, metallic, roughness } => {
-                vec![base_color.r, base_color.g, base_color.b, *metallic, *roughness]
+            NodeKind::Surface { base_color, metallic, roughness, emission } => {
+                vec![
+                    base_color.r, base_color.g, base_color.b, *metallic, *roughness,
+                    emission.r, emission.g, emission.b,
+                ]
             }
             NodeKind::Image { .. }
             | NodeKind::Multiply
@@ -208,6 +215,8 @@ impl NodeKind {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
                 roughness: at(4, 0.5),
+                // Absent in every file written before emission: none.
+                emission: SceneRgb::new(at(5, 0.0), at(6, 0.0), at(7, 0.0)),
             },
             _ => return None,
         })
@@ -332,6 +341,7 @@ impl ShaderGraph {
                     base_color,
                     metallic,
                     roughness,
+                    emission: SceneRgb::new(0.0, 0.0, 0.0),
                 },
             )],
             links: Vec::new(),
@@ -364,6 +374,9 @@ impl ShaderGraph {
             material.metallic,
             material.roughness,
         );
+        if let NodeKind::Surface { emission, .. } = &mut graph.nodes[0].kind {
+            *emission = material.emitted();
+        }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the
         // sockets want — which is why each `expect` is a statement about this
@@ -625,6 +638,7 @@ mod tests {
                 base_color,
                 metallic,
                 roughness,
+                ..
             } => {
                 assert_eq!(base_color, SceneRgb::new(0.8, 0.8, 0.8));
                 assert_eq!(metallic, 0.0);
@@ -783,6 +797,7 @@ mod tests {
                     base_color: SceneRgb::new(1.0, 1.0, 1.0),
                     metallic: 0.0,
                     roughness: 0.5,
+                    emission: SceneRgb::new(0.0, 0.0, 0.0),
                 },
             )),
             None
@@ -990,6 +1005,7 @@ mod tests {
                 base_color: SceneRgb::new(0.9, 0.8, 0.7),
                 metallic: 0.6,
                 roughness: 0.3,
+                emission: SceneRgb::new(2.0, 0.5, 0.0),
             },
         ];
         for kind in kinds {

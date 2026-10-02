@@ -704,6 +704,9 @@ pub struct MaterialRecord {
     /// are byte-identical, and the golden file does not move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal_strength: Option<f32>,
+    /// The glow's colour and strength (nits), written only when it glows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission: Option<[f32; 4]>,
     /// The material's own node graph, when it uses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphRecord>,
@@ -1317,6 +1320,12 @@ pub fn write(
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
                     normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
+                    emission: (m.emission_strength != 0.0).then_some([
+                        m.emission.r,
+                        m.emission.g,
+                        m.emission.b,
+                        m.emission_strength,
+                    ]),
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
                     extra: BTreeMap::new(),
@@ -1764,6 +1773,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .normal_uid
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
             normal_strength: record.normal_strength.unwrap_or(1.0),
+            emission: record
+                .emission
+                .map_or(kreate_math::SceneRgb::new(1.0, 1.0, 1.0), |e| kreate_math::SceneRgb::new(e[0], e[1], e[2])),
+            emission_strength: record.emission.map_or(0.0, |e| e[3]),
             graph: record
                 .graph
                 .as_ref()
