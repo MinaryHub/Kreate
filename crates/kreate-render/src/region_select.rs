@@ -176,6 +176,9 @@ const IDLE: u32 = 0;
 const IN_FLIGHT: u32 = 1;
 const READY: u32 = 2;
 const FAILED: u32 = 3;
+/// `map_async` has been called and its callback has not run yet. See the same
+/// state in `picking`: without it a second frame maps the buffer twice.
+const MAPPING: u32 = 4;
 
 /// The bitset, the dispatch, and the readback behind region selection.
 pub struct RegionSelect {
@@ -428,7 +431,11 @@ impl RegionSelect {
 
     /// Starts the map for a copy recorded this frame. Call after `submit`.
     pub fn after_submit(&self) {
-        if self.state.load(Ordering::Acquire) != IN_FLIGHT {
+        if self
+            .state
+            .compare_exchange(IN_FLIGHT, MAPPING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
         let state = self.state.clone();

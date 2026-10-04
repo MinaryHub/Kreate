@@ -213,7 +213,7 @@ impl PickRegion {
 struct Slot {
     buffer: wgpu::Buffer,
     /// Written by the map callback, read on the next frame. `0` idle, `1` in
-    /// flight, `2` ready, `3` failed.
+    /// flight, `2` ready, `3` failed, `4` mapping.
     state: Arc<AtomicU32>,
     centre: (i32, i32),
     domain: PickDomain,
@@ -223,6 +223,10 @@ const IDLE: u32 = 0;
 const IN_FLIGHT: u32 = 1;
 const READY: u32 = 2;
 const FAILED: u32 = 3;
+/// `map_async` has been called and its callback has not run yet. Distinct from
+/// `IN_FLIGHT` so a frame submitted before the callback fires does not map the
+/// buffer a second time, which wgpu treats as a fatal error.
+const MAPPING: u32 = 4;
 
 /// The id render target and the ring of readback buffers behind it.
 pub struct PickTarget {
@@ -364,7 +368,11 @@ impl PickTarget {
     /// waits for a command that will never arrive.
     pub fn after_submit(&self) {
         for slot in &self.slots {
-            if slot.state.load(Ordering::Acquire) != IN_FLIGHT {
+            if slot
+                .state
+                .compare_exchange(IN_FLIGHT, MAPPING, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
                 continue;
             }
             let state = slot.state.clone();
