@@ -2191,6 +2191,7 @@ impl Operator for SelectAll {
             .map(|(id, _)| id)
             .collect();
         let currently = doc.document().selection.objects.clone();
+        let previous_active = doc.document().selection.active;
 
         // `toggle` means "select all unless everything already is", which is what
         // a single key doing double duty has to mean.
@@ -2220,6 +2221,14 @@ impl Operator for SelectAll {
                     d.selection.add(id);
                 }
             }
+        }
+        // Each `add` made its object active, which left whichever came last in
+        // the document active. Blender keeps the active object through Select
+        // All, and things are built on that: select the cutters, the target
+        // active, A, Ctrl+minus. So the one that was active stays so, as long
+        // as it is still selected.
+        if let Some(previous) = previous_active.filter(|a| d.selection.contains(*a)) {
+            d.selection.active = Some(previous);
         }
         // Selection changes are undoable: users expect Ctrl+Z to restore a
         // selection, and losing a careful one is more annoying than losing an edit.
@@ -3107,6 +3116,20 @@ mod tests {
         );
         assert_eq!(d.selection.objects.len(), 1);
         assert_ne!(d.selection.active, Some(original));
+    }
+
+    #[test]
+    fn select_all_keeps_the_active_object() {
+        let (r, mut h, mut d, c) = setup();
+        run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
+        let first = d.selection.active.unwrap();
+        run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
+        // The first made active again; the other comes later in the document.
+        d.selection.clear();
+        d.selection.add(first);
+        run(&r, &mut h, &mut d, &c, "object.select_all", &[]);
+        assert_eq!(d.selection.objects.len(), 2);
+        assert_eq!(d.selection.active, Some(first));
     }
 
     #[test]
