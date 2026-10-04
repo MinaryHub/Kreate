@@ -104,6 +104,40 @@ fn new_token() -> String {
     format!("{:016x}{:016x}", word(), word())
 }
 
+/// Writes the token where only this user can read it.
+///
+/// A fresh file every time, created rather than opened: a file someone else
+/// put there first — to read what is written into it — is removed and not
+/// written through. On Unix it is made `0600` in a `0700` folder. On Windows
+/// the settings folder is under the profile, whose inherited access list is
+/// the user's alone, and a new file takes it.
+fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.flush()
+}
+
 /// Opens the socket, writes `info`, and starts accepting.
 ///
 /// `wake` is called whenever a request is waiting, from a connection's thread:
@@ -113,10 +147,7 @@ pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::R
     let port = listener.local_addr()?.port();
     let token = new_token();
     let record = serde_json::json!({ "port": port, "token": token, "pid": std::process::id() });
-    if let Some(parent) = info.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(info, record.to_string())?;
+    write_owner_only(info, record.to_string().as_bytes())?;
 
     let (tx, rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
