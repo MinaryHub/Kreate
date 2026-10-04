@@ -86,22 +86,12 @@ pub fn info_path() -> Option<PathBuf> {
     crate::prefs::config_dir().map(|dir| dir.join("bridge.json"))
 }
 
-/// A token nobody can guess: two words from the standard library's per-process
-/// random hasher keys, which are drawn from the operating system.
-fn new_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let word = || {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u128(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        );
-        h.write_u32(std::process::id());
-        h.finish()
-    };
-    format!("{:016x}{:016x}", word(), word())
+/// A token nobody can guess: 128 bits from the operating system's secure
+/// random source, in hex.
+fn new_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(format!("no secure randomness: {e}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Writes the token where only this user can read it.
@@ -145,7 +135,7 @@ fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Bridge> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
-    let token = new_token();
+    let token = new_token()?;
     let record = serde_json::json!({ "port": port, "token": token, "pid": std::process::id() });
     write_owner_only(info, record.to_string().as_bytes())?;
 
@@ -190,7 +180,8 @@ fn answer_line(
 ) -> Result<serde_json::Value, String> {
     let request: serde_json::Value =
         serde_json::from_str(line).map_err(|e| format!("not JSON: {e}"))?;
-    if request.get("token").and_then(|t| t.as_str()) != Some(token) {
+    let given = request.get("token").and_then(|t| t.as_str()).unwrap_or("");
+    if !same_secret(given.as_bytes(), token.as_bytes()) {
         return Err("wrong or missing token".into());
     }
     let method = request
@@ -206,6 +197,12 @@ fn answer_line(
     answer
         .recv_timeout(ANSWER_TIMEOUT)
         .map_err(|_| "Kreate did not answer in time".to_string())?
+}
+
+/// Compares two secrets in time that does not depend on where they differ,
+/// so how long a refusal takes says nothing about how close the guess was.
+fn same_secret(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Standard base64, padded: how a PNG travels inside JSON.
@@ -230,6 +227,15 @@ pub fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_are_long_and_never_repeat() {
+        let a = new_token().expect("randomness");
+        let b = new_token().expect("randomness");
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn base64_matches_the_standard_vectors() {

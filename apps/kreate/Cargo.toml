@@ -35,6 +35,8 @@ tracing-subscriber.workspace = true
 half = "2"
 # The connector's wire, and the viewport capture it hands back as PNG.
 serde_json.workspace = true
+# The bridge's token: the operating system's secure random source.
+getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.build-dependencies]
