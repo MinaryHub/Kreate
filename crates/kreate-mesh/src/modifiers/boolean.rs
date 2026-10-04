@@ -14,10 +14,16 @@
 //!
 //! # What it gives back
 //!
-//! Polygons split along the other solid's planes, their corners welded where
-//! they meet. Correct, not tidy: the faces around a cut are fans of slivers,
-//! which is what a modeller applying a boolean then cleans up. Attributes
-//! (UVs, materials) are not carried; the result is geometry.
+//! A closed mesh, with each input face kept whole wherever the cut did not
+//! reach it. The BSP alone gives neither: it splits a face along every plane of
+//! the other solid's tree, cut or not — a cube's side came back as a row of
+//! strips, one per facet of a cylinder that never touched it — and the pieces
+//! of two neighbouring faces split at different places meet in T-junctions,
+//! so the mesh had open edges everywhere and a bevel or a subdivision put on
+//! top of it tore. [`assemble`] puts that right: pieces are welded, every
+//! vertex lying on another piece's edge is put into that edge, and the pieces
+//! of one input face are merged back into as few polygons as stay simple.
+//! Attributes (UVs, materials) are not carried; the result is geometry.
 //!
 //! Everything is in `f64` — a plane test in `f32` misclassifies points near a
 //! face, and a boolean is nothing but plane tests.
@@ -66,10 +72,13 @@ impl Plane {
 struct Polygon {
     verts: Vec<DVec3>,
     plane: Plane,
+    /// Which input face this is, or a piece of — A's faces first, then B's.
+    /// What lets the pieces be merged back afterwards.
+    source: u32,
 }
 
 impl Polygon {
-    fn new(verts: Vec<DVec3>) -> Option<Polygon> {
+    fn new(verts: Vec<DVec3>, source: u32) -> Option<Polygon> {
         // The plane of the whole polygon, from its Newell normal, so a thin
         // first triangle does not decide it.
         let mut n = DVec3::ZERO;
@@ -78,12 +87,15 @@ impl Polygon {
             n += DVec3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y));
         }
         let len = n.length();
-        if verts.len() < 3 || len < 1e-12 {
-            return Plane::from_points(verts[0], verts[1], *verts.get(2)?).map(|plane| Polygon { verts, plane });
+        if verts.len() < 3 {
+            return None;
+        }
+        if len < 1e-12 {
+            return Plane::from_points(verts[0], verts[1], verts[2]).map(|plane| Polygon { verts, plane, source });
         }
         let normal = n / len;
         let centre = verts.iter().fold(DVec3::ZERO, |s, p| s + *p) / verts.len() as f64;
-        Some(Polygon { plane: Plane { normal, w: normal.dot(centre) }, verts })
+        Some(Polygon { plane: Plane { normal, w: normal.dot(centre) }, verts, source })
     }
 
     fn flip(&mut self) {
@@ -154,10 +166,10 @@ fn split(
                 }
             }
             if f.len() >= 3 {
-                front.push(Polygon { verts: f, plane: polygon.plane });
+                front.push(Polygon { verts: f, plane: polygon.plane, source: polygon.source });
             }
             if b.len() >= 3 {
-                back.push(Polygon { verts: b, plane: polygon.plane });
+                back.push(Polygon { verts: b, plane: polygon.plane, source: polygon.source });
             }
         }
     }
@@ -279,12 +291,13 @@ impl Tree {
     }
 }
 
-fn polygons_of(mesh: &MeshData) -> Vec<Polygon> {
+/// A mesh's faces as polygons, their sources numbered from `first`.
+fn polygons_of(mesh: &MeshData, first: u32) -> Vec<Polygon> {
     let positions = mesh.positions();
     (0..mesh.num_faces())
         .filter_map(|f| {
             let verts: Vec<DVec3> = mesh.face_verts(f).iter().map(|v| positions[*v as usize].as_dvec3()).collect();
-            Polygon::new(verts)
+            Polygon::new(verts, first + f)
         })
         .collect()
 }
@@ -303,8 +316,8 @@ pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
             _ => a.clone(),
         };
     }
-    let mut ta = Tree::new(polygons_of(a));
-    let mut tb = Tree::new(polygons_of(b));
+    let mut ta = Tree::new(polygons_of(a, 0));
+    let mut tb = Tree::new(polygons_of(b, a.num_faces()));
     let polygons = match op {
         BooleanOp::Union => {
             ta.clip_to(&tb);
@@ -342,32 +355,267 @@ pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
             result.all_polygons()
         }
     };
-    weld(polygons)
+    assemble(polygons)
 }
 
-/// Polygons to a mesh, corners at the same place made one vertex.
-fn weld(polygons: Vec<Polygon>) -> MeshData {
-    let scale = 1e5;
-    let mut index: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
-    let mut positions: Vec<Vec3> = Vec::new();
-    let mut faces: Vec<Vec<u32>> = Vec::new();
-    for p in polygons {
+/// How close two points are to be the same point, and a point to lie on an
+/// edge. Absolute, in the mesh's units: a boolean's numbers are plane tests
+/// accurate to [`EPSILON`], and this is ten times looser than that.
+const WELD: f64 = 1e-5;
+
+/// The BSP's polygons to a closed mesh: see the module docs.
+fn assemble(polygons: Vec<Polygon>) -> MeshData {
+    let mut welder = Welder::default();
+    let mut pieces: Vec<(u32, Vec<u32>)> = Vec::with_capacity(polygons.len());
+    for p in &polygons {
         let mut ring: Vec<u32> = Vec::with_capacity(p.verts.len());
         for v in &p.verts {
-            let key = [(v.x * scale).round() as i64, (v.y * scale).round() as i64, (v.z * scale).round() as i64];
-            let i = *index.entry(key).or_insert_with(|| {
-                positions.push(v.as_vec3());
-                (positions.len() - 1) as u32
-            });
-            if ring.last() != Some(&i) && ring.first() != Some(&i) {
+            let i = welder.index(*v);
+            if ring.last() != Some(&i) {
                 ring.push(i);
             }
         }
+        while ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
         if ring.len() >= 3 {
-            faces.push(ring);
+            pieces.push((p.source, ring));
         }
     }
-    MeshData::from_faces(positions, &faces)
+    let positions = welder.positions;
+
+    split_t_junctions(&positions, &mut pieces);
+
+    // The pieces of each input face, merged back together.
+    pieces.sort_by_key(|(source, _)| *source);
+    let mut faces: Vec<Vec<u32>> = Vec::new();
+    let mut at = 0;
+    while at < pieces.len() {
+        let source = pieces[at].0;
+        let end = at + pieces[at..].iter().take_while(|(s, _)| *s == source).count();
+        let group: Vec<Vec<u32>> = pieces[at..end].iter().map(|(_, r)| r.clone()).collect();
+        faces.extend(merge_pieces(group));
+        at = end;
+    }
+
+    dissolve_straight_vertices(&positions, &mut faces);
+
+    // Only the vertices still in use, renumbered in the order faces meet them.
+    let mut renumber = vec![u32::MAX; positions.len()];
+    let mut kept: Vec<Vec3> = Vec::new();
+    for face in &mut faces {
+        for v in face.iter_mut() {
+            if renumber[*v as usize] == u32::MAX {
+                renumber[*v as usize] = kept.len() as u32;
+                kept.push(positions[*v as usize].as_vec3());
+            }
+            *v = renumber[*v as usize];
+        }
+    }
+    MeshData::from_faces(kept, &faces)
+}
+
+/// Points to indices, a point within [`WELD`] of one already seen taking its
+/// index. Searches the neighbouring cells too: rounding alone puts two points
+/// a hair apart on either side of a cell boundary into different vertices.
+#[derive(Default)]
+struct Welder {
+    positions: Vec<DVec3>,
+    cells: std::collections::HashMap<[i64; 3], Vec<u32>>,
+}
+
+impl Welder {
+    fn cell(p: DVec3) -> [i64; 3] {
+        [(p.x / WELD).floor() as i64, (p.y / WELD).floor() as i64, (p.z / WELD).floor() as i64]
+    }
+
+    fn index(&mut self, p: DVec3) -> u32 {
+        let c = Self::cell(p);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(list) = self.cells.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
+                        if let Some(&i) = list.iter().find(|i| self.positions[**i as usize].distance(p) <= WELD) {
+                            return i;
+                        }
+                    }
+                }
+            }
+        }
+        let i = self.positions.len() as u32;
+        self.positions.push(p);
+        self.cells.entry(c).or_default().push(i);
+        i
+    }
+}
+
+/// Puts every vertex that lies on a piece's edge into that edge.
+///
+/// A face split at a point its neighbour across the edge was not split at is
+/// a T-junction: the mesh looks closed and is not, and the pieces of one face
+/// cannot be merged along an edge they do not share exactly. Candidates come
+/// from whichever axis the edge spans least, so a short or axis-aligned edge
+/// looks at a handful of vertices rather than all of them.
+fn split_t_junctions(positions: &[DVec3], pieces: &mut [(u32, Vec<u32>)]) {
+    let sorted: [Vec<u32>; 3] = std::array::from_fn(|axis| {
+        let mut order: Vec<u32> = (0..positions.len() as u32).collect();
+        order.sort_by(|a, b| positions[*a as usize][axis].total_cmp(&positions[*b as usize][axis]));
+        order
+    });
+    let mut on_edge: Vec<(f64, u32)> = Vec::new();
+    for (_, ring) in pieces.iter_mut() {
+        let n = ring.len();
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            out.push(a);
+            let (pa, pb) = (positions[a as usize], positions[b as usize]);
+            let d = pb - pa;
+            let len2 = d.length_squared();
+            if len2 <= WELD * WELD {
+                continue;
+            }
+            let extent = d.abs();
+            let axis = if extent.x <= extent.y && extent.x <= extent.z {
+                0
+            } else if extent.y <= extent.z {
+                1
+            } else {
+                2
+            };
+            let (lo, hi) = (pa[axis].min(pb[axis]) - WELD, pa[axis].max(pb[axis]) + WELD);
+            let list = &sorted[axis];
+            let from = list.partition_point(|i| positions[*i as usize][axis] < lo);
+            on_edge.clear();
+            for &v in list[from..].iter().take_while(|i| positions[**i as usize][axis] <= hi) {
+                if v == a || v == b {
+                    continue;
+                }
+                let p = positions[v as usize];
+                let t = (p - pa).dot(d) / len2;
+                if t <= 0.0 || t >= 1.0 {
+                    continue;
+                }
+                if (pa + d * t).distance(p) <= WELD {
+                    on_edge.push((t, v));
+                }
+            }
+            on_edge.sort_by(|x, y| x.0.total_cmp(&y.0));
+            out.extend(on_edge.iter().map(|(_, v)| *v));
+        }
+        *ring = out;
+    }
+}
+
+/// The pieces of one face, merged into as few polygons as stay simple.
+///
+/// Two pieces merge when they share one unbroken run of edges, which is
+/// exactly when their union has no hole in it: a face with a hole through it
+/// cannot be one polygon, and stays as however many it takes. Untouched by
+/// the cut, the pieces come back together as the face they were.
+fn merge_pieces(mut rings: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    let mut i = 0;
+    while i < rings.len() {
+        let mut j = i + 1;
+        while j < rings.len() {
+            if let Some(union) = merge_two(&rings[i], &rings[j]) {
+                rings[i] = union;
+                rings.swap_remove(j);
+                // Grown, it may now meet pieces it did not before.
+                j = i + 1;
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    rings
+}
+
+/// `p` and `q` as one polygon, if they share one unbroken run of edges and
+/// the result is simple.
+fn merge_two(p: &[u32], q: &[u32]) -> Option<Vec<u32>> {
+    let (n, m) = (p.len(), q.len());
+    // Shared: p's edge a→b is q's edge b→a.
+    let q_edges: std::collections::HashSet<(u32, u32)> = (0..m).map(|k| (q[k], q[(k + 1) % m])).collect();
+    let shared: Vec<bool> = (0..n).map(|k| q_edges.contains(&(p[(k + 1) % n], p[k]))).collect();
+    let count = shared.iter().filter(|s| **s).count();
+    if count == 0 || count == n {
+        return None;
+    }
+    // One run: exactly one place where an unshared edge is followed by a shared one.
+    let starts: Vec<usize> = (0..n).filter(|k| shared[*k] && !shared[(k + n - 1) % n]).collect();
+    if starts.len() != 1 {
+        return None;
+    }
+    let s = starts[0];
+    // p[s] .. p[s + count] is the shared chain; q runs it backwards, ending at p[s].
+    let first = p[s];
+    let last = p[(s + count) % n];
+    let at = q.iter().position(|v| *v == first)?;
+    let mut union = Vec::with_capacity(n + m - 2 * count);
+    // p from the chain's end round to its start...
+    for k in 0..=(n - count) {
+        union.push(p[(s + count + k) % n]);
+    }
+    // ...then q from just after the chain's start round to just before its end.
+    for k in 1..m {
+        let v = q[(at + k) % m];
+        if v == last {
+            break;
+        }
+        union.push(v);
+    }
+    if union.len() != n + m - 2 * count {
+        return None;
+    }
+    // A vertex twice is a pinch: the two touched at a point as well.
+    let mut seen = union.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    (seen.len() == union.len()).then_some(union)
+}
+
+/// Takes out every vertex that only passes along a straight edge.
+///
+/// What the T-junction repair put in where a neighbour was split and the
+/// merge then made unnecessary. A vertex with exactly two neighbours, in line
+/// with them, is on one edge between two faces, so taking it out of both
+/// keeps the mesh closed.
+fn dissolve_straight_vertices(positions: &[DVec3], faces: &mut [Vec<u32>]) {
+    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); positions.len()];
+    for face in faces.iter() {
+        let n = face.len();
+        for k in 0..n {
+            let (a, b) = (face[k], face[(k + 1) % n]);
+            for (x, y) in [(a, b), (b, a)] {
+                if !neighbours[x as usize].contains(&y) {
+                    neighbours[x as usize].push(y);
+                }
+            }
+        }
+    }
+    let mut straight: Vec<bool> = (0..positions.len())
+        .map(|v| {
+            let [a, b] = neighbours[v][..] else { return false };
+            let (pa, pb, p) = (positions[a as usize], positions[b as usize], positions[v]);
+            let d = pb - pa;
+            let t = (p - pa).dot(d) / d.length_squared().max(f64::MIN_POSITIVE);
+            t > 0.0 && t < 1.0 && (pa + d * t).distance(p) <= WELD
+        })
+        .collect();
+    // Out of every face or none: a face left too few corners keeps its own,
+    // and the face across the edge has to keep them too.
+    for face in faces.iter() {
+        if face.iter().filter(|v| !straight[**v as usize]).count() < 3 {
+            for v in face {
+                straight[*v as usize] = false;
+            }
+        }
+    }
+    for face in faces.iter_mut() {
+        face.retain(|v| !straight[*v as usize]);
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +642,87 @@ mod tests {
             }
         }
         v
+    }
+
+    /// Edges not matched by the same edge the other way round: holes and
+    /// T-junctions. Zero for a closed mesh.
+    fn open_edges(m: &MeshData) -> usize {
+        let mut e: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+        for f in 0..m.num_faces() {
+            let r = m.face_verts(f);
+            for i in 0..r.len() {
+                let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                *e.entry((a, b)).or_default() += 1;
+                *e.entry((b, a)).or_default() -= 1;
+            }
+        }
+        e.values().filter(|v| **v != 0).count() / 2
+    }
+
+    /// The volume of what the renderer would draw: through the real
+    /// triangulation, so a merged non-convex face that ear clipping got wrong
+    /// shows up here even though its polygon is right.
+    fn drawn_volume(m: &MeshData) -> f64 {
+        let p = m.positions();
+        m.triangulate()
+            .indices
+            .chunks(3)
+            .map(|t| {
+                let (a, b, c) = (p[t[0] as usize].as_dvec3(), p[t[1] as usize].as_dvec3(), p[t[2] as usize].as_dvec3());
+                a.dot(b.cross(c)) / 6.0
+            })
+            .sum()
+    }
+
+    fn rotated_to_x(mut m: MeshData) -> MeshData {
+        for p in m.positions_mut() {
+            *p = Vec3::new(p.z, p.y, -p.x);
+        }
+        m
+    }
+
+    #[test]
+    fn the_result_is_closed_and_draws_the_volume_it_encloses() {
+        let cube = primitives::cube(2.0);
+        let rod = primitives::cylinder(0.5, 4.0, 32);
+        let cases = [
+            ("hole", boolean(&cube, &rod, BooleanOp::Difference)),
+            ("sphere out", boolean(&cube, &primitives::uv_sphere(1.2, 32, 16), BooleanOp::Difference)),
+            ("sphere in", boolean(&cube, &primitives::uv_sphere(1.2, 32, 16), BooleanOp::Intersect)),
+            ("pocket", boolean(&cube, &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 0.5)), BooleanOp::Difference)),
+            ("stacked", boolean(&cube, &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 1.5)), BooleanOp::Union)),
+            ("torus", boolean(&cube, &primitives::torus(1.0, 0.3, 24, 12), BooleanOp::Difference)),
+        ];
+        for (name, m) in &cases {
+            assert_eq!(open_edges(m), 0, "{name}: open edges");
+            assert!((drawn_volume(m) - volume(m)).abs() < 1e-3, "{name}: drawn {} encloses {}", drawn_volume(m), volume(m));
+        }
+        // A second hole across the first, on the first's result: what a stack
+        // of two booleans does.
+        let twice = boolean(&cases[0].1, &rotated_to_x(rod.clone()), BooleanOp::Difference);
+        assert_eq!(open_edges(&twice), 0, "second hole: open edges");
+        assert!((drawn_volume(&twice) - volume(&twice)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn faces_the_cut_does_not_reach_stay_whole() {
+        // A rod through the top and bottom: the four sides are untouched and
+        // come back as the four quads they were, not as strips cut along the
+        // rod's facets.
+        let out = boolean(&primitives::cube(2.0), &primitives::cylinder(0.5, 4.0, 32), BooleanOp::Difference);
+        let p = out.positions();
+        let sides = (0..out.num_faces())
+            .filter(|f| {
+                let ring = out.face_verts(*f);
+                let n = crate::tessellate::newell_normal(&ring.iter().map(|v| p[*v as usize]).collect::<Vec<_>>());
+                n.z.abs() < 0.5
+                    && ring.iter().all(|v| p[*v as usize].x.abs() > 0.999 || p[*v as usize].y.abs() > 0.999)
+            })
+            .count();
+        assert_eq!(sides, 4, "the sides came back in pieces");
+        // The top and bottom each have a hole, so each is a few polygons
+        // rather than one — but a few, not the fan of 32 slivers it was.
+        assert!(out.num_faces() < 6 + 32 + 2 * 12, "{} faces", out.num_faces());
     }
 
     #[test]
