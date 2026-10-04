@@ -629,6 +629,22 @@ fn common() -> Vec<Binding> {
             Action::new("object.join"),
         )
         .with_modifiers(Modifiers::ctrl()),
+        // Blender's Bool Tool: select the cutters, then the object to cut,
+        // and Ctrl with the numpad's minus, plus or star. The main row's minus
+        // and equals (plus without Shift) for a keyboard with no numpad, and
+        // Ctrl+Shift+8, the main row's star.
+        key("object.boolean_difference", "NumpadSubtract", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 0))
+            .with_modifiers(Modifiers::ctrl()),
+        key("object.boolean_union", "NumpadAdd", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 1))
+            .with_modifiers(Modifiers::ctrl()),
+        key("object.boolean_intersect", "NumpadMultiply", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 2))
+            .with_modifiers(Modifiers::ctrl()),
+        key("object.boolean_difference_main", "Minus", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 0))
+            .with_modifiers(Modifiers::ctrl()),
+        key("object.boolean_union_main", "Equal", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 1))
+            .with_modifiers(Modifiers::ctrl()),
+        key("object.boolean_intersect_main", "Digit8", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 2))
+            .with_modifiers(Modifiers::ctrl_shift()),
         key(
             "mesh.separate",
             "P",

@@ -628,7 +628,67 @@ impl Operator for SetBoolean {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct BooleanParams {
+    /// What the selected objects do to the active one.
+    #[param(variants("difference", "union", "intersect"))]
+    pub operation: u32,
+}
+
+/// Blender's Bool Tool in one step: the active object gets a boolean for each
+/// other selected mesh, that mesh as its cutter.
+///
+/// Without it a boolean is three trips — make the target active, add the
+/// modifier, find the cutter in a list — with nothing on screen until the
+/// last. Here the selection already says which is which, the way Join reads
+/// it: the cutters selected, the target last so that it is active.
+pub struct Boolean;
+
+/// The other selected meshes, in selection order: what [`Boolean`] cuts with.
+fn cutters(doc: &Document, target: ObjectId) -> Vec<ObjectId> {
+    doc.selection
+        .objects
+        .iter()
+        .copied()
+        .filter(|id| *id != target && doc.object(*id).and_then(|o| o.mesh()).is_some())
+        .collect()
+}
+
+impl Operator for Boolean {
+    type Params = BooleanParams;
+    fn id() -> &'static str {
+        "object.boolean"
+    }
+    fn label() -> &'static str {
+        "Boolean"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some_and(|id| doc.object(id).and_then(|o| o.mesh()).is_some() && !cutters(doc, id).is_empty())
+    }
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(id) = target(d).filter(|id| d.object(*id).and_then(|o| o.mesh()).is_some()) else {
+            return Err(OpError::Failed("the active object has to be a mesh: select the cutters, then the object to cut".into()));
+        };
+        let operands: Vec<_> = cutters(d, id).into_iter().filter_map(|c| d.object_uid(c)).collect();
+        if operands.is_empty() {
+            return Err(OpError::Failed("select the cutters too, then the object to cut last".into()));
+        }
+        let op = match params.operation {
+            1 => BooleanOp::Union,
+            2 => BooleanOp::Intersect,
+            _ => BooleanOp::Difference,
+        };
+        let object = doc.document_mut().object_mut(id).expect("target checked");
+        for operand in operands {
+            object.modifiers.push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op })));
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<Boolean>();
     registry.register::<SetSolidify>();
     registry.register::<SetBevel>();
     registry.register::<SetBoolean>();
@@ -991,6 +1051,26 @@ mod tests {
             kreate_reflect::PropertyKind::Enum { variants } => assert_eq!(variants, KINDS),
             other => panic!("expected an enum, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn one_step_boolean_cuts_the_active_object_with_the_rest_of_the_selection() {
+        let (r, mut h, mut d, id, c) = setup();
+        let cutter = d.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+        // Only the target selected: nothing to cut with, so nothing offered.
+        assert!(!r.get("object.boolean").unwrap().poll(&c, &d));
+        d.selection.clear();
+        d.selection.add(cutter);
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        run(&r, &mut h, &mut d, &c, "object.boolean", &[("operation", PropertyValue::Enum(2))]);
+        let stack = &d.object(id).unwrap().modifiers;
+        assert_eq!(stack.len(), 1);
+        let ModifierKind::Boolean(b) = stack[0].kind else { panic!("not a boolean") };
+        assert_eq!(d.object_by_uid(b.operand), Some(cutter));
+        assert_eq!(b.op, BooleanOp::Intersect);
+        // The cutter's own stack is left alone.
+        assert!(d.object(cutter).unwrap().modifiers.is_empty());
     }
 
     #[test]

@@ -1393,6 +1393,9 @@ impl App {
                         ),
                             ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
                             ("object.join", &[]),
+                            ("object.boolean", &[("operation", PropertyValue::Enum(0))]),
+                            ("object.boolean", &[("operation", PropertyValue::Enum(1))]),
+                            ("object.boolean", &[("operation", PropertyValue::Enum(2))]),
                             ("object.delete", &[]),
                         ],
                         self,
@@ -5791,27 +5794,45 @@ impl App {
 
         let Some(gfx) = self.gfx.as_mut() else { return };
 
+        // Texture changes go up before the surface is asked for, not with the
+        // paint. egui sends each texture whole once and only patches after, so
+        // a frame that gives up on the surface below must not take the whole
+        // one with it: the next frame's patch would land on a texture that was
+        // never made, which egui-wgpu treats as fatal. Seen on a first frame
+        // whose surface was not ready yet.
+        for (id, delta) in &output.textures_delta.set {
+            gfx.egui_renderer
+                .update_texture(&gfx.gpu.device, &gfx.gpu.queue, *id, delta);
+        }
+
         use wgpu::CurrentSurfaceTexture as Acquired;
         let frame = match gfx.surface.get_current_texture() {
-            Acquired::Success(f) => f,
+            Acquired::Success(f) => Some(f),
             Acquired::Suboptimal(f) => {
                 gfx.surface.configure(&gfx.gpu.device, &gfx.config);
-                f
+                Some(f)
             }
             Acquired::Outdated | Acquired::Lost => {
                 gfx.surface.configure(&gfx.gpu.device, &gfx.config);
                 self.redraw.set(RedrawReason::RESIZE);
-                return;
+                None
             }
-            Acquired::Occluded => return,
+            Acquired::Occluded => None,
             Acquired::Timeout => {
                 tracing::warn!("timed out acquiring a surface texture");
-                return;
+                None
             }
             Acquired::Validation => {
                 tracing::error!("validation error acquiring a surface texture");
-                return;
+                None
             }
+        };
+        let Some(frame) = frame else {
+            // Nothing was drawn with them, so what egui retired can go now.
+            for id in &output.textures_delta.free {
+                gfx.egui_renderer.free_texture(id);
+            }
+            return;
         };
         let surface_view = frame
             .texture
@@ -5838,6 +5859,9 @@ impl App {
                     .unwrap_or_default()
             })
             .collect();
+        // A boolean's cutter is drawn as edges, or it would cover the very
+        // cut it makes. See `boolean_cutters`.
+        let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
         let mut draws: Vec<Draw> = Vec::new();
         for (at, (id, mesh)) in self.evaluated.iter().enumerate() {
             if let Some((_, gpu_mesh)) = gfx.meshes.iter().find(|(m, _)| Arc::ptr_eq(m, mesh)) {
@@ -5873,6 +5897,7 @@ impl App {
                                 && self.doc.selection.contains(*id),
                         )
                         .active(self.doc.selection.active == Some(*id))
+                        .wire_only(cutters.contains(id))
                         // The same key the outliner round-trips, so a pick and a
                         // row in the tree name the object the same way.
                         .object_id(shell::object_key(*id))
@@ -6059,7 +6084,11 @@ impl App {
                     let (surfaces, images) = materials.flat_surfaces(&self.doc);
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
-                    for (id, mesh) in &self.evaluated {
+                    // Cutters have no surface in the picture, as in the
+                    // viewport's own passes.
+                    let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
+                    let traced = || self.evaluated.iter().filter(|(id, _)| !cutters.contains(id));
+                    for (id, mesh) in traced() {
                         (Arc::as_ptr(mesh) as usize).hash(&mut h);
                         for v in self.doc.world_transform(*id).to_cols_array() {
                             v.to_bits().hash(&mut h);
@@ -6074,9 +6103,7 @@ impl App {
                     let key = h.finish();
                     if self.path_trace_key != Some(key) {
                         self.path_trace_key = Some(key);
-                        let extracted: Vec<_> = self
-                            .evaluated
-                            .iter()
+                        let extracted: Vec<_> = traced()
                             .map(|(id, mesh)| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
                                 let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
@@ -6236,10 +6263,6 @@ impl App {
         let paint_jobs = self
             .egui_ctx
             .tessellate(output.shapes, output.pixels_per_point);
-        for (id, delta) in &output.textures_delta.set {
-            gfx.egui_renderer
-                .update_texture(&gfx.gpu.device, &gfx.gpu.queue, *id, delta);
-        }
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gfx.config.width, gfx.config.height],
             pixels_per_point,

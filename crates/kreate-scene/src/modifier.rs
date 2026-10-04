@@ -286,6 +286,32 @@ pub fn apply_stack_with(
     current.unwrap_or_else(|| input.clone())
 }
 
+/// The objects some shown object's enabled boolean cuts with.
+///
+/// The viewport draws these as wireframes, as Blender's Bool Tool sets them
+/// to: a cutter drawn solid sits exactly over the hole it makes, so the one
+/// thing a boolean does is the one thing that cannot be seen. Derived rather
+/// than stored, so there is no display setting to save or to forget to undo —
+/// switching the modifier off, or removing it, gives the cutter its surface
+/// back.
+pub fn boolean_cutters(doc: &Document) -> Vec<ObjectId> {
+    let mut out: Vec<ObjectId> = Vec::new();
+    for (id, object) in doc.objects() {
+        if !doc.is_shown(id) {
+            continue;
+        }
+        for m in object.modifiers.iter().filter(|m| m.enabled) {
+            let ModifierKind::Boolean(b) = m.kind else { continue };
+            if let Some(cutter) = doc.object_by_uid(b.operand).filter(|c| *c != id) {
+                if !out.contains(&cutter) {
+                    out.push(cutter);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The mesh `object`'s modifier at `index` would make of its datablock on its
 /// own — what Apply bakes. Blender's rule: the one modifier, on the mesh as
 /// stored, whatever sits below it in the stack. `None` for no such modifier.
@@ -1203,5 +1229,27 @@ mod time_tests {
         doc.object_mut(target).unwrap().modifiers[0].kind =
             ModifierKind::Boolean(BooleanModifier { operand: kreate_reflect::Uid::NONE, op: BooleanOp::Difference });
         assert_eq!(cache.evaluated(&doc, target, &ctx).unwrap().num_faces(), 6);
+    }
+
+    #[test]
+    fn a_cutter_is_named_while_an_enabled_boolean_uses_it() {
+        use kreate_mesh::modifiers::BooleanOp;
+        let mut doc = Document::new();
+        let target = doc.add_mesh_object("Target", kreate_mesh::primitives::cube(2.0));
+        let cutter = doc.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+        assert!(boolean_cutters(&doc).is_empty());
+        let operand = doc.object_uid(cutter).unwrap();
+        doc.object_mut(target)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Difference })));
+        assert_eq!(boolean_cutters(&doc), vec![cutter]);
+        // Off: the cutter is an ordinary object again.
+        doc.object_mut(target).unwrap().modifiers[0].enabled = false;
+        assert!(boolean_cutters(&doc).is_empty());
+        // On, but on a hidden target: nothing is being cut on screen.
+        doc.object_mut(target).unwrap().modifiers[0].enabled = true;
+        doc.object_mut(target).unwrap().visible = false;
+        assert!(boolean_cutters(&doc).is_empty());
     }
 }

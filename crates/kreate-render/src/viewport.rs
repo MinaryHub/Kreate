@@ -607,6 +607,10 @@ pub struct Draw<'a> {
     /// read from `selected` rather than duplicated here — see
     /// [`Draw::protected`].
     pub editing: bool,
+    /// Drawn as its edges alone: no surface, no shadow, nothing in the
+    /// rendered picture, but still clickable. What a boolean's cutter is shown
+    /// as — see [`Draw::surface`].
+    pub wire_only: bool,
     /// Which of the viewport's materials this object is made of.
     ///
     /// An index, because `kreate-render` cannot see a document: the app
@@ -654,6 +658,7 @@ impl<'a> Draw<'a> {
             object_id: 0,
             preview: false,
             editing: false,
+            wire_only: false,
             material: 0,
             materials: &[],
             weights: false,
@@ -717,7 +722,22 @@ impl<'a> Draw<'a> {
     /// thing, and an editor that hides what was selected has told a lie about
     /// what exists.
     pub fn protected(&self) -> bool {
-        self.editing || self.selected
+        // A wire-only draw is nothing *but* its wireframe: faded out with
+        // distance, it would vanish while still being there to click.
+        self.editing || self.selected || self.wire_only
+    }
+
+    /// Draws only the edges. See [`Draw::wire_only`].
+    pub fn wire_only(mut self, yes: bool) -> Self {
+        self.wire_only = yes;
+        self
+    }
+
+    /// Whether this draw's surface is drawn: by the solid, lit and rendered
+    /// passes, and in the shadows. The id pass does not ask, so a wire-only
+    /// object can still be picked where its faces would be.
+    pub fn surface(&self) -> bool {
+        self.detail.draw && !self.wire_only
     }
 
     pub fn selected(mut self, yes: bool) -> Self {
@@ -3982,7 +4002,9 @@ impl Viewport {
                 .iter()
                 .zip(draws.iter().filter(|d| d.detail.draw))
             {
-                if slot.cluster_count == 0 {
+                // Skipped here rather than left out of the zip, which has to
+                // pair slots with draws exactly as the cull counted them.
+                if slot.cluster_count == 0 || draw.wire_only {
                     continue;
                 }
                 pass.set_bind_group(1, &self.cluster_instance_bind, &[slot.instance_offset]);
@@ -3998,7 +4020,7 @@ impl Viewport {
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                if mesh.counts.triangles == 0 || !draw.surface() {
                     continue;
                 }
                 pass.set_bind_group(1, &self.objects.bind, &[self.objects.offset(i as u32)]);
@@ -4126,7 +4148,8 @@ impl Viewport {
 
         // Wireframe over the solid pass, before the grid, so geometry occludes
         // the grid but its own edges sit on top of it.
-        if self.show_wireframe || self.shading == ShadingMode::Wireframe {
+        let all_wires = self.show_wireframe || self.shading == ShadingMode::Wireframe;
+        if all_wires || draws.iter().any(|d| d.wire_only) {
             pass.set_pipeline(&self.edges);
             pass.set_bind_group(0, &self.edge_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
@@ -4135,6 +4158,10 @@ impl Viewport {
                 // transparent: at that density the draw is millions of
                 // instances, and the point of the fade is not to pay for them.
                 if mesh.counts.edges == 0 || !draw.detail.draw || draw.detail.wire_alpha <= 0.0 {
+                    continue;
+                }
+                // With the wireframe overlay off, only the wire-only draws.
+                if !all_wires && !draw.wire_only {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.edge_bind, &[]);
@@ -4379,7 +4406,7 @@ impl Viewport {
             for v in d.transform.to_cols_array() {
                 v.to_bits().hash(&mut h);
             }
-            (d.material, d.weights, d.detail.draw).hash(&mut h);
+            (d.material, d.weights, d.detail.draw, d.wire_only).hash(&mut h);
         }
         let signature = h.finish();
         if signature != self.accum_signature {
@@ -4445,7 +4472,7 @@ impl Viewport {
                     // A see-through object casts as much shadow as light it
                     // stops: all of a solid's, none of clear glass's.
                     let see_through = self.see_through(draw);
-                    if draw.mesh.counts.triangles == 0 || see_through >= 1.0 {
+                    if draw.mesh.counts.triangles == 0 || see_through >= 1.0 || draw.wire_only {
                         return None;
                     }
                     Some((
@@ -4481,7 +4508,7 @@ impl Viewport {
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
                 // Contact is a solid's: a mostly see-through object marks none.
-                if mesh.counts.triangles == 0 || !draw.detail.draw || self.see_through(draw) >= 0.5 {
+                if mesh.counts.triangles == 0 || !draw.surface() || self.see_through(draw) >= 0.5 {
                     continue;
                 }
                 pass.set_bind_group(1, &self.rendered_objects.bind, &[self.rendered_objects.offset(i as u32)]);
@@ -4626,7 +4653,7 @@ impl Viewport {
             let mut current: Option<&str> = None;
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.detail.draw {
+                if mesh.counts.triangles == 0 || !draw.surface() {
                     continue;
                 }
                 pass.set_bind_group(

@@ -1257,6 +1257,8 @@ struct Labels {
     group_add: String,
     weights_normalize: String,
     menu_parent: String,
+    menu_boolean: String,
+    boolean_ops: [String; 3],
     parent_object: String,
     parent_clear: String,
     rename: String,
@@ -1504,6 +1506,8 @@ impl Labels {
             group_add: t("op-object-vertex-group-add"),
             weights_normalize: t("op-paint-weights-normalize"),
             menu_parent: t("menu-parent"),
+            menu_boolean: t("menu-boolean"),
+            boolean_ops: [0, 1, 2].map(|n| t(&format!("op-object-boolean-operation-{n}"))),
             parent_object: t("parent-object"),
             parent_clear: t("parent-clear"),
             rename: t("outliner-rename"),
@@ -3218,6 +3222,19 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
         entry("edit.copy", &l.object_copy, dispatch("edit.copy")),
         entry("edit.paste", &l.object_paste, dispatch("edit.paste")),
         MenuNode::Separator,
+        // The one-step boolean, for whoever has not met Ctrl+minus: the
+        // cutters selected, the object to cut active.
+        MenuNode::Sub(
+            l.menu_boolean.clone(),
+            (0..3u32)
+                .map(|n| {
+                    MenuNode::Entry(
+                        MenuEntry::new("object.boolean", &l.boolean_ops[n as usize], op("object.boolean", &[("operation", V::Enum(n))]))
+                            .variant("operation", V::Enum(n)),
+                    )
+                })
+                .collect(),
+        ),
         // Through `Dispatch`, so the application fills in the frame the
         // timeline is on — the key the menu entry stands for does the same.
         MenuNode::Sub(
@@ -7499,6 +7516,15 @@ op-object-delete = Delete
 op-object-delete-desc = Removes the selected objects.
 op-object-join = Join
 op-object-join-desc = Merges the selected objects' meshes into the active one, leaving everything where it was on screen.
+menu-boolean = Boolean
+op-object-boolean = Boolean
+op-object-boolean-desc = Cuts the active object with the other selected meshes. Select the cutters, then the object to cut.
+op-object-boolean-operation-0 = Difference
+op-object-boolean-operation-0-desc = Cuts the other selected meshes out of the active object (Ctrl+minus). They show as wireframes while they cut.
+op-object-boolean-operation-1 = Union
+op-object-boolean-operation-1-desc = Joins the other selected meshes onto the active object as one solid (Ctrl+plus).
+op-object-boolean-operation-2 = Intersect
+op-object-boolean-operation-2-desc = Keeps only what the active object shares with the other selected meshes (Ctrl+*).
 op-mesh-separate = Separate
 op-mesh-separate-desc = Moves the selected faces into a new object. Ownership changes, not shape.
 op-object-duplicate-linked-false = Duplicate
@@ -8252,6 +8278,15 @@ op-object-delete = 삭제
 op-object-delete-desc = 선택한 오브젝트를 지웁니다.
 op-object-join = 합치기
 op-object-join-desc = 선택한 오브젝트의 메시를 활성 오브젝트로 합칩니다. 화면 위 위치는 그대로입니다.
+menu-boolean = 불리언
+op-object-boolean = 불리언
+op-object-boolean-desc = 활성 오브젝트를 나머지 선택한 메시로 깎습니다. 깎을 도구를 먼저, 깎일 오브젝트를 마지막에 선택하세요.
+op-object-boolean-operation-0 = 빼기
+op-object-boolean-operation-0-desc = 나머지 선택한 메시만큼 활성 오브젝트를 파냅니다 (Ctrl+-). 깎는 도구는 와이어프레임으로 보입니다.
+op-object-boolean-operation-1 = 합집합
+op-object-boolean-operation-1-desc = 나머지 선택한 메시를 활성 오브젝트와 하나의 덩어리로 합칩니다 (Ctrl++).
+op-object-boolean-operation-2 = 교집합
+op-object-boolean-operation-2-desc = 활성 오브젝트와 나머지 선택한 메시가 겹치는 부분만 남깁니다 (Ctrl+*).
 op-mesh-separate = 분리
 op-mesh-separate-desc = 선택한 면을 새 오브젝트로 옮깁니다. 모양이 아니라 소유가 바뀝니다.
 op-object-duplicate-linked-false = 복제
