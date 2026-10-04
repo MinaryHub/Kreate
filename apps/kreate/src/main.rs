@@ -5791,27 +5791,45 @@ impl App {
 
         let Some(gfx) = self.gfx.as_mut() else { return };
 
+        // Texture changes go up before the surface is asked for, not with the
+        // paint. egui sends each texture whole once and only patches after, so
+        // a frame that gives up on the surface below must not take the whole
+        // one with it: the next frame's patch would land on a texture that was
+        // never made, which egui-wgpu treats as fatal. Seen on a first frame
+        // whose surface was not ready yet.
+        for (id, delta) in &output.textures_delta.set {
+            gfx.egui_renderer
+                .update_texture(&gfx.gpu.device, &gfx.gpu.queue, *id, delta);
+        }
+
         use wgpu::CurrentSurfaceTexture as Acquired;
         let frame = match gfx.surface.get_current_texture() {
-            Acquired::Success(f) => f,
+            Acquired::Success(f) => Some(f),
             Acquired::Suboptimal(f) => {
                 gfx.surface.configure(&gfx.gpu.device, &gfx.config);
-                f
+                Some(f)
             }
             Acquired::Outdated | Acquired::Lost => {
                 gfx.surface.configure(&gfx.gpu.device, &gfx.config);
                 self.redraw.set(RedrawReason::RESIZE);
-                return;
+                None
             }
-            Acquired::Occluded => return,
+            Acquired::Occluded => None,
             Acquired::Timeout => {
                 tracing::warn!("timed out acquiring a surface texture");
-                return;
+                None
             }
             Acquired::Validation => {
                 tracing::error!("validation error acquiring a surface texture");
-                return;
+                None
             }
+        };
+        let Some(frame) = frame else {
+            // Nothing was drawn with them, so what egui retired can go now.
+            for id in &output.textures_delta.free {
+                gfx.egui_renderer.free_texture(id);
+            }
+            return;
         };
         let surface_view = frame
             .texture
@@ -6236,10 +6254,6 @@ impl App {
         let paint_jobs = self
             .egui_ctx
             .tessellate(output.shapes, output.pixels_per_point);
-        for (id, delta) in &output.textures_delta.set {
-            gfx.egui_renderer
-                .update_texture(&gfx.gpu.device, &gfx.gpu.queue, *id, delta);
-        }
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gfx.config.width, gfx.config.height],
             pixels_per_point,
