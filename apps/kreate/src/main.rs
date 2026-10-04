@@ -5856,6 +5856,9 @@ impl App {
                     .unwrap_or_default()
             })
             .collect();
+        // A boolean's cutter is drawn as edges, or it would cover the very
+        // cut it makes. See `boolean_cutters`.
+        let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
         let mut draws: Vec<Draw> = Vec::new();
         for (at, (id, mesh)) in self.evaluated.iter().enumerate() {
             if let Some((_, gpu_mesh)) = gfx.meshes.iter().find(|(m, _)| Arc::ptr_eq(m, mesh)) {
@@ -5891,6 +5894,7 @@ impl App {
                                 && self.doc.selection.contains(*id),
                         )
                         .active(self.doc.selection.active == Some(*id))
+                        .wire_only(cutters.contains(id))
                         // The same key the outliner round-trips, so a pick and a
                         // row in the tree name the object the same way.
                         .object_id(shell::object_key(*id))
@@ -6077,7 +6081,11 @@ impl App {
                     let (surfaces, images) = materials.flat_surfaces(&self.doc);
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
-                    for (id, mesh) in &self.evaluated {
+                    // Cutters have no surface in the picture, as in the
+                    // viewport's own passes.
+                    let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
+                    let traced = || self.evaluated.iter().filter(|(id, _)| !cutters.contains(id));
+                    for (id, mesh) in traced() {
                         (Arc::as_ptr(mesh) as usize).hash(&mut h);
                         for v in self.doc.world_transform(*id).to_cols_array() {
                             v.to_bits().hash(&mut h);
@@ -6092,9 +6100,7 @@ impl App {
                     let key = h.finish();
                     if self.path_trace_key != Some(key) {
                         self.path_trace_key = Some(key);
-                        let extracted: Vec<_> = self
-                            .evaluated
-                            .iter()
+                        let extracted: Vec<_> = traced()
                             .map(|(id, mesh)| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
                                 let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
