@@ -16,6 +16,7 @@ members = [
     "crates/kreate-reflect",
     "apps/kreate",
     "apps/kreatec",
+    "apps/kreate-mcp",
 ]
 
 [workspace.package]

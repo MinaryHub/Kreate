@@ -1,0 +1,11 @@
+[package]
+name = "kreate-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An MCP server that lets Claude drive a running Kreate"
+
+[dependencies]
+serde_json.workspace = true

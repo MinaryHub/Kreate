@@ -7,6 +7,7 @@
 //! invisible to everything except a human looking at the screen.
 
 pub mod breadcrumbs;
+pub mod bridge;
 pub mod crashreport;
 pub mod docfile;
 pub mod dragpreview;

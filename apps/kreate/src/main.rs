@@ -267,6 +267,8 @@ struct ViewportTarget {
     /// wgpu's own refcount, and the handle is never needed again. Explicit
     /// `destroy` happens by dropping the view when the target is replaced.
     view: wgpu::TextureView,
+    /// Kept for the connector's capture, which copies the picture out.
+    texture: wgpu::Texture,
     id: egui::TextureId,
     size: (u32, u32),
 }
@@ -307,7 +309,9 @@ impl ViewportTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Self::FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[Self::SAMPLED_AS],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -316,7 +320,7 @@ impl ViewportTarget {
             ..Default::default()
         });
         let id = renderer.register_native_texture(device, &sampled, wgpu::FilterMode::Linear);
-        Self { view, id, size }
+        Self { view, texture, id, size }
     }
 
     /// Reallocates if the requested size differs enough to matter.
@@ -540,6 +544,8 @@ impl Gfx {
 }
 
 struct App {
+    /// The connector's socket. See `kreate::bridge`.
+    bridge: Option<kreate::bridge::Bridge>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     egui_ctx: egui::Context,
@@ -790,6 +796,7 @@ impl App {
 
     fn empty(doc: Document, locale: &str, registry: OperatorRegistry) -> Self {
         Self {
+            bridge: None,
             window: None,
             gfx: None,
             egui_ctx: egui::Context::default(),
@@ -3071,6 +3078,298 @@ impl App {
         }
     }
 
+    // --- the connector -----------------------------------------------------
+    //
+    // What `kreate-mcp` asks for, served on the main thread, where the
+    // document is. See `kreate::bridge`.
+
+    /// Answers every request waiting since the last wake.
+    fn serve_bridge(&mut self) {
+        let Some(bridge) = self.bridge.as_ref() else { return };
+        for request in bridge.pending() {
+            let result = self.bridge_call(&request.method, &request.params);
+            request.answer(result);
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn bridge_call(&mut self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let text = |name: &str| params.get(name).and_then(|v| v.as_str()).map(str::to_string);
+        match method {
+            "scene" => Ok(self.scene_json()),
+            "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
+            "run" => {
+                let script = text("script").ok_or("`script` is required")?;
+                let lines: Vec<_> = self
+                    .run_script_reporting(&script)
+                    .into_iter()
+                    .map(|(line, result)| match result {
+                        Ok(r) => json!({ "line": line, "ok": true, "result": r }),
+                        Err(e) => json!({ "line": line, "ok": false, "error": e }),
+                    })
+                    .collect();
+                Ok(json!({ "lines": lines }))
+            }
+            "undo" | "redo" => {
+                let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 1000);
+                for _ in 0..steps {
+                    if method == "undo" {
+                        self.undo();
+                    } else {
+                        self.redo();
+                    }
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                Ok(json!({ "steps": steps, "history_position": self.history.cursor() }))
+            }
+            "capture" => self.capture_viewport(),
+            "open" => {
+                let path = text("path").ok_or("`path` is required")?;
+                self.load_from(std::path::Path::new(&path));
+                let said = self.ui.status.clone().unwrap_or_default();
+                if said.starts_with("cannot") {
+                    Err(said)
+                } else {
+                    Ok(json!({ "message": said }))
+                }
+            }
+            "save" => {
+                let path = match text("path") {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => self
+                        .file
+                        .path()
+                        .map(|p| p.to_path_buf())
+                        .ok_or("the document has never been saved; give a path")?,
+                };
+                self.save_to(path).map(|m| json!({ "message": m }))
+            }
+            "export" => {
+                let path = text("path").ok_or("`path` is required")?;
+                self.export_to(std::path::Path::new(&path)).map(|m| json!({ "message": m }))
+            }
+            other => Err(format!("unknown method `{other}`")),
+        }
+    }
+
+    /// The document as the connector sees it: what is in it and where.
+    fn scene_json(&self) -> serde_json::Value {
+        use kreate_scene::document::ObjectData;
+        use serde_json::json;
+        let doc = &self.doc;
+        let rgb = |c: kreate_math::SceneRgb| [c.r, c.g, c.b];
+        let objects: Vec<_> = doc
+            .objects()
+            .map(|(id, o)| {
+                let t = &o.transform;
+                let r = kreate_scene::animation::to_euler(t.rotation);
+                let kind = match o.data {
+                    ObjectData::Empty => "empty",
+                    ObjectData::Mesh(_) => "mesh",
+                    ObjectData::Camera(_) => "camera",
+                    ObjectData::Light(_) => "light",
+                    ObjectData::Armature(_) => "armature",
+                };
+                let mut v = json!({
+                    "name": o.name,
+                    "type": kind,
+                    "location": t.translation.to_array(),
+                    "rotation_degrees": [r.x.to_degrees(), r.y.to_degrees(), r.z.to_degrees()],
+                    "scale": t.scale.to_array(),
+                    "visible": doc.is_shown(id),
+                    "selected": doc.selection.contains(id),
+                    "active": doc.selection.active == Some(id),
+                    "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
+                });
+                match o.data {
+                    ObjectData::Mesh(mesh) => {
+                        if let Some(m) = doc.mesh(mesh) {
+                            v["vertices"] = json!(m.num_verts());
+                            v["faces"] = json!(m.num_faces());
+                        }
+                        let slots: Vec<_> = (0..32)
+                            .map_while(|slot| doc.material_id_at(id, slot))
+                            .filter_map(|m| doc.material(m).map(|m| m.name.clone()))
+                            .collect();
+                        v["materials"] = json!(slots);
+                    }
+                    ObjectData::Light(light) => {
+                        if let Some(l) = doc.light(light) {
+                            v["light"] = json!({
+                                "kind": format!("{:?}", l.kind),
+                                "color": rgb(l.color),
+                                "intensity": l.intensity,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                v
+            })
+            .collect();
+        let materials: Vec<_> = doc
+            .materials()
+            .map(|(_, m)| {
+                json!({
+                    "name": m.name,
+                    "base_color": rgb(m.base_color),
+                    "metallic": m.metallic,
+                    "roughness": m.roughness,
+                    "alpha": m.alpha,
+                    "emission": rgb(m.emission),
+                    "emission_strength_nits": m.emission_strength,
+                    "transmission": m.transmission,
+                    "ior": m.ior,
+                    "uses_nodes": m.graph.is_some(),
+                })
+            })
+            .collect();
+        json!({
+            "file": self.file.path().map(|p| p.display().to_string()),
+            "mode": format!("{:?}", self.op_ctx.mode),
+            "frame": doc.playback.frame,
+            "cursor": doc.cursor.to_array(),
+            "objects": objects,
+            "materials": materials,
+            "last_operation": self.history.last().map(|e| e.to_script_call()),
+        })
+    }
+
+    /// The operators a script can call, with their parameters: the grammar
+    /// `run` speaks.
+    fn operators_json(&self, filter: &str) -> serde_json::Value {
+        use kreate_reflect::PropertyKind;
+        use serde_json::json;
+        let ops: Vec<_> = self
+            .registry
+            .iter()
+            .filter(|info| info.id.starts_with(filter) || info.id.contains(filter))
+            .map(|info| {
+                let params: Vec<_> = info
+                    .schema
+                    .iter()
+                    .filter(|d| !d.hidden)
+                    .map(|d| {
+                        let (kind, variants): (&str, &[&str]) = match d.kind {
+                            PropertyKind::Bool => ("bool", &[]),
+                            PropertyKind::Int => ("int", &[]),
+                            PropertyKind::Float => ("float", &[]),
+                            PropertyKind::Vec3 => ("vec3", &[]),
+                            PropertyKind::Color => ("color", &[]),
+                            PropertyKind::Text => ("text", &[]),
+                            PropertyKind::Enum { variants } => ("enum", variants),
+                            PropertyKind::Ints => ("ints", &[]),
+                            PropertyKind::Floats => ("floats", &[]),
+                        };
+                        let mut p = json!({ "name": d.name, "kind": kind });
+                        if !variants.is_empty() {
+                            p["variants"] = json!(variants);
+                        }
+                        if let Some(min) = d.min {
+                            p["min"] = json!(min);
+                        }
+                        if let Some(max) = d.max {
+                            p["max"] = json!(max);
+                        }
+                        if !d.doc.is_empty() {
+                            p["doc"] = json!(d.doc);
+                        }
+                        p
+                    })
+                    .collect();
+                json!({
+                    "id": info.id,
+                    "label": info.label,
+                    "available_now": info.poll(&self.op_ctx, &self.doc),
+                    "params": params,
+                })
+            })
+            .collect();
+        json!({ "operators": ops })
+    }
+
+    /// The viewport as a PNG, once the still view has settled.
+    fn capture_viewport(&mut self) -> Result<serde_json::Value, String> {
+        if self.gfx.is_none() {
+            return Err("the window is not open yet".into());
+        }
+        // Draw until the picture stops changing: the still view's mean, or
+        // the path tracer's, filled. Bounded, so a view that never settles
+        // still answers.
+        let started = Instant::now();
+        self.restart_mean_if_changed();
+        self.render();
+        self.redraw.clear();
+        while self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating())
+            && started.elapsed() < std::time::Duration::from_secs(30)
+        {
+            self.render();
+            self.redraw.clear();
+        }
+        let gfx = self.gfx.as_ref().ok_or("the window closed")?;
+        let (w, h) = gfx.viewport.render_size();
+        let row = (w * 4).div_ceil(256) * 256;
+        let buffer = gfx.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gfx
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &gfx.target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        gfx.gpu.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gfx.gpu
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("the GPU did not finish: {e:?}"))?;
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        {
+            let data = buffer.slice(..).get_mapped_range();
+            for y in 0..h as usize {
+                let start = y * row as usize;
+                pixels.extend_from_slice(&data[start..start + (w * 4) as usize]);
+            }
+        }
+        buffer.unmap();
+        // Opaque: the target's alpha is a compositing detail, not the picture.
+        for p in pixels.as_chunks_mut::<4>().0 {
+            p[3] = 255;
+        }
+        let image = image::RgbaImage::from_raw(w, h, pixels).ok_or("the capture has the wrong size")?;
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| format!("cannot encode the capture: {e}"))?;
+        Ok(serde_json::json!({
+            "width": w,
+            "height": h,
+            "png_base64": kreate::bridge::base64(&png),
+        }))
+    }
+
     /// Applies the commands the panels queued this frame.
     fn drain_ui_commands(&mut self) {
         for command in self.ui.queue.drain() {
@@ -3386,6 +3685,11 @@ impl App {
                 }
             }
         };
+        let _ = self.save_to(path);
+    }
+
+    /// Saves to `path`, which becomes the document's file. Says what happened.
+    fn save_to(&mut self, path: std::path::PathBuf) -> Result<String, String> {
         // The dialog may hand back a name with no extension, and a document
         // called `model` is one the shell will not associate with anything.
         let path = if path.extension().is_none() {
@@ -3396,9 +3700,15 @@ impl App {
         match self.file.save(&path, &self.doc) {
             Ok(()) => {
                 self.remember_recent(&path);
-                self.status(&format!("saved {}", path.display()));
+                let message = format!("saved {}", path.display());
+                self.status(&message);
+                Ok(message)
             }
-            Err(e) => self.status(&format!("cannot save {}: {e}", path.display())),
+            Err(e) => {
+                let message = format!("cannot save {}: {e}", path.display());
+                self.status(&message);
+                Err(message)
+            }
         }
     }
 
@@ -3422,6 +3732,12 @@ impl App {
         else {
             return;
         };
+        let _ = self.export_to(&path);
+    }
+
+    /// Writes the scene to `path`, in the format its extension names. Says
+    /// what happened.
+    fn export_to(&mut self, path: &std::path::Path) -> Result<String, String> {
         let (scene, mut notes) = kreate_io::scene_from_document(&self.doc);
         let lower = path
             .extension()
@@ -3472,25 +3788,37 @@ impl App {
         };
         let bytes = match written {
             Ok(bytes) => bytes,
-            Err(e) => return self.status(&format!("cannot export: {e}")),
+            Err(e) => {
+                let message = format!("cannot export: {e}");
+                self.status(&message);
+                return Err(message);
+            }
         };
         for note in &notes {
             tracing::info!(?note, "export note");
         }
-        match std::fs::write(&path, bytes) {
+        match std::fs::write(path, bytes) {
             // The path is deliberately not adopted. An export is not a save,
             // and a document whose path is a `.glb` would quietly lose
             // everything the format cannot hold on the next Ctrl+S.
-            Ok(()) => self.status(&format!(
-                "exported {}{}",
-                path.display(),
-                if notes.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({} notes)", notes.len())
-                }
-            )),
-            Err(e) => self.status(&format!("cannot write {}: {e}", path.display())),
+            Ok(()) => {
+                let message = format!(
+                    "exported {}{}",
+                    path.display(),
+                    if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} notes)", notes.len())
+                    }
+                );
+                self.status(&message);
+                Ok(message)
+            }
+            Err(e) => {
+                let message = format!("cannot write {}: {e}", path.display());
+                self.status(&message);
+                Err(message)
+            }
         }
     }
 
@@ -4991,7 +5319,14 @@ impl App {
     }
 
     fn run_script(&mut self, source: &str) {
+        self.run_script_reporting(source);
+    }
+
+    /// Runs a script as `run_script` does, and says what became of each line:
+    /// the line, and the history entry it became or why it did not.
+    fn run_script_reporting(&mut self, source: &str) -> Vec<(String, Result<String, String>)> {
         use kreate_ui::console::{ConsoleLine, LineKind};
+        let mut report = Vec::new();
         let outcomes = self.history.run_script(
             &self.registry,
             &mut self.doc,
@@ -5005,6 +5340,14 @@ impl App {
                 text: outcome.text.clone(),
                 kind: LineKind::Input,
             });
+            report.push((
+                outcome.text.clone(),
+                match &outcome.result {
+                    Ok(kreate_ops::OpResult::Finished) => Ok("finished".to_string()),
+                    Ok(other) => Ok(format!("{other:?}")),
+                    Err(e) => Err(e.to_string()),
+                },
+            ));
             match outcome.result {
                 Ok(kreate_ops::OpResult::Finished) => {}
                 Ok(other) => self.ui.console_log.push(ConsoleLine {
@@ -5028,6 +5371,7 @@ impl App {
             self.status(&format!("script: {errors} line(s) failed"));
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+        report
     }
 
     /// Ctrl+C: the selected objects, as text the application keeps.
@@ -6791,6 +7135,11 @@ impl Drop for App {
 }
 
 impl ApplicationHandler for App {
+    /// A connector request is waiting. See `kreate::bridge`.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        self.serve_bridge();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -7377,6 +7726,21 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App::new(doc, &locale);
     app.file = file;
+    // The connector's way in. A failure costs the connector and nothing else.
+    let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    if let Some(info) = kreate::bridge::info_path() {
+        match kreate::bridge::start(&info, move || {
+            if let Ok(proxy) = proxy.lock() {
+                let _ = proxy.send_event(());
+            }
+        }) {
+            Ok(bridge) => {
+                tracing::info!(port = bridge.port, "connector bridge listening");
+                app.bridge = Some(bridge);
+            }
+            Err(e) => tracing::warn!(error = %e, "connector bridge not started"),
+        }
+    }
     event_loop.run_app(&mut app).expect("run");
 }
 

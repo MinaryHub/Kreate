@@ -33,12 +33,12 @@ tracing-subscriber.workspace = true
 # An environment reaches the renderer as `Rgba16Float`, which is what the
 # datablock holds and what a sky needs. See `environment::pixels_of`.
 half = "2"
+# The connector's wire, and the viewport capture it hands back as PNG.
+serde_json.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon in the executable. See `build.rs`.
 winresource = "0.1"
 
 [dev-dependencies]
-# Dumps a composited frame to PNG so a layout defect can be looked at rather
-# than guessed at.
-image = { version = "0.25", default-features = false, features = ["png"] }

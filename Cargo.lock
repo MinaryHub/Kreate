@@ -1569,6 +1569,7 @@ dependencies = [
  "minidumper",
  "pollster",
  "rfd",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "wgpu",
@@ -1622,6 +1623,13 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+]
+
+[[package]]
+name = "kreate-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
