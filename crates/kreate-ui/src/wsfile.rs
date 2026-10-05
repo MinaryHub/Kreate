@@ -146,6 +146,13 @@ pub fn write(spaces: &Workspaces) -> String {
     );
     let _ = writeln!(out, "schema_version = {SCHEMA_VERSION}");
     let _ = writeln!(out, "active = \"{}\"", escape(&spaces.active().name));
+    // The workspaces Kreate ships, as this build knows them. A later build
+    // that ships another adds it on load; one named here and missing from the
+    // list below was deleted by the user and stays deleted. `x-` so a build
+    // that predates the field reads the file without a complaint.
+    for shipped in Workspaces::default().iter() {
+        let _ = writeln!(out, "x-shipped = \"{}\"", escape(&shipped.name));
+    }
 
     for space in spaces.iter() {
         out.push_str("\n[[workspace]]\n");
@@ -170,6 +177,9 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
     let mut version = OLDEST_SCHEMA;
     let mut active_name: Option<String> = None;
     let mut loaded: Vec<Workspace> = Vec::new();
+    // The shipped workspaces the file's writer knew. `None` for a file written
+    // before the field: everything shipped since is new to it.
+    let mut shipped: Option<Vec<String>> = None;
 
     // A workspace under construction: the line its table started on, its name,
     // and the nodes seen so far.
@@ -219,6 +229,7 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
             None => match name {
                 "schema_version" => version = value.parse().unwrap_or(OLDEST_SCHEMA),
                 "active" => active_name = Some(unquote(value)),
+                "x-shipped" => shipped.get_or_insert_with(Vec::new).push(unquote(value)),
                 // Ignored rather than rejected, so a file from a build with an
                 // extra setting still loads here.
                 _ if name.starts_with("x-") => {}
@@ -289,7 +300,35 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
     if version < SCHEMA_VERSION {
         migrate(version, &mut spaces);
     }
+    add_new_shipped(&mut spaces, shipped.as_deref());
     (spaces, problems)
+}
+
+/// Appends the shipped workspaces the file's writer did not know.
+///
+/// A file saved before a build added the Scripting workspace would otherwise
+/// keep it out for good: the file lists what existed then, and what is in the
+/// file is what loads. One the writer did know and the file does not list was
+/// deleted, and is not brought back.
+///
+/// A file from before the record holds none of it, and is read by what it
+/// contains: one built from the shipped set — any shipped name in it — gains
+/// what shipped since; one of the user's own layouts alone is left alone.
+fn add_new_shipped(spaces: &mut Workspaces, known: Option<&[String]>) {
+    let defaults = Workspaces::default();
+    if known.is_none() && !spaces.iter().any(|s| defaults.iter().any(|d| d.name == s.name)) {
+        return;
+    }
+    let active = spaces.active_index();
+    for space in defaults.iter() {
+        let present = spaces.iter().any(|s| s.name == space.name);
+        let deleted = known.is_some_and(|k| k.contains(&space.name));
+        if !present && !deleted {
+            spaces.add(space.name.clone(), space.screen.clone());
+        }
+    }
+    // `add` switches to what it adds; the user's choice is kept.
+    spaces.switch_to(active);
 }
 
 /// One `node` value: `area <editor>` or `split <axis> <ratio>`.
@@ -361,6 +400,62 @@ fn unquote(value: &str) -> String {
 
 fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod shipped_tests {
+    use super::*;
+
+    const OLD_FILE: &str = "schema_version = 1
+active = \"Modeling\"
+
+        [[workspace]]
+name = \"Layout\"
+node = \"area viewport\"
+
+        [[workspace]]
+name = \"Modeling\"
+node = \"area viewport\"
+";
+
+    fn names(spaces: &Workspaces) -> Vec<String> {
+        spaces.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_file_from_before_a_workspace_shipped_gains_it_and_keeps_its_active_one() {
+        // Saved when only these two existed: Scripting and the rest came
+        // later, and never showed up for anyone who had a file.
+        let (spaces, problems) = parse(OLD_FILE);
+        assert!(problems.is_empty(), "{problems:?}");
+        let got = names(&spaces);
+        assert!(got.contains(&"Scripting".to_string()), "{got:?}");
+        assert_eq!(&got[..2], ["Layout", "Modeling"], "the file's own come first, in its order");
+        assert_eq!(spaces.active().name, "Modeling");
+    }
+
+    #[test]
+    fn a_file_of_the_users_own_layouts_alone_is_left_alone() {
+        let text = "schema_version = 1
+
+[[workspace]]
+name = \"Mine\"
+node = \"area viewport\"
+";
+        let (spaces, _) = parse(text);
+        assert_eq!(names(&spaces), ["Mine"]);
+    }
+
+    #[test]
+    fn a_shipped_workspace_the_user_deleted_stays_deleted() {
+        let mut spaces = Workspaces::default();
+        let scripting = names(&spaces).iter().position(|n| n == "Scripting").expect("shipped");
+        assert!(spaces.remove(scripting));
+        let (back, problems) = parse(&write(&spaces));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!names(&back).contains(&"Scripting".to_string()));
+        assert_eq!(names(&back), names(&spaces));
+    }
 }
 
 #[cfg(test)]
