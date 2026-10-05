@@ -755,6 +755,10 @@ struct App {
     /// The camera object the view is through, while it is: its lens is the
     /// path tracer's.
     camera_view_object: Option<kreate_scene::document::ObjectId>,
+    /// Where the camera view last put the viewport. The view follows the
+    /// camera while the viewport is still there; once something else has
+    /// moved it — the user orbiting, a framing — the camera view is left.
+    camera_view_pose: Option<kreate_render::Camera>,
     /// `C`: the selection brush, while it is on.
     circle: Option<CircleSelect>,
     /// The document version the drivers last ran against. They run again
@@ -880,6 +884,7 @@ impl App {
             local_view: None,
             camera_view: None,
             camera_view_object: None,
+            camera_view_pose: None,
             circle: None,
             autokey: false,
             shown_title: String::new(),
@@ -2697,6 +2702,7 @@ impl App {
     fn toggle_camera_view(&mut self) {
         if let Some(before) = self.camera_view.take() {
             self.camera_view_object = None;
+            self.camera_view_pose = None;
             self.motion
                 .animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
             self.redraw.set(RedrawReason::CAMERA_MOVED);
@@ -2709,9 +2715,46 @@ impl App {
         self.camera_view_object = Some(object);
         let destination = self.view_through(object);
         self.camera_view = Some(self.camera);
+        self.camera_view_pose = Some(destination);
         self.motion
             .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
         self.redraw.set(RedrawReason::CAMERA_MOVED);
+    }
+
+    /// Keeps the camera view on the camera: as it plays an animation, is
+    /// moved, or has its lens changed. Blender's rule for the other half: a
+    /// view the user has moved away is no longer the camera's, and the camera
+    /// view is left where they took it rather than pulled back.
+    fn follow_camera_view(&mut self) {
+        // A capture or a render places the view itself, and puts it back.
+        if self.capturing || self.motion.is_animating() {
+            return;
+        }
+        let Some(object) = self.camera_view_object else {
+            return;
+        };
+        let leave = |app: &mut Self| {
+            app.camera_view = None;
+            app.camera_view_object = None;
+            app.camera_view_pose = None;
+        };
+        if self.doc.object(object).is_none() {
+            return leave(self);
+        }
+        let Some(pose) = self.camera_view_pose else {
+            self.camera_view_pose = Some(self.camera);
+            return;
+        };
+        if !same_view(&self.camera, &pose) {
+            return leave(self);
+        }
+        let now = self.view_through(object);
+        if !same_view(&now, &pose) {
+            self.camera = now;
+            self.motion.target = now;
+            self.camera_view_pose = Some(now);
+            self.redraw.set(RedrawReason::CAMERA_MOVED);
+        }
     }
 
     /// The camera object to look through: the one called `name`, or else the
@@ -6816,6 +6859,7 @@ impl App {
         // frame is drawn from, and it has to be settled before the viewport
         // projection, the ray queries and the interface all ask for it.
         self.advance_camera();
+        self.follow_camera_view();
         self.read_picks();
         if self.circle.as_ref().is_some_and(|c| c.stroke.is_some()) {
             self.drive_circle_stroke();
@@ -8508,6 +8552,17 @@ impl Drop for App {
     }
 }
 
+/// Whether two viewport cameras show the same view, to within what rounding
+/// in the easing leaves.
+fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
+    let reach = a.distance.max(b.distance).max(1e-3);
+    a.eye().distance(b.eye()) <= reach * 1e-6
+        && a.pivot.distance(b.pivot) <= reach * 1e-6
+        && a.rotation.dot(b.rotation).abs() >= 1.0 - 1e-9
+        && (a.fov_y - b.fov_y).abs() <= 1e-9
+        && a.projection == b.projection
+}
+
 /// What became of one line of a script.
 struct ScriptLine {
     text: String,
@@ -9549,6 +9604,44 @@ mod tests {
         assert!(app.camera_view.is_some());
         app.toggle_camera_view();
         assert!(app.camera_view.is_none());
+    }
+
+    #[test]
+    fn the_camera_view_follows_the_camera_until_the_user_takes_the_view() {
+        let mut app = app();
+        app.run_op("object.add_camera", PropertyMap::new());
+        let camera = app.doc.selection.active.expect("the camera is active");
+        app.toggle_camera_view();
+        // The move into the camera finishes, and the view is the camera's.
+        app.motion.advance(&mut app.camera, 10.0);
+        app.follow_camera_view();
+        let start = app.camera.eye();
+
+        // The camera moves — an animation playing, or a script.
+        app.doc.object_mut(camera).unwrap().transform.translation += DVec3::new(2.0, 0.0, 1.0);
+        app.follow_camera_view();
+        assert!(
+            (app.camera.eye() - start - DVec3::new(2.0, 0.0, 1.0)).length() < 1e-6,
+            "the view stayed at {start:?} while the camera moved"
+        );
+        assert!(app.camera_view.is_some());
+
+        // The user orbits: the view is theirs, and the camera view is left.
+        app.motion.target.orbit(0.3, 0.0);
+        app.motion.advance(&mut app.camera, 10.0);
+        app.follow_camera_view();
+        assert!(
+            app.camera_view.is_none(),
+            "orbiting did not leave the camera view"
+        );
+        let theirs = app.camera.eye();
+        app.doc.object_mut(camera).unwrap().transform.translation += DVec3::new(1.0, 0.0, 0.0);
+        app.follow_camera_view();
+        assert_eq!(
+            app.camera.eye(),
+            theirs,
+            "a view the user took was pulled back"
+        );
     }
 
     #[test]
