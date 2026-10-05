@@ -371,8 +371,7 @@ impl AlbedoTable {
     /// `F0·a + b`; with Fresnel at one it is `a + b`.
     pub fn lookup(&self, nov: f32, roughness: f32) -> (f32, f32) {
         let last = (ALBEDO_LUT - 1) as f32;
-        let to_index =
-            |t: f32| (t.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
+        let to_index = |t: f32| (t.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
         let (x, y) = (to_index(nov), to_index(roughness));
         let (x0, y0) = (x.floor() as usize, y.floor() as usize);
         let (x1, y1) = ((x0 + 1).min(ALBEDO_LUT - 1), (y0 + 1).min(ALBEDO_LUT - 1));
@@ -542,8 +541,7 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
         // a metal and `F0` is four percent, where the compensation is one to
         // within a thousandth.
         let avg = (f0[c] * avg_a + avg_b).clamp(0.0, 0.99);
-        diffuse[c] =
-            albedo[c] * inv_pi * (1.0 - share_v[c]) * (1.0 - share_l[c]) / (1.0 - avg);
+        diffuse[c] = albedo[c] * inv_pi * (1.0 - share_v[c]) * (1.0 - share_l[c]) / (1.0 - avg);
     }
 
     Response { diffuse, specular }
@@ -617,7 +615,6 @@ pub fn library_source() -> &'static str {
         None => panic!("the probe marker is gone from this shader"),
     }
 }
-
 
 /// How many `vec2` entries the shader's buffer holds.
 ///
@@ -1211,8 +1208,7 @@ mod tests {
                         // have clamped.
                         let nan_in = surface.base_color.to_array()[c].is_nan();
                         assert!(
-                            nan_in
-                                || (r.diffuse[c].is_finite() && r.specular[c].is_finite()),
+                            nan_in || (r.diffuse[c].is_finite() && r.specular[c].is_finite()),
                             "{surface:?} v {v} l {l} gave {r:?}"
                         );
                         assert!(

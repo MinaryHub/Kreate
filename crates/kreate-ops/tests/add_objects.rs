@@ -13,7 +13,12 @@ use kreate_scene::Document;
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 #[test]
@@ -27,11 +32,17 @@ fn every_primitive_the_menu_lists_adds_a_mesh_object_of_that_shape() {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let added = doc.selection.active.expect("the new object is active");
         let object = doc.object(added).expect("it exists");
-        assert!(matches!(object.data, ObjectData::Mesh(_)), "{name} is not a mesh");
+        assert!(
+            matches!(object.data, ObjectData::Mesh(_)),
+            "{name} is not a mesh"
+        );
         let mesh = doc.mesh(object.mesh().unwrap()).unwrap();
         assert!(mesh.num_faces() > 0, "{name} has no faces");
     }
-    assert_eq!(doc.object_count(), kreate_ops::ops::object::PRIMITIVES.len());
+    assert_eq!(
+        doc.object_count(),
+        kreate_ops::ops::object::PRIMITIVES.len()
+    );
     // Distinct shapes, not eight cubes: the face counts must not all agree.
     let mut faces: Vec<u32> = doc
         .objects()
@@ -39,7 +50,10 @@ fn every_primitive_the_menu_lists_adds_a_mesh_object_of_that_shape() {
         .collect();
     faces.sort_unstable();
     faces.dedup();
-    assert!(faces.len() >= 5, "the shapes are too alike to be eight shapes: {faces:?}");
+    assert!(
+        faces.len() >= 5,
+        "the shapes are too alike to be eight shapes: {faces:?}"
+    );
 }
 
 #[test]
@@ -48,11 +62,21 @@ fn an_empty_can_be_added_and_is_selected() {
     // else, which is what a parent for a rig or a target for a constraint is.
     let (registry, mut history, mut doc, ctx) = wired();
     history
-        .dispatch(&registry, &mut doc, &ctx, "object.add_empty", &PropertyMap::new())
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "object.add_empty",
+            &PropertyMap::new(),
+        )
         .expect("adds");
     let added = doc.selection.active.expect("the empty is active");
     assert!(matches!(doc.object(added).unwrap().data, ObjectData::Empty));
-    assert_eq!(doc.selection.objects, vec![added], "the empty is the whole selection");
+    assert_eq!(
+        doc.selection.objects,
+        vec![added],
+        "the empty is the whole selection"
+    );
     assert!(history.undo(&mut doc));
     assert_eq!(doc.object_count(), 0, "undo did not take it away");
 }
@@ -61,8 +85,17 @@ fn an_empty_can_be_added_and_is_selected() {
 fn a_camera_from_the_menu_arrives_selected() {
     let (registry, mut history, mut doc, ctx) = wired();
     history
-        .dispatch(&registry, &mut doc, &ctx, "object.add_camera", &PropertyMap::new())
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "object.add_camera",
+            &PropertyMap::new(),
+        )
         .expect("adds");
     let added = doc.selection.active.expect("active");
-    assert!(matches!(doc.object(added).unwrap().data, ObjectData::Camera(_)));
+    assert!(matches!(
+        doc.object(added).unwrap().data,
+        ObjectData::Camera(_)
+    ));
 }

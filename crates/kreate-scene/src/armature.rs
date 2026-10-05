@@ -317,14 +317,20 @@ impl Pose {
         match self.bones.iter().position(|b| b.name == name) {
             Some(i) => &mut self.bones[i],
             None => {
-                self.bones.push(PoseBone { name: name.into(), transform: DTransform::IDENTITY, selected: false });
+                self.bones.push(PoseBone {
+                    name: name.into(),
+                    transform: DTransform::IDENTITY,
+                    selected: false,
+                });
                 self.bones.last_mut().expect("just pushed")
             }
         }
     }
 
     pub fn transform(&self, name: &str) -> DTransform {
-        self.get(name).map(|b| b.transform).unwrap_or(DTransform::IDENTITY)
+        self.get(name)
+            .map(|b| b.transform)
+            .unwrap_or(DTransform::IDENTITY)
     }
 
     pub fn is_selected(&self, name: &str) -> bool {
@@ -351,7 +357,10 @@ pub fn posed_fk(armature: &Armature, pose: &Pose) -> Vec<DAffine3> {
     for bone in &armature.bones {
         let rest = bone.rest();
         let local = pose.transform(&bone.name).to_affine();
-        let frame = match bone.parent.and_then(|p| Some((out.get(p)?, armature.bones.get(p)?))) {
+        let frame = match bone
+            .parent
+            .and_then(|p| Some((out.get(p)?, armature.bones.get(p)?)))
+        {
             Some((parent_posed, parent)) => *parent_posed * parent.rest().inverse() * rest * local,
             None => rest * local,
         };
@@ -370,7 +379,10 @@ const IK_CLOSE: f64 = 1e-5;
 /// about its head to point the tip at the target), then carries every bone
 /// hanging below the chain along with it.
 fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkConstraint) {
-    let (Some(tip_bone), Some(target)) = (armature.bone_index(&ik.bone), armature.bone_index(&ik.target)) else {
+    let (Some(tip_bone), Some(target)) = (
+        armature.bone_index(&ik.bone),
+        armature.bone_index(&ik.target),
+    ) else {
         return;
     };
     // The chain, tip first. A target inside its own chain would chase itself.
@@ -387,7 +399,11 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
     let goal = frames[target].translation;
     let length = armature.bones[tip_bone].length();
     let tip = |frames: &[DAffine3]| frames[tip_bone].transform_point3(DVec3::Y * length);
-    let reach: f64 = chain.iter().map(|b| armature.bones[*b].length()).sum::<f64>().max(1e-9);
+    let reach: f64 = chain
+        .iter()
+        .map(|b| armature.bones[*b].length())
+        .sum::<f64>()
+        .max(1e-9);
     // A straight chain with the goal on its own line gives the solver no
     // side to bend to: every bone already points at it. Bend the first
     // joint a little first — towards the pole when there is one.
@@ -395,7 +411,9 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
         let root = frames[*chain.last().expect("not empty")].translation;
         let line = (tip(frames) - root).normalize_or_zero();
         let off_line = |p: DVec3| (p - root).cross(line).length();
-        let straight = chain.iter().all(|b| off_line(frames[*b].translation) < 1e-6 * reach);
+        let straight = chain
+            .iter()
+            .all(|b| off_line(frames[*b].translation) < 1e-6 * reach);
         if line != DVec3::ZERO && straight && off_line(goal) < 1e-6 * reach {
             let side = armature
                 .bone_index(&ik.pole)
@@ -425,7 +443,9 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
                 continue;
             }
             let turn = DQuat::from_rotation_arc(from.normalize(), to.normalize());
-            let about = DAffine3::from_translation(pivot) * DAffine3::from_quat(turn) * DAffine3::from_translation(-pivot);
+            let about = DAffine3::from_translation(pivot)
+                * DAffine3::from_quat(turn)
+                * DAffine3::from_translation(-pivot);
             // Bone `j` and the chain below it, which hang from it.
             for &c in &chain[..=k] {
                 frames[c] = about * frames[c];
@@ -442,7 +462,8 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
             let axis = (goal - root).normalize_or_zero();
             let flat = |v: DVec3| v - axis * v.dot(axis);
             let (bend, want) = (flat(joint - root), flat(frames[pole].translation - root));
-            if axis != DVec3::ZERO && bend.length_squared() > 1e-18 && want.length_squared() > 1e-18 {
+            if axis != DVec3::ZERO && bend.length_squared() > 1e-18 && want.length_squared() > 1e-18
+            {
                 let (bend, want) = (bend.normalize(), want.normalize());
                 let angle = bend.cross(want).dot(axis).atan2(bend.dot(want));
                 let about = DAffine3::from_translation(root)
@@ -464,7 +485,9 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
         if chain.contains(&i) {
             continue;
         }
-        let Some(p) = bone.parent.filter(|p| moved[*p]) else { continue };
+        let Some(p) = bone.parent.filter(|p| moved[*p]) else {
+            continue;
+        };
         let local = pose.transform(&bone.name).to_affine();
         frames[i] = frames[p] * armature.bones[p].rest().inverse() * bone.rest() * local;
         moved[i] = true;
@@ -474,9 +497,17 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
 /// The pose transform that puts bone `index` at `frame` (armature space),
 /// given the frames of the bones before it — the inverse of one step of
 /// [`posed`], and what an edit in world terms turns into.
-pub fn pose_for_frame(armature: &Armature, frames: &[DAffine3], index: usize, frame: DAffine3) -> DTransform {
+pub fn pose_for_frame(
+    armature: &Armature,
+    frames: &[DAffine3],
+    index: usize,
+    frame: DAffine3,
+) -> DTransform {
     let bone = &armature.bones[index];
-    let base = match bone.parent.and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?))) {
+    let base = match bone
+        .parent
+        .and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?)))
+    {
         Some((parent_posed, parent)) => *parent_posed * parent.rest().inverse() * bone.rest(),
         None => bone.rest(),
     };
@@ -520,24 +551,50 @@ mod tests {
     fn arm() -> Armature {
         let mut a = Armature::new("Arm");
         a.bones[0].name = "Upper".into();
-        a.add_bone(Bone { name: "Lower".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::new(0.0, 0.0, 2.0), roll: 0.0, ..Default::default() });
+        a.add_bone(Bone {
+            name: "Lower".into(),
+            parent: Some(0),
+            head: DVec3::Z,
+            tail: DVec3::new(0.0, 0.0, 2.0),
+            roll: 0.0,
+            ..Default::default()
+        });
         a
     }
 
     #[test]
     fn a_bones_y_runs_from_head_to_tail() {
-        let b = Bone { name: "B".into(), parent: None, head: DVec3::new(1.0, 0.0, 0.0), tail: DVec3::new(1.0, 0.0, 3.0), roll: 0.0, ..Default::default() };
+        let b = Bone {
+            name: "B".into(),
+            parent: None,
+            head: DVec3::new(1.0, 0.0, 0.0),
+            tail: DVec3::new(1.0, 0.0, 3.0),
+            roll: 0.0,
+            ..Default::default()
+        };
         let r = b.rest();
         assert!(close(r.translation, DVec3::new(1.0, 0.0, 0.0)));
         assert!(close(r.matrix3 * DVec3::Y, DVec3::Z));
         // Straight down, the one direction with no shortest arc.
-        let down = Bone { tail: DVec3::new(1.0, 0.0, -2.0), ..b.clone() };
+        let down = Bone {
+            tail: DVec3::new(1.0, 0.0, -2.0),
+            ..b.clone()
+        };
         assert!(close(down.rest().matrix3 * DVec3::Y, DVec3::NEG_Z));
         // The roll turns X about the bone.
-        let rolled = Bone { roll: std::f64::consts::FRAC_PI_2, ..b };
-        let x0 = b_x(&Bone { roll: 0.0, ..rolled.clone() });
+        let rolled = Bone {
+            roll: std::f64::consts::FRAC_PI_2,
+            ..b
+        };
+        let x0 = b_x(&Bone {
+            roll: 0.0,
+            ..rolled.clone()
+        });
         let x1 = b_x(&rolled);
-        assert!(x0.dot(x1).abs() < 1e-9, "a quarter roll left X where it was");
+        assert!(
+            x0.dot(x1).abs() < 1e-9,
+            "a quarter roll left X where it was"
+        );
     }
 
     fn b_x(b: &Bone) -> DVec3 {
@@ -557,14 +614,24 @@ mod tests {
         let a = arm();
         let mut pose = Pose::default();
         // A quarter turn about the upper bone's own X bends it over.
-        pose.entry("Upper").transform.rotation = DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
+        pose.entry("Upper").transform.rotation =
+            DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
         let frames = posed(&a, &pose);
         let elbow = frames[1].translation;
         let tip = frames[1].transform_point3(DVec3::Y * a.bones[1].length());
-        assert!((elbow.z).abs() < 1e-9, "the child's head did not follow its parent's tail: {elbow:?}");
+        assert!(
+            (elbow.z).abs() < 1e-9,
+            "the child's head did not follow its parent's tail: {elbow:?}"
+        );
         assert!((elbow.length() - 1.0).abs() < 1e-9);
-        assert!(((tip - elbow).length() - 1.0).abs() < 1e-9, "the child changed length");
-        assert!(close(tip - elbow, elbow), "the child did not keep pointing along its parent");
+        assert!(
+            ((tip - elbow).length() - 1.0).abs() < 1e-9,
+            "the child changed length"
+        );
+        assert!(
+            close(tip - elbow, elbow),
+            "the child did not keep pointing along its parent"
+        );
     }
 
     #[test]
@@ -593,7 +660,14 @@ mod tests {
         // Numbered from the stem, not stacked on the number.
         a.bones[1].name = "Lower.001".into();
         assert_eq!(a.unique_name("Lower.001"), "Lower.002");
-        let i = a.add_bone(Bone { name: "Loose".into(), parent: Some(99), head: DVec3::ZERO, tail: DVec3::Y, roll: 0.0, ..Default::default() });
+        let i = a.add_bone(Bone {
+            name: "Loose".into(),
+            parent: Some(99),
+            head: DVec3::ZERO,
+            tail: DVec3::Y,
+            roll: 0.0,
+            ..Default::default()
+        });
         assert_eq!(a.bones[i].parent, None);
         assert!(is_ancestor(&a, 0, 1));
         assert!(!is_ancestor(&a, 1, 0));
@@ -602,19 +676,41 @@ mod tests {
     /// The arm, a hand hanging off the forearm, and a loose IK target.
     fn rig() -> Armature {
         let mut a = arm();
-        a.add_bone(Bone { name: "Hand".into(), parent: Some(1), head: DVec3::new(0.0, 0.0, 2.0), tail: DVec3::new(0.0, 0.0, 2.3), connected: true, ..Default::default() });
-        a.add_bone(Bone { name: "Target".into(), parent: None, head: DVec3::new(1.2, 0.0, 0.9), tail: DVec3::new(1.2, 0.0, 1.2), ..Default::default() });
+        a.add_bone(Bone {
+            name: "Hand".into(),
+            parent: Some(1),
+            head: DVec3::new(0.0, 0.0, 2.0),
+            tail: DVec3::new(0.0, 0.0, 2.3),
+            connected: true,
+            ..Default::default()
+        });
+        a.add_bone(Bone {
+            name: "Target".into(),
+            parent: None,
+            head: DVec3::new(1.2, 0.0, 0.9),
+            tail: DVec3::new(1.2, 0.0, 1.2),
+            ..Default::default()
+        });
         a
     }
 
     fn ik(chain: u32) -> IkConstraint {
-        IkConstraint { bone: "Lower".into(), target: "Target".into(), chain, enabled: true, pole: String::new() }
+        IkConstraint {
+            bone: "Lower".into(),
+            target: "Target".into(),
+            chain,
+            enabled: true,
+            pole: String::new(),
+        }
     }
 
     #[test]
     fn ik_brings_the_forearms_tip_to_the_target_and_the_hand_along() {
         let a = rig();
-        let pose = Pose { ik: vec![ik(2)], ..Default::default() };
+        let pose = Pose {
+            ik: vec![ik(2)],
+            ..Default::default()
+        };
         let frames = posed(&a, &pose);
         let tip = frames[1].transform_point3(DVec3::Y * a.bones[1].length());
         assert!(tip.distance(DVec3::new(1.2, 0.0, 0.9)) < 1e-3, "{tip:?}");
@@ -623,9 +719,18 @@ mod tests {
         let elbow = frames[0].transform_point3(DVec3::Y * a.bones[0].length());
         assert!(elbow.distance(frames[1].translation) < 1e-9);
         // The hand is carried to the wrist.
-        assert!(frames[2].translation.distance(tip) < 1e-9, "the hand stayed behind");
+        assert!(
+            frames[2].translation.distance(tip) < 1e-9,
+            "the hand stayed behind"
+        );
         // Off, the arm stands as it was.
-        let off = Pose { ik: vec![IkConstraint { enabled: false, ..ik(2) }], ..Default::default() };
+        let off = Pose {
+            ik: vec![IkConstraint {
+                enabled: false,
+                ..ik(2)
+            }],
+            ..Default::default()
+        };
         assert!(close(posed(&a, &off)[1].translation, DVec3::Z));
     }
 
@@ -634,7 +739,13 @@ mod tests {
         let mut a = rig();
         a.bones[3].head = DVec3::new(10.0, 0.0, 0.0);
         a.bones[3].tail = DVec3::new(10.0, 0.0, 1.0);
-        let frames = posed(&a, &Pose { ik: vec![ik(0)], ..Default::default() });
+        let frames = posed(
+            &a,
+            &Pose {
+                ik: vec![ik(0)],
+                ..Default::default()
+            },
+        );
         let tip = frames[1].transform_point3(DVec3::Y * a.bones[1].length());
         assert!((tip - DVec3::new(2.0, 0.0, 0.0)).length() < 1e-2, "{tip:?}");
     }
@@ -642,8 +753,17 @@ mod tests {
     #[test]
     fn a_chain_of_one_turns_only_the_forearm() {
         let a = rig();
-        let frames = posed(&a, &Pose { ik: vec![ik(1)], ..Default::default() });
-        assert!(close(frames[0].matrix3 * DVec3::Y, DVec3::Z), "the upper arm moved");
+        let frames = posed(
+            &a,
+            &Pose {
+                ik: vec![ik(1)],
+                ..Default::default()
+            },
+        );
+        assert!(
+            close(frames[0].matrix3 * DVec3::Y, DVec3::Z),
+            "the upper arm moved"
+        );
         let dir = (frames[1].matrix3 * DVec3::Y).normalize();
         let want = (DVec3::new(1.2, 0.0, 0.9) - DVec3::Z).normalize();
         assert!(dir.dot(want) > 0.999, "{dir:?}");
@@ -658,14 +778,27 @@ mod tests {
         a.bones[3].tail = DVec3::new(0.0, 0.0, 1.8);
         for side in [1.0, -1.0] {
             let mut rig = a.clone();
-            rig.add_bone(Bone { name: "Pole".into(), head: DVec3::new(0.0, 3.0 * side, 1.0), tail: DVec3::new(0.0, 3.0 * side, 1.3), ..Default::default() });
-            let pose = Pose { ik: vec![IkConstraint { pole: "Pole".into(), ..ik(2) }], ..Default::default() };
+            rig.add_bone(Bone {
+                name: "Pole".into(),
+                head: DVec3::new(0.0, 3.0 * side, 1.0),
+                tail: DVec3::new(0.0, 3.0 * side, 1.3),
+                ..Default::default()
+            });
+            let pose = Pose {
+                ik: vec![IkConstraint {
+                    pole: "Pole".into(),
+                    ..ik(2)
+                }],
+                ..Default::default()
+            };
             let frames = posed(&rig, &pose);
             let elbow = frames[1].translation;
             assert!(elbow.y * side > 0.3, "side {side}: elbow at {elbow:?}");
             let tip = frames[1].transform_point3(DVec3::Y * rig.bones[1].length());
-            assert!(tip.distance(DVec3::new(0.0, 0.0, 1.5)) < 1e-3, "the pole pulled the tip off the target: {tip:?}");
+            assert!(
+                tip.distance(DVec3::new(0.0, 0.0, 1.5)) < 1e-3,
+                "the pole pulled the tip off the target: {tip:?}"
+            );
         }
     }
 }
-

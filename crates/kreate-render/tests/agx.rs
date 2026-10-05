@@ -402,8 +402,9 @@ fn the_screen_pass_covers_every_pixel() {
     let gpu = gpu_or_skip!(gpu());
     let width = 7;
     let height = 5;
-    let pixels: Vec<[f32; 4]> =
-        (0..width * height).map(|_| [0.1875, 0.1875, 0.1875, 1.0]).collect();
+    let pixels: Vec<[f32; 4]> = (0..width * height)
+        .map(|_| [0.1875, 0.1875, 0.1875, 1.0])
+        .collect();
     let shown = through_the_screen(
         &gpu,
         &pixels,
@@ -455,8 +456,7 @@ fn an_hdr_target_only_reallocates_when_the_size_changes() {
     // rarely. The answer says which happened so a caller can rebuild what
     // depended on the view.
     let gpu = gpu_or_skip!(gpu());
-    let mut target =
-        kreate_render::display::HdrTarget::new(&gpu.device, 640, 480);
+    let mut target = kreate_render::display::HdrTarget::new(&gpu.device, 640, 480);
     assert_eq!(target.size(), (640, 480));
     assert!(!target.resize(&gpu.device, 640, 480), "it reallocated");
     assert!(target.resize(&gpu.device, 800, 600));
@@ -610,7 +610,9 @@ fn a_count_that_is_not_a_whole_workgroup_writes_exactly_that_many() {
     let gpu = gpu_or_skip!(gpu());
     let count = 70; // Two workgroups' worth of threads, seventy colours.
     assert_eq!(workgroups(count as u32), 2);
-    let colors: Vec<[f32; 4]> = (0..count).map(|i| [i as f32 * 0.01, 0.0, 0.0, 1.0]).collect();
+    let colors: Vec<[f32; 4]> = (0..count)
+        .map(|i| [i as f32 * 0.01, 0.0, 0.0, 1.0])
+        .collect();
     let out = on_gpu(
         &gpu,
         &colors,
@@ -657,7 +659,10 @@ fn a_partial_frame_leaves_the_rest_of_the_buffer_alone() {
         } else {
             // Still the sentinel the buffer was filled with, which the
             // transform cannot produce.
-            assert_eq!(got[0], -7.0, "entry {i} was written past the count: {got:?}");
+            assert_eq!(
+                got[0], -7.0,
+                "entry {i} was written past the count: {got:?}"
+            );
         }
     }
 }

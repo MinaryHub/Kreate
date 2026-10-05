@@ -9,7 +9,12 @@ use kreate_scene::Document;
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 fn run(
@@ -34,7 +39,12 @@ fn text(s: &str) -> PropertyValue {
 }
 
 /// A handle and a door, the door's Z rotation to be driven by the handle's X.
-fn scene() -> (Document, kreate_scene::ObjectId, kreate_scene::ObjectId, String) {
+fn scene() -> (
+    Document,
+    kreate_scene::ObjectId,
+    kreate_scene::ObjectId,
+    String,
+) {
     let mut doc = Document::new();
     let handle = doc.add_object(Object::new("Handle", ObjectData::Empty));
     let mut door_object = Object::new("Door", ObjectData::Empty);
@@ -49,9 +59,30 @@ fn door_z(doc: &Document, door: kreate_scene::ObjectId) -> f64 {
 }
 
 /// The full rig, through the operators, as a panel would build it.
-fn rig(registry: &OperatorRegistry, history: &mut History, doc: &mut Document, ctx: &Context, handle: kreate_scene::ObjectId, target: &str) {
-    assert!(run(registry, history, doc, ctx, "anim.driver_add", &[("target", text(target))]));
-    assert!(run(registry, history, doc, ctx, "anim.driver_variable_add", &[("target", text(target))]));
+fn rig(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    ctx: &Context,
+    handle: kreate_scene::ObjectId,
+    target: &str,
+) {
+    assert!(run(
+        registry,
+        history,
+        doc,
+        ctx,
+        "anim.driver_add",
+        &[("target", text(target))]
+    ));
+    assert!(run(
+        registry,
+        history,
+        doc,
+        ctx,
+        "anim.driver_variable_add",
+        &[("target", text(target))]
+    ));
     let uid = doc.object_uid(handle).unwrap().raw().to_string();
     assert!(run(
         registry,
@@ -85,11 +116,30 @@ fn a_new_driver_holds_the_value_it_found() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (mut d, _, door, target) = scene();
     std::mem::swap(&mut doc, &mut d);
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.driver_add", &[("target", text(&target))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "anim.driver_add",
+        &[("target", text(&target))]
+    ));
     doc.drive();
-    assert!((door_z(&doc, door) - 0.25).abs() < 1e-12, "adding the driver turned the door");
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "anim.driver_add", &[("target", text(&target))]),
-        "a second driver on one component");
+    assert!(
+        (door_z(&doc, door) - 0.25).abs() < 1e-12,
+        "adding the driver turned the door"
+    );
+    assert!(
+        !run(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "anim.driver_add",
+            &[("target", text(&target))]
+        ),
+        "a second driver on one component"
+    );
 }
 
 #[test]
@@ -106,7 +156,10 @@ fn a_rig_built_from_the_operators_follows_its_handle_and_undoes() {
     // first expression said.
     assert!(history.undo(&mut doc));
     doc.drive();
-    assert!((door_z(&doc, door) - 0.25).abs() < 1e-9, "the old expression did not come back");
+    assert!(
+        (door_z(&doc, door) - 0.25).abs() < 1e-9,
+        "the old expression did not come back"
+    );
     assert!(history.undo(&mut doc));
     assert!(history.undo(&mut doc));
     assert!(history.undo(&mut doc));
@@ -120,11 +173,19 @@ fn a_rig_replays_from_the_history() {
     std::mem::swap(&mut doc, &mut d);
     let start = doc.clone();
     rig(&registry, &mut history, &mut doc, &ctx, handle, &target);
-    let script: String = history.entries().iter().map(|e| e.to_script_call()).collect::<Vec<_>>().join("\n");
+    let script: String = history
+        .entries()
+        .iter()
+        .map(|e| e.to_script_call())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut replay = start;
     let outcomes = History::new().run_script(&registry, &mut replay, None, &ctx, &script);
     assert!(outcomes.iter().all(|o| o.result.is_ok()), "{script}");
-    assert_eq!(replay.object(door).unwrap().drivers, doc.object(door).unwrap().drivers);
+    assert_eq!(
+        replay.object(door).unwrap().drivers,
+        doc.object(door).unwrap().drivers
+    );
 }
 
 #[test]
@@ -132,12 +193,30 @@ fn variables_are_numbered_names_and_come_off_again() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (mut d, _, door, target) = scene();
     std::mem::swap(&mut doc, &mut d);
-    run(&registry, &mut history, &mut doc, &ctx, "anim.driver_add", &[("target", text(&target))]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "anim.driver_add",
+        &[("target", text(&target))],
+    );
     for _ in 0..3 {
-        run(&registry, &mut history, &mut doc, &ctx, "anim.driver_variable_add", &[("target", text(&target))]);
+        run(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "anim.driver_variable_add",
+            &[("target", text(&target))],
+        );
     }
     let names = |doc: &Document| -> Vec<String> {
-        doc.object(door).unwrap().drivers[0].variables.iter().map(|v| v.name.clone()).collect()
+        doc.object(door).unwrap().drivers[0]
+            .variables
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
     };
     assert_eq!(names(&doc), vec!["var", "var_1", "var_2"]);
     assert!(run(
@@ -146,10 +225,20 @@ fn variables_are_numbered_names_and_come_off_again() {
         &mut doc,
         &ctx,
         "anim.driver_variable_remove",
-        &[("target", text(&target)), ("variable", PropertyValue::Int(1))]
+        &[
+            ("target", text(&target)),
+            ("variable", PropertyValue::Int(1))
+        ]
     ));
     assert_eq!(names(&doc), vec!["var", "var_2"]);
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "anim.driver_remove", &[("target", text(&target))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "anim.driver_remove",
+        &[("target", text(&target))]
+    ));
     assert!(doc.object(door).unwrap().drivers.is_empty());
 }
 
@@ -159,7 +248,22 @@ fn a_target_that_names_nothing_is_refused() {
     let (mut d, _, door, _) = scene();
     std::mem::swap(&mut doc, &mut d);
     let uid = doc.object_uid(door).unwrap().raw();
-    for bad in [driver_target(uid, "colour", 0), driver_target(uid, "location", 3), driver_target(999, "location", 0), "junk".into()] {
-        assert!(!run(&registry, &mut history, &mut doc, &ctx, "anim.driver_add", &[("target", text(&bad))]), "{bad}");
+    for bad in [
+        driver_target(uid, "colour", 0),
+        driver_target(uid, "location", 3),
+        driver_target(999, "location", 0),
+        "junk".into(),
+    ] {
+        assert!(
+            !run(
+                &registry,
+                &mut history,
+                &mut doc,
+                &ctx,
+                "anim.driver_add",
+                &[("target", text(&bad))]
+            ),
+            "{bad}"
+        );
     }
 }

@@ -49,10 +49,17 @@ pub struct SheetView {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SheetEdit {
     /// Select the keys of these rows between two frames.
-    Select { targets: Vec<String>, frame_min: f64, frame_max: f64, extend: bool },
+    Select {
+        targets: Vec<String>,
+        frame_min: f64,
+        frame_max: f64,
+        extend: bool,
+    },
     /// 0 select all, 1 deselect all, 2 invert — `anim.keys_select_all`'s order.
     SelectAll(u32),
-    Move { offset: f64 },
+    Move {
+        offset: f64,
+    },
     Delete,
     /// `anim.keys_interpolation`'s order: constant, linear, Bézier.
     Interpolation(u32),
@@ -73,11 +80,17 @@ enum Drag {
     #[default]
     None,
     /// Moving the selection; `from` is where the pointer started, in frames.
-    Move { from: f64 },
+    Move {
+        from: f64,
+    },
     /// Moving the selection with `G`: follows the pointer until a click.
-    Grab { from: f64 },
+    Grab {
+        from: f64,
+    },
     /// A box from this corner.
-    Box { from: Pos2 },
+    Box {
+        from: Pos2,
+    },
     Scrub,
 }
 
@@ -160,7 +173,12 @@ fn rows_between(layout: &Layout, a: f32, b: f32, count: usize) -> std::ops::Rang
 }
 
 /// Draws the dope sheet. Returns what was asked for.
-pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &SheetText) -> Vec<SheetEdit> {
+pub fn dope_sheet(
+    ui: &mut Ui,
+    view: &SheetView,
+    state: &mut SheetState,
+    text: &SheetText,
+) -> Vec<SheetEdit> {
     // Which object rows have rows under them, and the rows left once the
     // folded ones' children are taken out.
     let parents: std::collections::BTreeSet<String> = view
@@ -223,23 +241,55 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
     let layout = Layout::new(rect, range);
 
     // --- the grid ----------------------------------------------------------------
-    let ruler = Rect::from_min_max(Pos2::new(layout.keys.min.x, rect.min.y), Pos2::new(rect.max.x, layout.keys.min.y));
+    let ruler = Rect::from_min_max(
+        Pos2::new(layout.keys.min.x, rect.min.y),
+        Pos2::new(rect.max.x, layout.keys.min.y),
+    );
     painter.rect_filled(ruler, 0.0, theme.base);
     let names = Rect::from_min_max(rect.min, Pos2::new(layout.keys.min.x, rect.max.y));
     let dim = Color32::from_black_alpha(50);
-    painter.rect_filled(Rect::from_min_max(layout.keys.min, Pos2::new(layout.x(view.start as f64), rect.max.y)), 0.0, dim);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(layout.x(view.end as f64), layout.keys.min.y), rect.max), 0.0, dim);
+    painter.rect_filled(
+        Rect::from_min_max(
+            layout.keys.min,
+            Pos2::new(layout.x(view.start as f64), rect.max.y),
+        ),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(layout.x(view.end as f64), layout.keys.min.y),
+            rect.max,
+        ),
+        0.0,
+        dim,
+    );
     let step = tick_step(layout.frame_width(), 44.0);
     let mut f = ((range.0 / step as f64).ceil() as i64) * step as i64;
     while (f as f64) <= range.1 {
         let x = layout.x(f as f64);
-        painter.line_segment([Pos2::new(x, layout.keys.min.y), Pos2::new(x, rect.max.y)], Stroke::new(1.0, theme.border));
-        painter.text(Pos2::new(x, rect.min.y + 3.0), egui::Align2::CENTER_TOP, f.to_string(), egui::FontId::proportional(10.0), theme.text_faint);
+        painter.line_segment(
+            [Pos2::new(x, layout.keys.min.y), Pos2::new(x, rect.max.y)],
+            Stroke::new(1.0, theme.border),
+        );
+        painter.text(
+            Pos2::new(x, rect.min.y + 3.0),
+            egui::Align2::CENTER_TOP,
+            f.to_string(),
+            egui::FontId::proportional(10.0),
+            theme.text_faint,
+        );
         f += step as i64;
     }
 
     if view.rows.is_empty() {
-        painter.text(layout.keys.center(), egui::Align2::CENTER_CENTER, &text.empty, egui::FontId::proportional(12.0), theme.text_faint);
+        painter.text(
+            layout.keys.center(),
+            egui::Align2::CENTER_CENTER,
+            &text.empty,
+            egui::FontId::proportional(12.0),
+            theme.text_faint,
+        );
     }
 
     // What a drag in progress does to the selected keys, in whole frames.
@@ -254,7 +304,10 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
         let y = layout.row_y(i);
         if row.depth == 0 {
             painter.rect_filled(
-                Rect::from_center_size(Pos2::new(rect.center().x, y), Vec2::new(rect.width(), ROW - 1.0)),
+                Rect::from_center_size(
+                    Pos2::new(rect.center().x, y),
+                    Vec2::new(rect.width(), ROW - 1.0),
+                ),
                 0.0,
                 Color32::from_white_alpha(6),
             );
@@ -264,29 +317,62 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
             let c = Pos2::new(names.min.x + 9.0, y);
             let shut = state.collapsed.contains(&row.target);
             let points = if shut {
-                vec![c + Vec2::new(-2.5, -4.0), c + Vec2::new(3.5, 0.0), c + Vec2::new(-2.5, 4.0)]
+                vec![
+                    c + Vec2::new(-2.5, -4.0),
+                    c + Vec2::new(3.5, 0.0),
+                    c + Vec2::new(-2.5, 4.0),
+                ]
             } else {
-                vec![c + Vec2::new(-4.0, -2.5), c + Vec2::new(4.0, -2.5), c + Vec2::new(0.0, 3.5)]
+                vec![
+                    c + Vec2::new(-4.0, -2.5),
+                    c + Vec2::new(4.0, -2.5),
+                    c + Vec2::new(0.0, 3.5),
+                ]
             };
-            painter.add(egui::Shape::convex_polygon(points, theme.text_dim, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                theme.text_dim,
+                Stroke::NONE,
+            ));
         }
         painter.text(
             Pos2::new(names.min.x + 18.0 + row.depth as f32 * 12.0, y),
             egui::Align2::LEFT_CENTER,
             &row.label,
             egui::FontId::proportional(12.0),
-            if row.depth == 0 { theme.text } else { theme.text_dim },
+            if row.depth == 0 {
+                theme.text
+            } else {
+                theme.text_dim
+            },
         );
         for key in &row.keys {
-            let frame = if key.selected { key.frame + offset } else { key.frame };
+            let frame = if key.selected {
+                key.frame + offset
+            } else {
+                key.frame
+            };
             let x = layout.x(frame);
             if x < layout.keys.min.x - KEY_RADIUS || x > rect.max.x + KEY_RADIUS {
                 continue;
             }
-            let r = if row.depth == 0 { KEY_RADIUS } else { KEY_RADIUS - 1.0 };
+            let r = if row.depth == 0 {
+                KEY_RADIUS
+            } else {
+                KEY_RADIUS - 1.0
+            };
             painter.add(egui::Shape::convex_polygon(
-                vec![Pos2::new(x, y - r), Pos2::new(x + r, y), Pos2::new(x, y + r), Pos2::new(x - r, y)],
-                if key.selected { theme.accent } else { Color32::from_gray(200) },
+                vec![
+                    Pos2::new(x, y - r),
+                    Pos2::new(x + r, y),
+                    Pos2::new(x, y + r),
+                    Pos2::new(x - r, y),
+                ],
+                if key.selected {
+                    theme.accent
+                } else {
+                    Color32::from_gray(200)
+                },
                 Stroke::new(1.0, Color32::BLACK),
             ));
         }
@@ -294,13 +380,21 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
 
     // The clock.
     let x = layout.x(view.frame);
-    painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], Stroke::new(2.0, theme.accent));
+    painter.line_segment(
+        [Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)],
+        Stroke::new(2.0, theme.accent),
+    );
 
     // A box being drawn.
     if let (Drag::Box { from }, Some(p)) = (&state.drag, pointer) {
         let b = Rect::from_two_pos(*from, p);
         painter.rect_filled(b, 0.0, theme.accent_wash);
-        painter.rect_stroke(b, 0.0, Stroke::new(1.0, theme.accent), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            b,
+            0.0,
+            Stroke::new(1.0, theme.accent),
+            egui::StrokeKind::Inside,
+        );
     }
 
     // --- the pointer ---------------------------------------------------------------
@@ -328,12 +422,18 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
             } else if p.x < layout.keys.min.x {
                 // A click on an object's name folds it open or shut.
                 if let Some(row) = layout.row_at(p.y).and_then(|i| view.rows.get(i)) {
-                    if row.depth == 0 && parents.contains(&row.target) && !state.collapsed.remove(&row.target) {
+                    if row.depth == 0
+                        && parents.contains(&row.target)
+                        && !state.collapsed.remove(&row.target)
+                    {
                         state.collapsed.insert(row.target.clone());
                     }
                 }
             } else if let Some((row, frame)) = key_at(view, &layout, p) {
-                let already = view.rows[row].keys.iter().any(|k| k.frame == frame && k.selected);
+                let already = view.rows[row]
+                    .keys
+                    .iter()
+                    .any(|k| k.frame == frame && k.selected);
                 if !already || shift {
                     out.push(SheetEdit::Select {
                         targets: vec![view.rows[row].target.clone()],
@@ -342,7 +442,9 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
                         extend: shift,
                     });
                 }
-                state.drag = Drag::Move { from: layout.frame(p.x) };
+                state.drag = Drag::Move {
+                    from: layout.frame(p.x),
+                };
             } else if p.x >= layout.keys.min.x {
                 state.drag = Drag::Box { from: p };
             }
@@ -367,10 +469,19 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
                     }
                 } else {
                     let rows = rows_between(&layout, from.y, to.y, view.rows.len());
-                    let (a, b) = (layout.frame(from.x.min(to.x)), layout.frame(from.x.max(to.x)));
-                    let targets: Vec<String> = view.rows[rows].iter().map(|r| r.target.clone()).collect();
+                    let (a, b) = (
+                        layout.frame(from.x.min(to.x)),
+                        layout.frame(from.x.max(to.x)),
+                    );
+                    let targets: Vec<String> =
+                        view.rows[rows].iter().map(|r| r.target.clone()).collect();
                     if !targets.is_empty() {
-                        out.push(SheetEdit::Select { targets, frame_min: a, frame_max: b, extend: shift });
+                        out.push(SheetEdit::Select {
+                            targets,
+                            frame_min: a,
+                            frame_max: b,
+                            extend: shift,
+                        });
                     } else if !shift {
                         out.push(SheetEdit::SelectAll(1));
                     }
@@ -396,7 +507,9 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
         }
         if pressed(Key::G) {
             if let Some(p) = pointer.or_else(|| ui.input(|i| i.pointer.hover_pos())) {
-                state.drag = Drag::Grab { from: layout.frame(p.x) };
+                state.drag = Drag::Grab {
+                    from: layout.frame(p.x),
+                };
             }
         }
         if pressed(Key::T) {
@@ -414,7 +527,10 @@ pub fn dope_sheet(ui: &mut Ui, view: &SheetView, state: &mut SheetState, text: &
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.label(egui::RichText::new(&text.interpolation).strong());
                     ui.separator();
-                    for (i, label) in [&text.constant, &text.linear, &text.bezier].into_iter().enumerate() {
+                    for (i, label) in [&text.constant, &text.linear, &text.bezier]
+                        .into_iter()
+                        .enumerate()
+                    {
                         if ui.button(label).clicked() {
                             out.push(SheetEdit::Interpolation(i as u32));
                             close = true;
@@ -437,13 +553,34 @@ mod tests {
 
     fn view() -> SheetView {
         let keys = |frames: &[f64], selected: &[f64]| -> Vec<SheetKey> {
-            frames.iter().map(|f| SheetKey { frame: *f, selected: selected.contains(f) }).collect()
+            frames
+                .iter()
+                .map(|f| SheetKey {
+                    frame: *f,
+                    selected: selected.contains(f),
+                })
+                .collect()
         };
         SheetView {
             rows: vec![
-                SheetRow { label: "Cube".into(), depth: 0, target: "7/".into(), keys: keys(&[1.0, 20.0, 40.0], &[]) },
-                SheetRow { label: "Location".into(), depth: 1, target: "7/location".into(), keys: keys(&[1.0, 20.0], &[]) },
-                SheetRow { label: "Scale".into(), depth: 1, target: "7/scale".into(), keys: keys(&[40.0], &[]) },
+                SheetRow {
+                    label: "Cube".into(),
+                    depth: 0,
+                    target: "7/".into(),
+                    keys: keys(&[1.0, 20.0, 40.0], &[]),
+                },
+                SheetRow {
+                    label: "Location".into(),
+                    depth: 1,
+                    target: "7/location".into(),
+                    keys: keys(&[1.0, 20.0], &[]),
+                },
+                SheetRow {
+                    label: "Scale".into(),
+                    depth: 1,
+                    target: "7/scale".into(),
+                    keys: keys(&[40.0], &[]),
+                },
             ],
             frame: 1.0,
             start: 1,
@@ -460,7 +597,12 @@ mod tests {
 
     impl Rig {
         fn new(view: SheetView) -> Self {
-            let mut rig = Self { ctx: egui::Context::default(), state: SheetState::default(), view, time: 0.0 };
+            let mut rig = Self {
+                ctx: egui::Context::default(),
+                state: SheetState::default(),
+                view,
+                time: 0.0,
+            };
             rig.frame(vec![]);
             rig.frame(vec![]);
             rig
@@ -483,12 +625,17 @@ mod tests {
             };
             let mut out = Vec::new();
             let (state, view) = (&mut self.state, &self.view);
-            let _ = self.ctx.run_ui(raw, |ui| out = dope_sheet(ui, view, state, &text));
+            let _ = self
+                .ctx
+                .run_ui(raw, |ui| out = dope_sheet(ui, view, state, &text));
             out
         }
 
         fn layout(&self) -> Layout {
-            Layout::new(self.state.rect.unwrap(), visible(self.view.start, self.view.end))
+            Layout::new(
+                self.state.rect.unwrap(),
+                visible(self.view.start, self.view.end),
+            )
         }
 
         fn at(&self, row: usize, frame: f64) -> Pos2 {
@@ -497,13 +644,23 @@ mod tests {
         }
 
         fn drag(&mut self, a: Pos2, b: Pos2, shift: bool) -> Vec<SheetEdit> {
-            let modifiers = egui::Modifiers { shift, ..Default::default() };
-            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+            let modifiers = egui::Modifiers {
+                shift,
+                ..Default::default()
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
             let mut out = Vec::new();
             out.extend(self.frame(vec![egui::Event::PointerMoved(a)]));
             out.extend(self.frame(vec![button(a, true)]));
             for i in 1..=4 {
-                out.extend(self.frame(vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 4.0))]));
+                out.extend(self.frame(vec![egui::Event::PointerMoved(
+                    a + (b - a) * (i as f32 / 4.0),
+                )]));
             }
             out.extend(self.frame(vec![button(b, false)]));
             out
@@ -512,7 +669,10 @@ mod tests {
 
     #[test]
     fn a_frame_and_a_row_go_to_a_place_and_back() {
-        let l = Layout::new(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0)), visible(1, 100));
+        let l = Layout::new(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0)),
+            visible(1, 100),
+        );
         for f in [1.0, 33.0, 100.0] {
             assert!((l.frame(l.x(f)) - f).abs() < 1e-3);
         }
@@ -529,7 +689,12 @@ mod tests {
         let edits = rig.drag(p, p, false);
         assert_eq!(
             edits,
-            vec![SheetEdit::Select { targets: vec!["7/location".into()], frame_min: 20.0 - 1e-3, frame_max: 20.0 + 1e-3, extend: false }]
+            vec![SheetEdit::Select {
+                targets: vec!["7/location".into()],
+                frame_min: 20.0 - 1e-3,
+                frame_max: 20.0 + 1e-3,
+                extend: false
+            }]
         );
     }
 
@@ -539,8 +704,15 @@ mod tests {
         let a = rig.at(0, 20.0);
         let b = a + Vec2::new(rig.layout().frame_width() * 5.3, 0.0);
         let edits = rig.drag(a, b, false);
-        assert!(matches!(edits.first(), Some(SheetEdit::Select { .. })), "{edits:?}");
-        assert_eq!(edits.last(), Some(&SheetEdit::Move { offset: 5.0 }), "{edits:?}");
+        assert!(
+            matches!(edits.first(), Some(SheetEdit::Select { .. })),
+            "{edits:?}"
+        );
+        assert_eq!(
+            edits.last(),
+            Some(&SheetEdit::Move { offset: 5.0 }),
+            "{edits:?}"
+        );
     }
 
     #[test]
@@ -550,9 +722,20 @@ mod tests {
         let b = rig.at(2, 45.0) + Vec2::new(0.0, 6.0);
         let edits = rig.drag(a, b, false);
         match edits.as_slice() {
-            [SheetEdit::Select { targets, frame_min, frame_max, extend: false }] => {
-                assert_eq!(targets, &vec!["7/location".to_string(), "7/scale".to_string()]);
-                assert!((frame_min - 10.0).abs() < 0.5 && (frame_max - 45.0).abs() < 0.5, "{frame_min}..{frame_max}");
+            [SheetEdit::Select {
+                targets,
+                frame_min,
+                frame_max,
+                extend: false,
+            }] => {
+                assert_eq!(
+                    targets,
+                    &vec!["7/location".to_string(), "7/scale".to_string()]
+                );
+                assert!(
+                    (frame_min - 10.0).abs() < 0.5 && (frame_max - 45.0).abs() < 0.5,
+                    "{frame_min}..{frame_max}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -563,7 +746,13 @@ mod tests {
         let mut rig = Rig::new(view());
         let p = rig.at(2, 10.0);
         assert_eq!(rig.drag(p, p, false), vec![SheetEdit::SelectAll(1)]);
-        let key = |k, pressed| egui::Event::Key { key: k, physical_key: None, pressed, repeat: false, modifiers: Default::default() };
+        let key = |k, pressed| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
         let edits = rig.frame(vec![egui::Event::PointerMoved(p), key(Key::X, true)]);
         assert_eq!(edits, vec![SheetEdit::Delete]);
     }
@@ -575,8 +764,17 @@ mod tests {
         let a = Pos2::new(l.x(10.0), l.keys.min.y - RULER / 2.0);
         let b = Pos2::new(l.x(30.2), a.y);
         let edits = rig.drag(a, b, false);
-        let frames: Vec<f64> = edits.iter().filter_map(|e| match e { SheetEdit::SetFrame(f) => Some(*f), _ => None }).collect();
-        assert!(!frames.is_empty() && frames.iter().all(|f| f.fract() == 0.0), "{frames:?}");
+        let frames: Vec<f64> = edits
+            .iter()
+            .filter_map(|e| match e {
+                SheetEdit::SetFrame(f) => Some(*f),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !frames.is_empty() && frames.iter().all(|f| f.fract() == 0.0),
+            "{frames:?}"
+        );
         assert_eq!(*frames.last().unwrap(), 30.0);
     }
 
@@ -585,7 +783,10 @@ mod tests {
         let mut rig = Rig::new(view());
         let name = Pos2::new(rig.state.rect.unwrap().min.x + 20.0, rig.layout().row_y(0));
         rig.drag(name, name, false);
-        assert!(rig.state.collapsed.contains("7/"), "the click did not fold the object");
+        assert!(
+            rig.state.collapsed.contains("7/"),
+            "the click did not fold the object"
+        );
         // Folded, the second row is gone: a click where Location's key was
         // lands on nothing and selects nothing.
         let edits = rig.drag(rig.at(1, 1.0), rig.at(1, 1.0), false);
@@ -597,4 +798,3 @@ mod tests {
         assert!(rig.state.collapsed.is_empty());
     }
 }
-

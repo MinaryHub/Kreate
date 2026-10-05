@@ -146,7 +146,11 @@ fn header(
             }
             // Apply: baked into the mesh, off the stack.
             // i18n-exempt: geometric glyphs standing in for icons
-            if ui.small_button("\u{2713}").on_hover_text(&text.apply).clicked() {
+            if ui
+                .small_button("\u{2713}")
+                .on_hover_text(&text.apply)
+                .clicked()
+            {
                 queue.run("object.modifier_apply", index_params(row.index));
             }
             // i18n-exempt: geometric glyphs standing in for icons
@@ -187,9 +191,17 @@ fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut
         };
         let mut chosen = current.clone();
         ui.horizontal(|ui| {
-            ui.label(catalog.format(&format!("{}-object", row.op_id.replace(['.', '_'], "-")), TextKind::Ui, &[]));
+            ui.label(catalog.format(
+                &format!("{}-object", row.op_id.replace(['.', '_'], "-")),
+                TextKind::Ui,
+                &[],
+            ));
             egui::ComboBox::from_id_salt(("modifier-object", row.index))
-                .selected_text(if current.is_empty() { "\u{2014}".to_string() } else { current.clone() })
+                .selected_text(if current.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    current.clone()
+                })
                 .show_ui(ui, |ui| {
                     for name in &row.choices {
                         ui.selectable_value(&mut chosen, name.clone(), name.as_str());
@@ -200,7 +212,10 @@ fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut
             let mut params = row.params.clone();
             params.set("object", PropertyValue::Text(chosen));
             params.set("index", PropertyValue::Int(row.index as i64));
-            queue.push(Command::RunOperator { op_id: row.op_id.clone(), params });
+            queue.push(Command::RunOperator {
+                op_id: row.op_id.clone(),
+                params,
+            });
         }
     }
 

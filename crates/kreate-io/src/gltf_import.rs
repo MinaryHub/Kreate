@@ -60,9 +60,9 @@
 
 use crate::gltf_export::NGON_EXTENSION;
 use crate::ir::{
-    ImportCamera, ImportImage, ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode,
-    ImportNodeData, ImportScene, ImportTransform, LossyNote, SourceMetadata, UvOrigin,
-    ChannelInterpolation, ChannelValues, ImportAnimation, ImportChannel,
+    ChannelInterpolation, ChannelValues, ImportAnimation, ImportCamera, ImportChannel, ImportImage,
+    ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode, ImportNodeData,
+    ImportScene, ImportTransform, LossyNote, SourceMetadata, UvOrigin,
 };
 use glam::{Vec2, Vec3};
 use kreate_math::AxisConvention;
@@ -177,7 +177,11 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             .base_color_texture()
             .and_then(|t| texture("base colour", t.tex_coord(), t.texture().source().index()));
         let metallic_roughness_texture = pbr.metallic_roughness_texture().and_then(|t| {
-            texture("metallic-roughness", t.tex_coord(), t.texture().source().index())
+            texture(
+                "metallic-roughness",
+                t.tex_coord(),
+                t.texture().source().index(),
+            )
         });
         let (normal_texture, normal_scale) = match material.normal_texture() {
             Some(t) => (
@@ -370,24 +374,35 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 /// yet (Phase 11). A channel whose lists cannot be read, or that names a node
 /// the file does not have, is skipped and said too — one broken channel is not
 /// a reason to lose the rest of the clip.
-fn read_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data], scene: &mut ImportScene) {
+fn read_animations(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    scene: &mut ImportScene,
+) {
     use gltf::animation::util::ReadOutputs;
     for (index, animation) in document.animations().enumerate() {
         let name = animation
             .name()
             .map(str::to_string)
             .unwrap_or_else(|| format!("Animation{index}"));
-        let mut out = ImportAnimation { name: name.clone(), channels: Vec::new() };
+        let mut out = ImportAnimation {
+            name: name.clone(),
+            channels: Vec::new(),
+        };
         for channel in animation.channels() {
             let node = channel.target().node().index();
             let reader = channel.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
             let times: Option<Vec<f32>> = reader.read_inputs().map(|i| i.collect());
             let values = match reader.read_outputs() {
-                Some(ReadOutputs::Translations(v)) => Some(ChannelValues::Translation(v.map(Vec3::from).collect())),
+                Some(ReadOutputs::Translations(v)) => {
+                    Some(ChannelValues::Translation(v.map(Vec3::from).collect()))
+                }
                 Some(ReadOutputs::Rotations(v)) => Some(ChannelValues::Rotation(
                     v.into_f32().map(glam::Quat::from_array).collect(),
                 )),
-                Some(ReadOutputs::Scales(v)) => Some(ChannelValues::Scale(v.map(Vec3::from).collect())),
+                Some(ReadOutputs::Scales(v)) => {
+                    Some(ChannelValues::Scale(v.map(Vec3::from).collect()))
+                }
                 Some(ReadOutputs::MorphTargetWeights(_)) => {
                     scene.source.notes.push(LossyNote::Unsupported {
                         what: format!("{name}: morph target weights are not animated yet"),
@@ -410,7 +425,12 @@ fn read_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data], sc
                 gltf::animation::Interpolation::Linear => ChannelInterpolation::Linear,
                 gltf::animation::Interpolation::CubicSpline => ChannelInterpolation::CubicSpline,
             };
-            out.channels.push(ImportChannel { node, interpolation, times, values });
+            out.channels.push(ImportChannel {
+                node,
+                interpolation,
+                times,
+                values,
+            });
         }
         if !out.channels.is_empty() {
             scene.animations.push(out);
@@ -452,9 +472,7 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
 
     for camera in document.cameras() {
         let (fov_y, ortho_width, near, far) = match camera.projection() {
-            gltf::camera::Projection::Perspective(p) => {
-                (Some(p.yfov()), None, p.znear(), p.zfar())
-            }
+            gltf::camera::Projection::Perspective(p) => (Some(p.yfov()), None, p.znear(), p.zfar()),
             gltf::camera::Projection::Orthographic(o) => {
                 // glTF writes half-widths; the IR wants the whole width, which
                 // is what an orthographic scale means everywhere else.
@@ -680,7 +698,12 @@ fn rgba8(data: &gltf::image::Data) -> Option<Vec<u8>> {
             }
             Format::R16G16 => [wide(p * 2), wide(p * 2 + 1), 0, 255],
             Format::R16G16B16 => [wide(p * 3), wide(p * 3 + 1), wide(p * 3 + 2), 255],
-            Format::R16G16B16A16 => [wide(p * 4), wide(p * 4 + 1), wide(p * 4 + 2), wide(p * 4 + 3)],
+            Format::R16G16B16A16 => [
+                wide(p * 4),
+                wide(p * 4 + 1),
+                wide(p * 4 + 2),
+                wide(p * 4 + 3),
+            ],
             Format::R32G32B32FLOAT | Format::R32G32B32A32FLOAT => return None,
         };
         out.extend_from_slice(&texel);

@@ -153,7 +153,9 @@ impl OperatorInfo {
     /// operator that says what that is (see [`Operator::current`]). What is
     /// left after that still comes from the defaults.
     pub fn fill_from_current(&self, ctx: &Context, doc: &Document, given: &mut PropertyMap) {
-        let Some(current) = (self.current)(ctx, doc, given) else { return };
+        let Some(current) = (self.current)(ctx, doc, given) else {
+            return;
+        };
         for (name, value) in current.iter() {
             if given.get(name).is_none() {
                 given.set(name, value.clone());
@@ -562,8 +564,14 @@ mod mode_tests {
         // disagree about it. A menu entry the user can click that then does
         // nothing is what disagreement looks like.
         use crate::mode::Has;
-        let mesh = Has { mesh: true, armature: false };
-        let armature = Has { mesh: false, armature: true };
+        let mesh = Has {
+            mesh: true,
+            armature: false,
+        };
+        let armature = Has {
+            mesh: false,
+            armature: true,
+        };
         assert!(Mode::Object.can_enter(Has::NOTHING));
         assert!(Mode::Object.can_enter(mesh));
         assert!(!Mode::EditMesh.can_enter(Has::NOTHING));
@@ -575,7 +583,10 @@ mod mode_tests {
         // Every mode is reachable with everything present, or it could never
         // be entered at all.
         for mode in Mode::ALL {
-            assert!(mode.can_enter(Has::EVERYTHING), "{mode:?} can never be entered");
+            assert!(
+                mode.can_enter(Has::EVERYTHING),
+                "{mode:?} can never be entered"
+            );
         }
     }
 }

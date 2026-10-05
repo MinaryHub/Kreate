@@ -1004,7 +1004,11 @@ fn e_drags_along_the_selected_faces_normal_in_the_world() {
         let offsets = mesh.face_offsets();
         let corners = mesh.corner_verts();
         (0..mesh.num_faces() as usize)
-            .find(|f| corners[offsets[*f] as usize..offsets[f + 1] as usize].iter().all(|v| mesh.positions()[*v as usize].z > 0.0))
+            .find(|f| {
+                corners[offsets[*f] as usize..offsets[f + 1] as usize]
+                    .iter()
+                    .all(|v| mesh.positions()[*v as usize].z > 0.0)
+            })
             .expect("a top face")
     };
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[top]);
@@ -1030,10 +1034,21 @@ fn ctrl_r_slides_from_the_first_end_of_the_edge_it_reports() {
     let object = doc.selection.active.unwrap();
     doc.object_mut(object).unwrap().transform.translation = DVec3::new(5.0, 0.0, 0.0);
     let (a, b) = kreate_ops::ops::mesh::loop_cut_edge(&doc).expect("an edge is selected");
-    run(&mut doc, &ctx, "mesh.loop_cut", &[("cuts", PropertyValue::Int(1)), ("position", PropertyValue::Float(0.2))]).unwrap();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.loop_cut",
+        &[
+            ("cuts", PropertyValue::Int(1)),
+            ("position", PropertyValue::Float(0.2)),
+        ],
+    )
+    .unwrap();
     let want = a.lerp(b, 0.2) - DVec3::new(5.0, 0.0, 0.0);
     assert!(
-        positions(&doc).iter().any(|p| (p.as_dvec3() - want).length() < 1e-5),
+        positions(&doc)
+            .iter()
+            .any(|p| (p.as_dvec3() - want).length() < 1e-5),
         "no new vertex a fifth of the way from the first end"
     );
     select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[]);
@@ -1046,37 +1061,78 @@ fn inset_and_bevel_start_where_their_gestures_start() {
     // must run there, or the gesture is refused before the pointer moves.
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
-    let inset = run(&mut doc, &ctx, "mesh.inset", &[("thickness", PropertyValue::Float(0.0))]).unwrap();
+    let inset = run(
+        &mut doc,
+        &ctx,
+        "mesh.inset",
+        &[("thickness", PropertyValue::Float(0.0))],
+    )
+    .unwrap();
     assert_eq!(inset, kreate_ops::OpResult::Finished);
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
     select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[0]);
-    let bevel = run(&mut doc, &ctx, "mesh.bevel", &[("width", PropertyValue::Float(1e-4))]).unwrap();
+    let bevel = run(
+        &mut doc,
+        &ctx,
+        "mesh.bevel",
+        &[("width", PropertyValue::Float(1e-4))],
+    )
+    .unwrap();
     assert_eq!(bevel, kreate_ops::OpResult::Finished);
 }
 
 fn flags(doc: &Document, layer: &str) -> Vec<bool> {
     let id = doc.meshes().next().expect("a mesh").0;
-    doc.mesh(id).unwrap().attributes().get_bool(layer).map(|l| l.to_vec()).unwrap_or_default()
+    doc.mesh(id)
+        .unwrap()
+        .attributes()
+        .get_bool(layer)
+        .map(|l| l.to_vec())
+        .unwrap_or_default()
 }
 
 #[test]
 fn h_hides_the_selected_face_and_alt_h_brings_it_back_selected() {
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[2]);
-    run(&mut doc, &ctx, "mesh.hide", &[("mode", PropertyValue::Enum(2))]).unwrap();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.hide",
+        &[("mode", PropertyValue::Enum(2))],
+    )
+    .unwrap();
     assert!(flags(&doc, names::HIDE_FACE)[2]);
-    assert!(!flags(&doc, names::SELECT_FACE).iter().any(|s| *s), "the hidden face stayed selected");
+    assert!(
+        !flags(&doc, names::SELECT_FACE).iter().any(|s| *s),
+        "the hidden face stayed selected"
+    );
     // Select all cannot reach it.
-    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(0))]).unwrap();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &[("action", PropertyValue::Enum(0))],
+    )
+    .unwrap();
     assert!(!flags(&doc, names::SELECT_FACE)[2]);
     // Nothing more to hide is a no-op, not an error.
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
     assert_eq!(
-        run(&mut doc, &ctx, "mesh.hide", &[("mode", PropertyValue::Enum(2))]).unwrap(),
+        run(
+            &mut doc,
+            &ctx,
+            "mesh.hide",
+            &[("mode", PropertyValue::Enum(2))]
+        )
+        .unwrap(),
         kreate_ops::OpResult::Cancelled
     );
     run(&mut doc, &ctx, "mesh.reveal", &[]).unwrap();
-    assert!(flags(&doc, names::HIDE_FACE).is_empty(), "the hide layer outlived the reveal");
+    assert!(
+        flags(&doc, names::HIDE_FACE).is_empty(),
+        "the hide layer outlived the reveal"
+    );
     assert!(flags(&doc, names::SELECT_FACE)[2]);
 }
 
@@ -1084,12 +1140,48 @@ fn h_hides_the_selected_face_and_alt_h_brings_it_back_selected() {
 fn ctrl_plus_and_ctrl_l_grow_through_the_operator() {
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
-    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(6)), ("mode", PropertyValue::Enum(2))]).unwrap();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &[
+            ("action", PropertyValue::Enum(6)),
+            ("mode", PropertyValue::Enum(2)),
+        ],
+    )
+    .unwrap();
     // A cube's face touches every face but the opposite one.
-    assert_eq!(flags(&doc, names::SELECT_FACE).iter().filter(|s| **s).count(), 5);
-    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(7)), ("mode", PropertyValue::Enum(2))]).unwrap();
-    assert_eq!(flags(&doc, names::SELECT_FACE).iter().filter(|s| **s).count(), 1);
-    run(&mut doc, &ctx, "mesh.select", &[("action", PropertyValue::Enum(8))]).unwrap();
+    assert_eq!(
+        flags(&doc, names::SELECT_FACE)
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        5
+    );
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &[
+            ("action", PropertyValue::Enum(7)),
+            ("mode", PropertyValue::Enum(2)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        flags(&doc, names::SELECT_FACE)
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        1
+    );
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select",
+        &[("action", PropertyValue::Enum(8))],
+    )
+    .unwrap();
     assert!(flags(&doc, names::SELECT_FACE).iter().all(|s| *s));
 }
 
@@ -1100,11 +1192,30 @@ fn a_loop_cut_can_name_its_edge_and_needs_no_selection() {
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
     select(&mut doc, names::SELECT_EDGE, Domain::Edge, &[]);
     let before = positions(&doc).len();
-    run(&mut doc, &ctx, "mesh.loop_cut", &[("cuts", PropertyValue::Int(2)), ("edge", PropertyValue::Int(3))]).unwrap();
-    assert_eq!(positions(&doc).len(), before + 8, "two loops of four round a cube");
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.loop_cut",
+        &[
+            ("cuts", PropertyValue::Int(2)),
+            ("edge", PropertyValue::Int(3)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        positions(&doc).len(),
+        before + 8,
+        "two loops of four round a cube"
+    );
     // An edge the mesh does not have does nothing.
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(1.0));
-    let r = run(&mut doc, &ctx, "mesh.loop_cut", &[("edge", PropertyValue::Int(999))]).unwrap();
+    let r = run(
+        &mut doc,
+        &ctx,
+        "mesh.loop_cut",
+        &[("edge", PropertyValue::Int(999))],
+    )
+    .unwrap();
     assert_eq!(r, kreate_ops::OpResult::Cancelled);
 }
 
@@ -1119,7 +1230,11 @@ fn a_rotation_can_turn_about_the_3d_cursor() {
         &mut doc,
         &ctx,
         "mesh.rotate",
-        &[("angle", PropertyValue::Float(std::f64::consts::PI)), ("axis", PropertyValue::Enum(2)), ("pivot", PropertyValue::Enum(1))],
+        &[
+            ("angle", PropertyValue::Float(std::f64::consts::PI)),
+            ("axis", PropertyValue::Enum(2)),
+            ("pivot", PropertyValue::Enum(1)),
+        ],
     )
     .unwrap();
     let p1 = positions(&doc)[0].as_dvec3();
@@ -1137,7 +1252,9 @@ fn k_cuts_along_its_path_and_replays_from_the_script_line() {
     let mut p = PropertyMap::new();
     p.set("points", PropertyValue::Floats(points));
     p.set("view", PropertyValue::Vec3([0.0, 0.0, -1.0]));
-    history.dispatch(&registry, &mut doc, &ctx, "mesh.knife", &p).unwrap();
+    history
+        .dispatch(&registry, &mut doc, &ctx, "mesh.knife", &p)
+        .unwrap();
     let mesh = |d: &Document| d.mesh(d.meshes().next().unwrap().0).unwrap().num_faces();
     assert_eq!(mesh(&doc), 2);
     let script = history.entries()[0].to_script_call();
@@ -1155,20 +1272,42 @@ fn l_adds_the_piece_under_the_pointer_and_shift_l_takes_it_away() {
     for p in b.positions_mut() {
         p.x += 3.0;
     }
-    let part = |mesh| Part { mesh, transform: glam::DAffine3::IDENTITY };
+    let part = |mesh| Part {
+        mesh,
+        transform: glam::DAffine3::IDENTITY,
+    };
     let (joined, _) = join(&[part(&a), part(&b)]);
     let (mut doc, ctx) = scene(joined);
     // Face 7 is on the second cube; one face of the first is already selected.
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[0]);
-    run(&mut doc, &ctx, "mesh.select_linked_pick", &[("element", PropertyValue::Int(7)), ("mode", PropertyValue::Enum(2))]).unwrap();
-    let faces = |d: &Document| flags(d, names::SELECT_FACE);
-    assert!(faces(&doc)[6..12].iter().all(|s| *s), "the second cube is not all selected");
-    assert!(faces(&doc)[0] && !faces(&doc)[1], "the first cube's selection changed");
     run(
         &mut doc,
         &ctx,
         "mesh.select_linked_pick",
-        &[("element", PropertyValue::Int(7)), ("mode", PropertyValue::Enum(2)), ("deselect", PropertyValue::Bool(true))],
+        &[
+            ("element", PropertyValue::Int(7)),
+            ("mode", PropertyValue::Enum(2)),
+        ],
+    )
+    .unwrap();
+    let faces = |d: &Document| flags(d, names::SELECT_FACE);
+    assert!(
+        faces(&doc)[6..12].iter().all(|s| *s),
+        "the second cube is not all selected"
+    );
+    assert!(
+        faces(&doc)[0] && !faces(&doc)[1],
+        "the first cube's selection changed"
+    );
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select_linked_pick",
+        &[
+            ("element", PropertyValue::Int(7)),
+            ("mode", PropertyValue::Enum(2)),
+            ("deselect", PropertyValue::Bool(true)),
+        ],
     )
     .unwrap();
     assert!(faces(&doc)[6..12].iter().all(|s| !*s));
@@ -1183,14 +1322,44 @@ fn alt_click_selects_the_loop_through_the_edge() {
         .find(|e| {
             let [a, b] = mesh.edges()[*e as usize];
             let (pa, pb) = (mesh.positions()[a as usize], mesh.positions()[b as usize]);
-            (pa.y - 0.5).abs() < 1e-4 && (pb.y - 0.5).abs() < 1e-4 && pa.x.abs() < 0.6 && pb.x.abs() < 0.6
+            (pa.y - 0.5).abs() < 1e-4
+                && (pb.y - 0.5).abs() < 1e-4
+                && pa.x.abs() < 0.6
+                && pb.x.abs() < 0.6
         })
         .expect("a middle edge");
-    run(&mut doc, &ctx, "mesh.select_loop_pick", &[("edge", PropertyValue::Int(edge as i64))]).unwrap();
-    assert_eq!(flags(&doc, names::SELECT_EDGE).iter().filter(|s| **s).count(), 3);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select_loop_pick",
+        &[("edge", PropertyValue::Int(edge as i64))],
+    )
+    .unwrap();
+    assert_eq!(
+        flags(&doc, names::SELECT_EDGE)
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        3
+    );
     // The ring instead: the edges across it.
-    run(&mut doc, &ctx, "mesh.select_loop_pick", &[("edge", PropertyValue::Int(edge as i64)), ("ring", PropertyValue::Bool(true))]).unwrap();
-    assert_eq!(flags(&doc, names::SELECT_EDGE).iter().filter(|s| **s).count(), 4);
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.select_loop_pick",
+        &[
+            ("edge", PropertyValue::Int(edge as i64)),
+            ("ring", PropertyValue::Bool(true)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        flags(&doc, names::SELECT_EDGE)
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        4
+    );
 }
 
 #[test]
@@ -1203,33 +1372,68 @@ fn e_on_an_edge_pulls_out_a_face_and_moves_it() {
     {
         let id = doc.meshes().next().unwrap().0;
         let m = doc.mesh_mut(id).unwrap();
-        let verts = m.attributes_mut().make_mut_bool(names::SELECT_VERT).unwrap();
+        let verts = m
+            .attributes_mut()
+            .make_mut_bool(names::SELECT_VERT)
+            .unwrap();
         verts[a as usize] = true;
         verts[b as usize] = true;
     }
-    run(&mut doc, &ctx, "mesh.extrude_move", &[("translation", PropertyValue::Vec3([0.0, 0.0, 1.0]))]).unwrap();
+    run(
+        &mut doc,
+        &ctx,
+        "mesh.extrude_move",
+        &[("translation", PropertyValue::Vec3([0.0, 0.0, 1.0]))],
+    )
+    .unwrap();
     let after = doc.mesh(doc.meshes().next().unwrap().0).unwrap();
     assert_eq!(after.num_faces(), 2);
-    assert_eq!(after.positions().iter().filter(|p| (p.z - 1.0).abs() < 1e-6).count(), 2);
+    assert_eq!(
+        after
+            .positions()
+            .iter()
+            .filter(|p| (p.z - 1.0).abs() < 1e-6)
+            .count(),
+        2
+    );
     // Nothing selected: nothing to extrude.
     let (mut doc, ctx) = scene(kreate_mesh::primitives::plane(2.0));
     select(&mut doc, names::SELECT_VERT, Domain::Point, &[]);
-    assert_eq!(run(&mut doc, &ctx, "mesh.extrude_move", &[]).unwrap(), kreate_ops::OpResult::Cancelled);
+    assert_eq!(
+        run(&mut doc, &ctx, "mesh.extrude_move", &[]).unwrap(),
+        kreate_ops::OpResult::Cancelled
+    );
 }
 
 #[test]
 fn seams_marked_then_u_unwraps_into_the_map() {
     let (mut doc, ctx) = scene(kreate_mesh::primitives::cube(2.0));
-    let n = doc.mesh(doc.meshes().next().unwrap().0).unwrap().num_edges() as usize;
-    select(&mut doc, names::SELECT_EDGE, Domain::Edge, &(0..n).collect::<Vec<_>>());
+    let n = doc
+        .mesh(doc.meshes().next().unwrap().0)
+        .unwrap()
+        .num_edges() as usize;
+    select(
+        &mut doc,
+        names::SELECT_EDGE,
+        Domain::Edge,
+        &(0..n).collect::<Vec<_>>(),
+    );
     run(&mut doc, &ctx, "mesh.mark_seam", &[]).unwrap();
     assert!(flags(&doc, names::SEAM).iter().all(|s| *s));
     // Marking again is nothing; clearing one edge is something.
-    assert_eq!(run(&mut doc, &ctx, "mesh.mark_seam", &[]).unwrap(), kreate_ops::OpResult::Cancelled);
+    assert_eq!(
+        run(&mut doc, &ctx, "mesh.mark_seam", &[]).unwrap(),
+        kreate_ops::OpResult::Cancelled
+    );
     select(&mut doc, names::SELECT_FACE, Domain::Face, &[]);
     run(&mut doc, &ctx, "uv.unwrap", &[]).unwrap();
     let mesh = doc.mesh(doc.meshes().next().unwrap().0).unwrap();
-    let uvs = mesh.attributes().get_f32x2(kreate_mesh::attribute::names::UV).expect("a UV layer");
+    let uvs = mesh
+        .attributes()
+        .get_f32x2(kreate_mesh::attribute::names::UV)
+        .expect("a UV layer");
     assert_eq!(uvs.len(), 24);
-    assert!(uvs.iter().all(|p| p.x >= -1e-4 && p.x <= 1.0001 && p.y >= -1e-4 && p.y <= 1.0001));
+    assert!(uvs
+        .iter()
+        .all(|p| p.x >= -1e-4 && p.x <= 1.0001 && p.y >= -1e-4 && p.y <= 1.0001));
 }

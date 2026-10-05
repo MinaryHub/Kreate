@@ -380,7 +380,12 @@ pub fn bevel_edges_segments(
                 .filter_map(|g| offset_along(mesh, v, *g))
                 .sum();
             let corner = mesh.position(v)? + shared;
-            Some(arc(corner, mesh.position(from)?, mesh.position(to)?, segments))
+            Some(arc(
+                corner,
+                mesh.position(from)?,
+                mesh.position(to)?,
+                segments,
+            ))
         })()
         .unwrap_or_default();
         arcs.push(((from, to), points.clone()));
@@ -435,12 +440,21 @@ pub fn bevel_edges_segments(
             walls.push([near_b, near_a, far_a, far_b]);
             continue;
         }
-        strips.push(Strip { a: (near_a, far_a), b: (near_b, far_b), vertex_a: a, vertex_b: b });
+        strips.push(Strip {
+            a: (near_a, far_a),
+            b: (near_b, far_b),
+            vertex_a: a,
+            vertex_b: b,
+        });
     }
 
     // Each arc's vertices, made once.
     let mut arc_verts: Vec<((VertId, VertId), Vec<VertId>, VertId)> = Vec::new();
-    let mut rail = |mesh: &mut BMesh, out: &mut Bevel, ends: (VertId, VertId), vertex: VertId| -> Vec<VertId> {
+    let mut rail = |mesh: &mut BMesh,
+                    out: &mut Bevel,
+                    ends: (VertId, VertId),
+                    vertex: VertId|
+     -> Vec<VertId> {
         if let Some((_, made, _)) = arc_verts.iter().find(|(k, _, _)| *k == ends) {
             return made.clone();
         }
@@ -451,7 +465,11 @@ pub fn bevel_edges_segments(
             .iter()
             .find(|(k, _)| *k == ends)
             .map(|(_, p)| p.clone())
-            .or_else(|| arcs.iter().find(|(k, _)| *k == (ends.1, ends.0)).map(|(_, p)| p.iter().rev().copied().collect()))
+            .or_else(|| {
+                arcs.iter()
+                    .find(|(k, _)| *k == (ends.1, ends.0))
+                    .map(|(_, p)| p.iter().rev().copied().collect())
+            })
             .unwrap_or_default();
         let made: Vec<VertId> = points.into_iter().map(|p| mesh.add_vert(p)).collect();
         out.verts.extend(&made);
@@ -648,7 +666,10 @@ fn poke_onto_round(mesh: &mut BMesh, face: FaceId, centre: Vec3) -> Option<Vec<F
     let apex = mesh.add_vert(centre + outward * radius);
     let mut fan = Vec::with_capacity(ring.len());
     for i in 0..ring.len() {
-        fan.push(mesh.add_face(&[ring[i], ring[(i + 1) % ring.len()], apex]).ok()?);
+        fan.push(
+            mesh.add_face(&[ring[i], ring[(i + 1) % ring.len()], apex])
+                .ok()?,
+        );
     }
     Some(fan)
 }
@@ -659,7 +680,11 @@ pub fn bevel_selected(mesh: &mut BMesh, width: f32) -> Result<Bevel, BmError> {
 }
 
 /// Bevels the selected edges into `segments` strips on a round profile.
-pub fn bevel_selected_segments(mesh: &mut BMesh, width: f32, segments: u32) -> Result<Bevel, BmError> {
+pub fn bevel_selected_segments(
+    mesh: &mut BMesh,
+    width: f32,
+    segments: u32,
+) -> Result<Bevel, BmError> {
     let edges = mesh.selected_edges();
     bevel_edges_segments(mesh, &edges, width, segments)
 }
@@ -1011,7 +1036,11 @@ mod tests {
     /// Every new strip faces away from the cube's centre.
     fn strips_face_out(mesh: &BMesh, faces: &[FaceId]) -> bool {
         faces.iter().all(|f| {
-            let ring: Vec<Vec3> = mesh.face_verts(*f).iter().filter_map(|v| mesh.position(*v)).collect();
+            let ring: Vec<Vec3> = mesh
+                .face_verts(*f)
+                .iter()
+                .filter_map(|v| mesh.position(*v))
+                .collect();
             let centre: Vec3 = ring.iter().copied().sum::<Vec3>() / ring.len() as f32;
             mesh.face_normal(*f).dot(centre) > 0.0
         })
@@ -1040,7 +1069,10 @@ mod tests {
         for v in out.verts.iter().filter_map(|v| m.position(*v)) {
             let d = v - axis_point;
             let radial = (d - along * d.dot(along)).length();
-            assert!((radial - 0.4).abs() < 1e-4, "{v:?} is {radial} from the axis");
+            assert!(
+                (radial - 0.4).abs() < 1e-4,
+                "{v:?} is {radial} from the axis"
+            );
         }
     }
 
@@ -1058,7 +1090,10 @@ mod tests {
             for v in m.face_verts(*f) {
                 let p = m.position(v).unwrap();
                 let centre = p.signum() * (1.0 - 0.3);
-                assert!(((p - centre).length() - 0.3).abs() < 0.02, "{p:?} is off the round");
+                assert!(
+                    ((p - centre).length() - 0.3).abs() < 0.02,
+                    "{p:?} is off the round"
+                );
             }
         }
         assert!(watertight(&m), "a corner was left open");
@@ -1083,7 +1118,10 @@ mod tests {
         let out = bevel_edges_segments(&mut m, &top, 0.4, 5).unwrap();
         m.assert_valid();
         assert_eq!(out.faces.len(), 4 * 5);
-        assert!(out.caps.is_empty(), "the walls meet; nothing is left to cap");
+        assert!(
+            out.caps.is_empty(),
+            "the walls meet; nothing is left to cap"
+        );
         assert!(watertight(&m));
         assert_eq!(euler(&m), 2);
         assert!(strips_face_out(&m, &out.faces));

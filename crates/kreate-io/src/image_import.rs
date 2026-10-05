@@ -59,8 +59,8 @@ pub fn load_image(bytes: &[u8], name: &str, space: ColorSpace) -> Result<Image, 
     // From the bytes and not from the extension. A file's name is what somebody
     // typed and its magic is what it is, and the two disagree often enough that
     // trusting the name means refusing files that are fine.
-    let format = image::guess_format(bytes)
-        .map_err(|e| ImageError::UnknownFormat(e.to_string()))?;
+    let format =
+        image::guess_format(bytes).map_err(|e| ImageError::UnknownFormat(e.to_string()))?;
     let decoded = image::load_from_memory_with_format(bytes, format)
         .map_err(|e| ImageError::Decode(e.to_string()))?;
 
@@ -175,7 +175,11 @@ pub fn rgba8_of(image: &Image, space: ColorSpace) -> Vec<u8> {
                     }
                     let at = (row * tile + column) * stride;
                     let to = (y * width + x) * 4;
-                    out[to..to + 4].copy_from_slice(&texel(image.format, space, &bytes[at..at + stride]));
+                    out[to..to + 4].copy_from_slice(&texel(
+                        image.format,
+                        space,
+                        &bytes[at..at + stride],
+                    ));
                 }
             }
         }
@@ -199,23 +203,22 @@ fn texel(format: PixelFormat, space: ColorSpace, bytes: &[u8]) -> [u8; 4] {
                 };
                 (e * 255.0).round() as u8
             };
-            let alpha = f16::from_le_bytes([bytes[6], bytes[7]]).to_f32().clamp(0.0, 1.0);
-            [channel(0), channel(1), channel(2), (alpha * 255.0).round() as u8]
+            let alpha = f16::from_le_bytes([bytes[6], bytes[7]])
+                .to_f32()
+                .clamp(0.0, 1.0);
+            [
+                channel(0),
+                channel(1),
+                channel(2),
+                (alpha * 255.0).round() as u8,
+            ]
         }
     }
 }
 
 /// An empty image of the decoded size, or an error if that size is absurd.
-fn declare(
-    name: &str,
-    width: u32,
-    height: u32,
-    format: PixelFormat,
-) -> Result<Image, ImageError> {
-    Image::try_new(name, width, height, format).ok_or(ImageError::ImplausibleSize {
-        width,
-        height,
-    })
+fn declare(name: &str, width: u32, height: u32, format: PixelFormat) -> Result<Image, ImageError> {
+    Image::try_new(name, width, height, format).ok_or(ImageError::ImplausibleSize { width, height })
 }
 
 /// Walks the image's pixels into tiles.
@@ -224,12 +227,7 @@ fn declare(
 /// allocated once. The edge tiles keep the blank beyond the image's logical
 /// size: tiles are always square and always full, which is what keeps the
 /// special case out of every sampler (see [`kreate_scene::image`]).
-fn fill(
-    image: &mut Image,
-    width: u32,
-    height: u32,
-    mut pixel: impl FnMut(u32, u32, &mut [u8]),
-) {
+fn fill(image: &mut Image, width: u32, height: u32, mut pixel: impl FnMut(u32, u32, &mut [u8])) {
     let (across, down) = image.tile_counts();
     let stride = image.format.bytes_per_pixel();
     for ty in 0..down {
@@ -363,7 +361,17 @@ mod tests {
             *p = image::Rgb([value, value * 0.5, 0.25]);
         }
         image::codecs::hdr::HdrEncoder::new(&mut buffer)
-            .encode(pixels.as_raw().as_slice().chunks(3).map(|c| image::Rgb([c[0], c[1], c[2]])).collect::<Vec<_>>().as_slice(), 4, 4)
+            .encode(
+                pixels
+                    .as_raw()
+                    .as_slice()
+                    .chunks(3)
+                    .map(|c| image::Rgb([c[0], c[1], c[2]]))
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                4,
+                4,
+            )
             .expect("hdr encodes");
         buffer.into_inner()
     }

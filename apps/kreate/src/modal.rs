@@ -133,7 +133,10 @@ impl Kind {
 
     /// Whether the gesture is one of the three transforms, which take an axis.
     pub fn transforms(self) -> bool {
-        matches!(self, Kind::Move | Kind::Rotate | Kind::Scale | Kind::ExtrudeFree)
+        matches!(
+            self,
+            Kind::Move | Kind::Rotate | Kind::Scale | Kind::ExtrudeFree
+        )
     }
 }
 
@@ -501,7 +504,8 @@ impl Gesture {
     /// The edge a loop cut slides along, as its two ends in the world, first
     /// the end `position` 0 is at. Projected once, as the pivot is.
     pub fn set_slide_edge(&mut self, a: DVec3, b: DVec3) {
-        self.slide = project(a, &self.camera, self.viewport).zip(project(b, &self.camera, self.viewport));
+        self.slide =
+            project(a, &self.camera, self.viewport).zip(project(b, &self.camera, self.viewport));
     }
 
     /// Adds `step` loops to a loop cut, one at the least — the wheel.
@@ -529,7 +533,10 @@ impl Gesture {
     }
 
     fn snap_hit(&self) -> Option<crate::snap::Hit> {
-        if !self.snapping() || !self.snap.mode.needs_geometry() || !matches!(self.kind, Kind::Move | Kind::ExtrudeFree | Kind::Extrude) {
+        if !self.snapping()
+            || !self.snap.mode.needs_geometry()
+            || !matches!(self.kind, Kind::Move | Kind::ExtrudeFree | Kind::Extrude)
+        {
             return None;
         }
         crate::snap::resolve(
@@ -715,7 +722,9 @@ impl Gesture {
     /// suffix are read.
     fn unit(&self) -> crate::expr::Unit {
         match self.kind {
-            Kind::Move | Kind::ExtrudeFree | Kind::Extrude | Kind::Inset | Kind::Bevel => crate::expr::Unit::Length,
+            Kind::Move | Kind::ExtrudeFree | Kind::Extrude | Kind::Inset | Kind::Bevel => {
+                crate::expr::Unit::Length
+            }
             Kind::Rotate => crate::expr::Unit::Angle,
             Kind::Scale | Kind::LoopCut => crate::expr::Unit::Factor,
         }
@@ -739,7 +748,10 @@ impl Gesture {
                 );
             }
             Kind::Extrude => {
-                params.set("offset", PropertyValue::Float(self.extrude_distance(dx, dy)));
+                params.set(
+                    "offset",
+                    PropertyValue::Float(self.extrude_distance(dx, dy)),
+                );
             }
             Kind::Inset => {
                 let thickness = match self.depth_hold {
@@ -757,7 +769,10 @@ impl Gesture {
                 if let Some(edge) = self.edge {
                     params.set("edge", PropertyValue::Int(edge as i64));
                 }
-                params.set("position", PropertyValue::Float(self.slide_position(dx, dy)));
+                params.set(
+                    "position",
+                    PropertyValue::Float(self.slide_position(dx, dy)),
+                );
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
@@ -943,7 +958,9 @@ impl Gesture {
     /// wherever the pointer has slid it — the motion along the edge on screen,
     /// as a fraction of the edge's length there.
     fn slide_position(&self, dx: f32, dy: f32) -> f64 {
-        let Some(((ax, ay), (bx, by))) = self.slide else { return 0.5 };
+        let Some(((ax, ay), (bx, by))) = self.slide else {
+            return 0.5;
+        };
         let (ex, ey) = (bx - ax, by - ay);
         let length2 = ex * ex + ey * ey;
         // An edge seen end on has no length to slide along.
@@ -1038,13 +1055,23 @@ impl Gesture {
                 format!("{:.3}", self.extrude_distance(dx, dy))
             }
             Kind::Inset => {
-                let thickness = self.depth_hold.map(|(held, _)| held).unwrap_or_else(|| self.inset_thickness());
-                format!("thickness {thickness:.3}  depth {:.3}  (Ctrl: depth)", self.inset_depth())
+                let thickness = self
+                    .depth_hold
+                    .map(|(held, _)| held)
+                    .unwrap_or_else(|| self.inset_thickness());
+                format!(
+                    "thickness {thickness:.3}  depth {:.3}  (Ctrl: depth)",
+                    self.inset_depth()
+                )
             }
             Kind::Bevel => format!("width {:.3}", self.bevel_width()),
             Kind::LoopCut => {
                 let (dx, dy) = self.effective_delta(self.cursor);
-                format!("cuts {}  position {:.3}  (wheel: cuts)", self.loop_cuts(), self.slide_position(dx, dy))
+                format!(
+                    "cuts {}  position {:.3}  (wheel: cuts)",
+                    self.loop_cuts(),
+                    self.slide_position(dx, dy)
+                )
             }
             Kind::Move | Kind::ExtrudeFree => {
                 let (dx, dy) = self.effective_delta(self.cursor);

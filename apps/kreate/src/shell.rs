@@ -244,7 +244,8 @@ pub struct ShellState {
     /// `uv_views` is.
     node_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::NodeEditorState>,
     /// Each timeline's scrub state, per area.
-    timeline_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
+    timeline_views:
+        std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
     /// Each dope sheet's zoom and drag, per area.
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
     /// Each graph editor's view and drag, per area.
@@ -623,7 +624,10 @@ impl ShellState {
         // Not while the search is open: its field has the keyboard from the
         // frame after it opens, but on the frame it opens a typed `E` would
         // otherwise extrude.
-        !self.egui_wants_keyboard && !self.ime_active && !self.is_capturing() && !self.overlay_open()
+        !self.egui_wants_keyboard
+            && !self.ime_active
+            && !self.is_capturing()
+            && !self.overlay_open()
     }
 
     /// Whether a search box or a pie has the keyboard. While one does, keys
@@ -671,7 +675,10 @@ impl OutlinerOrder {
         // Each collection's objects under its heading, one level in; what is
         // in none after them, in the scene itself. A child goes where the top
         // of its family goes, so a hierarchy is never split across headings.
-        let collections: Vec<_> = doc.collections().map(|(id, c)| (id, c.name.clone(), c.hide)).collect();
+        let collections: Vec<_> = doc
+            .collections()
+            .map(|(id, c)| (id, c.name.clone(), c.hide))
+            .collect();
         let mut buckets: Vec<Vec<(u32, u16)>> = vec![Vec::new(); collections.len() + 1];
         let mut bucket = collections.len();
         for (id, depth) in hierarchy {
@@ -770,10 +777,7 @@ impl OutlinerOrder {
                 .collect(),
             _ => Vec::new(),
         };
-        let has_children = self
-            .depths
-            .get(index + 1)
-            .is_some_and(|next| *next > depth);
+        let has_children = self.depths.get(index + 1).is_some_and(|next| *next > depth);
         Some(OutlinerRow {
             id: key,
             name: object.name.clone(),
@@ -798,7 +802,11 @@ impl OutlinerOrder {
                                 depth += 1;
                                 at = a.bones.get(p).and_then(|b| b.parent);
                             }
-                            (b.name.clone(), depth, object.pose.active.as_deref() == Some(b.name.as_str()))
+                            (
+                                b.name.clone(),
+                                depth,
+                                object.pose.active.as_deref() == Some(b.name.as_str()),
+                            )
                         })
                         .collect()
                 })
@@ -884,7 +892,6 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Boolean(_) => "object.modifier_set_boolean",
     }
 }
-
 
 /// Opaque key for an object, so the UI can round-trip a handle it cannot read.
 pub fn object_key(id: ObjectId) -> u32 {
@@ -1061,7 +1068,13 @@ pub struct PaintSettings {
 
 impl Default for PaintSettings {
     fn default() -> Self {
-        Self { weight: 1.0, radius: 40.0, strength: 0.5, front_only: true, falloff: true }
+        Self {
+            weight: 1.0,
+            radius: 40.0,
+            strength: 0.5,
+            front_only: true,
+            falloff: true,
+        }
     }
 }
 
@@ -1078,7 +1091,12 @@ pub struct SculptSettings {
 
 impl Default for SculptSettings {
     fn default() -> Self {
-        Self { brush: 0, radius: 50.0, strength: 0.5, mirror_x: false }
+        Self {
+            brush: 0,
+            radius: 50.0,
+            strength: 0.5,
+            mirror_x: false,
+        }
     }
 }
 
@@ -1775,23 +1793,39 @@ pub fn draw(
             // view: what the hand does next, without opening a menu to learn
             // it. Read from the keymap, so a rebinding shows here too.
             let hints: &[&str] = match mode.acts_on() {
-                kreate_ops::mode::ActsOn::Objects => {
-                    &["object.translate", "object.rotate", "object.scale", "anim.keyframe_insert"]
-                }
-                kreate_ops::mode::ActsOn::MeshElements => {
-                    &["mesh.translate", "mesh.rotate", "mesh.scale", "mesh.extrude_region"]
-                }
-                kreate_ops::mode::ActsOn::Bones => {
-                    &["pose.translate", "pose.rotate", "pose.scale", "anim.keyframe_insert"]
-                }
-                kreate_ops::mode::ActsOn::BoneJoints => {
-                    &["armature.translate", "armature.extrude", "armature.bone_add", "armature.delete"]
-                }
+                kreate_ops::mode::ActsOn::Objects => &[
+                    "object.translate",
+                    "object.rotate",
+                    "object.scale",
+                    "anim.keyframe_insert",
+                ],
+                kreate_ops::mode::ActsOn::MeshElements => &[
+                    "mesh.translate",
+                    "mesh.rotate",
+                    "mesh.scale",
+                    "mesh.extrude_region",
+                ],
+                kreate_ops::mode::ActsOn::Bones => &[
+                    "pose.translate",
+                    "pose.rotate",
+                    "pose.scale",
+                    "anim.keyframe_insert",
+                ],
+                kreate_ops::mode::ActsOn::BoneJoints => &[
+                    "armature.translate",
+                    "armature.extrude",
+                    "armature.bone_add",
+                    "armature.delete",
+                ],
                 // The brush is the mouse; there are no keys to learn yet.
                 kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => &[],
             };
             for id in hints {
-                if let Some(info) = state.command_info.get(*id).filter(|i| !i.shortcut.is_empty()) {
+                if let Some(info) = state
+                    .command_info
+                    .get(*id)
+                    .filter(|i| !i.shortcut.is_empty())
+                {
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(&info.shortcut).strong().small());
                     ui.weak(egui::RichText::new(&info.name).small());
@@ -1902,10 +1936,16 @@ fn pie_entries(
 ) -> Option<(String, Vec<(MenuEntry, bool)>)> {
     use kreate_render::{ShadingMode, ViewAxis};
     let shade = |id: &'static str, label: &str, to: ShadingMode| {
-        (MenuEntry::new(id, label, Run::Command(Command::SetShading(to))), shading == to)
+        (
+            MenuEntry::new(id, label, Run::Command(Command::SetShading(to))),
+            shading == to,
+        )
     };
     let axis = |id: &'static str, label: &str, to: ViewAxis| {
-        (MenuEntry::new(id, label, Run::Command(Command::SnapToAxis(to))), false)
+        (
+            MenuEntry::new(id, label, Run::Command(Command::SnapToAxis(to))),
+            false,
+        )
     };
     Some(match name {
         // Blender's Z: wireframe left, rendered right, solid below, the
@@ -1913,9 +1953,21 @@ fn pie_entries(
         "shading" => (
             l.pie_shading.clone(),
             vec![
-                shade("view.shading_wireframe", &l.shading_wireframe, ShadingMode::Wireframe),
-                shade("view.shading_rendered", &l.shading_rendered, ShadingMode::Rendered),
-                shade("view.shading_studio", &l.shading_studio, ShadingMode::Studio),
+                shade(
+                    "view.shading_wireframe",
+                    &l.shading_wireframe,
+                    ShadingMode::Wireframe,
+                ),
+                shade(
+                    "view.shading_rendered",
+                    &l.shading_rendered,
+                    ShadingMode::Rendered,
+                ),
+                shade(
+                    "view.shading_studio",
+                    &l.shading_studio,
+                    ShadingMode::Studio,
+                ),
                 shade("view.shading_flat", &l.shading_flat, ShadingMode::Flat),
             ],
         ),
@@ -1932,8 +1984,18 @@ fn pie_entries(
                 axis("view.axis_back", &l.view_back, ViewAxis::PosY),
                 // Blender's pie: View Camera and View Selected on the last
                 // two slots. Frame All is Home and the View menu.
-                (MenuEntry::new("view.camera", &l.view_camera, dispatch("view.camera")), false),
-                (MenuEntry::new("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)), false),
+                (
+                    MenuEntry::new("view.camera", &l.view_camera, dispatch("view.camera")),
+                    false,
+                ),
+                (
+                    MenuEntry::new(
+                        "view.frame_selected",
+                        &l.view_frame_selected,
+                        Run::Command(Command::FrameSelection),
+                    ),
+                    false,
+                ),
             ],
         ),
         // Blender's Ctrl+Tab: every mode, the one you are in lit, the ones
@@ -1951,8 +2013,12 @@ fn pie_entries(
                     let info = m.info();
                     let label = l.mode_names.get(info.tag).cloned().unwrap_or_default();
                     (
-                        MenuEntry::new(info.label_key, &label, Run::Command(Command::SetMode(info.tag.to_string())))
-                            .enabled(m.can_enter(has)),
+                        MenuEntry::new(
+                            info.label_key,
+                            &label,
+                            Run::Command(Command::SetMode(info.tag.to_string())),
+                        )
+                        .enabled(m.can_enter(has)),
                         *m == mode,
                     )
                 })
@@ -1962,9 +2028,30 @@ fn pie_entries(
         "snap" => (
             l.pie_snap.clone(),
             vec![
-                (MenuEntry::new("view.cursor_to_selected", &l.cursor_to_selected, dispatch("view.cursor_to_selected")), false),
-                (MenuEntry::new("view.selection_to_cursor", &l.selection_to_cursor, dispatch("view.selection_to_cursor")), false),
-                (MenuEntry::new("view.cursor_to_origin", &l.cursor_to_origin, dispatch("view.cursor_to_origin")), false),
+                (
+                    MenuEntry::new(
+                        "view.cursor_to_selected",
+                        &l.cursor_to_selected,
+                        dispatch("view.cursor_to_selected"),
+                    ),
+                    false,
+                ),
+                (
+                    MenuEntry::new(
+                        "view.selection_to_cursor",
+                        &l.selection_to_cursor,
+                        dispatch("view.selection_to_cursor"),
+                    ),
+                    false,
+                ),
+                (
+                    MenuEntry::new(
+                        "view.cursor_to_origin",
+                        &l.cursor_to_origin,
+                        dispatch("view.cursor_to_origin"),
+                    ),
+                    false,
+                ),
             ],
         ),
         _ => return None,
@@ -1982,7 +2069,11 @@ fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
                 label,
                 op(
                     "object.transform_apply",
-                    &[("location", V::Bool(location)), ("rotation", V::Bool(rotation)), ("scale", V::Bool(scale))],
+                    &[
+                        ("location", V::Bool(location)),
+                        ("rotation", V::Bool(rotation)),
+                        ("scale", V::Bool(scale)),
+                    ],
                 ),
             )
             .variant("location", V::Bool(location))
@@ -1992,8 +2083,12 @@ fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
     };
     let origin = |label: &str, kind: u32| {
         MenuNode::Entry(
-            MenuEntry::new("object.origin_set", label, op("object.origin_set", &[("kind", V::Enum(kind))]))
-                .variant("kind", V::Enum(kind)),
+            MenuEntry::new(
+                "object.origin_set",
+                label,
+                op("object.origin_set", &[("kind", V::Enum(kind))]),
+            )
+            .variant("kind", V::Enum(kind)),
         )
     };
     vec![
@@ -2018,9 +2113,21 @@ fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(
             l.menu_snap.clone(),
             vec![
-                entry("view.cursor_to_selected", &l.cursor_to_selected, dispatch("view.cursor_to_selected")),
-                entry("view.selection_to_cursor", &l.selection_to_cursor, dispatch("view.selection_to_cursor")),
-                entry("view.cursor_to_origin", &l.cursor_to_origin, dispatch("view.cursor_to_origin")),
+                entry(
+                    "view.cursor_to_selected",
+                    &l.cursor_to_selected,
+                    dispatch("view.cursor_to_selected"),
+                ),
+                entry(
+                    "view.selection_to_cursor",
+                    &l.selection_to_cursor,
+                    dispatch("view.selection_to_cursor"),
+                ),
+                entry(
+                    "view.cursor_to_origin",
+                    &l.cursor_to_origin,
+                    dispatch("view.cursor_to_origin"),
+                ),
             ],
         ),
     ]
@@ -2038,7 +2145,8 @@ fn draw_pie(
         return;
     };
     let has = kreate_ops::mode::Has::of(doc);
-    let Some((title, entries)) = pie_entries(&open.name, l, state.view_status.shading, mode, has) else {
+    let Some((title, entries)) = pie_entries(&open.name, l, state.view_status.shading, mode, has)
+    else {
         // A name nothing defines — a binding from a newer keymap. Closed
         // rather than drawn empty.
         state.pie.open = None;
@@ -2213,15 +2321,22 @@ fn draw_area(
                         _ => None,
                     };
                     if let Some(radius) = brush {
-                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p)) {
+                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p))
+                        {
                             let theme = kreate_ui::theme::from_ui(ui);
-                            ui.painter()
-                                .with_clip_rect(inner)
-                                .circle_stroke(p, radius, egui::Stroke::new(1.2, theme.text));
+                            ui.painter().with_clip_rect(inner).circle_stroke(
+                                p,
+                                radius,
+                                egui::Stroke::new(1.2, theme.text),
+                            );
                         }
                     }
                     // The 3D cursor: Blender's red and white ring with a cross.
-                    if let Some(at) = state.projector.and_then(|p| p.project(doc.cursor)).filter(|p| inner.contains(*p)) {
+                    if let Some(at) = state
+                        .projector
+                        .and_then(|p| p.project(doc.cursor))
+                        .filter(|p| inner.contains(*p))
+                    {
                         let painter = ui.painter().with_clip_rect(inner);
                         let r = 9.0;
                         for i in 0..8 {
@@ -2248,21 +2363,29 @@ fn draw_area(
                     }
                     // Circle select's brush, under the pointer.
                     if let Some(radius) = state.circle_select {
-                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p)) {
+                        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p))
+                        {
                             let theme = kreate_ui::theme::from_ui(ui);
-                            ui.painter()
-                                .with_clip_rect(inner)
-                                .circle_stroke(p, radius, egui::Stroke::new(1.2, theme.text));
+                            ui.painter().with_clip_rect(inner).circle_stroke(
+                                p,
+                                radius,
+                                egui::Stroke::new(1.2, theme.text),
+                            );
                         }
                     }
                     // What a snapping drag caught, Blender's marker on it: a
                     // square for a vertex, a ring for an edge, a ring with a
                     // dot for a face.
                     if let Some((at, element)) = state.snap_target {
-                        if let Some(p) = state.projector.and_then(|pr| pr.project(at)).filter(|p| inner.contains(*p)) {
+                        if let Some(p) = state
+                            .projector
+                            .and_then(|pr| pr.project(at))
+                            .filter(|p| inner.contains(*p))
+                        {
                             let painter = ui.painter().with_clip_rect(inner);
                             let colour = egui::Color32::WHITE;
-                            let outline = egui::Stroke::new(3.5, egui::Color32::from_black_alpha(160));
+                            let outline =
+                                egui::Stroke::new(3.5, egui::Color32::from_black_alpha(160));
                             let stroke = egui::Stroke::new(1.5, colour);
                             match element {
                                 crate::snap::Element::Vertex => {
@@ -2281,24 +2404,36 @@ fn draw_area(
                         }
                     }
                     // The knife's path: the cut so far and the next stretch.
-                    if let Some(projector) = state.projector.filter(|_| !state.knife_preview.is_empty()) {
+                    if let Some(projector) =
+                        state.projector.filter(|_| !state.knife_preview.is_empty())
+                    {
                         let painter = ui.painter().with_clip_rect(inner);
                         let green = egui::Color32::from_rgb(90, 230, 120);
-                        let points: Vec<egui::Pos2> =
-                            state.knife_preview.iter().filter_map(|p| projector.project(*p)).collect();
+                        let points: Vec<egui::Pos2> = state
+                            .knife_preview
+                            .iter()
+                            .filter_map(|p| projector.project(*p))
+                            .collect();
                         if points.len() == state.knife_preview.len() {
-                            painter.add(egui::Shape::line(points.clone(), egui::Stroke::new(2.0, green)));
+                            painter.add(egui::Shape::line(
+                                points.clone(),
+                                egui::Stroke::new(2.0, green),
+                            ));
                             for p in &points {
                                 painter.circle_filled(*p, 3.5, green);
                             }
                         }
                     }
                     // The loops `Ctrl+R` would cut, in Blender's yellow.
-                    if let Some(projector) = state.projector.filter(|_| !state.loop_cut_preview.is_empty()) {
+                    if let Some(projector) = state
+                        .projector
+                        .filter(|_| !state.loop_cut_preview.is_empty())
+                    {
                         let painter = ui.painter().with_clip_rect(inner);
                         let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 214, 51));
                         for line in &state.loop_cut_preview {
-                            let points: Vec<egui::Pos2> = line.iter().filter_map(|p| projector.project(*p)).collect();
+                            let points: Vec<egui::Pos2> =
+                                line.iter().filter_map(|p| projector.project(*p)).collect();
                             if points.len() == line.len() {
                                 painter.add(egui::Shape::line(points, stroke));
                             }
@@ -2486,9 +2621,7 @@ fn draw_area_header(
                         // Select, Add, and whatever the mode's card says acts on
                         // what it acts on — from the tree F3 searches.
                         for menu in viewport_menus(l, mode, state.select_mode) {
-                            ui.menu_button(&menu.label, |ui| {
-                                draw_nodes(ui, state, l, &menu.nodes)
-                            });
+                            ui.menu_button(&menu.label, |ui| draw_nodes(ui, state, l, &menu.nodes));
                         }
 
                         // The element buttons stay buttons rather than becoming
@@ -2523,17 +2656,27 @@ fn draw_area_header(
                         // elements in.
                         if matches!(
                             mode.acts_on(),
-                            kreate_ops::mode::ActsOn::Objects | kreate_ops::mode::ActsOn::MeshElements
+                            kreate_ops::mode::ActsOn::Objects
+                                | kreate_ops::mode::ActsOn::MeshElements
                         ) {
                             ui.separator();
-                            let names = [&l.pivot_median, &l.pivot_individual, &l.pivot_active, &l.pivot_cursor];
+                            let names = [
+                                &l.pivot_median,
+                                &l.pivot_individual,
+                                &l.pivot_active,
+                                &l.pivot_cursor,
+                            ];
                             let current = names[state.pivot.min(3) as usize].clone();
                             egui::ComboBox::from_id_salt(("pivot", area.id.0))
                                 .width(80.0)
                                 .selected_text(current)
                                 .show_ui(ui, |ui| {
                                     for (i, name) in names.iter().enumerate() {
-                                        ui.selectable_value(&mut state.pivot, i as u32, name.as_str());
+                                        ui.selectable_value(
+                                            &mut state.pivot,
+                                            i as u32,
+                                            name.as_str(),
+                                        );
                                     }
                                 })
                                 .response
@@ -2543,7 +2686,12 @@ fn draw_area_header(
                         // The sculpt brush, in its header.
                         if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
                             ui.separator();
-                            let names = [&l.sculpt_draw, &l.sculpt_smooth, &l.sculpt_grab, &l.sculpt_inflate];
+                            let names = [
+                                &l.sculpt_draw,
+                                &l.sculpt_smooth,
+                                &l.sculpt_grab,
+                                &l.sculpt_inflate,
+                            ];
                             let s = &mut state.sculpt;
                             egui::ComboBox::from_id_salt(("sculpt-brush", area.id.0))
                                 .selected_text(names[s.brush.min(3) as usize].as_str())
@@ -2553,10 +2701,23 @@ fn draw_area_header(
                                     }
                                 });
                             ui.label(state.catalog.get("paint-radius"));
-                            ui.add(egui::DragValue::new(&mut state.sculpt.radius).range(4.0..=400.0).speed(1.0).suffix(" px"));
+                            ui.add(
+                                egui::DragValue::new(&mut state.sculpt.radius)
+                                    .range(4.0..=400.0)
+                                    .speed(1.0)
+                                    .suffix(" px"),
+                            );
                             ui.label(state.catalog.get("paint-strength"));
-                            ui.add(egui::DragValue::new(&mut state.sculpt.strength).range(0.0..=1.0).speed(0.01).max_decimals(2));
-                            ui.checkbox(&mut state.sculpt.mirror_x, state.catalog.get("sculpt-mirror-x"));
+                            ui.add(
+                                egui::DragValue::new(&mut state.sculpt.strength)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01)
+                                    .max_decimals(2),
+                            );
+                            ui.checkbox(
+                                &mut state.sculpt.mirror_x,
+                                state.catalog.get("sculpt-mirror-x"),
+                            );
                         }
                         // The brush, where Blender keeps it: in the header of
                         // the mode that uses it.
@@ -2564,11 +2725,26 @@ fn draw_area_header(
                             ui.separator();
                             let p = &mut state.paint;
                             ui.label(state.catalog.get("paint-weight"));
-                            ui.add(egui::DragValue::new(&mut p.weight).range(0.0..=1.0).speed(0.01).max_decimals(2));
+                            ui.add(
+                                egui::DragValue::new(&mut p.weight)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01)
+                                    .max_decimals(2),
+                            );
                             ui.label(state.catalog.get("paint-radius"));
-                            ui.add(egui::DragValue::new(&mut p.radius).range(2.0..=400.0).speed(1.0).suffix(" px"));
+                            ui.add(
+                                egui::DragValue::new(&mut p.radius)
+                                    .range(2.0..=400.0)
+                                    .speed(1.0)
+                                    .suffix(" px"),
+                            );
                             ui.label(state.catalog.get("paint-strength"));
-                            ui.add(egui::DragValue::new(&mut p.strength).range(0.0..=1.0).speed(0.01).max_decimals(2));
+                            ui.add(
+                                egui::DragValue::new(&mut p.strength)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01)
+                                    .max_decimals(2),
+                            );
                             ui.checkbox(&mut p.front_only, state.catalog.get("paint-front-only"));
                             ui.checkbox(&mut p.falloff, state.catalog.get("paint-falloff"));
                         }
@@ -2841,47 +3017,81 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
             label: l.menu_file.clone(),
             nodes: vec![
                 entry("file.new", &l.file_new, Run::Command(Command::NewDocument)),
-                entry("file.open", &l.file_open, Run::Command(Command::OpenDocument)),
+                entry(
+                    "file.open",
+                    &l.file_open,
+                    Run::Command(Command::OpenDocument),
+                ),
                 MenuNode::Recent,
                 // Recovered work under File, where Blender keeps it and where
                 // somebody who has just lost a session looks first.
                 MenuNode::Recover,
                 Separator,
-                entry("file.save", &l.file_save, Run::Command(Command::SaveDocument)),
-                entry("file.save_as", &l.file_save_as, Run::Command(Command::SaveDocumentAs)),
+                entry(
+                    "file.save",
+                    &l.file_save,
+                    Run::Command(Command::SaveDocument),
+                ),
+                entry(
+                    "file.save_as",
+                    &l.file_save_as,
+                    Run::Command(Command::SaveDocumentAs),
+                ),
                 Separator,
                 // A script is a file of history lines, the console's language.
-                entry("file.run_script", &l.file_run_script, dispatch("file.run_script")),
+                entry(
+                    "file.run_script",
+                    &l.file_run_script,
+                    dispatch("file.run_script"),
+                ),
                 Separator,
                 // After a separator, because an export is not a save: the
                 // document keeps no path from it and treating a `.glb` as a
                 // working file loses everything the format cannot hold.
-                entry("file.export", &l.file_export, Run::Command(Command::ExportScene)),
+                entry(
+                    "file.export",
+                    &l.file_export,
+                    Run::Command(Command::ExportScene),
+                ),
             ],
         },
         TopMenu {
             label: l.menu_edit.clone(),
             nodes: vec![
                 MenuNode::Entry(
-                    MenuEntry::new("edit.undo", &l.undo, Run::Command(Command::Undo)).enabled(can_undo),
+                    MenuEntry::new("edit.undo", &l.undo, Run::Command(Command::Undo))
+                        .enabled(can_undo),
                 ),
                 MenuNode::Entry(
-                    MenuEntry::new("edit.redo", &l.redo, Run::Command(Command::Redo)).enabled(can_redo),
+                    MenuEntry::new("edit.redo", &l.redo, Run::Command(Command::Redo))
+                        .enabled(can_redo),
                 ),
                 MenuNode::UndoHistory,
                 Separator,
                 entry("app.search", &l.menu_search, dispatch("app.search")),
                 // The history, as the script it already is — Blender's "Copy
                 // as Python", for the language this application speaks.
-                entry("edit.copy_script", &l.menu_copy_script, dispatch("edit.copy_script")),
+                entry(
+                    "edit.copy_script",
+                    &l.menu_copy_script,
+                    dispatch("edit.copy_script"),
+                ),
             ],
         },
         TopMenu {
             label: l.menu_help.clone(),
             nodes: vec![
-                entry("help.contact", &l.help_contact, Run::Command(Command::OpenContact)),
+                entry(
+                    "help.contact",
+                    &l.help_contact,
+                    Run::Command(Command::OpenContact),
+                ),
                 Separator,
-                entry("help.about", &l.help_about, Run::Command(Command::OpenAbout)),
+                entry(
+                    "help.about",
+                    &l.help_about,
+                    Run::Command(Command::OpenAbout),
+                ),
             ],
         },
     ]
@@ -2890,37 +3100,61 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
 /// The viewport's View entries: how the scene is looked at.
 fn view_nodes(l: &Labels) -> Vec<MenuNode> {
     vec![
-        entry("view.frame_all", &l.view_frame_all, dispatch("view.frame_all")),
-        entry("view.frame_selected", &l.view_frame_selected, Run::Command(Command::FrameSelection)),
+        entry(
+            "view.frame_all",
+            &l.view_frame_all,
+            dispatch("view.frame_all"),
+        ),
+        entry(
+            "view.frame_selected",
+            &l.view_frame_selected,
+            Run::Command(Command::FrameSelection),
+        ),
         // Numpad 0 is the key, and a keyboard without a numpad has no other
         // way through the camera.
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
         MenuNode::Separator,
-        entry("view.toggle_projection", &l.view_perspective, dispatch("view.toggle_projection")),
-        entry("view.toggle_sidebar", &l.view_sidebar, dispatch("view.toggle_sidebar")),
+        entry(
+            "view.toggle_projection",
+            &l.view_perspective,
+            dispatch("view.toggle_projection"),
+        ),
+        entry(
+            "view.toggle_sidebar",
+            &l.view_sidebar,
+            dispatch("view.toggle_sidebar"),
+        ),
         MenuNode::Separator,
         entry("time.play", &l.time_play_menu, dispatch("time.play")),
     ]
 }
 
 /// Select, Add, and the menus the mode's card names.
-fn viewport_menus(
-    l: &Labels,
-    mode: kreate_ops::operator::Mode,
-    select_mode: u32,
-) -> Vec<TopMenu> {
-    let mut out = vec![TopMenu { label: l.menu_select.clone(), nodes: select_nodes(l, mode, select_mode) }];
+fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<TopMenu> {
+    let mut out = vec![TopMenu {
+        label: l.menu_select.clone(),
+        nodes: select_nodes(l, mode, select_mode),
+    }];
     // What Add adds is the mode's: objects where objects are acted on, a bone
     // where a skeleton is being built, and nothing in pose mode — a pose adds
     // nothing, as Blender's has no Add menu there.
     match mode.acts_on() {
         // A pose and a brush add nothing, as in Blender.
-        kreate_ops::mode::ActsOn::Bones | kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => {}
+        kreate_ops::mode::ActsOn::Bones
+        | kreate_ops::mode::ActsOn::Weights
+        | kreate_ops::mode::ActsOn::Sculpt => {}
         kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
             label: l.add_menu.clone(),
-            nodes: vec![entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[]))],
+            nodes: vec![entry(
+                "armature.bone_add",
+                &l.armature_add_bone,
+                op("armature.bone_add", &[]),
+            )],
         }),
-        _ => out.push(TopMenu { label: l.add_menu.clone(), nodes: add_nodes(l) }),
+        _ => out.push(TopMenu {
+            label: l.add_menu.clone(),
+            nodes: add_nodes(l),
+        }),
     }
     // What the menus after Add are is the mode's to say, because what you can
     // act on is. Object mode acts on whole objects; edit mode on the parts of one.
@@ -2942,32 +3176,61 @@ fn viewport_menus(
             }),
             kreate_ops::mode::Menu::Sculpt => out.push(TopMenu {
                 label: l.menu_sculpt.clone(),
-                nodes: [&l.sculpt_draw, &l.sculpt_smooth, &l.sculpt_grab, &l.sculpt_inflate]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, label)| {
-                        MenuNode::Entry(
-                            MenuEntry::new("sculpt.brush", label, Run::Command(Command::SetSculptBrush(i as u32)))
-                                .variant("brush", kreate_reflect::PropertyValue::Enum(i as u32)),
+                nodes: [
+                    &l.sculpt_draw,
+                    &l.sculpt_smooth,
+                    &l.sculpt_grab,
+                    &l.sculpt_inflate,
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, label)| {
+                    MenuNode::Entry(
+                        MenuEntry::new(
+                            "sculpt.brush",
+                            label,
+                            Run::Command(Command::SetSculptBrush(i as u32)),
                         )
-                    })
-                    .collect(),
+                        .variant("brush", kreate_reflect::PropertyValue::Enum(i as u32)),
+                    )
+                })
+                .collect(),
             }),
             kreate_ops::mode::Menu::Weights => out.push(TopMenu {
                 label: l.menu_weights.clone(),
                 nodes: vec![
-                    entry("object.vertex_group_add", &l.group_add, op("object.vertex_group_add", &[])),
+                    entry(
+                        "object.vertex_group_add",
+                        &l.group_add,
+                        op("object.vertex_group_add", &[]),
+                    ),
                     MenuNode::Separator,
-                    entry("paint.weights_normalize", &l.weights_normalize, op("paint.weights_normalize", &[])),
+                    entry(
+                        "paint.weights_normalize",
+                        &l.weights_normalize,
+                        op("paint.weights_normalize", &[]),
+                    ),
                 ],
             }),
             kreate_ops::mode::Menu::Armature => out.push(TopMenu {
                 label: l.menu_armature.clone(),
                 nodes: vec![
-                    entry("armature.bone_add", &l.armature_add_bone, op("armature.bone_add", &[])),
-                    entry("armature.extrude", &l.armature_extrude, dispatch("armature.extrude")),
+                    entry(
+                        "armature.bone_add",
+                        &l.armature_add_bone,
+                        op("armature.bone_add", &[]),
+                    ),
+                    entry(
+                        "armature.extrude",
+                        &l.armature_extrude,
+                        dispatch("armature.extrude"),
+                    ),
                     MenuNode::Separator,
-                    entry("armature.delete", &l.armature_delete, op("armature.delete", &[])),
+                    entry(
+                        "armature.delete",
+                        &l.armature_delete,
+                        op("armature.delete", &[]),
+                    ),
                 ],
             }),
         }
@@ -2986,7 +3249,10 @@ pub fn searchable_menus(
 ) -> Vec<TopMenu> {
     let l = Labels::new(catalog);
     let mut out = top_bar_menus(&l, can_undo, can_redo);
-    out.push(TopMenu { label: l.menu_view.clone(), nodes: view_nodes(&l) });
+    out.push(TopMenu {
+        label: l.menu_view.clone(),
+        nodes: view_nodes(&l),
+    });
     out.extend(viewport_menus(&l, mode, select_mode));
     out
 }
@@ -2998,7 +3264,10 @@ pub fn flatten(menus: &[TopMenu]) -> Vec<(String, MenuEntry)> {
             match node {
                 MenuNode::Entry(e) => out.push((path.to_string(), e.clone())),
                 MenuNode::Sub(label, children) => walk(&format!("{path} / {label}"), children, out),
-                MenuNode::Separator | MenuNode::Recover | MenuNode::Recent | MenuNode::UndoHistory => {}
+                MenuNode::Separator
+                | MenuNode::Recover
+                | MenuNode::Recent
+                | MenuNode::UndoHistory => {}
             }
         }
     }
@@ -3041,20 +3310,26 @@ fn draw_undo_history(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         const SHOWN: usize = 40;
         let total = state.history_steps.len();
         let first = total.saturating_sub(SHOWN);
-        egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-            if first == 0 && ui.selectable_label(at == 0, &l.undo_original).clicked() {
-                state.queue.push(Command::UndoTo(0));
-                ui.close();
-            }
-            for (i, label) in state.history_steps.iter().enumerate().skip(first) {
-                let applied = i + 1;
-                let text = if applied > at { egui::RichText::new(label).weak() } else { egui::RichText::new(label) };
-                if ui.selectable_label(applied == at, text).clicked() {
-                    state.queue.push(Command::UndoTo(applied));
+        egui::ScrollArea::vertical()
+            .max_height(480.0)
+            .show(ui, |ui| {
+                if first == 0 && ui.selectable_label(at == 0, &l.undo_original).clicked() {
+                    state.queue.push(Command::UndoTo(0));
                     ui.close();
                 }
-            }
-        });
+                for (i, label) in state.history_steps.iter().enumerate().skip(first) {
+                    let applied = i + 1;
+                    let text = if applied > at {
+                        egui::RichText::new(label).weak()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    if ui.selectable_label(applied == at, text).clicked() {
+                        state.queue.push(Command::UndoTo(applied));
+                        ui.close();
+                    }
+                }
+            });
     });
 }
 
@@ -3081,29 +3356,48 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
         _ => None,
     };
     if let Some(id) = bones {
-        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (3, &l.select_invert)] {
+        for (action, label) in [
+            (0u32, &l.select_all),
+            (1, &l.select_none),
+            (3, &l.select_invert),
+        ] {
             out.push(MenuNode::Entry(
-                MenuEntry::new(id, label, op(id, &[("action", V::Enum(action))])).variant("action", V::Enum(action)),
+                MenuEntry::new(id, label, op(id, &[("action", V::Enum(action))]))
+                    .variant("action", V::Enum(action)),
             ));
         }
     } else if mode.edits_elements() {
-        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (2, &l.select_invert)] {
+        for (action, label) in [
+            (0u32, &l.select_all),
+            (1, &l.select_none),
+            (2, &l.select_invert),
+        ] {
             out.push(MenuNode::Entry(
                 MenuEntry::new(
                     "mesh.select",
                     label,
-                    op("mesh.select", &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))]),
+                    op(
+                        "mesh.select",
+                        &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))],
+                    ),
                 )
                 .variant("action", V::Enum(action)),
             ));
         }
         out.push(MenuNode::Separator);
-        for (action, label) in [(6u32, &l.select_more), (7, &l.select_less), (8, &l.select_linked)] {
+        for (action, label) in [
+            (6u32, &l.select_more),
+            (7, &l.select_less),
+            (8, &l.select_linked),
+        ] {
             out.push(MenuNode::Entry(
                 MenuEntry::new(
                     "mesh.select",
                     label,
-                    op("mesh.select", &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))]),
+                    op(
+                        "mesh.select",
+                        &[("action", V::Enum(action)), ("mode", V::Enum(select_mode))],
+                    ),
                 )
                 .variant("action", V::Enum(action)),
             ));
@@ -3132,16 +3426,28 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
         out.push(MenuNode::Sub(l.menu_select_similar.clone(), similar));
         out.push(MenuNode::Separator);
         out.push(MenuNode::Entry(
-            MenuEntry::new("mesh.select", &l.select_loop, op("mesh.select", &[("action", V::Enum(3))]))
-                .variant("action", V::Enum(3)),
+            MenuEntry::new(
+                "mesh.select",
+                &l.select_loop,
+                op("mesh.select", &[("action", V::Enum(3))]),
+            )
+            .variant("action", V::Enum(3)),
         ));
     } else {
         // `object.select_all` counts select, deselect, toggle, invert; the
         // menu offers the three a person asks for by name.
-        for (action, label) in [(0u32, &l.select_all), (1, &l.select_none), (3, &l.select_invert)] {
+        for (action, label) in [
+            (0u32, &l.select_all),
+            (1, &l.select_none),
+            (3, &l.select_invert),
+        ] {
             out.push(MenuNode::Entry(
-                MenuEntry::new("object.select_all", label, op("object.select_all", &[("action", V::Enum(action))]))
-                    .variant("action", V::Enum(action)),
+                MenuEntry::new(
+                    "object.select_all",
+                    label,
+                    op("object.select_all", &[("action", V::Enum(action))]),
+                )
+                .variant("action", V::Enum(action)),
             ));
         }
     }
@@ -3151,20 +3457,29 @@ fn select_nodes(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) 
 /// The Pose menu: putting what was done to the selected bones back.
 fn pose_nodes(l: &Labels) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
-    let mut out: Vec<MenuNode> = vec![entry("pose.ik_add", &l.pose_ik_add, op("pose.ik_add", &[])), MenuNode::Separator];
-    out.extend([
-        (0u32, &l.pose_clear_all),
-        (1, &l.pose_clear_location),
-        (2, &l.pose_clear_rotation),
-        (3, &l.pose_clear_scale),
-    ]
-    .into_iter()
-    .map(|(what, label)| {
-        MenuNode::Entry(
-            MenuEntry::new("pose.clear_transform", label, op("pose.clear_transform", &[("what", V::Enum(what))]))
+    let mut out: Vec<MenuNode> = vec![
+        entry("pose.ik_add", &l.pose_ik_add, op("pose.ik_add", &[])),
+        MenuNode::Separator,
+    ];
+    out.extend(
+        [
+            (0u32, &l.pose_clear_all),
+            (1, &l.pose_clear_location),
+            (2, &l.pose_clear_rotation),
+            (3, &l.pose_clear_scale),
+        ]
+        .into_iter()
+        .map(|(what, label)| {
+            MenuNode::Entry(
+                MenuEntry::new(
+                    "pose.clear_transform",
+                    label,
+                    op("pose.clear_transform", &[("what", V::Enum(what))]),
+                )
                 .variant("what", V::Enum(what)),
-        )
-    }));
+            )
+        }),
+    );
     out
 }
 
@@ -3197,8 +3512,12 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
     .into_iter()
     .map(|(kind, label)| {
         MenuNode::Entry(
-            MenuEntry::new("object.add_light", label, op("object.add_light", &[("kind", V::Enum(kind))]))
-                .variant("kind", V::Enum(kind)),
+            MenuEntry::new(
+                "object.add_light",
+                label,
+                op("object.add_light", &[("kind", V::Enum(kind))]),
+            )
+            .variant("kind", V::Enum(kind)),
         )
     })
     .collect();
@@ -3206,9 +3525,21 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(l.add_mesh.clone(), shapes),
         MenuNode::Sub(l.add_light.clone(), lights),
         MenuNode::Separator,
-        entry("object.add_camera", &l.add_camera, op("object.add_camera", &[])),
-        entry("object.add_empty", &l.add_empty, op("object.add_empty", &[])),
-        entry("object.add_armature", &l.add_armature, op("object.add_armature", &[])),
+        entry(
+            "object.add_camera",
+            &l.add_camera,
+            op("object.add_camera", &[]),
+        ),
+        entry(
+            "object.add_empty",
+            &l.add_empty,
+            op("object.add_empty", &[]),
+        ),
+        entry(
+            "object.add_armature",
+            &l.add_armature,
+            op("object.add_armature", &[]),
+        ),
     ]
 }
 
@@ -3237,15 +3568,27 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(
             l.menu_transform.clone(),
             vec![
-                entry("object.translate", &l.transform_move, dispatch("object.translate")),
-                entry("object.rotate", &l.transform_rotate, dispatch("object.rotate")),
+                entry(
+                    "object.translate",
+                    &l.transform_move,
+                    dispatch("object.translate"),
+                ),
+                entry(
+                    "object.rotate",
+                    &l.transform_rotate,
+                    dispatch("object.rotate"),
+                ),
                 entry("object.scale", &l.transform_scale, dispatch("object.scale")),
             ],
         ),
         MenuNode::Separator,
         MenuNode::Entry(
-            MenuEntry::new("object.duplicate", &l.duplicate, op("object.duplicate", &[("linked", V::Bool(true))]))
-                .variant("linked", V::Bool(true)),
+            MenuEntry::new(
+                "object.duplicate",
+                &l.duplicate,
+                op("object.duplicate", &[("linked", V::Bool(true))]),
+            )
+            .variant("linked", V::Bool(true)),
         ),
         // Copy and paste beside Duplicate, which is the same family: a paste
         // is a duplicate that survives the original being deleted and can be
@@ -3260,8 +3603,12 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
             (0..3u32)
                 .map(|n| {
                     MenuNode::Entry(
-                        MenuEntry::new("object.boolean", &l.boolean_ops[n as usize], op("object.boolean", &[("operation", V::Enum(n))]))
-                            .variant("operation", V::Enum(n)),
+                        MenuEntry::new(
+                            "object.boolean",
+                            &l.boolean_ops[n as usize],
+                            op("object.boolean", &[("operation", V::Enum(n))]),
+                        )
+                        .variant("operation", V::Enum(n)),
                     )
                 })
                 .collect(),
@@ -3271,8 +3618,16 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(
             l.menu_animation.clone(),
             vec![
-                entry("anim.keyframe_insert", &l.anim_insert, dispatch("anim.keyframe_insert")),
-                entry("anim.keyframe_delete", &l.anim_delete, dispatch("anim.keyframe_delete")),
+                entry(
+                    "anim.keyframe_insert",
+                    &l.anim_insert,
+                    dispatch("anim.keyframe_insert"),
+                ),
+                entry(
+                    "anim.keyframe_delete",
+                    &l.anim_delete,
+                    dispatch("anim.keyframe_delete"),
+                ),
             ],
         ),
         // Blender's Parent menu, its armature half: select the meshes, then
@@ -3282,8 +3637,12 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
             vec![
                 entry("object.parent", &l.parent_object, op("object.parent", &[])),
                 MenuNode::Entry(
-                    MenuEntry::new("object.parent", &l.parent_clear, op("object.parent", &[("clear", V::Bool(true))]))
-                        .variant("clear", V::Bool(true)),
+                    MenuEntry::new(
+                        "object.parent",
+                        &l.parent_clear,
+                        op("object.parent", &[("clear", V::Bool(true))]),
+                    )
+                    .variant("clear", V::Bool(true)),
                 ),
                 MenuNode::Separator,
                 MenuNode::Entry(
@@ -3295,11 +3654,19 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                     .variant("weights", V::Enum(0)),
                 ),
                 MenuNode::Entry(
-                    MenuEntry::new("object.bind_armature", &l.bind_empty, op("object.bind_armature", &[("weights", V::Enum(1))]))
-                        .variant("weights", V::Enum(1)),
+                    MenuEntry::new(
+                        "object.bind_armature",
+                        &l.bind_empty,
+                        op("object.bind_armature", &[("weights", V::Enum(1))]),
+                    )
+                    .variant("weights", V::Enum(1)),
                 ),
                 MenuNode::Separator,
-                entry("object.unbind_armature", &l.unbind, op("object.unbind_armature", &[])),
+                entry(
+                    "object.unbind_armature",
+                    &l.unbind,
+                    op("object.unbind_armature", &[]),
+                ),
             ],
         ),
         MenuNode::Sub(
@@ -3308,8 +3675,12 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                 entry("object.reveal", &l.reveal_hidden, op("object.reveal", &[])),
                 entry("object.hide", &l.hide_selected, op("object.hide", &[])),
                 MenuNode::Entry(
-                    MenuEntry::new("object.hide", &l.hide_unselected, op("object.hide", &[("unselected", V::Bool(true))]))
-                        .variant("unselected", V::Bool(true)),
+                    MenuEntry::new(
+                        "object.hide",
+                        &l.hide_unselected,
+                        op("object.hide", &[("unselected", V::Bool(true))]),
+                    )
+                    .variant("unselected", V::Bool(true)),
                 ),
             ],
         ),
@@ -3361,15 +3732,35 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         for (op, label, checked) in [
             ("view.toggle_grid", &l.overlay_grid, on.grid),
             ("view.toggle_wireframe", &l.overlay_wireframe, on.wireframe),
-            ("view.toggle_face_orientation", &l.overlay_face_orientation, on.face_orientation),
-            ("view.toggle_statistics", &l.overlay_statistics, on.statistics),
+            (
+                "view.toggle_face_orientation",
+                &l.overlay_face_orientation,
+                on.face_orientation,
+            ),
+            (
+                "view.toggle_statistics",
+                &l.overlay_statistics,
+                on.statistics,
+            ),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
             ("view.toggle_outline", &l.overlay_outline, on.outline),
             ("view.toggle_bloom", &l.overlay_bloom, on.bloom),
-            ("view.toggle_reflections", &l.overlay_reflections, on.reflections),
-            ("view.toggle_contact_shadows", &l.overlay_contact_shadows, on.contact_shadows),
-            ("view.toggle_path_trace", &l.overlay_path_trace, on.path_trace),
+            (
+                "view.toggle_reflections",
+                &l.overlay_reflections,
+                on.reflections,
+            ),
+            (
+                "view.toggle_contact_shadows",
+                &l.overlay_contact_shadows,
+                on.contact_shadows,
+            ),
+            (
+                "view.toggle_path_trace",
+                &l.overlay_path_trace,
+                on.path_trace,
+            ),
         ] {
             // A check box per setting, as Blender's popover: what is on is
             // readable without toggling it to find out. The menu stays open,
@@ -3575,7 +3966,11 @@ pub fn joint_under(
                 continue;
             };
             let ab = b - a;
-            let t = if ab.length_sq() > 0.0 { ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if ab.length_sq() > 0.0 {
+                ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             consider((a + ab * t).distance(at), &bone.name, 0, &mut best);
         }
     }
@@ -3599,9 +3994,18 @@ pub fn bone_under(
     let mut best: Option<(f32, String)> = None;
     for (bone, frame) in armature.bones.iter().zip(&frames) {
         let tail = frame.transform_point3(kreate_math::DVec3::Y * bone.length());
-        let (Some(a), Some(b)) = (projector.project(frame.translation), projector.project(tail)) else { continue };
+        let (Some(a), Some(b)) = (
+            projector.project(frame.translation),
+            projector.project(tail),
+        ) else {
+            continue;
+        };
         let ab = b - a;
-        let t = if ab.length_sq() > 0.0 { ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+        let t = if ab.length_sq() > 0.0 {
+            ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let distance = (a + ab * t).distance(at);
         if distance <= BONE_REACH && best.as_ref().is_none_or(|(d, _)| distance < *d) {
             best = Some((distance, bone.name.clone()));
@@ -3629,9 +4033,17 @@ fn draw_toolbar(
     // Extrude, which is most of what building one is.
     let bones = mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints;
     let tools: Vec<Tool> = if mode.info().edit_tools {
-        Tool::COMMON.iter().chain(Tool::EDIT.iter()).copied().collect()
+        Tool::COMMON
+            .iter()
+            .chain(Tool::EDIT.iter())
+            .copied()
+            .collect()
     } else if bones {
-        Tool::COMMON.iter().copied().chain([Tool::Extrude]).collect()
+        Tool::COMMON
+            .iter()
+            .copied()
+            .chain([Tool::Extrude])
+            .collect()
     } else {
         Tool::COMMON.to_vec()
     };
@@ -3640,7 +4052,11 @@ fn draw_toolbar(
     let gap = 2.0;
     // A gap between the common group and the edit group, the way Blender
     // separates its tool groups: the eye finds the boundary before it reads.
-    let groups_gap = if tools.len() > Tool::COMMON.len() { 8.0 } else { 0.0 };
+    let groups_gap = if tools.len() > Tool::COMMON.len() {
+        8.0
+    } else {
+        0.0
+    };
     let height = pad * 2.0 + tools.len() as f32 * (button + gap) - gap + groups_gap;
     let rect = egui::Rect::from_min_size(
         viewport.min + egui::vec2(8.0, 8.0),
@@ -3655,7 +4071,12 @@ fn draw_toolbar(
     let painter = ui.painter().with_clip_rect(viewport);
     let radius = egui::CornerRadius::same(theme.radius + 1);
     painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.96));
-    painter.rect_stroke(rect, radius, egui::Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, theme.border),
+        egui::StrokeKind::Inside,
+    );
 
     // The lit tool is the transform in progress, if any; otherwise Select,
     // which is what a click does when nothing else is going on. The header
@@ -3667,9 +4088,11 @@ fn draw_toolbar(
         .unwrap_or(Tool::Select);
 
     ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink(pad))
-            .id_salt(("toolbar", viewport.min.x as i32, viewport.min.y as i32)),
+        egui::UiBuilder::new().max_rect(rect.shrink(pad)).id_salt((
+            "toolbar",
+            viewport.min.x as i32,
+            viewport.min.y as i32,
+        )),
         |ui| {
             ui.set_clip_rect(rect);
             ui.spacing_mut().item_spacing = egui::vec2(0.0, gap);
@@ -3696,8 +4119,11 @@ fn draw_toolbar(
                     let tip = match op.and_then(|id| state.command_info.get(id)) {
                         Some(info) if !info.shortcut.is_empty() => {
                             // i18n-exempt: a name and a key, both already translated
-                            format!("{name}
-{}", info.shortcut)
+                            format!(
+                                "{name}
+{}",
+                                info.shortcut
+                            )
                         }
                         _ => name.clone(),
                     };
@@ -3707,14 +4133,21 @@ fn draw_toolbar(
                         let shape = state.tools.select_tool.min(2);
                         let names = ["select-tool-box", "select-tool-lasso", "select-tool-circle"];
                         // i18n-exempt: translated names joined
-                        let tip = format!("{}\n{}", state.catalog.get(names[shape as usize]), state.catalog.get("select-tool-hint"));
-                        kreate_ui::toolbar::select_button(ui, shape, *tool == active).on_hover_text(tip)
+                        let tip = format!(
+                            "{}\n{}",
+                            state.catalog.get(names[shape as usize]),
+                            state.catalog.get("select-tool-hint")
+                        );
+                        kreate_ui::toolbar::select_button(ui, shape, *tool == active)
+                            .on_hover_text(tip)
                     } else {
                         tool_button(ui, *tool, *tool == active).on_hover_text(tip)
                     };
                     if response.clicked() {
                         match tool {
-                            Tool::Select => state.tools.select_tool = (state.tools.select_tool + 1) % 3,
+                            Tool::Select => {
+                                state.tools.select_tool = (state.tools.select_tool + 1) % 3
+                            }
                             Tool::Move | Tool::Rotate | Tool::Scale => {
                                 if let Some(op) = op {
                                     state.queue.dispatch(op, PropertyMap::new());
@@ -3722,15 +4155,21 @@ fn draw_toolbar(
                             }
                             // Through the key's door, so the drag that places
                             // the new bones starts as E starts it.
-                            Tool::Extrude if bones => state.queue.dispatch("armature.extrude", PropertyMap::new()),
+                            Tool::Extrude if bones => {
+                                state.queue.dispatch("armature.extrude", PropertyMap::new())
+                            }
                             // Through the key's door, so the tool drags the new
                             // faces out as E does.
-                            Tool::Extrude => state.queue.dispatch("mesh.extrude_region", PropertyMap::new()),
+                            Tool::Extrude => state
+                                .queue
+                                .dispatch("mesh.extrude_region", PropertyMap::new()),
                             // Like the extrude, through the keys' door: the
                             // pointer then sets how much.
                             Tool::Inset => state.queue.dispatch("mesh.inset", PropertyMap::new()),
                             Tool::Bevel => state.queue.dispatch("mesh.bevel", PropertyMap::new()),
-                            Tool::LoopCut => state.queue.dispatch("mesh.loop_cut", PropertyMap::new()),
+                            Tool::LoopCut => {
+                                state.queue.dispatch("mesh.loop_cut", PropertyMap::new())
+                            }
                         }
                     }
                 }
@@ -3799,7 +4238,11 @@ fn draw_view_info(
         let galley = painter.layout_no_wrap(text.to_string(), font.clone(), colour);
         // A soft shadow rather than a box: this text sits over the picture and
         // a box would be a panel where the eye expects a scene.
-        painter.galley(egui::pos2(left + 1.0, y + 1.0), galley.clone(), theme.sunken.gamma_multiply(0.8));
+        painter.galley(
+            egui::pos2(left + 1.0, y + 1.0),
+            galley.clone(),
+            theme.sunken.gamma_multiply(0.8),
+        );
         painter.galley(egui::pos2(left, y), galley.clone(), colour);
         y += galley.size().y + 2.0;
     }
@@ -3810,17 +4253,24 @@ fn draw_view_info(
 fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> Vec<String> {
     use kreate_mesh::attribute::names;
     let count = |mesh: &kreate_mesh::MeshData, layer: &str| {
-        mesh.attributes().get_bool(layer).map(|s| s.iter().filter(|x| **x).count()).unwrap_or(0)
+        mesh.attributes()
+            .get_bool(layer)
+            .map(|s| s.iter().filter(|x| **x).count())
+            .unwrap_or(0)
     };
     let triangles = |mesh: &kreate_mesh::MeshData| -> usize {
-        (0..mesh.num_faces()).map(|f| mesh.face_verts(f).len().saturating_sub(2)).sum()
+        (0..mesh.num_faces())
+            .map(|f| mesh.face_verts(f).len().saturating_sub(2))
+            .sum()
     };
     // i18n-exempt: a translated noun and numbers
     let row = |name: &str, value: String| format!("{name}  {value}");
     if mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
         let (mut v, mut e, mut f, mut t) = ([0usize; 2], [0usize; 2], [0usize; 2], 0usize);
         for target in kreate_ops::ops::mesh::edit_targets(doc) {
-            let Some(mesh) = doc.mesh(target.mesh) else { continue };
+            let Some(mesh) = doc.mesh(target.mesh) else {
+                continue;
+            };
             v[0] += count(mesh, names::SELECT_VERT);
             v[1] += mesh.num_verts() as usize;
             e[0] += count(mesh, names::SELECT_EDGE);
@@ -3850,7 +4300,10 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
         }
     }
     vec![
-        row(&l.stats_objects, format!("{}/{}", doc.selection.objects.len(), objects)),
+        row(
+            &l.stats_objects,
+            format!("{}/{}", doc.selection.objects.len(), objects),
+        ),
         row(&l.stats_vertices, v.to_string()),
         row(&l.stats_edges, e.to_string()),
         row(&l.stats_faces, f.to_string()),
@@ -3906,14 +4359,24 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         sent: l.contact_sent.clone(),
     };
     // i18n-exempt: a version and a platform
-    let details = format!("Kreate {} · {}", crate::version::describe(), crate::version::platform());
+    let details = format!(
+        "Kreate {} · {}",
+        crate::version::describe(),
+        crate::version::platform()
+    );
     kreate_ui::contact::contact_window(ctx, &text, &mut state.contact, &details, &mut state.queue);
     let about = kreate_ui::contact::AboutText {
         title: l.about_title.clone(),
         version: l.about_version.clone(),
         close: l.contact_close.clone(),
     };
-    kreate_ui::contact::about_window(ctx, &about, &mut state.about_open, &crate::version::describe(), &crate::version::platform());
+    kreate_ui::contact::about_window(
+        ctx,
+        &about,
+        &mut state.about_open,
+        &crate::version::describe(),
+        &crate::version::platform(),
+    );
 }
 
 /// The Claude panel: the conversation, and a box to say the next thing.
@@ -4021,12 +4484,15 @@ fn driver_error_text(catalog: &Catalog, error: &kreate_scene::driver::DriverErro
     let t = |key: &str, args: &[(&str, &str)]| catalog.format(key, TextKind::Ui, args);
     match error {
         D::Expression(X::Empty) => t("driver-error-empty", &[]),
-        D::Expression(X::Syntax { at }) => t("driver-error-syntax", &[("at", &(at + 1).to_string())]),
+        D::Expression(X::Syntax { at }) => {
+            t("driver-error-syntax", &[("at", &(at + 1).to_string())])
+        }
         D::Expression(X::UnknownName(n)) => t("driver-error-name", &[("name", n)]),
         D::Expression(X::UnknownFunction(n)) => t("driver-error-function", &[("name", n)]),
-        D::Expression(X::Arguments { function, expected }) => {
-            t("driver-error-arguments", &[("name", function), ("count", &expected.to_string())])
-        }
+        D::Expression(X::Arguments { function, expected }) => t(
+            "driver-error-arguments",
+            &[("name", function), ("count", &expected.to_string())],
+        ),
         D::Expression(X::NotFinite) => t("driver-error-infinite", &[]),
         D::NoTarget { variable } => t("driver-error-target", &[("name", variable)]),
         D::BadProperty { variable } => t("driver-error-property", &[("name", variable)]),
@@ -4041,22 +4507,35 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
     use kreate_ui::drivers::{DriverEdit as E, DriverView, VariableView};
     const AXES: [&str; 3] = ["X", "Y", "Z"];
     let channel = |catalog: &Catalog, property: &str| {
-        catalog.format(&format!("channel-{}", property.replace('_', "-")), TextKind::Ui, &[])
+        catalog.format(
+            &format!("channel-{}", property.replace('_', "-")),
+            TextKind::Ui,
+            &[],
+        )
     };
     let cycles = doc.driver_cycles();
     let mut drivers = Vec::new();
     for id in &doc.selection.objects {
-        let (Some(object), Some(uid)) = (doc.object(*id), doc.object_uid(*id)) else { continue };
+        let (Some(object), Some(uid)) = (doc.object(*id), doc.object_uid(*id)) else {
+            continue;
+        };
         for (i, d) in object.drivers.iter().enumerate() {
             let axis = AXES.get(d.index as usize).copied().unwrap_or("");
             let result = if cycles.contains(id) {
-                Err(state.catalog.format("driver-error-cycle", TextKind::Ui, &[]))
+                Err(state
+                    .catalog
+                    .format("driver-error-cycle", TextKind::Ui, &[]))
             } else {
-                doc.evaluate_driver(*id, i).map_err(|e| driver_error_text(&state.catalog, &e))
+                doc.evaluate_driver(*id, i)
+                    .map_err(|e| driver_error_text(&state.catalog, &e))
             };
             drivers.push(DriverView {
                 // i18n-exempt: the object's name is the user's own text
-                label: format!("{}: {} {axis}", object.name, channel(&state.catalog, &d.property)),
+                label: format!(
+                    "{}: {} {axis}",
+                    object.name,
+                    channel(&state.catalog, &d.property)
+                ),
                 target: driver_target(uid.raw(), &d.property, d.index),
                 expression: d.expression.clone(),
                 result,
@@ -4066,7 +4545,10 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
                     .map(|v| VariableView {
                         name: v.name.clone(),
                         object: (v.target != kreate_scene::Uid::NONE).then(|| v.target.raw()),
-                        property: DRIVABLE.iter().position(|p| *p == v.property.as_ref()).unwrap_or(0) as u32,
+                        property: DRIVABLE
+                            .iter()
+                            .position(|p| *p == v.property.as_ref())
+                            .unwrap_or(0) as u32,
                         index: v.index as u32,
                     })
                     .collect(),
@@ -4074,13 +4556,25 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
         }
     }
     let mut addable = Vec::new();
-    if let Some((object, uid)) = doc.selection.active.and_then(|id| Some((doc.object(id)?, doc.object_uid(id)?))) {
+    if let Some((object, uid)) = doc
+        .selection
+        .active
+        .and_then(|id| Some((doc.object(id)?, doc.object_uid(id)?)))
+    {
         for property in DRIVABLE {
             for index in 0..3u8 {
-                if !object.drivers.iter().any(|d| d.property.as_ref() == property && d.index == index) {
+                if !object
+                    .drivers
+                    .iter()
+                    .any(|d| d.property.as_ref() == property && d.index == index)
+                {
                     addable.push((
                         // i18n-exempt: a translated channel and an axis letter
-                        format!("{} {}", channel(&state.catalog, property), AXES[index as usize]),
+                        format!(
+                            "{} {}",
+                            channel(&state.catalog, property),
+                            AXES[index as usize]
+                        ),
                         driver_target(uid.raw(), property, index),
                     ));
                 }
@@ -4104,7 +4598,11 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
         add_variable: t("drivers-add-variable"),
         remove_variable: t("drivers-remove-variable"),
         none: t("drivers-none"),
-        properties: [t("channel-location"), t("channel-rotation-euler"), t("channel-scale")],
+        properties: [
+            t("channel-location"),
+            t("channel-rotation-euler"),
+            t("channel-scale"),
+        ],
         axes: AXES.map(String::from),
     };
     let mut panel = state.driver_views.remove(&area).unwrap_or_default();
@@ -4130,11 +4628,18 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
                 p.set("target", V::Text(target));
                 state.queue.run("anim.driver_variable_add", p);
             }
-            E::SetVariable { target, variable, value } => {
+            E::SetVariable {
+                target,
+                variable,
+                value,
+            } => {
                 p.set("target", V::Text(target));
                 p.set("variable", V::Int(variable as i64));
                 p.set("name", V::Text(value.name));
-                p.set("object", V::Text(value.object.map(|u| u.to_string()).unwrap_or_default()));
+                p.set(
+                    "object",
+                    V::Text(value.object.map(|u| u.to_string()).unwrap_or_default()),
+                );
                 p.set("property", V::Enum(value.property));
                 p.set("index", V::Int(value.index as i64));
                 state.queue.run("anim.driver_variable_set", p);
@@ -4149,29 +4654,45 @@ fn draw_drivers(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreat
 }
 
 /// The graph editor, over the curves of every action the dope sheet shows.
-fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId, l: &Labels) {
+fn draw_graph_editor(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
     use kreate_reflect::PropertyValue as V;
     use kreate_ui::graph_editor::{GraphCurve, GraphEdit as E, GraphKey};
     let p = doc.playback;
     let mut curves = Vec::new();
     for action_id in kreate_ops::ops::anim::shown_actions(doc) {
-        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else { continue };
+        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else {
+            continue;
+        };
         let owner = owner_name(doc, action_id).unwrap_or_else(|| action.name.clone());
         for curve in &action.curves {
-            let (Some(index), Some(first), Some(last)) = (curve.path.index, curve.keys.first(), curve.keys.last()) else {
+            let (Some(index), Some(first), Some(last)) =
+                (curve.path.index, curve.keys.first(), curve.keys.last())
+            else {
                 continue;
             };
             let property = curve.path.property.as_ref();
-            let (components, is_color) = kreate_scene::animation::describe(action.animates, property)
-                .map(|d| (d.components, d.kind == kreate_reflect::PropertyKind::Color))
-                .unwrap_or((1, false));
+            let (components, is_color) =
+                kreate_scene::animation::describe(action.animates, property)
+                    .map(|d| (d.components, d.kind == kreate_reflect::PropertyKind::Color))
+                    .unwrap_or((1, false));
             // A quaternion's W first, then its X, Y, Z in the axes' colours.
             let (components, index) = if components == 4 {
-                if index == 0 { (1, 0) } else { (3, index - 1) }
+                if index == 0 {
+                    (1, 0)
+                } else {
+                    (3, index - 1)
+                }
             } else {
                 (components, index)
             };
-            let quaternion = kreate_scene::animation::describe(action.animates, property).is_some_and(|d| d.components == 4);
+            let quaternion = kreate_scene::animation::describe(action.animates, property)
+                .is_some_and(|d| d.components == 4);
             // X red, Y green, Z blue, as the axes everywhere else are; a
             // colour's R, G and B the same, and a single number white.
             let color = match (components, index) {
@@ -4185,9 +4706,17 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
             } else if components == 1 {
                 String::new()
             } else if is_color {
-                ["R", "G", "B"].get(index as usize).copied().unwrap_or("").to_string()
+                ["R", "G", "B"]
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or("")
+                    .to_string()
             } else {
-                ["X", "Y", "Z"].get(index as usize).copied().unwrap_or("").to_string()
+                ["X", "Y", "Z"]
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or("")
+                    .to_string()
             };
             let channel = channel_label(&state.catalog, property);
             // Sampled over the range and the keys, with room either side, at
@@ -4213,8 +4742,15 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
                     value: k.value,
                     selected: k.selected,
                     slope: curve.slope(i),
-                    before: i.checked_sub(1).map(|j| k.frame - curve.keys[j].frame).unwrap_or(10.0),
-                    after: curve.keys.get(i + 1).map(|n| n.frame - k.frame).unwrap_or(10.0),
+                    before: i
+                        .checked_sub(1)
+                        .map(|j| k.frame - curve.keys[j].frame)
+                        .unwrap_or(10.0),
+                    after: curve
+                        .keys
+                        .get(i + 1)
+                        .map(|n| n.frame - k.frame)
+                        .unwrap_or(10.0),
                 })
                 .collect();
             curves.push(GraphCurve {
@@ -4227,7 +4763,12 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
             });
         }
     }
-    let view = kreate_ui::graph_editor::GraphView { curves, frame: p.frame, start: p.start, end: p.end };
+    let view = kreate_ui::graph_editor::GraphView {
+        curves,
+        frame: p.frame,
+        start: p.start,
+        end: p.end,
+    };
     let text = kreate_ui::graph_editor::GraphText {
         empty: l.sheet_empty.clone(),
         interpolation: l.sheet_interpolation.clone(),
@@ -4244,7 +4785,12 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
     for edit in edits {
         let mut p = PropertyMap::new();
         match edit {
-            E::Select { targets, frames, values, extend } => {
+            E::Select {
+                targets,
+                frames,
+                values,
+                extend,
+            } => {
                 p.set("targets", V::Text(targets.join(" ")));
                 p.set("frame_min", V::Float(frames.0));
                 p.set("frame_max", V::Float(frames.1));
@@ -4271,7 +4817,11 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
                 p.set("kind", V::Enum(kind));
                 state.queue.run("anim.keys_handle_type", p);
             }
-            E::SetSlope { target, frame, slope } => {
+            E::SetSlope {
+                target,
+                frame,
+                slope,
+            } => {
                 p.set("target", V::Text(target));
                 p.set("frame", V::Float(frame));
                 p.set("slope", V::Float(slope));
@@ -4288,7 +4838,13 @@ fn draw_graph_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: 
 /// A curve's property as a person reads it: the channel's name, and for a
 /// bone's the bone's name before it — "Upper: Rotation".
 fn channel_label(catalog: &Catalog, property: &str) -> String {
-    let channel = |p: &str| catalog.format(&format!("channel-{}", p.replace('_', "-")), TextKind::Ui, &[]);
+    let channel = |p: &str| {
+        catalog.format(
+            &format!("channel-{}", p.replace('_', "-")),
+            TextKind::Ui,
+            &[],
+        )
+    };
     match kreate_scene::animation::parse_bone_path(property) {
         // i18n-exempt: a bone's name is the user's own text
         Some((bone, p)) => format!("{bone}: {}", channel(p)),
@@ -4301,13 +4857,27 @@ fn owner_name(doc: &Document, action: kreate_scene::ActionId) -> Option<String> 
     doc.objects()
         .find(|(_, o)| o.action == Some(action))
         .map(|(_, o)| o.name.clone())
-        .or_else(|| doc.materials().find(|(_, m)| m.action == Some(action)).map(|(_, m)| m.name.clone()))
-        .or_else(|| doc.lights().find(|(_, l)| l.action == Some(action)).map(|(_, l)| l.name.clone()))
+        .or_else(|| {
+            doc.materials()
+                .find(|(_, m)| m.action == Some(action))
+                .map(|(_, m)| m.name.clone())
+        })
+        .or_else(|| {
+            doc.lights()
+                .find(|(_, l)| l.action == Some(action))
+                .map(|(_, l)| l.name.clone())
+        })
 }
 
 /// The dope sheet, over the selected objects' actions — what Blender's shows
 /// with Only Show Selected, and what the `anim.keys_*` operators act on.
-fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId, l: &Labels) {
+fn draw_dope_sheet(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
     use kreate_reflect::PropertyValue as V;
     use kreate_ui::dope_sheet::{SheetEdit as E, SheetKey, SheetRow};
     let mut rows = Vec::new();
@@ -4315,17 +4885,29 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
     // in the order the operators act on them, each with its owner's name and
     // a row per property its kind animates.
     for action_id in kreate_ops::ops::anim::shown_actions(doc) {
-        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else { continue };
+        let (Some(action), Some(uid)) = (doc.action(action_id), doc.action_uid(action_id)) else {
+            continue;
+        };
         let owner = owner_name(doc, action_id).unwrap_or_else(|| action.name.clone());
         // A key per frame on a row, selected if any key there is — what the
         // summary row and a property's row both mean by one diamond.
         let keys_of = |property: Option<&str>| -> Vec<SheetKey> {
             let mut keys: Vec<SheetKey> = Vec::new();
-            for curve in action.curves.iter().filter(|c| property.is_none_or(|p| c.path.property.as_ref() == p)) {
+            for curve in action
+                .curves
+                .iter()
+                .filter(|c| property.is_none_or(|p| c.path.property.as_ref() == p))
+            {
                 for k in &curve.keys {
-                    match keys.iter_mut().find(|s| (s.frame - k.frame).abs() < kreate_scene::animation::SAME_FRAME) {
+                    match keys
+                        .iter_mut()
+                        .find(|s| (s.frame - k.frame).abs() < kreate_scene::animation::SAME_FRAME)
+                    {
                         Some(s) => s.selected |= k.selected,
-                        None => keys.push(SheetKey { frame: k.frame, selected: k.selected }),
+                        None => keys.push(SheetKey {
+                            frame: k.frame,
+                            selected: k.selected,
+                        }),
                     }
                 }
             }
@@ -4340,9 +4922,17 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
             keys: keys_of(None),
         });
         for desc in kreate_scene::animation::animatable(action.animates) {
-            if action.curves.iter().any(|c| c.path.property.as_ref() == desc.name) {
+            if action
+                .curves
+                .iter()
+                .any(|c| c.path.property.as_ref() == desc.name)
+            {
                 rows.push(SheetRow {
-                    label: state.catalog.format(&format!("channel-{}", desc.name.replace('_', "-")), TextKind::Ui, &[]),
+                    label: state.catalog.format(
+                        &format!("channel-{}", desc.name.replace('_', "-")),
+                        TextKind::Ui,
+                        &[],
+                    ),
                     depth: 1,
                     target: kreate_ops::ops::anim::row_target(uid.raw(), Some(desc.name)),
                     keys: keys_of(Some(desc.name)),
@@ -4353,7 +4943,9 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
         let mut bone_paths: Vec<&str> = Vec::new();
         for c in &action.curves {
             let path = c.path.property.as_ref();
-            if kreate_scene::animation::parse_bone_path(path).is_some() && !bone_paths.contains(&path) {
+            if kreate_scene::animation::parse_bone_path(path).is_some()
+                && !bone_paths.contains(&path)
+            {
                 bone_paths.push(path);
             }
         }
@@ -4385,7 +4977,12 @@ fn draw_dope_sheet(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kr
     for edit in edits {
         let mut p = PropertyMap::new();
         match edit {
-            E::Select { targets, frame_min, frame_max, extend } => {
+            E::Select {
+                targets,
+                frame_min,
+                frame_max,
+                extend,
+            } => {
                 p.set("targets", V::Text(targets.join(" ")));
                 p.set("frame_min", V::Float(frame_min));
                 p.set("frame_max", V::Float(frame_max));
@@ -4479,7 +5076,12 @@ fn apply_node_edits(state: &mut ShellState, slot: u32, edits: Vec<kreate_ui::Nod
                 p.set("y", V::Float(y as f64));
                 state.queue.run("node.translate", p);
             }
-            E::Link { from_node, from_socket, to_node, to_socket } => {
+            E::Link {
+                from_node,
+                from_socket,
+                to_node,
+                to_socket,
+            } => {
                 p.set("from_node", V::Int(from_node as i64));
                 p.set("from_socket", V::Int(from_socket as i64));
                 p.set("to_node", V::Int(to_node as i64));
@@ -4502,13 +5104,23 @@ fn apply_node_edits(state: &mut ShellState, slot: u32, edits: Vec<kreate_ui::Nod
                 state.queue.run("node.remove", p);
             }
             // A drag in a field is one step, folded the way a slider's is.
-            E::SetColor { node, field, swatch, continuing } => {
+            E::SetColor {
+                node,
+                field,
+                swatch,
+                continuing,
+            } => {
                 p.set("node", V::Int(node as i64));
                 p.set("field", V::Int(field as i64));
                 p.set("color", V::Vec3(swatch.map(|c| c as f64)));
                 send_edit(state, "node.set_color", p, continuing);
             }
-            E::SetValue { node, field, value, continuing } => {
+            E::SetValue {
+                node,
+                field,
+                value,
+                continuing,
+            } => {
                 p.set("node", V::Int(node as i64));
                 p.set("field", V::Int(field as i64));
                 p.set("value", V::Float(value as f64));
@@ -4570,9 +5182,10 @@ fn graph_view(
                     ty: ty(*s),
                     connected: graph.incoming(n, i).is_some(),
                     default: match (kind, i) {
-                        (NodeKind::Surface { base_color, .. }, 0) => {
-                            Some(FieldView::Color { field: 0, swatch: swatch(*base_color) })
-                        }
+                        (NodeKind::Surface { base_color, .. }, 0) => Some(FieldView::Color {
+                            field: 0,
+                            swatch: swatch(*base_color),
+                        }),
                         (NodeKind::Surface { metallic, .. }, 1) => Some(FieldView::Value {
                             field: 1,
                             value: *metallic,
@@ -4592,7 +5205,10 @@ fn graph_view(
                 })
                 .collect();
             let fields = match kind {
-                NodeKind::Color(c) => vec![FieldView::Color { field: 0, swatch: swatch(*c) }],
+                NodeKind::Color(c) => vec![FieldView::Color {
+                    field: 0,
+                    swatch: swatch(*c),
+                }],
                 NodeKind::Value(v) => vec![FieldView::Value {
                     field: 0,
                     value: *v,
@@ -4793,7 +5409,10 @@ fn draw_item_sidebar(
                 _ => None,
             };
             if let Some(op_id) = bone_op {
-                let object = doc.selection.active.expect("an active object was just read");
+                let object = doc
+                    .selection
+                    .active
+                    .expect("an active object was just read");
                 let Some((index, name)) = active_bone(doc, object) else {
                     ui.weak(&l.sidebar_nothing);
                     return;
@@ -4831,7 +5450,10 @@ fn draw_item_sidebar(
                 kreate_reflect::PropertyValue::Vec3(t.scale.to_array()),
             );
 
-            let object = doc.selection.active.expect("an active object was just read");
+            let object = doc
+                .selection
+                .active
+                .expect("an active object was just read");
             draw_object_transform(ui, state, doc, info, object, params, l);
         },
     );
@@ -4856,7 +5478,11 @@ fn draw_workspace_tabs(ui: &mut Ui, state: &mut ShellState) {
         // The built-in layouts' names are the program's words and are
         // translated; a name the user gave one is theirs and is not.
         let key = format!("workspace-{}", name.to_lowercase().replace(' ', "-"));
-        let shown = if state.catalog.has(&key) { state.catalog.get(&key) } else { name.clone() };
+        let shown = if state.catalog.has(&key) {
+            state.catalog.get(&key)
+        } else {
+            name.clone()
+        };
         if ui.selectable_label(index == active, shown).clicked() {
             state.switch_workspace(index);
         }
@@ -4927,11 +5553,27 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
             nodes: vec![
                 // Merge and dissolve both act on whatever the element mode is,
                 // so the entry carries it rather than asking again.
-                entry("mesh.merge", &l.merge, op("mesh.merge", &[("target", V::Enum(0))])),
-                entry("mesh.merge.by_distance", &l.weld, op("mesh.merge", &[("distance", V::Float(1e-4))])),
+                entry(
+                    "mesh.merge",
+                    &l.merge,
+                    op("mesh.merge", &[("target", V::Enum(0))]),
+                ),
+                entry(
+                    "mesh.merge.by_distance",
+                    &l.weld,
+                    op("mesh.merge", &[("distance", V::Float(1e-4))]),
+                ),
                 Separator,
-                entry("mesh.dissolve", &l.dissolve, op("mesh.dissolve", &[("mode", V::Enum(select_mode))])),
-                entry("mesh.delete", &l.delete, op("mesh.delete", &[("mode", V::Enum(select_mode))])),
+                entry(
+                    "mesh.dissolve",
+                    &l.dissolve,
+                    op("mesh.dissolve", &[("mode", V::Enum(select_mode))]),
+                ),
+                entry(
+                    "mesh.delete",
+                    &l.delete,
+                    op("mesh.delete", &[("mode", V::Enum(select_mode))]),
+                ),
                 Separator,
                 entry("mesh.spin", &l.spin, op("mesh.spin", &[])),
                 entry("mesh.knife", &l.knife, dispatch("mesh.knife")),
@@ -4939,14 +5581,26 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                 // Shading is a property of the mesh rather than of a selection,
                 // which is why it is here and not under Face.
                 MenuNode::Entry(
-                    MenuEntry::new("mesh.shade", &l.shade_smooth, op("mesh.shade", &[("smooth", V::Bool(true))]))
-                        .variant("smooth", V::Bool(true)),
+                    MenuEntry::new(
+                        "mesh.shade",
+                        &l.shade_smooth,
+                        op("mesh.shade", &[("smooth", V::Bool(true))]),
+                    )
+                    .variant("smooth", V::Bool(true)),
                 ),
                 MenuNode::Entry(
-                    MenuEntry::new("mesh.shade", &l.shade_flat, op("mesh.shade", &[("smooth", V::Bool(false))]))
-                        .variant("smooth", V::Bool(false)),
+                    MenuEntry::new(
+                        "mesh.shade",
+                        &l.shade_flat,
+                        op("mesh.shade", &[("smooth", V::Bool(false))]),
+                    )
+                    .variant("smooth", V::Bool(false)),
                 ),
-                entry("mesh.normals", &l.recalc_normals, op("mesh.normals", &[("action", V::Enum(0))])),
+                entry(
+                    "mesh.normals",
+                    &l.recalc_normals,
+                    op("mesh.normals", &[("action", V::Enum(0))]),
+                ),
                 Separator,
                 // Blender's Mesh ▸ Show/Hide.
                 MenuNode::Sub(
@@ -4957,7 +5611,13 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                             MenuEntry::new(
                                 "mesh.hide",
                                 &l.hide_selected,
-                                op("mesh.hide", &[("unselected", V::Bool(false)), ("mode", V::Enum(select_mode))]),
+                                op(
+                                    "mesh.hide",
+                                    &[
+                                        ("unselected", V::Bool(false)),
+                                        ("mode", V::Enum(select_mode)),
+                                    ],
+                                ),
                             )
                             .variant("unselected", V::Bool(false)),
                         ),
@@ -4965,7 +5625,13 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                             MenuEntry::new(
                                 "mesh.hide",
                                 &l.hide_unselected,
-                                op("mesh.hide", &[("unselected", V::Bool(true)), ("mode", V::Enum(select_mode))]),
+                                op(
+                                    "mesh.hide",
+                                    &[
+                                        ("unselected", V::Bool(true)),
+                                        ("mode", V::Enum(select_mode)),
+                                    ],
+                                ),
                             )
                             .variant("unselected", V::Bool(true)),
                         ),
@@ -4976,18 +5642,33 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
         TopMenu {
             label: l.menu_edge.clone(),
             nodes: vec![
-                entry("mesh.bevel", &l.bevel, op("mesh.bevel", &[("width", V::Float(0.1))])),
+                entry(
+                    "mesh.bevel",
+                    &l.bevel,
+                    op("mesh.bevel", &[("width", V::Float(0.1))]),
+                ),
                 entry(
                     "mesh.loop_cut",
                     &l.loop_cut,
-                    op("mesh.loop_cut", &[("cuts", V::Int(1)), ("position", V::Float(0.5))]),
+                    op(
+                        "mesh.loop_cut",
+                        &[("cuts", V::Int(1)), ("position", V::Float(0.5))],
+                    ),
                 ),
-                entry("mesh.subdivide", &l.subdivide, op("mesh.subdivide", &[("iterations", V::Int(1))])),
+                entry(
+                    "mesh.subdivide",
+                    &l.subdivide,
+                    op("mesh.subdivide", &[("iterations", V::Int(1))]),
+                ),
                 entry("mesh.bridge", &l.bridge, op("mesh.bridge", &[])),
                 Separator,
                 MenuNode::Entry(
-                    MenuEntry::new("mesh.select", &l.select_loop, op("mesh.select", &[("action", V::Enum(3))]))
-                        .variant("action", V::Enum(3)),
+                    MenuEntry::new(
+                        "mesh.select",
+                        &l.select_loop,
+                        op("mesh.select", &[("action", V::Enum(3))]),
+                    )
+                    .variant("action", V::Enum(3)),
                 ),
                 Separator,
                 // By angle rather than by selection: somebody reaching for this
@@ -4996,25 +5677,44 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                 entry(
                     "mesh.mark_sharp",
                     &l.mark_sharp,
-                    op("mesh.mark_sharp", &[("angle", V::Float(30f64.to_radians()))]),
+                    op(
+                        "mesh.mark_sharp",
+                        &[("angle", V::Float(30f64.to_radians()))],
+                    ),
                 ),
                 Separator,
                 // Where Unwrap cuts the surface open.
                 MenuNode::Entry(
-                    MenuEntry::new("mesh.mark_seam", &l.mark_seam, op("mesh.mark_seam", &[("clear", V::Bool(false))]))
-                        .variant("clear", V::Bool(false)),
+                    MenuEntry::new(
+                        "mesh.mark_seam",
+                        &l.mark_seam,
+                        op("mesh.mark_seam", &[("clear", V::Bool(false))]),
+                    )
+                    .variant("clear", V::Bool(false)),
                 ),
                 MenuNode::Entry(
-                    MenuEntry::new("mesh.mark_seam", &l.clear_seam, op("mesh.mark_seam", &[("clear", V::Bool(true))]))
-                        .variant("clear", V::Bool(true)),
+                    MenuEntry::new(
+                        "mesh.mark_seam",
+                        &l.clear_seam,
+                        op("mesh.mark_seam", &[("clear", V::Bool(true))]),
+                    )
+                    .variant("clear", V::Bool(true)),
                 ),
             ],
         },
         TopMenu {
             label: l.menu_face.clone(),
             nodes: vec![
-                entry("mesh.extrude_region", &l.extrude, op("mesh.extrude_region", &[("offset", V::Float(1.0))])),
-                entry("mesh.inset", &l.inset, op("mesh.inset", &[("thickness", V::Float(0.1))])),
+                entry(
+                    "mesh.extrude_region",
+                    &l.extrude,
+                    op("mesh.extrude_region", &[("offset", V::Float(1.0))]),
+                ),
+                entry(
+                    "mesh.inset",
+                    &l.inset,
+                    op("mesh.inset", &[("thickness", V::Float(0.1))]),
+                ),
                 Separator,
                 entry("mesh.fill", &l.fill, op("mesh.fill", &[])),
             ],
@@ -5076,8 +5776,13 @@ fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::
     // the mouse moved towards it. A press outside the menu is never that.
     let menu_rect = shown.response.rect;
     if ui.ctx().input(|i| {
-        let outside = i.pointer.interact_pos().is_some_and(|p| !menu_rect.contains(p));
-        (i.pointer.any_pressed() && outside && !i.pointer.button_pressed(egui::PointerButton::Secondary))
+        let outside = i
+            .pointer
+            .interact_pos()
+            .is_some_and(|p| !menu_rect.contains(p));
+        (i.pointer.any_pressed()
+            && outside
+            && !i.pointer.button_pressed(egui::PointerButton::Secondary))
             || i.key_pressed(egui::Key::Escape)
     }) {
         close = true;
@@ -5130,12 +5835,20 @@ fn keymap_text(catalog: &Catalog, changed: usize, shadowed: usize) -> kreate_ui:
 /// same rectangle, so the outline and the result cannot disagree.
 /// Blender's header tool settings: transform orientation, snapping and
 /// proportional editing. The selection tool is the toolbar's.
-fn draw_tool_settings(ui: &mut Ui, state: &mut ShellState, area: u32, mode: kreate_ops::operator::Mode) {
+fn draw_tool_settings(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    area: u32,
+    mode: kreate_ops::operator::Mode,
+) {
     let get = |state: &ShellState, key: &str| state.catalog.get(key);
     let mut tools = state.tools;
 
     // Transform orientation.
-    let orientations = [get(state, "orientation-global"), get(state, "orientation-local")];
+    let orientations = [
+        get(state, "orientation-global"),
+        get(state, "orientation-local"),
+    ];
     egui::ComboBox::from_id_salt(("orientation", area))
         .width(58.0)
         .selected_text(orientations[tools.orientation.min(1) as usize].as_str())
@@ -5159,7 +5872,10 @@ fn draw_tool_settings(ui: &mut Ui, state: &mut ShellState, area: u32, mode: krea
             t
         }
     };
-    let modes: Vec<String> = crate::snap::Mode::ALL.iter().map(|m| get(state, m.label_key())).collect();
+    let modes: Vec<String> = crate::snap::Mode::ALL
+        .iter()
+        .map(|m| get(state, m.label_key()))
+        .collect();
     egui::ComboBox::from_id_salt(("snap", area))
         .width(56.0)
         .selected_text(lit(get(state, "snap-toggle"), tools.snap))
@@ -5200,8 +5916,16 @@ fn draw_select_band(ui: &mut Ui, state: &ShellState, viewport: egui::Rect) {
     // A lasso: its path, closed back to where it began.
     if state.select_lasso.len() >= 2 {
         let theme = kreate_ui::theme::from_ui(ui);
-        let colour = if state.select_band_deselect { theme.info } else { theme.accent };
-        let mut points: Vec<egui::Pos2> = state.select_lasso.iter().map(|p| viewport.min + p.to_vec2()).collect();
+        let colour = if state.select_band_deselect {
+            theme.info
+        } else {
+            theme.accent
+        };
+        let mut points: Vec<egui::Pos2> = state
+            .select_lasso
+            .iter()
+            .map(|p| viewport.min + p.to_vec2())
+            .collect();
         points.push(points[0]);
         ui.painter()
             .with_clip_rect(viewport)
@@ -5288,7 +6012,10 @@ fn draw_recent_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         }
         let files = state.recent_files.clone();
         for path in files {
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             let response = ui
                 .add_enabled(path.exists(), egui::Button::new(name))
                 .on_hover_text(path.display().to_string());
@@ -5335,13 +6062,13 @@ fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                         // needs to see it.
                         ui.label(&name).on_hover_text(path.display().to_string());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let discard = ui
-                                .button(&l.recover_discard)
-                                .on_hover_text(state.catalog.format(
-                                    "op-recover-discard-desc",
-                                    TextKind::Tooltip,
-                                    &[],
-                                ));
+                            let discard =
+                                ui.button(&l.recover_discard)
+                                    .on_hover_text(state.catalog.format(
+                                        "op-recover-discard-desc",
+                                        TextKind::Tooltip,
+                                        &[],
+                                    ));
                             if discard.clicked() {
                                 state
                                     .queue
@@ -5361,7 +6088,13 @@ fn draw_recover_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         // Present from the first offer, not only when the list is long: a
         // user who wants none of them should not have to click forty times
         // to say so.
-        if menu_item(ui, state, "recover.discard_all", &[], &l.recover_discard_all) {
+        if menu_item(
+            ui,
+            state,
+            "recover.discard_all",
+            &[],
+            &l.recover_discard_all,
+        ) {
             discard_all_recoveries(state);
         }
     });
@@ -5476,28 +6209,38 @@ fn draw_adjust_float(
     history: &History,
     viewport: egui::Rect,
 ) {
-    let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) else { return };
+    let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) else {
+        return;
+    };
     // An operation with nothing to adjust — a selection, a paste — has no
     // panel, as in Blender.
     if info.schema.iter().all(|d| d.hidden) {
         return;
     }
     let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
-    let label = if label == info.name_key() { info.label.to_string() } else { label };
-    let shown = egui::Area::new(egui::Id::new(("adjust-float", viewport.min.x as i32, viewport.min.y as i32)))
-        .order(egui::Order::Middle)
-        .pivot(egui::Align2::LEFT_BOTTOM)
-        .fixed_pos(viewport.left_bottom() + egui::vec2(10.0, -10.0))
-        .constrain_to(viewport)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_width(250.0);
-                egui::CollapsingHeader::new(label)
-                    .id_salt("adjust-last")
-                    .default_open(false)
-                    .show(ui, |ui| draw_adjust_fields(ui, state, registry, history));
-            });
+    let label = if label == info.name_key() {
+        info.label.to_string()
+    } else {
+        label
+    };
+    let shown = egui::Area::new(egui::Id::new((
+        "adjust-float",
+        viewport.min.x as i32,
+        viewport.min.y as i32,
+    )))
+    .order(egui::Order::Middle)
+    .pivot(egui::Align2::LEFT_BOTTOM)
+    .fixed_pos(viewport.left_bottom() + egui::vec2(10.0, -10.0))
+    .constrain_to(viewport)
+    .show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_max_width(250.0);
+            egui::CollapsingHeader::new(label)
+                .id_salt("adjust-last")
+                .default_open(false)
+                .show(ui, |ui| draw_adjust_fields(ui, state, registry, history));
         });
+    });
     // Over the picture: a click on the panel must not select what is behind.
     state.viewport_blockers.push(shown.response.rect);
 }
@@ -5510,7 +6253,11 @@ fn draw_adjust_panel(
 ) {
     if let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) {
         let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
-        let label = if label == info.name_key() { info.label.to_string() } else { label };
+        let label = if label == info.name_key() {
+            info.label.to_string()
+        } else {
+            label
+        };
         ui.label(label);
         ui.separator();
     }
@@ -5634,20 +6381,29 @@ fn draw_properties(
                 // The glyph is the button and the name is the tooltip, which is
                 // what keeps the column narrow enough to be a column.
                 // Painted, and lit like any selected button.
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
                 let theme = kreate_ui::theme::from_ui(ui);
                 let visuals = ui.style().interact_selectable(&response, *tab == current);
                 if *tab == current || response.hovered() {
-                    ui.painter().rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
+                    ui.painter()
+                        .rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
                 }
-                let ink = if *tab == current { theme.accent } else { theme.text_dim };
-                let data = doc.selection.active.and_then(|id| doc.object(id)).map_or(RowKind::Empty, |o| match o.data {
-                    ObjectData::Light(_) => RowKind::Light,
-                    ObjectData::Camera(_) => RowKind::Camera,
-                    ObjectData::Armature(_) => RowKind::Armature,
-                    ObjectData::Mesh(_) => RowKind::Mesh { verts: 0, faces: 0 },
-                    ObjectData::Empty => RowKind::Empty,
-                });
+                let ink = if *tab == current {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                };
+                let data = doc.selection.active.and_then(|id| doc.object(id)).map_or(
+                    RowKind::Empty,
+                    |o| match o.data {
+                        ObjectData::Light(_) => RowKind::Light,
+                        ObjectData::Camera(_) => RowKind::Camera,
+                        ObjectData::Armature(_) => RowKind::Armature,
+                        ObjectData::Mesh(_) => RowKind::Mesh { verts: 0, faces: 0 },
+                        ObjectData::Empty => RowKind::Empty,
+                    },
+                );
                 kreate_ui::icons::paint_icon(ui, rect.shrink(3.0), tab.icon(data), ink);
                 if response.on_hover_text(&name).clicked() {
                     current = *tab;
@@ -5692,7 +6448,10 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
     );
     // An armature with an active bone that is really there: the tab shows
     // one bone, and with none it would be an empty panel.
-    let has_bone = doc.selection.active.is_some_and(|id| active_bone(doc, id).is_some());
+    let has_bone = doc
+        .selection
+        .active
+        .is_some_and(|id| active_bone(doc, id).is_some());
     [
         PropertiesTab::Tool,
         PropertiesTab::Object,
@@ -5775,19 +6534,35 @@ fn draw_object_tab(
         "location",
         kreate_reflect::PropertyValue::Vec3(t.translation.to_array()),
     );
-    params.set("rotation", kreate_reflect::PropertyValue::Vec3([rx, ry, rz]));
-    params.set("scale", kreate_reflect::PropertyValue::Vec3(t.scale.to_array()));
+    params.set(
+        "rotation",
+        kreate_reflect::PropertyValue::Vec3([rx, ry, rz]),
+    );
+    params.set(
+        "scale",
+        kreate_reflect::PropertyValue::Vec3(t.scale.to_array()),
+    );
     // In a panel, the way Blender's Object tab is a stack of them. One today;
     // the shape is what lets the next — relations, visibility — arrive as a
     // title rather than as more rows.
-    let object = doc.selection.active.expect("an active object was just read");
+    let object = doc
+        .selection
+        .active
+        .expect("an active object was just read");
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
     // What the object hangs from and what bends it: Blender's Relations
     // panel, and the Armature modifier's one field.
-    let parent = active.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone());
-    let skin = active.skin.and_then(|u| doc.object_by_uid(u)).and_then(|id| doc.object(id)).map(|o| o.name.clone());
+    let parent = active
+        .parent
+        .and_then(|p| doc.object(p))
+        .map(|p| p.name.clone());
+    let skin = active
+        .skin
+        .and_then(|u| doc.object_by_uid(u))
+        .and_then(|id| doc.object(id))
+        .map(|o| o.name.clone());
     if parent.is_some() || skin.is_some() {
         let title = state.catalog.get("panel-relations");
         kreate_ui::panel::section(ui, &title, true, |ui| {
@@ -5803,8 +6578,14 @@ fn draw_object_tab(
                     ui.horizontal(|ui| {
                         // i18n-exempt: an object's name is the user's own text
                         ui.label(skin);
-                        if ui.small_button(REMOVE_GLYPH).on_hover_text(state.catalog.get("unbind-armature")).clicked() {
-                            state.queue.run("object.unbind_armature", PropertyMap::new());
+                        if ui
+                            .small_button(REMOVE_GLYPH)
+                            .on_hover_text(state.catalog.get("unbind-armature"))
+                            .clicked()
+                        {
+                            state
+                                .queue
+                                .run("object.unbind_armature", PropertyMap::new());
                         }
                     });
                     ui.end_row();
@@ -5843,7 +6624,11 @@ fn draw_object_transform(
                 animatable: true,
                 keyed_here: key_mark(doc, o.action, property) == kreate_ui::KeyMark::Keyed,
                 driven: (0..3u8)
-                    .map(|i| o.drivers.iter().any(|d| d.property.as_ref() == property && d.index == i))
+                    .map(|i| {
+                        o.drivers
+                            .iter()
+                            .any(|d| d.property.as_ref() == property && d.index == i)
+                    })
                     .collect(),
                 resettable: true,
             })
@@ -5919,18 +6704,33 @@ fn field_action(
             p.set("datablock", V::Enum(datablock));
             p.set("slot", V::Int(slot as i64));
             p.set("property", V::Text(property.to_string()));
-            let op = if action == A::InsertKey { "anim.keyframe_insert_property" } else { "anim.keyframe_delete_property" };
+            let op = if action == A::InsertKey {
+                "anim.keyframe_insert_property"
+            } else {
+                "anim.keyframe_delete_property"
+            };
             state.queue.dispatch(op, p);
         }
         A::AddDriver(i) | A::RemoveDriver(i) => {
-            let (FieldOwner::Object(uid), Some(property)) = (owner, animated) else { return };
+            let (FieldOwner::Object(uid), Some(property)) = (owner, animated) else {
+                return;
+            };
             let mut p = PropertyMap::new();
-            p.set("target", V::Text(kreate_ops::ops::driver::driver_target(uid, property, i)));
-            let op = if matches!(action, A::AddDriver(_)) { "anim.driver_add" } else { "anim.driver_remove" };
+            p.set(
+                "target",
+                V::Text(kreate_ops::ops::driver::driver_target(uid, property, i)),
+            );
+            let op = if matches!(action, A::AddDriver(_)) {
+                "anim.driver_add"
+            } else {
+                "anim.driver_remove"
+            };
             state.queue.run(op, p);
         }
         A::Reset => {
-            let Some(default) = info.defaults().get(field).cloned() else { return };
+            let Some(default) = info.defaults().get(field).cloned() else {
+                return;
+            };
             params.set(field, default);
             state.queue.run(info.id, params);
         }
@@ -5954,9 +6754,8 @@ fn draw_camera_data(
     };
     ui.heading(&l.tab_data_camera);
     ui.separator();
-    let mut params = kreate_reflect::OpParams::to_map(
-        &kreate_ops::ops::object::camera_params(camera),
-    );
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::camera_params(camera));
     if kreate_ui::property_editor::property_editor(
         ui,
         &state.catalog,
@@ -6048,13 +6847,9 @@ fn draw_material_tab(
                         // row's text starts where the row starts, and centred
                         // names in a column read as a stack of buttons rather
                         // than as a list.
-                        let row = egui::Button::selectable(at as u32 == slot, "")
-                            .left_text(name);
+                        let row = egui::Button::selectable(at as u32 == slot, "").left_text(name);
                         let height = ui.spacing().interact_size.y;
-                        if ui
-                            .add_sized([ui.available_width(), height], row)
-                            .clicked()
-                        {
+                        if ui.add_sized([ui.available_width(), height], row).clicked() {
                             state.material_slot = at as u32;
                         }
                     }
@@ -6070,7 +6865,11 @@ fn draw_material_tab(
         // because they are two decisions — how many parts this model has, and
         // what each one is made of.
         ui.vertical(|ui| {
-            if ui.button(ADD_GLYPH).on_hover_text(&l.material_add_slot).clicked() {
+            if ui
+                .button(ADD_GLYPH)
+                .on_hover_text(&l.material_add_slot)
+                .clicked()
+            {
                 state.queue.run("material.add_slot", PropertyMap::new());
             }
             if !slots.is_empty()
@@ -6112,8 +6911,11 @@ fn draw_material_tab(
                     for (_, material) in doc.materials() {
                         // i18n-exempt: a material's name is the user's own text
                         if ui.selectable_label(false, material.name.as_str()).clicked() {
-                            let uid = kreate_reflect::PropertyValue::Text(material.uid.raw().to_string());
-                            state.queue.run("material.link", slot_param(Some(("uid", uid))));
+                            let uid =
+                                kreate_reflect::PropertyValue::Text(material.uid.raw().to_string());
+                            state
+                                .queue
+                                .run("material.link", slot_param(Some(("uid", uid))));
                         }
                     }
                 });
@@ -6122,10 +6924,18 @@ fn draw_material_tab(
     // Blender's Assign and Select, in edit mode: which faces are this slot.
     if mode.edits_elements() && !slots.is_empty() {
         ui.horizontal(|ui| {
-            if ui.button(&l.material_assign).on_hover_text(&l.material_assign_hint).clicked() {
+            if ui
+                .button(&l.material_assign)
+                .on_hover_text(&l.material_assign_hint)
+                .clicked()
+            {
                 state.queue.run("material.assign", slot_param(None));
             }
-            if ui.button(&l.material_select).on_hover_text(&l.material_select_hint).clicked() {
+            if ui
+                .button(&l.material_select)
+                .on_hover_text(&l.material_select_hint)
+                .clicked()
+            {
                 state.queue.run("material.select", slot_param(None));
             }
         });
@@ -6177,85 +6987,96 @@ fn draw_material_tab(
     // panel with no texture, so the one question somebody opens this tab to
     // answer had no answer on screen.
     kreate_ui::panel::section(ui, &l.panel_surface, true, |ui| {
-    for (index, map) in kreate_scene::MaterialMap::ALL.into_iter().enumerate() {
-        let label = match map {
-            kreate_scene::MaterialMap::BaseColor => &l.material_base_colour,
-            kreate_scene::MaterialMap::MetallicRoughness => &l.material_metallic_roughness,
-            kreate_scene::MaterialMap::Normal => &l.material_normal_map,
-        };
-        let map_id = index as u32;
-        ui.label(label);
-        ui.horizontal(|ui| {
-            let assigned = material
-                .map(map)
-                .and_then(|id| doc.image(id))
-                .map(|image| image.name.clone());
-            match &assigned {
-                // i18n-exempt: an image's name is the user's own text
-                Some(name) => {
-                    if ui.button(name).on_hover_text(&l.material_pick_image).clicked() {
-                        state.queue.push(Command::PickMaterialImage { map: map_id });
+        for (index, map) in kreate_scene::MaterialMap::ALL.into_iter().enumerate() {
+            let label = match map {
+                kreate_scene::MaterialMap::BaseColor => &l.material_base_colour,
+                kreate_scene::MaterialMap::MetallicRoughness => &l.material_metallic_roughness,
+                kreate_scene::MaterialMap::Normal => &l.material_normal_map,
+            };
+            let map_id = index as u32;
+            ui.label(label);
+            ui.horizontal(|ui| {
+                let assigned = material
+                    .map(map)
+                    .and_then(|id| doc.image(id))
+                    .map(|image| image.name.clone());
+                match &assigned {
+                    // i18n-exempt: an image's name is the user's own text
+                    Some(name) => {
+                        if ui
+                            .button(name)
+                            .on_hover_text(&l.material_pick_image)
+                            .clicked()
+                        {
+                            state.queue.push(Command::PickMaterialImage { map: map_id });
+                        }
+                        if ui
+                            .button(CLEAR_GLYPH)
+                            .on_hover_text(&l.material_clear_image)
+                            .clicked()
+                        {
+                            state
+                                .queue
+                                .push(Command::ClearMaterialImage { map: map_id });
+                        }
                     }
-                    if ui
-                        .button(CLEAR_GLYPH)
-                        .on_hover_text(&l.material_clear_image)
-                        .clicked()
-                    {
-                        state.queue.push(Command::ClearMaterialImage { map: map_id });
+                    None => {
+                        if ui.button(&l.material_pick_image).clicked() {
+                            state.queue.push(Command::PickMaterialImage { map: map_id });
+                        }
                     }
                 }
-                None => {
-                    if ui.button(&l.material_pick_image).clicked() {
-                        state.queue.push(Command::PickMaterialImage { map: map_id });
-                    }
-                }
-            }
-        });
-    }
-    ui.separator();
-    let mut params = kreate_reflect::OpParams::to_map(
-        &kreate_ops::ops::object::material_params(material, slot),
-    );
-    let text = field_menu_text(&state.catalog);
-    let out = kreate_ui::property_editor_full(
-        ui,
-        &state.catalog,
-        info.id,
-        info.schema,
-        &mut params,
-        // The slot is *which* material is being edited, not a property of it.
-        // Drawn as a spinner it would be a second, worse copy of the list
-        // above, and one that could point at a slot the list does not show.
-        // The normal strength only once there is a normal map for it to
-        // scale: a dial that does nothing is the dead control this panel was
-        // cleaned of once already.
-        |name| {
-            name != "slot"
-                && (name != "normal_strength" || material.normal_image.is_some())
-        },
-        |name| material_animated(name).map(|p| key_mark(doc, material.action, p)),
-        &l.key_property,
-        |name| {
-            Some(kreate_ui::FieldMenu {
-                animatable: material_animated(name).is_some(),
-                keyed_here: material_animated(name)
-                    .is_some_and(|p| key_mark(doc, material.action, p) == kreate_ui::KeyMark::Keyed),
-                driven: Vec::new(),
-                resettable: true,
-            })
-        },
-        &text,
-    );
-    if out.changed {
-        let dragging = ui.ctx().input(|i| i.pointer.any_down());
-        send_edit(state, "material.set_properties", params.clone(), dragging);
-    }
-    if let Some(property) = out.keyed.and_then(material_animated) {
-        toggle_key(state, doc, material.action, 0, slot, property);
-    }
-    if let Some((field, action)) = out.action {
-        field_action(state, info, params, field, action, FieldOwner::Material(slot));
-    }
+            });
+        }
+        ui.separator();
+        let mut params = kreate_reflect::OpParams::to_map(
+            &kreate_ops::ops::object::material_params(material, slot),
+        );
+        let text = field_menu_text(&state.catalog);
+        let out = kreate_ui::property_editor_full(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            // The slot is *which* material is being edited, not a property of it.
+            // Drawn as a spinner it would be a second, worse copy of the list
+            // above, and one that could point at a slot the list does not show.
+            // The normal strength only once there is a normal map for it to
+            // scale: a dial that does nothing is the dead control this panel was
+            // cleaned of once already.
+            |name| name != "slot" && (name != "normal_strength" || material.normal_image.is_some()),
+            |name| material_animated(name).map(|p| key_mark(doc, material.action, p)),
+            &l.key_property,
+            |name| {
+                Some(kreate_ui::FieldMenu {
+                    animatable: material_animated(name).is_some(),
+                    keyed_here: material_animated(name).is_some_and(|p| {
+                        key_mark(doc, material.action, p) == kreate_ui::KeyMark::Keyed
+                    }),
+                    driven: Vec::new(),
+                    resettable: true,
+                })
+            },
+            &text,
+        );
+        if out.changed {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "material.set_properties", params.clone(), dragging);
+        }
+        if let Some(property) = out.keyed.and_then(material_animated) {
+            toggle_key(state, doc, material.action, 0, slot, property);
+        }
+        if let Some((field, action)) = out.action {
+            field_action(
+                state,
+                info,
+                params,
+                field,
+                action,
+                FieldOwner::Material(slot),
+            );
+        }
     });
 }
 
@@ -6346,7 +7167,9 @@ fn draw_data_tab(
         kreate_scene::document::ObjectData::Camera(id) => {
             draw_camera_data(ui, state, doc, registry, l, id)
         }
-        kreate_scene::document::ObjectData::Armature(id) => draw_armature_data(ui, state, doc, registry, id),
+        kreate_scene::document::ObjectData::Armature(id) => {
+            draw_armature_data(ui, state, doc, registry, id)
+        }
         kreate_scene::document::ObjectData::Mesh(id) => {
             draw_vertex_groups(ui, state, doc, id, active);
             draw_shape_keys(ui, state, active);
@@ -6380,8 +7203,14 @@ fn draw_vertex_groups(
             }
         }
         ui.horizontal(|ui| {
-            if ui.small_button(ADD_GLYPH).on_hover_text(state.catalog.get("op-object-vertex-group-add")).clicked() {
-                state.queue.run("object.vertex_group_add", PropertyMap::new());
+            if ui
+                .small_button(ADD_GLYPH)
+                .on_hover_text(state.catalog.get("op-object-vertex-group-add"))
+                .clicked()
+            {
+                state
+                    .queue
+                    .run("object.vertex_group_add", PropertyMap::new());
             }
             let can_remove = object.active_group.is_some();
             if ui
@@ -6410,7 +7239,11 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
         if object.editing_shape.is_some() {
             ui.weak(state.catalog.get("shape-keys-editing"));
         }
-        if !object.shape_keys.is_empty() && ui.selectable_label(active.is_none(), state.catalog.get("shape-key-basis")).clicked() {
+        if !object.shape_keys.is_empty()
+            && ui
+                .selectable_label(active.is_none(), state.catalog.get("shape-key-basis"))
+                .clicked()
+        {
             let mut p = PropertyMap::new();
             p.set("name", V::Text(String::new()));
             state.queue.run("object.shape_key_set_active", p);
@@ -6426,10 +7259,17 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
                 }
                 // Blender's diamond: a key of this value at the current frame.
                 // i18n-exempt: a geometric glyph standing in for an icon
-                if ui.small_button("\u{25C6}").on_hover_text(state.catalog.get("op-anim-keyframe-insert-property")).clicked() {
+                if ui
+                    .small_button("\u{25C6}")
+                    .on_hover_text(state.catalog.get("op-anim-keyframe-insert-property"))
+                    .clicked()
+                {
                     let mut p = PropertyMap::new();
                     p.set("datablock", V::Enum(2));
-                    p.set("property", V::Text(kreate_scene::animation::shape_path(&key.name)));
+                    p.set(
+                        "property",
+                        V::Text(kreate_scene::animation::shape_path(&key.name)),
+                    );
                     // Through the keys' door, which fills in the current frame.
                     state.queue.dispatch("anim.keyframe_insert_property", p);
                 }
@@ -6444,7 +7284,11 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
             });
         }
         ui.horizontal(|ui| {
-            if ui.small_button(ADD_GLYPH).on_hover_text(state.catalog.get("op-object-shape-key-add")).clicked() {
+            if ui
+                .small_button(ADD_GLYPH)
+                .on_hover_text(state.catalog.get("op-object-shape-key-add"))
+                .clicked()
+            {
                 state.queue.run("object.shape_key_add", PropertyMap::new());
             }
             if ui
@@ -6458,7 +7302,11 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
                     state.queue.run("object.shape_key_remove", p);
                 }
             }
-            if ui.small_button(state.catalog.get("shape-key-from-mix")).on_hover_text(state.catalog.get("op-object-shape-key-add-desc")).clicked() {
+            if ui
+                .small_button(state.catalog.get("shape-key-from-mix"))
+                .on_hover_text(state.catalog.get("op-object-shape-key-add-desc"))
+                .clicked()
+            {
                 let mut p = PropertyMap::new();
                 p.set("from_mix", V::Bool(true));
                 state.queue.run("object.shape_key_add", p);
@@ -6482,16 +7330,24 @@ fn draw_armature_data(
     registry: &OperatorRegistry,
     id: kreate_scene::ArmatureId,
 ) {
-    let (Some(armature), Some(info)) = (doc.armature(id), registry.get("armature.set_display")) else {
+    let (Some(armature), Some(info)) = (doc.armature(id), registry.get("armature.set_display"))
+    else {
         return;
     };
     // i18n-exempt: the datablock's name is the user's own text
     ui.heading(&armature.name);
     ui.separator();
-    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::armature::display_params(armature));
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::armature::display_params(armature));
     let title = state.catalog.get("panel-viewport-display");
     kreate_ui::panel::section(ui, &title, true, |ui| {
-        if kreate_ui::property_editor::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+        if kreate_ui::property_editor::property_editor(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+        ) {
             send_edit(state, "armature.set_display", params, false);
         }
     });
@@ -6503,8 +7359,12 @@ fn draw_armature_data(
 /// changes, the rest is what a rigger changes, and seeing the one while
 /// changing the other is how a person finds out which they meant.
 fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry) {
-    let Some(object) = doc.selection.active else { return };
-    let Some((index, name)) = active_bone(doc, object) else { return };
+    let Some(object) = doc.selection.active else {
+        return;
+    };
+    let Some((index, name)) = active_bone(doc, object) else {
+        return;
+    };
     // i18n-exempt: the bone's name is the user's own text
     ui.heading(&name);
     ui.separator();
@@ -6524,36 +7384,54 @@ fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: 
 
 /// The bone's IK constraint: which bone it reaches for, how many bones turn,
 /// whether it is on — or a button to give it one.
-fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: ObjectId, bone: &str) {
+fn draw_ik_fields(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    object: ObjectId,
+    bone: &str,
+) {
     use kreate_reflect::PropertyValue as V;
     let Some(o) = doc.object(object) else { return };
-    let Some((_, armature)) = doc.armature_of(object) else { return };
-    let send = |state: &mut ShellState, op: &str, target: &str, chain: u32, enabled: bool, pole: &str| {
-        let mut p = PropertyMap::new();
-        p.set("bone", V::Text(bone.to_string()));
-        p.set("target", V::Text(target.to_string()));
-        p.set("chain", V::Int(chain as i64));
-        p.set("enabled", V::Bool(enabled));
-        p.set("pole", V::Text(pole.to_string()));
-        state.queue.run(op, p);
+    let Some((_, armature)) = doc.armature_of(object) else {
+        return;
     };
+    let send =
+        |state: &mut ShellState, op: &str, target: &str, chain: u32, enabled: bool, pole: &str| {
+            let mut p = PropertyMap::new();
+            p.set("bone", V::Text(bone.to_string()));
+            p.set("target", V::Text(target.to_string()));
+            p.set("chain", V::Int(chain as i64));
+            p.set("enabled", V::Bool(enabled));
+            p.set("pole", V::Text(pole.to_string()));
+            state.queue.run(op, p);
+        };
     let Some(ik) = o.pose.ik.iter().find(|c| c.bone == bone).cloned() else {
         if ui.button(state.catalog.get("op-pose-ik-add")).clicked() {
             send(state, "pose.ik_add", "", 2, true, "");
         }
         return;
     };
-    let (mut target, mut chain, mut enabled, mut pole) = (ik.target.clone(), ik.chain, ik.enabled, ik.pole.clone());
+    let (mut target, mut chain, mut enabled, mut pole) =
+        (ik.target.clone(), ik.chain, ik.enabled, ik.pole.clone());
     ui.horizontal(|ui| {
         ui.checkbox(&mut enabled, state.catalog.get("ik-enabled"));
-        if ui.small_button("\u{2715}").on_hover_text(state.catalog.get("op-pose-ik-remove")).clicked() {
+        if ui
+            .small_button("\u{2715}")
+            .on_hover_text(state.catalog.get("op-pose-ik-remove"))
+            .clicked()
+        {
             send(state, "pose.ik_remove", "", 0, true, "");
         }
     });
     ui.horizontal(|ui| {
         ui.label(state.catalog.get("ik-target"));
         egui::ComboBox::from_id_salt(("ik-target", bone))
-            .selected_text(if target.is_empty() { "\u{2014}".to_string() } else { target.clone() })
+            .selected_text(if target.is_empty() {
+                "\u{2014}".to_string()
+            } else {
+                target.clone()
+            })
             .show_ui(ui, |ui| {
                 for b in armature.bones.iter().filter(|b| b.name != bone) {
                     ui.selectable_value(&mut target, b.name.clone(), b.name.as_str());
@@ -6563,7 +7441,11 @@ fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: O
     ui.horizontal(|ui| {
         ui.label(state.catalog.get("ik-pole"));
         egui::ComboBox::from_id_salt(("ik-pole", bone))
-            .selected_text(if pole.is_empty() { "\u{2014}".to_string() } else { pole.clone() })
+            .selected_text(if pole.is_empty() {
+                "\u{2014}".to_string()
+            } else {
+                pole.clone()
+            })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut pole, String::new(), "\u{2014}");
                 for b in armature.bones.iter().filter(|b| b.name != bone) {
@@ -6578,7 +7460,9 @@ fn draw_ik_fields(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: O
         ui.add(egui::DragValue::new(&mut chain).range(0..=64))
             .on_hover_text(state.catalog.get("ik-chain-desc"));
     });
-    if (target.as_str(), chain, enabled, pole.as_str()) != (ik.target.as_str(), ik.chain, ik.enabled, ik.pole.as_str()) {
+    if (target.as_str(), chain, enabled, pole.as_str())
+        != (ik.target.as_str(), ik.chain, ik.enabled, ik.pole.as_str())
+    {
         send(state, "pose.ik_set", &target, chain, enabled, &pole);
     }
 }
@@ -6603,9 +7487,13 @@ fn draw_pose_bone_fields(
     object: ObjectId,
     bone: &str,
 ) {
-    let (Some(o), Some(info)) = (doc.object(object), registry.get("pose.set_bone")) else { return };
-    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&o.pose, bone));
-    let path = |field: &str| pose_animated(field).map(|p| kreate_scene::animation::bone_path(bone, p));
+    let (Some(o), Some(info)) = (doc.object(object), registry.get("pose.set_bone")) else {
+        return;
+    };
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::pose_bone_params(&o.pose, bone));
+    let path =
+        |field: &str| pose_animated(field).map(|p| kreate_scene::animation::bone_path(bone, p));
     let text = field_menu_text(&state.catalog);
     let tip = state.catalog.get("key-property");
     let out = kreate_ui::property_editor_full(
@@ -6670,23 +7558,44 @@ fn draw_rest_bone_fields(
     object: ObjectId,
     index: usize,
 ) {
-    let (Some((_, armature)), Some(info)) = (doc.armature_of(object), registry.get("armature.bone_set")) else { return };
-    let Some(bone) = kreate_ops::ops::armature::bone_params(armature, index) else { return };
+    let (Some((_, armature)), Some(info)) =
+        (doc.armature_of(object), registry.get("armature.bone_set"))
+    else {
+        return;
+    };
+    let Some(bone) = kreate_ops::ops::armature::bone_params(armature, index) else {
+        return;
+    };
     let mut params = kreate_reflect::OpParams::to_map(&bone);
-    let mut changed =
-        kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut params, |name| name != "parent");
+    let mut changed = kreate_ui::property_editor::property_editor_where(
+        ui,
+        &state.catalog,
+        info.id,
+        info.schema,
+        &mut params,
+        |name| name != "parent",
+    );
     // The parent from a list, as Blender's is: every bone that would not make
     // a loop, and none.
     let none = state.catalog.get("drivers-none");
-    let current = if bone.parent.is_empty() { none.clone() } else { bone.parent.clone() };
+    let current = if bone.parent.is_empty() {
+        none.clone()
+    } else {
+        bone.parent.clone()
+    };
     ui.horizontal(|ui| {
         ui.label(state.catalog.get("bone-parent"));
         egui::ComboBox::from_id_salt(("bone-parent", index))
             .selected_text(current)
             .show_ui(ui, |ui| {
                 let mut pick = |value: &str, shown: &str| {
-                    if ui.selectable_label(bone.parent == value, shown).clicked() && bone.parent != value {
-                        params.set("parent", kreate_reflect::PropertyValue::Text(value.to_string()));
+                    if ui.selectable_label(bone.parent == value, shown).clicked()
+                        && bone.parent != value
+                    {
+                        params.set(
+                            "parent",
+                            kreate_reflect::PropertyValue::Text(value.to_string()),
+                        );
                         changed = true;
                     }
                 };
@@ -6743,9 +7652,8 @@ fn draw_light_data(
     // the operator's own crate, so the panel and the operator cannot come to
     // disagree about what a field means — and a test says the round trip is an
     // identity.
-    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::light_params(
-        light,
-    ));
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::light_params(light));
     // Only the numbers this kind has. All four kinds' parameters ride in one
     // block on purpose — changing the kind is one of the edits — but a point
     // light drawing a cone angle and an angular diameter was offering two
@@ -6769,8 +7677,9 @@ fn draw_light_data(
             |name| {
                 Some(kreate_ui::FieldMenu {
                     animatable: light_animated(name).is_some(),
-                    keyed_here: light_animated(name)
-                        .is_some_and(|p| key_mark(doc, light.action, p) == kreate_ui::KeyMark::Keyed),
+                    keyed_here: light_animated(name).is_some_and(|p| {
+                        key_mark(doc, light.action, p) == kreate_ui::KeyMark::Keyed
+                    }),
                     driven: Vec::new(),
                     resettable: true,
                 })
@@ -6822,12 +7731,20 @@ fn key_mark(
     let Some(action) = action.and_then(|a| doc.action(a)) else {
         return kreate_ui::KeyMark::None;
     };
-    let mut curves = action.curves.iter().filter(|c| c.path.property.as_ref() == property).peekable();
+    let mut curves = action
+        .curves
+        .iter()
+        .filter(|c| c.path.property.as_ref() == property)
+        .peekable();
     if curves.peek().is_none() {
         return kreate_ui::KeyMark::None;
     }
     let frame = doc.playback.frame.round();
-    if curves.any(|c| c.keys.iter().any(|k| (k.frame - frame).abs() < kreate_scene::animation::SAME_FRAME)) {
+    if curves.any(|c| {
+        c.keys
+            .iter()
+            .any(|k| (k.frame - frame).abs() < kreate_scene::animation::SAME_FRAME)
+    }) {
         kreate_ui::KeyMark::Keyed
     } else {
         kreate_ui::KeyMark::Animated
@@ -6868,7 +7785,14 @@ fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_u
 /// operator's enum expects.
 ///
 /// Two lists that have to agree; a test holds them to it.
-const KIND_KEYS: &[&str] = &["modifier-mirror", "modifier-subdivide", "modifier-array", "modifier-solidify", "modifier-bevel", "modifier-boolean"];
+const KIND_KEYS: &[&str] = &[
+    "modifier-mirror",
+    "modifier-subdivide",
+    "modifier-array",
+    "modifier-solidify",
+    "modifier-bevel",
+    "modifier-boolean",
+];
 
 /// The built-in English catalog.
 ///
@@ -8708,7 +9632,10 @@ mod tests {
         let areas = state.screen().areas();
         assert!(state.has_editor(kreate_ui::EditorId::VIEWPORT));
         assert_eq!(areas.len(), 4, "viewport, timeline, outliner, properties");
-        assert!(state.has_editor(kreate_ui::EditorId::TIMELINE), "Layout keeps its clock in reach");
+        assert!(
+            state.has_editor(kreate_ui::EditorId::TIMELINE),
+            "Layout keeps its clock in reach"
+        );
 
         let mut ids: Vec<_> = areas.iter().map(|(id, _)| *id).collect();
         ids.sort();
@@ -8992,23 +9919,20 @@ mod tests {
         // drawing nothing is what reads as the editor breaking.
         let doc = Document::new();
         let tabs = available_tabs(&doc);
-        assert_eq!(
-            chosen_tab(PropertiesTab::Data, &tabs),
-            PropertiesTab::Tool
-        );
+        assert_eq!(chosen_tab(PropertiesTab::Data, &tabs), PropertiesTab::Tool);
         // With something selected, the Object tab rather than the last
         // operation.
         let (lit, _) = a_light_document();
         let tabs = available_tabs(&lit);
-        assert_eq!(chosen_tab(PropertiesTab::Material, &tabs), PropertiesTab::Object);
+        assert_eq!(
+            chosen_tab(PropertiesTab::Material, &tabs),
+            PropertiesTab::Object
+        );
         // And one that is still there is kept, or the panel would jump back to
         // Tool every time the selection changed at all.
         let (lit, _) = a_light_document();
         let tabs = available_tabs(&lit);
-        assert_eq!(
-            chosen_tab(PropertiesTab::Data, &tabs),
-            PropertiesTab::Data
-        );
+        assert_eq!(chosen_tab(PropertiesTab::Data, &tabs), PropertiesTab::Data);
     }
 
     #[test]
@@ -9040,7 +9964,12 @@ mod tests {
         // second drag of the same slider goes on adjusting the first one's
         // step, and the first drag becomes impossible to undo.
         let mut state = ShellState::default();
-        send_edit(&mut state, "light.set_properties", PropertyMap::new(), false);
+        send_edit(
+            &mut state,
+            "light.set_properties",
+            PropertyMap::new(),
+            false,
+        );
         end_gesture(&mut state, true);
         send_edit(&mut state, "light.set_properties", PropertyMap::new(), true);
         // Pointer up: the gesture is over.
@@ -9063,10 +9992,17 @@ mod tests {
         // light's step with a transform's parameters would be an operator run
         // with somebody else's arguments.
         let mut state = ShellState::default();
-        send_edit(&mut state, "light.set_properties", PropertyMap::new(), false);
+        send_edit(
+            &mut state,
+            "light.set_properties",
+            PropertyMap::new(),
+            false,
+        );
         send_edit(&mut state, "object.set_transform", PropertyMap::new(), true);
         let sent = state.queue.drain();
-        assert!(matches!(&sent[1], Command::RunOperator { op_id, .. } if op_id == "object.set_transform"));
+        assert!(
+            matches!(&sent[1], Command::RunOperator { op_id, .. } if op_id == "object.set_transform")
+        );
     }
 
     #[test]
@@ -9410,7 +10346,10 @@ mod tests {
         // hovering both.
         let icons: Vec<_> = ALL_TABS.iter().map(|t| t.icon(RowKind::Light)).collect();
         for (i, a) in icons.iter().enumerate() {
-            assert!(!icons[i + 1..].contains(a), "two property tabs share an icon: {a:?}");
+            assert!(
+                !icons[i + 1..].contains(a),
+                "two property tabs share an icon: {a:?}"
+            );
         }
     }
 
@@ -9421,10 +10360,22 @@ mod tests {
         let aspect = 4.0 / 3.0;
         let f = 1.0 / (std::f64::consts::FRAC_PI_4).tan();
         let projection = kreate_math::DMat4::from_cols_array(&[
-            f / aspect, 0.0, 0.0, 0.0,
-            0.0, f, 0.0, 0.0,
-            0.0, 0.0, -1.0, -1.0,
-            0.0, 0.0, -0.1, 0.0,
+            f / aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+            -1.0,
+            0.0,
+            0.0,
+            -0.1,
+            0.0,
         ]);
         kreate_ui::object_glyph::Projector {
             eye: kreate_math::DVec3::new(0.0, 0.0, 6.0),
@@ -9492,7 +10443,10 @@ mod tests {
         let p = projector();
         let at_a = p.project(kreate_math::DVec3::ZERO).unwrap();
         let at_b = p.project(kreate_math::DVec3::new(0.12, 0.0, 0.0)).unwrap();
-        assert!(at_a.distance(at_b) < kreate_ui::object_glyph::HIT_RADIUS, "the fixture must overlap");
+        assert!(
+            at_a.distance(at_b) < kreate_ui::object_glyph::HIT_RADIUS,
+            "the fixture must overlap"
+        );
         assert_eq!(glyph_under(&doc, &p, at_a), Some(a));
         assert_eq!(glyph_under(&doc, &p, at_b), Some(b));
     }
@@ -9527,15 +10481,24 @@ mod tests {
 
     #[test]
     fn a_plain_click_selects_the_hit_and_nothing_else() {
-        assert_eq!(click_selection(&[1, 2], Some(2), 3, false), (vec![3], Some(3)));
-        assert_eq!(click_selection(&[1, 2], Some(2), 1, false), (vec![1], Some(1)));
+        assert_eq!(
+            click_selection(&[1, 2], Some(2), 3, false),
+            (vec![3], Some(3))
+        );
+        assert_eq!(
+            click_selection(&[1, 2], Some(2), 1, false),
+            (vec![1], Some(1))
+        );
     }
 
     #[test]
     fn a_shift_click_adds_the_hit_and_makes_it_active() {
         // The complaint: shift-click replaced the selection in the viewport
         // while adding to it in the outliner. One rule now.
-        assert_eq!(click_selection(&[1, 2], Some(2), 3, true), (vec![1, 2, 3], Some(3)));
+        assert_eq!(
+            click_selection(&[1, 2], Some(2), 3, true),
+            (vec![1, 2, 3], Some(3))
+        );
         assert_eq!(click_selection(&[], None, 3, true), (vec![3], Some(3)));
     }
 
@@ -9543,15 +10506,24 @@ mod tests {
     fn a_shift_click_on_a_selected_object_takes_it_out_again() {
         // The same gesture on the same thing twice undoes itself rather than
         // doing nothing, which is Blender's rule and the one a user expects.
-        assert_eq!(click_selection(&[1, 2, 3], Some(1), 2, true), (vec![1, 3], Some(1)));
+        assert_eq!(
+            click_selection(&[1, 2, 3], Some(1), 2, true),
+            (vec![1, 3], Some(1))
+        );
     }
 
     #[test]
     fn removing_the_active_object_hands_active_to_the_last_still_selected() {
         // There should always be something for the panels to show while
         // anything is selected.
-        assert_eq!(click_selection(&[1, 2, 3], Some(3), 3, true), (vec![1, 2], Some(2)));
-        assert_eq!(click_selection(&[3], Some(3), 3, true), (Vec::<u32>::new(), None));
+        assert_eq!(
+            click_selection(&[1, 2, 3], Some(3), 3, true),
+            (vec![1, 2], Some(2))
+        );
+        assert_eq!(
+            click_selection(&[3], Some(3), 3, true),
+            (Vec::<u32>::new(), None)
+        );
     }
 
     #[test]
@@ -9564,7 +10536,9 @@ mod tests {
         // first: `{ $count }` is not drawn.
         for (locale, ftl) in [("en", EN_FTL), ("ko-KR", KO_FTL)] {
             for line in ftl.lines() {
-                let Some((key, value)) = line.split_once(" = ") else { continue };
+                let Some((key, value)) = line.split_once(" = ") else {
+                    continue;
+                };
                 let mut text = String::new();
                 let mut depth = 0;
                 for ch in value.chars() {
@@ -9618,7 +10592,11 @@ mod tests {
         }
         ids.sort_unstable();
         ids.dedup();
-        assert!(ids.len() > 30, "the walk found only {} entries; it has lost the menus", ids.len());
+        assert!(
+            ids.len() > 30,
+            "the walk found only {} entries; it has lost the menus",
+            ids.len()
+        );
         let missing: Vec<&str> = ids
             .iter()
             .copied()
@@ -9653,19 +10631,39 @@ mod tests {
         names.dedup();
         assert_eq!(names, vec!["mode", "shading", "snap", "view"]);
         for name in &names {
-            let (_, entries) = pie_entries(name, &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING)
-                .unwrap_or_else(|| panic!("no pie called {name}"));
-            assert!(!entries.is_empty() && entries.len() <= kreate_ui::pie_menu::MAX_SLOTS, "{name}");
+            let (_, entries) = pie_entries(
+                name,
+                &l,
+                kreate_render::ShadingMode::Studio,
+                kreate_ops::Mode::RESTING,
+                kreate_ops::mode::Has::EVERYTHING,
+            )
+            .unwrap_or_else(|| panic!("no pie called {name}"));
+            assert!(
+                !entries.is_empty() && entries.len() <= kreate_ui::pie_menu::MAX_SLOTS,
+                "{name}"
+            );
             for (entry, _) in &entries {
                 assert!(
                     catalog.has(&kreate_ui::command_info::description_key(entry.id)),
                     "{name}: `{}` has nothing to say on hover",
                     entry.id
                 );
-                assert!(!entry.label.is_empty() && !entry.label.contains('-'), "{name}: label {:?}", entry.label);
+                assert!(
+                    !entry.label.is_empty() && !entry.label.contains('-'),
+                    "{name}: label {:?}",
+                    entry.label
+                );
             }
         }
-        assert!(pie_entries("from_the_future", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING).is_none());
+        assert!(pie_entries(
+            "from_the_future",
+            &l,
+            kreate_render::ShadingMode::Studio,
+            kreate_ops::Mode::RESTING,
+            kreate_ops::mode::Has::EVERYTHING
+        )
+        .is_none());
     }
 
     #[test]
@@ -9674,7 +10672,14 @@ mod tests {
         // pair here is a pie that shows the back when asked for the front.
         let catalog = load_catalog("en");
         let l = Labels::new(&catalog);
-        let (_, entries) = pie_entries("view", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, kreate_ops::mode::Has::EVERYTHING).unwrap();
+        let (_, entries) = pie_entries(
+            "view",
+            &l,
+            kreate_render::ShadingMode::Studio,
+            kreate_ops::Mode::RESTING,
+            kreate_ops::mode::Has::EVERYTHING,
+        )
+        .unwrap();
         let axis_of = |id: &str| match &entries.iter().find(|(e, _)| e.id == id).unwrap().0.run {
             Run::Command(Command::SnapToAxis(axis)) => *axis,
             other => panic!("{id} runs {other:?}"),
@@ -9689,7 +10694,9 @@ mod tests {
         assert_eq!(entries[1].0.id, "view.axis_right");
         // The camera is reachable without a numpad: from the pie and the menu.
         assert!(entries.iter().any(|(e, _)| e.id == "view.camera"));
-        assert!(view_nodes(&l).iter().any(|n| matches!(n, MenuNode::Entry(e) if e.id == "view.camera")));
+        assert!(view_nodes(&l)
+            .iter()
+            .any(|n| matches!(n, MenuNode::Entry(e) if e.id == "view.camera")));
     }
 
     #[test]
@@ -9699,14 +10706,45 @@ mod tests {
         use kreate_ops::mode::Has;
         // With nothing, object mode and a greyed Edit Mode to learn from;
         // with an armature, its two modes and not the mesh's Edit Mode.
-        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, Has::NOTHING).unwrap();
+        let (_, entries) = pie_entries(
+            "mode",
+            &l,
+            kreate_render::ShadingMode::Studio,
+            kreate_ops::Mode::RESTING,
+            Has::NOTHING,
+        )
+        .unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
-        assert_eq!(ids, vec!["mode-object", "mode-edit", "mode-weight-paint", "mode-sculpt"]);
+        assert_eq!(
+            ids,
+            vec![
+                "mode-object",
+                "mode-edit",
+                "mode-weight-paint",
+                "mode-sculpt"
+            ]
+        );
         assert!(entries[0].1, "the mode you are in is not lit");
-        assert!(!entries[1].0.enabled, "edit mode with nothing to edit is not greyed");
-        assert!(!entries[2].0.enabled, "weight paint with nothing to paint is not greyed");
-        let armature = Has { mesh: false, armature: true };
-        let (_, entries) = pie_entries("mode", &l, kreate_render::ShadingMode::Studio, kreate_ops::Mode::RESTING, armature).unwrap();
+        assert!(
+            !entries[1].0.enabled,
+            "edit mode with nothing to edit is not greyed"
+        );
+        assert!(
+            !entries[2].0.enabled,
+            "weight paint with nothing to paint is not greyed"
+        );
+        let armature = Has {
+            mesh: false,
+            armature: true,
+        };
+        let (_, entries) = pie_entries(
+            "mode",
+            &l,
+            kreate_render::ShadingMode::Studio,
+            kreate_ops::Mode::RESTING,
+            armature,
+        )
+        .unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
         assert_eq!(ids, vec!["mode-object", "mode-edit-armature", "mode-pose"]);
         for (entry, current) in &entries {
@@ -9729,13 +10767,28 @@ mod tests {
         };
         let object = ids(kreate_ops::Mode::Object);
         let edit = ids(kreate_ops::Mode::EditMesh);
-        for common in ["file.save", "edit.undo", "app.search", "object.add_primitive", "view.frame_all"] {
-            assert!(object.contains(&common) && edit.contains(&common), "{common} is missing somewhere");
+        for common in [
+            "file.save",
+            "edit.undo",
+            "app.search",
+            "object.add_primitive",
+            "view.frame_all",
+        ] {
+            assert!(
+                object.contains(&common) && edit.contains(&common),
+                "{common} is missing somewhere"
+            );
         }
         assert!(object.contains(&"object.delete") && !object.contains(&"mesh.bevel"));
         assert!(edit.contains(&"mesh.bevel") && !edit.contains(&"object.delete"));
         // Every shape of the Add menu, each its own entry.
-        assert_eq!(object.iter().filter(|id| **id == "object.add_primitive").count(), ADD_SHAPES.len());
+        assert_eq!(
+            object
+                .iter()
+                .filter(|id| **id == "object.add_primitive")
+                .count(),
+            ADD_SHAPES.len()
+        );
     }
 
     #[test]
@@ -9743,7 +10796,13 @@ mod tests {
         // Extrude from the search is Extrude from Face ▸ Extrude: the same
         // operator with the same parameters, because it is the same entry.
         let catalog = load_catalog("en");
-        let entries = flatten(&searchable_menus(&catalog, kreate_ops::Mode::EditMesh, 2, true, true));
+        let entries = flatten(&searchable_menus(
+            &catalog,
+            kreate_ops::Mode::EditMesh,
+            2,
+            true,
+            true,
+        ));
         let (path, extrude) = entries
             .iter()
             .find(|(_, e)| e.id == "mesh.extrude_region")
@@ -9755,7 +10814,10 @@ mod tests {
         match commands.as_slice() {
             [Command::RunOperator { op_id, params }] => {
                 assert_eq!(op_id, "mesh.extrude_region");
-                assert_eq!(params.get("offset"), Some(&kreate_reflect::PropertyValue::Float(1.0)));
+                assert_eq!(
+                    params.get("offset"),
+                    Some(&kreate_reflect::PropertyValue::Float(1.0))
+                );
             }
             other => panic!("ran {other:?}"),
         }
@@ -9765,7 +10827,10 @@ mod tests {
         run_entry(&mut state, delete);
         match state.queue.drain().as_slice() {
             [Command::RunOperator { params, .. }] => {
-                assert_eq!(params.get("mode"), Some(&kreate_reflect::PropertyValue::Enum(2)));
+                assert_eq!(
+                    params.get("mode"),
+                    Some(&kreate_reflect::PropertyValue::Enum(2))
+                );
             }
             other => panic!("ran {other:?}"),
         }

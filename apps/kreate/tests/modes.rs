@@ -14,9 +14,16 @@ use kreate_ops::{Mode, OperatorRegistry};
 fn every_modes_keys_resolve_in_a_context_keystrokes_arrive_in() {
     let leaves: Vec<Context> = Context::leaves().collect();
     for mode in Mode::ALL {
-        let context = Context::from_tag(mode.info().keymap)
-            .unwrap_or_else(|| panic!("{mode:?} names keymap `{}`, which is no context", mode.info().keymap));
-        assert!(leaves.contains(&context), "{mode:?}'s context {context:?} is never dispatched in");
+        let context = Context::from_tag(mode.info().keymap).unwrap_or_else(|| {
+            panic!(
+                "{mode:?} names keymap `{}`, which is no context",
+                mode.info().keymap
+            )
+        });
+        assert!(
+            leaves.contains(&context),
+            "{mode:?}'s context {context:?} is never dispatched in"
+        );
     }
     for context in Context::ALL {
         assert_eq!(Context::from_tag(context.tag()), Some(*context));
@@ -29,7 +36,10 @@ fn every_modes_g_r_and_s_are_real_operators() {
     kreate_ops::register_builtin(&mut registry);
     for mode in Mode::ALL {
         for op in mode.info().transform {
-            assert!(registry.get(op).is_some(), "{mode:?}: `{op}` is not an operator");
+            assert!(
+                registry.get(op).is_some(),
+                "{mode:?}: `{op}` is not an operator"
+            );
         }
     }
 }
@@ -49,6 +59,9 @@ fn the_header_offers_what_the_mode_acts_on() {
             ActsOn::Weights => Menu::Weights,
             ActsOn::Sculpt => Menu::Sculpt,
         };
-        assert!(info.menus.contains(&want), "{mode:?} does not offer {want:?}");
+        assert!(
+            info.menus.contains(&want),
+            "{mode:?} does not offer {want:?}"
+        );
     }
 }

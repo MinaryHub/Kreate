@@ -13,7 +13,12 @@ use kreate_scene::Document;
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 fn cube(doc: &mut Document, name: &str) -> kreate_scene::ObjectId {
@@ -44,11 +49,25 @@ fn an_object_can_be_hidden_and_shown_by_name() {
     let b = cube(&mut doc, "B");
     let uid = doc.object_uid(a).expect("an identity").raw().to_string();
 
-    assert!(set_visible(&registry, &mut history, &mut doc, &ctx, &uid, false));
+    assert!(set_visible(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        &uid,
+        false
+    ));
     assert!(!doc.object(a).unwrap().visible, "A is still visible");
     assert!(doc.object(b).unwrap().visible, "B was hidden too");
 
-    assert!(set_visible(&registry, &mut history, &mut doc, &ctx, &uid, true));
+    assert!(set_visible(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        &uid,
+        true
+    ));
     assert!(doc.object(a).unwrap().visible);
 }
 
@@ -61,7 +80,14 @@ fn hiding_does_not_need_the_object_to_be_selected() {
     let b = cube(&mut doc, "B");
     doc.selection.add(b);
     let uid = doc.object_uid(a).expect("an identity").raw().to_string();
-    assert!(set_visible(&registry, &mut history, &mut doc, &ctx, &uid, false));
+    assert!(set_visible(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        &uid,
+        false
+    ));
     assert!(!doc.object(a).unwrap().visible);
     assert!(doc.selection.contains(b), "the selection was disturbed");
 }
@@ -71,7 +97,14 @@ fn hiding_is_one_undo_step() {
     let (registry, mut history, mut doc, ctx) = wired();
     let a = cube(&mut doc, "A");
     let uid = doc.object_uid(a).expect("an identity").raw().to_string();
-    assert!(set_visible(&registry, &mut history, &mut doc, &ctx, &uid, false));
+    assert!(set_visible(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        &uid,
+        false
+    ));
     assert!(history.undo(&mut doc));
     assert!(doc.object(a).unwrap().visible, "undo did not show it again");
 }
@@ -82,9 +115,20 @@ fn a_uid_naming_nothing_is_refused() {
     let a = cube(&mut doc, "A");
     let depth = history.entries().len();
     set_visible(&registry, &mut history, &mut doc, &ctx, "424242", false);
-    set_visible(&registry, &mut history, &mut doc, &ctx, "not a number", false);
+    set_visible(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "not a number",
+        false,
+    );
     assert!(doc.object(a).unwrap().visible);
-    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a refusal left a step to undo"
+    );
 }
 
 #[test]

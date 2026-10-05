@@ -14,7 +14,12 @@ use kreate_scene::{Document, Material, MaterialId};
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 /// A selected cube with a textured material in its first slot.
@@ -50,7 +55,9 @@ fn run(
         map.set(k, v.clone());
     }
     let depth = history.entries().len();
-    history.dispatch(registry, doc, ctx, op, &map).expect("the operator ran");
+    history
+        .dispatch(registry, doc, ctx, op, &map)
+        .expect("the operator ran");
     history.entries().len() > depth
 }
 
@@ -68,56 +75,107 @@ fn use_nodes_builds_the_graph_the_material_already_was() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, image) = textured_cube(&mut doc);
     let before = doc.material(material).unwrap().shading_graph();
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[
-        ("enabled", PropertyValue::Bool(true)),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[("enabled", PropertyValue::Bool(true)),]
+    ));
     assert_eq!(graph(&doc, material), before);
     assert!(graph(&doc, material).images().contains(&image));
 
     // Off takes it away, and the flat fields draw again; undo brings it back.
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[
-        ("enabled", PropertyValue::Bool(false)),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[("enabled", PropertyValue::Bool(false)),]
+    ));
     assert!(doc.material(material).unwrap().graph.is_none());
     assert!(history.undo(&mut doc));
     assert!(doc.material(material).unwrap().graph.is_some());
     // And asking for what is already so leaves no step to undo.
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[
-        ("enabled", PropertyValue::Bool(true)),
-    ]));
+    assert!(!run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[("enabled", PropertyValue::Bool(true)),]
+    ));
 }
 
 #[test]
 fn a_node_is_added_where_it_was_asked_and_undo_takes_it_away() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let count = graph(&doc, material).nodes.len();
     for (index, tag) in NodeKind::ADDABLE.iter().enumerate() {
-        assert!(run(&registry, &mut history, &mut doc, &ctx, "node.add", &[
-            ("kind", PropertyValue::Enum(index as u32)),
-            ("x", PropertyValue::Float(-300.0)),
-            ("y", PropertyValue::Float(40.0)),
-        ]));
+        assert!(run(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "node.add",
+            &[
+                ("kind", PropertyValue::Enum(index as u32)),
+                ("x", PropertyValue::Float(-300.0)),
+                ("y", PropertyValue::Float(40.0)),
+            ]
+        ));
         let g = graph(&doc, material);
         let added = g.nodes.last().unwrap();
-        assert_eq!(added.kind.tag(), *tag, "the menu's index {index} added the wrong kind");
+        assert_eq!(
+            added.kind.tag(),
+            *tag,
+            "the menu's index {index} added the wrong kind"
+        );
         assert_eq!(added.position, [-300.0, 40.0]);
     }
-    assert_eq!(graph(&doc, material).nodes.len(), count + NodeKind::ADDABLE.len());
+    assert_eq!(
+        graph(&doc, material).nodes.len(),
+        count + NodeKind::ADDABLE.len()
+    );
     assert!(history.undo(&mut doc));
-    assert_eq!(graph(&doc, material).nodes.len(), count + NodeKind::ADDABLE.len() - 1);
+    assert_eq!(
+        graph(&doc, material).nodes.len(),
+        count + NodeKind::ADDABLE.len() - 1
+    );
 }
 
 #[test]
 fn the_surface_can_be_neither_removed_nor_doubled() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let surface = graph(&doc, material).output().unwrap() as u32;
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "node.remove", &[
-        ("nodes", PropertyValue::Ints(vec![surface])),
-    ]));
+    assert!(!run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.remove",
+        &[("nodes", PropertyValue::Ints(vec![surface])),]
+    ));
     assert!(graph(&doc, material).output().is_some());
 }
 
@@ -127,14 +185,37 @@ fn removing_nodes_takes_their_wires_and_keeps_the_rest_pointing_right() {
     // it, and the operator must not remove a neighbour of the one it meant.
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let g = graph(&doc, material);
     let names: Vec<String> = g.nodes.iter().map(|n| n.name.clone()).collect();
-    let image = g.nodes.iter().position(|n| matches!(n.kind, NodeKind::Image { .. })).unwrap();
-    let tint = g.nodes.iter().position(|n| matches!(n.kind, NodeKind::Color(_))).unwrap();
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.remove", &[
-        ("nodes", PropertyValue::Ints(vec![tint as u32, image as u32])),
-    ]));
+    let image = g
+        .nodes
+        .iter()
+        .position(|n| matches!(n.kind, NodeKind::Image { .. }))
+        .unwrap();
+    let tint = g
+        .nodes
+        .iter()
+        .position(|n| matches!(n.kind, NodeKind::Color(_)))
+        .unwrap();
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.remove",
+        &[(
+            "nodes",
+            PropertyValue::Ints(vec![tint as u32, image as u32])
+        ),]
+    ));
     let after = graph(&doc, material);
     let left: Vec<String> = after.nodes.iter().map(|n| n.name.clone()).collect();
     let want: Vec<String> = names
@@ -155,9 +236,23 @@ fn removing_nodes_takes_their_wires_and_keeps_the_rest_pointing_right() {
 fn a_wire_goes_where_it_is_dropped_and_a_wrong_one_is_refused_quietly() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     // A Value node, wired into the roughness.
-    run(&registry, &mut history, &mut doc, &ctx, "node.add", &[("kind", PropertyValue::Enum(1))]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.add",
+        &[("kind", PropertyValue::Enum(1))],
+    );
     let g = graph(&doc, material);
     let value = (g.nodes.len() - 1) as u32;
     let surface = g.output().unwrap() as u32;
@@ -169,36 +264,88 @@ fn a_wire_goes_where_it_is_dropped_and_a_wrong_one_is_refused_quietly() {
             ("to_socket", PropertyValue::Int(to_socket as i64)),
         ]
     };
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.link", &link(0, 2)));
-    assert!(graph(&doc, material).incoming(surface as usize, 2).is_some());
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.link",
+        &link(0, 2)
+    ));
+    assert!(graph(&doc, material)
+        .incoming(surface as usize, 2)
+        .is_some());
     // A number into a colour: refused, and nothing to undo.
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "node.link", &link(0, 0)));
+    assert!(!run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.link",
+        &link(0, 0)
+    ));
     // The same wire again: nothing changes, nothing to undo.
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "node.link", &link(0, 2)));
+    assert!(!run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.link",
+        &link(0, 2)
+    ));
 
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.unlink", &[
-        ("to_node", PropertyValue::Int(surface as i64)),
-        ("to_socket", PropertyValue::Int(2)),
-    ]));
-    assert!(graph(&doc, material).incoming(surface as usize, 2).is_none());
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.unlink",
+        &[
+            ("to_node", PropertyValue::Int(surface as i64)),
+            ("to_socket", PropertyValue::Int(2)),
+        ]
+    ));
+    assert!(graph(&doc, material)
+        .incoming(surface as usize, 2)
+        .is_none());
 }
 
 #[test]
 fn a_drag_is_one_step_and_moves_every_node_once() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let before = graph(&doc, material);
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.translate", &[
-        // Named twice: moved once.
-        ("nodes", PropertyValue::Ints(vec![0, 1, 1])),
-        ("x", PropertyValue::Float(10.0)),
-        ("y", PropertyValue::Float(-5.0)),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.translate",
+        &[
+            // Named twice: moved once.
+            ("nodes", PropertyValue::Ints(vec![0, 1, 1])),
+            ("x", PropertyValue::Float(10.0)),
+            ("y", PropertyValue::Float(-5.0)),
+        ]
+    ));
     let after = graph(&doc, material);
     for i in [0usize, 1] {
-        assert_eq!(after.nodes[i].position[0], before.nodes[i].position[0] + 10.0);
-        assert_eq!(after.nodes[i].position[1], before.nodes[i].position[1] - 5.0);
+        assert_eq!(
+            after.nodes[i].position[0],
+            before.nodes[i].position[0] + 10.0
+        );
+        assert_eq!(
+            after.nodes[i].position[1],
+            before.nodes[i].position[1] - 5.0
+        );
     }
     assert_eq!(after.nodes[2].position, before.nodes[2].position);
 }
@@ -207,20 +354,45 @@ fn a_drag_is_one_step_and_moves_every_node_once() {
 fn a_nodes_numbers_and_image_are_set_through_their_fields() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, image) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let surface = graph(&doc, material).output().unwrap() as i64;
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.set_value", &[
-        ("node", PropertyValue::Int(surface)),
-        ("field", PropertyValue::Int(2)),
-        ("value", PropertyValue::Float(0.9)),
-    ]));
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.set_color", &[
-        ("node", PropertyValue::Int(surface)),
-        ("field", PropertyValue::Int(0)),
-        ("color", PropertyValue::Vec3([1.0, 0.0, 0.0])),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_value",
+        &[
+            ("node", PropertyValue::Int(surface)),
+            ("field", PropertyValue::Int(2)),
+            ("value", PropertyValue::Float(0.9)),
+        ]
+    ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_color",
+        &[
+            ("node", PropertyValue::Int(surface)),
+            ("field", PropertyValue::Int(0)),
+            ("color", PropertyValue::Vec3([1.0, 0.0, 0.0])),
+        ]
+    ));
     match graph(&doc, material).nodes[surface as usize].kind {
-        NodeKind::Surface { roughness, base_color, .. } => {
+        NodeKind::Surface {
+            roughness,
+            base_color,
+            ..
+        } => {
             assert!((roughness - 0.9).abs() < 1e-6);
             assert_eq!(base_color.r, 1.0);
             assert_eq!(base_color.g, 0.0);
@@ -228,11 +400,18 @@ fn a_nodes_numbers_and_image_are_set_through_their_fields() {
         _ => panic!("the surface moved"),
     }
     // A field the node does not have: refused.
-    assert!(!run(&registry, &mut history, &mut doc, &ctx, "node.set_value", &[
-        ("node", PropertyValue::Int(surface)),
-        ("field", PropertyValue::Int(7)),
-        ("value", PropertyValue::Float(0.1)),
-    ]));
+    assert!(!run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_value",
+        &[
+            ("node", PropertyValue::Int(surface)),
+            ("field", PropertyValue::Int(7)),
+            ("value", PropertyValue::Float(0.1)),
+        ]
+    ));
 
     // An image node, emptied and filled again by identity.
     let node = graph(&doc, material)
@@ -241,15 +420,29 @@ fn a_nodes_numbers_and_image_are_set_through_their_fields() {
         .position(|n| matches!(n.kind, NodeKind::Image { .. }))
         .unwrap() as i64;
     let uid = doc.image_uid(image).unwrap().raw().to_string();
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.set_image", &[
-        ("node", PropertyValue::Int(node)),
-        ("uid", PropertyValue::Text(String::new())),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_image",
+        &[
+            ("node", PropertyValue::Int(node)),
+            ("uid", PropertyValue::Text(String::new())),
+        ]
+    ));
     assert!(graph(&doc, material).images().is_empty());
-    assert!(run(&registry, &mut history, &mut doc, &ctx, "node.set_image", &[
-        ("node", PropertyValue::Int(node)),
-        ("uid", PropertyValue::Text(uid)),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_image",
+        &[
+            ("node", PropertyValue::Int(node)),
+            ("uid", PropertyValue::Text(uid)),
+        ]
+    ));
     assert_eq!(graph(&doc, material).images(), vec![image]);
 }
 
@@ -260,15 +453,36 @@ fn every_graph_edit_replays_from_the_history() {
     let (registry, mut history, mut doc, ctx) = wired();
     textured_cube(&mut doc);
     let start = doc.clone();
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
-    run(&registry, &mut history, &mut doc, &ctx, "node.add", &[
-        ("kind", PropertyValue::Enum(6)),
-        ("x", PropertyValue::Float(-500.0)),
-    ]);
-    run(&registry, &mut history, &mut doc, &ctx, "node.translate", &[
-        ("nodes", PropertyValue::Ints(vec![0])),
-        ("x", PropertyValue::Float(3.0)),
-    ]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.add",
+        &[
+            ("kind", PropertyValue::Enum(6)),
+            ("x", PropertyValue::Float(-500.0)),
+        ],
+    );
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.translate",
+        &[
+            ("nodes", PropertyValue::Ints(vec![0])),
+            ("x", PropertyValue::Float(3.0)),
+        ],
+    );
     let script: String = history
         .entries()
         .iter()

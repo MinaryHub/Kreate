@@ -46,8 +46,9 @@ pub fn posed_object(doc: &Document) -> Option<ObjectId> {
 
 /// The bones a transform moves: selected, with no selected ancestor.
 fn moving_bones(armature: &Armature, object: &Object) -> Vec<usize> {
-    let selected: Vec<usize> =
-        (0..armature.bones.len()).filter(|i| object.pose.is_selected(&armature.bones[*i].name)).collect();
+    let selected: Vec<usize> = (0..armature.bones.len())
+        .filter(|i| object.pose.is_selected(&armature.bones[*i].name))
+        .collect();
     selected
         .iter()
         .copied()
@@ -66,7 +67,10 @@ pub fn pivot(doc: &Document) -> Option<DVec3> {
     let (_, armature) = doc.armature_of(object)?;
     let o = doc.object(object)?;
     let frames = doc.posed_bones(object);
-    let heads: Vec<DVec3> = moving_bones(armature, o).iter().map(|i| frames[*i].translation).collect();
+    let heads: Vec<DVec3> = moving_bones(armature, o)
+        .iter()
+        .map(|i| frames[*i].translation)
+        .collect();
     if heads.is_empty() {
         return None;
     }
@@ -74,7 +78,10 @@ pub fn pivot(doc: &Document) -> Option<DVec3> {
 }
 
 /// Moves each moving bone's world frame by `change`, as a pose.
-fn transform_bones(doc: &mut DocMut<'_>, change: impl Fn(DAffine3) -> DAffine3) -> Result<OpResult, OpError> {
+fn transform_bones(
+    doc: &mut DocMut<'_>,
+    change: impl Fn(DAffine3) -> DAffine3,
+) -> Result<OpResult, OpError> {
     let Some(object) = posed_object(doc.document()) else {
         return Ok(OpResult::Cancelled);
     };
@@ -83,7 +90,9 @@ fn transform_bones(doc: &mut DocMut<'_>, change: impl Fn(DAffine3) -> DAffine3) 
         return Ok(OpResult::Cancelled);
     };
     let armature = armature.clone();
-    let Some(o) = d.object(object) else { return Ok(OpResult::Cancelled) };
+    let Some(o) = d.object(object) else {
+        return Ok(OpResult::Cancelled);
+    };
     let moving = moving_bones(&armature, o);
     if moving.is_empty() {
         return Ok(OpResult::Cancelled);
@@ -99,28 +108,43 @@ fn transform_bones(doc: &mut DocMut<'_>, change: impl Fn(DAffine3) -> DAffine3) 
         .iter()
         .map(|&i| {
             let target = to_armature * change(world * frames[i]);
-            (armature.bones[i].name.clone(), armature::pose_for_frame(&armature, &frames, i, target))
+            (
+                armature.bones[i].name.clone(),
+                armature::pose_for_frame(&armature, &frames, i, target),
+            )
         })
         .collect();
-    let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+    let Some(o) = doc.document_mut().object_mut(object) else {
+        return Ok(OpResult::Cancelled);
+    };
     for (name, pose) in poses {
         let entry = o.pose.entry(&name);
-        entry.transform = DTransform { rotation: pose.rotation.normalize(), ..pose };
+        entry.transform = DTransform {
+            rotation: pose.rotation.normalize(),
+            ..pose
+        };
     }
     Ok(OpResult::Finished)
 }
 
 /// Keys the bones a transform just moved, when auto-keying asked for it — in
 /// the same step, so the move and its key undo together.
-fn autokey(doc: &mut DocMut<'_>, done: OpResult, on: bool, frame: f64, properties: &[&str]) -> Result<OpResult, OpError> {
+fn autokey(
+    doc: &mut DocMut<'_>,
+    done: OpResult,
+    on: bool,
+    frame: f64,
+    properties: &[&str],
+) -> Result<OpResult, OpError> {
     if on && done == OpResult::Finished && frame.is_finite() {
         if let Some(object) = posed_object(doc.document()) {
             let bones: Vec<String> = {
                 let d = doc.document();
                 match (d.armature_of(object), d.object(object)) {
-                    (Some((_, a)), Some(o)) => {
-                        moving_bones(a, o).into_iter().map(|i| a.bones[i].name.clone()).collect()
-                    }
+                    (Some((_, a)), Some(o)) => moving_bones(a, o)
+                        .into_iter()
+                        .map(|i| a.bones[i].name.clone())
+                        .collect(),
                     _ => Vec::new(),
                 }
             };
@@ -154,7 +178,11 @@ impl Operator for AddArmature {
     fn poll(_ctx: &Context, _doc: &Document) -> bool {
         true
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document_mut();
         let datablock = d.add_armature(Armature::new("Armature"));
         let mut object = Object::new("Armature", ObjectData::Armature(datablock));
@@ -189,14 +217,24 @@ impl Operator for SelectPick {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Some((_, armature)) = doc.document().armature_of(object) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some((_, armature)) = doc.document().armature_of(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         let names: Vec<String> = armature.bones.iter().map(|b| b.name.clone()).collect();
         if !names.contains(&params.bone) {
             return Ok(OpResult::Cancelled);
         }
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         let pose = &mut o.pose;
         if params.extend {
             let was_active = pose.active.as_deref() == Some(params.bone.as_str());
@@ -241,11 +279,23 @@ impl Operator for SelectAll {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Some((_, armature)) = doc.document().armature_of(object) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some((_, armature)) = doc.document().armature_of(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         let names: Vec<String> = armature.bones.iter().map(|b| b.name.clone()).collect();
-        let before = doc.document().object(object).map(|o| o.pose.clone()).unwrap_or_default();
+        let before = doc
+            .document()
+            .object(object)
+            .map(|o| o.pose.clone())
+            .unwrap_or_default();
         let any = names.iter().any(|n| before.is_selected(n));
         let want = |n: &str| match params.action {
             0 => true,
@@ -256,14 +306,20 @@ impl Operator for SelectAll {
         if names.iter().all(|n| want(n) == before.is_selected(n)) {
             return Ok(OpResult::Cancelled);
         }
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         for n in &names {
             let selected = want(n);
             if selected != o.pose.is_selected(n) {
                 o.pose.entry(n).selected = selected;
             }
         }
-        if o.pose.active.as_ref().is_some_and(|a| !o.pose.is_selected(a)) {
+        if o.pose
+            .active
+            .as_ref()
+            .is_some_and(|a| !o.pose.is_selected(a))
+        {
             o.pose.active = None;
         }
         Ok(OpResult::Finished)
@@ -296,7 +352,11 @@ impl Operator for Translate {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let offset = DVec3::from_array(params.translation);
         if !offset.is_finite() {
             return Ok(OpResult::Cancelled);
@@ -332,11 +392,17 @@ impl Operator for Rotate {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         if !params.angle.is_finite() {
             return Ok(OpResult::Cancelled);
         }
-        let Some(p) = pivot(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(p) = pivot(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let axis = [DVec3::X, DVec3::Y, DVec3::Z][(params.axis as usize).min(2)];
         let turn = DAffine3::from_translation(p)
             * DAffine3::from_quat(DQuat::from_axis_angle(axis, params.angle))
@@ -344,7 +410,13 @@ impl Operator for Rotate {
         let done = transform_bones(doc, |f| turn * f)?;
         // The location too: a bone turned about a point that is not its head
         // has moved as well as turned.
-        autokey(doc, done, params.autokey, params.key_frame, &["location", "rotation_quaternion"])
+        autokey(
+            doc,
+            done,
+            params.autokey,
+            params.key_frame,
+            &["location", "rotation_quaternion"],
+        )
     }
 }
 
@@ -360,7 +432,11 @@ pub struct ScaleParams {
 
 impl Default for ScaleParams {
     fn default() -> Self {
-        Self { scale: [1.0; 3], autokey: false, key_frame: 1.0 }
+        Self {
+            scale: [1.0; 3],
+            autokey: false,
+            key_frame: 1.0,
+        }
     }
 }
 
@@ -384,7 +460,11 @@ impl Operator for Scale {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let s = DVec3::from_array(params.scale);
         if !s.is_finite() || s.min_element().abs() < 1e-9 {
             return Ok(OpResult::Cancelled);
@@ -414,19 +494,43 @@ impl Operator for ClearTransform {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_pose_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let cleared = |t: DTransform| match params.what {
-            1 => DTransform { translation: DVec3::ZERO, ..t },
-            2 => DTransform { rotation: DQuat::IDENTITY, ..t },
-            3 => DTransform { scale: DVec3::ONE, ..t },
+            1 => DTransform {
+                translation: DVec3::ZERO,
+                ..t
+            },
+            2 => DTransform {
+                rotation: DQuat::IDENTITY,
+                ..t
+            },
+            3 => DTransform {
+                scale: DVec3::ONE,
+                ..t
+            },
             _ => DTransform::IDENTITY,
         };
-        let Some(o) = doc.document().object(object) else { return Ok(OpResult::Cancelled) };
-        if !o.pose.bones.iter().any(|b| b.selected && cleared(b.transform) != b.transform) {
+        let Some(o) = doc.document().object(object) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if !o
+            .pose
+            .bones
+            .iter()
+            .any(|b| b.selected && cleared(b.transform) != b.transform)
+        {
             return Ok(OpResult::Cancelled);
         }
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         for b in o.pose.bones.iter_mut().filter(|b| b.selected) {
             b.transform = cleared(b.transform);
         }
@@ -450,7 +554,12 @@ pub struct SetPoseBoneParams {
 
 impl Default for SetPoseBoneParams {
     fn default() -> Self {
-        Self { bone: String::new(), location: [0.0; 3], rotation: [0.0; 3], scale: [1.0; 3] }
+        Self {
+            bone: String::new(),
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: [1.0; 3],
+        }
     }
 }
 
@@ -471,14 +580,24 @@ pub struct IkParams {
 
 impl Default for IkParams {
     fn default() -> Self {
-        Self { bone: String::new(), target: String::new(), chain: 2, enabled: true, pole: String::new() }
+        Self {
+            bone: String::new(),
+            target: String::new(),
+            chain: 2,
+            enabled: true,
+            pole: String::new(),
+        }
     }
 }
 
 /// The named bone, or the active one.
 fn bone_or_active(doc: &Document, object: ObjectId, bone: &str) -> Option<String> {
     let (_, armature) = doc.armature_of(object)?;
-    let name = if bone.is_empty() { doc.object(object)?.pose.active.clone()? } else { bone.to_string() };
+    let name = if bone.is_empty() {
+        doc.object(object)?.pose.active.clone()?
+    } else {
+        bone.to_string()
+    };
     armature.bone_index(&name).map(|_| name)
 }
 
@@ -497,8 +616,14 @@ impl Operator for AddIk {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         posed_object(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let d = doc.document();
         let Some(bone) = bone_or_active(d, object, &params.bone) else {
             return Err(OpError::Failed("no active bone to put IK on".into()));
@@ -515,9 +640,17 @@ impl Operator for AddIk {
         } else {
             params.target.clone()
         };
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         o.pose.ik.retain(|c| c.bone != bone);
-        o.pose.ik.push(IkConstraint { bone, target, chain: params.chain, enabled: params.enabled, pole: params.pole.clone() });
+        o.pose.ik.push(IkConstraint {
+            bone,
+            target,
+            chain: params.chain,
+            enabled: params.enabled,
+            pole: params.pole.clone(),
+        });
         Ok(OpResult::Finished)
     }
 }
@@ -536,9 +669,17 @@ impl Operator for SetIk {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         posed_object(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else {
+            return Ok(OpResult::Cancelled);
+        };
         let wanted = IkConstraint {
             bone: bone.clone(),
             target: params.target.clone(),
@@ -546,7 +687,9 @@ impl Operator for SetIk {
             enabled: params.enabled,
             pole: params.pole.clone(),
         };
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         match o.pose.ik.iter_mut().find(|c| c.bone == bone) {
             Some(c) if *c == wanted => Ok(OpResult::Cancelled),
             Some(c) => {
@@ -572,13 +715,27 @@ impl Operator for RemoveIk {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         posed_object(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else { return Ok(OpResult::Cancelled) };
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(bone) = bone_or_active(doc.document(), object, &params.bone) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         let before = o.pose.ik.len();
         o.pose.ik.retain(|c| c.bone != bone);
-        Ok(if o.pose.ik.len() < before { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if o.pose.ik.len() < before {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -607,9 +764,18 @@ impl Operator for SetPoseBone {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         posed_object(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(object) = posed_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let exists = doc.document().armature_of(object).is_some_and(|(_, a)| a.bone_index(&params.bone).is_some());
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let exists = doc
+            .document()
+            .armature_of(object)
+            .is_some_and(|(_, a)| a.bone_index(&params.bone).is_some());
         let (l, r, s) = (
             DVec3::from_array(params.location),
             DVec3::from_array(params.rotation),
@@ -618,12 +784,21 @@ impl Operator for SetPoseBone {
         if !exists || !l.is_finite() || !r.is_finite() || !s.is_finite() {
             return Ok(OpResult::Cancelled);
         }
-        let wanted = DTransform { translation: l, rotation: kreate_scene::animation::from_euler(r).normalize(), scale: s };
-        let now = doc.document().object(object).map(|o| o.pose.transform(&params.bone));
+        let wanted = DTransform {
+            translation: l,
+            rotation: kreate_scene::animation::from_euler(r).normalize(),
+            scale: s,
+        };
+        let now = doc
+            .document()
+            .object(object)
+            .map(|o| o.pose.transform(&params.bone));
         if now == Some(wanted) {
             return Ok(OpResult::Cancelled);
         }
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         o.pose.entry(&params.bone).transform = wanted;
         Ok(OpResult::Finished)
     }

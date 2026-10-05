@@ -92,7 +92,9 @@ fn pick(
     // a fraction of a pixel for the smoothing mean, as the application draws.
     for _ in 1..STILL_FRAMES.with(|f| f.get()) {
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         viewport.render(&mut encoder, &colour_view, &draws);
         gpu.queue.submit(Some(encoder.finish()));
     }
@@ -453,13 +455,20 @@ fn a_still_view_picks_a_slanted_face_on_every_frame() {
     // The first frame, a few nudged ones, and the settled view after them.
     for frames in [1, 2, 7, 15, kreate_render::accum::SAMPLES + 1] {
         STILL_FRAMES.with(|f| f.set(frames));
-        let hit = pick(&[cube_at(0.0, 5)], PickDomain::Object, false, CENTRE, slanted);
+        let hit = pick(
+            &[cube_at(0.0, 5)],
+            PickDomain::Object,
+            false,
+            CENTRE,
+            slanted,
+        );
         STILL_FRAMES.with(|f| f.set(1));
         let Some(hit) = hit else {
             eprintln!("no GPU adapter; skipping");
             return;
         };
-        let hit = hit.unwrap_or_else(|| panic!("frame {frames}: the click on the face picked nothing"));
+        let hit =
+            hit.unwrap_or_else(|| panic!("frame {frames}: the click on the face picked nothing"));
         assert_eq!(hit.object, 5);
     }
 }

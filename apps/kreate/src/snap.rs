@@ -49,7 +49,14 @@ pub enum Mode {
 
 impl Mode {
     /// Every mode, in the order the header lists them.
-    pub const ALL: [Mode; 6] = [Mode::Increment, Mode::Element, Mode::Vertex, Mode::Edge, Mode::EdgeMidpoint, Mode::Face];
+    pub const ALL: [Mode; 6] = [
+        Mode::Increment,
+        Mode::Element,
+        Mode::Vertex,
+        Mode::Edge,
+        Mode::EdgeMidpoint,
+        Mode::Face,
+    ];
 
     /// The catalog key for the header's name of it.
     pub fn label_key(self) -> &'static str {
@@ -206,7 +213,10 @@ pub fn resolve(
             camera,
             viewport,
         )
-        .map(|hit| Hit { element: Element::Edge, ..hit }),
+        .map(|hit| Hit {
+            element: Element::Edge,
+            ..hit
+        }),
         Mode::Edge => nearest_on_edges(world, cursor, camera, viewport),
         Mode::Face => under_cursor(world, cursor, camera, viewport),
     }

@@ -109,7 +109,12 @@ struct Shading {
 ///
 /// No world at all, which is a scene lit by its lamps. The tests that are about
 /// an environment go through [`under`] instead.
-fn on_gpu(gpu: &Gpu, points: &[Point], lights: &[PlacedLight], count: Option<u32>) -> Vec<[f32; 3]> {
+fn on_gpu(
+    gpu: &Gpu,
+    points: &[Point],
+    lights: &[PlacedLight],
+    count: Option<u32>,
+) -> Vec<[f32; 3]> {
     on_gpu_under(gpu, points, lights, count, [0.0; 4], None)
 }
 
@@ -281,8 +286,7 @@ fn on_gpu_under(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
@@ -401,7 +405,11 @@ fn on_gpu_under(
         .device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("contact depth"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -555,8 +563,13 @@ fn a_rig() -> Vec<PlacedLight> {
 /// something.
 fn some_points() -> Vec<Point> {
     let mut out = Vec::new();
-    for (metallic, roughness) in [(0.0f32, 0.25f32), (0.0, 0.8), (1.0, 0.15), (1.0, 0.7), (0.4, 0.5)]
-    {
+    for (metallic, roughness) in [
+        (0.0f32, 0.25f32),
+        (0.0, 0.8),
+        (1.0, 0.15),
+        (1.0, 0.7),
+        (0.4, 0.5),
+    ] {
         let surface = Surface {
             base_color: kreate_math::SceneRgb::new(0.85, 0.6, 0.35),
             metallic,
@@ -567,9 +580,9 @@ fn some_points() -> Vec<Point> {
             let position = glam::Vec3::new(a.cos(), a.sin(), 4.0 + 0.5 * a.sin());
             // Back toward the camera, tilted around so the lights strike at a
             // spread of angles rather than all head-on.
-            let normal =
-                (-position.normalize() + glam::Vec3::new(a.cos() * 0.5, a.sin() * 0.5, 0.0))
-                    .normalize();
+            let normal = (-position.normalize()
+                + glam::Vec3::new(a.cos() * 0.5, a.sin() * 0.5, 0.0))
+            .normalize();
             out.push(Point::facing_the_eye(position, normal, surface));
         }
     }
@@ -672,7 +685,10 @@ fn the_device_reads_the_count_and_not_the_buffers_length() {
         .take(2)
         .map(|l| GpuLight::pack(l, glam::DVec3::ZERO))
         .collect();
-    assert!(close(first_two, shading::shade(&point, &packed, NO_WORLD)[0]));
+    assert!(close(
+        first_two,
+        shading::shade(&point, &packed, NO_WORLD)[0]
+    ));
 }
 
 #[test]
@@ -895,14 +911,7 @@ fn a_bound_environment_that_is_switched_off_does_not_light_anything() {
         kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, 64, 32, &sky);
     let points = spread();
 
-    let off = on_gpu_under(
-        &gpu,
-        &points,
-        &[],
-        None,
-        [0.0; 4],
-        Some(&environment),
-    );
+    let off = on_gpu_under(&gpu, &points, &[], None, [0.0; 4], Some(&environment));
     for (i, v) in off.iter().enumerate() {
         assert!(
             v.iter().all(|c| *c < 1e-3),
@@ -1214,7 +1223,14 @@ fn the_worlds_strength_dims_both_halves_of_the_answer() {
 
     let at = |strength: f32, metallic: f32| {
         let saved = STRENGTH.with(|s| s.replace(strength));
-        let out = under_sky(&gpu, &environment, glam::Vec3::X, glam::Vec3::X, 0.4, metallic);
+        let out = under_sky(
+            &gpu,
+            &environment,
+            glam::Vec3::X,
+            glam::Vec3::X,
+            0.4,
+            metallic,
+        );
         STRENGTH.with(|s| s.set(saved));
         out
     };
@@ -1259,8 +1275,13 @@ fn a_surface_facing_away_from_a_sun_is_never_darker_than_black() {
             pixels.extend_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
         }
     }
-    let environment =
-        kreate_render::environment::Environment::new(&gpu.device, &gpu.queue, width, height, &pixels);
+    let environment = kreate_render::environment::Environment::new(
+        &gpu.device,
+        &gpu.queue,
+        width,
+        height,
+        &pixels,
+    );
 
     // Every direction, because which one rings is a property of where the sun
     // is and not something worth pinning to a fixture.

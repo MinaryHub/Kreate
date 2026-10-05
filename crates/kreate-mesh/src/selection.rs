@@ -332,7 +332,9 @@ pub fn deselect_hidden(mesh: &mut MeshData) {
     }
     for domain in [Domain::Point, Domain::Edge, Domain::Face] {
         let hidden = hidden_flags(mesh, domain);
-        let Some(name) = layer_of(domain) else { continue };
+        let Some(name) = layer_of(domain) else {
+            continue;
+        };
         if let Some(layer) = mesh.attributes_mut().make_mut_bool(name) {
             for (slot, h) in layer.iter_mut().zip(&hidden) {
                 *slot &= !*h;
@@ -342,8 +344,11 @@ pub fn deselect_hidden(mesh: &mut MeshData) {
 }
 
 fn write_hidden(mesh: &mut MeshData, domain: Domain, values: Vec<bool>) {
-    let Some(name) = hide_layer_of(domain) else { return };
-    mesh.attributes_mut().insert(name, domain, AttrData::Bool(Arc::new(values)));
+    let Some(name) = hide_layer_of(domain) else {
+        return;
+    };
+    mesh.attributes_mut()
+        .insert(name, domain, AttrData::Bool(Arc::new(values)));
 }
 
 /// Hides the selection — or with `unselected`, everything else — as `H` and
@@ -384,7 +389,9 @@ pub fn hide(mesh: &mut MeshData, mode: SelectMode, unselected: bool, corner_edge
         SelectMode::Edge => {
             edges = chosen;
             for f in 0..nf {
-                faces[f as usize] |= mesh.face_corner_range(f).any(|c| edges[corner_edges[c] as usize]);
+                faces[f as usize] |= mesh
+                    .face_corner_range(f)
+                    .any(|c| edges[corner_edges[c] as usize]);
             }
             verts = hide_bare_verts(mesh, &edges, verts);
         }
@@ -486,12 +493,17 @@ pub fn select_more(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) 
     let verts = seed_verts(mesh, mode);
     let hidden_faces = hidden_flags(mesh, Domain::Face);
     let hidden_edges = hidden_flags(mesh, Domain::Edge);
-    let before = (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len());
+    let before = (
+        selected(mesh, Domain::Point).len(),
+        selected(mesh, Domain::Face).len(),
+    );
     match mode {
         SelectMode::Face => {
             let mut faces = selected_flags(mesh, Domain::Face);
             for f in 0..mesh.num_faces() {
-                if !hidden_faces[f as usize] && mesh.face_verts(f).iter().any(|v| verts[*v as usize]) {
+                if !hidden_faces[f as usize]
+                    && mesh.face_verts(f).iter().any(|v| verts[*v as usize])
+                {
                     faces[f as usize] = true;
                 }
             }
@@ -518,7 +530,10 @@ pub fn select_more(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) 
             flush_with(mesh, SelectMode::Vert, corner_edges);
         }
     }
-    (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len()) != before
+    (
+        selected(mesh, Domain::Point).len(),
+        selected(mesh, Domain::Face).len(),
+    ) != before
 }
 
 /// The vertices a grow or a shrink measures from: in face mode, the corners
@@ -549,7 +564,10 @@ fn seed_verts(mesh: &MeshData, mode: SelectMode) -> Vec<bool> {
 pub fn select_less(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) -> bool {
     ensure_layers(mesh);
     let verts = seed_verts(mesh, mode);
-    let before = (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len());
+    let before = (
+        selected(mesh, Domain::Point).len(),
+        selected(mesh, Domain::Face).len(),
+    );
     // A vertex on the rim: some face or edge around it has an unselected
     // vertex. Hidden neighbours count as outside, as in Blender.
     let mut rim = vec![false; verts.len()];
@@ -610,7 +628,10 @@ pub fn select_less(mesh: &mut MeshData, mode: SelectMode, corner_edges: &[u32]) 
             flush_with(mesh, SelectMode::Vert, corner_edges);
         }
     }
-    (selected(mesh, Domain::Point).len(), selected(mesh, Domain::Face).len()) != before
+    (
+        selected(mesh, Domain::Point).len(),
+        selected(mesh, Domain::Face).len(),
+    ) != before
 }
 
 /// Adds — or with `deselect`, takes away — the whole piece `seed` is on:
@@ -656,7 +677,10 @@ pub fn select_linked_from(mesh: &mut MeshData, seed: &[u32], deselect: bool) -> 
     }
     for (f, on) in faces.iter_mut().enumerate() {
         let ring = mesh.face_verts(f as u32);
-        if ring.first().is_some_and(|v| piece[root(&mut parent, *v) as usize]) {
+        if ring
+            .first()
+            .is_some_and(|v| piece[root(&mut parent, *v) as usize])
+        {
             *on = !deselect;
         }
     }
@@ -709,12 +733,13 @@ pub fn select_linked(mesh: &mut MeshData, corner_edges: &[u32]) -> bool {
         }
     }
     let before = selected(mesh, Domain::Point).len();
-    let grown: Vec<bool> = (0..n).map(|v| reached[root(&mut parent, v as u32) as usize]).collect();
+    let grown: Vec<bool> = (0..n)
+        .map(|v| reached[root(&mut parent, v as u32) as usize])
+        .collect();
     write(mesh, Domain::Point, grown);
     flush_with(mesh, SelectMode::Vert, corner_edges);
     selected(mesh, Domain::Point).len() != before
 }
-
 
 /// What Select Similar compares — Blender's Shift+G, per element type.
 ///
@@ -736,7 +761,9 @@ pub const SIMILAR: [(&str, SelectMode); 9] = [
 /// `threshold`: radians for a direction, a fraction for a size, a length for
 /// a plane's offset. Adds to the selection; `false` when nothing new matched.
 pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool {
-    let Some(&(_, mode)) = SIMILAR.get(kind) else { return false };
+    let Some(&(_, mode)) = SIMILAR.get(kind) else {
+        return false;
+    };
     let domain = match mode {
         SelectMode::Vert => Domain::Point,
         SelectMode::Edge => Domain::Edge,
@@ -770,8 +797,16 @@ pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool 
     let matches: Vec<bool> = match kind {
         0..=4 => {
             let shapes: Vec<_> = (0..mesh.num_faces()).map(face_shape).collect();
-            let materials = mesh.attributes().get_i32(names::MATERIAL_INDEX).map(|m| m.to_vec());
-            let material = |f: usize| materials.as_ref().and_then(|m| m.get(f).copied()).unwrap_or(0);
+            let materials = mesh
+                .attributes()
+                .get_i32(names::MATERIAL_INDEX)
+                .map(|m| m.to_vec());
+            let material = |f: usize| {
+                materials
+                    .as_ref()
+                    .and_then(|m| m.get(f).copied())
+                    .unwrap_or(0)
+            };
             let sides = |f: usize| mesh.face_verts(f as u32).len();
             (0..count)
                 .map(|f| {
@@ -784,7 +819,9 @@ pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool 
                             1 => same_size(area, rarea),
                             // The same plane: the same facing, and no further
                             // off it than the threshold as a length.
-                            2 => same_direction(n, rn) && (point - rpoint).dot(rn).abs() <= t + 1e-6,
+                            2 => {
+                                same_direction(n, rn) && (point - rpoint).dot(rn).abs() <= t + 1e-6
+                            }
                             3 => material(f) == material(r),
                             _ => sides(f) == sides(r),
                         }
@@ -827,7 +864,10 @@ pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool 
                     picked.iter().any(|&r| {
                         let r = r as usize;
                         if kind == 7 {
-                            same_direction(normals[v].normalize_or_zero(), normals[r].normalize_or_zero())
+                            same_direction(
+                                normals[v].normalize_or_zero(),
+                                normals[r].normalize_or_zero(),
+                            )
                         } else {
                             faces[v] == faces[r]
                         }
@@ -850,7 +890,6 @@ pub fn select_similar(mesh: &mut MeshData, kind: usize, threshold: f64) -> bool 
     grew
 }
 
-
 /// Blender's Ctrl+click in edit mode: the shortest way from what is selected
 /// to `target`, selected — vertices and the edges between them, or faces
 /// across shared edges. Measured in distance, not in steps, so a long thin
@@ -868,8 +907,18 @@ pub fn select_shortest_path(mesh: &mut MeshData, mode: SelectMode, target: u32) 
 
     // The graph: vertices along edges, or faces across shared edges.
     let face_graph = mode == SelectMode::Face;
-    let nodes = if face_graph { mesh.num_faces() } else { mesh.num_verts() } as usize;
-    if target as usize >= if mode == SelectMode::Edge { edges.len() } else { nodes } {
+    let nodes = if face_graph {
+        mesh.num_faces()
+    } else {
+        mesh.num_verts()
+    } as usize;
+    if target as usize
+        >= if mode == SelectMode::Edge {
+            edges.len()
+        } else {
+            nodes
+        }
+    {
         return false;
     }
     let mut next: Vec<Vec<(u32, f64, u32)>> = vec![Vec::new(); nodes];
@@ -891,7 +940,11 @@ pub fn select_shortest_path(mesh: &mut MeshData, mode: SelectMode, target: u32) 
             for &a in faces {
                 for &b in faces {
                     if a != b && !is_hidden(&hidden_f, b as usize) {
-                        next[a as usize].push((b, centres[a as usize].distance(centres[b as usize]), e as u32));
+                        next[a as usize].push((
+                            b,
+                            centres[a as usize].distance(centres[b as usize]),
+                            e as u32,
+                        ));
                     }
                 }
             }
@@ -1015,7 +1068,13 @@ mod hide_tests {
         set_selected(&mut mesh, Domain::Face, 0, true);
         flush_with(&mut mesh, SelectMode::Face, &ce);
         assert!(hide(&mut mesh, SelectMode::Face, false, &ce));
-        assert_eq!(hidden_flags(&mesh, Domain::Face).iter().filter(|h| **h).count(), 1);
+        assert_eq!(
+            hidden_flags(&mesh, Domain::Face)
+                .iter()
+                .filter(|h| **h)
+                .count(),
+            1
+        );
         // A cube's face shares every edge and vertex with its neighbours.
         assert!(!hidden_flags(&mesh, Domain::Edge).iter().any(|h| *h));
         assert!(!hidden_flags(&mesh, Domain::Point).iter().any(|h| *h));
@@ -1040,8 +1099,20 @@ mod hide_tests {
         let ce = mesh.corner_edges();
         set_selected(&mut mesh, Domain::Point, 0, true);
         assert!(hide(&mut mesh, SelectMode::Vert, false, &ce));
-        assert_eq!(hidden_flags(&mesh, Domain::Edge).iter().filter(|h| **h).count(), 3);
-        assert_eq!(hidden_flags(&mesh, Domain::Face).iter().filter(|h| **h).count(), 3);
+        assert_eq!(
+            hidden_flags(&mesh, Domain::Edge)
+                .iter()
+                .filter(|h| **h)
+                .count(),
+            3
+        );
+        assert_eq!(
+            hidden_flags(&mesh, Domain::Face)
+                .iter()
+                .filter(|h| **h)
+                .count(),
+            3
+        );
 
         let mut mesh = primitives::cube(2.0);
         set_selected(&mut mesh, Domain::Face, 0, true);
@@ -1049,7 +1120,10 @@ mod hide_tests {
         assert!(hide(&mut mesh, SelectMode::Face, true, &ce));
         let hidden = hidden_flags(&mesh, Domain::Face);
         assert!(!hidden[0] && hidden.iter().filter(|h| **h).count() == 5);
-        assert!(is_selected(&mesh, Domain::Face, 0), "the kept face lost its selection");
+        assert!(
+            is_selected(&mesh, Domain::Face, 0),
+            "the kept face lost its selection"
+        );
     }
 
     #[test]
@@ -1058,13 +1132,21 @@ mod hide_tests {
         let ce = mesh.corner_edges();
         // The middle face of a 3 by 3 grid.
         let middle = (0..mesh.num_faces())
-            .find(|f| mesh.face_verts(*f).iter().all(|v| mesh.positions()[*v as usize].x.abs() < 1.0 && mesh.positions()[*v as usize].y.abs() < 1.0))
+            .find(|f| {
+                mesh.face_verts(*f).iter().all(|v| {
+                    mesh.positions()[*v as usize].x.abs() < 1.0
+                        && mesh.positions()[*v as usize].y.abs() < 1.0
+                })
+            })
             .expect("a middle face");
         set_selected(&mut mesh, Domain::Face, middle, true);
         flush_with(&mut mesh, SelectMode::Face, &ce);
         assert!(select_more(&mut mesh, SelectMode::Face, &ce));
         assert_eq!(selected(&mesh, Domain::Face).len(), 9);
-        assert!(!select_more(&mut mesh, SelectMode::Face, &ce), "there was nothing more");
+        assert!(
+            !select_more(&mut mesh, SelectMode::Face, &ce),
+            "there was nothing more"
+        );
         assert!(select_less(&mut mesh, SelectMode::Face, &ce));
         assert_eq!(selected(&mesh, Domain::Face), vec![middle]);
         assert_eq!(selected(&mesh, Domain::Point).len(), 4);
@@ -1083,7 +1165,10 @@ mod hide_tests {
         let mut a = primitives::cube(1.0);
         let b = primitives::cube(1.0);
         let n = a.num_verts();
-        let part = |mesh| crate::edit::join::Part { mesh, transform: glam::DAffine3::IDENTITY };
+        let part = |mesh| crate::edit::join::Part {
+            mesh,
+            transform: glam::DAffine3::IDENTITY,
+        };
         a = crate::edit::join::join(&[part(&a), part(&b)]).0;
         let ce = a.corner_edges();
         set_selected(&mut a, Domain::Point, 0, true);
@@ -1297,7 +1382,10 @@ mod tests {
         select_none(&mut m);
         set_selected(&mut m, Domain::Face, 0, true);
         flush(&mut m, SelectMode::Face);
-        assert!(!select_similar(&mut m, 0, 0.01), "no other face faces that way");
+        assert!(
+            !select_similar(&mut m, 0, 0.01),
+            "no other face faces that way"
+        );
         assert!(select_similar(&mut m, 1, 0.01));
         assert_eq!(selected(&m, Domain::Face).len(), 6);
 
@@ -1314,14 +1402,20 @@ mod tests {
         let mut m = crate::primitives::grid(4.0, 4, 4);
         select_none(&mut m);
         let p = m.positions().to_vec();
-        let corner = |x: f32, y: f32| p.iter().position(|q| (q.x - x).abs() < 1e-4 && (q.y - y).abs() < 1e-4).unwrap() as u32;
+        let corner = |x: f32, y: f32| {
+            p.iter()
+                .position(|q| (q.x - x).abs() < 1e-4 && (q.y - y).abs() < 1e-4)
+                .unwrap() as u32
+        };
         let (a, b) = (corner(-2.0, -2.0), corner(2.0, -2.0));
         set_selected(&mut m, Domain::Point, a, true);
         assert!(select_shortest_path(&mut m, SelectMode::Vert, b));
         // Along the bottom edge: five vertices, four edges.
         assert_eq!(selected(&m, Domain::Point).len(), 5);
         assert_eq!(selected(&m, Domain::Edge).len(), 4);
-        assert!(selected(&m, Domain::Point).iter().all(|v| (p[*v as usize].y + 2.0).abs() < 1e-4));
+        assert!(selected(&m, Domain::Point)
+            .iter()
+            .all(|v| (p[*v as usize].y + 2.0).abs() < 1e-4));
 
         // Faces: from one corner face to the next along the row.
         select_none(&mut m);

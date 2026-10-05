@@ -82,7 +82,11 @@ pub fn markers_only(
         if !doc.is_shown(id) || only.is_some_and(|keep| !keep.contains(&id)) {
             continue;
         }
-        let color = if doc.selection.contains(id) { accent } else { dim };
+        let color = if doc.selection.contains(id) {
+            accent
+        } else {
+            dim
+        };
         let transform = doc.world_transform(id);
         match &object.data {
             ObjectData::Light(light) => {
@@ -131,14 +135,20 @@ fn armature_glyph(
     lines: &mut Vec<OverlayLine>,
     points: &mut Vec<OverlayPoint>,
 ) {
-    let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else { return };
+    let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else {
+        return;
+    };
     // In pose and edit mode an unselected bone is a darker grey than the
     // object colour, so the selected ones and the white active one stand out
     // against it — the light grey everything else wears was too close to
     // white to tell the active bone from the rest.
     // Through the palette's conversion like every other mark: a raw number
     // here is read as linear light and comes out half again as bright.
-    let dim = if how == Bones::Object { dim } else { palette::display_rgba(0x5A_5C_63) };
+    let dim = if how == Bones::Object {
+        dim
+    } else {
+        palette::display_rgba(0x5A_5C_63)
+    };
     // Edit mode shows the skeleton as built, which is what is being edited;
     // the others show it as it stands.
     let frames = if how == Bones::Edit {
@@ -169,10 +179,16 @@ fn armature_glyph(
     }
     for (i, (bone, frame)) in armature.bones.iter().zip(&frames).enumerate() {
         let tint = if how == Bones::Edit {
-            if armature.bone_selected(i) { accent } else { dim }
+            if armature.bone_selected(i) {
+                accent
+            } else {
+                dim
+            }
         } else if how == Bones::Object {
             color
-        } else if o.pose.active.as_deref() == Some(bone.name.as_str()) && o.pose.is_selected(&bone.name) {
+        } else if o.pose.active.as_deref() == Some(bone.name.as_str())
+            && o.pose.is_selected(&bone.name)
+        {
             [1.0, 1.0, 1.0, 1.0]
         } else if o.pose.is_selected(&bone.name) {
             accent
@@ -343,7 +359,10 @@ mod armature_tests {
     fn a_bone_is_twelve_lines_and_pose_mode_colours_by_bone() {
         let mut doc = Document::new();
         let a = doc.add_armature(kreate_scene::armature::Armature::new("Rig"));
-        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        let rig = doc.add_object(kreate_scene::document::Object::new(
+            "Rig",
+            ObjectData::Armature(a),
+        ));
         let (lines, _) = markers_for(&doc);
         assert_eq!(lines.len(), 12);
         // The tail is a unit up: the bone stands on its head.
@@ -352,9 +371,15 @@ mod armature_tests {
         doc.object_mut(rig).unwrap().pose.entry("Bone").selected = true;
         let accent = palette::display_rgba(palette::ACCENT);
         let (unposed, _) = markers_posing(&doc, None);
-        assert!(unposed.iter().all(|l| l.color != accent), "an unselected armature looks selected");
+        assert!(
+            unposed.iter().all(|l| l.color != accent),
+            "an unselected armature looks selected"
+        );
         let (posed, _) = markers_posing(&doc, Some(rig));
-        assert!(posed.iter().all(|l| l.color == accent), "a selected bone does not say so");
+        assert!(
+            posed.iter().all(|l| l.color == accent),
+            "a selected bone does not say so"
+        );
     }
 
     #[test]
@@ -371,13 +396,32 @@ mod armature_tests {
         });
         let mut doc = Document::new();
         let a = doc.add_armature(arm);
-        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        let rig = doc.add_object(kreate_scene::document::Object::new(
+            "Rig",
+            ObjectData::Armature(a),
+        ));
         // A pose that edit mode must not show.
-        doc.object_mut(rig).unwrap().pose.entry("Bone").transform.translation = DVec3::X * 5.0;
+        doc.object_mut(rig)
+            .unwrap()
+            .pose
+            .entry("Bone")
+            .transform
+            .translation = DVec3::X * 5.0;
         let (lines, points) = markers_with(&doc, Some((rig, Bones::Edit)));
-        assert_eq!(points.len(), 3, "the shared joint was drawn twice, or not at all");
-        assert_eq!(points.iter().filter(|p| p.dot).count(), 1, "one joint is selected");
-        assert!(lines.iter().all(|l| l.a.x.abs() < 1.0), "edit mode drew the pose");
+        assert_eq!(
+            points.len(),
+            3,
+            "the shared joint was drawn twice, or not at all"
+        );
+        assert_eq!(
+            points.iter().filter(|p| p.dot).count(),
+            1,
+            "one joint is selected"
+        );
+        assert!(
+            lines.iter().all(|l| l.a.x.abs() < 1.0),
+            "edit mode drew the pose"
+        );
     }
 
     #[test]
@@ -387,7 +431,10 @@ mod armature_tests {
         arm.in_front = true;
         let mut doc = Document::new();
         let a = doc.add_armature(arm);
-        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", ObjectData::Armature(a)));
+        let rig = doc.add_object(kreate_scene::document::Object::new(
+            "Rig",
+            ObjectData::Armature(a),
+        ));
         let (lines, _) = markers_for(&doc);
         assert_eq!(lines.len(), 1);
         let (lines, points) = markers_with(&doc, Some((rig, Bones::Edit)));
@@ -417,7 +464,11 @@ mod tests {
         assert_eq!(points[0].shape, MarkerShape::Ring);
         assert_eq!(lines.len(), 1, "one line, to the ground");
         assert!(lines[0].dashed);
-        assert_eq!(lines[0].b, DVec3::new(1.0, 2.0, 0.0), "the foot is straight below");
+        assert_eq!(
+            lines[0].b,
+            DVec3::new(1.0, 2.0, 0.0),
+            "the foot is straight below"
+        );
     }
 
     #[test]

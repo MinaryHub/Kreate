@@ -30,7 +30,10 @@ pub fn driver_target(object_uid: u64, property: &str, index: u8) -> String {
 
 /// Where a target's driver is: the object, and the driver's place on it —
 /// `None` for a component nothing drives yet.
-fn find(doc: &Document, target: &str) -> Option<(kreate_scene::ObjectId, String, u8, Option<usize>)> {
+fn find(
+    doc: &Document,
+    target: &str,
+) -> Option<(kreate_scene::ObjectId, String, u8, Option<usize>)> {
     let (uid, property, index) = super::anim::parse_curve(target)?;
     if !DRIVABLE.contains(&property.as_str()) || index > 2 {
         return None;
@@ -82,7 +85,11 @@ impl Operator for AddDriver {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some((object, property, index, None)) = find(doc.document(), &params.target) else {
             return Ok(OpResult::Cancelled);
         };
@@ -121,7 +128,11 @@ impl Operator for RemoveDriver {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some((object, _, _, Some(at))) = find(doc.document(), &params.target) else {
             return Ok(OpResult::Cancelled);
         };
@@ -157,9 +168,14 @@ impl Operator for SetDriverExpression {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let unchanged = find(doc.document(), &params.target)
-            .and_then(|(o, _, _, at)| Some(doc.document().object(o)?.drivers.get(at?)?.expression == params.expression));
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let unchanged = find(doc.document(), &params.target).and_then(|(o, _, _, at)| {
+            Some(doc.document().object(o)?.drivers.get(at?)?.expression == params.expression)
+        });
         if unchanged != Some(false) {
             return Ok(OpResult::Cancelled);
         }
@@ -185,7 +201,11 @@ impl Operator for AddDriverVariable {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(d) = driver_mut(doc, &params.target) else {
             return Ok(OpResult::Cancelled);
         };
@@ -232,7 +252,11 @@ impl Operator for SetDriverVariable {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let target = match params.object.trim() {
             "" => Uid::NONE,
             text => match text.parse::<u64>() {
@@ -281,7 +305,11 @@ impl Operator for RemoveDriverVariable {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         any_object(doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(d) = driver_mut(doc, &params.target) else {
             return Ok(OpResult::Cancelled);
         };

@@ -264,7 +264,9 @@ pub fn property_editor_full(
             for desc in schema.iter().filter(|d| !d.hidden && keep(d.name)) {
                 let (name, tip) = labels(catalog, op_id, desc);
                 let field_menu = menu(desc.name);
-                let driven = field_menu.as_ref().is_some_and(|m| m.driven.iter().any(|d| *d));
+                let driven = field_menu
+                    .as_ref()
+                    .is_some_and(|m| m.driven.iter().any(|d| *d));
                 let label = if driven {
                     ui.label(egui::RichText::new(name).color(DRIVEN))
                 } else {
@@ -289,7 +291,11 @@ pub fn property_editor_full(
                     match mark(desc.name) {
                         Some(m) => {
                             let response = key_diamond(ui, m);
-                            let response = if key_tip.is_empty() { response } else { response.on_hover_text(key_tip) };
+                            let response = if key_tip.is_empty() {
+                                response
+                            } else {
+                                response.on_hover_text(key_tip)
+                            };
                             if response.clicked() {
                                 out.keyed = Some(desc.name);
                             }
@@ -311,7 +317,11 @@ pub fn property_editor_full(
 }
 
 /// The right-click menu of one field.
-fn field_context_menu(response: &egui::Response, m: &FieldMenu, text: &FieldMenuText) -> Option<FieldAction> {
+fn field_context_menu(
+    response: &egui::Response,
+    m: &FieldMenu,
+    text: &FieldMenuText,
+) -> Option<FieldAction> {
     let mut chosen = None;
     response.context_menu(|ui| {
         if m.animatable {
@@ -319,7 +329,10 @@ fn field_context_menu(response: &egui::Response, m: &FieldMenu, text: &FieldMenu
                 chosen = Some(FieldAction::InsertKey);
                 ui.close();
             }
-            if ui.add_enabled(m.keyed_here, egui::Button::new(&text.delete_key)).clicked() {
+            if ui
+                .add_enabled(m.keyed_here, egui::Button::new(&text.delete_key))
+                .clicked()
+            {
                 chosen = Some(FieldAction::DeleteKey);
                 ui.close();
             }
@@ -329,11 +342,18 @@ fn field_context_menu(response: &egui::Response, m: &FieldMenu, text: &FieldMenu
             let one = m.driven.len() == 1;
             let name = |i: usize, base: &str| {
                 // i18n-exempt: a translated verb and a component's letter
-                if one { base.to_string() } else { format!("{base} ({})", text.components[i.min(3)]) }
+                if one {
+                    base.to_string()
+                } else {
+                    format!("{base} ({})", text.components[i.min(3)])
+                }
             };
             for (i, driven) in m.driven.iter().enumerate() {
                 let (label, action) = if *driven {
-                    (name(i, &text.remove_driver), FieldAction::RemoveDriver(i as u8))
+                    (
+                        name(i, &text.remove_driver),
+                        FieldAction::RemoveDriver(i as u8),
+                    )
                 } else {
                     (name(i, &text.add_driver), FieldAction::AddDriver(i as u8))
                 };
@@ -371,9 +391,16 @@ fn key_diamond(ui: &mut Ui, mark: KeyMark) -> egui::Response {
     let (fill, stroke) = match mark {
         KeyMark::Keyed => (theme.accent, theme.accent),
         KeyMark::Animated => (theme.text_dim, theme.text_dim),
-        KeyMark::None => (egui::Color32::TRANSPARENT, if hover { theme.text } else { theme.text_faint }),
+        KeyMark::None => (
+            egui::Color32::TRANSPARENT,
+            if hover { theme.text } else { theme.text_faint },
+        ),
     };
-    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(1.2, stroke)));
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        fill,
+        egui::Stroke::new(1.2, stroke),
+    ));
     response
 }
 

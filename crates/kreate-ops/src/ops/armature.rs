@@ -74,7 +74,13 @@ pub fn pivot(doc: &Document) -> Option<DVec3> {
     let world = doc.world_transform(object);
     let sum: DVec3 = ends
         .iter()
-        .map(|&(i, tail)| world.transform_point3(if tail { armature.bones[i].tail } else { armature.bones[i].head }))
+        .map(|&(i, tail)| {
+            world.transform_point3(if tail {
+                armature.bones[i].tail
+            } else {
+                armature.bones[i].head
+            })
+        })
         .sum();
     Some(sum / ends.len() as f64)
 }
@@ -88,16 +94,24 @@ fn edit_armature(
     doc: &mut DocMut<'_>,
     edit: impl FnOnce(&mut Armature, &DAffine3) -> bool,
 ) -> Result<OpResult, OpError> {
-    let Some(object) = edited_object(doc.document()) else { return Ok(OpResult::Cancelled) };
-    let Some((id, _)) = doc.document().armature_of(object) else { return Ok(OpResult::Cancelled) };
+    let Some(object) = edited_object(doc.document()) else {
+        return Ok(OpResult::Cancelled);
+    };
+    let Some((id, _)) = doc.document().armature_of(object) else {
+        return Ok(OpResult::Cancelled);
+    };
     let world = doc.document().world_transform(object);
-    let Some(armature) = doc.document().armature(id) else { return Ok(OpResult::Cancelled) };
+    let Some(armature) = doc.document().armature(id) else {
+        return Ok(OpResult::Cancelled);
+    };
     let mut edited = armature.clone();
     if !edit(&mut edited, &world) {
         return Ok(OpResult::Cancelled);
     }
     edited.reconnect();
-    let Some(a) = doc.document_mut().armature_mut(id) else { return Ok(OpResult::Cancelled) };
+    let Some(a) = doc.document_mut().armature_mut(id) else {
+        return Ok(OpResult::Cancelled);
+    };
     *a = edited;
     Ok(OpResult::Finished)
 }
@@ -114,7 +128,11 @@ fn move_ends(doc: &mut DocMut<'_>, change: impl Fn(DVec3) -> DVec3) -> Result<Op
             return false;
         }
         for (i, tail) in ends {
-            let p = if tail { &mut a.bones[i].tail } else { &mut a.bones[i].head };
+            let p = if tail {
+                &mut a.bones[i].tail
+            } else {
+                &mut a.bones[i].head
+            };
             *p = to_local.transform_point3(change(world.transform_point3(*p)));
         }
         true
@@ -152,7 +170,11 @@ impl Operator for SelectPick {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let part = match params.part {
             1 => Part::Head,
             2 => Part::Tail,
@@ -161,7 +183,9 @@ impl Operator for SelectPick {
         let name = params.bone.clone();
         let extend = params.extend;
         edit_armature(doc, move |a, _| {
-            let Some(i) = a.bone_index(&name) else { return false };
+            let Some(i) = a.bone_index(&name) else {
+                return false;
+            };
             let before = a.clone();
             let is_on = match part {
                 Part::Body => a.bone_selected(i),
@@ -218,7 +242,11 @@ impl Operator for SelectAll {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let action = params.action;
         edit_armature(doc, move |a, _| {
             let before = a.clone();
@@ -258,7 +286,11 @@ impl Operator for Translate {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = DVec3::from_array(params.translation);
         if !d.is_finite() {
             return Ok(OpResult::Cancelled);
@@ -289,11 +321,17 @@ impl Operator for Rotate {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         if !params.angle.is_finite() {
             return Ok(OpResult::Cancelled);
         }
-        let Some(centre) = pivot(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(centre) = pivot(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let axis = [DVec3::X, DVec3::Y, DVec3::Z][(params.axis as usize).min(2)];
         let q = DQuat::from_axis_angle(axis, params.angle);
         move_ends(doc, |p| centre + q * (p - centre))
@@ -325,12 +363,18 @@ impl Operator for Scale {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let s = DVec3::from_array(params.scale);
         if !s.is_finite() || s.min_element().abs() < 1e-9 {
             return Ok(OpResult::Cancelled);
         }
-        let Some(centre) = pivot(doc.document()) else { return Ok(OpResult::Cancelled) };
+        let Some(centre) = pivot(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         move_ends(doc, |p| centre + (p - centre) * s)
     }
 }
@@ -357,9 +401,15 @@ impl Operator for Extrude {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         edit_armature(doc, |a, _| {
-            let from: Vec<usize> = (0..a.bones.len()).filter(|i| a.bones[*i].select_tail).collect();
+            let from: Vec<usize> = (0..a.bones.len())
+                .filter(|i| a.bones[*i].select_tail)
+                .collect();
             if from.is_empty() {
                 return false;
             }
@@ -370,7 +420,11 @@ impl Operator for Extrude {
             for i in from {
                 let parent = a.bones[i].clone();
                 let dir = parent.tail - parent.head;
-                let step = if dir.length() > 1e-9 { dir * 0.5 } else { DVec3::Z * 0.5 };
+                let step = if dir.length() > 1e-9 {
+                    dir * 0.5
+                } else {
+                    DVec3::Z * 0.5
+                };
                 let name = a.unique_name(&parent.name);
                 a.add_bone(Bone {
                     name,
@@ -405,7 +459,11 @@ impl Operator for Delete {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         edit_armature(doc, |a, _| {
             let remove: Vec<bool> = (0..a.bones.len()).map(|i| a.bone_selected(i)).collect();
             // An armature with no bones is not a skeleton; the last one stays.
@@ -439,7 +497,11 @@ impl Operator for AddBone {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         in_edit_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let head = DVec3::from_array(params.head);
         if !head.is_finite() {
             return Ok(OpResult::Cancelled);
@@ -503,18 +565,28 @@ impl Operator for SetDisplay {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_armature(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((_, id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, id)) = active_armature(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let display = if params.display == 1 {
             kreate_scene::armature::BoneDisplay::Stick
         } else {
             kreate_scene::armature::BoneDisplay::Octahedral
         };
-        let Some(a) = doc.document().armature(id) else { return Ok(OpResult::Cancelled) };
+        let Some(a) = doc.document().armature(id) else {
+            return Ok(OpResult::Cancelled);
+        };
         if a.in_front == params.in_front && a.display == display {
             return Ok(OpResult::Cancelled);
         }
-        let Some(a) = doc.document_mut().armature_mut(id) else { return Ok(OpResult::Cancelled) };
+        let Some(a) = doc.document_mut().armature_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
         a.in_front = params.in_front;
         a.display = display;
         Ok(OpResult::Finished)
@@ -545,7 +617,10 @@ pub fn bone_params(armature: &Armature, bone: usize) -> Option<SetBoneParams> {
     Some(SetBoneParams {
         bone: b.name.clone(),
         name: b.name.clone(),
-        parent: b.parent.map(|p| armature.bones[p].name.clone()).unwrap_or_default(),
+        parent: b
+            .parent
+            .map(|p| armature.bones[p].name.clone())
+            .unwrap_or_default(),
         connected: b.connected,
         head: b.head.to_array(),
         tail: b.tail.to_array(),
@@ -571,12 +646,24 @@ impl Operator for SetBone {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_armature(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((_, id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Some(original) = doc.document().armature(id).cloned() else { return Ok(OpResult::Cancelled) };
-        let Some(i) = original.bone_index(&params.bone) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, id)) = active_armature(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(original) = doc.document().armature(id).cloned() else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(i) = original.bone_index(&params.bone) else {
+            return Ok(OpResult::Cancelled);
+        };
         let renaming = params.name != params.bone;
-        if renaming && (params.name.trim().is_empty() || original.bone_index(&params.name).is_some()) {
+        if renaming
+            && (params.name.trim().is_empty() || original.bone_index(&params.name).is_some())
+        {
             return Ok(OpResult::Cancelled);
         }
         let parent = match params.parent.as_str() {
@@ -586,7 +673,10 @@ impl Operator for SetBone {
                 _ => return Ok(OpResult::Cancelled),
             },
         };
-        let (head, tail) = (DVec3::from_array(params.head), DVec3::from_array(params.tail));
+        let (head, tail) = (
+            DVec3::from_array(params.head),
+            DVec3::from_array(params.tail),
+        );
         if !head.is_finite() || !tail.is_finite() || !params.roll.is_finite() {
             return Ok(OpResult::Cancelled);
         }
@@ -645,13 +735,21 @@ impl Operator for Bind {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_armature(doc).is_some() && !meshes_to_bind(doc).is_empty()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((rig, armature_id)) = active_armature(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((rig, armature_id)) = active_armature(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let meshes = meshes_to_bind(doc.document());
         if meshes.is_empty() {
             return Ok(OpResult::Cancelled);
         }
-        let Some(rig_uid) = doc.document().object_uid(rig) else { return Ok(OpResult::Cancelled) };
+        let Some(rig_uid) = doc.document().object_uid(rig) else {
+            return Ok(OpResult::Cancelled);
+        };
         let d = doc.document_mut();
         for object in meshes {
             // Refused only for a loop, which a mesh under an armature cannot
@@ -660,9 +758,14 @@ impl Operator for Bind {
             if d.set_parent(object, Some(rig)).is_err() {
                 continue;
             }
-            let Some(mesh_id) = d.object(object).and_then(|o| o.mesh()) else { continue };
+            let Some(mesh_id) = d.object(object).and_then(|o| o.mesh()) else {
+                continue;
+            };
             let to_armature = d.world_transform(rig).inverse() * d.world_transform(object);
-            let (Some(armature), Some(mesh)) = (d.armature(armature_id).cloned(), d.mesh(mesh_id)) else { continue };
+            let (Some(armature), Some(mesh)) = (d.armature(armature_id).cloned(), d.mesh(mesh_id))
+            else {
+                continue;
+            };
             let layers: Vec<(String, Vec<f32>)> = if params.weights == 0 {
                 kreate_scene::skin::automatic_weights(mesh, &armature, to_armature)
             } else {
@@ -697,7 +800,9 @@ fn meshes_to_bind(doc: &Document) -> Vec<ObjectId> {
         .objects
         .iter()
         .copied()
-        .filter(|id| Some(*id) != doc.selection.active && doc.object(*id).is_some_and(|o| o.mesh().is_some()))
+        .filter(|id| {
+            Some(*id) != doc.selection.active && doc.object(*id).is_some_and(|o| o.mesh().is_some())
+        })
         .collect()
 }
 
@@ -718,9 +823,16 @@ impl Operator for Unbind {
         "Remove Armature Deform"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        doc.selection.objects.iter().any(|id| doc.object(*id).is_some_and(|o| o.skin.is_some()))
+        doc.selection
+            .objects
+            .iter()
+            .any(|id| doc.object(*id).is_some_and(|o| o.skin.is_some()))
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let bound: Vec<ObjectId> = doc
             .document()
             .selection

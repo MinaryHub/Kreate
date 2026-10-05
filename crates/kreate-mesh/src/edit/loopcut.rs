@@ -332,7 +332,9 @@ pub fn preview(mesh: &BMesh, seed: EdgeId, position: f32) -> Vec<Vec3> {
 /// the opposite edge, stopping at anything that is not a quad or at an edge
 /// with other than two faces.
 pub fn ring_on(mesh: &crate::MeshData, seed: u32) -> (Vec<(u32, u32)>, bool) {
-    let Some(&[a, _]) = mesh.edges().get(seed as usize) else { return (Vec::new(), false) };
+    let Some(&[a, _]) = mesh.edges().get(seed as usize) else {
+        return (Vec::new(), false);
+    };
     let corner_edges = mesh.corner_edges();
     let mut faces_of: Vec<Vec<u32>> = vec![Vec::new(); mesh.num_edges() as usize];
     for f in 0..mesh.num_faces() {
@@ -348,7 +350,11 @@ pub fn ring_on(mesh: &crate::MeshData, seed: u32) -> (Vec<(u32, u32)>, bool) {
         }
         let verts = mesh.face_verts(face);
         let i = range.clone().position(|c| corner_edges[c] == edge)?;
-        let next_start = if verts[i] == start { verts[(i + 3) % 4] } else { verts[(i + 2) % 4] };
+        let next_start = if verts[i] == start {
+            verts[(i + 3) % 4]
+        } else {
+            verts[(i + 2) % 4]
+        };
         Some((corner_edges[range.start + (i + 2) % 4], next_start))
     };
     let mut forward = vec![(seed, a)];
@@ -359,7 +365,11 @@ pub fn ring_on(mesh: &crate::MeshData, seed: u32) -> (Vec<(u32, u32)>, bool) {
         return (forward, false);
     }
     for (side, &first) in seed_faces.iter().enumerate() {
-        let out = if side == 0 { &mut forward } else { &mut backward };
+        let out = if side == 0 {
+            &mut forward
+        } else {
+            &mut backward
+        };
         let (mut edge, mut start, mut face) = (seed, a, first);
         while let Some((next, next_start)) = step(edge, start, face) {
             if next == seed {
@@ -779,7 +789,10 @@ mod tests {
         // Every point sits a third of the way along a cube edge: two
         // coordinates at the cube's half size, one at a third between.
         for p in &lines[0] {
-            let on_face = [p.x, p.y, p.z].iter().filter(|c| (c.abs() - 1.0).abs() < 1e-5).count();
+            let on_face = [p.x, p.y, p.z]
+                .iter()
+                .filter(|c| (c.abs() - 1.0).abs() < 1e-5)
+                .count();
             assert_eq!(on_face, 2, "{p:?}");
         }
         // On an open grid the ring runs from border to border, both ways from

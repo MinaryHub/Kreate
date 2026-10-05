@@ -25,7 +25,10 @@ fn main() {
             })),
         };
         if let Some(reply) = reply {
-            if writeln!(stdout, "{reply}").and_then(|_| stdout.flush()).is_err() {
+            if writeln!(stdout, "{reply}")
+                .and_then(|_| stdout.flush())
+                .is_err()
+            {
                 break;
             }
         }

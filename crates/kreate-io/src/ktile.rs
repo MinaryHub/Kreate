@@ -322,7 +322,9 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Image, KtileError> {
         // exist for the shader in `kreate-math`'s AgX: a line that does nothing
         // where the tests run and everything where they do not.
         if entry.offset > bytes.len() as u64
-            || offset.checked_add(length).is_none_or(|end| end > bytes.len())
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > bytes.len())
         {
             return Err(KtileError::TileOutOfBounds { index: i });
         }
@@ -421,7 +423,12 @@ mod tests {
         let mut image = Image::new("Blank", 128, 128, PixelFormat::Rgba8);
         image.tile_mut(0, 0).expect("in range");
         assert_eq!(image.resident_tiles(), 1);
-        assert!(image.tile(0, 0).expect("resident").bytes().iter().all(|b| *b == 0));
+        assert!(image
+            .tile(0, 0)
+            .expect("resident")
+            .bytes()
+            .iter()
+            .all(|b| *b == 0));
 
         let back = read(&write(&image), "Blank").expect("reads");
         assert_eq!(
@@ -488,10 +495,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_one_is_refused_rather_than_read() {
         assert!(matches!(read(b"", "x"), Err(KtileError::Truncated { .. })));
-        assert!(matches!(
-            read(&[0u8; 64], "x"),
-            Err(KtileError::BadMagic)
-        ));
+        assert!(matches!(read(&[0u8; 64], "x"), Err(KtileError::BadMagic)));
     }
 
     #[test]
@@ -570,7 +574,10 @@ mod tests {
         let mut bytes = write(&patchy());
         let header: &mut Header = bytemuck::from_bytes_mut(&mut bytes[..HEADER_SIZE]);
         header.tile_edge = TILE * 2;
-        assert!(matches!(read(&bytes, "x"), Err(KtileError::TileSize { .. })));
+        assert!(matches!(
+            read(&bytes, "x"),
+            Err(KtileError::TileSize { .. })
+        ));
     }
 
     #[test]

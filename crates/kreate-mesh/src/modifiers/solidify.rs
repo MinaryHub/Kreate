@@ -22,7 +22,10 @@ pub struct SolidifyParams {
 
 impl Default for SolidifyParams {
     fn default() -> Self {
-        Self { thickness: 0.1, offset: -1.0 }
+        Self {
+            thickness: 0.1,
+            offset: -1.0,
+        }
     }
 }
 
@@ -40,7 +43,10 @@ pub fn solidify(input: &MeshData, params: &SolidifyParams) -> MeshData {
         let ring = input.face_verts(f);
         let mut face_normal = Vec3::ZERO;
         for i in 0..ring.len() {
-            let (a, b) = (positions[ring[i] as usize], positions[ring[(i + 1) % ring.len()] as usize]);
+            let (a, b) = (
+                positions[ring[i] as usize],
+                positions[ring[(i + 1) % ring.len()] as usize],
+            );
             face_normal += a.cross(b);
         }
         for v in ring {
@@ -64,7 +70,14 @@ pub fn solidify(input: &MeshData, params: &SolidifyParams) -> MeshData {
         faces.push(input.face_verts(f).to_vec());
     }
     for f in 0..input.num_faces() {
-        faces.push(input.face_verts(f).iter().rev().map(|v| inner(*v)).collect());
+        faces.push(
+            input
+                .face_verts(f)
+                .iter()
+                .rev()
+                .map(|v| inner(*v))
+                .collect(),
+        );
     }
     // The rim: every edge on exactly one face, walked the way that face walks
     // it, gets a quad back across to the inner shell.
@@ -95,11 +108,20 @@ mod tests {
 
     #[test]
     fn a_plane_becomes_a_closed_slab_of_the_thickness_asked_for() {
-        let slab = solidify(&primitives::plane(2.0), &SolidifyParams { thickness: 0.5, offset: -1.0 });
+        let slab = solidify(
+            &primitives::plane(2.0),
+            &SolidifyParams {
+                thickness: 0.5,
+                offset: -1.0,
+            },
+        );
         assert_eq!(slab.num_verts(), 8);
         assert_eq!(slab.num_faces(), 6, "two shells and four sides");
         let (lo, hi) = (slab.bounds().min, slab.bounds().max);
-        assert!((hi.z - 0.0).abs() < 1e-6 && (lo.z + 0.5).abs() < 1e-6, "{lo:?} {hi:?}");
+        assert!(
+            (hi.z - 0.0).abs() < 1e-6 && (lo.z + 0.5).abs() < 1e-6,
+            "{lo:?} {hi:?}"
+        );
         // Closed: every edge on two faces.
         let mut uses = std::collections::HashMap::new();
         for f in 0..slab.num_faces() {
@@ -114,8 +136,17 @@ mod tests {
 
     #[test]
     fn a_closed_mesh_gets_no_rim_and_offset_moves_the_shells() {
-        let shell = solidify(&primitives::cube(2.0), &SolidifyParams { thickness: 0.2, offset: 1.0 });
+        let shell = solidify(
+            &primitives::cube(2.0),
+            &SolidifyParams {
+                thickness: 0.2,
+                offset: 1.0,
+            },
+        );
         assert_eq!(shell.num_faces(), 12);
-        assert!(shell.bounds().max.x > 1.05, "offset 1 did not grow outwards");
+        assert!(
+            shell.bounds().max.x > 1.05,
+            "offset 1 did not grow outwards"
+        );
     }
 }

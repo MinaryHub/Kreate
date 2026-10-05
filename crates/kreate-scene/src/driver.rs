@@ -70,7 +70,12 @@ pub struct DriverVariable {
 
 impl DriverVariable {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), target: Uid::NONE, property: "location".into(), index: 0 }
+        Self {
+            name: name.into(),
+            target: Uid::NONE,
+            property: "location".into(),
+            index: 0,
+        }
     }
 }
 
@@ -79,11 +84,17 @@ impl DriverVariable {
 pub enum DriverError {
     Expression(ExprError),
     /// A variable points at nothing, or at an object that is gone.
-    NoTarget { variable: String },
+    NoTarget {
+        variable: String,
+    },
     /// A variable reads a property that is not a transform's.
-    BadProperty { variable: String },
+    BadProperty {
+        variable: String,
+    },
     /// A variable's name is not one an expression can say.
-    BadName { variable: String },
+    BadName {
+        variable: String,
+    },
 }
 
 impl std::fmt::Display for DriverError {
@@ -91,7 +102,9 @@ impl std::fmt::Display for DriverError {
         match self {
             DriverError::Expression(e) => write!(f, "{e}"),
             DriverError::NoTarget { variable } => write!(f, "'{variable}' reads nothing"),
-            DriverError::BadProperty { variable } => write!(f, "'{variable}' reads no such property"),
+            DriverError::BadProperty { variable } => {
+                write!(f, "'{variable}' reads no such property")
+            }
             DriverError::BadName { variable } => write!(f, "'{variable}' is not a name"),
         }
     }
@@ -100,7 +113,9 @@ impl std::fmt::Display for DriverError {
 /// Whether `name` can appear in an expression as a variable.
 pub fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !expression::FUNCTIONS.iter().any(|(f, _)| *f == name)
 }
@@ -115,21 +130,31 @@ impl Document {
         let mut values = Vec::with_capacity(driver.variables.len());
         for v in &driver.variables {
             if !is_name(&v.name) {
-                return Err(DriverError::BadName { variable: v.name.clone() });
+                return Err(DriverError::BadName {
+                    variable: v.name.clone(),
+                });
             }
             let source = self
                 .object_by_uid(v.target)
                 .filter(|_| v.target != Uid::NONE)
                 .and_then(|id| self.object(id))
-                .ok_or_else(|| DriverError::NoTarget { variable: v.name.clone() })?;
+                .ok_or_else(|| DriverError::NoTarget {
+                    variable: v.name.clone(),
+                })?;
             let value = crate::animation::read_object(&source.transform, &v.property)
                 .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
-                .ok_or_else(|| DriverError::BadProperty { variable: v.name.clone() })?;
+                .ok_or_else(|| DriverError::BadProperty {
+                    variable: v.name.clone(),
+                })?;
             values.push((v.name.as_str(), value));
         }
         let frame = self.playback.frame;
         expression::evaluate(&driver.expression, &|n| {
-            values.iter().find(|(name, _)| *name == n).map(|(_, v)| *v).or((n == "frame").then_some(frame))
+            values
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, v)| *v)
+                .or((n == "frame").then_some(frame))
         })
         .map_err(DriverError::Expression)
     }
@@ -146,9 +171,14 @@ impl Document {
         for object in order {
             let count = self.object(object).map(|o| o.drivers.len()).unwrap_or(0);
             for i in 0..count {
-                let Ok(value) = self.evaluate_driver(object, i) else { continue };
-                let Some(o) = self.object_untouched_mut(object) else { continue };
-                let (property, index) = (o.drivers[i].property.clone(), o.drivers[i].index as usize);
+                let Ok(value) = self.evaluate_driver(object, i) else {
+                    continue;
+                };
+                let Some(o) = self.object_untouched_mut(object) else {
+                    continue;
+                };
+                let (property, index) =
+                    (o.drivers[i].property.clone(), o.drivers[i].index as usize);
                 if index > 2 {
                     continue;
                 }
@@ -187,17 +217,25 @@ impl Document {
     /// Driven objects with each after the objects it reads, then those in
     /// loops; and the ones in loops.
     fn driver_order(&self) -> (Vec<ObjectId>, Vec<ObjectId>) {
-        let driven: Vec<ObjectId> =
-            self.objects().filter(|(_, o)| !o.drivers.is_empty()).map(|(id, _)| id).collect();
+        let driven: Vec<ObjectId> = self
+            .objects()
+            .filter(|(_, o)| !o.drivers.is_empty())
+            .map(|(id, _)| id)
+            .collect();
         // What each driven object reads that is itself driven: the only edges
         // that constrain the order.
         let reads = |id: ObjectId| -> Vec<ObjectId> {
-            let Some(o) = self.object(id) else { return Vec::new() };
+            let Some(o) = self.object(id) else {
+                return Vec::new();
+            };
             let mut out: Vec<ObjectId> = o
                 .drivers
                 .iter()
                 .flat_map(|d| d.variables.iter())
-                .filter_map(|v| self.object_by_uid(v.target).filter(|_| v.target != Uid::NONE))
+                .filter_map(|v| {
+                    self.object_by_uid(v.target)
+                        .filter(|_| v.target != Uid::NONE)
+                })
                 .filter(|t| *t != id && driven.contains(t))
                 .collect();
             out.sort_unstable_by_key(|t| driven.iter().position(|d| d == t));
@@ -219,7 +257,11 @@ impl Document {
                 break;
             }
         }
-        let cycles: Vec<ObjectId> = driven.iter().copied().filter(|id| !done.contains(id)).collect();
+        let cycles: Vec<ObjectId> = driven
+            .iter()
+            .copied()
+            .filter(|id| !done.contains(id))
+            .collect();
         done.extend(cycles.iter().copied());
         (done, cycles)
     }
@@ -232,12 +274,26 @@ mod tests {
 
     fn doc_with(names: &[&str]) -> (Document, Vec<ObjectId>) {
         let mut doc = Document::new();
-        let ids = names.iter().map(|n| doc.add_object(Object::new(*n, ObjectData::Empty))).collect();
+        let ids = names
+            .iter()
+            .map(|n| doc.add_object(Object::new(*n, ObjectData::Empty)))
+            .collect();
         (doc, ids)
     }
 
-    fn var(doc: &Document, name: &str, target: ObjectId, property: &str, index: u8) -> DriverVariable {
-        DriverVariable { name: name.into(), target: doc.object_uid(target).unwrap(), property: property.into(), index }
+    fn var(
+        doc: &Document,
+        name: &str,
+        target: ObjectId,
+        property: &str,
+        index: u8,
+    ) -> DriverVariable {
+        DriverVariable {
+            name: name.into(),
+            target: doc.object_uid(target).unwrap(),
+            property: property.into(),
+            index,
+        }
     }
 
     #[test]
@@ -252,7 +308,11 @@ mod tests {
         assert_eq!(doc.drive(), 1);
         let z = crate::animation::to_euler(doc.object(ids[1]).unwrap().transform.rotation).z;
         assert!((z - 1.1).abs() < 1e-9, "the door turned to {z}");
-        assert_eq!(doc.drive(), 0, "a second run with nothing changed moved something");
+        assert_eq!(
+            doc.drive(),
+            0,
+            "a second run with nothing changed moved something"
+        );
     }
 
     #[test]
@@ -294,7 +354,12 @@ mod tests {
         doc.object_mut(ids[0]).unwrap().drivers.push(d);
         assert_eq!(doc.drive(), 0);
         assert_eq!(doc.object(ids[0]).unwrap().transform.translation.y, 4.0);
-        assert_eq!(doc.evaluate_driver(ids[0], 0), Err(DriverError::NoTarget { variable: "x".into() }));
+        assert_eq!(
+            doc.evaluate_driver(ids[0], 0),
+            Err(DriverError::NoTarget {
+                variable: "x".into()
+            })
+        );
         doc.object_mut(ids[0]).unwrap().drivers[0].variables.clear();
         assert_eq!(
             doc.evaluate_driver(ids[0], 0),
@@ -309,6 +374,9 @@ mod tests {
         assert!(!is_name("2x"));
         assert!(!is_name("a b"));
         assert!(!is_name(""));
-        assert!(!is_name("sin"), "a function's name would be shadowed by the call");
+        assert!(
+            !is_name("sin"),
+            "a function's name would be shadowed by the call"
+        );
     }
 }

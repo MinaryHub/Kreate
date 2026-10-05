@@ -240,10 +240,7 @@ impl GpuLight {
         // non-uniformly scaled parent arrives slightly off unit length, and a
         // direction that is not unit length makes a spot's cone the wrong
         // width rather than making anything obviously wrong.
-        let direction = light
-            .direction
-            .try_normalize()
-            .unwrap_or(glam::Vec3::NEG_Z);
+        let direction = light.direction.try_normalize().unwrap_or(glam::Vec3::NEG_Z);
 
         // A cone of "none" is a cosine of -1, which is the whole sphere: the
         // same arithmetic lights a point light fully, with no branch in the hot
@@ -294,9 +291,7 @@ impl GpuLight {
                 // because the second reading turns a nonsense number into an
                 // unlit scene and the first into a slow one.
                 match light.range {
-                    Some(r) if r > 0.0 && light.falloff != Falloff::Parallel => {
-                        1.0 / (r * r)
-                    }
+                    Some(r) if r > 0.0 && light.falloff != Falloff::Parallel => 1.0 / (r * r),
                     _ => 0.0,
                 },
             ],
@@ -317,10 +312,10 @@ impl GpuLight {
     /// units are photometric.
     pub fn illuminance_at(&self, at: glam::Vec3) -> [f32; 3] {
         // Against `Falloff::id` rather than a literal, so the wire format has
-            // one authority. A second copy of the number here would be a place
-            // for the CPU reference to disagree with what was packed — and this
-            // function *is* the reference the shader is held to.
-            let parallel = Falloff::Parallel.id();
+        // one authority. A second copy of the number here would be a place
+        // for the CPU reference to disagree with what was packed — and this
+        // function *is* the reference the shader is held to.
+        let parallel = Falloff::Parallel.id();
         let (attenuation, to_light) = match self.falloff {
             // Parallel: no distance term, and the direction is the light's own.
             f if f == parallel => (1.0, -glam::Vec3::from_slice(&self.direction[..3])),
@@ -342,10 +337,7 @@ impl GpuLight {
                 // and flat at both ends so neither the middle nor the edge
                 // shows a crease.
                 let window = window(distance_squared, self.amount[3]);
-                (
-                    window / distance_squared,
-                    offset / distance_squared.sqrt(),
-                )
+                (window / distance_squared, offset / distance_squared.sqrt())
             }
         };
 
@@ -444,9 +436,9 @@ impl Lights {
             queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&packed));
         }
         // The buffer is not shrunk, so the slots past `count` still hold the
-            // lights of an earlier frame. `count` is the only thing that says
-            // where the live ones end, which is why a consumer must loop to it
-            // rather than to the buffer's length.
+        // lights of an earlier frame. `count` is the only thing that says
+        // where the live ones end, which is why a consumer must loop to it
+        // rather than to the buffer's length.
         self.count = packed.len() as u32;
         self.count
     }
@@ -514,7 +506,6 @@ pub fn library_source() -> &'static str {
         None => panic!("the probe marker is gone from this shader"),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -677,7 +668,10 @@ mod tests {
         let bright = cull_range(4000.0, black);
         assert!((bright / dim - 2.0).abs() < 1e-3, "{bright} against {dim}");
 
-        let opened = cull_range(1000.0, kreate_math::DisplayTransform::agx(-6.0).black_radiance());
+        let opened = cull_range(
+            1000.0,
+            kreate_math::DisplayTransform::agx(-6.0).black_radiance(),
+        );
         assert!(opened > dim * 7.0, "{opened} against {dim}");
     }
 
@@ -714,7 +708,10 @@ mod tests {
         // What the naive path would have produced, for contrast: the two metres
         // do not survive being written down as an absolute f32.
         let naive = (far + 2.0) as f32 - far as f32;
-        assert_eq!(naive, 0.0, "the two metres survived, so this proves nothing");
+        assert_eq!(
+            naive, 0.0,
+            "the two metres survived, so this proves nothing"
+        );
     }
 
     #[test]

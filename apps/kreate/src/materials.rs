@@ -37,12 +37,15 @@ impl Materials {
     /// Compiles every material in the document, plus the default at zero.
     pub fn compile(doc: &Document) -> Self {
         // The default first, so its index is zero whatever else happens.
-        let mut compiled = vec![compile_one(doc, &ShaderGraph::standard(
-            "Default",
-            kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
-            0.0,
-            0.5,
-        ))];
+        let mut compiled = vec![compile_one(
+            doc,
+            &ShaderGraph::standard(
+                "Default",
+                kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+                0.0,
+                0.5,
+            ),
+        )];
         let mut index = std::collections::HashMap::new();
         for (id, material) in doc.materials() {
             index.insert(id, compiled.len() as u32);
@@ -74,7 +77,10 @@ impl Materials {
     /// fields, which is what its graph was built from unless it has one.
     ///
     /// With the images they read, which the surfaces name by position.
-    pub fn flat_surfaces(&self, doc: &Document) -> (Vec<kreate_render::pathtrace::PtSurface>, Vec<TextureImage>) {
+    pub fn flat_surfaces(
+        &self,
+        doc: &Document,
+    ) -> (Vec<kreate_render::pathtrace::PtSurface>, Vec<TextureImage>) {
         let default = kreate_render::pathtrace::PtSurface {
             base_color: [0.8, 0.8, 0.8],
             metallic: 0.0,
@@ -83,7 +89,9 @@ impl Materials {
         };
         let mut out = vec![default; self.compiled.len()];
         let mut images: Vec<TextureImage> = Vec::new();
-        let mut take = |id: Option<kreate_scene::document::ImageId>, space: kreate_scene::ColorSpace| -> Option<usize> {
+        let mut take = |id: Option<kreate_scene::document::ImageId>,
+                        space: kreate_scene::ColorSpace|
+         -> Option<usize> {
             let image = doc.image(id?)?;
             images.push(TextureImage {
                 width: image.width(),
@@ -103,7 +111,10 @@ impl Materials {
                     metallic: m.metallic,
                     roughness: m.roughness,
                     base_color_image: take(m.base_color_image, kreate_scene::ColorSpace::Srgb),
-                    metallic_roughness_image: take(m.metallic_roughness_image, kreate_scene::ColorSpace::Raw),
+                    metallic_roughness_image: take(
+                        m.metallic_roughness_image,
+                        kreate_scene::ColorSpace::Raw,
+                    ),
                     emission: graph_emission(m),
                     transmission: graph_glass(m).0,
                     ior: graph_glass(m).1,
@@ -309,7 +320,10 @@ mod tests {
         assert!(materials.compiled.iter().all(|c| &c.wgsl == first));
         // And the numbers really do differ, or the claim above is about
         // nothing.
-        assert_ne!(materials.compiled[1].constants, materials.compiled[2].constants);
+        assert_ne!(
+            materials.compiled[1].constants,
+            materials.compiled[2].constants
+        );
     }
 
     #[test]
@@ -485,7 +499,9 @@ fn graph_glass(m: &kreate_scene::Material) -> (f32, f32) {
         .as_ref()
         .and_then(|g| g.output().map(|o| &g.nodes[o].kind))
         .and_then(|k| match k {
-            kreate_scene::shader::NodeKind::Surface { transmission, ior, .. } => Some((*transmission, *ior)),
+            kreate_scene::shader::NodeKind::Surface {
+                transmission, ior, ..
+            } => Some((*transmission, *ior)),
             _ => None,
         })
         .unwrap_or((m.transmission, m.ior))

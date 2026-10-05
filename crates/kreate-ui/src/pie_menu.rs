@@ -111,35 +111,58 @@ impl PieState {
 const HOLD: f64 = 0.25;
 
 /// Draws the open pie, if any. Returns the chosen entry's index.
-pub fn pie_menu(ctx: &egui::Context, state: &mut PieState, title: &str, items: &[PieItem]) -> Option<usize> {
+pub fn pie_menu(
+    ctx: &egui::Context,
+    state: &mut PieState,
+    title: &str,
+    items: &[PieItem],
+) -> Option<usize> {
     let open = state.open.clone()?;
     let now = ctx.input(|i| i.time);
     let pointer = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(open.center);
     let hovered = slot_at(open.center, pointer, items.len());
 
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pie")));
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("pie"),
+    ));
     let theme = crate::theme::of(ctx);
     let radius = 110.0;
     // The centre: a ring, and a line toward where the pointer points, so the
     // direction being read is visible before anything is chosen.
-    painter.circle_stroke(open.center, DEAD_ZONE, Stroke::new(2.0, theme.border_strong));
+    painter.circle_stroke(
+        open.center,
+        DEAD_ZONE,
+        Stroke::new(2.0, theme.border_strong),
+    );
     if hovered.is_some() {
         let toward = (pointer - open.center).normalized();
         painter.line_segment(
-            [open.center + toward * (DEAD_ZONE - 4.0), open.center + toward * (DEAD_ZONE + 6.0)],
+            [
+                open.center + toward * (DEAD_ZONE - 4.0),
+                open.center + toward * (DEAD_ZONE + 6.0),
+            ],
             Stroke::new(3.0, theme.accent),
         );
     }
     let font = egui::FontId::proportional(13.0);
     // The title on a backing of its own: a pie opens wherever the pointer
     // is, often over a white model, and faint text on white is no text.
-    let heading = painter.layout_no_wrap(title.to_string(), egui::FontId::proportional(11.0), theme.text_dim);
+    let heading = painter.layout_no_wrap(
+        title.to_string(),
+        egui::FontId::proportional(11.0),
+        theme.text_dim,
+    );
     let backing = Rect::from_center_size(
         open.center + Vec2::new(0.0, -DEAD_ZONE - 14.0),
         heading.size() + Vec2::new(12.0, 4.0),
     );
     painter.rect_filled(backing, theme.radius, theme.base);
-    painter.galley(backing.center() - heading.size() / 2.0, heading, theme.text_dim);
+    painter.galley(
+        backing.center() - heading.size() / 2.0,
+        heading,
+        theme.text_dim,
+    );
     for (slot, item) in items.iter().enumerate().take(MAX_SLOTS) {
         let at = open.center + slot_direction(slot) * radius;
         let galley = painter.layout_no_wrap(item.label.clone(), font.clone(), theme.text);
@@ -147,7 +170,11 @@ pub fn pie_menu(ctx: &egui::Context, state: &mut PieState, title: &str, items: &
         // Anchored on the side facing the centre, so a long label grows
         // outward instead of across its neighbour.
         let d = slot_direction(slot);
-        let outward = if d.x.abs() > 0.3 { d.x.signum() * size.x / 2.0 } else { 0.0 };
+        let outward = if d.x.abs() > 0.3 {
+            d.x.signum() * size.x / 2.0
+        } else {
+            0.0
+        };
         let rect = Rect::from_center_size(at + Vec2::new(outward, 0.0), size);
         let lit = hovered == Some(slot) && item.enabled;
         let fill = if lit {
@@ -158,7 +185,12 @@ pub fn pie_menu(ctx: &egui::Context, state: &mut PieState, title: &str, items: &
             theme.raised
         };
         painter.rect_filled(rect, theme.radius, fill);
-        painter.rect_stroke(rect, theme.radius, Stroke::new(1.0, theme.border), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            theme.radius,
+            Stroke::new(1.0, theme.border),
+            egui::StrokeKind::Inside,
+        );
         let colour = if !item.enabled {
             theme.text_faint
         } else if lit {

@@ -19,7 +19,9 @@
 //! object would be a different operation and a surprising default: the user is
 //! looking at one stack.
 
-use kreate_mesh::modifiers::{ArrayParams, BevelParams, BooleanOp, MirrorParams, SolidifyParams, SubdivideParams};
+use kreate_mesh::modifiers::{
+    ArrayParams, BevelParams, BooleanOp, MirrorParams, SolidifyParams, SubdivideParams,
+};
 use kreate_ops_derive::OpParams;
 use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
 use kreate_scene::{DocMut, Document, ObjectId};
@@ -27,7 +29,14 @@ use kreate_scene::{DocMut, Document, ObjectId};
 use crate::operator::{Context, OpError, OpResult, Operator};
 
 /// The modifier kinds, in the order the "add" menu offers them.
-pub const KINDS: &[&str] = &["mirror", "subdivide", "array", "solidify", "bevel", "boolean"];
+pub const KINDS: &[&str] = &[
+    "mirror",
+    "subdivide",
+    "array",
+    "solidify",
+    "bevel",
+    "boolean",
+];
 
 fn kind_of(index: u32) -> ModifierKind {
     match index {
@@ -179,7 +188,9 @@ impl Operator for Apply {
             return Ok(OpResult::Cancelled);
         };
         if d.mesh_users(mesh) > 1 {
-            return Err(OpError::Failed("a mesh used by more than one object cannot have a modifier applied".into()));
+            return Err(OpError::Failed(
+                "a mesh used by more than one object cannot have a modifier applied".into(),
+            ));
         }
         let Some(result) = kreate_scene::modifier::apply_one(d, id, params.index as usize) else {
             return Ok(OpResult::Cancelled);
@@ -188,7 +199,10 @@ impl Operator for Apply {
         if let Some(m) = d.mesh_mut(mesh) {
             *m = result;
         }
-        d.object_mut(id).expect("target checked").modifiers.remove(params.index as usize);
+        d.object_mut(id)
+            .expect("target checked")
+            .modifiers
+            .remove(params.index as usize);
         Ok(OpResult::Finished)
     }
 }
@@ -295,7 +309,11 @@ impl Operator for Move {
 /// The panel edits this and hands it straight back to the operator, so the
 /// values shown are the values applied — there is no third representation to
 /// drift out of step.
-pub fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> crate::property::PropertyMap {
+pub fn setter_params(
+    doc: &Document,
+    index: u32,
+    kind: &ModifierKind,
+) -> crate::property::PropertyMap {
     let mut p = crate::property::PropertyMap::new();
     p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
     match kind {
@@ -309,17 +327,35 @@ pub fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> crate::
             );
         }
         ModifierKind::Subdivide(sub) => {
-            p.set("levels", kreate_reflect::PropertyValue::Int(sub.levels as i64));
+            p.set(
+                "levels",
+                kreate_reflect::PropertyValue::Int(sub.levels as i64),
+            );
             p.set("smooth", kreate_reflect::PropertyValue::Bool(sub.smooth));
         }
         ModifierKind::Solidify(s) => {
-            p.set("thickness", kreate_reflect::PropertyValue::Float(s.thickness as f64));
-            p.set("offset", kreate_reflect::PropertyValue::Float(s.offset as f64));
+            p.set(
+                "thickness",
+                kreate_reflect::PropertyValue::Float(s.thickness as f64),
+            );
+            p.set(
+                "offset",
+                kreate_reflect::PropertyValue::Float(s.offset as f64),
+            );
         }
         ModifierKind::Bevel(b) => {
-            p.set("width", kreate_reflect::PropertyValue::Float(b.width as f64));
-            p.set("angle", kreate_reflect::PropertyValue::Float(b.angle as f64));
-            p.set("segments", kreate_reflect::PropertyValue::Int(b.segments as i64));
+            p.set(
+                "width",
+                kreate_reflect::PropertyValue::Float(b.width as f64),
+            );
+            p.set(
+                "angle",
+                kreate_reflect::PropertyValue::Float(b.angle as f64),
+            );
+            p.set(
+                "segments",
+                kreate_reflect::PropertyValue::Int(b.segments as i64),
+            );
         }
         ModifierKind::Boolean(b) => {
             let name = doc
@@ -362,7 +398,11 @@ pub fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> crate::
 
 /// What a setter's line left out, from the modifier at the index it names:
 /// see [`Operator::current`]. `None` when that modifier is another kind.
-fn current_modifier<P: crate::property::OpParams>(doc: &Document, given: &crate::property::PropertyMap, id: &str) -> Option<P> {
+fn current_modifier<P: crate::property::OpParams>(
+    doc: &Document,
+    given: &crate::property::PropertyMap,
+    id: &str,
+) -> Option<P> {
     let index = match given.get("index") {
         Some(kreate_reflect::PropertyValue::Int(i)) => u32::try_from(*i).ok()?,
         _ => 0,
@@ -432,7 +472,11 @@ impl Operator for SetMirror {
         target(doc).is_some()
     }
 
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "mirror")
     }
     fn execute(
@@ -495,7 +539,11 @@ impl Operator for SetSubdivide {
         target(doc).is_some()
     }
 
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "subdivide")
     }
     fn execute(
@@ -565,7 +613,11 @@ impl Operator for SetArray {
         target(doc).is_some()
     }
 
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "array")
     }
     fn execute(
@@ -601,7 +653,11 @@ pub struct SetSolidifyParams {
 impl Default for SetSolidifyParams {
     fn default() -> Self {
         let d = SolidifyParams::default();
-        Self { index: 0, thickness: d.thickness as f64, offset: d.offset as f64 }
+        Self {
+            index: 0,
+            thickness: d.thickness as f64,
+            offset: d.offset as f64,
+        }
     }
 }
 
@@ -619,14 +675,25 @@ impl Operator for SetSolidify {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
     }
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "solidify")
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         set_kind(
             doc,
             params.index,
-            ModifierKind::Solidify(SolidifyParams { thickness: params.thickness as f32, offset: params.offset as f32 }),
+            ModifierKind::Solidify(SolidifyParams {
+                thickness: params.thickness as f32,
+                offset: params.offset as f32,
+            }),
         )
     }
 }
@@ -649,7 +716,12 @@ pub struct SetBevelParams {
 impl Default for SetBevelParams {
     fn default() -> Self {
         let d = BevelParams::default();
-        Self { index: 0, width: d.width as f64, angle: d.angle as f64, segments: d.segments }
+        Self {
+            index: 0,
+            width: d.width as f64,
+            angle: d.angle as f64,
+            segments: d.segments,
+        }
     }
 }
 
@@ -667,10 +739,18 @@ impl Operator for SetBevel {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
     }
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "bevel")
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         set_kind(
             doc,
             params.index,
@@ -709,10 +789,18 @@ impl Operator for SetBoolean {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
     }
-    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
         current_modifier(doc, given, "boolean")
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
         let operand = if params.object.is_empty() {
             kreate_scene::Uid::default()
@@ -722,7 +810,10 @@ impl Operator for SetBoolean {
                 .find(|(_, o)| o.name == params.object)
                 .and_then(|(id, _)| d.object_uid(id))
             else {
-                return Err(OpError::Failed(format!("no object called {}", params.object)));
+                return Err(OpError::Failed(format!(
+                    "no object called {}",
+                    params.object
+                )));
             };
             uid
         };
@@ -731,7 +822,11 @@ impl Operator for SetBoolean {
             2 => BooleanOp::Intersect,
             _ => BooleanOp::Difference,
         };
-        set_kind(doc, params.index, ModifierKind::Boolean(BooleanModifier { operand, op }))
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Boolean(BooleanModifier { operand, op }),
+        )
     }
 }
 
@@ -770,16 +865,30 @@ impl Operator for Boolean {
         "Boolean"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        target(doc).is_some_and(|id| doc.object(id).and_then(|o| o.mesh()).is_some() && !cutters(doc, id).is_empty())
+        target(doc).is_some_and(|id| {
+            doc.object(id).and_then(|o| o.mesh()).is_some() && !cutters(doc, id).is_empty()
+        })
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
         let Some(id) = target(d).filter(|id| d.object(*id).and_then(|o| o.mesh()).is_some()) else {
-            return Err(OpError::Failed("the active object has to be a mesh: select the cutters, then the object to cut".into()));
+            return Err(OpError::Failed(
+                "the active object has to be a mesh: select the cutters, then the object to cut"
+                    .into(),
+            ));
         };
-        let operands: Vec<_> = cutters(d, id).into_iter().filter_map(|c| d.object_uid(c)).collect();
+        let operands: Vec<_> = cutters(d, id)
+            .into_iter()
+            .filter_map(|c| d.object_uid(c))
+            .collect();
         if operands.is_empty() {
-            return Err(OpError::Failed("select the cutters too, then the object to cut last".into()));
+            return Err(OpError::Failed(
+                "select the cutters too, then the object to cut last".into(),
+            ));
         }
         let op = match params.operation {
             1 => BooleanOp::Union,
@@ -788,7 +897,11 @@ impl Operator for Boolean {
         };
         let object = doc.document_mut().object_mut(id).expect("target checked");
         for operand in operands {
-            object.modifiers.push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op })));
+            object
+                .modifiers
+                .push(ModifierInstance::new(ModifierKind::Boolean(
+                    BooleanModifier { operand, op },
+                )));
         }
         Ok(OpResult::Finished)
     }
@@ -1170,10 +1283,19 @@ mod tests {
         d.selection.add(cutter);
         d.selection.add(id);
         d.selection.active = Some(id);
-        run(&r, &mut h, &mut d, &c, "object.boolean", &[("operation", PropertyValue::Enum(2))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.boolean",
+            &[("operation", PropertyValue::Enum(2))],
+        );
         let stack = &d.object(id).unwrap().modifiers;
         assert_eq!(stack.len(), 1);
-        let ModifierKind::Boolean(b) = stack[0].kind else { panic!("not a boolean") };
+        let ModifierKind::Boolean(b) = stack[0].kind else {
+            panic!("not a boolean")
+        };
         assert_eq!(d.object_by_uid(b.operand), Some(cutter));
         assert_eq!(b.op, BooleanOp::Intersect);
         // The cutter's own stack is left alone.
@@ -1184,7 +1306,14 @@ mod tests {
     fn a_boolean_is_given_its_cutter_by_name_and_keeps_it_through_a_rename() {
         let (r, mut h, mut d, id, c) = setup();
         let cutter = d.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
-        run(&r, &mut h, &mut d, &c, "object.modifier_add", &[("kind", PropertyValue::Enum(5))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.modifier_add",
+            &[("kind", PropertyValue::Enum(5))],
+        );
         run(
             &r,
             &mut h,
@@ -1197,38 +1326,75 @@ mod tests {
                 ("operation", PropertyValue::Enum(1)),
             ],
         );
-        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else { panic!("not a boolean") };
+        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else {
+            panic!("not a boolean")
+        };
         assert_eq!(d.object_by_uid(b.operand), Some(cutter));
         assert_eq!(b.op, BooleanOp::Union);
         d.object_mut(cutter).unwrap().name = "Renamed".into();
-        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else { panic!() };
-        assert_eq!(d.object_by_uid(b.operand), Some(cutter), "a rename broke the link");
+        let ModifierKind::Boolean(b) = d.object(id).unwrap().modifiers[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            d.object_by_uid(b.operand),
+            Some(cutter),
+            "a rename broke the link"
+        );
         // A name nothing has is an error, not a silent no-op.
         let mut p = PropertyMap::new();
         p.set("object", PropertyValue::Text("Nobody".into()));
-        assert!(h.dispatch(&r, &mut d, &c, "object.modifier_set_boolean", &p).is_err());
+        assert!(h
+            .dispatch(&r, &mut d, &c, "object.modifier_set_boolean", &p)
+            .is_err());
     }
 
     #[test]
     fn apply_bakes_the_modifier_into_the_mesh_and_takes_it_off() {
         let (r, mut h, mut d, id, c) = setup();
-        run(&r, &mut h, &mut d, &c, "object.modifier_add", &[("kind", PropertyValue::Enum(3))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.modifier_add",
+            &[("kind", PropertyValue::Enum(3))],
+        );
         let mut cache = ModifierCache::new();
-        let drawn = cache.evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still()).unwrap().num_faces();
-        run(&r, &mut h, &mut d, &c, "object.modifier_apply", &[("index", PropertyValue::Int(0))]);
+        let drawn = cache
+            .evaluated(&d, id, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap()
+            .num_faces();
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.modifier_apply",
+            &[("index", PropertyValue::Int(0))],
+        );
         let o = d.object(id).unwrap();
         assert!(o.modifiers.is_empty());
-        assert_eq!(d.mesh(o.mesh().unwrap()).unwrap().num_faces(), drawn, "the mesh is not what was drawn");
+        assert_eq!(
+            d.mesh(o.mesh().unwrap()).unwrap().num_faces(),
+            drawn,
+            "the mesh is not what was drawn"
+        );
         // One step to undo, and it all comes back.
         assert!(h.undo(&mut d));
         assert_eq!(d.object(id).unwrap().modifiers.len(), 1);
-        assert_eq!(d.mesh(d.object(id).unwrap().mesh().unwrap()).unwrap().num_faces(), 6);
+        assert_eq!(
+            d.mesh(d.object(id).unwrap().mesh().unwrap())
+                .unwrap()
+                .num_faces(),
+            6
+        );
         // A shared mesh is refused.
         let mesh = d.object(id).unwrap().mesh().unwrap();
         d.add_object(Object::new("Twin", ObjectData::Mesh(mesh)));
         let mut p = PropertyMap::new();
         p.set("index", PropertyValue::Int(0));
-        assert!(h.dispatch(&r, &mut d, &c, "object.modifier_apply", &p).is_err());
+        assert!(h
+            .dispatch(&r, &mut d, &c, "object.modifier_apply", &p)
+            .is_err());
     }
 }
-

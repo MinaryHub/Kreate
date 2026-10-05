@@ -334,7 +334,10 @@ fn a_smaller_image_gets_a_rectangle_rather_than_being_stretched() {
         ],
     );
     assert_eq!(material.placed()[0].rect, [0.0, 0.0, 1.0, 1.0]);
-    assert_eq!(material.placed()[1].rect, [0.0, 0.0, 4.0 / 16.0, 8.0 / 16.0]);
+    assert_eq!(
+        material.placed()[1].rect,
+        [0.0, 0.0, 4.0 / 16.0, 8.0 / 16.0]
+    );
     assert_eq!(material.placed()[1].layer, 1);
 }
 
@@ -360,7 +363,10 @@ fn a_hundred_materials_of_one_shape_are_one_pipeline() {
             trivial_pipeline(&gpu.device)
         });
     }
-    assert_eq!(built, 1, "a hundred tinted plastics built {built} pipelines");
+    assert_eq!(
+        built, 1,
+        "a hundred tinted plastics built {built} pipelines"
+    );
     assert_eq!(cache.len(), 1);
 
     // And a material of a *different* shape is a second one, or the cache is
@@ -511,7 +517,11 @@ fn shading_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 /// A quad rather than a cube so that the whole frame is one surface with UVs
 /// running corner to corner, which is what makes "the left half differs from
 /// the right half" a statement about a texture.
-fn shoot(gpu: &Gpu, graph: &ShaderGraph, images: &[kreate_render::material::SourceImage<'_>]) -> Vec<[f32; 4]> {
+fn shoot(
+    gpu: &Gpu,
+    graph: &ShaderGraph,
+    images: &[kreate_render::material::SourceImage<'_>],
+) -> Vec<[f32; 4]> {
     let compiled = kreate_shader::compile(graph).expect("compiles");
     shoot_with(gpu, &compiled, images, &Stage::default())
 }
@@ -755,12 +765,7 @@ fn a_material_with_no_texture_is_the_colour_its_constants_say() {
     // only because a texture is there. Without this, a shader that happened to
     // vary with position would pass the test above for the wrong reason.
     let gpu = gpu_or_skip!(gpu());
-    let graph = ShaderGraph::standard(
-        "Flat",
-        kreate_math::SceneRgb::new(0.6, 0.1, 0.1),
-        0.0,
-        0.5,
-    );
+    let graph = ShaderGraph::standard("Flat", kreate_math::SceneRgb::new(0.6, 0.1, 0.1), 0.0, 0.5);
     let frame = shoot(&gpu, &graph, &[]);
     let size = 48usize;
     let row = size / 2;
@@ -930,7 +935,10 @@ fn a_data_map_is_read_as_the_numbers_it_holds() {
     };
     let (low, mid, high) = (grey(64), grey(128), grey(192));
     for c in 0..3 {
-        assert!(low[c] > 1e-4 && high[c] < 0.99, "channel {c} is against a clip");
+        assert!(
+            low[c] > 1e-4 && high[c] < 0.99,
+            "channel {c} is against a clip"
+        );
         let steps = (high[c] - mid[c]) / (mid[c] - low[c]);
         assert!(
             (steps - 1.0).abs() < 0.25,
@@ -995,12 +1003,8 @@ fn lit_centre(gpu: &Gpu, toward: glam::Vec3, texel: Option<[u8; 3]>) -> f32 {
             )
         }
         None => {
-            let graph = ShaderGraph::standard(
-                "Plain",
-                kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
-                0.0,
-                1.0,
-            );
+            let graph =
+                ShaderGraph::standard("Plain", kreate_math::SceneRgb::new(0.8, 0.8, 0.8), 0.0, 1.0);
             let compiled = kreate_shader::compile(&graph).expect("compiles");
             shoot_with(gpu, &compiled, &[], &stage)
         }
@@ -1052,5 +1056,3 @@ fn a_normal_map_tilts_the_surface_the_way_its_channels_say() {
         );
     }
 }
-
-

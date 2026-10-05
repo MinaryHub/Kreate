@@ -16,13 +16,21 @@ fn wired() -> (OperatorRegistry, History, Document, MeshId) {
     (registry, History::new(), doc, mesh)
 }
 
-fn run(registry: &OperatorRegistry, history: &mut History, doc: &mut Document, op: &str, params: &[(&'static str, PropertyValue)]) -> bool {
+fn run(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+    op: &str,
+    params: &[(&'static str, PropertyValue)],
+) -> bool {
     let mut p = PropertyMap::new();
     for (k, v) in params {
         p.set(k, v.clone());
     }
     let depth = history.entries().len();
-    history.dispatch(registry, doc, &Context::default(), op, &p).expect("ran");
+    history
+        .dispatch(registry, doc, &Context::default(), op, &p)
+        .expect("ran");
     history.entries().len() > depth
 }
 
@@ -33,16 +41,49 @@ fn text(s: &str) -> PropertyValue {
 #[test]
 fn groups_are_made_numbered_and_the_new_one_is_active() {
     let (registry, mut history, mut doc, mesh) = wired();
-    assert!(run(&registry, &mut history, &mut doc, "object.vertex_group_add", &[]));
-    assert!(run(&registry, &mut history, &mut doc, "object.vertex_group_add", &[]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.vertex_group_add",
+        &[]
+    ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.vertex_group_add",
+        &[]
+    ));
     assert_eq!(groups(&doc, mesh), vec!["Group", "Group.001"]);
-    let active = |doc: &Document| doc.object(doc.selection.active.unwrap()).unwrap().active_group.clone();
+    let active = |doc: &Document| {
+        doc.object(doc.selection.active.unwrap())
+            .unwrap()
+            .active_group
+            .clone()
+    };
     assert_eq!(active(&doc).as_deref(), Some("Group.001"));
-    assert!(run(&registry, &mut history, &mut doc, "object.vertex_group_set_active", &[("name", text("Group"))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.vertex_group_set_active",
+        &[("name", text("Group"))]
+    ));
     assert_eq!(active(&doc).as_deref(), Some("Group"));
-    assert!(run(&registry, &mut history, &mut doc, "object.vertex_group_remove", &[("name", text("Group"))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.vertex_group_remove",
+        &[("name", text("Group"))]
+    ));
     assert_eq!(groups(&doc, mesh), vec!["Group.001"]);
-    assert_eq!(active(&doc).as_deref(), Some("Group.001"), "removing the active group left nothing active");
+    assert_eq!(
+        active(&doc).as_deref(),
+        Some("Group.001"),
+        "removing the active group left nothing active"
+    );
 }
 
 #[test]
@@ -57,14 +98,33 @@ fn a_stroke_moves_its_vertices_towards_the_weight_once_and_replays() {
         ("weight", PropertyValue::Float(1.0)),
         ("strength", PropertyValue::Float(0.5)),
     ];
-    assert!(run(&registry, &mut history, &mut doc, "paint.weight_stroke", &stroke));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "paint.weight_stroke",
+        &stroke
+    ));
     let w = weights(&doc, mesh, "Arm");
-    assert_eq!((w[0], w[1]), (0.5, 0.0), "the stroke made the group and painted only what it crossed");
-    assert_eq!(w[2], 0.5, "a vertex the brush crossed twice moved twice rather than once");
+    assert_eq!(
+        (w[0], w[1]),
+        (0.5, 0.0),
+        "the stroke made the group and painted only what it crossed"
+    );
+    assert_eq!(
+        w[2], 0.5,
+        "a vertex the brush crossed twice moved twice rather than once"
+    );
     // Replayed from its script line, the same weights.
-    let script: String = history.entries().iter().map(|e| e.to_script_call()).collect::<Vec<_>>().join("\n");
+    let script: String = history
+        .entries()
+        .iter()
+        .map(|e| e.to_script_call())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut replay = start;
-    let outcomes = History::new().run_script(&registry, &mut replay, None, &Context::default(), &script);
+    let outcomes =
+        History::new().run_script(&registry, &mut replay, None, &Context::default(), &script);
     assert!(outcomes.iter().all(|o| o.result.is_ok()), "{script}");
     assert_eq!(weights(&replay, mesh, "Arm"), w);
 }
@@ -86,11 +146,30 @@ fn normalize_makes_each_vertex_sum_to_one() {
             ],
         );
     }
-    assert!(run(&registry, &mut history, &mut doc, "paint.weights_normalize", &[]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "paint.weights_normalize",
+        &[]
+    ));
     assert_eq!(weights(&doc, mesh, "A")[0], 0.5);
     assert_eq!(weights(&doc, mesh, "B")[0], 0.5);
-    assert_eq!(weights(&doc, mesh, "A")[1], 0.0, "a vertex with no weight got some");
-    assert!(!run(&registry, &mut history, &mut doc, "paint.weights_normalize", &[]), "normalizing twice changed something");
+    assert_eq!(
+        weights(&doc, mesh, "A")[1],
+        0.0,
+        "a vertex with no weight got some"
+    );
+    assert!(
+        !run(
+            &registry,
+            &mut history,
+            &mut doc,
+            "paint.weights_normalize",
+            &[]
+        ),
+        "normalizing twice changed something"
+    );
 }
 
 #[test]
@@ -104,7 +183,13 @@ fn a_soft_brush_paints_its_rim_less_than_its_middle() {
         // Vertex 1 crossed twice: the stronger pass counts, once.
         ("amounts", PropertyValue::Floats(vec![1.0, 0.25, 0.5])),
     ];
-    assert!(run(&registry, &mut history, &mut doc, "paint.weight_stroke", &stroke));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "paint.weight_stroke",
+        &stroke
+    ));
     let w = weights(&doc, mesh, "Arm");
     assert_eq!((w[0], w[1]), (1.0, 0.5));
 }

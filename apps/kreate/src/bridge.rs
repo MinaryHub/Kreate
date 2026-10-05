@@ -90,7 +90,8 @@ pub fn info_path() -> Option<PathBuf> {
 /// random source, in hex.
 fn new_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(format!("no secure randomness: {e}")))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|e| std::io::Error::other(format!("no secure randomness: {e}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -141,20 +142,28 @@ pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::R
 
     let (tx, rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-    std::thread::Builder::new().name("bridge".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let (tx, wake, token) = (tx.clone(), wake.clone(), token.clone());
-            let _ = std::thread::Builder::new()
-                .name("bridge connection".into())
-                .spawn(move || serve(stream, &token, &tx, &*wake));
-        }
-    })?;
-    Ok(Bridge { requests: rx, info: info.to_path_buf(), port })
+    std::thread::Builder::new()
+        .name("bridge".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (tx, wake, token) = (tx.clone(), wake.clone(), token.clone());
+                let _ = std::thread::Builder::new()
+                    .name("bridge connection".into())
+                    .spawn(move || serve(stream, &token, &tx, &*wake));
+            }
+        })?;
+    Ok(Bridge {
+        requests: rx,
+        info: info.to_path_buf(),
+        port,
+    })
 }
 
 /// One connection, request after request until it closes.
 fn serve(stream: TcpStream, token: &str, tx: &Sender<Request>, wake: &(dyn Fn() + Send + Sync)) {
-    let Ok(mut out) = stream.try_clone() else { return };
+    let Ok(mut out) = stream.try_clone() else {
+        return;
+    };
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let Ok(line) = line else { return };
@@ -189,10 +198,17 @@ fn answer_line(
         .and_then(|m| m.as_str())
         .ok_or("no method")?
         .to_string();
-    let params = request.get("params").cloned().unwrap_or(serde_json::Value::Null);
+    let params = request
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let (reply, answer) = mpsc::channel();
-    tx.send(Request { method, params, reply })
-        .map_err(|_| "Kreate is shutting down".to_string())?;
+    tx.send(Request {
+        method,
+        params,
+        reply,
+    })
+    .map_err(|_| "Kreate is shutting down".to_string())?;
     wake();
     answer
         .recv_timeout(ANSWER_TIMEOUT)
@@ -267,7 +283,8 @@ mod tests {
         let info = dir.join("bridge.json");
         let bridge = start(&info, || {}).expect("the socket opens");
         let record: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&info).expect("info written")).expect("json");
+            serde_json::from_str(&std::fs::read_to_string(&info).expect("info written"))
+                .expect("json");
         assert_eq!(record["port"].as_u64(), Some(bridge.port as u64));
         let token = record["token"].as_str().expect("a token").to_string();
         assert_eq!(token.len(), 32);
@@ -275,7 +292,10 @@ mod tests {
         // The main thread, played by this one: answer whatever arrives.
         let port = bridge.port;
         let asker = std::thread::spawn(move || {
-            ask(port, &format!(r#"{{"token":"{token}","method":"echo","params":{{"x":1}}}}"#))
+            ask(
+                port,
+                &format!(r#"{{"token":"{token}","method":"echo","params":{{"x":1}}}}"#),
+            )
         });
         let request = loop {
             if let Some(r) = bridge.pending().pop() {
@@ -298,7 +318,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kreate-bridge-refuse-{}", std::process::id()));
         let bridge = start(&dir.join("bridge.json"), || {}).expect("the socket opens");
         let answer = ask(bridge.port, r#"{"token":"guess","method":"scene"}"#);
-        assert!(answer["error"].as_str().is_some_and(|e| e.contains("token")));
+        assert!(answer["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("token")));
         assert!(bridge.pending().is_empty());
         drop(bridge);
         let _ = std::fs::remove_dir_all(&dir);

@@ -228,8 +228,11 @@ pub fn compile_with(
     // The three inputs, each either a wire or the slot beside it.
     let base = out.input_expr(output, 0, &format!("material.values[{surface_slot}].rgb"))?;
     let metallic = out.input_expr(output, 1, &format!("material.values[{surface_slot}].w"))?;
-    let roughness =
-        out.input_expr(output, 2, &format!("material.values[{}].x", surface_slot + 1))?;
+    let roughness = out.input_expr(
+        output,
+        2,
+        &format!("material.values[{}].x", surface_slot + 1),
+    )?;
     let _ = writeln!(wgsl, "    s.base_color = {base};");
     let _ = writeln!(wgsl, "    s.metallic = clamp({metallic}, 0.0, 1.0);");
     // Clamped away from zero at the bottom, because a roughness of exactly zero
@@ -241,7 +244,11 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    out.surface = s;");
     let _ = writeln!(wgsl, "    out.normal = {normal};");
     // In the roughness's slot, beside it: emitted light, in nits.
-    let _ = writeln!(wgsl, "    out.emission = material.values[{}].yzw;", surface_slot + 1);
+    let _ = writeln!(
+        wgsl,
+        "    out.emission = material.values[{}].yzw;",
+        surface_slot + 1
+    );
     // The third slot: how much passes through, and how it bends.
     let _ = writeln!(
         wgsl,
@@ -305,10 +312,7 @@ impl Emitter<'_> {
         match self.graph.nodes[node].kind {
             NodeKind::Color(c) => {
                 self.constants.push([c.r, c.g, c.b, 0.0]);
-                let _ = writeln!(
-                    self.body,
-                    "    let n{node} = material.values[{slot}].rgb;"
-                );
+                let _ = writeln!(self.body, "    let n{node} = material.values[{slot}].rgb;");
             }
             NodeKind::Value(v) => {
                 self.constants.push([v, 0.0, 0.0, 0.0]);
@@ -342,10 +346,8 @@ impl Emitter<'_> {
                         // adds and this is where it would go; with one image to
                         // a layer it shows only on the right and bottom of the
                         // smaller images in a material.
-                        let _ = writeln!(
-                            self.body,
-                            "    let n{node}_rect = material.values[{slot}];"
-                        );
+                        let _ =
+                            writeln!(self.body, "    let n{node}_rect = material.values[{slot}];");
                         // The gradients are the UV's, scaled into the rectangle
                         // the same way the coordinate is — and taken from the
                         // *unwrapped* UV, which is the point of passing them:
@@ -404,12 +406,21 @@ impl Emitter<'_> {
                     "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
                 );
             }
-            NodeKind::Surface { base_color, metallic, roughness, emission, transmission, ior } => {
+            NodeKind::Surface {
+                base_color,
+                metallic,
+                roughness,
+                emission,
+                transmission,
+                ior,
+            } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
                 // the graph's shape — see the comment where they are read.
-                self.constants.push([base_color.r, base_color.g, base_color.b, metallic]);
-                self.constants.push([roughness, emission.r, emission.g, emission.b]);
+                self.constants
+                    .push([base_color.r, base_color.g, base_color.b, metallic]);
+                self.constants
+                    .push([roughness, emission.r, emission.g, emission.b]);
                 self.constants.push([transmission, ior, 0.0, 0.0]);
             }
         }
@@ -475,7 +486,9 @@ mod tests {
         let glowing = compile(&g).expect("compiles");
         assert_eq!(plain.wgsl, glowing.wgsl);
         assert_eq!(glowing.constants[1], [0.4, 3.0, 2.0, 1.0]);
-        assert!(glowing.wgsl.contains("out.emission = material.values[1].yzw;"));
+        assert!(glowing
+            .wgsl
+            .contains("out.emission = material.values[1].yzw;"));
     }
 
     /// An image identity, which only a document can hand out.
@@ -515,7 +528,11 @@ mod tests {
         parses(&compiled);
         assert_eq!(
             compiled.constants,
-            vec![[0.8, 0.7, 0.6, 0.25], [0.4, 0.0, 0.0, 0.0], [0.0, 1.5, 0.0, 0.0]]
+            vec![
+                [0.8, 0.7, 0.6, 0.25],
+                [0.4, 0.0, 0.0, 0.0],
+                [0.0, 1.5, 0.0, 0.0]
+            ]
         );
         assert!(compiled.images.is_empty());
         assert!(compiled.notes.is_empty());
@@ -545,7 +562,10 @@ mod tests {
         //
         // Found by the renderer's cache test, which counted a hundred
         // pipelines for a hundred tinted plastics.
-        assert_eq!(a.wgsl, b.wgsl, "the same graph shape produced different code");
+        assert_eq!(
+            a.wgsl, b.wgsl,
+            "the same graph shape produced different code"
+        );
         assert_ne!(a.constants, b.constants, "the numbers did not travel");
         // And the two graphs really were named differently, or the claim above
         // is about nothing.
@@ -560,7 +580,10 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let red = graph
-            .add_node(Node::new("Red", NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0))))
+            .add_node(Node::new(
+                "Red",
+                NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0)),
+            ))
             .expect("added");
         graph
             .link(Link {
@@ -579,7 +602,9 @@ mod tests {
             compiled.wgsl
         );
         // And the other two still read their slots.
-        assert!(compiled.wgsl.contains("s.metallic = clamp(material.values["));
+        assert!(compiled
+            .wgsl
+            .contains("s.metallic = clamp(material.values["));
     }
 
     #[test]
@@ -650,7 +675,9 @@ mod tests {
         assert_eq!(compiled.image_slots.len(), 1);
         parses(&compiled);
         assert_eq!(compiled.wgsl.matches("textureSampleGrad(").count(), 1);
-        assert!(compiled.wgsl.contains(&format!("s.base_color = n{image}_rgba.rgb;")));
+        assert!(compiled
+            .wgsl
+            .contains(&format!("s.base_color = n{image}_rgba.rgb;")));
         assert!(compiled
             .wgsl
             .contains(&format!("clamp(n{image}_rgba.a, 0.02, 1.0)")));
@@ -777,10 +804,18 @@ mod multiply_tests {
         // white fallback makes.
         let mut graph = ShaderGraph::standard("M", SceneRgb::new(0.8, 0.8, 0.8), 0.0, 0.5);
         let node = graph
-            .add_node(Node::new("Multiply", kreate_scene::shader::NodeKind::Multiply))
+            .add_node(Node::new(
+                "Multiply",
+                kreate_scene::shader::NodeKind::Multiply,
+            ))
             .expect("not a surface");
         graph
-            .link(Link { from_node: node, from_socket: 0, to_node: 0, to_socket: 0 })
+            .link(Link {
+                from_node: node,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 0,
+            })
             .expect("a colour into a base colour");
         let compiled = compile(&graph).expect("it compiles");
         assert!(
@@ -797,8 +832,18 @@ mod multiply_tests {
         // different *images* must compile to the same text: the image is a
         // layer index and the colour is a constant, and neither is code.
         let mut doc = kreate_scene::Document::new();
-        let one = doc.add_image(kreate_scene::Image::new("A", 4, 4, kreate_scene::PixelFormat::Rgba8));
-        let two = doc.add_image(kreate_scene::Image::new("B", 8, 8, kreate_scene::PixelFormat::Rgba8));
+        let one = doc.add_image(kreate_scene::Image::new(
+            "A",
+            4,
+            4,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let two = doc.add_image(kreate_scene::Image::new(
+            "B",
+            8,
+            8,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
         let graph_of = |image, color| {
             ShaderGraph::for_material(&kreate_scene::Material {
                 base_color: color,
@@ -809,7 +854,10 @@ mod multiply_tests {
         let a = compile(&graph_of(one, SceneRgb::new(1.0, 0.0, 0.0))).expect("compiles");
         let b = compile(&graph_of(two, SceneRgb::new(0.0, 0.0, 1.0))).expect("compiles");
         assert_eq!(a.wgsl, b.wgsl, "a texture swap became a pipeline");
-        assert_ne!(a.constants, b.constants, "the colours did not reach the numbers");
+        assert_ne!(
+            a.constants, b.constants,
+            "the colours did not reach the numbers"
+        );
     }
 }
 
@@ -822,7 +870,12 @@ mod map_tests {
     fn mapped() -> (ShaderGraph, [ImageId; 3]) {
         let mut doc = kreate_scene::Document::new();
         let mut add = |name: &str| {
-            doc.add_image(kreate_scene::Image::new(name, 4, 4, kreate_scene::PixelFormat::Rgba8))
+            doc.add_image(kreate_scene::Image::new(
+                name,
+                4,
+                4,
+                kreate_scene::PixelFormat::Rgba8,
+            ))
         };
         let (colour, packed, normal) = (add("C"), add("MR"), add("N"));
         let material = kreate_scene::Material {
@@ -835,13 +888,22 @@ mod map_tests {
             normal_strength: 0.5,
             ..Default::default()
         };
-        (ShaderGraph::for_material(&material), [colour, packed, normal])
+        (
+            ShaderGraph::for_material(&material),
+            [colour, packed, normal],
+        )
     }
 
     /// The spaces a document would answer with: the colour map sRGB, the
     /// others raw.
     fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
-        move |id| if id == ids[0] { ColorSpace::Srgb } else { ColorSpace::Raw }
+        move |id| {
+            if id == ids[0] {
+                ColorSpace::Srgb
+            } else {
+                ColorSpace::Raw
+            }
+        }
     }
 
     fn parses(compiled: &Compiled) {
@@ -870,15 +932,34 @@ mod map_tests {
                 .map(|id| spaces(ids)(*id))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(compiled.wgsl.matches("textureSampleGrad(material_textures").count(), 1);
-        assert_eq!(compiled.wgsl.matches("textureSampleGrad(material_data").count(), 2);
-        assert!(compiled.wgsl.contains("material_textures, material_sampler, n"));
+        assert_eq!(
+            compiled
+                .wgsl
+                .matches("textureSampleGrad(material_textures")
+                .count(),
+            1
+        );
+        assert_eq!(
+            compiled
+                .wgsl
+                .matches("textureSampleGrad(material_data")
+                .count(),
+            2
+        );
+        assert!(compiled
+            .wgsl
+            .contains("material_textures, material_sampler, n"));
         // Two data images: layers 0 and 1 of the data array, not 1 and 2.
         let data_layers: Vec<&str> = compiled
             .wgsl
             .lines()
             .filter(|l| l.contains("textureSampleGrad(material_data"))
-            .map(|l| l.split(".zw, ").nth(1).and_then(|r| r.split(',').next()).unwrap_or(""))
+            .map(|l| {
+                l.split(".zw, ")
+                    .nth(1)
+                    .and_then(|r| r.split(',').next())
+                    .unwrap_or("")
+            })
             .collect();
         assert_eq!(data_layers, vec!["0", "1"], "{}", compiled.wgsl);
     }
@@ -900,7 +981,11 @@ mod map_tests {
         // Each is a product node; find what feeds it.
         let product_of = |field: &str| {
             let l = line(field);
-            let name = l.split("clamp(").nth(1).and_then(|r| r.split(',').next()).expect("a node");
+            let name = l
+                .split("clamp(")
+                .nth(1)
+                .and_then(|r| r.split(',').next())
+                .expect("a node");
             compiled
                 .wgsl
                 .lines()
@@ -908,7 +993,11 @@ mod map_tests {
                 .expect("the product is emitted")
                 .to_string()
         };
-        assert!(product_of("roughness").contains(".y *"), "{}", compiled.wgsl);
+        assert!(
+            product_of("roughness").contains(".y *"),
+            "{}",
+            compiled.wgsl
+        );
         assert!(product_of("metallic").contains(".z *"), "{}", compiled.wgsl);
     }
 
@@ -916,13 +1005,26 @@ mod map_tests {
     fn a_normal_map_reaches_the_output_and_nothing_else_does() {
         let (graph, ids) = mapped();
         let compiled = compile_with(&graph, spaces(ids)).expect("compiles");
-        assert!(compiled.wgsl.contains("* 2.0 - vec3<f32>(1.0)"), "the map is not decoded");
-        assert!(!compiled.wgsl.contains("out.normal = vec3<f32>(0.0, 0.0, 1.0);"));
+        assert!(
+            compiled.wgsl.contains("* 2.0 - vec3<f32>(1.0)"),
+            "the map is not decoded"
+        );
+        assert!(!compiled
+            .wgsl
+            .contains("out.normal = vec3<f32>(0.0, 0.0, 1.0);"));
         // And its strength is a constant, not text: two strengths, one shader.
-        let flat = compile(&ShaderGraph::standard("F", SceneRgb::new(1.0, 1.0, 1.0), 0.0, 0.5))
-            .expect("compiles");
+        let flat = compile(&ShaderGraph::standard(
+            "F",
+            SceneRgb::new(1.0, 1.0, 1.0),
+            0.0,
+            0.5,
+        ))
+        .expect("compiles");
         assert!(flat.wgsl.contains("out.normal = vec3<f32>(0.0, 0.0, 1.0);"));
-        assert!(compiled.constants.iter().any(|c| c[0] == 0.5), "the strength did not travel");
+        assert!(
+            compiled.constants.iter().any(|c| c[0] == 0.5),
+            "the strength did not travel"
+        );
     }
 
     #[test]
@@ -941,11 +1043,15 @@ mod map_tests {
 impl Compiled {
     /// How much light passes through, zero to one.
     pub fn transmission(&self) -> f32 {
-        self.constants.get(self.transmission_slot).map_or(0.0, |c| c[0].clamp(0.0, 1.0))
+        self.constants
+            .get(self.transmission_slot)
+            .map_or(0.0, |c| c[0].clamp(0.0, 1.0))
     }
 
     /// Whether light passes through: drawn after the solids, over them.
     pub fn transmissive(&self) -> bool {
-        self.constants.get(self.transmission_slot).is_some_and(|c| c[0] > 0.0)
+        self.constants
+            .get(self.transmission_slot)
+            .is_some_and(|c| c[0] > 0.0)
     }
 }

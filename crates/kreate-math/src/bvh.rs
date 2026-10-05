@@ -169,7 +169,10 @@ impl Bvh {
     /// node (the right child is the next one), then the leaf's primitive
     /// count, zero for an interior node.
     pub fn flat_nodes(&self) -> Vec<(Aabb, u32, u32)> {
-        self.nodes.iter().map(|n| (n.bounds, n.first, n.count)).collect()
+        self.nodes
+            .iter()
+            .map(|n| (n.bounds, n.first, n.count))
+            .collect()
     }
 
     /// The primitives in leaf order: a leaf's are a contiguous run of these.

@@ -33,9 +33,15 @@ pub fn unwrap(mesh: &mut BMesh, faces: &[FaceId], layer: &str, margin: f32) -> u
     let islands = islands(mesh, faces);
     let mut written: Vec<(LoopId, Vec2)> = Vec::new();
     let mut packed: Vec<Vec<LoopId>> = Vec::new();
-    let seams = mesh.attributes().get_bool(names::SEAM).map(|s| s.to_vec()).unwrap_or_default();
+    let seams = mesh
+        .attributes()
+        .get_bool(names::SEAM)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
     for island in &islands {
-        let Some(uvs) = flatten(mesh, island, &seams) else { continue };
+        let Some(uvs) = flatten(mesh, island, &seams) else {
+            continue;
+        };
         let mut corners = Vec::new();
         for (l, uv) in uvs {
             written.push((l, uv));
@@ -47,7 +53,8 @@ pub fn unwrap(mesh: &mut BMesh, faces: &[FaceId], layer: &str, margin: f32) -> u
         return 0;
     }
     let len = mesh.slot_count(Domain::Corner);
-    mesh.attributes_mut().ensure(layer, Domain::Corner, AttrType::F32x2, len);
+    mesh.attributes_mut()
+        .ensure(layer, Domain::Corner, AttrType::F32x2, len);
     if let Some(values) = mesh.attributes_mut().make_mut_f32x2(layer) {
         for (l, uv) in &written {
             if let Some(slot) = values.get_mut(l.index() as usize) {
@@ -62,7 +69,11 @@ pub fn unwrap(mesh: &mut BMesh, faces: &[FaceId], layer: &str, margin: f32) -> u
 /// The pieces: faces joined across edges that are not seams.
 fn islands(mesh: &BMesh, faces: &[FaceId]) -> Vec<Vec<FaceId>> {
     let wanted: std::collections::HashSet<FaceId> = faces.iter().copied().collect();
-    let seams = mesh.attributes().get_bool(names::SEAM).map(|s| s.to_vec()).unwrap_or_default();
+    let seams = mesh
+        .attributes()
+        .get_bool(names::SEAM)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
     let mut seen: std::collections::HashSet<FaceId> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for &start in faces {
@@ -110,7 +121,11 @@ fn flatten(mesh: &BMesh, island: &[FaceId], seams: &[bool]) -> Option<Vec<(LoopI
         }
         l
     }
-    let loop_at = |f: FaceId, v: VertId| mesh.face_loops(f).into_iter().find(|l| mesh.loop_vert(*l) == Some(v));
+    let loop_at = |f: FaceId, v: VertId| {
+        mesh.face_loops(f)
+            .into_iter()
+            .find(|l| mesh.loop_vert(*l) == Some(v))
+    };
     for f in island {
         for l in mesh.face_loops(*f) {
             parent.entry(l).or_insert(l);
@@ -122,7 +137,9 @@ fn flatten(mesh: &BMesh, island: &[FaceId], seams: &[bool]) -> Option<Vec<(LoopI
             if seams.get(e.index() as usize).copied().unwrap_or(false) {
                 continue;
             }
-            let Some(ends) = mesh.edge_verts(e) else { continue };
+            let Some(ends) = mesh.edge_verts(e) else {
+                continue;
+            };
             for g in mesh.edge_faces(e) {
                 if g == *f || !in_island.contains(&g) {
                     continue;
@@ -165,10 +182,17 @@ fn flatten(mesh: &BMesh, island: &[FaceId], seams: &[bool]) -> Option<Vec<(LoopI
     if n < 3 || triangles.is_empty() {
         return None;
     }
-    let p: Vec<Vec3> = verts.iter().map(|v| mesh.position(*v).unwrap_or(Vec3::ZERO)).collect();
+    let p: Vec<Vec3> = verts
+        .iter()
+        .map(|v| mesh.position(*v).unwrap_or(Vec3::ZERO))
+        .collect();
 
     // Two pins far apart: from any vertex, the farthest; from that, the farthest.
-    let far = |from: usize| (0..n).max_by(|a, b| p[*a].distance(p[from]).total_cmp(&p[*b].distance(p[from]))).unwrap_or(0);
+    let far = |from: usize| {
+        (0..n)
+            .max_by(|a, b| p[*a].distance(p[from]).total_cmp(&p[*b].distance(p[from])))
+            .unwrap_or(0)
+    };
     let pin_a = far(0);
     let pin_b = far(pin_a);
     if pin_a == pin_b {
@@ -254,7 +278,11 @@ fn flatten(mesh: &BMesh, island: &[FaceId], seams: &[bool]) -> Option<Vec<(LoopI
     };
     let mut rhs = vec![0.0; free.len()];
     for row in &rows {
-        let pinned: f64 = row.terms.iter().filter_map(|(i, c)| fixed[*i].map(|f| c * f)).sum();
+        let pinned: f64 = row
+            .terms
+            .iter()
+            .filter_map(|(i, c)| fixed[*i].map(|f| c * f))
+            .sum();
         for (i, c) in &row.terms {
             if slot[*i] != usize::MAX {
                 rhs[slot[*i]] -= c * pinned;
@@ -288,7 +316,9 @@ fn flatten(mesh: &BMesh, island: &[FaceId], seams: &[bool]) -> Option<Vec<(LoopI
         }
     }
     let value = |i: usize| fixed[i].unwrap_or_else(|| x[slot[i]]);
-    let mut uv: Vec<Vec2> = (0..n).map(|k| Vec2::new(value(2 * k) as f32, value(2 * k + 1) as f32)).collect();
+    let mut uv: Vec<Vec2> = (0..n)
+        .map(|k| Vec2::new(value(2 * k) as f32, value(2 * k + 1) as f32))
+        .collect();
 
     // A map can come out mirrored; a mirrored island samples a texture
     // backwards. Flip it if most triangles wound the other way.
@@ -339,7 +369,10 @@ mod tests {
         let mut out = Vec::new();
         for f in mesh.face_ids() {
             let loops = mesh.face_loops(f);
-            let p: Vec<Vec3> = loops.iter().map(|l| mesh.position(mesh.loop_vert(*l).unwrap()).unwrap()).collect();
+            let p: Vec<Vec3> = loops
+                .iter()
+                .map(|l| mesh.position(mesh.loop_vert(*l).unwrap()).unwrap())
+                .collect();
             let t: Vec<Vec2> = loops.iter().map(|l| uvs[l.index() as usize]).collect();
             for i in 1..loops.len() - 1 {
                 let a3 = (p[i] - p[0]).cross(p[i + 1] - p[0]).length() * 0.5;
@@ -367,8 +400,14 @@ mod tests {
         // seam every edge, so each face is its own island.
         let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
         let n = m.slot_count(Domain::Edge);
-        m.attributes_mut().ensure(names::SEAM, Domain::Edge, AttrType::Bool, n);
-        for s in m.attributes_mut().make_mut_bool(names::SEAM).unwrap().iter_mut() {
+        m.attributes_mut()
+            .ensure(names::SEAM, Domain::Edge, AttrType::Bool, n);
+        for s in m
+            .attributes_mut()
+            .make_mut_bool(names::SEAM)
+            .unwrap()
+            .iter_mut()
+        {
             *s = true;
         }
         let faces: Vec<FaceId> = m.face_ids().collect();
@@ -378,7 +417,9 @@ mod tests {
         assert!(s.iter().all(|x| (x / s[0] - 1.0).abs() < 1e-3), "{s:?}");
         // And everything inside the unit square.
         let uvs = m.attributes().get_f32x2(LAYER).unwrap();
-        assert!(uvs.iter().all(|p| p.x >= -1e-4 && p.x <= 1.0001 && p.y >= -1e-4 && p.y <= 1.0001));
+        assert!(uvs
+            .iter()
+            .all(|p| p.x >= -1e-4 && p.x <= 1.0001 && p.y >= -1e-4 && p.y <= 1.0001));
         let _ = SelectMode::Face;
     }
 
@@ -386,7 +427,10 @@ mod tests {
     fn a_cylinder_cut_once_down_its_side_opens_flat() {
         // A tube: the sides of a cylinder without its caps, one seam down it.
         let mut m = BMesh::from_mesh_data(&primitives::cylinder(1.0, 2.0, 16));
-        let sides: Vec<FaceId> = m.face_ids().filter(|f| m.face_verts(*f).len() == 4).collect();
+        let sides: Vec<FaceId> = m
+            .face_ids()
+            .filter(|f| m.face_verts(*f).len() == 4)
+            .collect();
         let vertical = m
             .edge_ids()
             .find(|e| {
@@ -396,7 +440,8 @@ mod tests {
             })
             .expect("a side edge");
         let n = m.slot_count(Domain::Edge);
-        m.attributes_mut().ensure(names::SEAM, Domain::Edge, AttrType::Bool, n);
+        m.attributes_mut()
+            .ensure(names::SEAM, Domain::Edge, AttrType::Bool, n);
         m.attributes_mut().make_mut_bool(names::SEAM).unwrap()[vertical.index() as usize] = true;
         unwrap(&mut m, &sides, LAYER, 0.0);
         // A developable surface: no stretch, so every side triangle alike.
@@ -404,12 +449,18 @@ mod tests {
         let mut ratios = Vec::new();
         for f in &sides {
             let loops = m.face_loops(*f);
-            let p: Vec<Vec3> = loops.iter().map(|l| m.position(m.loop_vert(*l).unwrap()).unwrap()).collect();
+            let p: Vec<Vec3> = loops
+                .iter()
+                .map(|l| m.position(m.loop_vert(*l).unwrap()).unwrap())
+                .collect();
             let t: Vec<Vec2> = loops.iter().map(|l| uvs[l.index() as usize]).collect();
             let a3 = (p[1] - p[0]).cross(p[2] - p[0]).length();
             let a2 = (t[1] - t[0]).perp_dot(t[2] - t[0]).abs();
             ratios.push(a2 / a3);
         }
-        assert!(ratios.iter().all(|r| (r / ratios[0] - 1.0).abs() < 0.02), "{ratios:?}");
+        assert!(
+            ratios.iter().all(|r| (r / ratios[0] - 1.0).abs() < 0.02),
+            "{ratios:?}"
+        );
     }
 }

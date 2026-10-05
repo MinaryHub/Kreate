@@ -21,7 +21,11 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 
 /// `name`, or `name.001` and so on when it is taken.
 fn unique(doc: &Document, name: &str) -> String {
-    let base = if name.trim().is_empty() { "Collection" } else { name.trim() };
+    let base = if name.trim().is_empty() {
+        "Collection"
+    } else {
+        name.trim()
+    };
     if doc.find_collection(base).is_none() {
         return base.to_string();
     }
@@ -58,19 +62,31 @@ impl Operator for MoveToCollection {
     fn poll(ctx: &Context, _doc: &Document) -> bool {
         ctx.mode.acts_on() == crate::mode::ActsOn::Objects
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let selected = if params.uid.is_empty() {
             doc.document().selection.objects.clone()
         } else {
-            let Ok(raw) = params.uid.trim().parse::<u64>() else { return Ok(OpResult::Cancelled) };
-            doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)).into_iter().collect()
+            let Ok(raw) = params.uid.trim().parse::<u64>() else {
+                return Ok(OpResult::Cancelled);
+            };
+            doc.document()
+                .object_by_uid(kreate_scene::Uid::from_raw(raw))
+                .into_iter()
+                .collect()
         };
         if selected.is_empty() {
             return Ok(OpResult::Cancelled);
         }
         let target = if params.new {
             let name = unique(doc.document(), &params.collection);
-            Some(doc.document_mut().add_collection(Collection { name, ..Default::default() }))
+            Some(doc.document_mut().add_collection(Collection {
+                name,
+                ..Default::default()
+            }))
         } else if params.collection.is_empty() {
             None
         } else {
@@ -98,7 +114,10 @@ pub struct SetCollectionVisibleParams {
 
 impl Default for SetCollectionVisibleParams {
     fn default() -> Self {
-        Self { name: String::new(), visible: true }
+        Self {
+            name: String::new(),
+            visible: true,
+        }
     }
 }
 
@@ -113,9 +132,19 @@ impl Operator for SetCollectionVisible {
     fn label() -> &'static str {
         "Show or Hide Collection"
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = doc.document().find_collection(&params.name) else { return Ok(OpResult::Cancelled) };
-        if doc.document().collection(id).is_some_and(|c| c.hide != params.visible) {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = doc.document().find_collection(&params.name) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if doc
+            .document()
+            .collection(id)
+            .is_some_and(|c| c.hide != params.visible)
+        {
             return Ok(OpResult::Cancelled);
         }
         if let Some(c) = doc.document_mut().collection_mut(id) {
@@ -141,8 +170,14 @@ impl Operator for RemoveCollection {
     fn label() -> &'static str {
         "Remove Collection"
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = doc.document().find_collection(&params.name) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = doc.document().find_collection(&params.name) else {
+            return Ok(OpResult::Cancelled);
+        };
         doc.document_mut().remove_collection(id);
         Ok(OpResult::Finished)
     }
@@ -165,8 +200,14 @@ impl Operator for RenameCollection {
     fn label() -> &'static str {
         "Rename Collection"
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = doc.document().find_collection(&params.name) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = doc.document().find_collection(&params.name) else {
+            return Ok(OpResult::Cancelled);
+        };
         if params.new_name.trim().is_empty() || params.new_name == params.name {
             return Ok(OpResult::Cancelled);
         }
@@ -194,7 +235,8 @@ mod tests {
             p.set(k, v.clone());
         }
         let mut h = History::new();
-        h.dispatch(&r, doc, &Context::default(), op, &p).expect("ran");
+        h.dispatch(&r, doc, &Context::default(), op, &p)
+            .expect("ran");
         !h.entries().is_empty()
     }
 
@@ -208,18 +250,43 @@ mod tests {
         let a = doc.add_object(Object::new("A", ObjectData::Empty));
         let b = doc.add_object(Object::new("B", ObjectData::Empty));
         doc.selection.add(a);
-        assert!(run(&mut doc, "object.move_to_collection", &[("collection", text("Props")), ("new", PropertyValue::Bool(true))]));
+        assert!(run(
+            &mut doc,
+            "object.move_to_collection",
+            &[
+                ("collection", text("Props")),
+                ("new", PropertyValue::Bool(true))
+            ]
+        ));
         let props = doc.find_collection("Props").expect("made");
         assert_eq!(doc.collection_of(a), Some(props));
         assert_eq!(doc.collection_of(b), None);
         // A second new one with the same name is numbered, and the object moves.
-        assert!(run(&mut doc, "object.move_to_collection", &[("collection", text("Props")), ("new", PropertyValue::Bool(true))]));
+        assert!(run(
+            &mut doc,
+            "object.move_to_collection",
+            &[
+                ("collection", text("Props")),
+                ("new", PropertyValue::Bool(true))
+            ]
+        ));
         assert_eq!(doc.collection_of(a), doc.find_collection("Props.001"));
-        assert!(doc.collection(props).unwrap().objects.is_empty(), "it is in two at once");
+        assert!(
+            doc.collection(props).unwrap().objects.is_empty(),
+            "it is in two at once"
+        );
         // Back to the scene; again is nothing.
-        assert!(run(&mut doc, "object.move_to_collection", &[("collection", text(""))]));
+        assert!(run(
+            &mut doc,
+            "object.move_to_collection",
+            &[("collection", text(""))]
+        ));
         assert_eq!(doc.collection_of(a), None);
-        assert!(!run(&mut doc, "object.move_to_collection", &[("collection", text(""))]));
+        assert!(!run(
+            &mut doc,
+            "object.move_to_collection",
+            &[("collection", text(""))]
+        ));
     }
 
     #[test]
@@ -227,13 +294,41 @@ mod tests {
         let mut doc = Document::new();
         let a = doc.add_object(Object::new("A", ObjectData::Empty));
         doc.selection.add(a);
-        run(&mut doc, "object.move_to_collection", &[("collection", text("Set")), ("new", PropertyValue::Bool(true))]);
+        run(
+            &mut doc,
+            "object.move_to_collection",
+            &[
+                ("collection", text("Set")),
+                ("new", PropertyValue::Bool(true)),
+            ],
+        );
         assert!(doc.is_shown(a));
-        assert!(run(&mut doc, "collection.set_visible", &[("name", text("Set")), ("visible", PropertyValue::Bool(false))]));
+        assert!(run(
+            &mut doc,
+            "collection.set_visible",
+            &[
+                ("name", text("Set")),
+                ("visible", PropertyValue::Bool(false))
+            ]
+        ));
         assert!(!doc.is_shown(a));
-        assert!(run(&mut doc, "collection.rename", &[("name", text("Set")), ("new_name", text("Stage"))]));
-        assert!(run(&mut doc, "collection.remove", &[("name", text("Stage"))]));
-        assert!(doc.is_shown(a), "removing the collection left its object hidden");
-        assert!(doc.object(a).is_some(), "removing the collection removed its object");
+        assert!(run(
+            &mut doc,
+            "collection.rename",
+            &[("name", text("Set")), ("new_name", text("Stage"))]
+        ));
+        assert!(run(
+            &mut doc,
+            "collection.remove",
+            &[("name", text("Stage"))]
+        ));
+        assert!(
+            doc.is_shown(a),
+            "removing the collection left its object hidden"
+        );
+        assert!(
+            doc.object(a).is_some(),
+            "removing the collection removed its object"
+        );
     }
 }

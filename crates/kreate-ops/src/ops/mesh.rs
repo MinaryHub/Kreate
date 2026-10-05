@@ -878,9 +878,14 @@ impl Operator for TranslateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let offset = glam::DVec3::from_array(params.translation);
-        run_transform(doc, params.proportional_size, params.proportional_falloff, false, None, |p, weight, _| {
-            p + offset * weight as f64
-        })
+        run_transform(
+            doc,
+            params.proportional_size,
+            params.proportional_falloff,
+            false,
+            None,
+            |p, weight, _| p + offset * weight as f64,
+        )
     }
 }
 
@@ -930,16 +935,23 @@ impl Operator for RotateSelection {
         };
         let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(doc, params.proportional_size, params.proportional_falloff, true, pivot, |p, weight, about| {
-            // The rotation is interpolated towards the identity rather than the
-            // *result* being interpolated towards the original. The two differ:
-            // blending positions drags a partly-weighted vertex along the chord
-            // and shrinks the mesh towards the pivot, while blending the
-            // rotation turns it through a smaller angle, which is what the tool
-            // means.
-            let partial = glam::DQuat::IDENTITY.slerp(rotation, weight as f64);
-            about + partial * (p - about)
-        })
+        run_transform(
+            doc,
+            params.proportional_size,
+            params.proportional_falloff,
+            true,
+            pivot,
+            |p, weight, about| {
+                // The rotation is interpolated towards the identity rather than the
+                // *result* being interpolated towards the original. The two differ:
+                // blending positions drags a partly-weighted vertex along the chord
+                // and shrinks the mesh towards the pivot, while blending the
+                // rotation turns it through a smaller angle, which is what the tool
+                // means.
+                let partial = glam::DQuat::IDENTITY.slerp(rotation, weight as f64);
+                about + partial * (p - about)
+            },
+        )
     }
 }
 
@@ -1001,19 +1013,26 @@ impl Operator for ScaleSelection {
     ) -> Result<OpResult, OpError> {
         let factor = glam::DVec3::from_array(params.scale);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(doc, params.proportional_size, params.proportional_falloff, true, pivot, |p, weight, about| {
-            // The factor is interpolated towards one.
-            //
-            // Unlike the rotation, this is *not* a correction: scaling is
-            // linear in the position, so blending the factor and blending the
-            // result are algebraically the same thing, and a test cannot tell
-            // them apart. Written this way for symmetry with the rotation above
-            // and because it says what is meant — a vertex at half weight is
-            // scaled half as much, rather than dragged half way to where a full
-            // scale would put it.
-            let partial = glam::DVec3::ONE.lerp(factor, weight as f64);
-            about + (p - about) * partial
-        })
+        run_transform(
+            doc,
+            params.proportional_size,
+            params.proportional_falloff,
+            true,
+            pivot,
+            |p, weight, about| {
+                // The factor is interpolated towards one.
+                //
+                // Unlike the rotation, this is *not* a correction: scaling is
+                // linear in the position, so blending the factor and blending the
+                // result are algebraically the same thing, and a test cannot tell
+                // them apart. Written this way for symmetry with the rotation above
+                // and because it says what is meant — a vertex at half weight is
+                // scaled half as much, rather than dragged half way to where a full
+                // scale would put it.
+                let partial = glam::DVec3::ONE.lerp(factor, weight as f64);
+                about + (p - about) * partial
+            },
+        )
     }
 }
 
@@ -1253,7 +1272,10 @@ pub struct BevelParams {
 
 impl Default for BevelParams {
     fn default() -> Self {
-        Self { width: 0.1, segments: 1 }
+        Self {
+            width: 0.1,
+            segments: 1,
+        }
     }
 }
 
@@ -1701,7 +1723,8 @@ impl Operator for LoopCut {
         // A named edge becomes the selection first, the way a click on it
         // would have made it: the cut then reads it as it reads any other.
         if params.edge >= 0 {
-            let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+            let mesh_id = target_mesh(doc.document())
+                .ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
             let named = with_named_mesh(doc, mesh_id, |mesh| {
                 if params.edge as u64 >= mesh.num_edges() as u64 {
                     return false;
@@ -1752,14 +1775,22 @@ impl Operator for ExtrudeMove {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         can_edit(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let made = with_bmesh(doc, |bm| edit::extrude_edges_and_verts(bm).map_err(|e| OpError::Failed(e.to_string())))?;
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let made = with_bmesh(doc, |bm| {
+            edit::extrude_edges_and_verts(bm).map_err(|e| OpError::Failed(e.to_string()))
+        })?;
         if made.new_verts.is_empty() {
             return Ok(OpResult::Cancelled);
         }
         let offset = glam::DVec3::from_array(params.translation);
         if offset != glam::DVec3::ZERO {
-            run_transform(doc, 0.0, 0, false, None, |p, weight, _| p + offset * weight as f64)?;
+            run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+                p + offset * weight as f64
+            })?;
         }
         Ok(OpResult::Finished)
     }
@@ -1787,7 +1818,11 @@ impl Operator for MarkSeam {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         can_edit(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let changed = for_each_edit_mesh(doc, |_, mesh| {
             let selected = selection::selected(mesh, kreate_mesh::Domain::Edge);
             if selected.is_empty() {
@@ -1816,7 +1851,11 @@ impl Operator for MarkSeam {
             }
             any
         })?;
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -1864,7 +1903,9 @@ impl Operator for KnifeCut {
         if path.len() < 2 || !path.iter().all(|p| p.is_finite()) || !view.is_finite() {
             return Ok(OpResult::Cancelled);
         }
-        let cut = with_bmesh(doc, |bm| edit::knife(bm, &path, view).map_err(|e| OpError::Failed(e.to_string())))?;
+        let cut = with_bmesh(doc, |bm| {
+            edit::knife(bm, &path, view).map_err(|e| OpError::Failed(e.to_string()))
+        })?;
         Ok(if cut.faces.is_empty() {
             OpResult::Cancelled
         } else {
@@ -2098,7 +2139,17 @@ pub enum SelectAction {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct SelectParams {
     /// What to do to the selection.
-    #[param(variants("all", "none", "invert", "loop", "ring", "face_loop", "more", "less", "linked"))]
+    #[param(variants(
+        "all",
+        "none",
+        "invert",
+        "loop",
+        "ring",
+        "face_loop",
+        "more",
+        "less",
+        "linked"
+    ))]
     pub action: u32,
     /// Which element type an inversion, a grow or a shrink works in.
     #[param(variants("vert", "edge", "face"))]
@@ -2128,7 +2179,10 @@ pub struct SelectSimilarParams {
 
 impl Default for SelectSimilarParams {
     fn default() -> Self {
-        Self { kind: 0, threshold: 0.01 }
+        Self {
+            kind: 0,
+            threshold: 0.01,
+        }
     }
 }
 
@@ -2158,14 +2212,24 @@ impl Operator for SelectShortestPath {
         can_edit(ctx, doc)
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let mode = match params.mode {
             1 => SelectMode::Edge,
             2 => SelectMode::Face,
             _ => SelectMode::Vert,
         };
-        let found = with_mesh(doc, |mesh| selection::select_shortest_path(mesh, mode, params.element))?;
-        Ok(if found { OpResult::Finished } else { OpResult::Cancelled })
+        let found = with_mesh(doc, |mesh| {
+            selection::select_shortest_path(mesh, mode, params.element)
+        })?;
+        Ok(if found {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2185,11 +2249,19 @@ impl Operator for SelectSimilar {
         can_edit(ctx, doc)
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let grew = for_each_edit_mesh(doc, |_, mesh| {
             selection::select_similar(mesh, params.kind as usize, params.threshold)
         })?;
-        Ok(if grew { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if grew {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2259,18 +2331,20 @@ impl Operator for SelectElements {
         // More, less and linked: layer writes too, over the mesh's own
         // adjacency, and every mesh in edit mode like select all.
         if params.action >= 6 {
-            return Ok(if for_each_edit_mesh(doc, |_, mesh| {
-                let corner_edges = mesh.corner_edges();
-                match params.action {
-                    6 => selection::select_more(mesh, mode, &corner_edges),
-                    7 => selection::select_less(mesh, mode, &corner_edges),
-                    _ => selection::select_linked(mesh, &corner_edges),
-                }
-            })? {
-                OpResult::Finished
-            } else {
-                OpResult::Cancelled
-            });
+            return Ok(
+                if for_each_edit_mesh(doc, |_, mesh| {
+                    let corner_edges = mesh.corner_edges();
+                    match params.action {
+                        6 => selection::select_more(mesh, mode, &corner_edges),
+                        7 => selection::select_less(mesh, mode, &corner_edges),
+                        _ => selection::select_linked(mesh, &corner_edges),
+                    }
+                })? {
+                    OpResult::Finished
+                } else {
+                    OpResult::Cancelled
+                },
+            );
         }
 
         let grew = each_bmesh(doc, |bm| {
@@ -2333,12 +2407,21 @@ impl Operator for SelectLinkedPick {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         can_edit(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let mesh_id =
+            target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
         let changed = with_named_mesh(doc, mesh_id, |mesh| {
             let seed: Vec<u32> = match params.mode {
                 2 if params.element < mesh.num_faces() => mesh.face_verts(params.element).to_vec(),
-                1 => mesh.edges().get(params.element as usize).map(|e| e.to_vec()).unwrap_or_default(),
+                1 => mesh
+                    .edges()
+                    .get(params.element as usize)
+                    .map(|e| e.to_vec())
+                    .unwrap_or_default(),
                 0 if params.element < mesh.num_verts() => vec![params.element],
                 _ => Vec::new(),
             };
@@ -2347,7 +2430,11 @@ impl Operator for SelectLinkedPick {
             }
             selection::select_linked_from(mesh, &seed, params.deselect)
         })?;
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2378,8 +2465,13 @@ impl Operator for SelectLoopPick {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         can_edit(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let mesh_id = target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let mesh_id =
+            target_mesh(doc.document()).ok_or_else(|| OpError::Failed("no mesh to edit".into()))?;
         // The edge by where its ends are: the stored mesh numbers its edges,
         // and the edit structure — after a delete — may number them otherwise.
         let ends = with_named_mesh(doc, mesh_id, |mesh| {
@@ -2408,7 +2500,11 @@ impl Operator for SelectLoopPick {
                 bm.select_edge_loop(e)
             })
         })?;
-        Ok(if grew > 0 { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if grew > 0 {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2455,7 +2551,11 @@ impl Operator for HideElements {
             let corner_edges = mesh.corner_edges();
             selection::hide(mesh, mode, params.unselected, &corner_edges)
         })?;
-        Ok(if any { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if any {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2484,7 +2584,11 @@ impl Operator for RevealElements {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let any = for_each_edit_mesh(doc, |_, mesh| selection::reveal(mesh))?;
-        Ok(if any { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if any {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -2859,14 +2963,22 @@ impl Operator for Crease {
         can_edit(ctx, doc)
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let changed: usize = each_bmesh(doc, |bm| {
             let edges = bm.selected_edges();
             Ok(edit::set_crease(bm, &edges, params.value as f32))
         })?
         .into_iter()
         .sum();
-        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+        Ok(if changed == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
     }
 }
 
@@ -2936,13 +3048,20 @@ impl Operator for SelectWhere {
         can_edit(ctx, doc)
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let mode = match params.mode {
             1 => SelectMode::Edge,
             2 => SelectMode::Face,
             _ => SelectMode::Vert,
         };
-        let (lo, hi) = (glam::DVec3::from_array(params.min), glam::DVec3::from_array(params.max));
+        let (lo, hi) = (
+            glam::DVec3::from_array(params.min),
+            glam::DVec3::from_array(params.max),
+        );
         let inside = |p: glam::DVec3| p.cmpge(lo).all() && p.cmple(hi).all();
         let wanted = glam::DVec3::from_array(params.normal).normalize_or_zero();
         let cos_limit = params.angle.cos();
@@ -2954,7 +3073,10 @@ impl Operator for SelectWhere {
             let positions = mesh.positions().to_vec();
             let facing = |n: glam::Vec3| {
                 wanted == glam::DVec3::ZERO
-                    || (to_world_normal * n.as_dvec3()).normalize_or_zero().dot(wanted) >= cos_limit
+                    || (to_world_normal * n.as_dvec3())
+                        .normalize_or_zero()
+                        .dot(wanted)
+                        >= cos_limit
             };
             let vertex_normals = if wanted != glam::DVec3::ZERO && mode != SelectMode::Face {
                 mesh.compute_vertex_normals()
@@ -2975,7 +3097,9 @@ impl Operator for SelectWhere {
                     .filter(|(_, [a, b])| {
                         inside(at((positions[*a as usize] + positions[*b as usize]) * 0.5))
                             && (vertex_normals.is_empty()
-                                || facing(vertex_normals[*a as usize] + vertex_normals[*b as usize]))
+                                || facing(
+                                    vertex_normals[*a as usize] + vertex_normals[*b as usize],
+                                ))
                     })
                     .map(|(e, _)| e as u32)
                     .collect(),
@@ -2988,7 +3112,11 @@ impl Operator for SelectWhere {
                     (0..mesh.num_faces())
                         .filter(|f| {
                             let ring = mesh.face_verts(*f);
-                            let centre = ring.iter().map(|v| positions[*v as usize]).sum::<glam::Vec3>() / ring.len() as f32;
+                            let centre = ring
+                                .iter()
+                                .map(|v| positions[*v as usize])
+                                .sum::<glam::Vec3>()
+                                / ring.len() as f32;
                             if !inside(at(centre)) {
                                 return false;
                             }
@@ -2996,7 +3124,11 @@ impl Operator for SelectWhere {
                                 return false;
                             }
                             params.material < 0
-                                || slots.as_ref().and_then(|s| s.get(*f as usize)).copied().unwrap_or(0) as i64
+                                || slots
+                                    .as_ref()
+                                    .and_then(|s| s.get(*f as usize))
+                                    .copied()
+                                    .unwrap_or(0) as i64
                                     == params.material
                         })
                         .collect()
@@ -3016,7 +3148,11 @@ impl Operator for SelectWhere {
         if matched == 0 && params.extend {
             return Ok(OpResult::Cancelled);
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -3064,8 +3200,15 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
     let mut sum = glam::DVec3::ZERO;
     for target in edit_targets(doc) {
-        let Some(mesh) = doc.mesh(target.mesh) else { continue };
-        let Some(selected) = mesh.attributes().get_bool(kreate_mesh::attribute::names::SELECT_FACE) else { continue };
+        let Some(mesh) = doc.mesh(target.mesh) else {
+            continue;
+        };
+        let Some(selected) = mesh
+            .attributes()
+            .get_bool(kreate_mesh::attribute::names::SELECT_FACE)
+        else {
+            continue;
+        };
         let offsets = mesh.face_offsets();
         let corners = mesh.corner_verts();
         let positions = mesh.positions();
@@ -3079,7 +3222,11 @@ pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
             for (i, &a) in ring.iter().enumerate() {
                 let p = positions[a as usize].as_dvec3();
                 let q = positions[ring[(i + 1) % ring.len()] as usize].as_dvec3();
-                n += glam::DVec3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y));
+                n += glam::DVec3::new(
+                    (p.y - q.y) * (p.z + q.z),
+                    (p.z - q.z) * (p.x + q.x),
+                    (p.x - q.x) * (p.y + q.y),
+                );
             }
             sum += normal_matrix * n;
         }
@@ -3094,7 +3241,9 @@ pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
 /// cut along with the pointer; `None` when no edge is selected.
 pub fn loop_cut_edge(doc: &Document) -> Option<(glam::DVec3, glam::DVec3)> {
     let mesh = doc.mesh(target_mesh(doc)?)?;
-    let selected = mesh.attributes().get_bool(kreate_mesh::attribute::names::SELECT_EDGE)?;
+    let selected = mesh
+        .attributes()
+        .get_bool(kreate_mesh::attribute::names::SELECT_EDGE)?;
     let edge = selected.iter().position(|on| *on)?;
     edge_in_world(doc, edge as u32)
 }
@@ -3120,9 +3269,24 @@ mod tests {
         let half = |curve| super::falloff(0.5, 1.0, curve);
         let expect = [0.5, 0.75f32.sqrt(), 0.5f32.sqrt(), 0.25, 0.5, 1.0];
         for (curve, want) in expect.iter().enumerate() {
-            assert!((half(curve as u32) - want).abs() < 1e-5, "{}: {}", super::FALLOFF_CURVES[curve], half(curve as u32));
-            assert_eq!(super::falloff(1.0, 1.0, curve as u32), 0.0, "{} at the rim", super::FALLOFF_CURVES[curve]);
-            assert_eq!(super::falloff(0.0, 1.0, curve as u32), 1.0, "{} at the centre", super::FALLOFF_CURVES[curve]);
+            assert!(
+                (half(curve as u32) - want).abs() < 1e-5,
+                "{}: {}",
+                super::FALLOFF_CURVES[curve],
+                half(curve as u32)
+            );
+            assert_eq!(
+                super::falloff(1.0, 1.0, curve as u32),
+                0.0,
+                "{} at the rim",
+                super::FALLOFF_CURVES[curve]
+            );
+            assert_eq!(
+                super::falloff(0.0, 1.0, curve as u32),
+                1.0,
+                "{} at the centre",
+                super::FALLOFF_CURVES[curve]
+            );
         }
     }
 

@@ -79,18 +79,25 @@ pub fn add_layer(mesh: &mut MeshData, name: &str, from_mix: &[ShapeKey]) {
             d[i] = *now - *base;
         }
     }
-    mesh.attributes_mut().insert(&layer(name), Domain::Point, AttrData::F32x3(Arc::new(d)));
+    mesh.attributes_mut()
+        .insert(&layer(name), Domain::Point, AttrData::F32x3(Arc::new(d)));
 }
 
 /// Into edit mode on key `name`: the positions become its shape, and the
 /// layer holds the basis meanwhile. `false` when the mesh has no such key.
 pub fn trade_in(mesh: &mut MeshData, name: &str) -> bool {
-    let Some(d) = offsets(mesh, name) else { return false };
+    let Some(d) = offsets(mesh, name) else {
+        return false;
+    };
     let basis: Vec<Vec3> = mesh.positions().to_vec();
     for (p, off) in mesh.positions_mut().iter_mut().zip(d.iter()) {
         *p += *off;
     }
-    mesh.attributes_mut().insert(&layer(name), Domain::Point, AttrData::F32x3(Arc::new(basis)));
+    mesh.attributes_mut().insert(
+        &layer(name),
+        Domain::Point,
+        AttrData::F32x3(Arc::new(basis)),
+    );
     true
 }
 
@@ -114,7 +121,8 @@ pub fn trade_out(mesh: &mut MeshData, name: &str) -> bool {
         d[i] = edited[i] - base[i];
     }
     mesh.positions_mut().copy_from_slice(&base);
-    mesh.attributes_mut().insert(&layer(name), Domain::Point, AttrData::F32x3(Arc::new(d)));
+    mesh.attributes_mut()
+        .insert(&layer(name), Domain::Point, AttrData::F32x3(Arc::new(d)));
     true
 }
 
@@ -123,7 +131,10 @@ mod tests {
     use super::*;
 
     fn key(name: &str, value: f32) -> ShapeKey {
-        ShapeKey { name: name.into(), value }
+        ShapeKey {
+            name: name.into(),
+            value,
+        }
     }
 
     #[test]
@@ -131,7 +142,10 @@ mod tests {
         let mut m = kreate_mesh::primitives::cube(2.0);
         add_layer(&mut m, "Tall", &[]);
         let fresh = mix(&m, &[key("Tall", 1.0)]).map(|x| x.positions().to_vec());
-        assert!(fresh.is_none_or(|p| p == m.positions()), "a new key moved something");
+        assert!(
+            fresh.is_none_or(|p| p == m.positions()),
+            "a new key moved something"
+        );
         // Edit the key: the top four up by two.
         assert!(trade_in(&mut m, "Tall"));
         for p in m.positions_mut() {
@@ -161,8 +175,17 @@ mod tests {
         bm.add_vert(Vec3::new(5.0, 5.0, 0.0));
         let mut m = bm.to_mesh_data();
         trade_out(&mut m, "K");
-        assert!(m.positions().contains(&Vec3::new(5.0, 5.0, 0.0)), "the new vertex moved");
+        assert!(
+            m.positions().contains(&Vec3::new(5.0, 5.0, 0.0)),
+            "the new vertex moved"
+        );
         let full = mix(&m, &[key("K", 1.0)]);
-        assert!(full.is_none() || full.unwrap().positions().contains(&Vec3::new(5.0, 5.0, 0.0)));
+        assert!(
+            full.is_none()
+                || full
+                    .unwrap()
+                    .positions()
+                    .contains(&Vec3::new(5.0, 5.0, 0.0))
+        );
     }
 }

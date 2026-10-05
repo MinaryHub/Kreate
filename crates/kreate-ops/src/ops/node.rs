@@ -576,7 +576,10 @@ impl Operator for SetNodeImage {
                 let Ok(raw) = text.parse::<u64>() else {
                     return Ok(OpResult::Cancelled);
                 };
-                match doc.document().image_by_uid(kreate_scene::Uid::from_raw(raw)) {
+                match doc
+                    .document()
+                    .image_by_uid(kreate_scene::Uid::from_raw(raw))
+                {
                     Some(image) => Some(image),
                     None => return Ok(OpResult::Cancelled),
                 }
@@ -585,7 +588,11 @@ impl Operator for SetNodeImage {
         let Some(graph) = graph_in(doc, params.slot) else {
             return Ok(OpResult::Cancelled);
         };
-        match graph.nodes.get_mut(params.node as usize).map(|n| &mut n.kind) {
+        match graph
+            .nodes
+            .get_mut(params.node as usize)
+            .map(|n| &mut n.kind)
+        {
             Some(NodeKind::Image { image: slot }) => {
                 if *slot == image {
                     return Ok(OpResult::Cancelled);

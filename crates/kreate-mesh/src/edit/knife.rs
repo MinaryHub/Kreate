@@ -132,8 +132,12 @@ pub fn knife(mesh: &mut BMesh, path: &[Vec3], view: Vec3) -> Result<Knife, BmErr
     for piece in pieces {
         // From the first point on the face's outline to the last; a piece that
         // does not reach the outline twice cannot split anything.
-        let Some(first) = piece.iter().position(|(_, inner)| !inner) else { continue };
-        let Some(last) = piece.iter().rposition(|(_, inner)| !inner) else { continue };
+        let Some(first) = piece.iter().position(|(_, inner)| !inner) else {
+            continue;
+        };
+        let Some(last) = piece.iter().rposition(|(_, inner)| !inner) else {
+            continue;
+        };
         if last <= first {
             continue;
         }
@@ -184,13 +188,23 @@ fn extent(mesh: &BMesh) -> f32 {
 
 /// Which vertex, edge or face `p` is on, trying them in that order.
 fn locate(mesh: &BMesh, p: Vec3, near: f32) -> Option<Pos> {
-    if let Some(v) = mesh.vert_ids().find(|v| mesh.position(*v).is_some_and(|q| q.distance(p) < near)) {
-        return Some(Pos { loc: Loc::Vert(v), at: mesh.position(v)? });
+    if let Some(v) = mesh
+        .vert_ids()
+        .find(|v| mesh.position(*v).is_some_and(|q| q.distance(p) < near))
+    {
+        return Some(Pos {
+            loc: Loc::Vert(v),
+            at: mesh.position(v)?,
+        });
     }
     let mut best: Option<(f32, EdgeId, Vec3)> = None;
     for e in mesh.edge_ids() {
-        let Some([a, b]) = mesh.edge_verts(e) else { continue };
-        let (Some(pa), Some(pb)) = (mesh.position(a), mesh.position(b)) else { continue };
+        let Some([a, b]) = mesh.edge_verts(e) else {
+            continue;
+        };
+        let (Some(pa), Some(pb)) = (mesh.position(a), mesh.position(b)) else {
+            continue;
+        };
         let q = closest_on_segment(p, pa, pb);
         let d = q.distance(p);
         if d < near && best.is_none_or(|(bd, _, _)| d < bd) {
@@ -198,12 +212,19 @@ fn locate(mesh: &BMesh, p: Vec3, near: f32) -> Option<Pos> {
         }
     }
     if let Some((_, e, q)) = best {
-        return Some(Pos { loc: Loc::Edge(e), at: q });
+        return Some(Pos {
+            loc: Loc::Edge(e),
+            at: q,
+        });
     }
     // Inside a face: on one of its fan triangles, within reach of its plane.
     let mut best: Option<(f32, FaceId)> = None;
     for f in mesh.face_ids() {
-        let ring: Vec<Vec3> = mesh.face_verts(f).iter().filter_map(|v| mesh.position(*v)).collect();
+        let ring: Vec<Vec3> = mesh
+            .face_verts(f)
+            .iter()
+            .filter_map(|v| mesh.position(*v))
+            .collect();
         for i in 1..ring.len().saturating_sub(1) {
             if let Some(d) = on_triangle(p, ring[0], ring[i], ring[i + 1], near * 10.0) {
                 if best.is_none_or(|(bd, _)| d < bd) {
@@ -212,7 +233,10 @@ fn locate(mesh: &BMesh, p: Vec3, near: f32) -> Option<Pos> {
             }
         }
     }
-    best.map(|(_, f)| Pos { loc: Loc::Face(f), at: p })
+    best.map(|(_, f)| Pos {
+        loc: Loc::Face(f),
+        at: p,
+    })
 }
 
 fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
@@ -269,7 +293,10 @@ fn walk(mesh: &BMesh, a: Pos, b: Pos, view: Vec3, near: f32, steps: &mut Vec<(Fa
     let mut came_from: Option<FaceId> = None;
     // A walk crosses at most every face once; a bound, not an expectation.
     for _ in 0..mesh.num_faces() + 1 {
-        let around: Vec<FaceId> = faces_at(mesh, here.loc).into_iter().filter(|f| Some(*f) != came_from).collect();
+        let around: Vec<FaceId> = faces_at(mesh, here.loc)
+            .into_iter()
+            .filter(|f| Some(*f) != came_from)
+            .collect();
         if let Some(f) = around.iter().find(|f| target.contains(f)) {
             steps.push((*f, here, b));
             return;
@@ -288,8 +315,12 @@ fn walk(mesh: &BMesh, a: Pos, b: Pos, view: Vec3, near: f32, steps: &mut Vec<(Fa
                 if touches {
                     continue;
                 }
-                let Some([p, q]) = mesh.edge_verts(e) else { continue };
-                let (Some(pp), Some(pq)) = (mesh.position(p), mesh.position(q)) else { continue };
+                let Some([p, q]) = mesh.edge_verts(e) else {
+                    continue;
+                };
+                let (Some(pp), Some(pq)) = (mesh.position(p), mesh.position(q)) else {
+                    continue;
+                };
                 let (sp, sq) = (normal.dot(pp - a.at), normal.dot(pq - a.at));
                 if (sp > 0.0 && sq > 0.0) || (sp < 0.0 && sq < 0.0) || sp == sq {
                     continue;
@@ -301,11 +332,20 @@ fn walk(mesh: &BMesh, a: Pos, b: Pos, view: Vec3, near: f32, steps: &mut Vec<(Fa
                     continue;
                 }
                 let loc = if x.distance(pp) < near {
-                    Pos { loc: Loc::Vert(p), at: pp }
+                    Pos {
+                        loc: Loc::Vert(p),
+                        at: pp,
+                    }
                 } else if x.distance(pq) < near {
-                    Pos { loc: Loc::Vert(q), at: pq }
+                    Pos {
+                        loc: Loc::Vert(q),
+                        at: pq,
+                    }
                 } else {
-                    Pos { loc: Loc::Edge(e), at: x }
+                    Pos {
+                        loc: Loc::Edge(e),
+                        at: x,
+                    }
                 };
                 if best.as_ref().is_none_or(|(bs, _, _)| s < *bs) {
                     best = Some((s, f, loc));
@@ -322,9 +362,17 @@ fn walk(mesh: &BMesh, a: Pos, b: Pos, view: Vec3, near: f32, steps: &mut Vec<(Fa
 
 /// Splits edge `e` at `points`, one new vertex each, and puts them into every
 /// face along it. Returns each point with its vertex.
-fn split_edge(mesh: &mut BMesh, e: EdgeId, points: &[Vec3]) -> Result<Vec<(Vec3, VertId)>, BmError> {
-    let Some([p, q]) = mesh.edge_verts(e) else { return Ok(Vec::new()) };
-    let Some(pp) = mesh.position(p) else { return Ok(Vec::new()) };
+fn split_edge(
+    mesh: &mut BMesh,
+    e: EdgeId,
+    points: &[Vec3],
+) -> Result<Vec<(Vec3, VertId)>, BmError> {
+    let Some([p, q]) = mesh.edge_verts(e) else {
+        return Ok(Vec::new());
+    };
+    let Some(pp) = mesh.position(p) else {
+        return Ok(Vec::new());
+    };
     let mut sorted: Vec<Vec3> = points.to_vec();
     sorted.sort_by(|a, b| a.distance(pp).total_cmp(&b.distance(pp)));
     let faces = mesh.edge_faces(e);
@@ -376,8 +424,14 @@ fn split_face(mesh: &mut BMesh, chain: &[VertId]) -> Result<Option<[FaceId; 2]>,
     };
     let ring = mesh.face_verts(face);
     let n = ring.len();
-    let a = ring.iter().position(|v| *v == first).expect("the face has it");
-    let b = ring.iter().position(|v| *v == last).expect("the face has it");
+    let a = ring
+        .iter()
+        .position(|v| *v == first)
+        .expect("the face has it");
+    let b = ring
+        .iter()
+        .position(|v| *v == last)
+        .expect("the face has it");
     if inner.is_empty() && ((a + 1) % n == b || (b + 1) % n == a) {
         return Ok(None);
     }
@@ -425,7 +479,12 @@ mod tests {
     #[test]
     fn a_stroke_from_edge_to_edge_splits_the_face_in_two() {
         let mut m = plane();
-        let out = knife(&mut m, &[Vec3::new(-1.0, 0.2, 0.0), Vec3::new(1.0, -0.3, 0.0)], Vec3::NEG_Z).unwrap();
+        let out = knife(
+            &mut m,
+            &[Vec3::new(-1.0, 0.2, 0.0), Vec3::new(1.0, -0.3, 0.0)],
+            Vec3::NEG_Z,
+        )
+        .unwrap();
         m.assert_valid();
         assert_eq!(m.num_faces(), 2);
         assert_eq!(m.num_verts(), 6);
@@ -442,7 +501,12 @@ mod tests {
         let mut m = BMesh::from_mesh_data(&primitives::grid(3.0, 3, 3));
         let before = m.num_faces();
         // Along y = 0.1, across the middle row of three quads.
-        knife(&mut m, &[Vec3::new(-1.5, 0.1, 0.0), Vec3::new(1.5, 0.1, 0.0)], Vec3::NEG_Z).unwrap();
+        knife(
+            &mut m,
+            &[Vec3::new(-1.5, 0.1, 0.0), Vec3::new(1.5, 0.1, 0.0)],
+            Vec3::NEG_Z,
+        )
+        .unwrap();
         m.assert_valid();
         assert_eq!(m.num_faces(), before + 3);
     }
@@ -452,7 +516,11 @@ mod tests {
         let mut m = plane();
         knife(
             &mut m,
-            &[Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 0.5, 0.0), Vec3::new(1.0, 0.0, 0.0)],
+            &[
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.5, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+            ],
             Vec3::NEG_Z,
         )
         .unwrap();
@@ -464,7 +532,12 @@ mod tests {
     #[test]
     fn a_stroke_that_stops_inside_a_face_cuts_nothing_and_leaves_nothing() {
         let mut m = plane();
-        knife(&mut m, &[Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.2, 0.1, 0.0)], Vec3::NEG_Z).unwrap();
+        knife(
+            &mut m,
+            &[Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.2, 0.1, 0.0)],
+            Vec3::NEG_Z,
+        )
+        .unwrap();
         m.assert_valid();
         assert_eq!(m.num_faces(), 1);
         // The crossed edge keeps its new vertex; the stray end does not.
@@ -477,7 +550,12 @@ mod tests {
         // left edge to its right edge. The back face is in the same plane of
         // the cut and must not be touched.
         let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
-        knife(&mut m, &[Vec3::new(-1.0, -1.0, 0.3), Vec3::new(1.0, -1.0, 0.3)], Vec3::Y).unwrap();
+        knife(
+            &mut m,
+            &[Vec3::new(-1.0, -1.0, 0.3), Vec3::new(1.0, -1.0, 0.3)],
+            Vec3::Y,
+        )
+        .unwrap();
         m.assert_valid();
         assert_eq!(m.num_faces(), 7);
         // The side faces had their shared edges split, so they are pentagons
@@ -497,7 +575,11 @@ mod tests {
         let before = m.num_faces();
         knife(
             &mut m,
-            &[Vec3::new(-1.0, -1.0, 0.5), Vec3::new(0.0, -1.0, 1.0), Vec3::new(1.0, 0.0, 1.0)],
+            &[
+                Vec3::new(-1.0, -1.0, 0.5),
+                Vec3::new(0.0, -1.0, 1.0),
+                Vec3::new(1.0, 0.0, 1.0),
+            ],
             (Vec3::Y - Vec3::Z).normalize(),
         )
         .unwrap();

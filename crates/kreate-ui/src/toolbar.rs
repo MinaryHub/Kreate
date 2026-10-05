@@ -92,11 +92,17 @@ pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
     let theme = crate::theme::from_ui(ui);
     let visuals = ui.style().interact_selectable(&response, active);
     if active || response.hovered() {
-        ui.painter().rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
+        ui.painter()
+            .rect_filled(rect, theme.radius as f32, visuals.weak_bg_fill);
     }
     let ink = if active { theme.accent } else { theme.text };
     let area = Rect::from_center_size(rect.center(), Vec2::splat(GLYPH));
-    let at = |x: f32, y: f32| Pos2::new(area.min.x + x * area.width(), area.min.y + y * area.height());
+    let at = |x: f32, y: f32| {
+        Pos2::new(
+            area.min.x + x * area.width(),
+            area.min.y + y * area.height(),
+        )
+    };
     let thin = Stroke::new(1.0, ink.gamma_multiply(0.55));
     match shape {
         // A loose loop.
@@ -112,7 +118,8 @@ pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
         }
         // A ring.
         2 => {
-            ui.painter().circle_stroke(at(0.42, 0.42), area.width() * 0.32, thin);
+            ui.painter()
+                .circle_stroke(at(0.42, 0.42), area.width() * 0.32, thin);
         }
         _ => dashed_rect(ui, Rect::from_min_max(at(0.08, 0.08), at(0.72, 0.72)), thin),
     }
@@ -123,7 +130,12 @@ pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
 /// The picture for each tool, in a unit square scaled to `area`.
 fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
     let p = ui.painter();
-    let at = |x: f32, y: f32| Pos2::new(area.min.x + x * area.width(), area.min.y + y * area.height());
+    let at = |x: f32, y: f32| {
+        Pos2::new(
+            area.min.x + x * area.width(),
+            area.min.y + y * area.height(),
+        )
+    };
     let line = Stroke::new(1.6, ink);
     let thin = Stroke::new(1.0, ink.gamma_multiply(0.55));
     match tool {
@@ -137,7 +149,10 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
         Tool::Move => {
             let c = at(0.5, 0.5);
             for (dx, dy) in [(0.0, -1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
-                let tip = Pos2::new(c.x + dx * area.width() * 0.45, c.y + dy * area.height() * 0.45);
+                let tip = Pos2::new(
+                    c.x + dx * area.width() * 0.45,
+                    c.y + dy * area.height() * 0.45,
+                );
                 p.line_segment([c, tip], line);
                 arrow_head(ui, tip, Vec2::new(dx, dy), area.width() * 0.18, ink);
             }
@@ -165,7 +180,13 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
             p.rect_stroke(small, 0.0, line, egui::StrokeKind::Middle);
             p.rect_stroke(big, 0.0, thin, egui::StrokeKind::Middle);
             p.line_segment([at(0.5, 0.5), at(0.86, 0.14)], line);
-            arrow_head(ui, at(0.86, 0.14), Vec2::new(1.0, -1.0).normalized(), area.width() * 0.18, ink);
+            arrow_head(
+                ui,
+                at(0.86, 0.14),
+                Vec2::new(1.0, -1.0).normalized(),
+                area.width() * 0.18,
+                ink,
+            );
         }
         // A face lifted off its base.
         Tool::Extrude => {
@@ -186,7 +207,12 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
         }
         // A corner cut off.
         Tool::Bevel => {
-            let pts = vec![at(0.15, 0.85), at(0.15, 0.45), at(0.45, 0.15), at(0.85, 0.15)];
+            let pts = vec![
+                at(0.15, 0.85),
+                at(0.15, 0.45),
+                at(0.45, 0.15),
+                at(0.85, 0.15),
+            ];
             p.add(egui::Shape::line(pts, line));
             p.line_segment([at(0.15, 0.15), at(0.15, 0.45)], thin);
             p.line_segment([at(0.15, 0.15), at(0.45, 0.15)], thin);
@@ -223,7 +249,12 @@ fn arrow_cursor(ui: &Ui, origin: Pos2, size: f32, ink: Color32) {
 
 fn dashed_rect(ui: &Ui, r: Rect, stroke: Stroke) {
     let p = ui.painter();
-    let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
+    let corners = [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+    ];
     for i in 0..4 {
         let a = corners[i];
         let b = corners[(i + 1) % 4];

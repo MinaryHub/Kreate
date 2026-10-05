@@ -320,7 +320,12 @@ impl ViewportTarget {
             ..Default::default()
         });
         let id = renderer.register_native_texture(device, &sampled, wgpu::FilterMode::Linear);
-        Self { view, texture, id, size }
+        Self {
+            view,
+            texture,
+            id,
+            size,
+        }
     }
 
     /// Reallocates if the requested size differs enough to matter.
@@ -1082,12 +1087,18 @@ impl App {
         // step for a selection nobody can see would be one more thing to undo.
         let sweeps = self.op_ctx.mode.edits_elements() || change.to.edits_elements();
         let meshes = |m: OpMode| m.acts_on() == kreate_ops::mode::ActsOn::MeshElements;
-        let (entering, leaving) = (!meshes(self.op_ctx.mode) && meshes(change.to), meshes(self.op_ctx.mode) && !meshes(change.to));
+        let (entering, leaving) = (
+            !meshes(self.op_ctx.mode) && meshes(change.to),
+            meshes(self.op_ctx.mode) && !meshes(change.to),
+        );
         self.op_ctx.mode = change.to;
         // With a shape key active, edit mode edits that key: its shape is
         // traded into the mesh before the session reads it.
         if entering {
-            self.run_op_with("object.shape_key_edit", &[("enter", PropertyValue::Bool(true))]);
+            self.run_op_with(
+                "object.shape_key_edit",
+                &[("enter", PropertyValue::Bool(true))],
+            );
         }
 
         if sweeps {
@@ -1114,7 +1125,10 @@ impl App {
         }
         // And traded back on the way out, once the session has let go.
         if leaving {
-            self.run_op_with("object.shape_key_edit", &[("enter", PropertyValue::Bool(false))]);
+            self.run_op_with(
+                "object.shape_key_edit",
+                &[("enter", PropertyValue::Bool(false))],
+            );
         }
 
         // The mode decides which context a shortcut resolves in, so the
@@ -1273,7 +1287,11 @@ impl App {
             kreate_ops::mode::ActsOn::Bones => Some(vec![
                 group(
                     &t("menu-group-transform"),
-                    &[("pose.translate", &[]), ("pose.rotate", &[]), ("pose.scale", &[])],
+                    &[
+                        ("pose.translate", &[]),
+                        ("pose.rotate", &[]),
+                        ("pose.scale", &[]),
+                    ],
                     self,
                 ),
                 group(
@@ -1295,12 +1313,20 @@ impl App {
             kreate_ops::mode::ActsOn::BoneJoints => Some(vec![
                 group(
                     &t("menu-group-transform"),
-                    &[("armature.translate", &[]), ("armature.rotate", &[]), ("armature.scale", &[])],
+                    &[
+                        ("armature.translate", &[]),
+                        ("armature.rotate", &[]),
+                        ("armature.scale", &[]),
+                    ],
                     self,
                 ),
                 group(
                     &t("menu-group-bones"),
-                    &[("armature.extrude", &[]), ("armature.bone_add", &[]), ("armature.delete", &[])],
+                    &[
+                        ("armature.extrude", &[]),
+                        ("armature.bone_add", &[]),
+                        ("armature.delete", &[]),
+                    ],
                     self,
                 ),
             ]),
@@ -1403,8 +1429,8 @@ impl App {
                         &[
                             (
                                 "object.duplicate",
-                            &[("linked", PropertyValue::Bool(false))],
-                        ),
+                                &[("linked", PropertyValue::Bool(false))],
+                            ),
                             ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
                             ("object.join", &[]),
                             ("object.boolean", &[("operation", PropertyValue::Enum(0))]),
@@ -1423,7 +1449,9 @@ impl App {
                     params.set("menu", PropertyValue::Text("add".into()));
                     let mut info = self.command_info("app.menu", &params);
                     info.name = format!("{}...", t("menu-add"));
-                    object.entries.insert(0, Entry::new("app.menu", info).with_params(params));
+                    object
+                        .entries
+                        .insert(0, Entry::new("app.menu", info).with_params(params));
                     object
                 },
             ]
@@ -1461,37 +1489,85 @@ impl App {
                 let mesh = shapes
                     .iter()
                     .enumerate()
-                    .map(|(i, key)| row(self, t(key), "object.add_primitive", &[("shape", PropertyValue::Enum(i as u32))]))
+                    .map(|(i, key)| {
+                        row(
+                            self,
+                            t(key),
+                            "object.add_primitive",
+                            &[("shape", PropertyValue::Enum(i as u32))],
+                        )
+                    })
                     .collect();
-                let lights = ["menu-add-light-point", "menu-add-light-sun", "menu-add-light-spot", "menu-add-light-area"]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, key)| row(self, t(key), "object.add_light", &[("kind", PropertyValue::Enum(i as u32))]))
-                    .collect();
+                let lights = [
+                    "menu-add-light-point",
+                    "menu-add-light-sun",
+                    "menu-add-light-spot",
+                    "menu-add-light-area",
+                ]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    row(
+                        self,
+                        t(key),
+                        "object.add_light",
+                        &[("kind", PropertyValue::Enum(i as u32))],
+                    )
+                })
+                .collect();
                 let other = vec![
                     row(self, t("menu-add-camera"), "object.add_camera", &[]),
                     row(self, t("menu-add-empty"), "object.add_empty", &[]),
                     row(self, t("menu-add-armature"), "object.add_armature", &[]),
                 ];
                 vec![
-                    Group { title: t("menu-add-mesh"), entries: mesh },
-                    Group { title: t("menu-add-light"), entries: lights },
-                    Group { title: String::new(), entries: other },
+                    Group {
+                        title: t("menu-add-mesh"),
+                        entries: mesh,
+                    },
+                    Group {
+                        title: t("menu-add-light"),
+                        entries: lights,
+                    },
+                    Group {
+                        title: String::new(),
+                        entries: other,
+                    },
                 ]
             }
             "collection" => {
-                let mut entries = vec![row(self, t("collection-scene"), "object.move_to_collection", &[("collection", PropertyValue::Text(String::new()))])];
-                let names: Vec<String> = self.doc.collections().map(|(_, c)| c.name.clone()).collect();
+                let mut entries = vec![row(
+                    self,
+                    t("collection-scene"),
+                    "object.move_to_collection",
+                    &[("collection", PropertyValue::Text(String::new()))],
+                )];
+                let names: Vec<String> = self
+                    .doc
+                    .collections()
+                    .map(|(_, c)| c.name.clone())
+                    .collect();
                 for name in names {
-                    entries.push(row(self, name.clone(), "object.move_to_collection", &[("collection", PropertyValue::Text(name))]));
+                    entries.push(row(
+                        self,
+                        name.clone(),
+                        "object.move_to_collection",
+                        &[("collection", PropertyValue::Text(name))],
+                    ));
                 }
                 entries.push(row(
                     self,
                     t("collection-new"),
                     "object.move_to_collection",
-                    &[("collection", PropertyValue::Text("Collection".into())), ("new", PropertyValue::Bool(true))],
+                    &[
+                        ("collection", PropertyValue::Text("Collection".into())),
+                        ("new", PropertyValue::Bool(true)),
+                    ],
                 ));
-                vec![Group { title: t("menu-move-to-collection"), entries }]
+                vec![Group {
+                    title: t("menu-move-to-collection"),
+                    entries,
+                }]
             }
             // Blender's Shift+G: what to compare, for the element type in use.
             "similar" => {
@@ -1507,25 +1583,48 @@ impl App {
                             }
                     })
                     .map(|(i, (name, _))| {
-                        row(self, t(&format!("similar-{}", name.replace('_', "-"))), "mesh.select_similar", &[("kind", PropertyValue::Enum(i as u32))])
+                        row(
+                            self,
+                            t(&format!("similar-{}", name.replace('_', "-"))),
+                            "mesh.select_similar",
+                            &[("kind", PropertyValue::Enum(i as u32))],
+                        )
                     })
                     .collect();
-                vec![Group { title: t("menu-select-similar"), entries }]
+                vec![Group {
+                    title: t("menu-select-similar"),
+                    entries,
+                }]
             }
             // Blender's Ctrl+P: what to parent to.
             "parent" => vec![Group {
                 title: t("menu-parent-to"),
                 entries: vec![
                     row(self, t("parent-object"), "object.parent", &[]),
-                    row(self, t("bind-automatic"), "object.bind_armature", &[("weights", PropertyValue::Enum(0))]),
-                    row(self, t("bind-empty"), "object.bind_armature", &[("weights", PropertyValue::Enum(1))]),
+                    row(
+                        self,
+                        t("bind-automatic"),
+                        "object.bind_armature",
+                        &[("weights", PropertyValue::Enum(0))],
+                    ),
+                    row(
+                        self,
+                        t("bind-empty"),
+                        "object.bind_armature",
+                        &[("weights", PropertyValue::Enum(1))],
+                    ),
                 ],
             }],
             // Blender's Alt+P.
             "parent_clear" => vec![Group {
                 title: t("parent-clear"),
                 entries: vec![
-                    row(self, t("parent-clear"), "object.parent", &[("clear", PropertyValue::Bool(true))]),
+                    row(
+                        self,
+                        t("parent-clear"),
+                        "object.parent",
+                        &[("clear", PropertyValue::Bool(true))],
+                    ),
                     row(self, t("unbind-armature"), "object.unbind_armature", &[]),
                 ],
             }],
@@ -1535,7 +1634,11 @@ impl App {
                         app,
                         t(key),
                         "object.transform_apply",
-                        &[("location", PropertyValue::Bool(l)), ("rotation", PropertyValue::Bool(r)), ("scale", PropertyValue::Bool(s))],
+                        &[
+                            ("location", PropertyValue::Bool(l)),
+                            ("rotation", PropertyValue::Bool(r)),
+                            ("scale", PropertyValue::Bool(s)),
+                        ],
                     )
                 };
                 vec![Group {
@@ -1552,10 +1655,17 @@ impl App {
             _ => return,
         };
         self.ui.context_menu.groups = groups;
-        let Some((rx, ry, _, _)) = self.viewport_px else { return };
-        let Some((x, y)) = self.input.cursor else { return };
+        let Some((rx, ry, _, _)) = self.viewport_px else {
+            return;
+        };
+        let Some((x, y)) = self.input.cursor else {
+            return;
+        };
         let scale = self.egui_ctx.pixels_per_point().max(0.01);
-        self.ui.context_menu.at = Some(egui::pos2((x as f32 - rx) / scale + rx / scale, (y as f32 - ry) / scale + ry / scale));
+        self.ui.context_menu.at = Some(egui::pos2(
+            (x as f32 - rx) / scale + rx / scale,
+            (y as f32 - ry) / scale + ry / scale,
+        ));
         self.redraw.set(RedrawReason::UI);
     }
 
@@ -1634,8 +1744,14 @@ impl App {
             ("object.add_camera", &[]),
             ("object.add_empty", &[]),
             ("object.add_armature", &[]),
-            ("object.bind_armature", &[("weights", PropertyValue::Enum(0))]),
-            ("object.bind_armature", &[("weights", PropertyValue::Enum(1))]),
+            (
+                "object.bind_armature",
+                &[("weights", PropertyValue::Enum(0))],
+            ),
+            (
+                "object.bind_armature",
+                &[("weights", PropertyValue::Enum(1))],
+            ),
             ("object.unbind_armature", &[]),
             ("pose.translate", &[]),
             ("pose.rotate", &[]),
@@ -1869,7 +1985,8 @@ impl App {
     fn snap_sources(&self) -> Vec<DVec3> {
         const MAX: usize = 200_000;
         let mut out = Vec::new();
-        let point = |to_world: &glam::DAffine3, p: glam::Vec3| to_world.transform_point3(p.as_dvec3());
+        let point =
+            |to_world: &glam::DAffine3, p: glam::Vec3| to_world.transform_point3(p.as_dvec3());
         if self.op_ctx.mode.edits_elements() {
             let Some(edited) = kreate_ops::ops::mesh::target_mesh(&self.doc) else {
                 return out;
@@ -1883,7 +2000,11 @@ impl App {
                 if out.len() + selected.len() > MAX {
                     return Vec::new();
                 }
-                out.extend(selected.iter().map(|v| point(&to_world, mesh.positions()[*v as usize])));
+                out.extend(
+                    selected
+                        .iter()
+                        .map(|v| point(&to_world, mesh.positions()[*v as usize])),
+                );
             }
         } else if self.op_ctx.mode.info().acts_on == kreate_ops::mode::ActsOn::Objects {
             for id in &self.doc.selection.objects {
@@ -1929,7 +2050,10 @@ impl App {
             .filter(|_| kind == kreate::modal::Kind::LoopCut)
             .and_then(|(edge, _)| kreate_ops::ops::mesh::edge_in_world(&self.doc, edge))
             .map(|(a, b)| (a + b) * 0.5);
-        let Some(pivot) = hovered_edge.or_else(|| self.pivot_override(kind)).or_else(|| self.selection_pivot()) else {
+        let Some(pivot) = hovered_edge
+            .or_else(|| self.pivot_override(kind))
+            .or_else(|| self.selection_pivot())
+        else {
             self.status("nothing selected");
             return;
         };
@@ -1968,7 +2092,9 @@ impl App {
         );
         if matches!(
             kind,
-            kreate::modal::Kind::Move | kreate::modal::Kind::ExtrudeFree | kreate::modal::Kind::Extrude
+            kreate::modal::Kind::Move
+                | kreate::modal::Kind::ExtrudeFree
+                | kreate::modal::Kind::Extrude
         ) {
             gesture.set_sources(self.snap_sources());
         }
@@ -2097,7 +2223,11 @@ impl App {
         // the mesh moving at the end of every drag.
         let radius = self.proportional.unwrap_or(0.0);
         let to_world = self.doc.world_transform(active);
-        let Some(weighing) = kreate_ops::ops::mesh::weigh_edit_selection_with(&self.doc, radius, self.proportional_falloff) else {
+        let Some(weighing) = kreate_ops::ops::mesh::weigh_edit_selection_with(
+            &self.doc,
+            radius,
+            self.proportional_falloff,
+        ) else {
             return;
         };
         // One `Deform` covers one mesh, so a drag reaching several takes the CPU
@@ -2114,7 +2244,11 @@ impl App {
         }
         // An object flattened by a zero scale has no way back from world space.
         // The operator skips the same case, so this mesh would not move anyway.
-        let pivot = if self.ui.pivot == 3 { self.doc.cursor } else { weighing.pivot };
+        let pivot = if self.ui.pivot == 3 {
+            self.doc.cursor
+        } else {
+            weighing.pivot
+        };
         let Some(place) = kreate_render::Placement::new(to_world, pivot) else {
             return;
         };
@@ -2227,7 +2361,11 @@ impl App {
         let to_world = kreate_ops::ops::mesh::target_object(&self.doc)
             .map(|id| self.doc.world_transform(id))
             .unwrap_or(kreate_math::glam::DAffine3::IDENTITY);
-        let weighing = kreate_ops::ops::mesh::weigh_edit_selection_with(&self.doc, radius, self.proportional_falloff);
+        let weighing = kreate_ops::ops::mesh::weigh_edit_selection_with(
+            &self.doc,
+            radius,
+            self.proportional_falloff,
+        );
         let Some(gfx) = self.gfx.as_mut() else { return };
         // A wider radius can reach a *second* mesh, and one `Deform` cannot
         // follow it there. Giving the preview up is the honest answer: the drag
@@ -2397,20 +2535,29 @@ impl App {
     /// centimetre or ten metres.
     /// The application's additions to an operator's parameters, as of now.
     fn app_params(&self) -> AppParams {
-        AppParams { key: self.autokey_frame(), pivot: self.ui.pivot, cursor: self.doc.cursor }
+        AppParams {
+            key: self.autokey_frame(),
+            pivot: self.ui.pivot,
+            cursor: self.doc.cursor,
+        }
     }
 
     /// Where a rotation or scale turns about, on screen as in the operator:
     /// the header's pivot point, or `None` for the selection's own middle.
     fn pivot_override(&self, kind: kreate::modal::Kind) -> Option<DVec3> {
-        if !matches!(kind, kreate::modal::Kind::Rotate | kreate::modal::Kind::Scale) {
+        if !matches!(
+            kind,
+            kreate::modal::Kind::Rotate | kreate::modal::Kind::Scale
+        ) {
             return None;
         }
         match self.ui.pivot {
             3 => Some(self.doc.cursor),
-            2 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects => {
-                self.doc.selection.active.map(|a| self.doc.world_transform(a).translation)
-            }
+            2 if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects => self
+                .doc
+                .selection
+                .active
+                .map(|a| self.doc.world_transform(a).translation),
             _ => None,
         }
     }
@@ -2421,7 +2568,9 @@ impl App {
         let Some(ndc) = self.cursor_ndc() else { return };
         let aspect = self.viewport_aspect();
         self.evaluate_scene();
-        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
         let at = match hit {
             Some(hit) => hit.point,
             None => {
@@ -2466,10 +2615,16 @@ impl App {
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
             let weighing = kreate_ops::ops::mesh::weigh_edit_selection(&self.doc, 0.0)?;
             for part in &weighing.parts {
-                let Some(mesh) = self.doc.mesh(part.target.mesh) else { continue };
+                let Some(mesh) = self.doc.mesh(part.target.mesh) else {
+                    continue;
+                };
                 for (i, w) in part.indices.iter().zip(&part.weights) {
                     if *w >= 1.0 {
-                        points.push(part.target.to_world.transform_point3(mesh.positions()[*i as usize].as_dvec3()));
+                        points.push(
+                            part.target
+                                .to_world
+                                .transform_point3(mesh.positions()[*i as usize].as_dvec3()),
+                        );
                     }
                 }
             }
@@ -2477,7 +2632,11 @@ impl App {
             for id in &self.doc.selection.objects {
                 let world = self.doc.world_transform(*id);
                 match self.evaluated.iter().find(|(o, _)| o == id) {
-                    Some((_, mesh)) => points.extend(mesh.positions().iter().map(|p| world.transform_point3(p.as_dvec3()))),
+                    Some((_, mesh)) => points.extend(
+                        mesh.positions()
+                            .iter()
+                            .map(|p| world.transform_point3(p.as_dvec3())),
+                    ),
                     None => points.push(world.translation),
                 }
             }
@@ -2499,10 +2658,15 @@ impl App {
             self.frame_all();
             return;
         };
-        let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
+        let aspect = self
+            .gfx
+            .as_ref()
+            .map(|g| g.viewport.aspect())
+            .unwrap_or(16.0 / 9.0);
         let mut destination = self.camera;
         destination.frame_sphere(centre, radius, aspect);
-        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        self.motion
+            .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
         self.redraw.set(RedrawReason::CAMERA_MOVED);
     }
 
@@ -2510,7 +2674,8 @@ impl App {
     /// where the view was.
     fn toggle_local_view(&mut self) {
         if let Some((_, before)) = self.local_view.take() {
-            self.motion.animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
+            self.motion
+                .animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
             self.status("");
             self.redraw.set(RedrawReason::SCENE_CHANGED);
             return;
@@ -2532,7 +2697,8 @@ impl App {
     fn toggle_camera_view(&mut self) {
         if let Some(before) = self.camera_view.take() {
             self.camera_view_object = None;
-            self.motion.animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
+            self.motion
+                .animate_to(self.camera, before, kreate_render::DEFAULT_TRANSITION);
             self.redraw.set(RedrawReason::CAMERA_MOVED);
             return;
         }
@@ -2543,7 +2709,8 @@ impl App {
         self.camera_view_object = Some(object);
         let destination = self.view_through(object);
         self.camera_view = Some(self.camera);
-        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        self.motion
+            .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
         self.redraw.set(RedrawReason::CAMERA_MOVED);
     }
 
@@ -2551,24 +2718,44 @@ impl App {
     /// active object when it is a camera, or else the first camera.
     fn scene_camera(&self, name: Option<&str>) -> Option<kreate_scene::document::ObjectId> {
         let is_camera = |id: kreate_scene::document::ObjectId| {
-            self.doc.object(id).is_some_and(|o| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
+            self.doc
+                .object(id)
+                .is_some_and(|o| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
         };
         if let Some(name) = name {
-            return self.doc.objects().find(|(id, o)| o.name == name && is_camera(*id)).map(|(id, _)| id);
+            return self
+                .doc
+                .objects()
+                .find(|(id, o)| o.name == name && is_camera(*id))
+                .map(|(id, _)| id);
         }
         self.doc
             .selection
             .active
             .filter(|a| is_camera(*a))
-            .or_else(|| self.doc.objects().map(|(id, _)| id).find(|id| is_camera(*id)))
+            .or_else(|| {
+                self.doc
+                    .objects()
+                    .map(|(id, _)| id)
+                    .find(|id| is_camera(*id))
+            })
     }
 
     /// The viewport camera that sees what a scene camera sees.
     fn view_through(&self, object: kreate_scene::document::ObjectId) -> kreate_render::Camera {
-        let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
-        let (_, rotation, eye) = self.doc.world_transform(object).to_scale_rotation_translation();
+        let aspect = self
+            .gfx
+            .as_ref()
+            .map(|g| g.viewport.aspect())
+            .unwrap_or(16.0 / 9.0);
+        let (_, rotation, eye) = self
+            .doc
+            .world_transform(object)
+            .to_scale_rotation_translation();
         let lens = match self.doc.object(object).map(|o| &o.data) {
-            Some(kreate_scene::document::ObjectData::Camera(c)) => self.doc.camera(*c).map(|c| c.fov_y(aspect)),
+            Some(kreate_scene::document::ObjectData::Camera(c)) => {
+                self.doc.camera(*c).map(|c| c.fov_y(aspect))
+            }
             _ => None,
         };
         let mut destination = self.camera;
@@ -2595,7 +2782,10 @@ impl App {
             return;
         }
         let radius = self.circle_radius;
-        self.circle = Some(CircleSelect { radius, stroke: None });
+        self.circle = Some(CircleSelect {
+            radius,
+            stroke: None,
+        });
         self.show_circle();
         self.status("Circle Select — drag to select, Shift+drag to deselect, wheel for size, Esc or right-click to stop");
     }
@@ -2618,14 +2808,25 @@ impl App {
 
     /// A press with the brush on: a stroke begins.
     fn begin_circle_stroke(&mut self) {
-        let before: Vec<u32> = self.doc.selection.objects.iter().map(|id| shell::object_key(*id)).collect();
+        let before: Vec<u32> = self
+            .doc
+            .selection
+            .objects
+            .iter()
+            .map(|id| shell::object_key(*id))
+            .collect();
         let deselect = self.input.shift_down || self.input.ctrl_down;
         // What an earlier drag left in the reduction is not this stroke's.
         if let Some(gfx) = self.gfx.as_mut() {
             gfx.region.clear();
         }
         if let Some(c) = &mut self.circle {
-            c.stroke = Some(CircleStroke { deselect, elements: Default::default(), session: None, before });
+            c.stroke = Some(CircleStroke {
+                deselect,
+                elements: Default::default(),
+                session: None,
+                before,
+            });
         }
         self.redraw.set(RedrawReason::HOVER_CHANGED);
     }
@@ -2633,14 +2834,23 @@ impl App {
     /// Adds what the brush has covered since the last frame to the stroke,
     /// and applies it — live, so the selection grows under the brush.
     fn drive_circle_stroke(&mut self) {
-        let Some(resolved) = self.gfx.as_ref().and_then(|g| g.region.resolved()).map(|e| e.to_vec()) else { return };
+        let Some(resolved) = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.region.resolved())
+            .map(|e| e.to_vec())
+        else {
+            return;
+        };
         let edits = self.op_ctx.mode.edits_elements();
         let mode = match self.pick_domain() {
             kreate_render::PickDomain::Vert => 0u32,
             kreate_render::PickDomain::Edge => 1,
             _ => 2,
         };
-        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.as_mut()) else { return };
+        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.as_mut()) else {
+            return;
+        };
         let before = stroke.elements.len();
         stroke.elements.extend(resolved);
         if stroke.elements.len() == before {
@@ -2650,35 +2860,63 @@ impl App {
             // Objects: the selection the stroke began with, plus or minus
             // everything the brush has passed over.
             let mut objects: Vec<u32> = if stroke.deselect {
-                stroke.before.iter().copied().filter(|k| !stroke.elements.contains(k)).collect()
+                stroke
+                    .before
+                    .iter()
+                    .copied()
+                    .filter(|k| !stroke.elements.contains(k))
+                    .collect()
             } else {
                 let mut all = stroke.before.clone();
-                all.extend(stroke.elements.iter().copied().filter(|k| !stroke.before.contains(k)));
+                all.extend(
+                    stroke
+                        .elements
+                        .iter()
+                        .copied()
+                        .filter(|k| !stroke.before.contains(k)),
+                );
                 all
             };
             objects.dedup();
             let active = objects.last().copied();
-            self.ui.queue.push(kreate_ui::Command::SetSelection { objects, active });
+            self.ui
+                .queue
+                .push(kreate_ui::Command::SetSelection { objects, active });
             self.redraw.set(RedrawReason::SCENE_CHANGED);
             return;
         }
         let mut params = PropertyMap::new();
-        params.set("elements", PropertyValue::Ints(stroke.elements.iter().copied().collect()));
+        params.set(
+            "elements",
+            PropertyValue::Ints(stroke.elements.iter().copied().collect()),
+        );
         params.set("mode", PropertyValue::Enum(mode));
         params.set("extend", PropertyValue::Bool(true));
         params.set("deselect", PropertyValue::Bool(stroke.deselect));
         match stroke.session.as_mut() {
             Some(session) => {
-                if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, session, &params) {
+                if let Err(e) = self.history.update_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    Some(&mut self.edit),
+                    &self.op_ctx,
+                    session,
+                    &params,
+                ) {
                     tracing::warn!(error = %e, "circle select failed");
                 }
             }
             None => {
                 // Begun on the first stroke that changes anything, so a stroke
                 // over what was already selected leaves no step behind.
-                if let Ok(Some(session)) =
-                    self.history.begin_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, "mesh.select_set", &params)
-                {
+                if let Ok(Some(session)) = self.history.begin_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    Some(&mut self.edit),
+                    &self.op_ctx,
+                    "mesh.select_set",
+                    &params,
+                ) {
                     stroke.session = Some(session);
                 }
             }
@@ -2688,7 +2926,9 @@ impl App {
 
     /// The button comes up: the stroke is one step to undo.
     fn finish_circle_stroke(&mut self) {
-        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.take()) else { return };
+        let Some(stroke) = self.circle.as_mut().and_then(|c| c.stroke.take()) else {
+            return;
+        };
         if let Some(session) = stroke.session {
             self.history.commit_modal(session);
             if let Some(entry) = self.history.last() {
@@ -2713,7 +2953,9 @@ impl App {
     /// pointer is close to one on screen — a cut that starts and ends on edges
     /// is what splits faces.
     fn update_knife(&mut self) {
-        let Some((points, _)) = self.knife.take() else { return };
+        let Some((points, _)) = self.knife.take() else {
+            return;
+        };
         if self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements {
             self.end_knife("");
             return;
@@ -2721,19 +2963,31 @@ impl App {
         let mut hover = None;
         let object = kreate_ops::ops::mesh::target_object(&self.doc);
         let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc);
-        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) =
-            (self.cursor_ndc(), object, mesh_id, self.ui.projector, self.input.cursor)
-        {
+        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) = (
+            self.cursor_ndc(),
+            object,
+            mesh_id,
+            self.ui.projector,
+            self.input.cursor,
+        ) {
             let aspect = self.viewport_aspect();
-            let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+            let hit = self
+                .pick
+                .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
             let stored = self.doc.mesh_arc(mesh_id).cloned();
-            let as_drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone());
+            let as_drawn = self
+                .evaluated
+                .iter()
+                .find(|(id, _)| *id == object)
+                .map(|(_, m)| m.clone());
             if let (Some(hit), Some(mesh), Some(drawn)) = (hit, stored, as_drawn) {
-                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces() {
+                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces()
+                {
                     let ppp = self.egui_ctx.pixels_per_point();
                     let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
                     let world = self.doc.world_transform(object);
-                    let place = |v: u32| world.transform_point3(mesh.positions()[v as usize].as_dvec3());
+                    let place =
+                        |v: u32| world.transform_point3(mesh.positions()[v as usize].as_dvec3());
                     let ring = mesh.face_verts(hit.face).to_vec();
                     let mut best: Option<(f32, DVec3)> = None;
                     // A vertex within ten points wins outright.
@@ -2750,9 +3004,17 @@ impl App {
                     if best.is_none() {
                         for i in 0..ring.len() {
                             let (wa, wb) = (place(ring[i]), place(ring[(i + 1) % ring.len()]));
-                            let (Some(sa), Some(sb)) = (projector.project(wa), projector.project(wb)) else { continue };
+                            let (Some(sa), Some(sb)) =
+                                (projector.project(wa), projector.project(wb))
+                            else {
+                                continue;
+                            };
                             let ab = sb - sa;
-                            let t = if ab.length_sq() > 0.0 { ((at - sa).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+                            let t = if ab.length_sq() > 0.0 {
+                                ((at - sa).dot(ab) / ab.length_sq()).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
                             let d = (sa + ab * t).distance(at);
                             if d < 8.0 && best.is_none_or(|(bd, _)| d < bd) {
                                 best = Some((d, wa.lerp(wb, t as f64)));
@@ -2785,19 +3047,28 @@ impl App {
 
     /// Enter: the path, in the mesh's own space, to the operator.
     fn commit_knife(&mut self) {
-        let Some((points, _)) = self.knife.clone() else { return };
+        let Some((points, _)) = self.knife.clone() else {
+            return;
+        };
         self.end_knife("");
         if points.len() < 2 {
             self.status("Knife cancelled: click at least two points");
             return;
         }
-        let Some(object) = kreate_ops::ops::mesh::target_object(&self.doc) else { return };
+        let Some(object) = kreate_ops::ops::mesh::target_object(&self.doc) else {
+            return;
+        };
         let to_local = self.doc.world_transform(object).inverse();
         if !to_local.is_finite() {
             return;
         }
-        let flat: Vec<f64> = points.iter().flat_map(|p| to_local.transform_point3(*p).to_array()).collect();
-        let view = to_local.transform_vector3(self.camera.forward()).normalize_or_zero();
+        let flat: Vec<f64> = points
+            .iter()
+            .flat_map(|p| to_local.transform_point3(*p).to_array())
+            .collect();
+        let view = to_local
+            .transform_vector3(self.camera.forward())
+            .normalize_or_zero();
         let mut params = PropertyMap::new();
         params.set("points", PropertyValue::Floats(flat));
         params.set("view", PropertyValue::Vec3(view.to_array()));
@@ -2832,9 +3103,15 @@ impl App {
         let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc)?;
         let (ndc, projector, (x, y)) = (self.cursor_ndc()?, self.ui.projector?, self.input.cursor?);
         let aspect = self.viewport_aspect();
-        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
         let mesh = self.doc.mesh_arc(mesh_id).cloned()?;
-        let drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone())?;
+        let drawn = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == object)
+            .map(|(_, m)| m.clone())?;
         if hit.object != object || !Arc::ptr_eq(&mesh, &drawn) || hit.face >= mesh.num_faces() {
             return None;
         }
@@ -2842,7 +3119,9 @@ impl App {
         let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
         let world = self.doc.world_transform(object);
         let corner_edges = mesh.corner_edges();
-        let screen = |v: u32| projector.project(world.transform_point3(mesh.positions()[v as usize].as_dvec3()));
+        let screen = |v: u32| {
+            projector.project(world.transform_point3(mesh.positions()[v as usize].as_dvec3()))
+        };
         let mut best: Option<(f32, u32)> = None;
         for c in mesh.face_corner_range(hit.face) {
             let e = corner_edges[c];
@@ -2860,12 +3139,17 @@ impl App {
     /// Alt+click: the loop through the edge under the pointer — Ctrl for a
     /// ring, Shift to add; in face mode, a loop of faces.
     fn loop_pick(&mut self) {
-        let Some(edge) = self.edge_under_cursor() else { return };
+        let Some(edge) = self.edge_under_cursor() else {
+            return;
+        };
         let mut params = PropertyMap::new();
         params.set("edge", PropertyValue::Int(edge as i64));
         params.set("ring", PropertyValue::Bool(self.input.ctrl_down));
         params.set("extend", PropertyValue::Bool(self.input.shift_down));
-        params.set("faces", PropertyValue::Bool(self.select_mode == 2 && !self.input.ctrl_down));
+        params.set(
+            "faces",
+            PropertyValue::Bool(self.select_mode == 2 && !self.input.ctrl_down),
+        );
         self.run_op("mesh.select_loop_pick", params);
     }
 
@@ -2888,7 +3172,9 @@ impl App {
     }
 
     fn update_loop_cut_hover(&mut self) {
-        let Some((_, cuts)) = self.loop_cut_hover else { return };
+        let Some((_, cuts)) = self.loop_cut_hover else {
+            return;
+        };
         if self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements {
             self.end_loop_cut_hover();
             return;
@@ -2896,20 +3182,35 @@ impl App {
         let mut found = None;
         let object = kreate_ops::ops::mesh::target_object(&self.doc);
         let mesh_id = kreate_ops::ops::mesh::target_mesh(&self.doc);
-        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) =
-            (self.cursor_ndc(), object, mesh_id, self.ui.projector, self.input.cursor)
-        {
+        if let (Some(ndc), Some(object), Some(mesh_id), Some(projector), Some((x, y))) = (
+            self.cursor_ndc(),
+            object,
+            mesh_id,
+            self.ui.projector,
+            self.input.cursor,
+        ) {
             let aspect = self.viewport_aspect();
-            let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+            let hit = self
+                .pick
+                .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
             let stored = self.doc.mesh_arc(mesh_id).cloned();
-            let as_drawn = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone());
+            let as_drawn = self
+                .evaluated
+                .iter()
+                .find(|(id, _)| *id == object)
+                .map(|(_, m)| m.clone());
             if let (Some(hit), Some(mesh), Some(drawn)) = (hit, stored, as_drawn) {
-                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces() {
+                if hit.object == object && Arc::ptr_eq(&mesh, &drawn) && hit.face < mesh.num_faces()
+                {
                     let ppp = self.egui_ctx.pixels_per_point();
                     let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
                     let world = self.doc.world_transform(object);
                     let corner_edges = mesh.corner_edges();
-                    let screen = |v: u32| projector.project(world.transform_point3(mesh.positions()[v as usize].as_dvec3()));
+                    let screen = |v: u32| {
+                        projector.project(
+                            world.transform_point3(mesh.positions()[v as usize].as_dvec3()),
+                        )
+                    };
                     let mut best = f32::INFINITY;
                     for c in mesh.face_corner_range(hit.face) {
                         let e = corner_edges[c];
@@ -2927,7 +3228,11 @@ impl App {
                         .unwrap_or_default();
                     self.ui.loop_cut_preview = lines
                         .iter()
-                        .map(|line| line.iter().map(|p| world.transform_point3(p.as_dvec3())).collect())
+                        .map(|line| {
+                            line.iter()
+                                .map(|p| world.transform_point3(p.as_dvec3()))
+                                .collect()
+                        })
                         .collect();
                 }
             }
@@ -2950,7 +3255,9 @@ impl App {
 
     /// The click: cut across the edge under the pointer, then slide it.
     fn commit_loop_cut_hover(&mut self) {
-        let Some((edge, cuts)) = self.loop_cut_hover else { return };
+        let Some((edge, cuts)) = self.loop_cut_hover else {
+            return;
+        };
         self.end_loop_cut_hover();
         let Some(edge) = edge else {
             self.status("Loop Cut cancelled: no edge under the pointer");
@@ -2970,7 +3277,9 @@ impl App {
             self.update_loop_cut_hover();
             return true;
         }
-        let Some((gesture, _)) = &mut self.gesture else { return false };
+        let Some((gesture, _)) = &mut self.gesture else {
+            return false;
+        };
         if gesture.kind != kreate::modal::Kind::LoopCut {
             return false;
         }
@@ -3137,7 +3446,10 @@ impl App {
             text: text.clone(),
         });
         if let Err(e) = chat.send(&text) {
-            self.ui.chat_log.push(ChatMessage { role: ChatRole::Error, text: e });
+            self.ui.chat_log.push(ChatMessage {
+                role: ChatRole::Error,
+                text: e,
+            });
         }
         self.ui.chat_busy = chat.busy();
     }
@@ -3162,7 +3474,11 @@ impl App {
                         Account::Checking => ChatAccount::Checking,
                         Account::SignedOut => ChatAccount::SignedOut,
                         Account::Unavailable(why) => ChatAccount::Unavailable(why),
-                        Account::SignedIn { email, organisation, plan } => ChatAccount::SignedIn {
+                        Account::SignedIn {
+                            email,
+                            organisation,
+                            plan,
+                        } => ChatAccount::SignedIn {
                             email,
                             detail: [organisation, plan.map(|p| format!("({p})"))]
                                 .into_iter()
@@ -3174,7 +3490,8 @@ impl App {
                     continue;
                 }
                 Event::SignInUrl(url) => {
-                    self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn { url: Some(url) };
+                    self.ui.chat_account =
+                        kreate_ui::chat::ChatAccount::SigningIn { url: Some(url) };
                     continue;
                 }
                 Event::SignedIn(None) => {
@@ -3193,7 +3510,9 @@ impl App {
                 Event::Tool { name, detail } if detail.is_empty() => (ChatRole::Tool, name),
                 Event::Tool { name, detail } => (ChatRole::Tool, format!("{name}: {detail}")),
                 Event::ToolError(text) => (ChatRole::Error, text),
-                Event::Done(Some(why)) if why == "stopped" => (ChatRole::Note, self.ui.catalog.get("chat-stopped")),
+                Event::Done(Some(why)) if why == "stopped" => {
+                    (ChatRole::Note, self.ui.catalog.get("chat-stopped"))
+                }
                 Event::Done(Some(why)) => (ChatRole::Error, why),
             };
             self.ui.chat_log.push(ChatMessage { role, text });
@@ -3206,7 +3525,9 @@ impl App {
 
     /// Answers every request waiting since the last wake.
     fn serve_bridge(&mut self) {
-        let Some(bridge) = self.bridge.as_ref() else { return };
+        let Some(bridge) = self.bridge.as_ref() else {
+            return;
+        };
         for request in bridge.pending() {
             let result = self.bridge_call(&request.method, &request.params);
             request.answer(result);
@@ -3216,30 +3537,64 @@ impl App {
         }
     }
 
-    fn bridge_call(&mut self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn bridge_call(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         use serde_json::json;
-        let text = |name: &str| params.get(name).and_then(|v| v.as_str()).map(str::to_string);
+        let text = |name: &str| {
+            params
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
         match method {
             "scene" => Ok(self.scene_json()),
             "mesh" => {
                 let name = text("object").unwrap_or_default();
                 let world = text("space").as_deref() != Some("local");
-                let selected = params.get("selected").and_then(|v| v.as_bool()).unwrap_or(false);
-                let faces = params.get("faces").and_then(|v| v.as_bool()).unwrap_or(false);
-                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000).clamp(1, 100_000) as usize;
+                let selected = params
+                    .get("selected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let faces = params
+                    .get("faces")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2000)
+                    .clamp(1, 100_000) as usize;
                 self.mesh_json(&name, world, selected, faces, limit)
             }
             "render" => {
                 let path = text("path").ok_or("`path` is required")?;
-                let number = |key: &str, default: u64| params.get(key).and_then(|v| v.as_u64()).unwrap_or(default);
+                let number = |key: &str, default: u64| {
+                    params.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
+                };
                 let size = (number("width", 1920) as u32, number("height", 1080) as u32);
                 let samples = number("samples", 128).clamp(1, 512) as u32;
                 let limit = std::time::Duration::from_secs(number("time_limit", 110).clamp(1, 110));
-                self.render_still(text("camera").as_deref(), size, samples, std::path::Path::new(&path), limit)
+                self.render_still(
+                    text("camera").as_deref(),
+                    size,
+                    samples,
+                    std::path::Path::new(&path),
+                    limit,
+                )
             }
             "overlaps" => {
-                let tolerance = params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(0.001).max(0.0);
-                let exact = params.get("exact").and_then(|v| v.as_bool()).unwrap_or(true);
+                let tolerance = params
+                    .get("tolerance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.001)
+                    .max(0.0);
+                let exact = params
+                    .get("exact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 Ok(self.overlaps_json(tolerance, exact))
             }
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
@@ -3254,7 +3609,9 @@ impl App {
                             Err(e) => json!({ "line": line.text, "ok": false, "error": e }),
                         };
                         let listed = |made: &[(String, u64)]| -> serde_json::Value {
-                            made.iter().map(|(name, uid)| json!({ "name": name, "uid": uid })).collect()
+                            made.iter()
+                                .map(|(name, uid)| json!({ "name": name, "uid": uid }))
+                                .collect()
                         };
                         if !line.created.is_empty() {
                             v["created"] = listed(&line.created);
@@ -3268,11 +3625,20 @@ impl App {
                         v
                     })
                     .collect();
-                let active = self.doc.selection.active.and_then(|id| self.doc.object(id)).map(|o| o.name.clone());
+                let active = self
+                    .doc
+                    .selection
+                    .active
+                    .and_then(|id| self.doc.object(id))
+                    .map(|o| o.name.clone());
                 Ok(json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active }))
             }
             "undo" | "redo" => {
-                let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 1000);
+                let steps = params
+                    .get("steps")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .clamp(1, 1000);
                 for _ in 0..steps {
                     if method == "undo" {
                         self.undo();
@@ -3285,7 +3651,9 @@ impl App {
             }
             "capture" => {
                 let camera = match params.get("camera") {
-                    Some(serde_json::Value::String(name)) if !name.is_empty() => Some(Some(name.clone())),
+                    Some(serde_json::Value::String(name)) if !name.is_empty() => {
+                        Some(Some(name.clone()))
+                    }
                     Some(serde_json::Value::Bool(true)) => Some(None),
                     _ => None,
                 };
@@ -3299,19 +3667,30 @@ impl App {
                         // Through the camera for this one picture, then back
                         // to where the user was looking — and with the
                         // camera's lens, as its own view would be.
-                        let saved = (self.camera, self.motion, self.camera_view, self.camera_view_object);
+                        let saved = (
+                            self.camera,
+                            self.motion,
+                            self.camera_view,
+                            self.camera_view_object,
+                        );
                         self.motion.interrupt(&self.camera);
                         self.camera = self.view_through(object);
                         self.motion.target = self.camera;
                         self.camera_view = Some(saved.0);
                         self.camera_view_object = Some(object);
                         let shot = self.capture_png();
-                        (self.camera, self.motion, self.camera_view, self.camera_view_object) = saved;
+                        (
+                            self.camera,
+                            self.motion,
+                            self.camera_view,
+                            self.camera_view_object,
+                        ) = saved;
                         self.redraw.set(RedrawReason::CAMERA_MOVED);
                         shot?
                     }
                 };
-                let mut shot = json!({ "width": w, "height": h, "png_base64": kreate::bridge::base64(&png) });
+                let mut shot =
+                    json!({ "width": w, "height": h, "png_base64": kreate::bridge::base64(&png) });
                 if let Some(path) = text("path") {
                     std::fs::write(&path, &png).map_err(|e| format!("cannot write {path}: {e}"))?;
                     shot["path"] = json!(path);
@@ -3341,7 +3720,8 @@ impl App {
             }
             "export" => {
                 let path = text("path").ok_or("`path` is required")?;
-                self.export_to(std::path::Path::new(&path)).map(|m| json!({ "message": m }))
+                self.export_to(std::path::Path::new(&path))
+                    .map(|m| json!({ "message": m }))
             }
             other => Err(format!("unknown method `{other}`")),
         }
@@ -3354,23 +3734,44 @@ impl App {
     /// Indices are the mesh's own, so they are the ones `mesh.select_set`
     /// takes. Capped at `limit` vertices, with the count of what was left out,
     /// so a scanned model does not flood the answer.
-    fn mesh_json(&self, name: &str, world: bool, selected: bool, faces: bool, limit: usize) -> Result<serde_json::Value, String> {
+    fn mesh_json(
+        &self,
+        name: &str,
+        world: bool,
+        selected: bool,
+        faces: bool,
+        limit: usize,
+    ) -> Result<serde_json::Value, String> {
         use kreate_mesh::attribute::Domain;
         use serde_json::json;
         let doc = &self.doc;
         let id = if name.is_empty() {
-            doc.selection.active.ok_or("no object is active; name one")?
+            doc.selection
+                .active
+                .ok_or("no object is active; name one")?
         } else {
-            doc.objects().find(|(_, o)| o.name == name).map(|(id, _)| id).ok_or(format!("no object called {name:?}"))?
+            doc.objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id)
+                .ok_or(format!("no object called {name:?}"))?
         };
         let object = doc.object(id).ok_or("the object is gone")?;
-        let mesh = object.mesh().and_then(|m| doc.mesh(m)).ok_or(format!("{:?} is not a mesh", object.name))?;
+        let mesh = object
+            .mesh()
+            .and_then(|m| doc.mesh(m))
+            .ok_or(format!("{:?} is not a mesh", object.name))?;
         let to_world = doc.world_transform(id);
         let at = |p: kreate_math::Vec3| {
             let p = p.as_dvec3();
-            if world { to_world.transform_point3(p).to_array() } else { p.to_array() }
+            if world {
+                to_world.transform_point3(p).to_array()
+            } else {
+                p.to_array()
+            }
         };
-        let wanted = |domain: Domain, i: u32| !selected || kreate_mesh::selection::is_selected(mesh, domain, i);
+        let wanted = |domain: Domain, i: u32| {
+            !selected || kreate_mesh::selection::is_selected(mesh, domain, i)
+        };
         let mut vertices = Vec::new();
         let mut matching = 0usize;
         for (i, p) in mesh.positions().iter().enumerate() {
@@ -3399,7 +3800,11 @@ impl App {
                 .take(limit)
                 .map(|f| {
                     let n = normals[f as usize].as_dvec3();
-                    let n = if world { (linear * n).normalize_or_zero() } else { n };
+                    let n = if world {
+                        (linear * n).normalize_or_zero()
+                    } else {
+                        n
+                    };
                     json!({ "index": f, "vertices": mesh.face_verts(f), "normal": n.to_array() })
                 })
                 .collect();
@@ -3432,11 +3837,26 @@ impl App {
         let size = (width.clamp(16, 8192), height.clamp(16, 8192));
 
         // Everything this changes, to put back.
-        let view = (self.camera, self.motion, self.camera_view, self.camera_view_object, self.wanted_viewport);
+        let view = (
+            self.camera,
+            self.motion,
+            self.camera_view,
+            self.camera_view_object,
+            self.wanted_viewport,
+        );
         let gfx = self.gfx.as_mut().expect("checked");
         let look = {
             let v = &gfx.viewport;
-            (v.shading, v.path_trace, v.show_grid, v.show_wireframe, v.show_outline, v.xray, v.face_orientation, v.sample_cap)
+            (
+                v.shading,
+                v.path_trace,
+                v.show_grid,
+                v.show_wireframe,
+                v.show_outline,
+                v.xray,
+                v.face_orientation,
+                v.sample_cap,
+            )
         };
         {
             let v = &mut gfx.viewport;
@@ -3475,7 +3895,9 @@ impl App {
             self.restart_mean_if_changed();
             self.render();
             self.redraw.clear();
-            let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else { break };
+            let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else {
+                break;
+            };
             let traced = v.path_tracing();
             if (traced && v.path_trace_samples() > 0 && !v.accumulating())
                 || (!traced && started.elapsed() >= grace && !v.accumulating())
@@ -3484,7 +3906,11 @@ impl App {
                 break;
             }
         }
-        let summed = self.gfx.as_ref().map(|g| g.viewport.path_trace_samples()).unwrap_or(0);
+        let summed = self
+            .gfx
+            .as_ref()
+            .map(|g| g.viewport.path_trace_samples())
+            .unwrap_or(0);
         let shot = self.read_target_png();
 
         // Back as it was, whatever happened.
@@ -3492,9 +3918,24 @@ impl App {
         self.capturing = false;
         if let Some(gfx) = self.gfx.as_mut() {
             let v = &mut gfx.viewport;
-            (v.shading, v.path_trace, v.show_grid, v.show_wireframe, v.show_outline, v.xray, v.face_orientation, v.sample_cap) = look;
+            (
+                v.shading,
+                v.path_trace,
+                v.show_grid,
+                v.show_wireframe,
+                v.show_outline,
+                v.xray,
+                v.face_orientation,
+                v.sample_cap,
+            ) = look;
         }
-        (self.camera, self.motion, self.camera_view, self.camera_view_object, self.wanted_viewport) = view;
+        (
+            self.camera,
+            self.motion,
+            self.camera_view,
+            self.camera_view_object,
+            self.wanted_viewport,
+        ) = view;
         self.redraw.set(RedrawReason::CAMERA_MOVED);
 
         let (w, h, png) = shot?;
@@ -3555,16 +3996,28 @@ impl App {
                         continue;
                     }
                     let triangles = |id| {
-                        let mesh = doc.object(id).and_then(|o| o.mesh()).and_then(|m| doc.mesh(m))?;
-                        Some(kreate_mesh::intersect::world_triangles(mesh, doc.world_transform(id)))
+                        let mesh = doc
+                            .object(id)
+                            .and_then(|o| o.mesh())
+                            .and_then(|m| doc.mesh(m))?;
+                        Some(kreate_mesh::intersect::world_triangles(
+                            mesh,
+                            doc.world_transform(id),
+                        ))
                     };
-                    let (Some(ta), Some(tb)) = (triangles(*a), triangles(*b)) else { continue };
+                    let (Some(ta), Some(tb)) = (triangles(*a), triangles(*b)) else {
+                        continue;
+                    };
                     use kreate_mesh::intersect::Contact;
                     let how = match kreate_mesh::intersect::contact(&ta, &tb) {
                         Contact::Clear => continue,
                         Contact::Crossing => "crossing".to_string(),
-                        Contact::Inside { first_in_second: true } => format!("{an} inside {bn}"),
-                        Contact::Inside { first_in_second: false } => format!("{bn} inside {an}"),
+                        Contact::Inside {
+                            first_in_second: true,
+                        } => format!("{an} inside {bn}"),
+                        Contact::Inside {
+                            first_in_second: false,
+                        } => format!("{bn} inside {an}"),
                     };
                     pairs.push(json!({ "a": an, "b": bn, "contact": how, "box_overlap": depth.to_array() }));
                 }
@@ -3662,7 +4115,11 @@ impl App {
             .map(|(mid, m)| {
                 let users = doc
                     .objects()
-                    .filter(|(oid, _)| (0..32).map_while(|slot| doc.material_id_at(*oid, slot)).any(|x| x == mid))
+                    .filter(|(oid, _)| {
+                        (0..32)
+                            .map_while(|slot| doc.material_id_at(*oid, slot))
+                            .any(|x| x == mid)
+                    })
                     .count();
                 json!({
                     "name": m.name,
@@ -3806,7 +4263,9 @@ impl App {
         let mut encoder = gfx
             .gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("capture"),
+            });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &gfx.target.texture,
@@ -3822,7 +4281,11 @@ impl App {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         gfx.gpu.queue.submit([encoder.finish()]);
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -3843,7 +4306,8 @@ impl App {
         for p in pixels.as_chunks_mut::<4>().0 {
             p[3] = 255;
         }
-        let image = image::RgbaImage::from_raw(w, h, pixels).ok_or("the capture has the wrong size")?;
+        let image =
+            image::RgbaImage::from_raw(w, h, pixels).ok_or("the capture has the wrong size")?;
         let mut png = Vec::new();
         image
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -3874,8 +4338,13 @@ impl App {
                 Command::ChatSignIn => {
                     if let Some(chat) = &mut self.chat {
                         match chat.sign_in() {
-                            Ok(()) => self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn { url: None },
-                            Err(e) => self.ui.chat_account = kreate_ui::chat::ChatAccount::Unavailable(e),
+                            Ok(()) => {
+                                self.ui.chat_account =
+                                    kreate_ui::chat::ChatAccount::SigningIn { url: None }
+                            }
+                            Err(e) => {
+                                self.ui.chat_account = kreate_ui::chat::ChatAccount::Unavailable(e)
+                            }
                         }
                     }
                 }
@@ -3891,14 +4360,27 @@ impl App {
                 }
                 Command::OpenContact => self.ui.contact.open(),
                 Command::OpenAbout => self.ui.about_open = true,
-                Command::ContactSend { kind, name, email, message, include_details } => {
+                Command::ContactSend {
+                    kind,
+                    name,
+                    email,
+                    message,
+                    include_details,
+                } => {
                     let details = include_details
                         .then(|| (kreate::version::describe(), kreate::version::platform()));
                     match &self.outbox {
-                        Some(outbox) => outbox.send(&kreate::contact::Message { kind, name, email, message, details }),
+                        Some(outbox) => outbox.send(&kreate::contact::Message {
+                            kind,
+                            name,
+                            email,
+                            message,
+                            details,
+                        }),
                         None => {
-                            self.ui.contact.status =
-                                kreate_ui::contact::ContactStatus::Failed("messages cannot be sent from here".into())
+                            self.ui.contact.status = kreate_ui::contact::ContactStatus::Failed(
+                                "messages cannot be sent from here".into(),
+                            )
                         }
                     }
                 }
@@ -3912,7 +4394,10 @@ impl App {
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.
                 Command::ParentObject { child, parent } => {
-                    let uid = |key| shell::object_from_key(&self.doc, key).and_then(|id| self.doc.object_uid(id));
+                    let uid = |key| {
+                        shell::object_from_key(&self.doc, key)
+                            .and_then(|id| self.doc.object_uid(id))
+                    };
                     if let (Some(c), Some(p)) = (uid(child), uid(parent)) {
                         let mut params = PropertyMap::new();
                         params.set("child", PropertyValue::Text(c.raw().to_string()));
@@ -3921,7 +4406,8 @@ impl App {
                     }
                 }
                 Command::MoveObjectToCollection { object, collection } => {
-                    let uid = shell::object_from_key(&self.doc, object).and_then(|id| self.doc.object_uid(id));
+                    let uid = shell::object_from_key(&self.doc, object)
+                        .and_then(|id| self.doc.object_uid(id));
                     if let Some(uid) = uid {
                         let mut params = PropertyMap::new();
                         params.set("uid", PropertyValue::Text(uid.raw().to_string()));
@@ -4020,7 +4506,10 @@ impl App {
                 Command::UndoTo(target) => {
                     while self.history.cursor() > target && self.history.undo(&mut self.doc) {}
                     while self.history.cursor() < target {
-                        match self.history.redo(&self.registry, &mut self.doc, &self.op_ctx) {
+                        match self
+                            .history
+                            .redo(&self.registry, &mut self.doc, &self.op_ctx)
+                        {
                             Ok(true) => {}
                             _ => break,
                         }
@@ -4045,16 +4534,24 @@ impl App {
                     }
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
-                Command::SelectBone { object, bone, extend } => {
+                Command::SelectBone {
+                    object,
+                    bone,
+                    extend,
+                } => {
                     // The pick of whatever mode this is, on the armature being
                     // posed or edited; in object mode the armature is simply
                     // selected, which is what clicking its bone there does.
-                    let Some(id) = shell::object_from_key(&self.doc, object) else { continue };
+                    let Some(id) = shell::object_from_key(&self.doc, object) else {
+                        continue;
+                    };
                     let mut params = PropertyMap::new();
                     params.set("bone", PropertyValue::Text(bone));
                     params.set("extend", PropertyValue::Bool(extend));
                     match self.op_ctx.mode.acts_on() {
-                        kreate_ops::mode::ActsOn::Bones if kreate_ops::ops::pose::posed_object(&self.doc) == Some(id) => {
+                        kreate_ops::mode::ActsOn::Bones
+                            if kreate_ops::ops::pose::posed_object(&self.doc) == Some(id) =>
+                        {
                             self.run_op("pose.select_pick", params)
                         }
                         kreate_ops::mode::ActsOn::BoneJoints
@@ -4236,7 +4733,6 @@ impl App {
         }
     }
 
-
     /// Writes the scene to an interchange format.
     ///
     /// The other half of `load_from`, and until now it did not exist in the
@@ -4346,7 +4842,6 @@ impl App {
         }
     }
 
-
     /// Loads an image and makes it the world's background.
     ///
     /// The file read is here and the document edit is an operator, and the
@@ -4385,7 +4880,10 @@ impl App {
             return self.status("the image has no identity");
         };
         let mut params = PropertyMap::new();
-        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        params.set(
+            "uid",
+            kreate_reflect::PropertyValue::Text(uid.raw().to_string()),
+        );
         self.run_op("world.set_image", params);
         self.status(&format!("environment: {name}"));
     }
@@ -4395,7 +4893,10 @@ impl App {
     /// step to undo and replays from its script line — and an HDR becomes the
     /// world's light.
     fn open_dropped(&mut self, path: &std::path::Path) {
-        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
         match ext.as_str() {
             "kreate" => {
                 if self.confirm_discarding_changes("open the dropped document") {
@@ -4456,7 +4957,10 @@ impl App {
         };
         let mut params = self.material_slot_param();
         params.set("map", kreate_reflect::PropertyValue::Enum(map));
-        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        params.set(
+            "uid",
+            kreate_reflect::PropertyValue::Text(uid.raw().to_string()),
+        );
         self.run_op("material.set_image", params);
         self.status(&format!("{}: {name}", slot.tag()));
     }
@@ -4556,7 +5060,10 @@ impl App {
         let mut params = PropertyMap::new();
         params.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
         params.set("node", kreate_reflect::PropertyValue::Int(node as i64));
-        params.set("uid", kreate_reflect::PropertyValue::Text(uid.raw().to_string()));
+        params.set(
+            "uid",
+            kreate_reflect::PropertyValue::Text(uid.raw().to_string()),
+        );
         self.run_op("node.set_image", params);
         self.status(&format!("image texture: {name}"));
     }
@@ -4801,11 +5308,15 @@ impl App {
         // What `H` hid is hidden in edit mode only: every other object, and
         // every object outside edit mode, is drawn whole. A copy without the
         // hide layers, kept per input so an unchanged mesh is not copied again.
-        let editing: Vec<_> = if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
-            kreate_ops::ops::mesh::edit_targets(&self.doc).into_iter().map(|t| t.object).collect()
-        } else {
-            Vec::new()
-        };
+        let editing: Vec<_> =
+            if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
+                kreate_ops::ops::mesh::edit_targets(&self.doc)
+                    .into_iter()
+                    .map(|t| t.object)
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let mut unhidden = Vec::new();
         for (id, mesh) in self.evaluated.iter_mut() {
             if editing.contains(id) || !kreate_mesh::selection::any_hidden(mesh) {
@@ -4828,15 +5339,24 @@ impl App {
         // In weight paint mode the painted mesh is shown by its weights.
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
             let active = self.doc.selection.active;
-            let group = active.and_then(|id| self.doc.object(id)).and_then(|o| o.active_group.clone());
-            if let Some((_, mesh)) = self.evaluated.iter_mut().find(|(id, _)| Some(*id) == active) {
+            let group = active
+                .and_then(|id| self.doc.object(id))
+                .and_then(|o| o.active_group.clone());
+            if let Some((_, mesh)) = self
+                .evaluated
+                .iter_mut()
+                .find(|(id, _)| Some(*id) == active)
+            {
                 let reuse = self
                     .weight_display
                     .as_ref()
                     .filter(|(input, g, _)| Arc::ptr_eq(input, mesh) && *g == group)
                     .map(|(_, _, out)| out.clone());
                 let shown = reuse.unwrap_or_else(|| {
-                    let out = Arc::new(kreate_ops::ops::paint::weight_display(mesh, group.as_deref()));
+                    let out = Arc::new(kreate_ops::ops::paint::weight_display(
+                        mesh,
+                        group.as_deref(),
+                    ));
                     self.weight_display = Some((mesh.clone(), group.clone(), out.clone()));
                     out
                 });
@@ -5036,9 +5556,18 @@ impl App {
     fn region_request(&self) -> Option<(kreate_render::SelectShape, kreate_render::Collect)> {
         // A circle-select stroke tests the brush where the pointer is now.
         let shape = match (&self.circle, self.drag_select.as_ref()) {
-            (Some(CircleSelect { radius, stroke: Some(_) }), _) => {
+            (
+                Some(CircleSelect {
+                    radius,
+                    stroke: Some(_),
+                }),
+                _,
+            ) => {
                 let (x, y) = self.cursor_viewport_px()?;
-                kreate_render::SelectShape::Circle { centre: (x as f32, y as f32), radius: *radius }
+                kreate_render::SelectShape::Circle {
+                    centre: (x as f32, y as f32),
+                    radius: *radius,
+                }
             }
             (_, Some(drag)) if drag.moved => drag.shape(),
             _ => return None,
@@ -5281,7 +5810,8 @@ impl App {
     fn adopt_tool_settings(&mut self) {
         let t = self.ui.tools;
         self.snap.enabled = t.snap;
-        self.snap.mode = kreate::snap::Mode::ALL[(t.snap_mode as usize).min(kreate::snap::Mode::ALL.len() - 1)];
+        self.snap.mode =
+            kreate::snap::Mode::ALL[(t.snap_mode as usize).min(kreate::snap::Mode::ALL.len() - 1)];
         self.proportional = match (t.proportional, self.proportional) {
             (false, _) => None,
             (true, None) => Some(1.0),
@@ -5299,7 +5829,9 @@ impl App {
 
     /// Starts a brush stroke on the active mesh's active group.
     fn begin_paint_stroke(&mut self) {
-        let Some(object) = self.doc.selection.active else { return };
+        let Some(object) = self.doc.selection.active else {
+            return;
+        };
         let Some(group) = self.doc.object(object).and_then(|o| o.active_group.clone()) else {
             self.status("add a vertex group to paint (Data tab)");
             return;
@@ -5310,9 +5842,20 @@ impl App {
         params.set("vertices", PropertyValue::Ints(Vec::new()));
         params.set("weight", PropertyValue::Float(paint.weight as f64));
         params.set("strength", PropertyValue::Float(paint.strength as f64));
-        match self.history.begin_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, "paint.weight_stroke", &params) {
+        match self.history.begin_modal(
+            &self.registry,
+            &mut self.doc,
+            Some(&mut self.edit),
+            &self.op_ctx,
+            "paint.weight_stroke",
+            &params,
+        ) {
             Ok(Some(session)) => {
-                self.paint_stroke = Some(PaintStroke { session, touched: Default::default(), normals: self.paint_normals(object) });
+                self.paint_stroke = Some(PaintStroke {
+                    session,
+                    touched: Default::default(),
+                    normals: self.paint_normals(object),
+                });
                 self.drive_paint_stroke();
             }
             Ok(None) => {}
@@ -5325,21 +5868,36 @@ impl App {
         let object = self.doc.selection.active?;
         let ndc = self.cursor_ndc()?;
         let aspect = self.viewport_aspect();
-        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
         (hit.object == object).then_some(hit.point)
     }
 
     /// A press in sculpt mode: a stroke starts where the pointer meets the
     /// mesh. Shift smooths whatever the brush is; Ctrl inverts it.
     fn begin_sculpt_stroke(&mut self) {
-        let Some(object) = self.doc.selection.active.filter(|a| self.doc.object(*a).and_then(|o| o.mesh()).is_some()) else {
+        let Some(object) = self
+            .doc
+            .selection
+            .active
+            .filter(|a| self.doc.object(*a).and_then(|o| o.mesh()).is_some())
+        else {
             return;
         };
         let Some(at) = self.sculpt_hit() else { return };
         let settings = self.ui.sculpt;
-        let brush = if self.input.shift_down { 1 } else { settings.brush };
+        let brush = if self.input.shift_down {
+            1
+        } else {
+            settings.brush
+        };
         // The brush's screen radius as a world length at the depth it touched.
-        let height = self.viewport_px.map(|(_, _, _, h)| h as f64).unwrap_or(1.0).max(1.0);
+        let height = self
+            .viewport_px
+            .map(|(_, _, _, h)| h as f64)
+            .unwrap_or(1.0)
+            .max(1.0);
         let ppp = self.egui_ctx.pixels_per_point() as f64;
         let distance = (at - self.camera.eye()).length();
         let per_pixel = 2.0 * (self.camera.fov_y * 0.5).tan() * distance / height;
@@ -5359,10 +5917,14 @@ impl App {
     }
 
     fn add_sculpt_dab(&mut self, at: DVec3) {
-        let Some(stroke) = self.sculpt_stroke.as_mut() else { return };
+        let Some(stroke) = self.sculpt_stroke.as_mut() else {
+            return;
+        };
         let to_local = self.doc.world_transform(stroke.object).inverse();
         let local = to_local.transform_point3(at);
-        let radius = to_local.transform_vector3(DVec3::X * stroke.radius_world).length();
+        let radius = to_local
+            .transform_vector3(DVec3::X * stroke.radius_world)
+            .length();
         stroke.dabs.extend([local.x, local.y, local.z, radius]);
         stroke.last = at;
     }
@@ -5371,8 +5933,16 @@ impl App {
     /// quarter of the brush, or for a grab the drag so far — then the stroke
     /// re-run from where it began.
     fn drive_sculpt_stroke(&mut self) {
-        let Some(stroke) = self.sculpt_stroke.as_ref() else { return };
-        let (object, brush, last, radius, hold) = (stroke.object, stroke.brush, stroke.last, stroke.radius_world, stroke.hold);
+        let Some(stroke) = self.sculpt_stroke.as_ref() else {
+            return;
+        };
+        let (object, brush, last, radius, hold) = (
+            stroke.object,
+            stroke.brush,
+            stroke.last,
+            stroke.radius_world,
+            stroke.hold,
+        );
         let to_local = self.doc.world_transform(object).inverse();
         let mut grab = DVec3::ZERO;
         if brush == 2 {
@@ -5394,7 +5964,9 @@ impl App {
             }
         }
         let settings = self.ui.sculpt;
-        let Some(stroke) = self.sculpt_stroke.as_mut() else { return };
+        let Some(stroke) = self.sculpt_stroke.as_mut() else {
+            return;
+        };
         let mut params = PropertyMap::new();
         params.set("brush", PropertyValue::Enum(stroke.brush));
         params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
@@ -5404,12 +5976,26 @@ impl App {
         params.set("mirror_x", PropertyValue::Bool(settings.mirror_x));
         match stroke.session.as_mut() {
             Some(session) => {
-                if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, None, &self.op_ctx, session, &params) {
+                if let Err(e) = self.history.update_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    session,
+                    &params,
+                ) {
                     tracing::warn!(error = %e, "sculpt failed");
                 }
             }
             None => {
-                if let Ok(Some(session)) = self.history.begin_modal(&self.registry, &mut self.doc, None, &self.op_ctx, "sculpt.stroke", &params) {
+                if let Ok(Some(session)) = self.history.begin_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    "sculpt.stroke",
+                    &params,
+                ) {
                     stroke.session = Some(session);
                 }
             }
@@ -5419,7 +6005,12 @@ impl App {
 
     /// The painted mesh's vertex normals, in the world, as it is drawn.
     fn paint_normals(&self, object: kreate_scene::document::ObjectId) -> Vec<DVec3> {
-        let Some(mesh) = self.evaluated.iter().find(|(id, _)| *id == object).map(|(_, m)| m.clone()) else {
+        let Some(mesh) = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == object)
+            .map(|(_, m)| m.clone())
+        else {
             return Vec::new();
         };
         let p = mesh.positions();
@@ -5428,14 +6019,24 @@ impl App {
             let ring = mesh.face_verts(f);
             let mut n = DVec3::ZERO;
             for i in 0..ring.len() {
-                n += p[ring[i] as usize].as_dvec3().cross(p[ring[(i + 1) % ring.len()] as usize].as_dvec3());
+                n += p[ring[i] as usize]
+                    .as_dvec3()
+                    .cross(p[ring[(i + 1) % ring.len()] as usize].as_dvec3());
             }
             for v in ring {
                 normals[*v as usize] += n;
             }
         }
-        let to_world = self.doc.world_transform(object).matrix3.inverse().transpose();
-        normals.into_iter().map(|n| (to_world * n).normalize_or_zero()).collect()
+        let to_world = self
+            .doc
+            .world_transform(object)
+            .matrix3
+            .inverse()
+            .transpose();
+        normals
+            .into_iter()
+            .map(|n| (to_world * n).normalize_or_zero())
+            .collect()
     }
 
     /// Adds the vertices under the brush to the stroke and re-applies it.
@@ -5445,14 +6046,24 @@ impl App {
     /// document's, which a skin or a stack that keeps the topology has; a
     /// stack that changes it paints the cage instead.
     fn drive_paint_stroke(&mut self) {
-        let (Some((x, y)), Some(projector), Some(object)) = (self.input.cursor, self.ui.projector, self.doc.selection.active)
-        else {
+        let (Some((x, y)), Some(projector), Some(object)) = (
+            self.input.cursor,
+            self.ui.projector,
+            self.doc.selection.active,
+        ) else {
             return;
         };
         let ppp = self.egui_ctx.pixels_per_point();
         let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
         let radius = self.ui.paint.radius;
-        let Some(cage) = self.doc.object(object).and_then(|o| o.mesh()).and_then(|m| self.doc.mesh(m)) else { return };
+        let Some(cage) = self
+            .doc
+            .object(object)
+            .and_then(|o| o.mesh())
+            .and_then(|m| self.doc.mesh(m))
+        else {
+            return;
+        };
         let shown = self
             .evaluated
             .iter()
@@ -5466,11 +6077,19 @@ impl App {
         };
         let paint = self.ui.paint;
         let eye = self.camera.eye();
-        let Some(stroke) = self.paint_stroke.as_mut() else { return };
+        let Some(stroke) = self.paint_stroke.as_mut() else {
+            return;
+        };
         let mut grew = stroke.touched.is_empty();
         for (v, p) in positions.iter().enumerate() {
             let w = world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
-            let Some(d) = projector.project(w).map(|s| s.distance(at)).filter(|d| *d <= radius) else { continue };
+            let Some(d) = projector
+                .project(w)
+                .map(|s| s.distance(at))
+                .filter(|d| *d <= radius)
+            else {
+                continue;
+            };
             // Only when the normals are this mesh's: a stack that changed the
             // vertex count paints the cage, and has none here.
             let facing_away = stroke.normals.len() == positions.len()
@@ -5497,14 +6116,31 @@ impl App {
         let touched = &stroke.touched;
         let session = &mut stroke.session;
         let paint = self.ui.paint;
-        let group = self.doc.object(object).and_then(|o| o.active_group.clone()).unwrap_or_default();
+        let group = self
+            .doc
+            .object(object)
+            .and_then(|o| o.active_group.clone())
+            .unwrap_or_default();
         let mut params = PropertyMap::new();
         params.set("group", PropertyValue::Text(group));
-        params.set("vertices", PropertyValue::Ints(touched.keys().copied().collect()));
-        params.set("amounts", PropertyValue::Floats(touched.values().map(|a| *a as f64).collect()));
+        params.set(
+            "vertices",
+            PropertyValue::Ints(touched.keys().copied().collect()),
+        );
+        params.set(
+            "amounts",
+            PropertyValue::Floats(touched.values().map(|a| *a as f64).collect()),
+        );
         params.set("weight", PropertyValue::Float(paint.weight as f64));
         params.set("strength", PropertyValue::Float(paint.strength as f64));
-        if let Err(e) = self.history.update_modal(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, session, &params) {
+        if let Err(e) = self.history.update_modal(
+            &self.registry,
+            &mut self.doc,
+            Some(&mut self.edit),
+            &self.op_ctx,
+            session,
+            &params,
+        ) {
             tracing::warn!(error = %e, "stroke failed");
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -5518,7 +6154,11 @@ impl App {
     fn end_mouse_drag(&mut self, slot: usize) {
         // A stroke ends where the button comes up: one step to undo.
         if slot == 0 {
-            if let Some(SculptStroke { session: Some(session), .. }) = self.sculpt_stroke.take() {
+            if let Some(SculptStroke {
+                session: Some(session),
+                ..
+            }) = self.sculpt_stroke.take()
+            {
                 self.history.commit_modal(session);
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
@@ -5862,12 +6502,21 @@ impl App {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let before: std::collections::HashSet<_> =
-                self.doc.objects().filter_map(|(id, _)| self.doc.object_uid(id)).collect();
-            let materials_before: std::collections::HashSet<_> =
-                self.doc.materials().filter_map(|(id, _)| self.doc.material_uid(id)).collect();
-            let images_before: std::collections::HashSet<_> =
-                self.doc.images().filter_map(|(id, _)| self.doc.image_uid(id)).collect();
+            let before: std::collections::HashSet<_> = self
+                .doc
+                .objects()
+                .filter_map(|(id, _)| self.doc.object_uid(id))
+                .collect();
+            let materials_before: std::collections::HashSet<_> = self
+                .doc
+                .materials()
+                .filter_map(|(id, _)| self.doc.material_uid(id))
+                .collect();
+            let images_before: std::collections::HashSet<_> = self
+                .doc
+                .images()
+                .filter_map(|(id, _)| self.doc.image_uid(id))
+                .collect();
             self.ui.console_log.push(ConsoleLine {
                 text: trimmed.to_string(),
                 kind: LineKind::Input,
@@ -5878,7 +6527,13 @@ impl App {
                 None => {
                     let outcome = self
                         .history
-                        .run_script(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, trimmed)
+                        .run_script(
+                            &self.registry,
+                            &mut self.doc,
+                            Some(&mut self.edit),
+                            &self.op_ctx,
+                            trimmed,
+                        )
                         .pop();
                     match outcome.map(|o| o.result) {
                         Some(Ok(kreate_ops::OpResult::Finished)) => Ok("finished".to_string()),
@@ -5955,7 +6610,9 @@ impl App {
                     // mode of the kind of thing that is active.
                     "edit" => OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc)),
                     other => OpMode::from_tag(other).ok_or_else(|| {
-                        format!("no mode called {other:?}: object, edit, sculpt, weight_paint or pose")
+                        format!(
+                            "no mode called {other:?}: object, edit, sculpt, weight_paint or pose"
+                        )
                     })?,
                 };
                 if self.op_ctx.mode == mode {
@@ -5981,7 +6638,12 @@ impl App {
                 let (name, size) = (image.name.clone(), (image.width(), image.height()));
                 let id = self.doc.add_image(image);
                 let uid = self.doc.image_uid(id).ok_or("the image has no identity")?;
-                Ok(format!("image {name:?} {}x{} uid={}", size.0, size.1, uid.raw()))
+                Ok(format!(
+                    "image {name:?} {}x{} uid={}",
+                    size.0,
+                    size.1,
+                    uid.raw()
+                ))
             }
         }
     }
@@ -6209,11 +6871,15 @@ impl App {
         // Viewport pixels back into points: the drag is tracked against the id
         // buffer, which is the offscreen texture's size, and egui lays out in
         // logical points.
-        self.ui.select_band = self.drag_select.as_ref().filter(|d| d.moved && d.lasso.is_none()).map(|d| {
-            let scale = self.egui_ctx.pixels_per_point();
-            let to_points = |p: (f32, f32)| egui::pos2(p.0 / scale, p.1 / scale);
-            (to_points(d.origin), to_points(d.current))
-        });
+        self.ui.select_band = self
+            .drag_select
+            .as_ref()
+            .filter(|d| d.moved && d.lasso.is_none())
+            .map(|d| {
+                let scale = self.egui_ctx.pixels_per_point();
+                let to_points = |p: (f32, f32)| egui::pos2(p.0 / scale, p.1 / scale);
+                (to_points(d.origin), to_points(d.current))
+            });
         self.ui.select_lasso = self
             .drag_select
             .as_ref()
@@ -6221,7 +6887,9 @@ impl App {
             .and_then(|d| d.lasso.as_ref())
             .map(|path| {
                 let scale = self.egui_ctx.pixels_per_point();
-                path.iter().map(|p| egui::pos2(p.0 / scale, p.1 / scale)).collect()
+                path.iter()
+                    .map(|p| egui::pos2(p.0 / scale, p.1 / scale))
+                    .collect()
             })
             .unwrap_or_default();
         self.ui.select_band_deselect = self.drag_select.as_ref().is_some_and(|d| d.deselect);
@@ -6241,7 +6909,9 @@ impl App {
                     kreate::modal::Kind::Move => kreate_ui::toolbar::Tool::Move,
                     kreate::modal::Kind::Rotate => kreate_ui::toolbar::Tool::Rotate,
                     kreate::modal::Kind::Scale => kreate_ui::toolbar::Tool::Scale,
-                    kreate::modal::Kind::Extrude | kreate::modal::Kind::ExtrudeFree => kreate_ui::toolbar::Tool::Extrude,
+                    kreate::modal::Kind::Extrude | kreate::modal::Kind::ExtrudeFree => {
+                        kreate_ui::toolbar::Tool::Extrude
+                    }
                     kreate::modal::Kind::Inset => kreate_ui::toolbar::Tool::Inset,
                     kreate::modal::Kind::Bevel => kreate_ui::toolbar::Tool::Bevel,
                     kreate::modal::Kind::LoopCut => kreate_ui::toolbar::Tool::LoopCut,
@@ -6291,7 +6961,10 @@ impl App {
         });
         // The header's tool settings show what the keys last set.
         self.ui.tools.snap = self.snap.enabled;
-        self.ui.tools.snap_mode = kreate::snap::Mode::ALL.iter().position(|m| *m == self.snap.mode).unwrap_or(0) as u32;
+        self.ui.tools.snap_mode = kreate::snap::Mode::ALL
+            .iter()
+            .position(|m| *m == self.snap.mode)
+            .unwrap_or(0) as u32;
         self.ui.tools.proportional = self.proportional.is_some();
         self.ui.tools.falloff = self.proportional_falloff;
         let mut viewport_rect = egui::Rect::ZERO;
@@ -6325,7 +6998,8 @@ impl App {
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay)
             .unwrap_or(std::time::Duration::MAX);
-        self.ui_repaint_at = (delay < std::time::Duration::from_secs(60)).then(|| Instant::now() + delay);
+        self.ui_repaint_at =
+            (delay < std::time::Duration::from_secs(60)).then(|| Instant::now() + delay);
 
         // The single input gate. Scattered `if !typing` checks are how a rename
         // field ends up firing tool shortcuts again.
@@ -6396,7 +7070,11 @@ impl App {
             Some(kreate_render::PreviewSelection {
                 domain: self.pick_domain(),
                 deselect: self.drag_select.as_ref().is_some_and(|d| d.deselect)
-                    || self.circle.as_ref().and_then(|c| c.stroke.as_ref()).is_some_and(|s| s.deselect),
+                    || self
+                        .circle
+                        .as_ref()
+                        .and_then(|c| c.stroke.as_ref())
+                        .is_some_and(|s| s.deselect),
                 elements: *count,
             })
         });
@@ -6447,9 +7125,10 @@ impl App {
             }
             return;
         }
-        let surface_view = frame
-            .as_ref()
-            .map(|f| f.texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let surface_view = frame.as_ref().map(|f| {
+            f.texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
 
         // One draw entry per *object*, sharing GPU geometry by the identity of the
         // evaluated mesh — so a thousand linked duplicates cost a thousand
@@ -6627,7 +7306,11 @@ impl App {
             // per material and nothing else — which is the whole reason the
             // compiler keeps constants out of the text.
             let materials = kreate::materials::Materials::compile(&self.doc);
-            let transmissive: Vec<f32> = materials.compiled.iter().map(|c| c.transmission()).collect();
+            let transmissive: Vec<f32> = materials
+                .compiled
+                .iter()
+                .map(|c| c.transmission())
+                .collect();
             gfx.viewport.set_transmissive(&transmissive);
             let same = self
                 .materials
@@ -6654,11 +7337,7 @@ impl App {
                     .collect();
                 let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
                     .iter()
-                    .map(|set| {
-                        set.iter()
-                            .map(|i| i.source())
-                            .collect()
-                    })
+                    .map(|set| set.iter().map(|i| i.source()).collect())
                     .collect();
                 let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
                     .compiled
@@ -6700,7 +7379,11 @@ impl App {
                     // Cutters have no surface in the picture, as in the
                     // viewport's own passes.
                     let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
-                    let traced = || self.evaluated.iter().filter(|(id, _)| !cutters.contains(id));
+                    let traced = || {
+                        self.evaluated
+                            .iter()
+                            .filter(|(id, _)| !cutters.contains(id))
+                    };
                     for (id, mesh) in traced() {
                         (Arc::as_ptr(mesh) as usize).hash(&mut h);
                         for v in self.doc.world_transform(*id).to_cols_array() {
@@ -6719,22 +7402,35 @@ impl App {
                         let extracted: Vec<_> = traced()
                             .map(|(id, mesh)| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
-                                let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
+                                let positions: Vec<[f32; 3]> =
+                                    cpu.positions.iter().map(|p| p.0).collect();
                                 let uvs = cpu.uvs.clone();
-                                let normals: Vec<kreate_math::Vec3> =
-                                    cpu.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect();
-                                (positions, uvs, normals, cpu.indices, self.doc.world_transform(*id), materials.index_of(&self.doc, *id))
+                                let normals: Vec<kreate_math::Vec3> = cpu
+                                    .normals
+                                    .iter()
+                                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                                    .collect();
+                                (
+                                    positions,
+                                    uvs,
+                                    normals,
+                                    cpu.indices,
+                                    self.doc.world_transform(*id),
+                                    materials.index_of(&self.doc, *id),
+                                )
                             })
                             .collect();
                         let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
                             .iter()
-                            .map(|(positions, uvs, normals, indices, transform, surface)| kreate_render::pathtrace::PtMesh {
-                                positions,
-                                uvs,
-                                normals,
-                                indices,
-                                transform: *transform,
-                                surface: *surface,
+                            .map(|(positions, uvs, normals, indices, transform, surface)| {
+                                kreate_render::pathtrace::PtMesh {
+                                    positions,
+                                    uvs,
+                                    normals,
+                                    indices,
+                                    transform: *transform,
+                                    surface: *surface,
+                                }
                             })
                             .collect();
                         let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
@@ -6746,19 +7442,21 @@ impl App {
                                 color: i.kind == kreate_render::material::TextureKind::Color,
                             })
                             .collect();
-                        gfx.viewport.set_path_trace_scene(&gfx.gpu.device, &gfx.gpu.queue, &meshes, &surfaces, &pt_images);
+                        gfx.viewport.set_path_trace_scene(
+                            &gfx.gpu.device,
+                            &gfx.gpu.queue,
+                            &meshes,
+                            &surfaces,
+                            &pt_images,
+                        );
                     }
                 }
             }
             // With the distance each lamp is worth computing to, which is
             // what the tile pass culls against.
             let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);
-            gfx.viewport.set_lights(
-                &gfx.gpu.device,
-                &gfx.gpu.queue,
-                self.camera.eye(),
-                &lights,
-            );
+            gfx.viewport
+                .set_lights(&gfx.gpu.device, &gfx.gpu.queue, self.camera.eye(), &lights);
             // The bridge between §2.2's photometric lights and §2.1's display
             // transform: without it a sunlit scene saturates every pixel. The
             // scene camera's, not the viewport camera's — the exposure is a
@@ -6806,18 +7504,22 @@ impl App {
         // objects, and a copy of their transforms would be one more thing to
         // keep in step with undo.
         let shown = match self.op_ctx.mode.acts_on() {
-            kreate_ops::mode::ActsOn::Bones => {
-                kreate_ops::ops::pose::posed_object(&self.doc).map(|id| (id, kreate::glyphs::Bones::Pose))
-            }
+            kreate_ops::mode::ActsOn::Bones => kreate_ops::ops::pose::posed_object(&self.doc)
+                .map(|id| (id, kreate::glyphs::Bones::Pose)),
             kreate_ops::mode::ActsOn::BoneJoints => {
-                kreate_ops::ops::armature::edited_object(&self.doc).map(|id| (id, kreate::glyphs::Bones::Edit))
+                kreate_ops::ops::armature::edited_object(&self.doc)
+                    .map(|id| (id, kreate::glyphs::Bones::Edit))
             }
             _ => None,
         };
         let (marker_lines, marker_points) = if self.rendering_still {
             Default::default()
         } else {
-            kreate::glyphs::markers_only(&self.doc, shown, self.local_view.as_ref().map(|(ids, _)| ids.as_slice()))
+            kreate::glyphs::markers_only(
+                &self.doc,
+                shown,
+                self.local_view.as_ref().map(|(ids, _)| ids.as_slice()),
+            )
         };
         gfx.viewport.set_markers(
             &gfx.gpu.device,
@@ -7178,7 +7880,12 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
-        if self.circle.is_some() && matches!(code, KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) {
+        if self.circle.is_some()
+            && matches!(
+                code,
+                KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space
+            )
+        {
             self.end_circle_select();
             return;
         }
@@ -7217,7 +7924,9 @@ impl App {
             // transform: a session lost to the key that means "never mind".
             KeyCode::Escape => return,
             // Quit on the key every application quits on.
-            KeyCode::KeyQ if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down => {
+            KeyCode::KeyQ
+                if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down =>
+            {
                 event_loop.exit();
                 return;
             }
@@ -7298,8 +8007,12 @@ impl App {
             "object.translate" | "mesh.translate" | "pose.translate" => {
                 self.begin_gesture(kreate::modal::Kind::Move)
             }
-            "object.rotate" | "mesh.rotate" | "pose.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
-            "object.scale" | "mesh.scale" | "pose.scale" => self.begin_gesture(kreate::modal::Kind::Scale),
+            "object.rotate" | "mesh.rotate" | "pose.rotate" => {
+                self.begin_gesture(kreate::modal::Kind::Rotate)
+            }
+            "object.scale" | "mesh.scale" | "pose.scale" => {
+                self.begin_gesture(kreate::modal::Kind::Scale)
+            }
             // Blender's E: extrude, then drag the new faces out along their
             // normal with the pointer, rather than by a fixed amount.
             // Faces go out along their normal; edges and vertices, with no
@@ -7312,12 +8025,20 @@ impl App {
                 }
             }
             // I, Ctrl+B and Ctrl+R the same way: the pointer sets how much.
-            "mesh.inset" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Inset),
-            "mesh.bevel" if self.op_ctx.mode.edits_elements() => self.begin_gesture(kreate::modal::Kind::Bevel),
+            "mesh.inset" if self.op_ctx.mode.edits_elements() => {
+                self.begin_gesture(kreate::modal::Kind::Inset)
+            }
+            "mesh.bevel" if self.op_ctx.mode.edits_elements() => {
+                self.begin_gesture(kreate::modal::Kind::Bevel)
+            }
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
             "mesh.select_linked_pick" if self.op_ctx.mode.edits_elements() => {
-                let deselect = action.params.get("deselect").and_then(|v| v.as_bool()).unwrap_or(false);
+                let deselect = action
+                    .params
+                    .get("deselect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 self.linked_pick(deselect);
             }
             "view.circle_select" => self.toggle_circle_select(),
@@ -7335,7 +8056,12 @@ impl App {
             }
             "app.rename" => {
                 // The active object's name, in a field under the pointer.
-                let name = self.doc.selection.active.and_then(|a| self.doc.object(a)).map(|o| o.name.clone());
+                let name = self
+                    .doc
+                    .selection
+                    .active
+                    .and_then(|a| self.doc.object(a))
+                    .map(|o| o.name.clone());
                 if let (Some(name), Some((x, y))) = (name, self.input.cursor) {
                     let scale = self.egui_ctx.pixels_per_point().max(0.01);
                     self.ui.rename = Some((egui::pos2(x as f32 / scale, y as f32 / scale), name));
@@ -7483,7 +8209,11 @@ impl App {
             }
             "time.toggle_autokey" => {
                 self.autokey = !self.autokey;
-                self.status(if self.autokey { "auto-keying on" } else { "auto-keying off" });
+                self.status(if self.autokey {
+                    "auto-keying on"
+                } else {
+                    "auto-keying off"
+                });
                 self.redraw.set(RedrawReason::UI);
             }
             "time.set_frame" => {
@@ -7634,7 +8364,10 @@ impl App {
                 // be between frames while playing and a key at 12.37 is one
                 // nobody can land on again.
                 if action.op_id.starts_with("anim.keyframe") && params.get("frame").is_none() {
-                    params.set("frame", PropertyValue::Float(self.doc.playback.frame.round()));
+                    params.set(
+                        "frame",
+                        PropertyValue::Float(self.doc.playback.frame.round()),
+                    );
                 }
                 if action.op_id.starts_with("mesh.")
                     && params.get("mode").is_none()
@@ -7801,7 +8534,12 @@ impl ApplicationHandler for App {
         }
         // The icon in the title bar and the taskbar: a cube with a K on it,
         // 64 pixels square, straight RGBA so nothing has to be decoded.
-        let icon = winit::window::Icon::from_rgba(include_bytes!("../assets/kreate-64.rgba").to_vec(), 64, 64).ok();
+        let icon = winit::window::Icon::from_rgba(
+            include_bytes!("../assets/kreate-64.rgba").to_vec(),
+            64,
+            64,
+        )
+        .ok();
         let attrs = Window::default_attributes()
             .with_title("Kreate")
             .with_window_icon(icon)
@@ -8044,7 +8782,11 @@ impl ApplicationHandler for App {
                 }
                 // A press the keymap names — Shift+Right-click for the 3D
                 // cursor. Drags are resolved when they start moving.
-                if pressed && button == MouseButton::Right && self.gesture.is_none() && self.press_belongs_to_viewport() {
+                if pressed
+                    && button == MouseButton::Right
+                    && self.gesture.is_none()
+                    && self.press_belongs_to_viewport()
+                {
                     if let Some(action) = self.keymap.resolve(
                         self.key_context(),
                         &KeyInput::Mouse(KeyMouse::Right),
@@ -8104,7 +8846,10 @@ impl ApplicationHandler for App {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }
                 // The brush circle follows the pointer.
-                if matches!(self.op_ctx.mode.acts_on(), kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt) {
+                if matches!(
+                    self.op_ctx.mode.acts_on(),
+                    kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt
+                ) {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }
             }
@@ -8287,8 +9032,6 @@ fn load_document(path: Option<&str>) -> Document {
     doc
 }
 
-
-
 /// Reads a scene file into a fresh document, through the IR.
 ///
 /// Every format lands here, which is the point: what a file said and what the
@@ -8328,7 +9071,6 @@ fn import_scene(
     }
     Ok((doc, notes))
 }
-
 
 fn main() {
     tracing_subscriber::fmt()
@@ -8488,7 +9230,9 @@ impl AppParams {
         // own offset from it — above and back — so a new one lights and sees
         // the thing at the cursor rather than sitting inside it.
         let offset = match op_id {
-            "object.add_primitive" | "object.add_empty" | "object.add_armature" => Some(DVec3::ZERO),
+            "object.add_primitive" | "object.add_empty" | "object.add_armature" => {
+                Some(DVec3::ZERO)
+            }
             "object.add_light" => Some(DVec3::new(0.0, 0.0, 4.0)),
             "object.add_camera" => Some(DVec3::new(0.0, -8.0, 2.0)),
             _ => None,
@@ -8545,7 +9289,11 @@ fn mode_key_context(mode: OpMode) -> KeyContext {
 fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     let ab = b - a;
     let len2 = ab.length_sq();
-    let t = if len2 > 0.0 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if len2 > 0.0 {
+        ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (a + ab * t).distance(p)
 }
 
@@ -8554,20 +9302,42 @@ mod tests {
     #[test]
     fn the_pivot_point_and_the_cursor_reach_the_operators() {
         use super::*;
-        let fill = AppParams { key: None, pivot: 3, cursor: DVec3::new(1.0, 2.0, 3.0) };
+        let fill = AppParams {
+            key: None,
+            pivot: 3,
+            cursor: DVec3::new(1.0, 2.0, 3.0),
+        };
         let none = PropertyMap::new();
-        assert_eq!(fill.apply("object.rotate", &none).get("pivot"), Some(&PropertyValue::Enum(4)));
-        assert_eq!(fill.apply("mesh.scale", &none).get("pivot"), Some(&PropertyValue::Enum(1)));
+        assert_eq!(
+            fill.apply("object.rotate", &none).get("pivot"),
+            Some(&PropertyValue::Enum(4))
+        );
+        assert_eq!(
+            fill.apply("mesh.scale", &none).get("pivot"),
+            Some(&PropertyValue::Enum(1))
+        );
         assert_eq!(fill.apply("mesh.translate", &none).get("pivot"), None);
         // A given pivot is not overruled.
         let mut given = PropertyMap::new();
         given.set("pivot", PropertyValue::Enum(0));
-        assert_eq!(fill.apply("object.scale", &given).get("pivot"), Some(&PropertyValue::Enum(0)));
+        assert_eq!(
+            fill.apply("object.scale", &given).get("pivot"),
+            Some(&PropertyValue::Enum(0))
+        );
         // New things at the cursor; a lamp above it.
-        assert_eq!(fill.apply("object.add_primitive", &none).get("location"), Some(&PropertyValue::Vec3([1.0, 2.0, 3.0])));
-        assert_eq!(fill.apply("object.add_light", &none).get("location"), Some(&PropertyValue::Vec3([1.0, 2.0, 7.0])));
+        assert_eq!(
+            fill.apply("object.add_primitive", &none).get("location"),
+            Some(&PropertyValue::Vec3([1.0, 2.0, 3.0]))
+        );
+        assert_eq!(
+            fill.apply("object.add_light", &none).get("location"),
+            Some(&PropertyValue::Vec3([1.0, 2.0, 7.0]))
+        );
         let median = AppParams { pivot: 0, ..fill };
-        assert_eq!(median.apply("mesh.rotate", &none).get("pivot"), Some(&PropertyValue::Enum(0)));
+        assert_eq!(
+            median.apply("mesh.rotate", &none).get("pivot"),
+            Some(&PropertyValue::Enum(0))
+        );
     }
 
     #[test]
@@ -8583,7 +9353,10 @@ mod tests {
                 let kreate_input::Input::Key(name) = &binding.input else {
                     panic!("{preset:?}: a pie opened by something that is not a key");
                 };
-                assert!(egui_key(name).is_some(), "{preset:?}: `{name}` has no egui key");
+                assert!(
+                    egui_key(name).is_some(),
+                    "{preset:?}: `{name}` has no egui key"
+                );
             }
         }
     }
@@ -8615,7 +9388,10 @@ mod tests {
         };
         assert!(matches!(drag.shape(), kreate_render::SelectShape::Lasso(p) if p.len() == 3));
         drag.lasso = None;
-        assert!(matches!(drag.shape(), kreate_render::SelectShape::Box { .. }));
+        assert!(matches!(
+            drag.shape(),
+            kreate_render::SelectShape::Box { .. }
+        ));
     }
 
     /// Blender's Ctrl+P and Alt+P menus: plain parenting first, the armature
@@ -8624,10 +9400,22 @@ mod tests {
     fn the_parent_menus_offer_object_and_armature() {
         let mut app = app();
         let ops = |app: &App| -> Vec<String> {
-            app.ui.context_menu.groups.iter().flat_map(|g| g.entries.iter().map(|e| e.op_id.clone())).collect()
+            app.ui
+                .context_menu
+                .groups
+                .iter()
+                .flat_map(|g| g.entries.iter().map(|e| e.op_id.clone()))
+                .collect()
         };
         app.open_popup_menu("parent");
-        assert_eq!(ops(&app), ["object.parent", "object.bind_armature", "object.bind_armature"]);
+        assert_eq!(
+            ops(&app),
+            [
+                "object.parent",
+                "object.bind_armature",
+                "object.bind_armature"
+            ]
+        );
         app.open_popup_menu("parent_clear");
         assert_eq!(ops(&app), ["object.parent", "object.unbind_armature"]);
     }
@@ -8735,7 +9523,10 @@ mod tests {
         app.evaluate_scene();
         assert_eq!(app.evaluated.len(), 2);
         app.toggle_local_view();
-        assert!(app.evaluated.iter().all(|(id, _)| *id == a), "B is still drawn");
+        assert!(
+            app.evaluated.iter().all(|(id, _)| *id == a),
+            "B is still drawn"
+        );
         app.toggle_local_view();
         app.evaluate_scene();
         assert!(app.evaluated.iter().any(|(id, _)| *id == b));
@@ -8749,7 +9540,10 @@ mod tests {
     fn numpad_zero_needs_a_camera_and_toggles_back() {
         let mut app = app();
         app.toggle_camera_view();
-        assert!(app.camera_view.is_none(), "there is no camera to look through");
+        assert!(
+            app.camera_view.is_none(),
+            "there is no camera to look through"
+        );
         app.run_op("object.add_camera", PropertyMap::new());
         app.toggle_camera_view();
         assert!(app.camera_view.is_some());
@@ -8761,15 +9555,25 @@ mod tests {
     fn a_dropped_scene_is_added_to_this_one_as_one_step() {
         let mut app = app();
         let cube = app.doc.add_mesh(kreate_mesh::primitives::cube(1.0));
-        app.doc.add_object(kreate_scene::document::Object::new("Cube", kreate_scene::document::ObjectData::Mesh(cube)));
-        let (bytes, _) = kreate_io::write_stl(&kreate_mesh::primitives::cube(2.0), &kreate_io::StlOptions::default());
+        app.doc.add_object(kreate_scene::document::Object::new(
+            "Cube",
+            kreate_scene::document::ObjectData::Mesh(cube),
+        ));
+        let (bytes, _) = kreate_io::write_stl(
+            &kreate_mesh::primitives::cube(2.0),
+            &kreate_io::StlOptions::default(),
+        );
         let dir = std::env::temp_dir().join(format!("kreate-drop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dropped.stl");
         std::fs::write(&path, bytes).unwrap();
         let (objects, steps) = (app.doc.object_count(), app.history.entries().len());
         app.open_dropped(&path);
-        assert_eq!(app.doc.object_count(), objects + 1, "the scene was replaced or nothing came");
+        assert_eq!(
+            app.doc.object_count(),
+            objects + 1,
+            "the scene was replaced or nothing came"
+        );
         assert_eq!(app.history.entries().len(), steps + 1);
         assert!(app.history.undo(&mut app.doc));
         assert_eq!(app.doc.object_count(), objects);

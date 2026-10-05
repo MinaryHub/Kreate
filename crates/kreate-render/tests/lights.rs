@@ -436,15 +436,25 @@ fn the_count_is_the_authority_and_not_the_buffers_length() {
             ..PlacedLight::default()
         })
         .collect();
-    assert_eq!(buffer.upload(&gpu.device, &gpu.queue, glam::DVec3::ZERO, &many), 9);
+    assert_eq!(
+        buffer.upload(&gpu.device, &gpu.queue, glam::DVec3::ZERO, &many),
+        9
+    );
     let grown = buffer.capacity();
     assert!(grown >= 9);
 
     // Now two. The capacity stays, the count does not.
     let few = &many[..2];
-    assert_eq!(buffer.upload(&gpu.device, &gpu.queue, glam::DVec3::ZERO, few), 2);
+    assert_eq!(
+        buffer.upload(&gpu.device, &gpu.queue, glam::DVec3::ZERO, few),
+        2
+    );
     assert_eq!(buffer.count(), 2);
-    assert_eq!(buffer.capacity(), grown, "the buffer was reallocated to shrink");
+    assert_eq!(
+        buffer.capacity(),
+        grown,
+        "the buffer was reallocated to shrink"
+    );
 
     // And the stale slot is still readable, which is exactly why the count has
     // to be obeyed rather than inferred.

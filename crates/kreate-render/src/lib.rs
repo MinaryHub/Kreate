@@ -3,29 +3,29 @@
 //! This crate never mutates a document. It consumes an immutable snapshot,
 //! which is what lets the render path stay lock-free.
 
+pub mod accum;
+pub mod ao;
+pub mod bloom;
 pub mod brdf;
 pub mod camera;
 pub mod capability;
 pub mod cluster;
 pub mod cluster_cull;
 pub mod deform;
-pub mod accum;
-pub mod ao;
-pub mod bloom;
 pub mod denoise;
 pub mod display;
-pub mod fxaa;
 pub mod environment;
+pub mod fxaa;
 pub mod gpu;
 pub mod hiz;
 pub mod lights;
 pub mod markers;
 pub use markers::{MarkerShape, OverlayLine, OverlayPoint};
-pub mod material;
 pub mod lod;
-pub mod outline;
+pub mod material;
 pub mod mesh_gpu;
 pub mod motion;
+pub mod outline;
 pub mod palette;
 pub mod pathtrace;
 pub mod picking;

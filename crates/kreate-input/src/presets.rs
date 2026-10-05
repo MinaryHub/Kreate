@@ -189,7 +189,12 @@ fn common() -> Vec<Binding> {
         // The clock, on Blender's keys and everywhere — an animator plays from
         // whichever editor the pointer is over. Space plays and stops; the
         // arrows step a frame, or with Shift jump to either end of the range.
-        key("time.play", "Space", Context::Global, Action::new("time.play")),
+        key(
+            "time.play",
+            "Space",
+            Context::Global,
+            Action::new("time.play"),
+        ),
         key(
             "time.next",
             "ArrowRight",
@@ -202,13 +207,28 @@ fn common() -> Vec<Binding> {
             Context::Global,
             Action::new("time.step").with("delta", PropertyValue::Int(-1)),
         ),
-        key("time.end", "ArrowRight", Context::Global, Action::new("time.jump").with("to_end", PropertyValue::Bool(true)))
-            .with_modifiers(Modifiers::shift()),
-        key("time.start", "ArrowLeft", Context::Global, Action::new("time.jump"))
-            .with_modifiers(Modifiers::shift()),
+        key(
+            "time.end",
+            "ArrowRight",
+            Context::Global,
+            Action::new("time.jump").with("to_end", PropertyValue::Bool(true)),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "time.start",
+            "ArrowLeft",
+            Context::Global,
+            Action::new("time.jump"),
+        )
+        .with_modifiers(Modifiers::shift()),
         // Blender's menu search, on Blender's key, everywhere: a command whose
         // menu you cannot find is one you can still name.
-        key("app.search", "F3", Context::Global, Action::new("app.search")),
+        key(
+            "app.search",
+            "F3",
+            Context::Global,
+            Action::new("app.search"),
+        ),
         key(
             "view.frame_all",
             "F",
@@ -349,12 +369,38 @@ fn common() -> Vec<Binding> {
         ),
         // Blender's numpad views: `/` local view (on the main row too), `0`
         // through the scene camera, `.` framing the selection.
-        key("view.local_view", "NumpadDivide", Context::Viewport, Action::new("view.local_view")),
-        key("view.local_view_main", "Slash", Context::Viewport, Action::new("view.local_view")),
-        key("view.camera", "Numpad0", Context::Viewport, Action::new("view.camera")),
+        key(
+            "view.local_view",
+            "NumpadDivide",
+            Context::Viewport,
+            Action::new("view.local_view"),
+        ),
+        key(
+            "view.local_view_main",
+            "Slash",
+            Context::Viewport,
+            Action::new("view.local_view"),
+        ),
+        key(
+            "view.camera",
+            "Numpad0",
+            Context::Viewport,
+            Action::new("view.camera"),
+        ),
         // Blender's Alt+Z: see through the surfaces, and select through them.
-        key("view.xray", "Z", Context::Viewport, Action::new("view.toggle_xray")).with_modifiers(Modifiers::alt()),
-        key("view.frame_selected", "NumpadDecimal", Context::Viewport, Action::new("view.frame_selected")),
+        key(
+            "view.xray",
+            "Z",
+            Context::Viewport,
+            Action::new("view.toggle_xray"),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "view.frame_selected",
+            "NumpadDecimal",
+            Context::Viewport,
+            Action::new("view.frame_selected"),
+        ),
         // Blender's Shift+S: the snap pie — the 3D cursor to the selection or
         // the world's origin, or the selection to the cursor.
         key(
@@ -520,47 +566,168 @@ fn common() -> Vec<Binding> {
             Action::new("mesh.scale").with("scale", PropertyValue::Vec3([1.2, 1.2, 1.2])),
         ),
         // --- pose mode: the same three keys, on bones ------------------------
-        key("pose.translate", "G", Context::Pose, Action::new("pose.translate")),
-        key("pose.rotate", "R", Context::Pose, Action::new("pose.rotate")),
+        key(
+            "pose.translate",
+            "G",
+            Context::Pose,
+            Action::new("pose.translate"),
+        ),
+        key(
+            "pose.rotate",
+            "R",
+            Context::Pose,
+            Action::new("pose.rotate"),
+        ),
         key("pose.scale", "S", Context::Pose, Action::new("pose.scale")),
         // Blender's: `A` all, `Alt+A` none, `Ctrl+I` the others; and
         // `Alt+G/R/S` put what was moved, turned or scaled back at rest.
         // Keys on the same keys as in object mode; the operators know which
         // mode they are in and key the bones.
-        key("pose.keyframe_insert", "I", Context::Pose, Action::new("anim.keyframe_insert")),
-        key("pose.keyframe_delete", "I", Context::Pose, Action::new("anim.keyframe_delete"))
-            .with_modifiers(Modifiers::alt()),
-        key("pose.select_all", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 0)),
-        key("pose.select_none", "A", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 1))
-            .with_modifiers(Modifiers::alt()),
+        key(
+            "pose.keyframe_insert",
+            "I",
+            Context::Pose,
+            Action::new("anim.keyframe_insert"),
+        ),
+        key(
+            "pose.keyframe_delete",
+            "I",
+            Context::Pose,
+            Action::new("anim.keyframe_delete"),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "pose.select_all",
+            "A",
+            Context::Pose,
+            enum_param(Action::new("pose.select_all"), "action", 0),
+        ),
+        key(
+            "pose.select_none",
+            "A",
+            Context::Pose,
+            enum_param(Action::new("pose.select_all"), "action", 1),
+        )
+        .with_modifiers(Modifiers::alt()),
         // Blender's sculpt brushes on their letters.
-        key("sculpt.draw", "X", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(0))),
-        key("sculpt.smooth", "S", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(1))),
-        key("sculpt.grab", "G", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(2))),
-        key("sculpt.inflate", "I", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(3))),
+        key(
+            "sculpt.draw",
+            "X",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(0)),
+        ),
+        key(
+            "sculpt.smooth",
+            "S",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(1)),
+        ),
+        key(
+            "sculpt.grab",
+            "G",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(2)),
+        ),
+        key(
+            "sculpt.inflate",
+            "I",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(3)),
+        ),
         // Blender's Shift+I: IK on the active bone, to the other selected one.
-        key("pose.ik_add", "I", Context::Pose, Action::new("pose.ik_add")).with_modifiers(Modifiers::shift()),
-        key("pose.select_invert", "I", Context::Pose, enum_param(Action::new("pose.select_all"), "action", 3))
-            .with_modifiers(Modifiers::ctrl()),
-        key("pose.clear_location", "G", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 1))
-            .with_modifiers(Modifiers::alt()),
-        key("pose.clear_rotation", "R", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 2))
-            .with_modifiers(Modifiers::alt()),
-        key("pose.clear_scale", "S", Context::Pose, enum_param(Action::new("pose.clear_transform"), "what", 3))
-            .with_modifiers(Modifiers::alt()),
+        key(
+            "pose.ik_add",
+            "I",
+            Context::Pose,
+            Action::new("pose.ik_add"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "pose.select_invert",
+            "I",
+            Context::Pose,
+            enum_param(Action::new("pose.select_all"), "action", 3),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "pose.clear_location",
+            "G",
+            Context::Pose,
+            enum_param(Action::new("pose.clear_transform"), "what", 1),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "pose.clear_rotation",
+            "R",
+            Context::Pose,
+            enum_param(Action::new("pose.clear_transform"), "what", 2),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "pose.clear_scale",
+            "S",
+            Context::Pose,
+            enum_param(Action::new("pose.clear_transform"), "what", 3),
+        )
+        .with_modifiers(Modifiers::alt()),
         // --- armature edit mode: building the skeleton -------------------------
-        key("armature.translate", "G", Context::EditArmature, Action::new("armature.translate")),
-        key("armature.rotate", "R", Context::EditArmature, Action::new("armature.rotate")),
-        key("armature.scale", "S", Context::EditArmature, Action::new("armature.scale")),
-        key("armature.extrude", "E", Context::EditArmature, Action::new("armature.extrude")),
-        key("armature.delete", "X", Context::EditArmature, Action::new("armature.delete")),
-        key("armature.bone_add", "A", Context::EditArmature, Action::new("armature.bone_add"))
-            .with_modifiers(Modifiers::shift()),
-        key("armature.select_all", "A", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 0)),
-        key("armature.select_none", "A", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 1))
-            .with_modifiers(Modifiers::alt()),
-        key("armature.select_invert", "I", Context::EditArmature, enum_param(Action::new("armature.select_all"), "action", 3))
-            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "armature.translate",
+            "G",
+            Context::EditArmature,
+            Action::new("armature.translate"),
+        ),
+        key(
+            "armature.rotate",
+            "R",
+            Context::EditArmature,
+            Action::new("armature.rotate"),
+        ),
+        key(
+            "armature.scale",
+            "S",
+            Context::EditArmature,
+            Action::new("armature.scale"),
+        ),
+        key(
+            "armature.extrude",
+            "E",
+            Context::EditArmature,
+            Action::new("armature.extrude"),
+        ),
+        key(
+            "armature.delete",
+            "X",
+            Context::EditArmature,
+            Action::new("armature.delete"),
+        ),
+        key(
+            "armature.bone_add",
+            "A",
+            Context::EditArmature,
+            Action::new("armature.bone_add"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "armature.select_all",
+            "A",
+            Context::EditArmature,
+            enum_param(Action::new("armature.select_all"), "action", 0),
+        ),
+        key(
+            "armature.select_none",
+            "A",
+            Context::EditArmature,
+            enum_param(Action::new("armature.select_all"), "action", 1),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "armature.select_invert",
+            "I",
+            Context::EditArmature,
+            enum_param(Action::new("armature.select_all"), "action", 3),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // --- object mode ---------------------------------------------------
         // Selection as in Blender: A all, Alt+A none, Ctrl+I the rest.
         key(
@@ -611,7 +778,12 @@ fn common() -> Vec<Binding> {
         )
         .with_modifiers(Modifiers::alt()),
         // Blender's H, Shift+H and Alt+H, in object mode as in edit mode.
-        key("object.hide", "H", Context::ObjectMode, Action::new("object.hide")),
+        key(
+            "object.hide",
+            "H",
+            Context::ObjectMode,
+            Action::new("object.hide"),
+        ),
         key(
             "object.hide_unselected",
             "H",
@@ -619,9 +791,20 @@ fn common() -> Vec<Binding> {
             Action::new("object.hide").with("unselected", PropertyValue::Bool(true)),
         )
         .with_modifiers(Modifiers::shift()),
-        key("object.reveal", "H", Context::ObjectMode, Action::new("object.reveal")).with_modifiers(Modifiers::alt()),
+        key(
+            "object.reveal",
+            "H",
+            Context::ObjectMode,
+            Action::new("object.reveal"),
+        )
+        .with_modifiers(Modifiers::alt()),
         // Blender's F2: rename the active object.
-        key("object.rename", "F2", Context::ObjectMode, Action::new("app.rename")),
+        key(
+            "object.rename",
+            "F2",
+            Context::ObjectMode,
+            Action::new("app.rename"),
+        ),
         key(
             "object.join",
             "J",
@@ -633,18 +816,48 @@ fn common() -> Vec<Binding> {
         // and Ctrl with the numpad's minus, plus or star. The main row's minus
         // and equals (plus without Shift) for a keyboard with no numpad, and
         // Ctrl+Shift+8, the main row's star.
-        key("object.boolean_difference", "NumpadSubtract", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 0))
-            .with_modifiers(Modifiers::ctrl()),
-        key("object.boolean_union", "NumpadAdd", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 1))
-            .with_modifiers(Modifiers::ctrl()),
-        key("object.boolean_intersect", "NumpadMultiply", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 2))
-            .with_modifiers(Modifiers::ctrl()),
-        key("object.boolean_difference_main", "Minus", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 0))
-            .with_modifiers(Modifiers::ctrl()),
-        key("object.boolean_union_main", "Equal", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 1))
-            .with_modifiers(Modifiers::ctrl()),
-        key("object.boolean_intersect_main", "Digit8", Context::ObjectMode, enum_param(Action::new("object.boolean"), "operation", 2))
-            .with_modifiers(Modifiers::ctrl_shift()),
+        key(
+            "object.boolean_difference",
+            "NumpadSubtract",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 0),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.boolean_union",
+            "NumpadAdd",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 1),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.boolean_intersect",
+            "NumpadMultiply",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 2),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.boolean_difference_main",
+            "Minus",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 0),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.boolean_union_main",
+            "Equal",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 1),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.boolean_intersect_main",
+            "Digit8",
+            Context::ObjectMode,
+            enum_param(Action::new("object.boolean"), "operation", 2),
+        )
+        .with_modifiers(Modifiers::ctrl_shift()),
         key(
             "mesh.separate",
             "P",
@@ -677,13 +890,33 @@ fn common() -> Vec<Binding> {
             Action::new("anim.keyframe_delete"),
         )
         .with_modifiers(Modifiers::alt()),
-        key("edit.copy", "C", Context::ObjectMode, Action::new("edit.copy"))
-            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "edit.copy",
+            "C",
+            Context::ObjectMode,
+            Action::new("edit.copy"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // Blender's C: circle select, a brush that selects what it passes over.
-        key("object.circle_select", "C", Context::ObjectMode, Action::new("view.circle_select")),
-        key("mesh.circle_select", "C", Context::EditMesh, Action::new("view.circle_select")),
-        key("edit.paste", "V", Context::ObjectMode, Action::new("edit.paste"))
-            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "object.circle_select",
+            "C",
+            Context::ObjectMode,
+            Action::new("view.circle_select"),
+        ),
+        key(
+            "mesh.circle_select",
+            "C",
+            Context::EditMesh,
+            Action::new("view.circle_select"),
+        ),
+        key(
+            "edit.paste",
+            "V",
+            Context::ObjectMode,
+            Action::new("edit.paste"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // --- edit mode -----------------------------------------------------
         key(
             "mesh.extrude",
@@ -810,9 +1043,19 @@ fn common() -> Vec<Binding> {
         // every modeller's hand expects.
         // Blender's U ▸ Unwrap, its first entry and the one reached for; the
         // projections are on the right-click menu and the UV menu.
-        key("uv.unwrap", "U", Context::EditMesh, Action::new("uv.unwrap")),
+        key(
+            "uv.unwrap",
+            "U",
+            Context::EditMesh,
+            Action::new("uv.unwrap"),
+        ),
         // Blender's K is the knife; marking sharp is in the Edge menu.
-        key("mesh.knife", "K", Context::EditMesh, Action::new("mesh.knife")),
+        key(
+            "mesh.knife",
+            "K",
+            Context::EditMesh,
+            Action::new("mesh.knife"),
+        ),
         key(
             "mesh.clear_sharp",
             "K",
@@ -830,7 +1073,12 @@ fn common() -> Vec<Binding> {
         .with_modifiers(Modifiers::shift()),
         // Blender's L and Shift+L: the piece under the pointer, in or out.
         // Loops and rings are Alt+click and Ctrl+Alt+click, as in Blender.
-        key("mesh.select_linked_pick", "L", Context::EditMesh, Action::new("mesh.select_linked_pick")),
+        key(
+            "mesh.select_linked_pick",
+            "L",
+            Context::EditMesh,
+            Action::new("mesh.select_linked_pick"),
+        ),
         key(
             "mesh.deselect_linked_pick",
             "L",
@@ -840,18 +1088,48 @@ fn common() -> Vec<Binding> {
         .with_modifiers(Modifiers::shift()),
         // Blender's grow, shrink and linked: Ctrl with the numpad's plus and
         // minus, and the main row's for a keyboard without one.
-        key("mesh.select_more", "NumpadAdd", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 6))
-            .with_modifiers(Modifiers::ctrl()),
-        key("mesh.select_more_main", "Equal", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 6))
-            .with_modifiers(Modifiers::ctrl()),
-        key("mesh.select_less", "NumpadSubtract", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 7))
-            .with_modifiers(Modifiers::ctrl()),
-        key("mesh.select_less_main", "Minus", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 7))
-            .with_modifiers(Modifiers::ctrl()),
-        key("mesh.select_linked", "L", Context::EditMesh, enum_param(Action::new("mesh.select"), "action", 8))
-            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.select_more",
+            "NumpadAdd",
+            Context::EditMesh,
+            enum_param(Action::new("mesh.select"), "action", 6),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.select_more_main",
+            "Equal",
+            Context::EditMesh,
+            enum_param(Action::new("mesh.select"), "action", 6),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.select_less",
+            "NumpadSubtract",
+            Context::EditMesh,
+            enum_param(Action::new("mesh.select"), "action", 7),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.select_less_main",
+            "Minus",
+            Context::EditMesh,
+            enum_param(Action::new("mesh.select"), "action", 7),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "mesh.select_linked",
+            "L",
+            Context::EditMesh,
+            enum_param(Action::new("mesh.select"), "action", 8),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // H hides the selection, Shift+H everything else, Alt+H brings it back.
-        key("mesh.hide", "H", Context::EditMesh, Action::new("mesh.hide")),
+        key(
+            "mesh.hide",
+            "H",
+            Context::EditMesh,
+            Action::new("mesh.hide"),
+        ),
         // Blender's Shift+G: Select Similar, a menu of what to compare.
         key(
             "mesh.select_similar",
@@ -867,7 +1145,13 @@ fn common() -> Vec<Binding> {
             Action::new("mesh.hide").with("unselected", PropertyValue::Bool(true)),
         )
         .with_modifiers(Modifiers::shift()),
-        key("mesh.reveal", "H", Context::EditMesh, Action::new("mesh.reveal")).with_modifiers(Modifiers::alt()),
+        key(
+            "mesh.reveal",
+            "H",
+            Context::EditMesh,
+            Action::new("mesh.reveal"),
+        )
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.select_all",
             "A",
@@ -1006,8 +1290,13 @@ mod tests {
             // of them. In edit mode Shift+G is Blender's Select Similar, and
             // the grid is in the Overlays menu.
             assert_eq!(
-                k.resolve(Context::ObjectMode, &Input::key("G"), Modifiers::shift(), EventKind::Press)
-                    .map(|a| a.op_id),
+                k.resolve(
+                    Context::ObjectMode,
+                    &Input::key("G"),
+                    Modifiers::shift(),
+                    EventKind::Press
+                )
+                .map(|a| a.op_id),
                 Some("view.toggle_grid".to_string()),
                 "{preset:?}: the grid toggle is unreachable from object mode"
             );
@@ -1032,7 +1321,12 @@ mod tests {
         // And `M` in object mode is its own — Move to Collection, as in
         // Blender — rather than object mode quietly inheriting edit mode's merge.
         let object = k
-            .resolve(Context::ObjectMode, &Input::key("M"), Modifiers::NONE, EventKind::Press)
+            .resolve(
+                Context::ObjectMode,
+                &Input::key("M"),
+                Modifiers::NONE,
+                EventKind::Press,
+            )
             .expect("M is bound in object mode");
         assert_eq!(object.op_id, "app.menu");
     }
@@ -1083,10 +1377,20 @@ mod tests {
     #[test]
     fn a_selects_all_and_the_add_and_apply_menus_are_where_blender_keeps_them() {
         let k = load(Preset::Kreate);
-        let resolve = |context, key: &str, mods| k.resolve(context, &Input::key(key), mods, EventKind::Press);
-        for (context, op) in [(Context::ObjectMode, "object.select_all"), (Context::EditMesh, "mesh.select")] {
+        let resolve =
+            |context, key: &str, mods| k.resolve(context, &Input::key(key), mods, EventKind::Press);
+        for (context, op) in [
+            (Context::ObjectMode, "object.select_all"),
+            (Context::EditMesh, "mesh.select"),
+        ] {
             let all = resolve(context, "A", Modifiers::NONE).expect("A is bound");
-            assert_eq!((all.op_id.as_str(), all.params.get("action").and_then(|v| v.as_int())), (op, Some(0)));
+            assert_eq!(
+                (
+                    all.op_id.as_str(),
+                    all.params.get("action").and_then(|v| v.as_int())
+                ),
+                (op, Some(0))
+            );
             let none = resolve(context, "A", Modifiers::alt()).expect("Alt+A is bound");
             assert_eq!(none.params.get("action").and_then(|v| v.as_int()), Some(1));
         }
@@ -1095,8 +1399,14 @@ mod tests {
             assert_eq!(a.op_id, "app.menu");
             a.params.get("menu").cloned()
         };
-        assert_eq!(menu("A", Modifiers::shift()), Some(PropertyValue::Text("add".into())));
-        assert_eq!(menu("A", Modifiers::ctrl()), Some(PropertyValue::Text("apply".into())));
+        assert_eq!(
+            menu("A", Modifiers::shift()),
+            Some(PropertyValue::Text("add".into()))
+        );
+        assert_eq!(
+            menu("A", Modifiers::ctrl()),
+            Some(PropertyValue::Text("apply".into()))
+        );
     }
 
     #[test]

@@ -54,7 +54,12 @@ pub struct Accum {
 }
 
 impl Accum {
-    pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        target: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("accum"),
             source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
@@ -77,29 +82,34 @@ impl Accum {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |label: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("accum_vertex"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("accum_copy"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let pipeline =
+            |label: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("accum_vertex"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("accum_copy"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
         // mean = frame * w + mean * (1 - w), w = 1/n from the blend constant.
         let mean_blend = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::Constant,
@@ -109,39 +119,71 @@ impl Accum {
         let add = pipeline(
             "accum add",
             MEAN_FORMAT,
-            Some(wgpu::BlendState { color: mean_blend, alpha: mean_blend }),
+            Some(wgpu::BlendState {
+                color: mean_blend,
+                alpha: mean_blend,
+            }),
         );
         let present = pipeline("accum present", target, None);
         let size = (width.max(1), height.max(1));
         let (frame, mean) = Self::images(device, target, size);
         let frame_bind = Self::bind(device, &layout, &frame);
         let mean_bind = Self::bind(device, &layout, &mean);
-        Self { add, present, layout, target_format: target, frame, mean, frame_bind, mean_bind, size }
+        Self {
+            add,
+            present,
+            layout,
+            target_format: target,
+            frame,
+            mean,
+            frame_bind,
+            mean_bind,
+            size,
+        }
     }
 
-    fn images(device: &wgpu::Device, target: wgpu::TextureFormat, size: (u32, u32)) -> (wgpu::TextureView, wgpu::TextureView) {
+    fn images(
+        device: &wgpu::Device,
+        target: wgpu::TextureFormat,
+        size: (u32, u32),
+    ) -> (wgpu::TextureView, wgpu::TextureView) {
         let image = |label, format| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
-        (image("accum frame", target), image("accum mean", MEAN_FORMAT))
+        (
+            image("accum frame", target),
+            image("accum mean", MEAN_FORMAT),
+        )
     }
 
-    fn bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("accum"),
             layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
         })
     }
 
@@ -166,14 +208,24 @@ impl Accum {
         let mut pass = Self::begin(encoder, &self.mean, "accum add");
         pass.set_viewport(0.0, 0.0, region.0 as f32, region.1 as f32, 0.0, 1.0);
         let w = 1.0 / n.max(1) as f64;
-        pass.set_blend_constant(wgpu::Color { r: w, g: w, b: w, a: w });
+        pass.set_blend_constant(wgpu::Color {
+            r: w,
+            g: w,
+            b: w,
+            a: w,
+        });
         pass.set_pipeline(&self.add);
         pass.set_bind_group(0, &self.frame_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
     /// Puts the mean on `target`.
-    pub fn present(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, region: (u32, u32)) {
+    pub fn present(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        region: (u32, u32),
+    ) {
         let mut pass = Self::begin(encoder, target, "accum present");
         pass.set_viewport(0.0, 0.0, region.0 as f32, region.1 as f32, 0.0, 1.0);
         pass.set_pipeline(&self.present);
@@ -181,14 +233,21 @@ impl Accum {
         pass.draw(0..3, 0..1);
     }
 
-    fn begin<'a>(encoder: &'a mut wgpu::CommandEncoder, view: &'a wgpu::TextureView, label: &str) -> wgpu::RenderPass<'a> {
+    fn begin<'a>(
+        encoder: &'a mut wgpu::CommandEncoder,
+        view: &'a wgpu::TextureView,
+        label: &str,
+    ) -> wgpu::RenderPass<'a> {
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -211,6 +270,10 @@ mod tests {
             assert!(x.abs() <= 0.5 && y.abs() <= 0.5, "{n}: {x} {y}");
             seen.insert(((x * 1000.0) as i32, (y * 1000.0) as i32));
         }
-        assert_eq!(seen.len(), SAMPLES as usize - 1, "every offset is different");
+        assert_eq!(
+            seen.len(),
+            SAMPLES as usize - 1,
+            "every offset is different"
+        );
     }
 }

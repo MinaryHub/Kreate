@@ -402,12 +402,7 @@ fn pack(
         }
         placed.push(Placed {
             layer: layer as u32,
-            rect: [
-                0.0,
-                0.0,
-                w as f32 / width as f32,
-                h as f32 / height as f32,
-            ],
+            rect: [0.0, 0.0, w as f32 / width as f32, h as f32 / height as f32],
         });
     }
     if stand_in {
@@ -577,7 +572,11 @@ mod mip_tests {
         assert_eq!(chain.len(), 9);
         assert_eq!((chain[8].1, chain[8].2), (1, 1));
         for (bytes, w, h) in &chain {
-            assert_eq!(bytes.len(), (w * h * 4) as usize, "a level is the wrong size");
+            assert_eq!(
+                bytes.len(),
+                (w * h * 4) as usize,
+                "a level is the wrong size"
+            );
         }
     }
 
@@ -616,8 +615,16 @@ mod mip_tests {
         let layer = padded(&image, 2, 1, 4, 2);
         let at = |x: usize, y: usize| &layer[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
         assert_eq!(at(0, 0), &[10, 20, 30, 255]);
-        assert_eq!(at(3, 0), &[40, 50, 60, 255], "the right margin is not the edge");
-        assert_eq!(at(0, 1), &[10, 20, 30, 255], "the bottom margin is not the edge");
+        assert_eq!(
+            at(3, 0),
+            &[40, 50, 60, 255],
+            "the right margin is not the edge"
+        );
+        assert_eq!(
+            at(0, 1),
+            &[10, 20, 30, 255],
+            "the bottom margin is not the edge"
+        );
         assert_eq!(at(3, 1), &[40, 50, 60, 255]);
     }
 }

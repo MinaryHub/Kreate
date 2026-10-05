@@ -29,18 +29,23 @@ pub mod uv_project;
 pub mod uv_unwrap;
 pub mod walk;
 
-pub use bevel::{bevel_edges, bevel_edges_segments, bevel_selected, bevel_selected_segments, Bevel};
+pub use bevel::{
+    bevel_edges, bevel_edges_segments, bevel_selected, bevel_selected_segments, Bevel,
+};
 pub use bridge::{bridge_loops, bridge_selected, open_borders, Bridge, BridgeError};
 pub use delete::{delete, dissolve_edges, dissolve_faces, dissolve_verts, DeleteMode, Dissolution};
-pub use extrude::{extrude_edges_and_verts, extrude_faces, extrude_selected_faces, Extrusion, WireExtrusion};
+pub use extrude::{
+    extrude_edges_and_verts, extrude_faces, extrude_selected_faces, Extrusion, WireExtrusion,
+};
 pub use fill::{fill, fill_selected, grid_fill, the_only_border, Fill, FillError};
 pub use inset::{inset_individual, inset_region, inset_selected, Inset};
-pub use knife::{knife, Knife};
 pub use join::{join, separate_selected, Part, Report as JoinReport};
+pub use knife::{knife, Knife};
 pub use loopcut::{loop_cut, loop_cut_selected, LoopCut};
 pub use merge::{merge_groups, merge_selected, weld_all, weld_by_distance, Merge, MergeTarget};
 pub use normals::{
-    auto_smooth, flip, recalculate, set_crease, set_shade_smooth, set_sharp, set_sharp_selected, Recalculation,
+    auto_smooth, flip, recalculate, set_crease, set_shade_smooth, set_sharp, set_sharp_selected,
+    Recalculation,
 };
 pub use region::Region;
 pub use spin::{close_spin, spin, spin_selected, Spin};

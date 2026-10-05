@@ -89,9 +89,7 @@ fn showing_a_light_and_sending_it_straight_back_changes_nothing() {
         a_light(&registry, &mut history, &mut doc, &ctx, kind);
         let before = only_light(&doc).clone();
 
-        let map = kreate_reflect::OpParams::to_map(
-            &kreate_ops::ops::object::light_params(&before),
-        );
+        let map = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::light_params(&before));
         history
             .dispatch(&registry, &mut doc, &ctx, "light.set_properties", &map)
             .expect("dispatch");
@@ -268,7 +266,14 @@ fn every_datablock_panel_shows_what_it_would_store() {
     // A world, a material and a camera, each reachable from its own panel.
     let world = doc.add_world(kreate_scene::World::new("World"));
     doc.set_active_world(Some(world));
-    run(&registry, &mut history, &mut doc, &ctx, "object.add_primitive", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "object.add_primitive",
+        &[],
+    );
     let material = doc.add_material(kreate_scene::Material {
         name: "Paint".into(),
         base_color: kreate_math::SceneRgb::new(0.2, 0.55, 0.9),
@@ -330,7 +335,14 @@ fn every_datablock_panel_shows_what_it_would_store() {
     }
 
     // The camera.
-    run(&registry, &mut history, &mut doc, &ctx, "object.add_camera", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "object.add_camera",
+        &[],
+    );
     let id = doc
         .objects()
         .filter_map(|(_, o)| match o.data {
@@ -340,8 +352,7 @@ fn every_datablock_panel_shows_what_it_would_store() {
         .next()
         .expect("a camera");
     let before = doc.camera(id).expect("a camera").clone();
-    let map =
-        kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::camera_params(&before));
+    let map = kreate_reflect::OpParams::to_map(&kreate_ops::ops::object::camera_params(&before));
     history
         .dispatch(&registry, &mut doc, &ctx, "camera.set_properties", &map)
         .expect("dispatch");
@@ -359,7 +370,14 @@ fn a_pinhole_is_off_and_not_a_very_small_aperture() {
     // number to offer, so zero is how off is spelled — and it has to survive
     // the trip.
     let (registry, mut history, mut doc, ctx) = setup();
-    run(&registry, &mut history, &mut doc, &ctx, "object.add_camera", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "object.add_camera",
+        &[],
+    );
     let id = doc
         .objects()
         .filter_map(|(_, o)| match o.data {
@@ -402,7 +420,12 @@ fn a_colour_typed_into_the_world_panel_does_not_discard_an_image() {
     // An image that is not in the document. What matters here is that the
     // background stays the *kind* it is, and an id nothing resolves is the
     // cheapest way to say "an image was chosen".
-    let image = doc.add_image(kreate_scene::Image::new("HDRI", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let image = doc.add_image(kreate_scene::Image::new(
+        "HDRI",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
     world.background = kreate_scene::Background::Image(image);
     let id = doc.add_world(world);
     doc.set_active_world(Some(id));
@@ -805,7 +828,10 @@ fn each_kind_offers_only_the_numbers_it_has() {
     assert!(!light_param_applies(POINT, "angular_diameter"));
 
     assert!(light_param_applies(SUN, "angular_diameter"));
-    assert!(!light_param_applies(SUN, "radius"), "a sun has no source size");
+    assert!(
+        !light_param_applies(SUN, "radius"),
+        "a sun has no source size"
+    );
     assert!(!light_param_applies(SUN, "cone_angle"));
 
     // A spot is a point with a cone, so it keeps the radius.

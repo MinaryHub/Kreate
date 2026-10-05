@@ -80,10 +80,22 @@ mod tests {
         let f = 1.0 / (std::f64::consts::FRAC_PI_4).tan();
         // A plain perspective matrix, +Y up, w = -z.
         let projection = DMat4::from_cols_array(&[
-            f / aspect, 0.0, 0.0, 0.0,
-            0.0, f, 0.0, 0.0,
-            0.0, 0.0, -1.0, -1.0,
-            0.0, 0.0, -0.1, 0.0,
+            f / aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+            -1.0,
+            0.0,
+            0.0,
+            -0.1,
+            0.0,
         ]);
         Projector {
             eye: DVec3::new(0.0, 0.0, 5.0),
@@ -97,7 +109,10 @@ mod tests {
     fn the_point_the_camera_looks_at_lands_in_the_middle() {
         let p = projector();
         let at = p.project(DVec3::ZERO).expect("in front");
-        assert!((at.x - 110.0).abs() < 0.01 && (at.y - 70.0).abs() < 0.01, "{at:?}");
+        assert!(
+            (at.x - 110.0).abs() < 0.01 && (at.y - 70.0).abs() < 0.01,
+            "{at:?}"
+        );
     }
 
     #[test]

@@ -30,7 +30,12 @@ pub struct Fxaa {
 }
 
 impl Fxaa {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fxaa"),
             source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
@@ -113,19 +118,37 @@ impl Fxaa {
         let size = (width.max(1), height.max(1));
         let view = Self::image(device, format, size);
         let bind = Self::bind(device, &layout, &view, &sampler, &params);
-        Self { pipeline, layout, sampler, params, format, view, bind, size }
+        Self {
+            pipeline,
+            layout,
+            sampler,
+            params,
+            format,
+            view,
+            bind,
+            size,
+        }
     }
 
-    fn image(device: &wgpu::Device, format: wgpu::TextureFormat, size: (u32, u32)) -> wgpu::TextureView {
+    fn image(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+    ) -> wgpu::TextureView {
         device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("fxaa source"),
-                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
@@ -142,9 +165,18 @@ impl Fxaa {
             label: Some("fxaa"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         })
     }
@@ -155,7 +187,13 @@ impl Fxaa {
         if size != self.size {
             self.size = size;
             self.view = Self::image(device, self.format, size);
-            self.bind = Self::bind(device, &self.layout, &self.view, &self.sampler, &self.params);
+            self.bind = Self::bind(
+                device,
+                &self.layout,
+                &self.view,
+                &self.sampler,
+                &self.params,
+            );
         }
     }
 
@@ -177,14 +215,22 @@ impl Fxaa {
     }
 
     /// Writes the smoothed surfaces into `target`'s `region`.
-    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, region: (u32, u32)) {
+    pub fn resolve(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        region: (u32, u32),
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("fxaa"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

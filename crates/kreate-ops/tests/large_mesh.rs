@@ -561,14 +561,7 @@ fn a_proportional_drag_frame_stays_within_budget() {
         // The same drag with the falloff switched off, measured here so the
         // comparison below is against a number from this machine at this
         // moment. See the note above the assertion.
-        let plain = drag_median(
-            &registry,
-            &mut doc,
-            &mut session,
-            &ctx,
-            &mut history,
-            0.0,
-        );
+        let plain = drag_median(&registry, &mut doc, &mut session, &ctx, &mut history, 0.0);
         eprintln!("{shape}, no falloff: {plain:?} a frame");
 
         for radius in [0.2, 1.0, 4.0] {

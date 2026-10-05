@@ -879,7 +879,12 @@ fn the_operator_a_gesture_runs_depends_on_the_mode() {
     // key in its context reaches them.
     let mut ids: Vec<&str> = Mode::ALL
         .iter()
-        .filter(|mode| !matches!(mode.acts_on(), kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt))
+        .filter(|mode| {
+            !matches!(
+                mode.acts_on(),
+                kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt
+            )
+        })
         .flat_map(|mode| {
             [Kind::Move, Kind::Rotate, Kind::Scale]
                 .into_iter()
@@ -901,7 +906,16 @@ fn every_operator_a_gesture_names_exists() {
     // Every mode, from `Mode::ALL` rather than a list written here: a mode
     // added without an operator behind it is exactly the failure this test is
     // for, and a hardcoded pair would not see it.
-    for kind in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::ExtrudeFree, Kind::Inset, Kind::Bevel, Kind::LoopCut] {
+    for kind in [
+        Kind::Move,
+        Kind::Rotate,
+        Kind::Scale,
+        Kind::Extrude,
+        Kind::ExtrudeFree,
+        Kind::Inset,
+        Kind::Bevel,
+        Kind::LoopCut,
+    ] {
         for mode in kreate_ops::operator::Mode::ALL {
             let id = kind.op_id(mode);
             assert!(
@@ -951,14 +965,22 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
     let mut registry = kreate_ops::OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
 
-    for (kind, mode) in [Kind::Move, Kind::Rotate, Kind::Scale, Kind::Extrude, Kind::ExtrudeFree, Kind::Inset, Kind::Bevel, Kind::LoopCut]
-        .into_iter()
-        .flat_map(|kind| {
-            kreate_ops::operator::Mode::ALL
-                .into_iter()
-                .map(move |mode| (kind, mode))
-        })
-    {
+    for (kind, mode) in [
+        Kind::Move,
+        Kind::Rotate,
+        Kind::Scale,
+        Kind::Extrude,
+        Kind::ExtrudeFree,
+        Kind::Inset,
+        Kind::Bevel,
+        Kind::LoopCut,
+    ]
+    .into_iter()
+    .flat_map(|kind| {
+        kreate_ops::operator::Mode::ALL
+            .into_iter()
+            .map(move |mode| (kind, mode))
+    }) {
         let mut g = Gesture::begin(
             kind,
             (500.0, 300.0),
@@ -1213,7 +1235,10 @@ fn b_turns_snapping_on_for_the_rest_of_the_drag_and_off_again() {
     let on_increment = |t: f64| (t / 0.1 - (t / 0.1).round()).abs() < 1e-9;
 
     let free = translation(&at(&mut g, free_pointer))[0];
-    assert!(!on_increment(free), "the fixture pointer must land off the grid: {free}");
+    assert!(
+        !on_increment(free),
+        "the fixture pointer must land off the grid: {free}"
+    );
 
     // With the header on increment, B snaps to geometry instead (see
     // `b_snaps_the_move_to_the_vertex_under_the_pointer`); with nothing under
@@ -1418,11 +1443,17 @@ fn an_extrude_follows_the_pointer_along_the_normal_and_only_along_it() {
     let mut g = extrude();
     assert_eq!(offset(&at(&mut g, (400.0, 300.0))), 0.0);
     let up = offset(&at(&mut g, (400.0, 200.0)));
-    assert!(up > 0.5, "dragging towards the normal did not pull the faces out: {up}");
+    assert!(
+        up > 0.5,
+        "dragging towards the normal did not pull the faces out: {up}"
+    );
     let down = offset(&at(&mut g, (400.0, 400.0)));
     assert!(down < -0.5, "dragging away did not push them in: {down}");
     let across = offset(&at(&mut g, (500.0, 300.0)));
-    assert!(across.abs() < 1e-6, "a drag across the normal moved along it: {across}");
+    assert!(
+        across.abs() < 1e-6,
+        "a drag across the normal moved along it: {across}"
+    );
     // Axis keys do not take it off the normal.
     g.cycle_axis(Axis::X);
     assert_eq!(g.axis, Some(Axis::Z));
@@ -1441,7 +1472,16 @@ fn a_typed_extrude_distance_is_exact() {
 /// A gesture of `kind` begun 200 pixels right of the pivot, which is at the
 /// middle of the screen.
 fn pulled(kind: Kind) -> Gesture {
-    Gesture::begin(kind, (600.0, 300.0), DVec3::ZERO, &camera(), VIEWPORT, WORLD_AXES, Snap::default(), SnapWorld::default())
+    Gesture::begin(
+        kind,
+        (600.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    )
 }
 
 fn float(params: &kreate_ops::PropertyMap, name: &str) -> f64 {
@@ -1495,9 +1535,15 @@ fn a_loop_cut_slides_along_its_edge_and_the_wheel_or_a_number_sets_how_many() {
     let p = at(&mut g, (600.0, 300.0));
     assert_eq!((float(&p, "position"), cuts(&p)), (0.5, 1));
     let right = float(&at(&mut g, (630.0, 300.0)), "position");
-    assert!(right > 0.5 && right < 1.0, "sliding towards the second end: {right}");
+    assert!(
+        right > 0.5 && right < 1.0,
+        "sliding towards the second end: {right}"
+    );
     let left = float(&at(&mut g, (570.0, 300.0)), "position");
-    assert!((left - (1.0 - right)).abs() < 1e-6, "not symmetric: {left} {right}");
+    assert!(
+        (left - (1.0 - right)).abs() < 1e-6,
+        "not symmetric: {left} {right}"
+    );
     // Across the edge does not slide it; far past an end stops at the end.
     assert_eq!(float(&at(&mut g, (600.0, 200.0)), "position"), 0.5);
     assert_eq!(float(&at(&mut g, (2000.0, 300.0)), "position"), 1.0);
@@ -1520,7 +1566,10 @@ fn a_loop_cut_begun_on_a_hovered_edge_names_it() {
     assert_eq!(p.get("edge"), Some(&PropertyValue::Int(7)));
     assert_eq!(p.get("cuts"), Some(&PropertyValue::Int(3)));
     // Without one, the operator's own default — the selection — stands.
-    assert_eq!(at(&mut pulled(Kind::LoopCut), (600.0, 300.0)).get("edge"), None);
+    assert_eq!(
+        at(&mut pulled(Kind::LoopCut), (600.0, 300.0)).get("edge"),
+        None
+    );
 }
 
 #[test]
@@ -1538,7 +1587,6 @@ fn ctrl_during_an_inset_holds_the_thickness_and_drives_the_depth() {
     g.set_snap_inverted(false);
     assert!((float(&at(&mut g, (560.0, 300.0)), "depth") - depth).abs() < 1e-9);
 }
-
 
 /// `B` mid-drag, Blender's: the drag began with nothing to catch on, and from
 /// the press on it lands on the vertex under the pointer.
@@ -1558,14 +1606,23 @@ fn b_snaps_the_move_to_the_vertex_under_the_pointer() {
     let on_it = kreate::snap::project(target, &camera(), VIEWPORT).unwrap();
     let near = (on_it.0 + 3.0, on_it.1 - 2.0);
     let unsnapped = translation(&at(&mut g, near));
-    assert!((DVec3::from_array(unsnapped) - target).length() > 1e-3, "nothing to snap to yet");
+    assert!(
+        (DVec3::from_array(unsnapped) - target).length() > 1e-3,
+        "nothing to snap to yet"
+    );
 
     g.toggle_snap();
     assert!(g.wants_world(), "increment snapping gathered no geometry");
-    g.set_world(SnapWorld { verts: vec![DVec3::new(-3.0, 0.0, 0.0), target], ..SnapWorld::default() });
+    g.set_world(SnapWorld {
+        verts: vec![DVec3::new(-3.0, 0.0, 0.0), target],
+        ..SnapWorld::default()
+    });
     assert!(!g.wants_world());
     let snapped = translation(&at(&mut g, near));
-    assert!((DVec3::from_array(snapped) - target).length() < 1e-9, "{snapped:?}");
+    assert!(
+        (DVec3::from_array(snapped) - target).length() < 1e-9,
+        "{snapped:?}"
+    );
     let (point, element) = g.snap_point().expect("a marker to draw");
     assert_eq!(element, kreate::snap::Element::Vertex);
     assert!((point - target).length() < 1e-9);
@@ -1595,10 +1652,16 @@ fn the_nearest_moving_point_lands_on_the_target() {
     g.set_sources(vec![DVec3::new(0.5, 0.0, 0.5), DVec3::new(-0.2, 0.0, -0.9)]);
     g.toggle_snap();
     let target = DVec3::new(2.0, 0.0, 1.0);
-    g.set_world(SnapWorld { verts: vec![target], ..SnapWorld::default() });
+    g.set_world(SnapWorld {
+        verts: vec![target],
+        ..SnapWorld::default()
+    });
     let on_it = kreate::snap::project(target, &camera(), VIEWPORT).unwrap();
     let moved = translation(&at(&mut g, on_it));
-    assert!((DVec3::from_array(moved) - DVec3::new(1.5, 0.0, 0.5)).length() < 1e-9, "{moved:?}");
+    assert!(
+        (DVec3::from_array(moved) - DVec3::new(1.5, 0.0, 0.5)).length() < 1e-9,
+        "{moved:?}"
+    );
 }
 
 /// A rotation has no destination, so `B` there means its increments, as
@@ -1613,9 +1676,15 @@ fn a_rotation_is_not_snapped_to_elements() {
         VIEWPORT,
         WORLD_AXES,
         Snap::default(),
-        SnapWorld { verts: vec![DVec3::new(1.0, 0.0, 0.0)], ..SnapWorld::default() },
+        SnapWorld {
+            verts: vec![DVec3::new(1.0, 0.0, 0.0)],
+            ..SnapWorld::default()
+        },
     );
     g.toggle_snap();
-    at(&mut g, kreate::snap::project(DVec3::new(1.0, 0.0, 0.0), &camera(), VIEWPORT).unwrap());
+    at(
+        &mut g,
+        kreate::snap::project(DVec3::new(1.0, 0.0, 0.0), &camera(), VIEWPORT).unwrap(),
+    );
     assert!(g.snap_point().is_none());
 }

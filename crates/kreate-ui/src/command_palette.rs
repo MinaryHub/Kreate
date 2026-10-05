@@ -88,9 +88,7 @@ fn word_score(word: &str, hay: &str) -> Option<i32> {
     }
     // Scattered: every letter, in order.
     let mut letters = hay.chars();
-    word.chars()
-        .all(|c| letters.any(|h| h == c))
-        .then_some(10)
+    word.chars().all(|c| letters.any(|h| h == c)).then_some(10)
 }
 
 /// How well `query` matches an entry, or `None` if some word is missing.
@@ -168,7 +166,10 @@ pub fn command_palette(
     let width = (screen.width() - 32.0).clamp(240.0, 560.0);
     let area = egui::Area::new(egui::Id::new("command-palette"))
         .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(screen.center().x - width / 2.0, screen.min.y + 60.0))
+        .fixed_pos(egui::pos2(
+            screen.center().x - width / 2.0,
+            screen.min.y + 60.0,
+        ))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let theme = crate::theme::from_ui(ui);
@@ -235,7 +236,12 @@ pub fn command_palette(
                 if let Some(item) = order.get(state.selected).map(|i| &items[*i]) {
                     if !item.detail.is_empty() {
                         ui.separator();
-                        ui.add(egui::Label::new(egui::RichText::new(&item.detail).color(theme.text_dim)).wrap());
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&item.detail).color(theme.text_dim),
+                            )
+                            .wrap(),
+                        );
                     }
                 }
             });
@@ -292,7 +298,10 @@ mod tests {
         let list = items();
         let order = ranked(&list, "ext", &[]);
         assert_eq!(list[order[0]].key, "extrude", "{order:?}");
-        assert!(order.iter().any(|i| list[*i].key == "next"), "Next was dropped, not ranked");
+        assert!(
+            order.iter().any(|i| list[*i].key == "next"),
+            "Next was dropped, not ranked"
+        );
     }
 
     #[test]

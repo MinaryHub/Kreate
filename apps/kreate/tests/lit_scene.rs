@@ -124,11 +124,7 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
         .collect();
     let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
         .iter()
-        .map(|set| {
-            set.iter()
-                .map(|i| i.source())
-                .collect()
-        })
+        .map(|set| set.iter().map(|i| i.source()).collect())
         .collect();
     let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
         .compiled
@@ -213,7 +209,13 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
 
     // The lamp and camera glyphs, the way the frame loop hands them over.
     let (marker_lines, marker_points) = kreate::glyphs::markers_for(doc);
-    viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
+    viewport.set_markers(
+        &gpu.device,
+        &gpu.queue,
+        camera.eye(),
+        &marker_lines,
+        &marker_points,
+    );
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -326,11 +328,7 @@ fn shoot_path(gpu: &Gpu, doc: &Document, cameras: &[Camera]) -> Vec<[f32; 4]> {
         .collect();
     let images: Vec<Vec<kreate_render::material::SourceImage<'_>>> = pixels
         .iter()
-        .map(|set| {
-            set.iter()
-                .map(|i| i.source())
-                .collect()
-        })
+        .map(|set| set.iter().map(|i| i.source()).collect())
         .collect();
     let sources: Vec<kreate_render::viewport::MaterialSource<'_>> = materials
         .compiled
@@ -434,7 +432,13 @@ fn shoot_path(gpu: &Gpu, doc: &Document, cameras: &[Camera]) -> Vec<[f32; 4]> {
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     for (n, camera) in cameras.iter().enumerate() {
-        viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
+        viewport.set_markers(
+            &gpu.device,
+            &gpu.queue,
+            camera.eye(),
+            &marker_lines,
+            &marker_points,
+        );
         let lights = scenelights::culled_lights(doc, camera.pivot);
         viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
         viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
@@ -542,7 +546,10 @@ fn a_new_document_renders_a_picture_with_nothing_added() {
     // world nobody can reach is a tab that never appears; a camera nobody can
     // reach is an exposure nobody can set.
     assert!(doc.active_world().is_some(), "a new document has no world");
-    assert!(doc.cameras().next().is_some(), "a new document has no camera");
+    assert!(
+        doc.cameras().next().is_some(),
+        "a new document has no camera"
+    );
     assert!(
         doc.objects()
             .any(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Light(_))),
@@ -609,7 +616,10 @@ fn a_scene_with_no_lamp_is_black_and_that_is_why_the_menu_matters() {
 
     let pixels = shoot(&gpu, &doc);
     let brightest = pixels.iter().fold(0.0f32, |acc, p| acc.max(p[0]));
-    assert!(brightest < 0.02, "an unlit scene was not black: {brightest}");
+    assert!(
+        brightest < 0.02,
+        "an unlit scene was not black: {brightest}"
+    );
 }
 
 #[test]
@@ -630,8 +640,8 @@ fn turning_a_lamp_down_moves_the_meter_and_not_the_picture() {
     let mut history = History::new();
     let mut doc = a_scene_a_user_would_build(0);
 
-    let before_lux = scenelights::metered_illuminance(&doc, kreate_math::DVec3::ZERO)
-        .expect("a lit scene");
+    let before_lux =
+        scenelights::metered_illuminance(&doc, kreate_math::DVec3::ZERO).expect("a lit scene");
     let bright = shoot(&gpu, &doc);
     menu(
         &registry,
@@ -643,8 +653,8 @@ fn turning_a_lamp_down_moves_the_meter_and_not_the_picture() {
             ("intensity", PropertyValue::Float(100.0)),
         ],
     );
-    let after_lux = scenelights::metered_illuminance(&doc, kreate_math::DVec3::ZERO)
-        .expect("still lit");
+    let after_lux =
+        scenelights::metered_illuminance(&doc, kreate_math::DVec3::ZERO).expect("still lit");
     let dim = shoot(&gpu, &doc);
 
     // A tenth of the power is a tenth of the reading.
@@ -723,12 +733,8 @@ fn with_two_lamps_turning_one_down_changes_the_balance() {
 /// identity the renderer's tests are *for* — here the point is that a direction
 /// survives all the way to the screen.
 fn a_sky(width: u32, height: u32) -> kreate_scene::Image {
-    let mut image = kreate_scene::Image::new(
-        "Sky",
-        width,
-        height,
-        kreate_scene::PixelFormat::Rgba16F,
-    );
+    let mut image =
+        kreate_scene::Image::new("Sky", width, height, kreate_scene::PixelFormat::Rgba16F);
     image.color_space = kreate_scene::ColorSpace::Raw;
     let (across, down) = image.tile_counts();
     for ty in 0..down {
@@ -1057,7 +1063,9 @@ fn a_texture_assigned_from_the_panel_reaches_the_picture() {
         &[("uid", PropertyValue::Text(uid))],
     );
     assert_eq!(
-        doc.material(material).expect("still there").base_color_image,
+        doc.material(material)
+            .expect("still there")
+            .base_color_image,
         Some(id),
         "the operator did not make the link"
     );
@@ -1193,5 +1201,10 @@ fn the_new_documents_shadow_stays_while_the_view_moves() {
     let dark = |p: &Vec<[f32; 4]>| p.iter().filter(|c| lum(c) < 0.15).count();
     eprintln!("SHADOW still {} moving {}", dark(&still), dark(&moving));
     let differ = differing(&still, &moving);
-    assert!(differ * 20 < still.len(), "{differ} pixels differ mid-orbit; dark {} still, {} moving", dark(&still), dark(&moving));
+    assert!(
+        differ * 20 < still.len(),
+        "{differ} pixels differ mid-orbit; dark {} still, {} moving",
+        dark(&still),
+        dark(&moving)
+    );
 }

@@ -85,14 +85,12 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
             .split_once('=')
             .ok_or_else(|| ScriptError::Syntax(format!("`{arg}` is not `name=value`")))?;
         let name = name.trim();
-        let desc = info
-            .schema
-            .iter()
-            .find(|d| d.name == name)
-            .ok_or_else(|| ScriptError::UnknownParameter {
+        let desc = info.schema.iter().find(|d| d.name == name).ok_or_else(|| {
+            ScriptError::UnknownParameter {
                 op: id.to_string(),
                 name: name.to_string(),
-            })?;
+            }
+        })?;
         let value = parse_value(raw.trim())?;
         let value = coerce(value, &desc.kind, desc.name)?;
         params.set(desc.name, value);
@@ -142,7 +140,11 @@ fn split_args(args: &str) -> Result<Vec<&str>, ScriptError> {
     if !last.trim().is_empty() {
         out.push(last);
     }
-    Ok(out.into_iter().map(str::trim).filter(|a| !a.is_empty()).collect())
+    Ok(out
+        .into_iter()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .collect())
 }
 
 /// A value as the text has it, before the schema says what it is for.
@@ -177,9 +179,20 @@ fn parse_value(raw: &str) -> Result<Raw, ScriptError> {
         return Ok(Raw::Tuple(parts?));
     }
     if let Some(inner) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        let items: Vec<&str> = inner.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
-        if items.iter().any(|p| p.parse::<i64>().is_err()) && items.iter().all(|p| p.parse::<f64>().is_ok()) {
-            return Ok(Raw::FloatList(items.iter().map(|p| p.parse::<f64>().unwrap_or(0.0)).collect()));
+        let items: Vec<&str> = inner
+            .split(',')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if items.iter().any(|p| p.parse::<i64>().is_err())
+            && items.iter().all(|p| p.parse::<f64>().is_ok())
+        {
+            return Ok(Raw::FloatList(
+                items
+                    .iter()
+                    .map(|p| p.parse::<f64>().unwrap_or(0.0))
+                    .collect(),
+            ));
         }
         let parts: Result<Vec<i64>, _> = inner
             .split(',')
@@ -274,14 +287,15 @@ fn coerce(raw: Raw, kind: &PropertyKind, name: &str) -> Result<PropertyValue, Sc
         }
         // A variant by name, which is what a person types.
         (PropertyKind::Enum { variants }, Raw::Text(t)) => {
-            let index = variants
-                .iter()
-                .position(|v| *v == t)
-                .ok_or_else(|| ScriptError::WrongType {
-                    name: name.to_string(),
-                    wanted: "one of the variants",
-                    got: t.clone(),
-                })?;
+            let index =
+                variants
+                    .iter()
+                    .position(|v| *v == t)
+                    .ok_or_else(|| ScriptError::WrongType {
+                        name: name.to_string(),
+                        wanted: "one of the variants",
+                        got: t.clone(),
+                    })?;
             PropertyValue::Enum(index as u32)
         }
         (PropertyKind::Vec3 | PropertyKind::Color, Raw::Tuple(v)) if v.len() == 3 => {
@@ -295,7 +309,9 @@ fn coerce(raw: Raw, kind: &PropertyKind, name: &str) -> Result<PropertyValue, Sc
             PropertyValue::Ints(v.into_iter().map(|f| f.max(0.0) as u32).collect())
         }
         (PropertyKind::Floats, Raw::FloatList(v) | Raw::Tuple(v)) => PropertyValue::Floats(v),
-        (PropertyKind::Floats, Raw::List(v)) => PropertyValue::Floats(v.into_iter().map(|i| i as f64).collect()),
+        (PropertyKind::Floats, Raw::List(v)) => {
+            PropertyValue::Floats(v.into_iter().map(|i| i as f64).collect())
+        }
         (kind, raw) => {
             return Err(wrong(
                 match kind {
@@ -408,8 +424,12 @@ mod tests {
                     PropertyKind::Bool => PropertyValue::Bool(true),
                     PropertyKind::Int => PropertyValue::Int(3),
                     PropertyKind::Float => PropertyValue::Float(0.25),
-                    PropertyKind::Vec3 | PropertyKind::Color => PropertyValue::Vec3([1.0, 0.5, 0.0]),
-                    PropertyKind::Text => PropertyValue::Text("a \"quoted\" name\nwith a break".into()),
+                    PropertyKind::Vec3 | PropertyKind::Color => {
+                        PropertyValue::Vec3([1.0, 0.5, 0.0])
+                    }
+                    PropertyKind::Text => {
+                        PropertyValue::Text("a \"quoted\" name\nwith a break".into())
+                    }
                     PropertyKind::Enum { .. } => PropertyValue::Enum(0),
                     PropertyKind::Ints => PropertyValue::Ints(vec![0, 7, 42]),
                     PropertyKind::Floats => PropertyValue::Floats(vec![0.5, -1.0, 3.0, 1e-7]),
@@ -446,7 +466,10 @@ mod tests {
             parse_call(&r, "mesh.translate(translation=1.0)"),
             Err(ScriptError::WrongType { name, .. }) if name == "translation"
         ));
-        assert!(matches!(parse_call(&r, "mesh.translate"), Err(ScriptError::Syntax(_))));
+        assert!(matches!(
+            parse_call(&r, "mesh.translate"),
+            Err(ScriptError::Syntax(_))
+        ));
         assert!(matches!(
             parse_call(&r, r#"object.add_primitive(shape="banana")"#),
             Err(ScriptError::WrongType { .. })
@@ -470,8 +493,15 @@ mod tests {
         assert_eq!(outcomes[0].line, 2);
         assert!(outcomes[0].result.is_ok());
         assert!(outcomes[1].result.is_ok());
-        assert!(matches!(outcomes[2].result, Err(ScriptError::UnknownOperator(_))));
-        assert_eq!(doc.object_count(), 2, "the good lines ran; the bad one did not stop them");
+        assert!(matches!(
+            outcomes[2].result,
+            Err(ScriptError::UnknownOperator(_))
+        ));
+        assert_eq!(
+            doc.object_count(),
+            2,
+            "the good lines ran; the bad one did not stop them"
+        );
         // One undo step per line, as though the user had done each.
         assert!(h.undo(&mut doc));
         assert_eq!(doc.object_count(), 1);
@@ -487,10 +517,12 @@ mod tests {
         let mut h = History::new();
         let mut p = PropertyMap::new();
         p.set("shape", PropertyValue::Enum(5));
-        h.dispatch(&r, &mut a, &ctx, "object.add_primitive", &p).unwrap();
+        h.dispatch(&r, &mut a, &ctx, "object.add_primitive", &p)
+            .unwrap();
         let mut t = PropertyMap::new();
         t.set("translation", PropertyValue::Vec3([2.0, 0.0, 0.0]));
-        h.dispatch(&r, &mut a, &ctx, "object.translate", &t).unwrap();
+        h.dispatch(&r, &mut a, &ctx, "object.translate", &t)
+            .unwrap();
         let script = h.to_script();
 
         let mut b = Document::new();
@@ -531,10 +563,22 @@ mod tests {
         let active = doc.selection.active.expect("the cube is active");
         let t = &doc.object(active).unwrap().transform;
         assert_eq!(t.translation.to_array(), [1.0, 0.0, 0.0]);
-        assert_eq!(t.scale.to_array(), [2.0, 3.0, 4.0], "the move kept the scale");
-        assert!((kreate_scene::animation::to_euler(t.rotation).x - 0.5).abs() < 1e-9, "and the rotation");
-        let material = doc.material(doc.material_id_at(active, 0).unwrap()).unwrap();
-        assert!((material.roughness - 0.1).abs() < 1e-6, "the colour kept the roughness");
+        assert_eq!(
+            t.scale.to_array(),
+            [2.0, 3.0, 4.0],
+            "the move kept the scale"
+        );
+        assert!(
+            (kreate_scene::animation::to_euler(t.rotation).x - 0.5).abs() < 1e-9,
+            "and the rotation"
+        );
+        let material = doc
+            .material(doc.material_id_at(active, 0).unwrap())
+            .unwrap();
+        assert!(
+            (material.roughness - 0.1).abs() < 1e-6,
+            "the colour kept the roughness"
+        );
         assert!(material.base_color.as_swatch().r > 0.99);
     }
 
@@ -561,10 +605,16 @@ mod tests {
         assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
         let first = doc.objects().next().map(|(id, _)| id).unwrap();
         let scale = doc.object(first).unwrap().transform.scale;
-        assert!((scale.x - 0.8).abs() < 1e-6 && (scale.y - 0.45).abs() < 1e-6, "{scale:?}");
+        assert!(
+            (scale.x - 0.8).abs() < 1e-6 && (scale.y - 0.45).abs() < 1e-6,
+            "{scale:?}"
+        );
         assert_eq!(scale.z, 1.0, "zero leaves an axis alone");
         let names: Vec<_> = doc.materials().map(|(_, m)| m.name.clone()).collect();
-        assert!(names.contains(&"Oak".to_string()) && names.contains(&"Oak.001".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"Oak".to_string()) && names.contains(&"Oak.001".to_string()),
+            "{names:?}"
+        );
     }
 
     #[test]
@@ -592,16 +642,33 @@ mod tests {
         let vase = doc.selection.active.unwrap();
         let (lo, hi) = doc.object_world_bounds(vase).unwrap();
         assert!((lo.z - 0.75).abs() < 1e-6, "on the table top: {lo:?}");
-        assert!((lo.x + hi.x - 4.0).abs() < 1e-6 && (lo.y + hi.y - 2.0).abs() < 1e-6, "in its middle");
-        assert_eq!(doc.materials().count(), 1, "the replaced material was purged");
+        assert!(
+            (lo.x + hi.x - 4.0).abs() < 1e-6 && (lo.y + hi.y - 2.0).abs() < 1e-6,
+            "in its middle"
+        );
+        assert_eq!(
+            doc.materials().count(),
+            1,
+            "the replaced material was purged"
+        );
 
         // Its underside, found by direction rather than by index.
-        let edit = Context { mode: crate::Mode::EditMesh };
-        let outcomes = h.run_script(&r, &mut doc, None, &edit, "mesh.select_where(mode=\"face\", normal=(0.0, 0.0, -1.0))\n");
+        let edit = Context {
+            mode: crate::Mode::EditMesh,
+        };
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &edit,
+            "mesh.select_where(mode=\"face\", normal=(0.0, 0.0, -1.0))\n",
+        );
         assert!(outcomes[0].result.is_ok(), "{outcomes:?}");
         let mesh = doc.mesh(doc.object(vase).unwrap().mesh().unwrap()).unwrap();
         let picked = (0..mesh.num_faces())
-            .filter(|f| kreate_mesh::selection::is_selected(mesh, kreate_mesh::attribute::Domain::Face, *f))
+            .filter(|f| {
+                kreate_mesh::selection::is_selected(mesh, kreate_mesh::attribute::Domain::Face, *f)
+            })
             .count();
         assert_eq!(picked, 12, "the bottom fan, and nothing on the sides");
 
@@ -615,7 +682,10 @@ mod tests {
         );
         assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
         let table = doc.selection.active.unwrap();
-        assert!(doc.object_world_bounds(table).unwrap().0.x.abs() < 1e-6, "its left side on the cursor");
+        assert!(
+            doc.object_world_bounds(table).unwrap().0.x.abs() < 1e-6,
+            "its left side on the cursor"
+        );
     }
 
     #[test]
@@ -638,15 +708,29 @@ mod tests {
         match &doc.object(cube).unwrap().modifiers[0].kind {
             kreate_scene::ModifierKind::Bevel(b) => {
                 assert_eq!(b.segments, 4);
-                assert!((b.width - 0.2).abs() < 1e-6, "setting the segments kept the width");
+                assert!(
+                    (b.width - 0.2).abs() < 1e-6,
+                    "setting the segments kept the width"
+                );
             }
             other => panic!("{other:?}"),
         }
 
         // And in edit mode, on the edges themselves.
-        let edit = Context { mode: crate::Mode::EditMesh };
-        let before = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap().num_faces();
-        let outcomes = h.run_script(&r, &mut doc, None, &edit, "mesh.select(action=0)\nmesh.bevel(width=0.2, segments=3)\n");
+        let edit = Context {
+            mode: crate::Mode::EditMesh,
+        };
+        let before = doc
+            .mesh(doc.object(cube).unwrap().mesh().unwrap())
+            .unwrap()
+            .num_faces();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &edit,
+            "mesh.select(action=0)\nmesh.bevel(width=0.2, segments=3)\n",
+        );
         assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
         let after = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap();
         assert_eq!(
@@ -661,9 +745,17 @@ mod tests {
         let r = registry();
         let mut doc = Document::new();
         let mut h = History::new();
-        let outcomes = h.run_script(&r, &mut doc, None, &Context::default(), "object.add_primitive(shape=\"cube\")\n");
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &Context::default(),
+            "object.add_primitive(shape=\"cube\")\n",
+        );
         assert!(outcomes[0].result.is_ok());
-        let edit = Context { mode: crate::Mode::EditMesh };
+        let edit = Context {
+            mode: crate::Mode::EditMesh,
+        };
         // An edge of the top faces their way: up, give or take the half the
         // vertex normals lean out. The four round the top, and none below.
         let outcomes = h.run_script(
@@ -676,9 +768,21 @@ mod tests {
         assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
         let cube = doc.selection.active.unwrap();
         let mesh = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap();
-        let crease = mesh.attributes().get_f32(kreate_mesh::attribute::names::CREASE).expect("creased");
-        let creased: Vec<_> = mesh.edges().iter().zip(crease).filter(|(_, c)| **c > 0.0).map(|(e, _)| *e).collect();
+        let crease = mesh
+            .attributes()
+            .get_f32(kreate_mesh::attribute::names::CREASE)
+            .expect("creased");
+        let creased: Vec<_> = mesh
+            .edges()
+            .iter()
+            .zip(crease)
+            .filter(|(_, c)| **c > 0.0)
+            .map(|(e, _)| *e)
+            .collect();
         assert_eq!(creased.len(), 4, "{creased:?}");
-        assert!(creased.iter().all(|[a, b]| mesh.positions()[*a as usize].z > 0.0 && mesh.positions()[*b as usize].z > 0.0));
+        assert!(creased
+            .iter()
+            .all(|[a, b]| mesh.positions()[*a as usize].z > 0.0
+                && mesh.positions()[*b as usize].z > 0.0));
     }
 }

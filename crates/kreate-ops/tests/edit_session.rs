@@ -473,7 +473,11 @@ fn pressing_extrude_twice_extrudes_the_same_face_twice() {
             .map(|s| (0..s.len() as u32).filter(|i| s[*i as usize]).collect())
             .unwrap_or_default();
         let (lid, z) = top_face(&d, mesh);
-        assert_eq!(selected, vec![lid], "press {press}: the selection is not the lid alone");
+        assert_eq!(
+            selected,
+            vec![lid],
+            "press {press}: the selection is not the lid alone"
+        );
         assert!(
             (z - (z0 + press as f32)).abs() < 1e-4,
             "press {press}: the lid is at z={z}, expected {}",
@@ -481,4 +485,3 @@ fn pressing_extrude_twice_extrudes_the_same_face_twice() {
         );
     }
 }
-

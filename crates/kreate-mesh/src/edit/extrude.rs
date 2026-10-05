@@ -231,12 +231,18 @@ pub fn extrude_edges_and_verts(mesh: &mut BMesh) -> Result<WireExtrusion, BmErro
     }
     let copy_of = |v: VertId| copy.iter().find(|(o, _)| *o == v).map(|(_, n)| *n);
     for (a, b) in walls {
-        let (Some(na), Some(nb)) = (copy_of(a), copy_of(b)) else { continue };
+        let (Some(na), Some(nb)) = (copy_of(a), copy_of(b)) else {
+            continue;
+        };
         out.new_faces.push(mesh.add_face(&[a, b, nb, na])?);
     }
     // A vertex on no selected edge: an edge out of it.
     for (v, n) in &copy {
-        if mesh.edge_between(*v, *n).is_none() && !edges.iter().any(|e| mesh.edge_verts(*e).is_some_and(|ends| ends.contains(v))) {
+        if mesh.edge_between(*v, *n).is_none()
+            && !edges
+                .iter()
+                .any(|e| mesh.edge_verts(*e).is_some_and(|ends| ends.contains(v)))
+        {
             mesh.add_edge(*v, *n)?;
         }
     }
@@ -505,4 +511,3 @@ mod tests {
         assert_eq!(m.num_faces(), 1);
     }
 }
-

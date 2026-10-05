@@ -82,7 +82,11 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, ink: Color32) {
             let a = c + Vec2::new(-s * 0.8, s * 0.8);
             let b = c + Vec2::new(s * 0.25, -s * 0.25);
             p.line_segment([a, b], Stroke::new(2.2, ink));
-            p.circle_stroke(c + Vec2::new(s * 0.5, -s * 0.5), s * 0.45, Stroke::new(1.8, ink));
+            p.circle_stroke(
+                c + Vec2::new(s * 0.5, -s * 0.5),
+                s * 0.45,
+                Stroke::new(1.8, ink),
+            );
         }
     }
 }

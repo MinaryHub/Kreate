@@ -69,7 +69,10 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
             "cluster_cull",
             include_str!("../src/shaders/cluster_cull.wgsl").into(),
         ),
-        ("hiz_build", include_str!("../src/shaders/hiz_build.wgsl").into()),
+        (
+            "hiz_build",
+            include_str!("../src/shaders/hiz_build.wgsl").into(),
+        ),
         ("deform", include_str!("../src/shaders/deform.wgsl").into()),
         ("agx", include_str!("../src/shaders/agx.wgsl").into()),
         ("fxaa", kreate_render::fxaa::source().into()),
@@ -78,15 +81,27 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("accum", kreate_render::accum::source().into()),
         ("bloom", kreate_render::bloom::source().into()),
         ("ssr", kreate_render::ssr::source().into()),
-        ("pathtrace", kreate_render::pathtrace::shader_source().into()),
-        ("pathtrace_resolve", kreate_render::pathtrace::resolve_source().into()),
+        (
+            "pathtrace",
+            kreate_render::pathtrace::shader_source().into(),
+        ),
+        (
+            "pathtrace_resolve",
+            kreate_render::pathtrace::resolve_source().into(),
+        ),
         ("denoise", kreate_render::denoise::source().into()),
-        ("contact_depth", include_str!("../src/shaders/contact_depth.wgsl").into()),
+        (
+            "contact_depth",
+            include_str!("../src/shaders/contact_depth.wgsl").into(),
+        ),
         ("lights", include_str!("../src/shaders/lights.wgsl").into()),
         ("brdf", include_str!("../src/shaders/brdf.wgsl").into()),
         ("shadow", include_str!("../src/shaders/shadow.wgsl").into()),
         ("tiles", include_str!("../src/shaders/tiles.wgsl").into()),
-        ("markers", include_str!("../src/shaders/markers.wgsl").into()),
+        (
+            "markers",
+            include_str!("../src/shaders/markers.wgsl").into(),
+        ),
         (
             "environment",
             include_str!("../src/shaders/environment.wgsl").into(),

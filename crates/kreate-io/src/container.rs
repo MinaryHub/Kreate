@@ -392,7 +392,11 @@ fn enabled_default() -> bool {
 fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<ModifierRecord> {
     use kreate_mesh::modifiers::BooleanOp;
     use kreate_scene::modifier::ModifierKind as K;
-    let mut r = ModifierRecord { kind: m.kind.id().to_string(), enabled: m.enabled, ..Default::default() };
+    let mut r = ModifierRecord {
+        kind: m.kind.id().to_string(),
+        enabled: m.enabled,
+        ..Default::default()
+    };
     match &m.kind {
         K::Mirror(p) => {
             r.axes = Some([p.x, p.y, p.z]);
@@ -438,16 +442,26 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
 fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierInstance> {
     use kreate_mesh::modifiers::*;
     use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind as K};
-    let v3 = |a: Option<[f32; 3]>, d: kreate_math::Vec3| a.map(kreate_math::Vec3::from_array).unwrap_or(d);
+    let v3 = |a: Option<[f32; 3]>, d: kreate_math::Vec3| {
+        a.map(kreate_math::Vec3::from_array).unwrap_or(d)
+    };
     let kind = match r.kind.as_str() {
         "mirror" => {
             let d = MirrorParams::default();
             let [x, y, z] = r.axes.unwrap_or([d.x, d.y, d.z]);
-            K::Mirror(MirrorParams { x, y, z, merge_threshold: r.merge_threshold.unwrap_or(d.merge_threshold) })
+            K::Mirror(MirrorParams {
+                x,
+                y,
+                z,
+                merge_threshold: r.merge_threshold.unwrap_or(d.merge_threshold),
+            })
         }
         "subdivide" => {
             let d = SubdivideParams::default();
-            K::Subdivide(SubdivideParams { levels: r.levels.unwrap_or(d.levels), smooth: r.smooth.unwrap_or(d.smooth) })
+            K::Subdivide(SubdivideParams {
+                levels: r.levels.unwrap_or(d.levels),
+                smooth: r.smooth.unwrap_or(d.smooth),
+            })
         }
         "array" => {
             let d = ArrayParams::default();
@@ -459,7 +473,10 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
         }
         "solidify" => {
             let d = SolidifyParams::default();
-            K::Solidify(SolidifyParams { thickness: r.thickness.unwrap_or(d.thickness), offset: r.offset.unwrap_or(d.offset) })
+            K::Solidify(SolidifyParams {
+                thickness: r.thickness.unwrap_or(d.thickness),
+                offset: r.offset.unwrap_or(d.offset),
+            })
         }
         "bevel" => {
             let d = BevelParams::default();
@@ -479,7 +496,10 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
         }),
         _ => return None,
     };
-    Some(ModifierInstance { kind, enabled: r.enabled })
+    Some(ModifierInstance {
+        kind,
+        enabled: r.enabled,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1222,8 +1242,11 @@ pub fn write(
             })
             .collect();
 
-        let armature_index: BTreeMap<kreate_scene::ArmatureId, usize> =
-            document.armatures().enumerate().map(|(i, (id, _))| (id, i)).collect();
+        let armature_index: BTreeMap<kreate_scene::ArmatureId, usize> = document
+            .armatures()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
         scene.armatures = document
             .armatures()
             .map(|(_, a)| ArmatureRecord {
@@ -1269,7 +1292,8 @@ pub fn write(
             .map(|(_, a)| ActionRecord {
                 name: a.name.clone(),
                 uid: a.uid.raw(),
-                animates: (a.animates != kreate_scene::DatablockKind::Object).then(|| a.animates.id().to_string()),
+                animates: (a.animates != kreate_scene::DatablockKind::Object)
+                    .then(|| a.animates.id().to_string()),
                 curves: a
                     .curves
                     .iter()
@@ -1295,19 +1319,30 @@ pub fn write(
                     .collect(),
             })
             .collect();
-        scene.cursor = (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
+        scene.cursor =
+            (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
         scene.collections = document
             .collections()
             .map(|(_, c)| CollectionRecord {
                 name: c.name.clone(),
                 hide: c.hide,
-                objects: c.objects.iter().filter_map(|o| index_of.get(o).copied()).collect(),
+                objects: c
+                    .objects
+                    .iter()
+                    .filter_map(|o| index_of.get(o).copied())
+                    .collect(),
             })
             .collect();
-    scene.playback = (document.playback != kreate_scene::animation::Playback::default()).then(|| {
-            let p = document.playback;
-            PlaybackRecord { frame: p.frame, start: p.start, end: p.end, fps: p.fps }
-        });
+        scene.playback =
+            (document.playback != kreate_scene::animation::Playback::default()).then(|| {
+                let p = document.playback;
+                PlaybackRecord {
+                    frame: p.frame,
+                    start: p.start,
+                    end: p.end,
+                    fps: p.fps,
+                }
+            });
         scene.materials = document
             .materials()
             .map(|(_, m)| {
@@ -1480,7 +1515,11 @@ pub fn write(
                     .collect(),
                 skin: object.skin.map(|u| u.raw()),
                 active_group: object.active_group.clone(),
-                shape_keys: object.shape_keys.iter().map(|k| (k.name.clone(), k.value)).collect(),
+                shape_keys: object
+                    .shape_keys
+                    .iter()
+                    .map(|k| (k.name.clone(), k.value))
+                    .collect(),
                 active_shape: object.active_shape.clone(),
                 editing_shape: object.editing_shape.clone(),
                 material_overrides: object
@@ -1508,7 +1547,11 @@ pub fn write(
                             .collect(),
                     })
                     .collect(),
-                modifiers: object.modifiers.iter().filter_map(modifier_record).collect(),
+                modifiers: object
+                    .modifiers
+                    .iter()
+                    .filter_map(modifier_record)
+                    .collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -1728,14 +1771,16 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .as_deref()
                 .and_then(kreate_reflect_kind)
                 .unwrap_or(kreate_scene::DatablockKind::Object);
-            let mut action = kreate_scene::animation::Action::for_kind(record.name.clone(), animates);
+            let mut action =
+                kreate_scene::animation::Action::for_kind(record.name.clone(), animates);
             for curve in &record.curves {
-                let mut made = kreate_scene::animation::FCurve::new(kreate_scene::PropertyPath::component(
-                    animates,
-                    kreate_scene::Uid::NONE,
-                    &curve.property,
-                    curve.index,
-                ));
+                let mut made =
+                    kreate_scene::animation::FCurve::new(kreate_scene::PropertyPath::component(
+                        animates,
+                        kreate_scene::Uid::NONE,
+                        &curve.property,
+                        curve.index,
+                    ));
                 made.keys = curve
                     .keys
                     .iter()
@@ -1760,8 +1805,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             document.restore_action(action, kreate_scene::Uid::from_raw(record.uid))
         })
         .collect();
-    let mut material_ids: Vec<kreate_scene::MaterialId> =
-        Vec::with_capacity(scene.materials.len());
+    let mut material_ids: Vec<kreate_scene::MaterialId> = Vec::with_capacity(scene.materials.len());
     for record in &scene.materials {
         let material = kreate_scene::Material {
             name: record.name.clone(),
@@ -1789,7 +1833,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             normal_strength: record.normal_strength.unwrap_or(1.0),
             emission: record
                 .emission
-                .map_or(kreate_math::SceneRgb::new(1.0, 1.0, 1.0), |e| kreate_math::SceneRgb::new(e[0], e[1], e[2])),
+                .map_or(kreate_math::SceneRgb::new(1.0, 1.0, 1.0), |e| {
+                    kreate_math::SceneRgb::new(e[0], e[1], e[2])
+                }),
             emission_strength: record.emission.map_or(0.0, |e| e[3]),
             transmission: record.transmission.map_or(0.0, |t| t[0]),
             ior: record.transmission.map_or(1.5, |t| t[1]),
@@ -1817,7 +1863,6 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .collect();
         document.set_mesh_slots(*mesh, resolved);
     }
-
 
     let armature_ids: Vec<kreate_scene::ArmatureId> = scene
         .armatures
@@ -1863,7 +1908,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         document.set_active_world(Some(*id));
     }
 
-    if let Some(c) = scene.cursor.map(kreate_math::DVec3::from_array).filter(|c| c.is_finite()) {
+    if let Some(c) = scene
+        .cursor
+        .map(kreate_math::DVec3::from_array)
+        .filter(|c| c.is_finite())
+    {
         document.cursor = c;
     }
     if let Some(p) = scene.playback {
@@ -1937,7 +1986,12 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     name: b.bone.clone(),
                     transform: kreate_math::DTransform {
                         translation: glam::DVec3::from_array(b.translation),
-                        rotation: glam::DQuat::from_xyzw(b.rotation[0], b.rotation[1], b.rotation[2], b.rotation[3]),
+                        rotation: glam::DQuat::from_xyzw(
+                            b.rotation[0],
+                            b.rotation[1],
+                            b.rotation[2],
+                            b.rotation[3],
+                        ),
                         scale: glam::DVec3::from_array(b.scale),
                     },
                     selected: b.selected,
@@ -1980,7 +2034,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.shape_keys = record
             .shape_keys
             .iter()
-            .map(|(name, value)| kreate_scene::shape::ShapeKey { name: name.clone(), value: *value })
+            .map(|(name, value)| kreate_scene::shape::ShapeKey {
+                name: name.clone(),
+                value: *value,
+            })
             .collect();
         object.active_shape = record.active_shape.clone();
         object.editing_shape = record.editing_shape.clone();
@@ -2112,4 +2169,3 @@ fn affine_from_array(a: &[f64; 12]) -> glam::DAffine3 {
 fn kreate_reflect_kind(id: &str) -> Option<kreate_scene::DatablockKind> {
     kreate_scene::DatablockKind::from_id(id)
 }
-

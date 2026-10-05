@@ -579,7 +579,10 @@ pub struct UnwrapParams {
 
 impl Default for UnwrapParams {
     fn default() -> Self {
-        Self { margin: f64::from(uv_pack::DEFAULT_MARGIN), layer: String::new() }
+        Self {
+            margin: f64::from(uv_pack::DEFAULT_MARGIN),
+            layer: String::new(),
+        }
     }
 }
 
@@ -601,7 +604,11 @@ impl Operator for Unwrap {
         can_edit(ctx, doc)
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let layer = layer_or_default(&params.layer).to_string();
         let margin = params.margin as f32;
         let written = with_bmesh(doc, |bm| {
@@ -609,9 +616,15 @@ impl Operator for Unwrap {
             if faces.is_empty() {
                 faces = bm.face_ids().collect::<Vec<FaceId>>();
             }
-            Ok(kreate_mesh::edit::uv_unwrap::unwrap(bm, &faces, &layer, margin))
+            Ok(kreate_mesh::edit::uv_unwrap::unwrap(
+                bm, &faces, &layer, margin,
+            ))
         })?;
-        Ok(if written == 0 { OpResult::Cancelled } else { OpResult::Finished })
+        Ok(if written == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
     }
 }
 

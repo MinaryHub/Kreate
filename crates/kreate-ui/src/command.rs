@@ -17,16 +17,26 @@ use kreate_reflect::PropertyMap;
 pub enum Command {
     /// The outliner's drag and drop onto an object: `child` parented to
     /// `parent`, both outliner keys. The selection is left alone.
-    ParentObject { child: u32, parent: u32 },
+    ParentObject {
+        child: u32,
+        parent: u32,
+    },
     /// The outliner's drag and drop onto a collection's heading; an empty
     /// name is the scene itself.
-    MoveObjectToCollection { object: u32, collection: String },
+    MoveObjectToCollection {
+        object: u32,
+        collection: String,
+    },
     /// File ▸ Open Recent.
     OpenPath(std::path::PathBuf),
     /// Select a bone of an armature object, by the object's outliner key and
     /// the bone's name: the outliner's bone rows. The application turns it
     /// into the pick of whatever mode it is in.
-    SelectBone { object: u32, bone: String, extend: bool },
+    SelectBone {
+        object: u32,
+        bone: String,
+        extend: bool,
+    },
     /// Run an operator. The only way the UI causes a document change.
     RunOperator {
         op_id: String,
@@ -117,13 +127,20 @@ pub enum Command {
     /// is the operator's parameter of the same name — which slot — and it
     /// also decides how the file is read: a base colour as sRGB, a roughness
     /// or normal map as the numbers it holds.
-    PickMaterialImage { map: u32 },
+    PickMaterialImage {
+        map: u32,
+    },
     /// Take one of the active material's textures off.
-    ClearMaterialImage { map: u32 },
+    ClearMaterialImage {
+        map: u32,
+    },
     /// Ask for an image file and put it in an Image Texture node of the
     /// material in `slot`. A command for the reason `PickMaterialImage` is:
     /// `node.set_image` makes the link, the file read cannot be an operator.
-    PickNodeImage { slot: u32, node: u32 },
+    PickNodeImage {
+        slot: u32,
+        node: u32,
+    },
     /// Give the active object a material, so that there is one to edit.
     ///
     /// A command rather than a menu entry wired straight to the operator

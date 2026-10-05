@@ -126,8 +126,15 @@ fn render(
     let mut draws = if PAIR.with(|p| p.get()) {
         // Two copies: the left being edited, the right only standing there.
         vec![
-            Draw::new(&uploaded, DAffine3::from_translation(DVec3::new(-1.2, 0.0, 0.0))).editing(true),
-            Draw::new(&uploaded, DAffine3::from_translation(DVec3::new(1.2, 0.0, 0.0))),
+            Draw::new(
+                &uploaded,
+                DAffine3::from_translation(DVec3::new(-1.2, 0.0, 0.0)),
+            )
+            .editing(true),
+            Draw::new(
+                &uploaded,
+                DAffine3::from_translation(DVec3::new(1.2, 0.0, 0.0)),
+            ),
         ]
     } else {
         vec![Draw::new(&uploaded, DAffine3::IDENTITY)]
@@ -608,8 +615,20 @@ fn only_the_edited_mesh_shows_its_elements() {
             .collect()
     };
     let changed = |right: bool| {
-        half(&plain, right).iter().zip(&half(&shown, right)).filter(|(a, b)| a != b).count()
+        half(&plain, right)
+            .iter()
+            .zip(&half(&shown, right))
+            .filter(|(a, b)| a != b)
+            .count()
     };
-    assert!(changed(false) > 20, "the edited mesh shows no elements: {}", changed(false));
-    assert_eq!(changed(true), 0, "the mesh not being edited shows its elements");
+    assert!(
+        changed(false) > 20,
+        "the edited mesh shows no elements: {}",
+        changed(false)
+    );
+    assert_eq!(
+        changed(true),
+        0,
+        "the mesh not being edited shows its elements"
+    );
 }

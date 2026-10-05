@@ -326,7 +326,10 @@ impl Camera {
     /// `rate` is the scene's, because the shutter is stored as a fraction of a
     /// frame (see [`Camera::shutter`]) and an exposure needs a duration.
     pub fn ev100(&self, rate: f64) -> f64 {
-        let n = self.f_stop.filter(|f| *f > 0.0).unwrap_or(DEFAULT_EXPOSURE_F_STOP);
+        let n = self
+            .f_stop
+            .filter(|f| *f > 0.0)
+            .unwrap_or(DEFAULT_EXPOSURE_F_STOP);
         let t = self
             .shutter_seconds(rate)
             .filter(|t| *t > 0.0)

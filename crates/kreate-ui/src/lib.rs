@@ -8,33 +8,33 @@
 
 pub mod area;
 pub mod chat;
-pub mod contact;
 pub mod command;
 pub mod command_info;
 pub mod command_palette;
+pub mod console;
+pub mod contact;
 pub mod context_menu;
 pub mod dope_sheet;
 pub mod drivers;
-pub mod console;
 pub mod element_icon;
 pub mod fonts;
 pub mod graph_editor;
 pub mod icons;
-pub mod object_glyph;
-pub mod panel;
-pub mod pie_menu;
-pub mod toolbar;
-pub mod view_icons;
 pub mod keymap_editor;
 pub mod modifier_stack;
 pub mod nav_gizmo;
 pub mod node_editor;
+pub mod object_glyph;
 pub mod outliner;
+pub mod panel;
+pub mod pie_menu;
 pub mod property_editor;
 pub mod text;
 pub mod theme;
 pub mod timeline;
+pub mod toolbar;
 pub mod uv_editor;
+pub mod view_icons;
 pub mod workspace;
 pub mod wsfile;
 
@@ -49,8 +49,8 @@ pub use modifier_stack::{modifier_stack, ModifierRow, ModifierText};
 pub use node_editor::{node_editor, GraphView, NodeEdit, NodeEditorState, NodeText};
 pub use outliner::{outliner, ClickModifiers, OutlinerRow, RowKind};
 pub use property_editor::{
-    property_editor, property_editor_full, property_editor_keyed, property_widget, EditorOutcome, FieldAction, FieldMenu,
-    FieldMenuText, KeyMark, UnitDisplay,
+    property_editor, property_editor_full, property_editor_keyed, property_widget, EditorOutcome,
+    FieldAction, FieldMenu, FieldMenuText, KeyMark, UnitDisplay,
 };
 pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};
 pub use theme::{install as install_theme, Density, Theme};
