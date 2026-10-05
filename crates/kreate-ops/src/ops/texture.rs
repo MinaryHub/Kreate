@@ -90,12 +90,21 @@ impl Operator for Generate {
         "Generate Texture"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let size = params.size.clamp(16, 4096);
         let kind = KINDS.get(params.kind as usize).copied().unwrap_or("noise");
         let pattern = Pattern::new(kind, params);
         let height: Vec<f32> = (0..size * size)
-            .map(|i| pattern.value((i % size) as f32 / size as f32, (i / size) as f32 / size as f32))
+            .map(|i| {
+                pattern.value(
+                    (i % size) as f32 / size as f32,
+                    (i / size) as f32 / size as f32,
+                )
+            })
             .collect();
         let srgb = |c: [f64; 3]| c.map(|v| v.clamp(0.0, 1.0) as f32);
         let (a, b) = (srgb(params.color_a), srgb(params.color_b));
@@ -119,7 +128,12 @@ impl Operator for Generate {
                         let dx = (at(x + 1, y) - at(x + s - 1, y)) * 0.5 * s as f32 / 64.0;
                         let dy = (at(x, y + 1) - at(x, y + s - 1)) * 0.5 * s as f32 / 64.0;
                         let n = glam::Vec3::new(-dx * k, dy * k, 1.0).normalize();
-                        pixels.extend_from_slice(&[byte(n.x * 0.5 + 0.5), byte(n.y * 0.5 + 0.5), byte(n.z * 0.5 + 0.5), 255]);
+                        pixels.extend_from_slice(&[
+                            byte(n.x * 0.5 + 0.5),
+                            byte(n.y * 0.5 + 0.5),
+                            byte(n.z * 0.5 + 0.5),
+                            255,
+                        ]);
                     }
                 }
             }
@@ -136,7 +150,10 @@ impl Operator for Generate {
             }
         }
         let name = match params.name.trim() {
-            "" => format!("{kind}-{}", ["color", "height", "normal"][params.output.min(2) as usize]),
+            "" => format!(
+                "{kind}-{}",
+                ["color", "height", "normal"][params.output.min(2) as usize]
+            ),
             name => name.to_string(),
         };
         let space = if params.output == 0 {
@@ -181,7 +198,8 @@ impl Pattern {
                 let bend = self.fbm(u * 2.0, v * 8.0, 2, 8) * self.distortion * 0.35;
                 let ring = (v * s + bend).fract();
                 let fine = self.fbm(u * 16.0, v * 64.0, 16, 64) * 0.15;
-                (smooth(0.0, 0.6, ring) * (1.0 - smooth(0.6, 1.0, ring)) * 0.85 + fine).clamp(0.0, 1.0)
+                (smooth(0.0, 0.6, ring) * (1.0 - smooth(0.6, 1.0, ring)) * 0.85 + fine)
+                    .clamp(0.0, 1.0)
             }
             "marble" => {
                 // Bands bent by noise, then pushed towards the light colour so
@@ -205,7 +223,14 @@ impl Pattern {
     fn fbm(&self, x: f32, y: f32, px: u32, py: u32) -> f32 {
         let (mut sum, mut amp, mut norm, mut f) = (0.0, 1.0, 0.0, 1u32);
         for octave in 0..self.detail {
-            sum += amp * gradient_noise(x * f as f32, y * f as f32, px * f, py * f, self.seed.wrapping_add(octave * 131));
+            sum += amp
+                * gradient_noise(
+                    x * f as f32,
+                    y * f as f32,
+                    px * f,
+                    py * f,
+                    self.seed.wrapping_add(octave * 131),
+                );
             norm += amp;
             amp *= 0.5;
             f *= 2;
@@ -221,13 +246,21 @@ impl Pattern {
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let (gx, gy) = (cx + dx, cy + dy);
-                let h = hash(gx.rem_euclid(period as i64) as u32, gy.rem_euclid(period as i64) as u32, self.seed);
-                let jitter = (h as f32 / u32::MAX as f32, hash(h, 7, self.seed) as f32 / u32::MAX as f32);
+                let h = hash(
+                    gx.rem_euclid(period as i64) as u32,
+                    gy.rem_euclid(period as i64) as u32,
+                    self.seed,
+                );
+                let jitter = (
+                    h as f32 / u32::MAX as f32,
+                    hash(h, 7, self.seed) as f32 / u32::MAX as f32,
+                );
                 let p = (gx as f32 + jitter.0, gy as f32 + jitter.1);
                 nearest = nearest.min(((p.0 - x).powi(2) + (p.1 - y).powi(2)).sqrt());
             }
         }
-        let grain = self.fbm(x * 2.0, y * 2.0, period * 2, period * 2) * 0.2 * self.distortion.min(1.0);
+        let grain =
+            self.fbm(x * 2.0, y * 2.0, period * 2, period * 2) * 0.2 * self.distortion.min(1.0);
         (nearest.min(1.0) + grain).clamp(0.0, 1.0)
     }
 
@@ -239,7 +272,11 @@ impl Pattern {
         let rows = (self.scale.max(2) * 2) as f32;
         let y = v * rows;
         let row = y.floor();
-        let offset = if (row as i64).rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+        let offset = if (row as i64).rem_euclid(2) == 1 {
+            0.5
+        } else {
+            0.0
+        };
         let x = u * across + offset;
         let (fx, fy) = (x.fract(), y.fract());
         let mortar = 0.06;
@@ -247,7 +284,12 @@ impl Pattern {
         let inside = edge(fx, mortar * across / rows * 2.0) * edge(fy, mortar);
         let brick = (x.floor() as i64).rem_euclid(across as i64) as u32;
         let tone = hash(brick, row as u32, self.seed) as f32 / u32::MAX as f32 * 0.35;
-        let grain = self.fbm(u * across * 4.0, v * rows * 2.0, (across as u32) * 4, (rows as u32) * 2) * 0.15;
+        let grain = self.fbm(
+            u * across * 4.0,
+            v * rows * 2.0,
+            (across as u32) * 4,
+            (rows as u32) * 2,
+        ) * 0.15;
         (1.0 - inside * (1.0 - tone - grain)).clamp(0.0, 1.0)
     }
 }
@@ -259,7 +301,8 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
 
 /// A well-mixed 32-bit hash of a lattice point and a seed.
 fn hash(x: u32, y: u32, seed: u32) -> u32 {
-    let mut h = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
+    let mut h =
+        x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5bd1_e995);
     h ^ (h >> 15)
@@ -271,15 +314,21 @@ fn gradient_noise(x: f32, y: f32, px: u32, py: u32, seed: u32) -> f32 {
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
     let corner = |ix: i64, iy: i64, dx: f32, dy: f32| {
-        let h = hash(ix.rem_euclid(px.max(1) as i64) as u32, iy.rem_euclid(py.max(1) as i64) as u32, seed);
+        let h = hash(
+            ix.rem_euclid(px.max(1) as i64) as u32,
+            iy.rem_euclid(py.max(1) as i64) as u32,
+            seed,
+        );
         let angle = h as f32 / u32::MAX as f32 * std::f32::consts::TAU;
         angle.cos() * dx + angle.sin() * dy
     };
     let (ix, iy) = (x0 as i64, y0 as i64);
     let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
     let (u, v) = (fade(fx), fade(fy));
-    let a = corner(ix, iy, fx, fy) + (corner(ix + 1, iy, fx - 1.0, fy) - corner(ix, iy, fx, fy)) * u;
-    let b = corner(ix, iy + 1, fx, fy - 1.0) + (corner(ix + 1, iy + 1, fx - 1.0, fy - 1.0) - corner(ix, iy + 1, fx, fy - 1.0)) * u;
+    let a =
+        corner(ix, iy, fx, fy) + (corner(ix + 1, iy, fx - 1.0, fy) - corner(ix, iy, fx, fy)) * u;
+    let b = corner(ix, iy + 1, fx, fy - 1.0)
+        + (corner(ix + 1, iy + 1, fx - 1.0, fy - 1.0) - corner(ix, iy + 1, fx, fy - 1.0)) * u;
     (a + (b - a) * v) * std::f32::consts::SQRT_2
 }
 
@@ -292,7 +341,13 @@ mod tests {
     use super::*;
 
     fn pattern(kind: &'static str) -> Pattern {
-        Pattern::new(kind, &GenerateParams { scale: 3.0, ..GenerateParams::default() })
+        Pattern::new(
+            kind,
+            &GenerateParams {
+                scale: 3.0,
+                ..GenerateParams::default()
+            },
+        )
     }
 
     #[test]
@@ -317,9 +372,16 @@ mod tests {
     fn every_pattern_stays_in_range_and_varies() {
         for kind in KINDS {
             let p = pattern(kind);
-            let values: Vec<f32> = (0..400).map(|i| p.value((i % 20) as f32 / 20.0, (i / 20) as f32 / 20.0)).collect();
-            assert!(values.iter().all(|v| (0.0..=1.0).contains(v)), "{kind} left [0, 1]");
-            let (lo, hi) = values.iter().fold((1.0f32, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            let values: Vec<f32> = (0..400)
+                .map(|i| p.value((i % 20) as f32 / 20.0, (i / 20) as f32 / 20.0))
+                .collect();
+            assert!(
+                values.iter().all(|v| (0.0..=1.0).contains(v)),
+                "{kind} left [0, 1]"
+            );
+            let (lo, hi) = values
+                .iter()
+                .fold((1.0f32, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             assert!(hi - lo > 0.2, "{kind} is flat: {lo}..{hi}");
         }
     }
@@ -327,8 +389,14 @@ mod tests {
     #[test]
     fn a_seed_changes_the_pattern() {
         let a = Pattern::new("noise", &GenerateParams::default());
-        let b = Pattern::new("noise", &GenerateParams { seed: 9, ..GenerateParams::default() });
-        assert!((0..50).any(|i| (a.value(i as f32 / 50.0, 0.3) - b.value(i as f32 / 50.0, 0.3)).abs() > 0.05));
+        let b = Pattern::new(
+            "noise",
+            &GenerateParams {
+                seed: 9,
+                ..GenerateParams::default()
+            },
+        );
+        assert!((0..50)
+            .any(|i| (a.value(i as f32 / 50.0, 0.3) - b.value(i as f32 / 50.0, 0.3)).abs() > 0.05));
     }
 }
-

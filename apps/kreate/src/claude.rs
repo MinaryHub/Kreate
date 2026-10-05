@@ -260,7 +260,11 @@ impl Chat {
                 out.push(Event::SignedIn(if ok {
                     None
                 } else {
-                    Some(said.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "stopped".into()))
+                    Some(
+                        said.map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "stopped".into()),
+                    )
                 }));
                 self.check_account();
                 continue;
@@ -272,7 +276,9 @@ impl Chat {
     }
 
     fn poll_turn(&mut self) -> Vec<Event> {
-        let Some(turn) = &mut self.turn else { return Vec::new() };
+        let Some(turn) = &mut self.turn else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         let mut finished = false;
         loop {
@@ -306,7 +312,8 @@ impl Drop for Chat {
     }
 }
 
-const NOT_INSTALLED: &str = "Claude Code (`claude`) was not found. Install it from https://claude.com/claude-code, \
+const NOT_INSTALLED: &str =
+    "Claude Code (`claude`) was not found. Install it from https://claude.com/claude-code, \
      or set KREATE_CLAUDE to its path.";
 
 /// `claude auth status`, read.
@@ -316,9 +323,14 @@ fn ask_account() -> Account {
     };
     // Not logged in exits with 1 and still prints the answer, so the output is
     // read whatever the status.
-    match Command::new(claude).args(["auth", "status", "--json"]).stdin(Stdio::null()).output() {
-        Ok(out) => parse_account(&String::from_utf8_lossy(&out.stdout))
-            .unwrap_or_else(|| Account::Unavailable(String::from_utf8_lossy(&out.stderr).trim().to_string())),
+    match Command::new(claude)
+        .args(["auth", "status", "--json"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) => parse_account(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|| {
+            Account::Unavailable(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }),
         Err(e) => Account::Unavailable(format!("cannot start Claude Code: {e}")),
     }
 }
@@ -329,7 +341,12 @@ pub fn parse_account(json: &str) -> Option<Account> {
     if v.get("loggedIn").and_then(Value::as_bool) != Some(true) {
         return Some(Account::SignedOut);
     }
-    let text = |key: &str| v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     Some(Account::SignedIn {
         email: text("email").unwrap_or_else(|| "signed in".into()),
         organisation: text("orgName"),
@@ -363,7 +380,10 @@ fn scan_sign_in(stream: impl Read, tx: &Sender<Event>, wake: &(dyn Fn() + Send +
 /// The first web address in a line of output.
 pub fn sign_in_url(line: &str) -> Option<String> {
     let start = line.find("https://")?;
-    let url: String = line[start..].chars().take_while(|c| !c.is_whitespace()).collect();
+    let url: String = line[start..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
     Some(url)
 }
 
@@ -418,7 +438,11 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             for block in content(&message) {
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
-                        let text = block.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                        let text = block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
                         if !text.is_empty() {
                             out.push(Event::Text(text.to_string()));
                         }
@@ -447,7 +471,10 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 out.push(Event::Session(id.to_string()));
             }
             let failed = message.get("is_error").and_then(Value::as_bool) == Some(true)
-                || message.get("subtype").and_then(Value::as_str).is_some_and(|s| s != "success");
+                || message
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s != "success");
             out.push(Event::Done(failed.then(|| {
                 message
                     .get("result")
@@ -504,7 +531,11 @@ fn find_claude() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KREATE_CLAUDE") {
         return Some(PathBuf::from(path));
     }
-    let name = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let name = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
     if let Some(found) = std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
@@ -527,7 +558,11 @@ fn find_claude() -> Option<PathBuf> {
 
 /// `kreate-mcp`, which ships next to Kreate.
 fn find_connector() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "kreate-mcp.exe" } else { "kreate-mcp" };
+    let name = if cfg!(windows) {
+        "kreate-mcp.exe"
+    } else {
+        "kreate-mcp"
+    };
     let here = std::env::current_exe().ok()?;
     let beside = here.parent()?.join(name);
     beside.is_file().then_some(beside)
@@ -539,7 +574,8 @@ mod tests {
 
     #[test]
     fn init_line_gives_the_session() {
-        let events = parse_line(r#"{"type":"system","subtype":"init","session_id":"abc","tools":[]}"#);
+        let events =
+            parse_line(r#"{"type":"system","subtype":"init","session_id":"abc","tools":[]}"#);
         assert_eq!(events, vec![Event::Session("abc".into())]);
     }
 
@@ -575,17 +611,27 @@ mod tests {
             {"type":"tool_result","tool_use_id":"t2","content":"fine"}
         ]}}"#
             .replace('\n', "");
-        assert_eq!(parse_line(&line), vec![Event::ToolError("no object called Nope".into())]);
+        assert_eq!(
+            parse_line(&line),
+            vec![Event::ToolError("no object called Nope".into())]
+        );
     }
 
     #[test]
     fn result_ends_the_turn() {
-        let ok = parse_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"abc"}"#);
+        let ok = parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"abc"}"#,
+        );
         assert_eq!(ok, vec![Event::Session("abc".into()), Event::Done(None)]);
-        let failed = parse_line(r#"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"abc"}"#);
+        let failed = parse_line(
+            r#"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"abc"}"#,
+        );
         assert_eq!(
             failed,
-            vec![Event::Session("abc".into()), Event::Done(Some("error_max_turns".into()))]
+            vec![
+                Event::Session("abc".into()),
+                Event::Done(Some("error_max_turns".into()))
+            ]
         );
     }
 
@@ -601,7 +647,10 @@ mod tests {
                 plan: Some("team".into()),
             })
         );
-        assert_eq!(parse_account(r#"{"loggedIn": false, "authMethod": "none"}"#), Some(Account::SignedOut));
+        assert_eq!(
+            parse_account(r#"{"loggedIn": false, "authMethod": "none"}"#),
+            Some(Account::SignedOut)
+        );
         assert_eq!(parse_account("Not logged in."), None);
     }
 

@@ -42,10 +42,15 @@ pub enum ChatAccount {
     Checking,
     /// Signed in: the account's address, and a line about it (organisation,
     /// plan).
-    SignedIn { email: String, detail: String },
+    SignedIn {
+        email: String,
+        detail: String,
+    },
     SignedOut,
     /// Signing in: the page's address once the CLI has said it.
-    SigningIn { url: Option<String> },
+    SigningIn {
+        url: Option<String>,
+    },
     /// Claude Code cannot be used: why.
     Unavailable(String),
 }
@@ -99,7 +104,10 @@ pub fn chat(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add_enabled(!messages.is_empty() && !busy, egui::Button::new(&text.new_chat))
+                .add_enabled(
+                    !messages.is_empty() && !busy,
+                    egui::Button::new(&text.new_chat),
+                )
                 .clicked()
             {
                 queue.push(Command::ChatNew);
@@ -127,7 +135,10 @@ pub fn chat(
     ui.horizontal(|ui| {
         let button_width = 64.0;
         let response = ui.add_sized(
-            [(ui.available_width() - button_width - 8.0).max(40.0), row * 3.0],
+            [
+                (ui.available_width() - button_width - 8.0).max(40.0),
+                row * 3.0,
+            ],
             egui::TextEdit::multiline(input)
                 .id(id)
                 .hint_text(&text.placeholder)
@@ -137,7 +148,10 @@ pub fn chat(
         let entered = response.has_focus()
             && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
         let send = if busy {
-            if ui.add_sized([button_width, row], egui::Button::new(&text.stop)).clicked() {
+            if ui
+                .add_sized([button_width, row], egui::Button::new(&text.stop))
+                .clicked()
+            {
                 queue.push(Command::ChatStop);
             }
             false
@@ -178,7 +192,8 @@ fn draw_account(
         ChatAccount::SignedIn { email, detail } => {
             ui.horizontal(|ui| {
                 // i18n-exempt: an account's address and its organisation
-                ui.label(egui::RichText::new(email).color(theme.text)).on_hover_text(detail);
+                ui.label(egui::RichText::new(email).color(theme.text))
+                    .on_hover_text(detail);
                 if !detail.is_empty() {
                     // i18n-exempt: the organisation and plan, as Claude names them
                     ui.label(egui::RichText::new(detail).small().color(theme.text_faint));
@@ -198,7 +213,10 @@ fn draw_account(
         ChatAccount::SigningIn { url } => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.add(egui::Label::new(egui::RichText::new(&text.signing_in).color(theme.text_dim)).wrap());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&text.signing_in).color(theme.text_dim))
+                        .wrap(),
+                );
             });
             if let Some(url) = url {
                 ui.hyperlink_to(&text.open_sign_in, url);
@@ -209,8 +227,15 @@ fn draw_account(
                         .hint_text(&text.code_hint)
                         .desired_width((ui.available_width() - 150.0).max(80.0)),
                 );
-                let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.add_enabled(!code.trim().is_empty(), egui::Button::new(&text.code_submit)).clicked() || entered)
+                let entered =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui
+                    .add_enabled(
+                        !code.trim().is_empty(),
+                        egui::Button::new(&text.code_submit),
+                    )
+                    .clicked()
+                    || entered)
                     && !code.trim().is_empty()
                 {
                     queue.push(Command::ChatSignInCode {
@@ -265,7 +290,14 @@ fn draw_message(ui: &mut Ui, theme: &crate::Theme, message: &ChatMessage) {
             ui.add(egui::Label::new(egui::RichText::new(&message.text).color(theme.accent)).wrap());
         }
         ChatRole::Note => {
-            ui.add(egui::Label::new(egui::RichText::new(&message.text).italics().color(theme.text_faint)).wrap());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&message.text)
+                        .italics()
+                        .color(theme.text_faint),
+                )
+                .wrap(),
+            );
         }
     }
 }
