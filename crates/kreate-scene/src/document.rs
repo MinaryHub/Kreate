@@ -244,6 +244,14 @@ impl Object {
 /// linked copies of a chair, one of them upholstered differently.
 pub type MaterialOverrides = Vec<Option<MaterialId>>;
 
+/// What [`Document::purge_unused`] removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Purged {
+    pub meshes: usize,
+    pub materials: usize,
+    pub images: usize,
+}
+
 /// A material, deliberately a "standard surface" and nothing more.
 ///
 /// Its parameters map near-1:1 onto both glTF metal-rough and
@@ -654,9 +662,33 @@ impl Document {
 
     // --- objects ------------------------------------------------------------
 
-    pub fn add_object(&mut self, object: Object) -> ObjectId {
+    /// Adds an object, numbered (`.001`) if another object has its name.
+    ///
+    /// As Blender does: a name is how a person and a script find an object,
+    /// and two of the same is one neither can find — a script that added two
+    /// cubes could not join them, because it could not say which was which.
+    pub fn add_object(&mut self, mut object: Object) -> ObjectId {
+        object.name = self.unique_object_name(&object.name);
         let uid = self.issue(DatablockKind::Object);
         self.insert_object(object, uid)
+    }
+
+    /// `name`, or the first `name.NNN` no object has. A name that already ends
+    /// in a number counts on from its stem, so a copy of `Cube.001` is
+    /// `Cube.002` rather than `Cube.001.001`.
+    pub fn unique_object_name(&self, name: &str) -> String {
+        let taken = |n: &str| self.objects.iter().any(|(_, o)| o.name == n);
+        if name.is_empty() || !taken(name) {
+            return name.to_string();
+        }
+        let stem = match name.rsplit_once('.') {
+            Some((stem, digits)) if digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()) => stem,
+            _ => name,
+        };
+        (1..)
+            .map(|i| format!("{stem}.{i:03}"))
+            .find(|n| !taken(n))
+            .expect("names run out after integers")
     }
 
     /// Adds an object with an identity it already had.
@@ -772,6 +804,50 @@ impl Document {
     #[inline]
     pub fn roots(&self) -> &[ObjectId] {
         &self.roots
+    }
+
+    /// Removes what nothing uses: meshes no object shows, materials no slot
+    /// holds, and images no material or world reaches. Blender's Purge.
+    ///
+    /// In that order, because each frees the next: a mesh's slots may be the
+    /// last place a material was used, and a material the last thing that
+    /// reached an image. Returns how many of each went.
+    pub fn purge_unused(&mut self) -> Purged {
+        let mut purged = Purged::default();
+        let shown: std::collections::HashSet<MeshId> = self.objects.values().filter_map(|o| o.mesh()).collect();
+        let meshes: Vec<MeshId> = self.meshes.ids().filter(|m| !shown.contains(m)).collect();
+        for mesh in meshes {
+            self.meshes.remove(mesh);
+            purged.meshes += 1;
+        }
+
+        let mut held: std::collections::HashSet<MaterialId> = self
+            .meshes
+            .values()
+            .flat_map(|entry| entry.slots.iter().flatten().copied())
+            .collect();
+        held.extend(self.objects.values().flat_map(|o| o.material_overrides.iter().flatten().copied()));
+        let materials: Vec<MaterialId> = self.materials.ids().filter(|m| !held.contains(m)).collect();
+        for material in materials {
+            self.materials.remove(material);
+            purged.materials += 1;
+        }
+
+        let mut reached: std::collections::HashSet<ImageId> =
+            self.materials.values().flat_map(|m| m.images()).collect();
+        reached.extend(self.worlds.values().filter_map(|w| match w.background {
+            crate::light::Background::Image(image) => Some(image),
+            _ => None,
+        }));
+        let images: Vec<ImageId> = self.images.ids().filter(|i| !reached.contains(i)).collect();
+        for image in images {
+            self.images.remove(image);
+            purged.images += 1;
+        }
+        if purged != Purged::default() {
+            self.touch();
+        }
+        purged
     }
 
     /// Removes an object and reparents its children to its own parent.
@@ -1776,18 +1852,26 @@ impl Document {
     /// The cheap duplicate, and the reason for datablock indirection: geometry is
     /// not copied, so a thousand instances cost a thousand transforms.
     pub fn duplicate_linked(&mut self, id: ObjectId) -> Option<ObjectId> {
-        let mut copy = self.objects.get(id)?.clone();
-        copy.name = format!("{}.001", copy.name);
+        // Numbered by `add_object`, which counts on from a name that already
+        // ends in one.
+        let copy = self.objects.get(id)?.clone();
         Some(self.add_object(copy))
     }
 
     /// Duplicates an object *and* its mesh, so the two can diverge.
     pub fn duplicate_full(&mut self, id: ObjectId) -> Option<ObjectId> {
         let mut copy = self.objects.get(id)?.clone();
-        copy.name = format!("{}.001", copy.name);
+        // Numbered by `add_object`, which counts on from a name that already
+        // ends in one.
         if let ObjectData::Mesh(mesh_id) = copy.data {
             let cloned = self.mesh(mesh_id)?.clone();
-            copy.data = ObjectData::Mesh(self.add_mesh(cloned));
+            // The slots with it, pointing at the same materials, as Blender's
+            // Shift+D does. They live on the entry rather than in the mesh, so
+            // copying the mesh alone gave a copy with no materials: grey.
+            let slots = self.meshes.get(mesh_id)?.slots.clone();
+            let new = self.add_mesh(cloned);
+            self.set_mesh_slots(new, slots);
+            copy.data = ObjectData::Mesh(new);
         }
         // A skeleton too, as Blender's full duplicate does: the copy is a
         // character that can be rebuilt without rebuilding the original.
@@ -1805,6 +1889,25 @@ impl Document {
     /// is what Frame All frames, and Blender's frames the lamp and the camera
     /// too; a new document whose lamp sat outside the first view read as a
     /// document with no lamp in it.
+    /// One mesh object's box in world space: its own mesh's vertices,
+    /// carried through its world transform. `None` for anything without a
+    /// mesh, or with an empty one.
+    ///
+    /// The base mesh, before modifiers: what a script built and can reason
+    /// about. A mirror or an array modifier makes the picture bigger than this.
+    pub fn object_world_bounds(&self, id: ObjectId) -> Option<(DVec3, DVec3)> {
+        let mesh = self.mesh(self.objects.get(id)?.mesh()?)?;
+        let world = self.world_transform(id);
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for p in mesh.positions() {
+            let w = world.transform_point3(p.as_dvec3());
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        (lo.x <= hi.x).then_some((lo, hi))
+    }
+
     pub fn world_bounds(&self) -> kreate_math::Aabb {
         let mut bounds = kreate_math::Aabb::EMPTY;
         for (id, object) in self.objects.iter() {
@@ -1952,6 +2055,57 @@ mod tests {
             d.mesh(a).unwrap().positions()[0],
             d.mesh(b).unwrap().positions()[0]
         );
+    }
+
+    #[test]
+    fn purging_removes_only_what_nothing_reaches() {
+        let mut d = Document::new();
+        let cube = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let gone = d.add_mesh_object("Gone", kreate_mesh::primitives::cube(2.0));
+        let image = d.add_image(crate::Image::new("wood.png", 2, 2, crate::PixelFormat::Rgba8));
+        let stray = d.add_image(crate::Image::new("stray.png", 2, 2, crate::PixelFormat::Rgba8));
+        let used = d.add_material(Material::default());
+        let textured = d.add_material(Material {
+            base_color_image: Some(image),
+            ..Material::default()
+        });
+        let _orphan = d.add_material(Material::default());
+        let cube_mesh = d.object(cube).unwrap().mesh().unwrap();
+        let gone_mesh = d.object(gone).unwrap().mesh().unwrap();
+        d.set_mesh_slots(cube_mesh, vec![Some(used)]);
+        d.set_mesh_slots(gone_mesh, vec![Some(textured)]);
+        d.remove_object(gone);
+
+        let purged = d.purge_unused();
+        assert_eq!(purged, Purged { meshes: 1, materials: 2, images: 2 });
+        assert!(d.material(used).is_some() && d.mesh(cube_mesh).is_some());
+        assert!(d.material(textured).is_none(), "its only mesh went first");
+        assert!(d.image(image).is_none() && d.image(stray).is_none());
+        assert_eq!(d.purge_unused(), Purged::default(), "a second purge finds nothing");
+    }
+
+    #[test]
+    fn a_new_object_never_takes_a_name_in_use() {
+        let mut d = Document::new();
+        let a = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let b = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        let c = d.duplicate_full(b).unwrap();
+        let names: Vec<_> = [a, b, c].iter().map(|id| d.object(*id).unwrap().name.clone()).collect();
+        assert_eq!(names, ["Cube", "Cube.001", "Cube.002"]);
+    }
+
+    #[test]
+    fn a_full_duplicate_wears_the_same_materials() {
+        let (mut d, id) = doc_with_cube();
+        let red = d.add_material(Material::default());
+        let mesh = d.object(id).unwrap().mesh().unwrap();
+        d.set_mesh_slots(mesh, vec![Some(red)]);
+        let copy = d.duplicate_full(id).unwrap();
+        assert_eq!(d.material_id_at(copy, 0), Some(red));
+        // Its own list, though: a slot changed on the copy leaves the original.
+        let copied = d.object(copy).unwrap().mesh().unwrap();
+        d.set_mesh_slots(copied, vec![None]);
+        assert_eq!(d.material_id_at(id, 0), Some(red));
     }
 
     #[test]

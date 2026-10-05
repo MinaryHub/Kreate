@@ -375,6 +375,9 @@ pub struct ModifierRecord {
     pub width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<f32>,
+    /// A bevel's strips. Absent in files from before it had any but one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<u32>,
     /// A boolean's other object, by its identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand: Option<u64>,
@@ -411,6 +414,7 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
         K::Bevel(p) => {
             r.width = Some(p.width);
             r.angle = Some(p.angle);
+            r.segments = (p.segments != 1).then_some(p.segments);
         }
         K::Boolean(b) => {
             r.operand = Some(b.operand.raw());
@@ -459,7 +463,11 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
         }
         "bevel" => {
             let d = BevelParams::default();
-            K::Bevel(BevelParams { width: r.width.unwrap_or(d.width), angle: r.angle.unwrap_or(d.angle) })
+            K::Bevel(BevelParams {
+                width: r.width.unwrap_or(d.width),
+                angle: r.angle.unwrap_or(d.angle),
+                segments: r.segments.unwrap_or(d.segments).clamp(1, 64),
+            })
         }
         "boolean" => K::Boolean(BooleanModifier {
             operand: kreate_scene::Uid::from_raw(r.operand.unwrap_or(0)),

@@ -347,7 +347,11 @@ impl History {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let result = parse_call(registry, trimmed).and_then(|call| {
+            let result = parse_call(registry, trimmed).and_then(|mut call| {
+                // What the line left out is what it did not mean to change.
+                if let Some(info) = registry.get(call.op_id) {
+                    info.fill_from_current(ctx, doc, &mut call.params);
+                }
                 self.dispatch_in_session(
                     registry,
                     doc,
@@ -500,5 +504,181 @@ mod tests {
             a.world_transform(id_a).translation,
             b.world_transform(id_b).translation
         );
+    }
+
+    #[test]
+    fn what_a_line_leaves_out_stays_as_it_was() {
+        // Setting one thing must not reset the rest to the defaults: a colour
+        // line that also flattened the roughness, or a move that undid a
+        // scale, is a script that cannot be written one change at a time.
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let ctx = Context::default();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "object.add_primitive(shape=\"cube\")\n\
+             object.set_transform(scale=(2.0, 3.0, 4.0), rotation=(0.5, 0.0, 0.0))\n\
+             object.set_transform(location=(1.0, 0.0, 0.0))\n\
+             material.new(slot=0)\n\
+             material.set_properties(roughness=0.1)\n\
+             material.set_properties(color=(1.0, 0.0, 0.0))\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let active = doc.selection.active.expect("the cube is active");
+        let t = &doc.object(active).unwrap().transform;
+        assert_eq!(t.translation.to_array(), [1.0, 0.0, 0.0]);
+        assert_eq!(t.scale.to_array(), [2.0, 3.0, 4.0], "the move kept the scale");
+        assert!((kreate_scene::animation::to_euler(t.rotation).x - 0.5).abs() < 1e-9, "and the rotation");
+        let material = doc.material(doc.material_id_at(active, 0).unwrap()).unwrap();
+        assert!((material.roughness - 0.1).abs() < 1e-6, "the colour kept the roughness");
+        assert!(material.base_color.as_swatch().r > 0.99);
+    }
+
+    #[test]
+    fn dimensions_shading_and_material_names_from_a_script() {
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let ctx = Context::default();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "object.add_primitive(shape=\"cube\", size=2.0)\n\
+             object.set_dimensions(dimensions=(1.6, 0.9, 0.0))\n\
+             object.shade_smooth(angle=0.5)\n\
+             material.new(slot=0)\n\
+             material.rename(slot=0, name=\"Oak\")\n\
+             object.add_primitive(shape=\"cube\")\n\
+             material.new(slot=0)\n\
+             material.rename(slot=0, name=\"Oak\")\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let first = doc.objects().next().map(|(id, _)| id).unwrap();
+        let scale = doc.object(first).unwrap().transform.scale;
+        assert!((scale.x - 0.8).abs() < 1e-6 && (scale.y - 0.45).abs() < 1e-6, "{scale:?}");
+        assert_eq!(scale.z, 1.0, "zero leaves an axis alone");
+        let names: Vec<_> = doc.materials().map(|(_, m)| m.name.clone()).collect();
+        assert!(names.contains(&"Oak".to_string()) && names.contains(&"Oak.001".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn a_vase_stood_on_a_table_with_its_underside_selected() {
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let ctx = Context::default();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "object.add_primitive(shape=\"cube\", size=1.0)\n\
+             object.rename(name=\"Table\")\n\
+             object.set_dimensions(dimensions=(1.6, 0.9, 0.75))\n\
+             object.set_transform(location=(2.0, 1.0, 0.375))\n\
+             object.add_lathe(points=[0.0, 0.0, 0.1, 0.0, 0.12, 0.3, 0.0, 0.3], segments=12)\n\
+             object.place_on(target=\"Table\", center=True)\n\
+             material.new(slot=0)\n\
+             material.new(slot=0)\n\
+             data.purge()\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let vase = doc.selection.active.unwrap();
+        let (lo, hi) = doc.object_world_bounds(vase).unwrap();
+        assert!((lo.z - 0.75).abs() < 1e-6, "on the table top: {lo:?}");
+        assert!((lo.x + hi.x - 4.0).abs() < 1e-6 && (lo.y + hi.y - 2.0).abs() < 1e-6, "in its middle");
+        assert_eq!(doc.materials().count(), 1, "the replaced material was purged");
+
+        // Its underside, found by direction rather than by index.
+        let edit = Context { mode: crate::Mode::EditMesh };
+        let outcomes = h.run_script(&r, &mut doc, None, &edit, "mesh.select_where(mode=\"face\", normal=(0.0, 0.0, -1.0))\n");
+        assert!(outcomes[0].result.is_ok(), "{outcomes:?}");
+        let mesh = doc.mesh(doc.object(vase).unwrap().mesh().unwrap()).unwrap();
+        let picked = (0..mesh.num_faces())
+            .filter(|f| kreate_mesh::selection::is_selected(mesh, kreate_mesh::attribute::Domain::Face, *f))
+            .count();
+        assert_eq!(picked, 12, "the bottom fan, and nothing on the sides");
+
+        // And the table's top edge, by a box around it.
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &Context::default(),
+            "object.select(name=\"Table\")\nobject.align(target=\"\", axis=\"x\", side=\"min\", to=\"center\")\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let table = doc.selection.active.unwrap();
+        assert!(doc.object_world_bounds(table).unwrap().0.x.abs() < 1e-6, "its left side on the cursor");
+    }
+
+    #[test]
+    fn rounded_edges_from_a_script() {
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &Context::default(),
+            "object.add_primitive(shape=\"cube\")\n\
+             object.modifier_add(kind=\"bevel\")\n\
+             object.modifier_set_bevel(index=0, width=0.2)\n\
+             object.modifier_set_bevel(index=0, segments=4)\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let cube = doc.selection.active.unwrap();
+        match &doc.object(cube).unwrap().modifiers[0].kind {
+            kreate_scene::ModifierKind::Bevel(b) => {
+                assert_eq!(b.segments, 4);
+                assert!((b.width - 0.2).abs() < 1e-6, "setting the segments kept the width");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // And in edit mode, on the edges themselves.
+        let edit = Context { mode: crate::Mode::EditMesh };
+        let before = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap().num_faces();
+        let outcomes = h.run_script(&r, &mut doc, None, &edit, "mesh.select(action=0)\nmesh.bevel(width=0.2, segments=3)\n");
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let after = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap();
+        assert_eq!(
+            after.num_faces(),
+            before + 12 * 3 + 8 * 9,
+            "three strips an edge, and a fan of nine on each corner"
+        );
+    }
+
+    #[test]
+    fn the_top_edges_found_by_direction_and_creased() {
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let outcomes = h.run_script(&r, &mut doc, None, &Context::default(), "object.add_primitive(shape=\"cube\")\n");
+        assert!(outcomes[0].result.is_ok());
+        let edit = Context { mode: crate::Mode::EditMesh };
+        // An edge of the top faces their way: up, give or take the half the
+        // vertex normals lean out. The four round the top, and none below.
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &edit,
+            "mesh.select_where(mode=\"edge\", normal=(0.0, 0.0, 1.0), angle=0.8)\nmesh.crease(value=0.5)\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let cube = doc.selection.active.unwrap();
+        let mesh = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap();
+        let crease = mesh.attributes().get_f32(kreate_mesh::attribute::names::CREASE).expect("creased");
+        let creased: Vec<_> = mesh.edges().iter().zip(crease).filter(|(_, c)| **c > 0.0).map(|(e, _)| *e).collect();
+        assert_eq!(creased.len(), 4, "{creased:?}");
+        assert!(creased.iter().all(|[a, b]| mesh.positions()[*a as usize].z > 0.0 && mesh.positions()[*b as usize].z > 0.0));
     }
 }

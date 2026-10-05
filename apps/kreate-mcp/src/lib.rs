@@ -28,14 +28,46 @@ const INSTRUCTIONS: &str = "Kreate is a 3D modelling application, open on the us
 These tools act on the document it has open: every edit goes through the same operators as \
 its menus and lands in its undo history. Start with get_scene to see what is there. Edits are \
 script lines run by run_script; list_operators gives every operator and its parameters. \
-Units are metres, Z is up. Use capture_viewport to look at the result.";
+Units are metres, Z is up. Use capture_viewport to look at the result, or camera=true to see \
+the shot through the scene camera; render_image writes a finished, path-traced picture \
+through a camera to a file.\n\
+Workflow: object.* operators work in object mode on the selection and the active object. \
+mesh.* and uv.* operators work in edit mode on the selected elements: enter it with \
+kreate.ops.object.mode_set(mode=\"edit\") and leave it with mode=\"object\". \
+run_script returns, for each line, the objects it created (name and uid), so name and \
+reuse them rather than guessing. Object names are unique: a second \"Cube\" becomes \"Cube.001\". \
+get_scene gives each mesh's dimensions and world bounds, for sizing and placing, and \
+get_mesh its vertex positions and faces; \
+object.set_dimensions sizes an object in metres. Reuse a material with \
+material.link(slot=..., uid=...) using the uid get_scene gives; name materials with \
+material.rename. Load textures with kreate.ops.image.open(path=...), which returns the \
+image's uid, or make one with image.generate (noise, voronoi, wood, marble, checker, bricks; \
+output=\"color\", \"height\" for a roughness map or \"normal\" for bumps): every pattern \
+tiles. run_script reports the uids of images and materials a line made. Put an image on a \
+material with material.set_image(slot=..., map=..., uid=...); unwrap or project UVs first \
+(uv.project(mode=\"box\") in edit mode needs no seams).\n\
+Light is physical: a sun is tens of thousands of lux, and a world background's strength is \
+in nits, so beside a sun a daylight sky needs strength in the thousands (3000 to 10000) or \
+it renders black; indoors with lamps only, a few nits is right.\n\
+Shapes: object.add_lathe turns a radius, height profile into a vase, cup or bottle \
+(resolution=6 curves it through the points); \
+object.add_sweep carries a circle or a profile of your own along a path of points — a \
+handle, a spout (scale_end narrows it), a pipe, a cable, a frame (closed=true). \
+Round furniture edges with mesh.bevel(width=..., segments=3 or more) in edit mode, or \
+non-destructively with a bevel modifier (object.modifier_set_bevel(segments=...)). Under a \
+subdivide modifier, mesh.crease(value=...) keeps selected edges sharp (1) or softly \
+rounded (0.2 to 0.8), and edges marked with mesh.mark_sharp stay sharp. object.shade_smooth(angle=...) smooths a whole \
+object. Placement: object.place_on(target=...) stands the active object on another; \
+object.align lines up sides of bounding boxes; check_overlaps finds parts that run into \
+each other. mesh.select_where selects elements by a world-space box, a face direction or a \
+material slot instead of by index. data.purge removes unused meshes, materials and images.";
 
 /// The tools, as `tools/list` describes them.
 pub fn tools() -> Value {
     json!([
         {
             "name": "get_scene",
-            "description": "What the open document holds: every object (name, type, location, rotation in degrees as XYZ Euler, scale, visibility, selection, materials; vertex and face counts for meshes; kind, colour and intensity for lights), every material (base colour, metallic, roughness, emission, transmission, IOR), the editing mode, the 3D cursor, the current frame and the document's file.",
+            "description": "What the open document holds: every object (name, uid, type, location, rotation in degrees as XYZ Euler, scale, visibility, selection, parent; for meshes vertex and face counts, dimensions in metres, world-space bounds and the materials in its slots with their uids; kind, colour and intensity for lights; lens and exposure settings for cameras), every material (uid, how many objects use it, base colour, metallic, roughness, emission, transmission, IOR; colours are sRGB, as material.set_properties takes them), every image (name, uid, size), the editing mode, the view's exposure in stops and whether the meter set it, the 3D cursor, the current frame and the document's file.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
@@ -52,7 +84,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "run_script",
-            "description": "Runs script lines in Kreate, one operator call per line, each its own undo step. The syntax is the one the history records: kreate.ops.<operator id>(<name>=<value>, ...). Values: numbers, True/False, \"text\", (x, y, z) for vectors and colours, an enum by its variant name in quotes or by index, [1, 2, 3] for lists. Parameters left out take their defaults. Examples:\nkreate.ops.object.add_primitive(shape=\"uv_sphere\", size=1.0, location=(0.0, 0.0, 2.0))\nkreate.ops.object.translate(translation=(1.0, 0.0, 0.0))\nkreate.ops.material.set_properties(color=(0.8, 0.1, 0.1), roughness=0.3)\nOperators act on the selection and the active object, as the menus do. Returns, for each line, what it became in the history or why it failed.",
+            "description": "Runs script lines in Kreate, one operator call per line, each its own undo step. The syntax is the one the history records: kreate.ops.<operator id>(<name>=<value>, ...). Values: numbers, True/False, \"text\", (x, y, z) for vectors and colours, an enum by its variant name in quotes or by index, [1, 2, 3] for lists. Parameters left out take their defaults. Examples:\nkreate.ops.object.add_primitive(shape=\"uv_sphere\", size=1.0, location=(0.0, 0.0, 2.0))\nkreate.ops.object.translate(translation=(1.0, 0.0, 0.0))\nkreate.ops.material.set_properties(color=(0.8, 0.1, 0.1), roughness=0.3)\nOperators act on the selection and the active object, as the menus do. A parameter left out of a set_* operator (object.set_transform, material.set_properties, light.set_properties, camera.set_properties, world.set_properties) keeps its current value; elsewhere it takes the default.\nTwo lines are not operators but are written like them: kreate.ops.object.mode_set(mode=\"edit\") (object, edit, sculpt, weight_paint, pose) switches mode for the lines after it, and kreate.ops.image.open(path=\"/abs/file.png\", color=True) reads an image and returns its uid (color=False for normal and roughness maps).\nReturns, for each line, what it became in the history or why it failed, and the objects, materials and images it created (name, uid); then the mode and the active object.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -62,9 +94,61 @@ pub fn tools() -> Value {
             }
         },
         {
+            "name": "render_image",
+            "description": "Renders the scene through a scene camera to a PNG file: rendered shading, path traced to the given number of samples, no grid, outlines or other overlays, at the size asked for. Returns a small preview to check it by. Takes as long as the samples do, up to time_limit seconds (at most 110); finished=false means it stopped at the limit with fewer samples. The user's view is put back afterwards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Where to write the PNG: an absolute path." },
+                    "camera": { "type": "string", "description": "A camera object's name. Left out: the active object if it is a camera, else the first camera." },
+                    "width": { "type": "integer", "minimum": 16, "maximum": 8192, "default": 1920 },
+                    "height": { "type": "integer", "minimum": 16, "maximum": 8192, "default": 1080 },
+                    "samples": { "type": "integer", "minimum": 1, "maximum": 512, "default": 128 },
+                    "time_limit": { "type": "integer", "minimum": 1, "maximum": 110, "default": 110 }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_mesh",
+            "description": "One mesh object's vertices: index and position, in world space (default) or the object's own; with faces=true also each face's vertex indices and normal. The indices are the ones mesh.select_set takes. Capped at limit vertices; omitted says how many more there were. selected=true gives only what is selected in edit mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "The object's name. Empty or left out: the active object." },
+                    "space": { "type": "string", "enum": ["world", "local"], "default": "world" },
+                    "faces": { "type": "boolean", "default": false },
+                    "selected": { "type": "boolean", "default": false },
+                    "limit": { "type": "integer", "minimum": 1, "default": 2000 }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "check_overlaps",
+            "description": "Which visible mesh objects run into each other. Pairs whose bounding boxes overlap by more than the tolerance are tested on their actual surfaces: reported with contact \"crossing\" when the surfaces pass through each other, or \"X inside Y\" when one is wholly within the other, and the box overlap in metres. Touching (a vase standing on a table, a chair against a wall) is not reported, nor are a shape and its own parent or child. exact=false skips the surface test and reports every box overlap, which is quicker and cruder.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tolerance": { "type": "number", "minimum": 0, "default": 0.001, "description": "Metres of box overlap to ignore." },
+                    "exact": { "type": "boolean", "default": true }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "capture_viewport",
-            "description": "A PNG of Kreate's 3D viewport as it is now, after the picture has finished refining. Shows what the user sees: the shading mode, overlays and camera they have chosen.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "A PNG of Kreate's 3D viewport, after the picture has finished refining. By default what the user sees: the shading mode, overlays and view they have chosen. With camera, the view through a scene camera, with its lens and exposure, for checking a composition; the user's view is left as it was.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "camera": {
+                        "description": "true for the active camera object or else the first camera, or a camera object's name.",
+                        "type": ["boolean", "string"]
+                    },
+                    "path": { "type": "string", "description": "Also write the PNG here: an absolute path." }
+                }
+            },
             "annotations": { "readOnlyHint": true }
         },
         {
@@ -167,7 +251,10 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "get_scene" => ("scene", json!({})),
         "list_operators" => ("operators", pick(&["filter"])),
         "run_script" => ("run", pick(&["script"])),
-        "capture_viewport" => ("capture", json!({})),
+        "capture_viewport" => ("capture", pick(&["camera", "path"])),
+        "check_overlaps" => ("overlaps", pick(&["tolerance", "exact"])),
+        "get_mesh" => ("mesh", pick(&["object", "space", "faces", "selected", "limit"])),
+        "render_image" => ("render", pick(&["path", "camera", "width", "height", "samples", "time_limit"])),
         "undo" => ("undo", pick(&["steps"])),
         "redo" => ("redo", pick(&["steps"])),
         "open_file" => ("open", pick(&["path"])),
@@ -178,13 +265,24 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
     let answer = app.call(method, params);
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
-        Ok(value) if method == "capture" => {
+        Ok(value) if method == "capture" || method == "render" => {
             let data = value.get("png_base64").and_then(Value::as_str).unwrap_or("").to_string();
-            let size = format!(
-                "viewport {} x {}",
-                value.get("width").unwrap_or(&json!(0)),
-                value.get("height").unwrap_or(&json!(0))
-            );
+            let size = if method == "render" {
+                format!(
+                    "rendered {} x {} at {} samples{} to {}",
+                    value.get("width").unwrap_or(&json!(0)),
+                    value.get("height").unwrap_or(&json!(0)),
+                    value.get("samples").unwrap_or(&json!(0)),
+                    if value.get("finished") == Some(&json!(false)) { " (stopped at the time limit)" } else { "" },
+                    value.get("path").and_then(Value::as_str).unwrap_or("?"),
+                )
+            } else {
+                format!(
+                    "viewport {} x {}",
+                    value.get("width").unwrap_or(&json!(0)),
+                    value.get("height").unwrap_or(&json!(0))
+                )
+            };
             json!({
                 "content": [
                     { "type": "image", "data": data, "mimeType": "image/png" },

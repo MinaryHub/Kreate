@@ -115,16 +115,22 @@ fn modeling_screen() -> Screen {
     screen
 }
 
-/// The scene and the console side by side: type a call, watch it happen.
+/// The scene beside Claude and the console: ask for it or type it, and
+/// watch it happen.
 ///
-/// Blender's Scripting workspace. The console takes the larger share because
-/// a script line is long and a viewport is legible small.
+/// Blender's Scripting workspace, with a conversation above the console —
+/// what Claude does arrives there as script lines like any other edit. The
+/// right side takes the larger share because a script line is long and a
+/// viewport is legible small.
 fn scripting_screen() -> Screen {
     let mut screen = Screen::single(EditorId::VIEWPORT);
     let viewport = screen.areas()[0].0;
-    screen
-        .split(viewport, Axis::Vertical, 0.45, EditorId::CONSOLE)
+    let claude = screen
+        .split(viewport, Axis::Vertical, 0.45, EditorId::CLAUDE)
         .expect("the screen has one area to split");
+    screen
+        .split(claude, Axis::Horizontal, 0.62, EditorId::CONSOLE)
+        .expect("the Claude area was just created");
     screen
 }
 

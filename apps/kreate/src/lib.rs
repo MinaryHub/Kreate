@@ -6,8 +6,10 @@
 //! interface and the viewport is precisely where a defect would otherwise be
 //! invisible to everything except a human looking at the screen.
 
+pub mod appcall;
 pub mod breadcrumbs;
 pub mod bridge;
+pub mod claude;
 pub mod crashreport;
 pub mod docfile;
 pub mod dragpreview;

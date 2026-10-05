@@ -290,6 +290,88 @@ impl Operator for Move {
 /// panel and from scripts, where the stack may have changed since. Writing
 /// mirror parameters over an array would be a silent replacement of one
 /// modifier by another.
+/// A modifier's parameters, in its setter operator's terms.
+///
+/// The panel edits this and hands it straight back to the operator, so the
+/// values shown are the values applied — there is no third representation to
+/// drift out of step.
+pub fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> crate::property::PropertyMap {
+    let mut p = crate::property::PropertyMap::new();
+    p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
+    match kind {
+        ModifierKind::Mirror(m) => {
+            p.set("x", kreate_reflect::PropertyValue::Bool(m.x));
+            p.set("y", kreate_reflect::PropertyValue::Bool(m.y));
+            p.set("z", kreate_reflect::PropertyValue::Bool(m.z));
+            p.set(
+                "merge_threshold",
+                kreate_reflect::PropertyValue::Float(m.merge_threshold as f64),
+            );
+        }
+        ModifierKind::Subdivide(sub) => {
+            p.set("levels", kreate_reflect::PropertyValue::Int(sub.levels as i64));
+            p.set("smooth", kreate_reflect::PropertyValue::Bool(sub.smooth));
+        }
+        ModifierKind::Solidify(s) => {
+            p.set("thickness", kreate_reflect::PropertyValue::Float(s.thickness as f64));
+            p.set("offset", kreate_reflect::PropertyValue::Float(s.offset as f64));
+        }
+        ModifierKind::Bevel(b) => {
+            p.set("width", kreate_reflect::PropertyValue::Float(b.width as f64));
+            p.set("angle", kreate_reflect::PropertyValue::Float(b.angle as f64));
+            p.set("segments", kreate_reflect::PropertyValue::Int(b.segments as i64));
+        }
+        ModifierKind::Boolean(b) => {
+            let name = doc
+                .object_by_uid(b.operand)
+                .and_then(|id| doc.object(id))
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            p.set("object", kreate_reflect::PropertyValue::Text(name));
+            p.set(
+                "operation",
+                kreate_reflect::PropertyValue::Enum(match b.op {
+                    kreate_mesh::modifiers::BooleanOp::Difference => 0,
+                    kreate_mesh::modifiers::BooleanOp::Union => 1,
+                    kreate_mesh::modifiers::BooleanOp::Intersect => 2,
+                }),
+            );
+        }
+        ModifierKind::Array(a) => {
+            p.set("count", kreate_reflect::PropertyValue::Int(a.count as i64));
+            p.set(
+                "relative",
+                kreate_reflect::PropertyValue::Vec3([
+                    a.relative.x as f64,
+                    a.relative.y as f64,
+                    a.relative.z as f64,
+                ]),
+            );
+            p.set(
+                "constant",
+                kreate_reflect::PropertyValue::Vec3([
+                    a.constant.x as f64,
+                    a.constant.y as f64,
+                    a.constant.z as f64,
+                ]),
+            );
+        }
+    }
+    p
+}
+
+/// What a setter's line left out, from the modifier at the index it names:
+/// see [`Operator::current`]. `None` when that modifier is another kind.
+fn current_modifier<P: crate::property::OpParams>(doc: &Document, given: &crate::property::PropertyMap, id: &str) -> Option<P> {
+    let index = match given.get("index") {
+        Some(kreate_reflect::PropertyValue::Int(i)) => u32::try_from(*i).ok()?,
+        _ => 0,
+    };
+    let object = doc.object(target(doc)?)?;
+    let kind = &object.modifiers.get(index as usize)?.kind;
+    (kind.id() == id).then(|| P::from_map(&setter_params(doc, index, kind)))
+}
+
 fn set_kind(doc: &mut DocMut<'_>, index: u32, kind: ModifierKind) -> Result<OpResult, OpError> {
     let Some(id) = target(doc.document()) else {
         return Ok(OpResult::Cancelled);
@@ -350,6 +432,9 @@ impl Operator for SetMirror {
         target(doc).is_some()
     }
 
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "mirror")
+    }
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
@@ -410,6 +495,9 @@ impl Operator for SetSubdivide {
         target(doc).is_some()
     }
 
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "subdivide")
+    }
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
@@ -477,6 +565,9 @@ impl Operator for SetArray {
         target(doc).is_some()
     }
 
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "array")
+    }
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
@@ -528,6 +619,9 @@ impl Operator for SetSolidify {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
     }
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "solidify")
+    }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         set_kind(
             doc,
@@ -547,12 +641,15 @@ pub struct SetBevelParams {
     /// Edges sharper than this are bevelled.
     #[param(min = 0.0, max = 3.0, unit = "angle")]
     pub angle: f64,
+    /// Strips across each edge: one is a flat chamfer, more round it off.
+    #[param(min = 1, max = 64, unit = "count")]
+    pub segments: u32,
 }
 
 impl Default for SetBevelParams {
     fn default() -> Self {
         let d = BevelParams::default();
-        Self { index: 0, width: d.width as f64, angle: d.angle as f64 }
+        Self { index: 0, width: d.width as f64, angle: d.angle as f64, segments: d.segments }
     }
 }
 
@@ -570,11 +667,18 @@ impl Operator for SetBevel {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
     }
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "bevel")
+    }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         set_kind(
             doc,
             params.index,
-            ModifierKind::Bevel(BevelParams { width: params.width as f32, angle: params.angle as f32 }),
+            ModifierKind::Bevel(BevelParams {
+                width: params.width as f32,
+                angle: params.angle as f32,
+                segments: params.segments.clamp(1, 64),
+            }),
         )
     }
 }
@@ -604,6 +708,9 @@ impl Operator for SetBoolean {
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         target(doc).is_some()
+    }
+    fn current(_ctx: &Context, doc: &Document, given: &crate::property::PropertyMap) -> Option<Self::Params> {
+        current_modifier(doc, given, "boolean")
     }
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         let d = doc.document();

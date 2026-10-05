@@ -1,10 +1,18 @@
 //! Bevel: replacing an edge with a face.
 //!
 //! The plan calls this the hardest of the core operators and pins its scope down
-//! precisely: **edge bevel, one segment, no profile, simple miter**. Several
-//! segments, a profile curve, miter types and general self-intersection handling
-//! are all deferred. What is here has to be right for the ordinary cases and
-//! honest about the rest.
+//! precisely: **edge bevel, simple miter**, now with any number of segments on
+//! a round profile. A profile shape other than round, miter types and general
+//! self-intersection handling are deferred. What is here has to be right for
+//! the ordinary cases and honest about the rest.
+//!
+//! # Segments
+//!
+//! One segment is a flat chamfer: each bevelled edge becomes a quad. More
+//! segments bend that quad into strips along an arc that leaves one face and
+//! arrives at the other tangent to both — a rounded edge, which is what
+//! furniture, a phone, a bar of soap have. See [`arc`] for the curve and why
+//! neighbouring walls share theirs.
 //!
 //! # The vertex is the whole problem
 //!
@@ -82,6 +90,18 @@ struct CornerPoint {
 /// the number suggests. That is a v1 simplification, and the exact-distance
 /// variant belongs with the profile work.
 pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bevel, BmError> {
+    bevel_edges_segments(mesh, edges, width, 1)
+}
+
+/// Bevels the given edges by `width` into `segments` strips on a round
+/// profile. One segment is [`bevel_edges`]' flat chamfer.
+pub fn bevel_edges_segments(
+    mesh: &mut BMesh,
+    edges: &[EdgeId],
+    width: f32,
+    segments: u32,
+) -> Result<Bevel, BmError> {
+    let segments = segments.clamp(1, 64);
     let mut out = Bevel::default();
     if width <= 0.0 {
         return Ok(out);
@@ -283,6 +303,17 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
             .map(|p| p.created)
     };
 
+    // What each new point is: the original vertex, moved along these edges.
+    // The arc between two of them bends about the part they share — see `arc`.
+    let basis = |created: VertId| -> Option<(VertId, Vec<EdgeId>)> {
+        if let Some(p) = edge_points.iter().find(|p| p.created == created) {
+            return Some((p.vertex, vec![p.along]));
+        }
+        let p = corner_points.iter().find(|p| p.created == created)?;
+        let (incoming, outgoing) = corner_edges(mesh, p.face, p.vertex)?;
+        Some((p.vertex, vec![incoming, outgoing]))
+    };
+
     // The rings for the rebuilt faces, and the single point each face presents
     // at each bevelled corner — which is what the walls are built from.
     let mut rebuilt: Vec<Vec<VertId>> = Vec::with_capacity(plan.len());
@@ -324,7 +355,47 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
             .any(|l| mesh.loop_edge(l) == Some(edge) && mesh.loop_vert(l) == Some(from))
     }
 
+    // The profile between two wall corners at one original vertex: the
+    // points strictly between them, from `from` to `to`. Shared by every wall
+    // that runs between the same two corners — where two bevelled edges turn
+    // a corner together, both walls end on the same pair, and a curve of each
+    // their own would leave a sliver open between them.
+    let mut arcs: Vec<((VertId, VertId), Vec<Vec3>)> = Vec::new();
+    let mut profile = |mesh: &BMesh, from: VertId, to: VertId| -> Vec<Vec3> {
+        if segments < 2 || from == to {
+            return Vec::new();
+        }
+        if let Some((_, points)) = arcs.iter().find(|(k, _)| *k == (from, to)) {
+            return points.clone();
+        }
+        if let Some((_, points)) = arcs.iter().find(|(k, _)| *k == (to, from)) {
+            return points.iter().rev().copied().collect();
+        }
+        let points = (|| {
+            let (v, a) = basis(from)?;
+            let (_, b) = basis(to)?;
+            let shared: Vec3 = a
+                .iter()
+                .filter(|g| b.contains(g))
+                .filter_map(|g| offset_along(mesh, v, *g))
+                .sum();
+            let corner = mesh.position(v)? + shared;
+            Some(arc(corner, mesh.position(from)?, mesh.position(to)?, segments))
+        })()
+        .unwrap_or_default();
+        arcs.push(((from, to), points.clone()));
+        points
+    };
+
     let mut walls: Vec<[VertId; 4]> = Vec::new();
+    /// A wall bent into strips: the corner pairs at each end of its edge.
+    struct Strip {
+        a: (VertId, VertId),
+        b: (VertId, VertId),
+        vertex_a: VertId,
+        vertex_b: VertId,
+    }
+    let mut strips: Vec<Strip> = Vec::new();
     for &e in &chosen {
         let Some([a, b]) = mesh.edge_verts(e) else {
             continue;
@@ -352,8 +423,70 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
         // Against the forward face's direction along its own new edge, then with
         // the backward face's — which is what it means for all three to agree
         // across the edges they share.
-        walls.push([near_b, near_a, far_a, far_b]);
+        if segments < 2 {
+            walls.push([near_b, near_a, far_a, far_b]);
+            continue;
+        }
+        // The arcs at each end, as positions for now: vertices are made once
+        // per arc, below, so two walls sharing one share its vertices too.
+        let at_a = profile(mesh, near_a, far_a);
+        let at_b = profile(mesh, near_b, far_b);
+        if at_a.len() + 1 != segments as usize || at_b.len() + 1 != segments as usize {
+            walls.push([near_b, near_a, far_a, far_b]);
+            continue;
+        }
+        strips.push(Strip { a: (near_a, far_a), b: (near_b, far_b), vertex_a: a, vertex_b: b });
     }
+
+    // Each arc's vertices, made once.
+    let mut arc_verts: Vec<((VertId, VertId), Vec<VertId>, VertId)> = Vec::new();
+    let mut rail = |mesh: &mut BMesh, out: &mut Bevel, ends: (VertId, VertId), vertex: VertId| -> Vec<VertId> {
+        if let Some((_, made, _)) = arc_verts.iter().find(|(k, _, _)| *k == ends) {
+            return made.clone();
+        }
+        if let Some((_, made, _)) = arc_verts.iter().find(|(k, _, _)| *k == (ends.1, ends.0)) {
+            return made.iter().rev().copied().collect();
+        }
+        let points = arcs
+            .iter()
+            .find(|(k, _)| *k == ends)
+            .map(|(_, p)| p.clone())
+            .or_else(|| arcs.iter().find(|(k, _)| *k == (ends.1, ends.0)).map(|(_, p)| p.iter().rev().copied().collect()))
+            .unwrap_or_default();
+        let made: Vec<VertId> = points.into_iter().map(|p| mesh.add_vert(p)).collect();
+        out.verts.extend(&made);
+        arc_verts.push((ends, made.clone(), vertex));
+        made
+    };
+    let mut strip_rings: Vec<Vec<VertId>> = Vec::new();
+    for strip in &strips {
+        let mut at_a = vec![strip.a.0];
+        at_a.extend(rail(mesh, &mut out, strip.a, strip.vertex_a));
+        at_a.push(strip.a.1);
+        let mut at_b = vec![strip.b.0];
+        at_b.extend(rail(mesh, &mut out, strip.b, strip.vertex_b));
+        at_b.push(strip.b.1);
+        for k in 0..segments as usize {
+            strip_rings.push(vec![at_b[k], at_a[k], at_a[k + 1], at_b[k + 1]]);
+        }
+    }
+
+    // Where each corner's round is centred: the original vertex moved in along
+    // every bevelled edge that meets there. On a cube bevelled all round, every
+    // arc at the corner lies on a sphere about this point — which is what lets
+    // the cap be bent onto that sphere rather than left flat.
+    let centres: Vec<(VertId, Vec3)> = touched
+        .iter()
+        .filter_map(|&v| {
+            let moved: Vec3 = mesh
+                .vert_edges(v)
+                .into_iter()
+                .filter(|g| bevelled(*g))
+                .filter_map(|g| offset_along(mesh, v, g))
+                .sum();
+            Some((v, mesh.position(v)? + moved))
+        })
+        .collect();
 
     // --- write --------------------------------------------------------------
     for &f in &affected {
@@ -367,6 +500,16 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
         }
         if cleaned.len() >= 3 {
             mesh.add_face(&cleaned)?;
+        }
+    }
+    for ring in strip_rings {
+        let mut ring = ring;
+        ring.dedup();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() >= 3 {
+            out.faces.push(mesh.add_face(&ring)?);
         }
     }
     for wall in walls {
@@ -417,6 +560,12 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
                     .filter(|p| p.vertex == v)
                     .map(|p| p.created),
             )
+            .chain(
+                arc_verts
+                    .iter()
+                    .filter(|(_, _, vertex)| *vertex == v)
+                    .flat_map(|(_, made, _)| made.iter().copied()),
+            )
             .filter(|w| mesh.vert(*w).is_some())
             .collect();
         if ring.len() < 3 {
@@ -446,7 +595,19 @@ pub fn bevel_edges(mesh: &mut BMesh, edges: &[EdgeId], width: f32) -> Result<Bev
         }
         let cycle = cycle.clone();
         if let Ok(cap) = super::fill::fill(mesh, &cycle) {
-            out.caps.extend(cap.faces);
+            if segments < 2 {
+                out.caps.extend(cap.faces);
+                continue;
+            }
+            // Rounded edges around a flat cap read as a cut corner. Poked
+            // instead: a fan to one point pushed out onto the round.
+            let centre = centres.iter().find(|(w, _)| *w == v).map(|(_, c)| *c);
+            for face in cap.faces {
+                match centre.and_then(|c| poke_onto_round(mesh, face, c)) {
+                    Some(fan) => out.caps.extend(fan),
+                    None => out.caps.push(face),
+                }
+            }
         }
     }
 
@@ -468,10 +629,64 @@ fn corner_edges(mesh: &BMesh, face: FaceId, vertex: VertId) -> Option<(EdgeId, E
     Some((mesh.loop_edge(previous)?, mesh.loop_edge(l)?))
 }
 
+/// Replaces `face` with a fan of triangles to a new point on the round about
+/// `centre`: the face's own middle, carried out from `centre` to the average
+/// distance its corners are. `None`, leaving the face, if it cannot be done.
+fn poke_onto_round(mesh: &mut BMesh, face: FaceId, centre: Vec3) -> Option<Vec<FaceId>> {
+    let ring = mesh.face_verts(face);
+    let points: Vec<Vec3> = ring.iter().filter_map(|v| mesh.position(*v)).collect();
+    if points.len() != ring.len() || ring.len() < 4 {
+        return None;
+    }
+    let middle = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    let radius = points.iter().map(|p| (*p - centre).length()).sum::<f32>() / points.len() as f32;
+    let outward = (middle - centre).normalize_or_zero();
+    if outward == Vec3::ZERO || radius <= 0.0 {
+        return None;
+    }
+    mesh.remove_face(face);
+    let apex = mesh.add_vert(centre + outward * radius);
+    let mut fan = Vec::with_capacity(ring.len());
+    for i in 0..ring.len() {
+        fan.push(mesh.add_face(&[ring[i], ring[(i + 1) % ring.len()], apex]).ok()?);
+    }
+    Some(fan)
+}
+
 /// Bevels the selected edges.
 pub fn bevel_selected(mesh: &mut BMesh, width: f32) -> Result<Bevel, BmError> {
+    bevel_selected_segments(mesh, width, 1)
+}
+
+/// Bevels the selected edges into `segments` strips on a round profile.
+pub fn bevel_selected_segments(mesh: &mut BMesh, width: f32, segments: u32) -> Result<Bevel, BmError> {
     let edges = mesh.selected_edges();
-    bevel_edges(mesh, &edges, width)
+    bevel_edges_segments(mesh, &edges, width, segments)
+}
+
+/// The points strictly between `from` and `to` on a round profile about
+/// `corner`, for `segments` strips.
+///
+/// `from - corner` and `to - corner` are the two offsets the bevel made, one
+/// in each face; the curve leaves `from` heading back along the first and
+/// arrives at `to` along the second, so it meets both faces tangentially. On
+/// a square corner with equal offsets it is a quarter circle; on any other it
+/// is the same quarter circle carried by the affine map that takes the axes
+/// to the two offsets, which keeps both tangencies.
+///
+/// `corner` is the original vertex moved along whatever edges the two ends
+/// share: nothing for a single edge's wall, the bevelled edge itself where its
+/// neighbours are bevelled too, as on a cube bevelled all round. It depends
+/// only on the two ends, which is what lets two walls ending on the same pair
+/// agree on the curve between them.
+fn arc(corner: Vec3, from: Vec3, to: Vec3, segments: u32) -> Vec<Vec3> {
+    let (u, v) = (from - corner, to - corner);
+    (1..segments)
+        .map(|i| {
+            let t = std::f32::consts::FRAC_PI_2 * i as f32 / segments as f32;
+            corner + u * (1.0 - t.sin()) + v * (1.0 - t.cos())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -791,5 +1006,86 @@ mod tests {
         let all: Vec<EdgeId> = m.edge_ids().collect();
         bevel_edges(&mut m, &all, 0.3).unwrap();
         assert_eq!(m.to_mesh_data().validate(), Vec::new());
+    }
+
+    /// Every new strip faces away from the cube's centre.
+    fn strips_face_out(mesh: &BMesh, faces: &[FaceId]) -> bool {
+        faces.iter().all(|f| {
+            let ring: Vec<Vec3> = mesh.face_verts(*f).iter().filter_map(|v| mesh.position(*v)).collect();
+            let centre: Vec3 = ring.iter().copied().sum::<Vec3>() / ring.len() as f32;
+            mesh.face_normal(*f).dot(centre) > 0.0
+        })
+    }
+
+    #[test]
+    fn segments_round_one_edge_into_a_quarter_cylinder() {
+        let mut m = cube();
+        let e = m.edge_ids().next().unwrap();
+        let [a, b] = m.edge_verts(e).unwrap();
+        let (pa, pb) = (m.position(a).unwrap(), m.position(b).unwrap());
+        let out = bevel_edges_segments(&mut m, &[e], 0.4, 4).unwrap();
+        m.assert_valid();
+        assert!(!out.clamped);
+        assert_eq!(out.faces.len(), 4, "four strips");
+        assert!(watertight(&m));
+        assert_eq!(euler(&m), 2);
+        assert!(strips_face_out(&m, &out.faces));
+
+        // Every point on the round lies half a width from the axis the round
+        // turns about: the old edge moved in by the width along both faces.
+        let along = (pb - pa).normalize();
+        let inward = -(pa + pb) * 0.5;
+        let inward = (inward - along * inward.dot(along)).normalize();
+        let axis_point = pa + inward * (0.4 * std::f32::consts::SQRT_2);
+        for v in out.verts.iter().filter_map(|v| m.position(*v)) {
+            let d = v - axis_point;
+            let radial = (d - along * d.dot(along)).length();
+            assert!((radial - 0.4).abs() < 1e-4, "{v:?} is {radial} from the axis");
+        }
+    }
+
+    #[test]
+    fn segments_round_every_edge_of_a_cube_and_close_the_corners() {
+        let mut m = cube();
+        let edges: Vec<EdgeId> = m.edge_ids().collect();
+        let out = bevel_edges_segments(&mut m, &edges, 0.3, 3).unwrap();
+        m.assert_valid();
+        assert_eq!(out.faces.len(), 12 * 3);
+        // Each corner: three arcs of three strips meet, nine points round a
+        // fan of nine triangles bent onto the sphere.
+        assert_eq!(out.caps.len(), 8 * 9, "a fan on every corner");
+        for f in &out.caps {
+            for v in m.face_verts(*f) {
+                let p = m.position(v).unwrap();
+                let centre = p.signum() * (1.0 - 0.3);
+                assert!(((p - centre).length() - 0.3).abs() < 0.02, "{p:?} is off the round");
+            }
+        }
+        assert!(watertight(&m), "a corner was left open");
+        assert_eq!(euler(&m), 2);
+        assert!(strips_face_out(&m, &out.faces));
+    }
+
+    #[test]
+    fn segments_round_a_rim_with_the_walls_meeting_at_its_corners() {
+        // The top four edges, as on a table top: at each corner two rounded
+        // walls turn together, and must share their profile rather than leave
+        // a sliver between them.
+        let mut m = cube();
+        let top: Vec<EdgeId> = m
+            .edge_ids()
+            .filter(|e| {
+                let [a, b] = m.edge_verts(*e).unwrap();
+                m.position(a).unwrap().z > 0.5 && m.position(b).unwrap().z > 0.5
+            })
+            .collect();
+        assert_eq!(top.len(), 4);
+        let out = bevel_edges_segments(&mut m, &top, 0.4, 5).unwrap();
+        m.assert_valid();
+        assert_eq!(out.faces.len(), 4 * 5);
+        assert!(out.caps.is_empty(), "the walls meet; nothing is left to cap");
+        assert!(watertight(&m));
+        assert_eq!(euler(&m), 2);
+        assert!(strips_face_out(&m, &out.faces));
     }
 }

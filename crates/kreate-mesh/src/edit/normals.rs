@@ -256,6 +256,28 @@ pub fn set_sharp(mesh: &mut BMesh, edges: &[EdgeId], sharp: bool) -> usize {
     live.len()
 }
 
+/// Sets the subdivision crease of `edges`: 0 smooth, 1 sharp at every level,
+/// between them sharp for a while — see the Catmull–Clark module.
+pub fn set_crease(mesh: &mut BMesh, edges: &[EdgeId], weight: f32) -> usize {
+    let live: Vec<u32> = edges
+        .iter()
+        .filter(|e| mesh.edge(**e).is_some())
+        .map(|e| e.index())
+        .collect();
+    if live.is_empty() {
+        return 0;
+    }
+    let len = mesh.slot_count(Domain::Edge);
+    mesh.attributes_mut()
+        .ensure(names::CREASE, Domain::Edge, AttrType::F32, len);
+    if let Some(values) = mesh.attributes_mut().make_mut_f32(names::CREASE) {
+        for slot in &live {
+            values[*slot as usize] = weight.clamp(0.0, 1.0);
+        }
+    }
+    live.len()
+}
+
 /// Marks every edge whose two faces meet at more than `angle` as sharp.
 ///
 /// The auto-smooth operation, applied once rather than evaluated every frame.

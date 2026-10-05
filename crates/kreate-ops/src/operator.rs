@@ -85,6 +85,18 @@ pub trait Operator: 'static {
         true
     }
 
+    /// The parameters that would leave the document as it is, for an
+    /// operator whose parameters *are* the state it sets — a transform typed
+    /// into a panel, a material's numbers.
+    ///
+    /// A script line names only what it changes. Without this, everything it
+    /// left out would come from the defaults, and setting a material's colour
+    /// would quietly reset its roughness. `given` is what the line did say,
+    /// for an operator that needs it to know what it is about (a slot).
+    fn current(_ctx: &Context, _doc: &Document, _given: &PropertyMap) -> Option<Self::Params> {
+        None
+    }
+
     /// Performs the work. Reads only `params` and the document.
     fn execute(
         params: &Self::Params,
@@ -105,6 +117,7 @@ pub struct OperatorInfo {
     pub schema: &'static [PropertyDesc],
     defaults: fn() -> PropertyMap,
     poll: fn(&Context, &Document) -> bool,
+    current: fn(&Context, &Document, &PropertyMap) -> Option<PropertyMap>,
     exec: fn(&PropertyMap, &mut DocMut<'_>, &Context) -> Result<OpResult, OpError>,
 }
 
@@ -116,6 +129,7 @@ impl OperatorInfo {
             schema: O::Params::schema(),
             defaults: O::Params::defaults_map,
             poll: O::poll,
+            current: |ctx, doc, given| O::current(ctx, doc, given).map(|p| p.to_map()),
             exec: |map, doc, ctx| {
                 // The one place parameters cross from runtime-typed to typed.
                 // `from_map` fills in missing entries from the defaults and
@@ -133,6 +147,18 @@ impl OperatorInfo {
 
     pub fn poll(&self, ctx: &Context, doc: &Document) -> bool {
         (self.poll)(ctx, doc)
+    }
+
+    /// Fills what `given` leaves out from the document as it stands, for an
+    /// operator that says what that is (see [`Operator::current`]). What is
+    /// left after that still comes from the defaults.
+    pub fn fill_from_current(&self, ctx: &Context, doc: &Document, given: &mut PropertyMap) {
+        let Some(current) = (self.current)(ctx, doc, given) else { return };
+        for (name, value) in current.iter() {
+            if given.get(name).is_none() {
+                given.set(name, value.clone());
+            }
+        }
     }
 
     /// i18n key for the operator's own name.

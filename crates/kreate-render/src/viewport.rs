@@ -1516,6 +1516,10 @@ pub struct Viewport {
     /// Whether to draw the ground grid. A user-facing toggle, and what lets a
     /// test compare geometry without the world-anchored lattice in the way.
     pub show_grid: bool,
+    /// At most this many frames in a still view's mean, below the usual
+    /// limit: what a render asks for when it wants a draft quickly, or fewer
+    /// samples than the path tracer's default. `None` is the default.
+    pub sample_cap: Option<u32>,
     /// Colour faces blue from the front and red from the back — Blender's Face
     /// Orientation overlay. Solid shading only.
     pub face_orientation: bool,
@@ -2492,6 +2496,7 @@ impl Viewport {
             shading: ShadingMode::Studio,
             background: palette::clear(palette::VIEWPORT),
             show_grid: true,
+            sample_cap: None,
             face_orientation: false,
             cluster_path: false,
             lod_budget: Budget::default(),
@@ -4332,11 +4337,12 @@ impl Viewport {
     /// How many frames a still view takes: the raster mean's sixteen, or the
     /// path tracer's hundreds.
     fn sample_limit(&self) -> u32 {
-        if self.path_tracing() {
+        let limit = if self.path_tracing() {
             crate::pathtrace::SAMPLES
         } else {
             crate::accum::SAMPLES
-        }
+        };
+        self.sample_cap.map_or(limit, |cap| cap.clamp(1, limit))
     }
 
     /// Whether this frame is path traced: asked for, in the rendered view,
