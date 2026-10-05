@@ -1142,6 +1142,27 @@ impl App {
         // The mode decides which context a shortcut resolves in, so the
         // tooltips change with it: `X` deletes an object in one mode and
         // constrains an axis in the other.
+        // A brush moves vertices, so a mesh with few of them barely changes
+        // under one — the default cube has eight. Said once, on the way in,
+        // rather than left to look like a brush that does nothing.
+        if change.to.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+            let verts = self
+                .doc
+                .selection
+                .active
+                .and_then(|id| self.doc.object(id))
+                .and_then(|o| o.mesh())
+                .and_then(|m| self.doc.mesh(m))
+                .map(|m| m.num_verts())
+                .unwrap_or(0);
+            if verts < SCULPT_DENSE_ENOUGH {
+                let message = self
+                    .ui
+                    .catalog
+                    .get_args("sculpt-coarse", &[("count", &verts.to_string())]);
+                self.status(&message);
+            }
+        }
         self.refresh_command_info();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
@@ -8596,6 +8617,10 @@ fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
         && (a.fov_y - b.fov_y).abs() <= 1e-9
         && a.projection == b.projection
 }
+
+/// Below this many vertices a mesh is too coarse for a brush to shape
+/// visibly, and entering sculpt mode says so.
+const SCULPT_DENSE_ENOUGH: u32 = 1000;
 
 /// What became of one line of a script.
 struct ScriptLine {

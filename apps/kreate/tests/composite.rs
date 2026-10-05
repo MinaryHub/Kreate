@@ -1974,6 +1974,23 @@ fn shot_claude_sign_in() {
     }
 }
 
+/// Sculpt mode, in the default layout: the brush and its settings must be
+/// on screen, not scrolled off the header's end.
+#[test]
+fn shot_sculpt() {
+    let doc = doc_with_cube();
+    FORCED_MODE.with(|m| m.set(Some(kreate_ops::operator::Mode::Sculpt)));
+    let shot = composite_with(&doc, "ko-KR", false, |_| {});
+    let narrow = composite_with(&doc, "ko-KR", false, |state| state.switch_workspace(5));
+    FORCED_MODE.with(|m| m.set(None));
+    let (Some(shot), Some(narrow)) = (shot, narrow) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("sculpt-ko");
+    narrow.dump("sculpt-narrow-ko");
+}
+
 /// Help ▸ Contact's form, with a message being written, and About.
 #[test]
 fn shot_contact() {
