@@ -30,6 +30,15 @@ pub enum Tool {
     Inset,
     Bevel,
     LoopCut,
+    // --- sculpt mode -------------------------------------------------------
+    /// Builds the surface up, or digs it in.
+    SculptDraw,
+    /// Evens the surface out.
+    SculptSmooth,
+    /// Drags the surface under the brush along.
+    SculptGrab,
+    /// Swells the surface along its normals.
+    SculptInflate,
 }
 
 impl Tool {
@@ -44,6 +53,10 @@ impl Tool {
             Tool::Inset => "tool-inset",
             Tool::Bevel => "tool-bevel",
             Tool::LoopCut => "tool-loop-cut",
+            Tool::SculptDraw => "sculpt-draw",
+            Tool::SculptSmooth => "sculpt-smooth",
+            Tool::SculptGrab => "sculpt-grab",
+            Tool::SculptInflate => "sculpt-inflate",
         }
     }
 
@@ -51,6 +64,14 @@ impl Tool {
     pub const COMMON: [Tool; 4] = [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale];
     /// The tools edit mode adds, in the order Blender lists them.
     pub const EDIT: [Tool; 4] = [Tool::Extrude, Tool::Inset, Tool::Bevel, Tool::LoopCut];
+    /// Sculpt mode's brushes, in the order of the brush menu — so a brush's
+    /// index here is its number in the brush setting.
+    pub const SCULPT: [Tool; 4] = [
+        Tool::SculptDraw,
+        Tool::SculptSmooth,
+        Tool::SculptGrab,
+        Tool::SculptInflate,
+    ];
 }
 
 /// Side of the icon's drawing area, in points.
@@ -139,6 +160,77 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
     let line = Stroke::new(1.6, ink);
     let thin = Stroke::new(1.0, ink.gamma_multiply(0.55));
     match tool {
+        // A mound rising out of a line: clay put on.
+        Tool::SculptDraw => {
+            let ground: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let x = 0.08 + i as f32 / 20.0 * 0.84;
+                    let bump = (-((x - 0.5) / 0.17).powi(2)).exp() * 0.42;
+                    at(x, 0.78 - bump)
+                })
+                .collect();
+            p.add(egui::Shape::line(ground, line));
+            p.line_segment([at(0.5, 0.06), at(0.5, 0.26)], thin);
+            p.line_segment([at(0.4, 0.16), at(0.6, 0.16)], thin);
+        }
+        // A rough line above, a smooth one below.
+        Tool::SculptSmooth => {
+            let rough: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    at(
+                        0.1 + i as f32 / 12.0 * 0.8,
+                        0.3 + if i % 2 == 0 { -0.08 } else { 0.08 },
+                    )
+                })
+                .collect();
+            p.add(egui::Shape::line(rough, thin));
+            let smooth: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let t = i as f32 / 20.0;
+                    at(
+                        0.1 + t * 0.8,
+                        0.7 + (t * std::f32::consts::TAU).sin() * 0.06,
+                    )
+                })
+                .collect();
+            p.add(egui::Shape::line(smooth, line));
+        }
+        // A surface pulled sideways by an arrow.
+        Tool::SculptGrab => {
+            let ground: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let x = 0.08 + i as f32 / 20.0 * 0.84;
+                    let bump = (-((x - 0.62) / 0.14).powi(2)).exp() * 0.3;
+                    at(x, 0.8 - bump)
+                })
+                .collect();
+            p.add(egui::Shape::line(ground, line));
+            p.line_segment([at(0.2, 0.3), at(0.7, 0.3)], line);
+            arrow_head(
+                ui,
+                at(0.74, 0.3),
+                Vec2::new(1.0, 0.0),
+                area.width() * 0.18,
+                ink,
+            );
+        }
+        // A circle with arrows out of it.
+        Tool::SculptInflate => {
+            let c = at(0.5, 0.5);
+            p.circle_stroke(c, area.width() * 0.2, line);
+            for (dx, dy) in [(0.0f32, -1.0f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
+                let from = Pos2::new(
+                    c.x + dx * area.width() * 0.27,
+                    c.y + dy * area.height() * 0.27,
+                );
+                let tip = Pos2::new(
+                    c.x + dx * area.width() * 0.46,
+                    c.y + dy * area.height() * 0.46,
+                );
+                p.line_segment([from, tip], thin);
+                arrow_head(ui, tip, Vec2::new(dx, dy), area.width() * 0.12, ink);
+            }
+        }
         // A dashed rectangle with a cursor arrow: the marquee.
         Tool::Select => {
             let r = Rect::from_min_max(at(0.08, 0.08), at(0.72, 0.72));

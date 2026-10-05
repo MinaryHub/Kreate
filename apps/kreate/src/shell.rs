@@ -2613,6 +2613,7 @@ fn draw_area_header(
                         // other key does and what the menus after it contain.
                         draw_mode_menu(ui, state, doc, mode);
                         ui.separator();
+                        draw_brush_settings(ui, state, l, area.id.0, mode);
                     }
 
                     // Every editor has a View menu, and the area operations
@@ -2687,71 +2688,6 @@ fn draw_area_header(
                                 .on_hover_text(&l.pivot_label);
                             draw_tool_settings(ui, state, area.id.0, mode);
                         }
-                        // The sculpt brush, in its header.
-                        if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
-                            ui.separator();
-                            let names = [
-                                &l.sculpt_draw,
-                                &l.sculpt_smooth,
-                                &l.sculpt_grab,
-                                &l.sculpt_inflate,
-                            ];
-                            let s = &mut state.sculpt;
-                            egui::ComboBox::from_id_salt(("sculpt-brush", area.id.0))
-                                .selected_text(names[s.brush.min(3) as usize].as_str())
-                                .show_ui(ui, |ui| {
-                                    for (i, name) in names.iter().enumerate() {
-                                        ui.selectable_value(&mut s.brush, i as u32, name.as_str());
-                                    }
-                                });
-                            ui.label(state.catalog.get("paint-radius"));
-                            ui.add(
-                                egui::DragValue::new(&mut state.sculpt.radius)
-                                    .range(4.0..=400.0)
-                                    .speed(1.0)
-                                    .suffix(" px"),
-                            );
-                            ui.label(state.catalog.get("paint-strength"));
-                            ui.add(
-                                egui::DragValue::new(&mut state.sculpt.strength)
-                                    .range(0.0..=1.0)
-                                    .speed(0.01)
-                                    .max_decimals(2),
-                            );
-                            ui.checkbox(
-                                &mut state.sculpt.mirror_x,
-                                state.catalog.get("sculpt-mirror-x"),
-                            );
-                        }
-                        // The brush, where Blender keeps it: in the header of
-                        // the mode that uses it.
-                        if mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
-                            ui.separator();
-                            let p = &mut state.paint;
-                            ui.label(state.catalog.get("paint-weight"));
-                            ui.add(
-                                egui::DragValue::new(&mut p.weight)
-                                    .range(0.0..=1.0)
-                                    .speed(0.01)
-                                    .max_decimals(2),
-                            );
-                            ui.label(state.catalog.get("paint-radius"));
-                            ui.add(
-                                egui::DragValue::new(&mut p.radius)
-                                    .range(2.0..=400.0)
-                                    .speed(1.0)
-                                    .suffix(" px"),
-                            );
-                            ui.label(state.catalog.get("paint-strength"));
-                            ui.add(
-                                egui::DragValue::new(&mut p.strength)
-                                    .range(0.0..=1.0)
-                                    .speed(0.01)
-                                    .max_decimals(2),
-                            );
-                            ui.checkbox(&mut p.front_only, state.catalog.get("paint-front-only"));
-                            ui.checkbox(&mut p.falloff, state.catalog.get("paint-falloff"));
-                        }
                     }
                 });
             });
@@ -2768,6 +2704,83 @@ fn draw_area_header(
             });
         }
     });
+}
+
+/// A brush mode's brush, in its header — first after the mode, ahead of the
+/// menus, because it is what the hand is using: a narrow viewport scrolls the
+/// menus off the end of the row before it loses the brush.
+fn draw_brush_settings(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    l: &Labels,
+    area: u32,
+    mode: kreate_ops::operator::Mode,
+) {
+    // The sculpt brush, in its header.
+    if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+        let names = [
+            &l.sculpt_draw,
+            &l.sculpt_smooth,
+            &l.sculpt_grab,
+            &l.sculpt_inflate,
+        ];
+        let s = &mut state.sculpt;
+        egui::ComboBox::from_id_salt(("sculpt-brush", area))
+            .selected_text(names[s.brush.min(3) as usize].as_str())
+            .show_ui(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    ui.selectable_value(&mut s.brush, i as u32, name.as_str());
+                }
+            });
+        ui.label(state.catalog.get("paint-radius"));
+        ui.add(
+            egui::DragValue::new(&mut state.sculpt.radius)
+                .range(4.0..=400.0)
+                .speed(1.0)
+                .suffix(" px"),
+        );
+        ui.label(state.catalog.get("paint-strength"));
+        ui.add(
+            egui::DragValue::new(&mut state.sculpt.strength)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .max_decimals(2),
+        );
+        ui.checkbox(
+            &mut state.sculpt.mirror_x,
+            state.catalog.get("sculpt-mirror-x"),
+        );
+        ui.separator();
+    }
+    // The brush, where Blender keeps it: in the header of
+    // the mode that uses it.
+    if mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
+        let p = &mut state.paint;
+        ui.label(state.catalog.get("paint-weight"));
+        ui.add(
+            egui::DragValue::new(&mut p.weight)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .max_decimals(2),
+        );
+        ui.label(state.catalog.get("paint-radius"));
+        ui.add(
+            egui::DragValue::new(&mut p.radius)
+                .range(2.0..=400.0)
+                .speed(1.0)
+                .suffix(" px"),
+        );
+        ui.label(state.catalog.get("paint-strength"));
+        ui.add(
+            egui::DragValue::new(&mut p.strength)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .max_decimals(2),
+        );
+        ui.checkbox(&mut p.front_only, state.catalog.get("paint-front-only"));
+        ui.checkbox(&mut p.falloff, state.catalog.get("paint-falloff"));
+        ui.separator();
+    }
 }
 
 /// How wide the viewport header's right-hand group will be this frame.
@@ -3807,6 +3820,7 @@ fn draw_viewport(
         );
     }
     let toolbar = draw_toolbar(ui, state, mode, rect);
+    draw_sculpt_box(ui, state, mode, rect, toolbar);
     draw_view_info(ui, state, doc, mode, l, rect, toolbar);
     draw_select_band(ui, state, rect);
     draw_modal_header(ui, state, rect);
@@ -4036,7 +4050,12 @@ fn draw_toolbar(
     // A skeleton being built has one tool of its own after the common ones:
     // Extrude, which is most of what building one is.
     let bones = mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints;
-    let tools: Vec<Tool> = if mode.info().edit_tools {
+    // Sculpt mode's column is its brushes, as Blender's is: what a drag does
+    // there is decided by the brush, and the transform tools mean nothing.
+    let sculpt = mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt;
+    let tools: Vec<Tool> = if sculpt {
+        Tool::SCULPT.to_vec()
+    } else if mode.info().edit_tools {
         Tool::COMMON
             .iter()
             .chain(Tool::EDIT.iter())
@@ -4056,7 +4075,7 @@ fn draw_toolbar(
     let gap = 2.0;
     // A gap between the common group and the edit group, the way Blender
     // separates its tool groups: the eye finds the boundary before it reads.
-    let groups_gap = if tools.len() > Tool::COMMON.len() {
+    let groups_gap = if !sculpt && tools.len() > Tool::COMMON.len() {
         8.0
     } else {
         0.0
@@ -4085,11 +4104,15 @@ fn draw_toolbar(
     // The lit tool is the transform in progress, if any; otherwise Select,
     // which is what a click does when nothing else is going on. The header
     // says which gesture is running, so that is what is read.
-    let active = state
-        .modal
-        .as_ref()
-        .and_then(|m| m.tool)
-        .unwrap_or(Tool::Select);
+    let active = if sculpt {
+        Tool::SCULPT[(state.sculpt.brush as usize).min(Tool::SCULPT.len() - 1)]
+    } else {
+        state
+            .modal
+            .as_ref()
+            .and_then(|m| m.tool)
+            .unwrap_or(Tool::Select)
+    };
 
     ui.scope_builder(
         egui::UiBuilder::new().max_rect(rect.shrink(pad)).id_salt((
@@ -4102,7 +4125,7 @@ fn draw_toolbar(
             ui.spacing_mut().item_spacing = egui::vec2(0.0, gap);
             ui.vertical(|ui| {
                 for (i, tool) in tools.iter().enumerate() {
-                    if i == Tool::COMMON.len() {
+                    if !sculpt && i == Tool::COMMON.len() {
                         ui.add_space(groups_gap - gap);
                     }
                     let name = state.catalog.get(tool.label_key());
@@ -4119,6 +4142,10 @@ fn draw_toolbar(
                         Tool::Inset => Some("mesh.inset"),
                         Tool::Bevel => Some("mesh.bevel"),
                         Tool::LoopCut => Some("mesh.loop_cut"),
+                        Tool::SculptDraw
+                        | Tool::SculptSmooth
+                        | Tool::SculptGrab
+                        | Tool::SculptInflate => None,
                     };
                     let tip = match op.and_then(|id| state.command_info.get(id)) {
                         Some(info) if !info.shortcut.is_empty() => {
@@ -4174,6 +4201,16 @@ fn draw_toolbar(
                             Tool::LoopCut => {
                                 state.queue.dispatch("mesh.loop_cut", PropertyMap::new())
                             }
+                            // The brush the next stroke uses: the same
+                            // setting as the header's brush menu.
+                            Tool::SculptDraw
+                            | Tool::SculptSmooth
+                            | Tool::SculptGrab
+                            | Tool::SculptInflate => {
+                                if let Some(i) = Tool::SCULPT.iter().position(|t| t == tool) {
+                                    state.sculpt.brush = i as u32;
+                                }
+                            }
                         }
                     }
                 }
@@ -4181,6 +4218,77 @@ fn draw_toolbar(
         },
     );
     rect
+}
+
+/// Sculpt mode's brush settings, in a box under the brush column: where the
+/// hand already is, and on screen however narrow the viewport — the header
+/// has them too, but a narrow header scrolls them out of sight.
+fn draw_sculpt_box(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    mode: kreate_ops::operator::Mode,
+    viewport: egui::Rect,
+    toolbar: egui::Rect,
+) {
+    if mode.acts_on() != kreate_ops::mode::ActsOn::Sculpt || toolbar == egui::Rect::NOTHING {
+        return;
+    }
+    let theme = kreate_ui::theme::from_ui(ui);
+    let width = 132.0;
+    let height = 112.0;
+    let rect = egui::Rect::from_min_size(
+        toolbar.left_bottom() + egui::vec2(0.0, 8.0),
+        egui::vec2(width, height),
+    );
+    if rect.bottom() > viewport.bottom() - 8.0 || rect.right() > viewport.right() - 8.0 {
+        return;
+    }
+    state.viewport_blockers.push(rect);
+    let radius = egui::CornerRadius::same(theme.radius + 1);
+    let painter = ui.painter().with_clip_rect(viewport);
+    painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.96));
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, theme.border),
+        egui::StrokeKind::Inside,
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rect.shrink(8.0)).id_salt((
+            "sculpt-box",
+            viewport.min.x as i32,
+            viewport.min.y as i32,
+        )),
+        |ui| {
+            ui.set_clip_rect(rect);
+            egui::Grid::new(("sculpt-box-grid", viewport.min.x as i32))
+                .num_columns(2)
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(state.catalog.get("paint-radius")).small());
+                    ui.add(
+                        egui::DragValue::new(&mut state.sculpt.radius)
+                            .range(4.0..=400.0)
+                            .speed(1.0)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                    ui.label(egui::RichText::new(state.catalog.get("paint-strength")).small());
+                    ui.add(
+                        egui::DragValue::new(&mut state.sculpt.strength)
+                            .range(0.0..=1.0)
+                            .speed(0.01)
+                            .max_decimals(2),
+                    );
+                    ui.end_row();
+                });
+            ui.add_space(2.0);
+            ui.checkbox(
+                &mut state.sculpt.mirror_x,
+                egui::RichText::new(state.catalog.get("sculpt-mirror-x")).small(),
+            );
+        },
+    );
 }
 
 /// The view information in the viewport's top-left corner.
@@ -8311,6 +8419,7 @@ chat-open-sign-in = Open the sign-in page
 chat-code-hint = Paste the code here if the page shows one
 chat-code-submit = Submit
 chat-cancel = Cancel
+sculpt-coarse = This mesh has { $count } vertices: too few for a brush to shape. Add detail first, with a subdivide modifier applied or Subdivide in edit mode.
 menu-help = Help
 help-contact = Contact the Developers…
 help-about = About Kreate
@@ -9124,6 +9233,7 @@ chat-open-sign-in = 로그인 페이지 열기
 chat-code-hint = 페이지에 코드가 나오면 여기에 붙여 넣으세요
 chat-code-submit = 확인
 chat-cancel = 취소
+sculpt-coarse = 이 메시는 정점이 { $count }개라 브러시로 모양을 만들기에 너무 적습니다. 먼저 서브디비전 모디파이어를 적용하거나 편집 모드에서 세분화(Subdivide)로 정점을 늘리세요.
 menu-help = 도움말
 help-contact = 개발자에게 문의하기…
 help-about = Kreate 정보
@@ -10241,6 +10351,7 @@ mod tests {
             "chat-code-hint",
             "chat-code-submit",
             "chat-cancel",
+            "sculpt-coarse",
             "menu-help",
             "help-contact",
             "help-about",
