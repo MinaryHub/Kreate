@@ -105,6 +105,10 @@ pub struct ShellState {
     /// Who Claude Code is signed in as, and the code box for signing in.
     pub chat_account: kreate_ui::chat::ChatAccount,
     pub chat_code: String,
+    /// Help ▸ Contact's form, kept while closed so a half-written message
+    /// survives, and whether Help ▸ About is showing.
+    pub contact: kreate_ui::contact::ContactForm,
+    pub about_open: bool,
     /// Which material slot the Material tab is editing.
     ///
     /// **Interface state, not document state.** Blender keeps this on the
@@ -544,6 +548,8 @@ impl Default for ShellState {
             chat_busy: false,
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
+            contact: kreate_ui::contact::ContactForm::new(),
+            about_open: false,
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -1244,6 +1250,26 @@ struct Labels {
     exposure_manual: String,
     menu_file: String,
     menu_edit: String,
+    menu_help: String,
+    help_contact: String,
+    help_about: String,
+    contact_title: String,
+    contact_intro: String,
+    contact_kind_bug: String,
+    contact_kind_feature: String,
+    contact_kind_question: String,
+    contact_kind_other: String,
+    contact_name: String,
+    contact_email: String,
+    contact_email_hint: String,
+    contact_message_hint: String,
+    contact_details: String,
+    contact_send: String,
+    contact_close: String,
+    contact_sending: String,
+    contact_sent: String,
+    about_title: String,
+    about_version: String,
     menu_view: String,
     menu_select: String,
     menu_transform: String,
@@ -1515,6 +1541,26 @@ impl Labels {
             exposure_manual: t("exposure-manual"),
             menu_file: t("menu-file"),
             menu_edit: t("menu-edit"),
+            menu_help: t("menu-help"),
+            help_contact: t("help-contact"),
+            help_about: t("help-about"),
+            contact_title: t("contact-title"),
+            contact_intro: t("contact-intro"),
+            contact_kind_bug: t("contact-kind-bug"),
+            contact_kind_feature: t("contact-kind-feature"),
+            contact_kind_question: t("contact-kind-question"),
+            contact_kind_other: t("contact-kind-other"),
+            contact_name: t("contact-name"),
+            contact_email: t("contact-email"),
+            contact_email_hint: t("contact-email-hint"),
+            contact_message_hint: t("contact-message-hint"),
+            contact_details: t("contact-details"),
+            contact_send: t("contact-send"),
+            contact_close: t("contact-close"),
+            contact_sending: t("contact-sending"),
+            contact_sent: t("contact-sent"),
+            about_title: t("about-title"),
+            about_version: t("about-version"),
             menu_view: t("menu-view"),
             menu_select: t("menu-select"),
             menu_transform: t("menu-transform"),
@@ -1836,6 +1882,7 @@ pub fn draw(
             }
         });
     state.apply_area_edits();
+    draw_help_windows(ui.ctx(), state, &l);
     draw_search(ui, state, &l, history, mode);
     draw_pie(ui, state, &l, doc, mode);
     viewport_rect
@@ -2827,6 +2874,14 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 // The history, as the script it already is — Blender's "Copy
                 // as Python", for the language this application speaks.
                 entry("edit.copy_script", &l.menu_copy_script, dispatch("edit.copy_script")),
+            ],
+        },
+        TopMenu {
+            label: l.menu_help.clone(),
+            nodes: vec![
+                entry("help.contact", &l.help_contact, Run::Command(Command::OpenContact)),
+                Separator,
+                entry("help.about", &l.help_about, Run::Command(Command::OpenAbout)),
             ],
         },
     ]
@@ -3827,6 +3882,38 @@ fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labe
     let mut input = std::mem::take(&mut state.console_input);
     kreate_ui::console::console(ui, &text, &lines, &mut input, &mut state.queue);
     state.console_input = input;
+}
+
+/// Help's two windows: the contact form and About.
+fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
+    let text = kreate_ui::contact::ContactText {
+        title: l.contact_title.clone(),
+        intro: l.contact_intro.clone(),
+        kinds: [
+            l.contact_kind_bug.clone(),
+            l.contact_kind_feature.clone(),
+            l.contact_kind_question.clone(),
+            l.contact_kind_other.clone(),
+        ],
+        name: l.contact_name.clone(),
+        email: l.contact_email.clone(),
+        email_hint: l.contact_email_hint.clone(),
+        message_hint: l.contact_message_hint.clone(),
+        details: l.contact_details.clone(),
+        send: l.contact_send.clone(),
+        close: l.contact_close.clone(),
+        sending: l.contact_sending.clone(),
+        sent: l.contact_sent.clone(),
+    };
+    // i18n-exempt: a version and a platform
+    let details = format!("Kreate {} · {}", crate::version::describe(), crate::version::platform());
+    kreate_ui::contact::contact_window(ctx, &text, &mut state.contact, &details, &mut state.queue);
+    let about = kreate_ui::contact::AboutText {
+        title: l.about_title.clone(),
+        version: l.about_version.clone(),
+        close: l.contact_close.clone(),
+    };
+    kreate_ui::contact::about_window(ctx, &about, &mut state.about_open, &crate::version::describe(), &crate::version::platform());
 }
 
 /// The Claude panel: the conversation, and a box to say the next thing.
@@ -6880,6 +6967,10 @@ op-app-search = Search
 op-app-search-desc = Find any menu command by typing part of its name, and run it with Enter.
 op-edit-copy-script = Copy History as Script
 op-edit-copy-script-desc = Puts every edit so far on the clipboard as script lines the console and Run Script can replay.
+op-help-contact = Contact the Developers
+op-help-contact-desc = Writes to the developers: a problem, a feature you would like, a question. An email address is only needed for a reply.
+op-help-about = About Kreate
+op-help-about-desc = Shows which version of Kreate this is and the commit it was built from.
 op-file-run-script = Run Script
 op-file-run-script-desc = Runs a text file of script lines, one undo step per line, the way the console runs what is typed into it.
 world-pick-image = Environment...
@@ -7283,6 +7374,26 @@ chat-open-sign-in = Open the sign-in page
 chat-code-hint = Paste the code here if the page shows one
 chat-code-submit = Submit
 chat-cancel = Cancel
+menu-help = Help
+help-contact = Contact the Developers…
+help-about = About Kreate
+contact-title = Contact the Developers
+contact-intro = Report a problem, ask for a feature or ask a question. Leave an email address if you would like an answer.
+contact-kind-bug = Bug
+contact-kind-feature = Feature Request
+contact-kind-question = Question
+contact-kind-other = Other
+contact-name = Name
+contact-email = Email
+contact-email-hint = Optional, for a reply
+contact-message-hint = What happened, or what you would like…
+contact-details = Include the version and platform
+contact-send = Send
+contact-close = Close
+contact-sending = Sending…
+contact-sent = Sent. Thank you!
+about-title = About Kreate
+about-version = Version
 uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
 adjust-nothing = No operation to adjust
 status-counts = { $objects } objects, { $meshes } meshes, { $selected } selected
@@ -7654,6 +7765,10 @@ op-app-search = 검색
 op-app-search-desc = 메뉴 명령의 이름 일부를 입력해 찾고, Enter로 실행합니다.
 op-edit-copy-script = 히스토리를 스크립트로 복사
 op-edit-copy-script-desc = 지금까지의 모든 편집을 콘솔과 스크립트 실행이 다시 돌릴 수 있는 스크립트 줄로 클립보드에 넣습니다.
+op-help-contact = 개발자에게 문의하기
+op-help-contact-desc = 개발자에게 문제, 원하는 기능, 질문을 보냅니다. 답장을 받으려면 이메일 주소만 적으면 됩니다.
+op-help-about = Kreate 정보
+op-help-about-desc = 이 Kreate의 버전과 빌드한 커밋을 보여 줍니다.
 op-file-run-script = 스크립트 실행
 op-file-run-script-desc = 스크립트 줄이 적힌 텍스트 파일을 실행합니다. 콘솔에 입력한 것처럼 한 줄이 되돌리기 한 단계입니다.
 world-pick-image = 환경 이미지...
@@ -8072,6 +8187,26 @@ chat-open-sign-in = 로그인 페이지 열기
 chat-code-hint = 페이지에 코드가 나오면 여기에 붙여 넣으세요
 chat-code-submit = 확인
 chat-cancel = 취소
+menu-help = 도움말
+help-contact = 개발자에게 문의하기…
+help-about = Kreate 정보
+contact-title = 개발자에게 문의하기
+contact-intro = 문제를 알리거나 기능을 요청하거나 질문을 남겨 주세요. 답장을 받으려면 이메일 주소를 적어 주세요.
+contact-kind-bug = 버그
+contact-kind-feature = 기능 요청
+contact-kind-question = 질문
+contact-kind-other = 기타
+contact-name = 이름
+contact-email = 이메일
+contact-email-hint = 선택, 답장 받을 주소
+contact-message-hint = 무슨 일이 있었는지, 무엇을 원하시는지 적어 주세요…
+contact-details = 버전과 플랫폼 정보 함께 보내기
+contact-send = 보내기
+contact-close = 닫기
+contact-sending = 보내는 중…
+contact-sent = 보냈습니다. 감사합니다!
+about-title = Kreate 정보
+about-version = 버전
 uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
 adjust-nothing = 조정할 작업이 없습니다
 status-counts = 오브젝트 { $objects }개, 메시 { $meshes }개, 선택 { $selected }개
@@ -9157,6 +9292,26 @@ mod tests {
             "chat-code-hint",
             "chat-code-submit",
             "chat-cancel",
+            "menu-help",
+            "help-contact",
+            "help-about",
+            "contact-title",
+            "contact-intro",
+            "contact-kind-bug",
+            "contact-kind-feature",
+            "contact-kind-question",
+            "contact-kind-other",
+            "contact-name",
+            "contact-email",
+            "contact-email-hint",
+            "contact-message-hint",
+            "contact-details",
+            "contact-send",
+            "contact-close",
+            "contact-sending",
+            "contact-sent",
+            "about-title",
+            "about-version",
             "material-no-slots",
             "material-add-slot",
             "material-remove-slot",

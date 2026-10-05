@@ -8,6 +8,7 @@
 
 pub mod area;
 pub mod chat;
+pub mod contact;
 pub mod command;
 pub mod command_info;
 pub mod command_palette;
