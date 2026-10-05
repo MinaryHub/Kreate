@@ -102,6 +102,9 @@ pub struct ShellState {
     pub chat_input: String,
     pub chat_log: Vec<kreate_ui::chat::ChatMessage>,
     pub chat_busy: bool,
+    /// Which assistant the chat panel talks to: an index into
+    /// `kreate::claude::Provider::ALL`.
+    pub chat_provider: usize,
     /// Who Claude Code is signed in as, and the code box for signing in.
     pub chat_account: kreate_ui::chat::ChatAccount,
     pub chat_code: String,
@@ -547,6 +550,7 @@ impl Default for ShellState {
             chat_input: String::new(),
             chat_log: Vec::new(),
             chat_busy: false,
+            chat_provider: 0,
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
@@ -4399,9 +4403,18 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     };
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
+    let names: Vec<&str> = crate::claude::Provider::ALL
+        .iter()
+        .map(|p| p.name())
+        .collect();
+    let providers = kreate_ui::chat::ChatProviders {
+        names: &names,
+        current: state.chat_provider,
+    };
     kreate_ui::chat::chat(
         ui,
         &text,
+        &providers,
         &state.chat_account,
         &state.chat_log,
         &mut input,
@@ -8252,7 +8265,7 @@ editor-properties = Properties
 editor-uv = UV Editor
 editor-preferences = Preferences
 editor-console = Console
-editor-claude = Claude
+editor-claude = AI Chat
 editor-shader = Shader Editor
 material-uses-nodes = This material uses nodes. Edit it in the Shader Editor.
 node-use-nodes = Use Nodes
@@ -8283,15 +8296,15 @@ node-socket-g = G
 node-socket-strength = Strength
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = Every edit you make appears here as a line of script. Type one to run it.
-chat-placeholder = Ask Claude to build or change something…
-chat-empty = Ask Claude about the scene, or to change it. Every edit it makes is one undo step.
+chat-placeholder = Ask for something to be built or changed…
+chat-empty = Ask about the scene, or to change it — with Claude, Gemini or ChatGPT, chosen above. Every edit it makes is one undo step.
 chat-send = Send
 chat-stop = Stop
 chat-new = New Chat
-chat-working = Claude is working…
+chat-working = Working…
 chat-stopped = Stopped.
-chat-checking = Checking the Claude account…
-chat-signed-out = Not signed in to Claude.
+chat-checking = Checking the account…
+chat-signed-out = Not signed in.
 chat-sign-in = Sign In
 chat-signing-in = Finish signing in in the browser that opened.
 chat-open-sign-in = Open the sign-in page
@@ -9065,7 +9078,7 @@ editor-properties = 특성
 editor-uv = UV 에디터
 editor-preferences = 환경 설정
 editor-console = 콘솔
-editor-claude = Claude
+editor-claude = AI 채팅
 editor-shader = 셰이더 에디터
 material-uses-nodes = 이 재질은 노드를 사용합니다. 셰이더 에디터에서 편집하세요.
 node-use-nodes = 노드 사용
@@ -9096,15 +9109,15 @@ node-socket-g = G
 node-socket-strength = 세기
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
-chat-placeholder = Claude에게 만들거나 바꿀 것을 말해 보세요…
-chat-empty = 장면에 대해 묻거나 바꿔 달라고 해 보세요. Claude가 하는 편집은 하나하나 실행 취소할 수 있습니다.
+chat-placeholder = 만들거나 바꿀 것을 말해 보세요…
+chat-empty = 장면에 대해 묻거나 바꿔 달라고 해 보세요. 위에서 Claude, Gemini, ChatGPT 중에 고를 수 있고, AI가 하는 편집은 하나하나 실행 취소할 수 있습니다.
 chat-send = 보내기
 chat-stop = 중지
 chat-new = 새 대화
-chat-working = Claude가 작업 중…
+chat-working = 작업 중…
 chat-stopped = 중지했습니다.
-chat-checking = Claude 계정 확인 중…
-chat-signed-out = Claude에 로그인되어 있지 않습니다.
+chat-checking = 계정 확인 중…
+chat-signed-out = 로그인되어 있지 않습니다.
 chat-sign-in = 로그인
 chat-signing-in = 열린 브라우저에서 로그인을 마치세요.
 chat-open-sign-in = 로그인 페이지 열기

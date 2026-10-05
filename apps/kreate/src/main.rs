@@ -553,6 +553,8 @@ struct App {
     bridge: Option<kreate::bridge::Bridge>,
     /// The Claude panel's conversation. See `kreate::claude`.
     chat: Option<kreate::claude::Chat>,
+    /// Whether the last chat entry is a reply still streaming in.
+    chat_streaming: bool,
     /// Help ▸ Contact's messages on their way. See `kreate::contact`.
     outbox: Option<kreate::contact::Outbox>,
     window: Option<Arc<Window>>,
@@ -817,6 +819,7 @@ impl App {
         Self {
             bridge: None,
             chat: None,
+            chat_streaming: false,
             outbox: None,
             window: None,
             gfx: None,
@@ -3504,7 +3507,25 @@ impl App {
         let Some(chat) = &mut self.chat else { return };
         for event in chat.poll() {
             let (role, text) = match event {
-                Event::Session(_) | Event::Done(None) => continue,
+                Event::Session(_) | Event::Done(None) => {
+                    self.chat_streaming = false;
+                    continue;
+                }
+                // A streamed reply: onto the end of what it is saying, while
+                // it is still saying it.
+                Event::TextPart(part) => {
+                    match self.ui.chat_log.last_mut() {
+                        Some(last) if last.role == ChatRole::Claude && self.chat_streaming => {
+                            last.text.push_str(&part)
+                        }
+                        _ => self.ui.chat_log.push(ChatMessage {
+                            role: ChatRole::Claude,
+                            text: part,
+                        }),
+                    }
+                    self.chat_streaming = true;
+                    continue;
+                }
                 Event::Account(account) => {
                     use kreate::claude::Account;
                     use kreate_ui::chat::ChatAccount;
@@ -3559,6 +3580,7 @@ impl App {
                 Event::Done(Some(why)) => (ChatRole::Error, why),
             };
             self.ui.chat_log.push(ChatMessage { role, text });
+            self.chat_streaming = false;
         }
         self.ui.chat_busy = chat.busy();
         if let Some(w) = &self.window {
@@ -4377,6 +4399,18 @@ impl App {
                     if let Some(chat) = &mut self.chat {
                         chat.stop();
                     }
+                }
+                Command::ChatProvider { index } => {
+                    let Some(provider) = kreate::claude::Provider::ALL.get(index).copied() else {
+                        continue;
+                    };
+                    if let Some(chat) = &mut self.chat {
+                        chat.set_provider(provider);
+                    }
+                    self.ui.chat_provider = index;
+                    self.ui.chat_log.clear();
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                    self.ui.chat_busy = false;
                 }
                 Command::ChatSignIn => {
                     if let Some(chat) = &mut self.chat {

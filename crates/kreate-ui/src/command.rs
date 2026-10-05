@@ -173,6 +173,11 @@ pub enum Command {
     ChatStop,
     /// From the Claude panel: forget the conversation and start another.
     ChatNew,
+    /// From the chat panel: talk to another assistant — an index into the
+    /// list the panel was given.
+    ChatProvider {
+        index: usize,
+    },
     /// From the Claude panel: sign Claude Code in, in the browser.
     ChatSignIn,
     /// From the Claude panel: the code the sign-in page showed.
