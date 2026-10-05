@@ -22,7 +22,7 @@
 
 use egui::{Panel, Ui};
 use kreate_i18n::{Catalog, TextKind};
-use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+use kreate_ops::{History, OperatorRegistry, PropertyMap};
 use kreate_scene::document::{ObjectData, ObjectId};
 use kreate_scene::modifier::ModifierKind;
 use kreate_scene::Document;
@@ -97,6 +97,14 @@ pub struct ShellState {
     /// takes them out of the log the way it takes them out of the document.
     pub console_input: String,
     pub console_log: Vec<kreate_ui::console::ConsoleLine>,
+    /// The Claude panel: what is being typed, the conversation, and whether
+    /// Claude is answering. The process behind it is the application's.
+    pub chat_input: String,
+    pub chat_log: Vec<kreate_ui::chat::ChatMessage>,
+    pub chat_busy: bool,
+    /// Who Claude Code is signed in as, and the code box for signing in.
+    pub chat_account: kreate_ui::chat::ChatAccount,
+    pub chat_code: String,
     /// Which material slot the Material tab is editing.
     ///
     /// **Interface state, not document state.** Blender keeps this on the
@@ -531,6 +539,11 @@ impl Default for ShellState {
             material_slot: 0,
             console_input: String::new(),
             console_log: Vec::new(),
+            chat_input: String::new(),
+            chat_log: Vec::new(),
+            chat_busy: false,
+            chat_account: kreate_ui::chat::ChatAccount::Checking,
+            chat_code: String::new(),
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -839,7 +852,7 @@ pub fn modifier_rows(
                 enabled: entry.enabled,
                 op_id: op_id.to_string(),
                 schema: info.schema,
-                params: setter_params(doc, index as u32, &entry.kind),
+                params: kreate_ops::ops::modifier::setter_params(doc, index as u32, &entry.kind),
                 // A boolean names another mesh object: offer them.
                 choices: match entry.kind {
                     ModifierKind::Boolean(_) => doc
@@ -866,74 +879,6 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
     }
 }
 
-/// A modifier's parameters, in its setter operator's terms.
-///
-/// The panel edits this and hands it straight back to the operator, so the
-/// values shown are the values applied — there is no third representation to
-/// drift out of step.
-fn setter_params(doc: &Document, index: u32, kind: &ModifierKind) -> PropertyMap {
-    let mut p = PropertyMap::new();
-    p.set("index", PropertyValue::Int(index as i64));
-    match kind {
-        ModifierKind::Mirror(m) => {
-            p.set("x", PropertyValue::Bool(m.x));
-            p.set("y", PropertyValue::Bool(m.y));
-            p.set("z", PropertyValue::Bool(m.z));
-            p.set(
-                "merge_threshold",
-                PropertyValue::Float(m.merge_threshold as f64),
-            );
-        }
-        ModifierKind::Subdivide(sub) => {
-            p.set("levels", PropertyValue::Int(sub.levels as i64));
-            p.set("smooth", PropertyValue::Bool(sub.smooth));
-        }
-        ModifierKind::Solidify(s) => {
-            p.set("thickness", PropertyValue::Float(s.thickness as f64));
-            p.set("offset", PropertyValue::Float(s.offset as f64));
-        }
-        ModifierKind::Bevel(b) => {
-            p.set("width", PropertyValue::Float(b.width as f64));
-            p.set("angle", PropertyValue::Float(b.angle as f64));
-        }
-        ModifierKind::Boolean(b) => {
-            let name = doc
-                .object_by_uid(b.operand)
-                .and_then(|id| doc.object(id))
-                .map(|o| o.name.clone())
-                .unwrap_or_default();
-            p.set("object", PropertyValue::Text(name));
-            p.set(
-                "operation",
-                PropertyValue::Enum(match b.op {
-                    kreate_mesh::modifiers::BooleanOp::Difference => 0,
-                    kreate_mesh::modifiers::BooleanOp::Union => 1,
-                    kreate_mesh::modifiers::BooleanOp::Intersect => 2,
-                }),
-            );
-        }
-        ModifierKind::Array(a) => {
-            p.set("count", PropertyValue::Int(a.count as i64));
-            p.set(
-                "relative",
-                PropertyValue::Vec3([
-                    a.relative.x as f64,
-                    a.relative.y as f64,
-                    a.relative.z as f64,
-                ]),
-            );
-            p.set(
-                "constant",
-                PropertyValue::Vec3([
-                    a.constant.x as f64,
-                    a.constant.y as f64,
-                    a.constant.z as f64,
-                ]),
-            );
-        }
-    }
-    p
-}
 
 /// Opaque key for an object, so the UI can round-trip a handle it cannot read.
 pub fn object_key(id: ObjectId) -> u32 {
@@ -1233,6 +1178,20 @@ struct Labels {
     material_empty_slot: String,
     console_placeholder: String,
     console_empty: String,
+    chat_placeholder: String,
+    chat_empty: String,
+    chat_send: String,
+    chat_stop: String,
+    chat_new: String,
+    chat_working: String,
+    chat_checking: String,
+    chat_signed_out: String,
+    chat_sign_in: String,
+    chat_signing_in: String,
+    chat_open_sign_in: String,
+    chat_code_hint: String,
+    chat_code_submit: String,
+    chat_cancel: String,
     material_no_slots: String,
     material_add_slot: String,
     material_remove_slot: String,
@@ -1482,6 +1441,20 @@ impl Labels {
             material_empty_slot: t("material-empty-slot"),
             console_placeholder: t("console-placeholder"),
             console_empty: t("console-empty"),
+            chat_placeholder: t("chat-placeholder"),
+            chat_empty: t("chat-empty"),
+            chat_send: t("chat-send"),
+            chat_stop: t("chat-stop"),
+            chat_new: t("chat-new"),
+            chat_working: t("chat-working"),
+            chat_checking: t("chat-checking"),
+            chat_signed_out: t("chat-signed-out"),
+            chat_sign_in: t("chat-sign-in"),
+            chat_signing_in: t("chat-signing-in"),
+            chat_open_sign_in: t("chat-open-sign-in"),
+            chat_code_hint: t("chat-code-hint"),
+            chat_code_submit: t("chat-code-submit"),
+            chat_cancel: t("chat-cancel"),
             material_no_slots: t("material-no-slots"),
             material_add_slot: t("material-add-slot"),
             material_remove_slot: t("material-remove-slot"),
@@ -2322,6 +2295,9 @@ fn draw_area(
                 }
                 "console" => {
                     draw_console(ui, state, history, l);
+                }
+                "claude" => {
+                    draw_chat(ui, state, l);
                 }
                 "shader" => {
                     draw_shader_editor(ui, state, doc, area.id, l);
@@ -3851,6 +3827,40 @@ fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labe
     let mut input = std::mem::take(&mut state.console_input);
     kreate_ui::console::console(ui, &text, &lines, &mut input, &mut state.queue);
     state.console_input = input;
+}
+
+/// The Claude panel: the conversation, and a box to say the next thing.
+fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let text = kreate_ui::chat::ChatText {
+        placeholder: l.chat_placeholder.clone(),
+        empty: l.chat_empty.clone(),
+        send: l.chat_send.clone(),
+        stop: l.chat_stop.clone(),
+        new_chat: l.chat_new.clone(),
+        working: l.chat_working.clone(),
+        checking: l.chat_checking.clone(),
+        signed_out: l.chat_signed_out.clone(),
+        sign_in: l.chat_sign_in.clone(),
+        signing_in: l.chat_signing_in.clone(),
+        open_sign_in: l.chat_open_sign_in.clone(),
+        code_hint: l.chat_code_hint.clone(),
+        code_submit: l.chat_code_submit.clone(),
+        cancel: l.chat_cancel.clone(),
+    };
+    let mut input = std::mem::take(&mut state.chat_input);
+    let mut code = std::mem::take(&mut state.chat_code);
+    kreate_ui::chat::chat(
+        ui,
+        &text,
+        &state.chat_account,
+        &state.chat_log,
+        &mut input,
+        &mut code,
+        state.chat_busy,
+        &mut state.queue,
+    );
+    state.chat_input = input;
+    state.chat_code = code;
 }
 
 /// The UV editor, with the view state that belongs to this area.
@@ -7227,6 +7237,7 @@ editor-properties = Properties
 editor-uv = UV Editor
 editor-preferences = Preferences
 editor-console = Console
+editor-claude = Claude
 editor-shader = Shader Editor
 material-uses-nodes = This material uses nodes. Edit it in the Shader Editor.
 node-use-nodes = Use Nodes
@@ -7257,6 +7268,21 @@ node-socket-g = G
 node-socket-strength = Strength
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = Every edit you make appears here as a line of script. Type one to run it.
+chat-placeholder = Ask Claude to build or change something…
+chat-empty = Ask Claude about the scene, or to change it. Every edit it makes is one undo step.
+chat-send = Send
+chat-stop = Stop
+chat-new = New Chat
+chat-working = Claude is working…
+chat-stopped = Stopped.
+chat-checking = Checking the Claude account…
+chat-signed-out = Not signed in to Claude.
+chat-sign-in = Sign In
+chat-signing-in = Finish signing in in the browser that opened.
+chat-open-sign-in = Open the sign-in page
+chat-code-hint = Paste the code here if the page shows one
+chat-code-submit = Submit
+chat-cancel = Cancel
 uv-not-editing = The UV editor shows the mesh being edited. Press Tab to enter edit mode.
 adjust-nothing = No operation to adjust
 status-counts = { $objects } objects, { $meshes } meshes, { $selected } selected
@@ -7516,6 +7542,8 @@ op-object-delete = Delete
 op-object-delete-desc = Removes the selected objects.
 op-object-join = Join
 op-object-join-desc = Merges the selected objects' meshes into the active one, leaving everything where it was on screen.
+op-object-select = Select Object
+op-object-select-desc = Selects an object by its name and makes it active. With extend, adds it to the selection.
 menu-boolean = Boolean
 op-object-boolean = Boolean
 op-object-boolean-desc = Cuts the active object with the other selected meshes. Select the cutters, then the object to cut.
@@ -7998,6 +8026,7 @@ editor-properties = 특성
 editor-uv = UV 에디터
 editor-preferences = 환경 설정
 editor-console = 콘솔
+editor-claude = Claude
 editor-shader = 셰이더 에디터
 material-uses-nodes = 이 재질은 노드를 사용합니다. 셰이더 에디터에서 편집하세요.
 node-use-nodes = 노드 사용
@@ -8028,6 +8057,21 @@ node-socket-g = G
 node-socket-strength = 세기
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
+chat-placeholder = Claude에게 만들거나 바꿀 것을 말해 보세요…
+chat-empty = 장면에 대해 묻거나 바꿔 달라고 해 보세요. Claude가 하는 편집은 하나하나 실행 취소할 수 있습니다.
+chat-send = 보내기
+chat-stop = 중지
+chat-new = 새 대화
+chat-working = Claude가 작업 중…
+chat-stopped = 중지했습니다.
+chat-checking = Claude 계정 확인 중…
+chat-signed-out = Claude에 로그인되어 있지 않습니다.
+chat-sign-in = 로그인
+chat-signing-in = 열린 브라우저에서 로그인을 마치세요.
+chat-open-sign-in = 로그인 페이지 열기
+chat-code-hint = 페이지에 코드가 나오면 여기에 붙여 넣으세요
+chat-code-submit = 확인
+chat-cancel = 취소
 uv-not-editing = UV 에디터는 편집 중인 메시를 보여줍니다. Tab을 눌러 편집 모드로 들어가세요.
 adjust-nothing = 조정할 작업이 없습니다
 status-counts = 오브젝트 { $objects }개, 메시 { $meshes }개, 선택 { $selected }개
@@ -8278,6 +8322,8 @@ op-object-delete = 삭제
 op-object-delete-desc = 선택한 오브젝트를 지웁니다.
 op-object-join = 합치기
 op-object-join-desc = 선택한 오브젝트의 메시를 활성 오브젝트로 합칩니다. 화면 위 위치는 그대로입니다.
+op-object-select = 오브젝트 선택
+op-object-select-desc = 이름으로 오브젝트를 선택하고 활성으로 만듭니다. extend를 켜면 기존 선택에 더합니다.
 menu-boolean = 불리언
 op-object-boolean = 불리언
 op-object-boolean-desc = 활성 오브젝트를 나머지 선택한 메시로 깎습니다. 깎을 도구를 먼저, 깎일 오브젝트를 마지막에 선택하세요.
@@ -9095,6 +9141,22 @@ mod tests {
             "node-socket-strength",
             "console-empty",
             "editor-console",
+            "editor-claude",
+            "chat-placeholder",
+            "chat-empty",
+            "chat-send",
+            "chat-stop",
+            "chat-new",
+            "chat-working",
+            "chat-stopped",
+            "chat-checking",
+            "chat-signed-out",
+            "chat-sign-in",
+            "chat-signing-in",
+            "chat-open-sign-in",
+            "chat-code-hint",
+            "chat-code-submit",
+            "chat-cancel",
             "material-no-slots",
             "material-add-slot",
             "material-remove-slot",

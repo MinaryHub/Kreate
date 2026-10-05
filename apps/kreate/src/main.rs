@@ -546,6 +546,8 @@ impl Gfx {
 struct App {
     /// The connector's socket. See `kreate::bridge`.
     bridge: Option<kreate::bridge::Bridge>,
+    /// The Claude panel's conversation. See `kreate::claude`.
+    chat: Option<kreate::claude::Chat>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     egui_ctx: egui::Context,
@@ -675,6 +677,12 @@ struct App {
     /// invisible; freeing a texture the renderer is about to use is a validation
     /// error and a dead device.
     wanted_viewport: (u32, u32),
+    /// A still is being rendered: the viewport draws the picture alone, with
+    /// no lamps' or cameras' glyphs and no element overlays.
+    rendering_still: bool,
+    /// A capture or a render is waiting on the viewport: draw it even when
+    /// the window is hidden and there is no frame to show it in.
+    capturing: bool,
     /// Which primitive Shift+A adds next.
     next_shape: u32,
     /// Where the document lives, and everything about saving it.
@@ -797,6 +805,7 @@ impl App {
     fn empty(doc: Document, locale: &str, registry: OperatorRegistry) -> Self {
         Self {
             bridge: None,
+            chat: None,
             window: None,
             gfx: None,
             egui_ctx: egui::Context::default(),
@@ -835,6 +844,8 @@ impl App {
             viewport_px: None,
             ui: ShellState::with_catalog(shell::load_catalog(locale)),
             wanted_viewport: (0, 0),
+            rendering_still: false,
+            capturing: false,
             next_shape: 1,
             snap: kreate::modal::Snap::default(),
             proportional: None,
@@ -2522,20 +2533,35 @@ impl App {
             self.redraw.set(RedrawReason::CAMERA_MOVED);
             return;
         }
-        let is_camera = |id: kreate_scene::document::ObjectId| {
-            self.doc.object(id).is_some_and(|o| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
-        };
-        let chosen = self
-            .doc
-            .selection
-            .active
-            .filter(|a| is_camera(*a))
-            .or_else(|| self.doc.objects().map(|(id, _)| id).find(|id| is_camera(*id)));
-        let Some(object) = chosen else {
+        let Some(object) = self.scene_camera(None) else {
             self.status("the scene has no camera");
             return;
         };
         self.camera_view_object = Some(object);
+        let destination = self.view_through(object);
+        self.camera_view = Some(self.camera);
+        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+    }
+
+    /// The camera object to look through: the one called `name`, or else the
+    /// active object when it is a camera, or else the first camera.
+    fn scene_camera(&self, name: Option<&str>) -> Option<kreate_scene::document::ObjectId> {
+        let is_camera = |id: kreate_scene::document::ObjectId| {
+            self.doc.object(id).is_some_and(|o| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
+        };
+        if let Some(name) = name {
+            return self.doc.objects().find(|(id, o)| o.name == name && is_camera(*id)).map(|(id, _)| id);
+        }
+        self.doc
+            .selection
+            .active
+            .filter(|a| is_camera(*a))
+            .or_else(|| self.doc.objects().map(|(id, _)| id).find(|id| is_camera(*id)))
+    }
+
+    /// The viewport camera that sees what a scene camera sees.
+    fn view_through(&self, object: kreate_scene::document::ObjectId) -> kreate_render::Camera {
         let aspect = self.gfx.as_ref().map(|g| g.viewport.aspect()).unwrap_or(16.0 / 9.0);
         let (_, rotation, eye) = self.doc.world_transform(object).to_scale_rotation_translation();
         let lens = match self.doc.object(object).map(|o| &o.data) {
@@ -2550,9 +2576,7 @@ impl App {
         if let Some(fov) = lens.filter(|f| f.is_finite() && *f > 0.0) {
             destination.fov_y = fov;
         }
-        self.camera_view = Some(self.camera);
-        self.motion.animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
-        self.redraw.set(RedrawReason::CAMERA_MOVED);
+        destination
     }
 
     /// `C`: turns the selection brush on, or off again.
@@ -3086,6 +3110,82 @@ impl App {
     // What `kreate-mcp` asks for, served on the main thread, where the
     // document is. See `kreate::bridge`.
 
+    /// Says something to Claude from the Claude panel.
+    fn chat_send(&mut self, text: String) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let Some(chat) = &mut self.chat else { return };
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::User,
+            text: text.clone(),
+        });
+        if let Err(e) = chat.send(&text) {
+            self.ui.chat_log.push(ChatMessage { role: ChatRole::Error, text: e });
+        }
+        self.ui.chat_busy = chat.busy();
+    }
+
+    /// Moves what Claude has said since the last wake into the panel.
+    fn serve_chat(&mut self) {
+        use kreate::claude::Event;
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let Some(chat) = &mut self.chat else { return };
+        for event in chat.poll() {
+            let (role, text) = match event {
+                Event::Session(_) | Event::Done(None) => continue,
+                Event::Account(account) => {
+                    use kreate::claude::Account;
+                    use kreate_ui::chat::ChatAccount;
+                    // A sign-in waiting on the browser keeps its box until it
+                    // ends, whatever an earlier question answers.
+                    if chat.signing_in() {
+                        continue;
+                    }
+                    self.ui.chat_account = match account {
+                        Account::Checking => ChatAccount::Checking,
+                        Account::SignedOut => ChatAccount::SignedOut,
+                        Account::Unavailable(why) => ChatAccount::Unavailable(why),
+                        Account::SignedIn { email, organisation, plan } => ChatAccount::SignedIn {
+                            email,
+                            detail: [organisation, plan.map(|p| format!("({p})"))]
+                                .into_iter()
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        },
+                    };
+                    continue;
+                }
+                Event::SignInUrl(url) => {
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn { url: Some(url) };
+                    continue;
+                }
+                Event::SignedIn(None) => {
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                    continue;
+                }
+                Event::SignedIn(Some(why)) if why == "stopped" => {
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                    continue;
+                }
+                Event::SignedIn(Some(why)) => {
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                    (ChatRole::Error, why)
+                }
+                Event::Text(text) => (ChatRole::Claude, text),
+                Event::Tool { name, detail } if detail.is_empty() => (ChatRole::Tool, name),
+                Event::Tool { name, detail } => (ChatRole::Tool, format!("{name}: {detail}")),
+                Event::ToolError(text) => (ChatRole::Error, text),
+                Event::Done(Some(why)) if why == "stopped" => (ChatRole::Note, self.ui.catalog.get("chat-stopped")),
+                Event::Done(Some(why)) => (ChatRole::Error, why),
+            };
+            self.ui.chat_log.push(ChatMessage { role, text });
+        }
+        self.ui.chat_busy = chat.busy();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Answers every request waiting since the last wake.
     fn serve_bridge(&mut self) {
         let Some(bridge) = self.bridge.as_ref() else { return };
@@ -3103,18 +3203,55 @@ impl App {
         let text = |name: &str| params.get(name).and_then(|v| v.as_str()).map(str::to_string);
         match method {
             "scene" => Ok(self.scene_json()),
+            "mesh" => {
+                let name = text("object").unwrap_or_default();
+                let world = text("space").as_deref() != Some("local");
+                let selected = params.get("selected").and_then(|v| v.as_bool()).unwrap_or(false);
+                let faces = params.get("faces").and_then(|v| v.as_bool()).unwrap_or(false);
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000).clamp(1, 100_000) as usize;
+                self.mesh_json(&name, world, selected, faces, limit)
+            }
+            "render" => {
+                let path = text("path").ok_or("`path` is required")?;
+                let number = |key: &str, default: u64| params.get(key).and_then(|v| v.as_u64()).unwrap_or(default);
+                let size = (number("width", 1920) as u32, number("height", 1080) as u32);
+                let samples = number("samples", 128).clamp(1, 512) as u32;
+                let limit = std::time::Duration::from_secs(number("time_limit", 110).clamp(1, 110));
+                self.render_still(text("camera").as_deref(), size, samples, std::path::Path::new(&path), limit)
+            }
+            "overlaps" => {
+                let tolerance = params.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(0.001).max(0.0);
+                let exact = params.get("exact").and_then(|v| v.as_bool()).unwrap_or(true);
+                Ok(self.overlaps_json(tolerance, exact))
+            }
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
             "run" => {
                 let script = text("script").ok_or("`script` is required")?;
                 let lines: Vec<_> = self
                     .run_script_reporting(&script)
                     .into_iter()
-                    .map(|(line, result)| match result {
-                        Ok(r) => json!({ "line": line, "ok": true, "result": r }),
-                        Err(e) => json!({ "line": line, "ok": false, "error": e }),
+                    .map(|line| {
+                        let mut v = match line.result {
+                            Ok(r) => json!({ "line": line.text, "ok": true, "result": r }),
+                            Err(e) => json!({ "line": line.text, "ok": false, "error": e }),
+                        };
+                        let listed = |made: &[(String, u64)]| -> serde_json::Value {
+                            made.iter().map(|(name, uid)| json!({ "name": name, "uid": uid })).collect()
+                        };
+                        if !line.created.is_empty() {
+                            v["created"] = listed(&line.created);
+                        }
+                        if !line.materials.is_empty() {
+                            v["materials_created"] = listed(&line.materials);
+                        }
+                        if !line.images.is_empty() {
+                            v["images_created"] = listed(&line.images);
+                        }
+                        v
                     })
                     .collect();
-                Ok(json!({ "lines": lines }))
+                let active = self.doc.selection.active.and_then(|id| self.doc.object(id)).map(|o| o.name.clone());
+                Ok(json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active }))
             }
             "undo" | "redo" => {
                 let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 1000);
@@ -3128,7 +3265,41 @@ impl App {
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
                 Ok(json!({ "steps": steps, "history_position": self.history.cursor() }))
             }
-            "capture" => self.capture_viewport(),
+            "capture" => {
+                let camera = match params.get("camera") {
+                    Some(serde_json::Value::String(name)) if !name.is_empty() => Some(Some(name.clone())),
+                    Some(serde_json::Value::Bool(true)) => Some(None),
+                    _ => None,
+                };
+                let (w, h, png) = match camera {
+                    None => self.capture_png()?,
+                    Some(name) => {
+                        let object = self.scene_camera(name.as_deref()).ok_or(match &name {
+                            Some(n) => format!("no camera called {n:?}"),
+                            None => "the scene has no camera".to_string(),
+                        })?;
+                        // Through the camera for this one picture, then back
+                        // to where the user was looking — and with the
+                        // camera's lens, as its own view would be.
+                        let saved = (self.camera, self.motion, self.camera_view, self.camera_view_object);
+                        self.motion.interrupt(&self.camera);
+                        self.camera = self.view_through(object);
+                        self.motion.target = self.camera;
+                        self.camera_view = Some(saved.0);
+                        self.camera_view_object = Some(object);
+                        let shot = self.capture_png();
+                        (self.camera, self.motion, self.camera_view, self.camera_view_object) = saved;
+                        self.redraw.set(RedrawReason::CAMERA_MOVED);
+                        shot?
+                    }
+                };
+                let mut shot = json!({ "width": w, "height": h, "png_base64": kreate::bridge::base64(&png) });
+                if let Some(path) = text("path") {
+                    std::fs::write(&path, &png).map_err(|e| format!("cannot write {path}: {e}"))?;
+                    shot["path"] = json!(path);
+                }
+                Ok(shot)
+            }
             "open" => {
                 let path = text("path").ok_or("`path` is required")?;
                 self.load_from(std::path::Path::new(&path));
@@ -3159,11 +3330,243 @@ impl App {
     }
 
     /// The document as the connector sees it: what is in it and where.
+    /// One mesh's vertices, and its faces if asked: what an edit by position
+    /// needs to know where things are. The active object when `name` is empty.
+    ///
+    /// Indices are the mesh's own, so they are the ones `mesh.select_set`
+    /// takes. Capped at `limit` vertices, with the count of what was left out,
+    /// so a scanned model does not flood the answer.
+    fn mesh_json(&self, name: &str, world: bool, selected: bool, faces: bool, limit: usize) -> Result<serde_json::Value, String> {
+        use kreate_mesh::attribute::Domain;
+        use serde_json::json;
+        let doc = &self.doc;
+        let id = if name.is_empty() {
+            doc.selection.active.ok_or("no object is active; name one")?
+        } else {
+            doc.objects().find(|(_, o)| o.name == name).map(|(id, _)| id).ok_or(format!("no object called {name:?}"))?
+        };
+        let object = doc.object(id).ok_or("the object is gone")?;
+        let mesh = object.mesh().and_then(|m| doc.mesh(m)).ok_or(format!("{:?} is not a mesh", object.name))?;
+        let to_world = doc.world_transform(id);
+        let at = |p: kreate_math::Vec3| {
+            let p = p.as_dvec3();
+            if world { to_world.transform_point3(p).to_array() } else { p.to_array() }
+        };
+        let wanted = |domain: Domain, i: u32| !selected || kreate_mesh::selection::is_selected(mesh, domain, i);
+        let mut vertices = Vec::new();
+        let mut matching = 0usize;
+        for (i, p) in mesh.positions().iter().enumerate() {
+            if !wanted(Domain::Point, i as u32) {
+                continue;
+            }
+            matching += 1;
+            if vertices.len() < limit {
+                vertices.push(json!({ "index": i, "position": at(*p) }));
+            }
+        }
+        let mut out = json!({
+            "object": object.name,
+            "space": if world { "world" } else { "local" },
+            "vertex_count": mesh.num_verts(),
+            "edge_count": mesh.num_edges(),
+            "face_count": mesh.num_faces(),
+            "vertices": vertices,
+            "omitted": matching.saturating_sub(limit),
+        });
+        if faces {
+            let normals = mesh.compute_face_normals();
+            let linear = to_world.matrix3.inverse().transpose();
+            let list: Vec<_> = (0..mesh.num_faces())
+                .filter(|f| wanted(Domain::Face, *f))
+                .take(limit)
+                .map(|f| {
+                    let n = normals[f as usize].as_dvec3();
+                    let n = if world { (linear * n).normalize_or_zero() } else { n };
+                    json!({ "index": f, "vertices": mesh.face_verts(f), "normal": n.to_array() })
+                })
+                .collect();
+            out["faces"] = json!(list);
+        }
+        Ok(out)
+    }
+
+    /// Renders the scene through a camera at a size of its own: the rendered
+    /// shading, path traced to `samples`, with no overlays — and writes it to
+    /// `path` as a PNG. The window's own view is put back afterwards.
+    ///
+    /// The viewport is the renderer, so for the length of the render it draws
+    /// the shot at the shot's size; the panel shows it stretched meanwhile.
+    fn render_still(
+        &mut self,
+        camera: Option<&str>,
+        (width, height): (u32, u32),
+        samples: u32,
+        path: &std::path::Path,
+        limit: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        if self.gfx.is_none() {
+            return Err("the window is not open yet".into());
+        }
+        let object = self.scene_camera(camera).ok_or(match camera {
+            Some(n) => format!("no camera called {n:?}"),
+            None => "the scene has no camera; add one with object.add_camera".to_string(),
+        })?;
+        let size = (width.clamp(16, 8192), height.clamp(16, 8192));
+
+        // Everything this changes, to put back.
+        let view = (self.camera, self.motion, self.camera_view, self.camera_view_object, self.wanted_viewport);
+        let gfx = self.gfx.as_mut().expect("checked");
+        let look = {
+            let v = &gfx.viewport;
+            (v.shading, v.path_trace, v.show_grid, v.show_wireframe, v.show_outline, v.xray, v.face_orientation, v.sample_cap)
+        };
+        {
+            let v = &mut gfx.viewport;
+            v.shading = kreate_render::ShadingMode::Rendered;
+            v.path_trace = true;
+            v.show_grid = false;
+            v.show_wireframe = false;
+            v.show_outline = false;
+            v.xray = false;
+            v.face_orientation = false;
+            v.sample_cap = Some(samples);
+        }
+        self.rendering_still = true;
+        self.capturing = true;
+
+        // One frame at the shot's size first: the lens is fitted to the
+        // aspect the target has, which is the new one only once it is there.
+        self.wanted_viewport = size;
+        self.render();
+        self.motion.interrupt(&self.camera);
+        self.camera = self.view_through(object);
+        self.motion.target = self.camera;
+        self.camera_view = Some(view.0);
+        self.camera_view_object = Some(object);
+
+        // Until the path tracer has summed the samples. It has to have the
+        // scene first, which takes a frame or a few to build; until then the
+        // view is not path traced and "not accumulating" means nothing. If it
+        // never gets one — a device without the capability — the raster
+        // picture is what there is, after a grace period.
+        let started = Instant::now();
+        let grace = std::time::Duration::from_secs(5).min(limit);
+        let mut finished = false;
+        while started.elapsed() < limit {
+            self.wanted_viewport = size;
+            self.restart_mean_if_changed();
+            self.render();
+            self.redraw.clear();
+            let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else { break };
+            let traced = v.path_tracing();
+            if (traced && v.path_trace_samples() > 0 && !v.accumulating())
+                || (!traced && started.elapsed() >= grace && !v.accumulating())
+            {
+                finished = true;
+                break;
+            }
+        }
+        let summed = self.gfx.as_ref().map(|g| g.viewport.path_trace_samples()).unwrap_or(0);
+        let shot = self.read_target_png();
+
+        // Back as it was, whatever happened.
+        self.rendering_still = false;
+        self.capturing = false;
+        if let Some(gfx) = self.gfx.as_mut() {
+            let v = &mut gfx.viewport;
+            (v.shading, v.path_trace, v.show_grid, v.show_wireframe, v.show_outline, v.xray, v.face_orientation, v.sample_cap) = look;
+        }
+        (self.camera, self.motion, self.camera_view, self.camera_view_object, self.wanted_viewport) = view;
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+
+        let (w, h, png) = shot?;
+        std::fs::write(path, &png).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        // A small copy to look at: the file is the render, this is for checking it.
+        let preview = image::load_from_memory(&png)
+            .map(|i| i.thumbnail(800, 800))
+            .map_err(|e| e.to_string())
+            .and_then(|i| {
+                let mut out = Vec::new();
+                i.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())
+                    .map(|_| out)
+            })?;
+        Ok(serde_json::json!({
+            "path": path.display().to_string(),
+            "width": w,
+            "height": h,
+            "samples": summed,
+            "finished": finished,
+            "png_base64": kreate::bridge::base64(&preview),
+        }))
+    }
+
+    /// Which visible mesh objects run into each other, by their world-space
+    /// boxes: two whose boxes overlap by more than `tolerance` on every axis.
+    /// Touching — a vase standing on a table — is not running into.
+    ///
+    /// With `exact`, each pair whose boxes overlap is then tested on its
+    /// triangles (see `kreate_mesh::intersect`): kept only if the surfaces
+    /// cross or one is inside the other, and said which. Without it, boxes
+    /// alone — quick, and a pair can be reported that only comes close.
+    fn overlaps_json(&self, tolerance: f64, exact: bool) -> serde_json::Value {
+        use serde_json::json;
+        let doc = &self.doc;
+        let boxes: Vec<_> = doc
+            .objects()
+            .filter(|(id, _)| doc.is_shown(*id))
+            .filter_map(|(id, o)| Some((id, o.name.clone(), doc.object_world_bounds(id)?)))
+            .collect();
+        let related = |a, b| {
+            let mut up = doc.object(a).and_then(|o| o.parent);
+            while let Some(p) = up {
+                if p == b {
+                    return true;
+                }
+                up = doc.object(p).and_then(|o| o.parent);
+            }
+            false
+        };
+        let mut pairs = Vec::new();
+        for (i, (a, an, (alo, ahi))) in boxes.iter().enumerate() {
+            for (b, bn, (blo, bhi)) in &boxes[i + 1..] {
+                let depth = ahi.min(*bhi) - alo.max(*blo);
+                if depth.min_element() > tolerance && !related(*a, *b) && !related(*b, *a) {
+                    if !exact {
+                        pairs.push(json!({ "a": an, "b": bn, "overlap": depth.to_array() }));
+                        continue;
+                    }
+                    let triangles = |id| {
+                        let mesh = doc.object(id).and_then(|o| o.mesh()).and_then(|m| doc.mesh(m))?;
+                        Some(kreate_mesh::intersect::world_triangles(mesh, doc.world_transform(id)))
+                    };
+                    let (Some(ta), Some(tb)) = (triangles(*a), triangles(*b)) else { continue };
+                    use kreate_mesh::intersect::Contact;
+                    let how = match kreate_mesh::intersect::contact(&ta, &tb) {
+                        Contact::Clear => continue,
+                        Contact::Crossing => "crossing".to_string(),
+                        Contact::Inside { first_in_second: true } => format!("{an} inside {bn}"),
+                        Contact::Inside { first_in_second: false } => format!("{bn} inside {an}"),
+                    };
+                    pairs.push(json!({ "a": an, "b": bn, "contact": how, "box_overlap": depth.to_array() }));
+                }
+            }
+        }
+        json!({ "checked": boxes.len(), "overlapping": pairs })
+    }
+
     fn scene_json(&self) -> serde_json::Value {
         use kreate_scene::document::ObjectData;
         use serde_json::json;
         let doc = &self.doc;
-        let rgb = |c: kreate_math::SceneRgb| [c.r, c.g, c.b];
+        // Colours as the set_* operators take them — sRGB swatches, as a
+        // colour picker holds them — so a value read here can be written back
+        // unchanged. The linear numbers the renderer uses are not what a
+        // script types.
+        let rgb = |c: kreate_math::SceneRgb| {
+            let s = c.as_swatch();
+            [s.r, s.g, s.b]
+        };
         let objects: Vec<_> = doc
             .objects()
             .map(|(id, o)| {
@@ -3186,16 +3589,28 @@ impl App {
                     "selected": doc.selection.contains(id),
                     "active": doc.selection.active == Some(id),
                     "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
+                    "uid": doc.object_uid(id).map(|u| u.raw()),
                 });
                 match o.data {
                     ObjectData::Mesh(mesh) => {
                         if let Some(m) = doc.mesh(mesh) {
                             v["vertices"] = json!(m.num_verts());
                             v["faces"] = json!(m.num_faces());
+                            // Blender's Dimensions: the mesh's own extent times
+                            // the scale. And where it is in the world, which is
+                            // what placing one thing on another needs.
+                            let local = m.bounds();
+                            if local.min.x <= local.max.x {
+                                let size = (local.max - local.min).as_dvec3() * t.scale;
+                                v["dimensions"] = json!(size.abs().to_array());
+                                if let Some((lo, hi)) = doc.object_world_bounds(id) {
+                                    v["bounds"] = json!({ "min": lo.to_array(), "max": hi.to_array() });
+                                }
+                            }
                         }
                         let slots: Vec<_> = (0..32)
                             .map_while(|slot| doc.material_id_at(id, slot))
-                            .filter_map(|m| doc.material(m).map(|m| m.name.clone()))
+                            .filter_map(|m| doc.material(m).map(|mat| json!({ "name": mat.name, "uid": doc.material_uid(m).map(|u| u.raw()) })))
                             .collect();
                         v["materials"] = json!(slots);
                     }
@@ -3208,6 +3623,17 @@ impl App {
                             });
                         }
                     }
+                    ObjectData::Camera(camera) => {
+                        if let Some(c) = doc.camera(camera) {
+                            v["camera"] = json!({
+                                "focal_length_mm": c.focal_length_mm,
+                                "auto_exposure": c.auto_exposure,
+                                "f_stop": c.f_stop,
+                                "iso": c.iso,
+                                "exposure_compensation": c.exposure_compensation,
+                            });
+                        }
+                    }
                     _ => {}
                 }
                 v
@@ -3215,9 +3641,15 @@ impl App {
             .collect();
         let materials: Vec<_> = doc
             .materials()
-            .map(|(_, m)| {
+            .map(|(mid, m)| {
+                let users = doc
+                    .objects()
+                    .filter(|(oid, _)| (0..32).map_while(|slot| doc.material_id_at(*oid, slot)).any(|x| x == mid))
+                    .count();
                 json!({
                     "name": m.name,
+                    "uid": doc.material_uid(mid).map(|u| u.raw()),
+                    "users": users,
                     "base_color": rgb(m.base_color),
                     "metallic": m.metallic,
                     "roughness": m.roughness,
@@ -3232,11 +3664,23 @@ impl App {
             .collect();
         json!({
             "file": self.file.path().map(|p| p.display().to_string()),
-            "mode": format!("{:?}", self.op_ctx.mode),
+            "mode": self.op_ctx.mode.tag(),
             "frame": doc.playback.frame,
             "cursor": doc.cursor.to_array(),
             "objects": objects,
             "materials": materials,
+            "images": doc
+                .images()
+                .map(|(iid, i)| json!({ "name": i.name, "uid": doc.image_uid(iid).map(|u| u.raw()), "width": i.width(), "height": i.height() }))
+                .collect::<Vec<_>>(),
+            // The exposure the picture is being made at, and whether the meter
+            // chose it or the scene camera's dials did.
+            "view": {
+                "shading": format!("{:?}", self.ui.view_status.shading),
+                "exposure_ev": self.ui.view_status.exposure,
+                "metered": self.ui.view_status.metered,
+                "through_camera": self.camera_view_object.and_then(|id| doc.object(id)).map(|o| o.name.clone()),
+            },
             "last_operation": self.history.last().map(|e| e.to_script_call()),
         })
     }
@@ -3290,12 +3734,25 @@ impl App {
                     "params": params,
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // The lines the application answers itself, listed with the operators
+        // because a script writes them the same way.
+        let mut ops = ops;
+        for (id, doc, params) in kreate::appcall::LISTING {
+            if id.starts_with(filter) || id.contains(filter) {
+                ops.push(json!({
+                    "id": id,
+                    "label": doc,
+                    "available_now": true,
+                    "params": params.iter().map(|(name, doc)| json!({ "name": name, "doc": doc })).collect::<Vec<_>>(),
+                }));
+            }
+        }
         json!({ "operators": ops })
     }
 
     /// The viewport as a PNG, once the still view has settled.
-    fn capture_viewport(&mut self) -> Result<serde_json::Value, String> {
+    fn capture_png(&mut self) -> Result<(u32, u32, Vec<u8>), String> {
         if self.gfx.is_none() {
             return Err("the window is not open yet".into());
         }
@@ -3303,6 +3760,7 @@ impl App {
         // the path tracer's, filled. Bounded, so a view that never settles
         // still answers.
         let started = Instant::now();
+        self.capturing = true;
         self.restart_mean_if_changed();
         self.render();
         self.redraw.clear();
@@ -3312,6 +3770,12 @@ impl App {
             self.render();
             self.redraw.clear();
         }
+        self.capturing = false;
+        self.read_target_png()
+    }
+
+    /// The viewport's colour target as it is, as a PNG.
+    fn read_target_png(&self) -> Result<(u32, u32, Vec<u8>), String> {
         let gfx = self.gfx.as_ref().ok_or("the window closed")?;
         let (w, h) = gfx.viewport.render_size();
         let row = (w * 4).div_ceil(256) * 256;
@@ -3366,11 +3830,7 @@ impl App {
         image
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .map_err(|e| format!("cannot encode the capture: {e}"))?;
-        Ok(serde_json::json!({
-            "width": w,
-            "height": h,
-            "png_base64": kreate::bridge::base64(&png),
-        }))
+        Ok((w, h, png))
     }
 
     /// Applies the commands the panels queued this frame.
@@ -3387,6 +3847,36 @@ impl App {
                 // key press would go: one undo step per line, and an
                 // edit-mode operator works on the open session.
                 Command::RunScript { source } => self.run_script(&source),
+                Command::ChatSend { text } => self.chat_send(text),
+                Command::ChatStop => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.stop();
+                    }
+                }
+                Command::ChatSignIn => {
+                    if let Some(chat) = &mut self.chat {
+                        match chat.sign_in() {
+                            Ok(()) => self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn { url: None },
+                            Err(e) => self.ui.chat_account = kreate_ui::chat::ChatAccount::Unavailable(e),
+                        }
+                    }
+                }
+                Command::ChatSignInCode { code } => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.sign_in_code(&code);
+                    }
+                }
+                Command::ChatSignInCancel => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.cancel_sign_in();
+                    }
+                }
+                Command::ChatNew => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.reset();
+                    }
+                    self.ui.chat_log.clear();
+                }
                 // The outliner's key resolved against the *current* document,
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.
@@ -5326,46 +5816,93 @@ impl App {
     }
 
     /// Runs a script as `run_script` does, and says what became of each line:
-    /// the line, and the history entry it became or why it did not.
-    fn run_script_reporting(&mut self, source: &str) -> Vec<(String, Result<String, String>)> {
+    /// the line, the history entry it became or why it did not, and the
+    /// objects it made.
+    ///
+    /// One line at a time rather than the whole script to the history at
+    /// once, because a line may change the mode (see `kreate::appcall`) and
+    /// every line after it has to run in the mode it left.
+    fn run_script_reporting(&mut self, source: &str) -> Vec<ScriptLine> {
         use kreate_ui::console::{ConsoleLine, LineKind};
         let mut report = Vec::new();
-        let outcomes = self.history.run_script(
-            &self.registry,
-            &mut self.doc,
-            Some(&mut self.edit),
-            &self.op_ctx,
-            source,
-        );
         let mut errors = 0;
-        for outcome in outcomes {
+        for text in source.lines() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let before: std::collections::HashSet<_> =
+                self.doc.objects().filter_map(|(id, _)| self.doc.object_uid(id)).collect();
+            let materials_before: std::collections::HashSet<_> =
+                self.doc.materials().filter_map(|(id, _)| self.doc.material_uid(id)).collect();
+            let images_before: std::collections::HashSet<_> =
+                self.doc.images().filter_map(|(id, _)| self.doc.image_uid(id)).collect();
             self.ui.console_log.push(ConsoleLine {
-                text: outcome.text.clone(),
+                text: trimmed.to_string(),
                 kind: LineKind::Input,
             });
-            report.push((
-                outcome.text.clone(),
-                match &outcome.result {
-                    Ok(kreate_ops::OpResult::Finished) => Ok("finished".to_string()),
-                    Ok(other) => Ok(format!("{other:?}")),
-                    Err(e) => Err(e.to_string()),
-                },
-            ));
-            match outcome.result {
-                Ok(kreate_ops::OpResult::Finished) => {}
+            let result = match kreate::appcall::parse(trimmed) {
+                Some(Ok(call)) => self.run_app_call(call),
+                Some(Err(e)) => Err(e),
+                None => {
+                    let outcome = self
+                        .history
+                        .run_script(&self.registry, &mut self.doc, Some(&mut self.edit), &self.op_ctx, trimmed)
+                        .pop();
+                    match outcome.map(|o| o.result) {
+                        Some(Ok(kreate_ops::OpResult::Finished)) => Ok("finished".to_string()),
+                        Some(Ok(other)) => Ok(format!("{other:?}")),
+                        Some(Err(e)) => Err(e.to_string()),
+                        None => continue,
+                    }
+                }
+            };
+            match &result {
+                Ok(r) if r == "finished" => {}
                 Ok(other) => self.ui.console_log.push(ConsoleLine {
                     // i18n-exempt: an operator outcome is API text
-                    text: format!("{other:?}"),
+                    text: other.clone(),
                     kind: LineKind::Note,
                 }),
                 Err(e) => {
                     errors += 1;
                     self.ui.console_log.push(ConsoleLine {
-                        text: e.to_string(),
+                        text: e.clone(),
                         kind: LineKind::Error,
                     });
                 }
             }
+            let created = self
+                .doc
+                .objects()
+                .filter_map(|(id, o)| {
+                    let uid = self.doc.object_uid(id)?;
+                    (!before.contains(&uid)).then(|| (o.name.clone(), uid.raw()))
+                })
+                .collect();
+            let made_materials = self
+                .doc
+                .materials()
+                .filter_map(|(id, m)| {
+                    let uid = self.doc.material_uid(id)?;
+                    (!materials_before.contains(&uid)).then(|| (m.name.clone(), uid.raw()))
+                })
+                .collect();
+            let made_images = self
+                .doc
+                .images()
+                .filter_map(|(id, i)| {
+                    let uid = self.doc.image_uid(id)?;
+                    (!images_before.contains(&uid)).then(|| (i.name.clone(), uid.raw()))
+                })
+                .collect();
+            report.push(ScriptLine {
+                text: trimmed.to_string(),
+                result,
+                created,
+                materials: made_materials,
+                images: made_images,
+            });
         }
         // The echo above is what was typed; the history line the console
         // draws beneath it is what it became. A line that ran is not shown
@@ -5375,6 +5912,47 @@ impl App {
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
         report
+    }
+
+    /// A script line the application answers rather than an operator.
+    fn run_app_call(&mut self, call: kreate::appcall::AppCall) -> Result<String, String> {
+        use kreate::appcall::AppCall;
+        match call {
+            AppCall::ModeSet(name) => {
+                let mode = match name.as_str() {
+                    // Whatever Tab would enter from object mode: the edit
+                    // mode of the kind of thing that is active.
+                    "edit" => OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc)),
+                    other => OpMode::from_tag(other).ok_or_else(|| {
+                        format!("no mode called {other:?}: object, edit, sculpt, weight_paint or pose")
+                    })?,
+                };
+                if self.op_ctx.mode == mode {
+                    return Ok(format!("already in {} mode", mode.tag()));
+                }
+                self.set_mode(mode);
+                if self.op_ctx.mode != mode {
+                    return Err(format!(
+                        "cannot enter {} mode: the active object is not one it can edit",
+                        mode.tag()
+                    ));
+                }
+                Ok(format!("mode {}", mode.tag()))
+            }
+            AppCall::OpenImage { path, color } => {
+                let space = if color {
+                    kreate_scene::ColorSpace::Srgb
+                } else {
+                    kreate_scene::ColorSpace::Raw
+                };
+                let image = kreate_io::load_image_file(std::path::Path::new(&path), space)
+                    .map_err(|e| format!("cannot read {path}: {e}"))?;
+                let (name, size) = (image.name.clone(), (image.width(), image.height()));
+                let id = self.doc.add_image(image);
+                let uid = self.doc.image_uid(id).ok_or("the image has no identity")?;
+                Ok(format!("image {name:?} {}x{} uid={}", size.0, size.1, uid.raw()))
+            }
+        }
     }
 
     /// Ctrl+C: the selected objects, as text the application keeps.
@@ -5827,16 +6405,20 @@ impl App {
                 None
             }
         };
-        let Some(frame) = frame else {
+        // A hidden window has no frame to draw into, and normally that means
+        // nothing is drawn. Not while a capture or a render waits on the
+        // viewport: it draws offscreen regardless, and only the window's own
+        // picture is skipped.
+        if frame.is_none() && !self.capturing {
             // Nothing was drawn with them, so what egui retired can go now.
             for id in &output.textures_delta.free {
                 gfx.egui_renderer.free_texture(id);
             }
             return;
-        };
+        }
         let surface_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+            .as_ref()
+            .map(|f| f.texture.create_view(&wgpu::TextureViewDescriptor::default()));
 
         // One draw entry per *object*, sharing GPU geometry by the identity of the
         // evaluated mesh — so a thousand linked duplicates cost a thousand
@@ -5931,7 +6513,7 @@ impl App {
         // The overlay set, asked of the mode. `== EditMesh` said the wrong
         // thing: sculpt and weight-paint modes will also be editing a mesh
         // and will also not want element dots.
-        gfx.viewport.show_elements = self.op_ctx.mode.shows_elements();
+        gfx.viewport.show_elements = self.op_ctx.mode.shows_elements() && !self.rendering_still;
         // A tolerance chosen in pixels is a tolerance chosen for one screen
         // density; without this, picking on a high-density display is a third as
         // forgiving as it was designed to be.
@@ -6201,8 +6783,11 @@ impl App {
             }
             _ => None,
         };
-        let (marker_lines, marker_points) =
-            kreate::glyphs::markers_only(&self.doc, shown, self.local_view.as_ref().map(|(ids, _)| ids.as_slice()));
+        let (marker_lines, marker_points) = if self.rendering_still {
+            Default::default()
+        } else {
+            kreate::glyphs::markers_only(&self.doc, shown, self.local_view.as_ref().map(|(ids, _)| ids.as_slice()))
+        };
         gfx.viewport.set_markers(
             &gfx.gpu.device,
             &gfx.gpu.queue,
@@ -6274,11 +6859,11 @@ impl App {
             &paint_jobs,
             &screen,
         );
-        {
+        if let Some(surface_view) = &surface_view {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
+                    view: surface_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -6298,7 +6883,9 @@ impl App {
         gfx.gpu
             .queue
             .submit(extra.into_iter().chain(Some(encoder.finish())));
-        frame.present();
+        if let Some(frame) = frame {
+            frame.present();
+        }
         // Only after submit: mapping a buffer whose copy has not been submitted
         // waits for a command that will never arrive.
         gfx.pick_target.after_submit();
@@ -7157,10 +7744,23 @@ impl Drop for App {
     }
 }
 
+/// What became of one line of a script.
+struct ScriptLine {
+    text: String,
+    /// What the line became, or why it did not run.
+    result: Result<String, String>,
+    /// The objects it made, by name and uid.
+    created: Vec<(String, u64)>,
+    /// And the materials and images.
+    materials: Vec<(String, u64)>,
+    images: Vec<(String, u64)>,
+}
+
 impl ApplicationHandler for App {
     /// A connector request is waiting. See `kreate::bridge`.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         self.serve_bridge();
+        self.serve_chat();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -7750,6 +8350,16 @@ fn main() {
     let mut app = App::new(doc, &locale);
     app.file = file;
     // The connector's way in. A failure costs the connector and nothing else.
+    let chat_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    let chat = kreate::claude::Chat::new(move || {
+        if let Ok(proxy) = chat_proxy.lock() {
+            let _ = proxy.send_event(());
+        }
+    });
+    // Asked once at start, off the main thread: the panel shows who it will
+    // talk as before anything is typed.
+    chat.check_account();
+    app.chat = Some(chat);
     let proxy = std::sync::Mutex::new(event_loop.create_proxy());
     if let Some(info) = kreate::bridge::info_path() {
         match kreate::bridge::start(&info, move || {

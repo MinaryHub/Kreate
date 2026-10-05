@@ -1878,6 +1878,69 @@ fn shot_scripting() {
     shot.dump("workspace-scripting");
 }
 
+/// A picture of the Scripting workspace with a conversation in the Claude panel.
+#[test]
+fn shot_claude() {
+    use kreate_ui::chat::{ChatMessage, ChatRole};
+    let doc = doc_with_cube();
+    for (label, locale) in [("claude", "en"), ("claude-ko", "ko-KR")] {
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.switch_workspace(5);
+            state.chat_busy = true;
+            state.chat_account = kreate_ui::chat::ChatAccount::SignedIn {
+                email: "artist@studio.kr".into(),
+                detail: "Studio (team)".into(),
+            };
+            state.chat_log = vec![
+                ChatMessage {
+                    role: ChatRole::User,
+                    text: "빨간 구를 원점 위 2m에 하나 추가해줘".into(),
+                },
+                ChatMessage {
+                    role: ChatRole::Tool,
+                    text: "run_script: kreate.ops.object.add_primitive(shape=\"uv_sphere\", location=(0.0, 0.0, 2.0))".into(),
+                },
+                ChatMessage {
+                    role: ChatRole::Error,
+                    text: "no object called Nope".into(),
+                },
+                ChatMessage {
+                    role: ChatRole::Claude,
+                    text: "원점 위 2m 지점 (0, 0, 2)에 빨간 구를 추가했습니다. 새 머티리얼을 만들어 빨간색으로 지정했습니다.".into(),
+                },
+                ChatMessage {
+                    role: ChatRole::Note,
+                    text: "Stopped.".into(),
+                },
+            ];
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("workspace-{label}"));
+    }
+}
+
+/// The Claude panel before an account is signed in, and while one is.
+#[test]
+fn shot_claude_sign_in() {
+    use kreate_ui::chat::ChatAccount;
+    let doc = doc_with_cube();
+    for (label, account) in [
+        ("claude-signed-out-ko", ChatAccount::SignedOut),
+        ("claude-signing-in-ko", ChatAccount::SigningIn { url: Some("https://claude.com/cai/oauth/authorize".into()) }),
+    ] {
+        let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
+            state.switch_workspace(5);
+            state.chat_account = account.clone();
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(&format!("workspace-{label}"));
+    }
+}
+
 /// A picture of the Shading workspace, with a textured material's graph.
 #[test]
 fn shot_shading() {

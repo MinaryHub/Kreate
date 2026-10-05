@@ -93,6 +93,8 @@ impl EditorId {
     pub const PREFERENCES: Self = Self::known("preferences");
     /// The history as a script, and a line to type one. Phase 9's first editor.
     pub const CONSOLE: Self = Self::known("console");
+    /// A conversation with Claude, who edits the document through its operators.
+    pub const CLAUDE: Self = Self::known("claude");
     /// A material's node graph.
     pub const SHADER: Self = Self::known("shader");
     /// The scene's clock and a ruler to move it along.
@@ -166,6 +168,7 @@ impl EditorRegistry {
             (EditorId::UV_EDITOR, "editor-uv", false),
             (EditorId::PREFERENCES, "editor-preferences", false),
             (EditorId::CONSOLE, "editor-console", false),
+            (EditorId::CLAUDE, "editor-claude", false),
             (EditorId::SHADER, "editor-shader", true),
             (EditorId::TIMELINE, "editor-timeline", true),
             (EditorId::DOPE_SHEET, "editor-dope-sheet", true),

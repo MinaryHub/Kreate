@@ -148,6 +148,22 @@ pub enum Command {
     RunScript {
         source: String,
     },
+    /// From the Claude panel: say this to Claude, in the conversation so far.
+    ChatSend {
+        text: String,
+    },
+    /// From the Claude panel: stop the answer in progress.
+    ChatStop,
+    /// From the Claude panel: forget the conversation and start another.
+    ChatNew,
+    /// From the Claude panel: sign Claude Code in, in the browser.
+    ChatSignIn,
+    /// From the Claude panel: the code the sign-in page showed.
+    ChatSignInCode {
+        code: String,
+    },
+    /// From the Claude panel: give up on signing in.
+    ChatSignInCancel,
     /// Run an action the way a key press would.
     ///
     /// **The other door into the application.** `RunOperator` goes through
