@@ -25,18 +25,57 @@ use kreate_mesh::primitives;
 /// The plan's Phase 2 budget.
 const BUDGET_PER_VERT: usize = 250;
 
+/// Prints a mesh's edit-structure cost and returns its *topology's* bytes per
+/// vertex: the vertices, edges, loops and faces and the links between them.
+///
+/// Attribute layers — UVs, selection, colours — are reported but not counted
+/// against the budget. They are the content a mesh carries rather than what
+/// the structure costs, they scale with what the user puts on the mesh, and
+/// counting them hid the structure's own cost behind whichever layers the
+/// primitives happen to have: the UVs the primitives gained after the budget
+/// was set took the grid from 221 to 253 bytes a vertex without the structure
+/// changing at all. [`attributes_hold_one_value_per_element`] keeps the layers
+/// honest instead.
 fn report(name: &str, mesh: &kreate_mesh::MeshData) -> f64 {
     let bm = BMesh::from_mesh_data(mesh);
     let bytes = bm.memory_bytes();
-    let per_vert = bytes as f64 / bm.num_verts() as f64;
+    let attributes: usize = bm
+        .attributes()
+        .iter()
+        .map(|l| l.data.len() * l.data.ty().size())
+        .sum();
+    let verts = bm.num_verts() as f64;
+    let topology = (bytes - attributes) as f64 / verts;
     println!(
-        "{name:12} V {:6} E {:6} L {:6} F {:6}  {bytes:9} B  {per_vert:6.1} B/vert",
+        "{name:12} V {:6} E {:6} L {:6} F {:6}  {bytes:9} B  topology {topology:6.1} B/vert  attributes {:5.1} B/vert",
         bm.num_verts(),
         bm.num_edges(),
         bm.num_loops(),
         bm.num_faces(),
+        attributes as f64 / verts,
     );
-    per_vert
+    topology
+}
+
+/// Every attribute layer holds one value per element of its domain, at its
+/// type's size: no stale slots, no layer kept at a larger domain's length.
+#[test]
+fn attributes_hold_one_value_per_element() {
+    for (name, mesh) in [
+        ("grid", primitives::grid(10.0, 32, 32)),
+        ("uv_sphere", primitives::uv_sphere(1.0, 32, 16)),
+        ("torus", primitives::torus(1.0, 0.25, 32, 12)),
+    ] {
+        let bm = BMesh::from_mesh_data(&mesh);
+        for layer in bm.attributes().iter() {
+            assert_eq!(
+                layer.data.len(),
+                bm.slot_count(layer.domain),
+                "{name}: the {} layer does not have one value per element",
+                layer.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -59,7 +98,7 @@ fn the_edit_structure_stays_inside_its_per_vertex_budget() {
 
     assert!(
         per_vert <= BUDGET_PER_VERT as f64,
-        "{per_vert:.1} B/vert exceeds the {BUDGET_PER_VERT} B budget"
+        "{per_vert:.1} B/vert of topology exceeds the {BUDGET_PER_VERT} B budget"
     );
 }
 

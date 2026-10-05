@@ -43,7 +43,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
+        if: runner.os != 'Windows'
         run: cargo test --workspace
+
+      # The Windows runner has no GPU and draws through WARP, and the GPU
+      # tests in the application's crate crash it when several make their
+      # devices at once. One at a time there; everything else as usual. Bash,
+      # so a failure in the first command fails the step.
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test --workspace --exclude kreate
+          cargo test -p kreate -- --test-threads=1
 
       # Arena handles carry a generation counter only when debug_assertions is
       # on, so the release build takes a genuinely different code path and a
