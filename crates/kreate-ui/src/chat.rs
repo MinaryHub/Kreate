@@ -79,10 +79,17 @@ pub struct ChatText {
 
 /// Draws the panel. `input` is what is being typed; Enter sends it and
 /// Shift+Enter starts a new line. `busy` is whether Claude is answering.
+/// Which assistants the panel can talk to, and which it is talking to.
+pub struct ChatProviders<'a> {
+    pub names: &'a [&'a str],
+    pub current: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn chat(
     ui: &mut Ui,
     text: &ChatText,
+    providers: &ChatProviders<'_>,
     account: &ChatAccount,
     messages: &[ChatMessage],
     input: &mut String,
@@ -94,6 +101,25 @@ pub fn chat(
     let row = ui.spacing().interact_size.y;
     let input_height = row * 3.0 + 20.0;
 
+    // Which assistant, first: changing it starts a new conversation, so not
+    // while one is answering or signing in.
+    let settled = !busy && !matches!(account, ChatAccount::SigningIn { .. });
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(settled, |ui| {
+            let current = providers.names.get(providers.current).copied().unwrap_or("");
+            egui::ComboBox::from_id_salt("chat-provider")
+                // i18n-exempt: an assistant's name
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (index, name) in providers.names.iter().enumerate() {
+                        // i18n-exempt: an assistant's name
+                        if ui.selectable_label(index == providers.current, *name).clicked() && index != providers.current {
+                            queue.push(Command::ChatProvider { index });
+                        }
+                    }
+                });
+        });
+    });
     draw_account(ui, &theme, text, account, code, queue);
     ui.separator();
 
