@@ -263,7 +263,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Image, KtileError> {
             found: bytes.len(),
         });
     }
-    let header: Header = *bytemuck::from_bytes(&bytes[..HEADER_SIZE]);
+    let header: Header = bytemuck::pod_read_unaligned(&bytes[..HEADER_SIZE]);
     if header.magic != MAGIC {
         return Err(KtileError::BadMagic);
     }
@@ -311,7 +311,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Image, KtileError> {
 
     for i in 0..claimed {
         let start = HEADER_SIZE + i * INDEX_SIZE;
-        let entry: IndexEntry = *bytemuck::from_bytes(&bytes[start..start + INDEX_SIZE]);
+        let entry: IndexEntry = bytemuck::pod_read_unaligned(&bytes[start..start + INDEX_SIZE]);
         let offset = entry.offset as usize;
         let length = entry.length as usize;
         // Two checks, and the first does nothing on a 64-bit machine: there
@@ -453,7 +453,7 @@ mod tests {
         let bytes = write(&image);
         for i in 0..3 {
             let start = HEADER_SIZE + i * INDEX_SIZE;
-            let entry: IndexEntry = *bytemuck::from_bytes(&bytes[start..start + INDEX_SIZE]);
+            let entry: IndexEntry = bytemuck::pod_read_unaligned(&bytes[start..start + INDEX_SIZE]);
             assert!(
                 (entry.offset as usize).is_multiple_of(ALIGN),
                 "tile {i} is at {}",
@@ -496,6 +496,17 @@ mod tests {
     fn a_file_that_is_not_one_is_refused_rather_than_read() {
         assert!(matches!(read(b"", "x"), Err(KtileError::Truncated { .. })));
         assert!(matches!(read(&[0u8; 64], "x"), Err(KtileError::BadMagic)));
+    }
+
+    #[test]
+    fn a_file_is_read_wherever_its_bytes_start() {
+        // Inside a zip, or after anything else in a buffer, the bytes need not
+        // start where a header's fields would like them to. Reading must not
+        // care: an alignment assumption here was a panic on a real file.
+        let bytes = write(&patchy());
+        let mut shifted = vec![0u8; bytes.len() + 1];
+        shifted[1..].copy_from_slice(&bytes);
+        assert!(read(&shifted[1..], "x").is_ok());
     }
 
     #[test]
