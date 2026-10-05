@@ -25,6 +25,8 @@ edition = "2021"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kreate3d/kreate"
+# An application, not a library: none of these crates goes to crates.io.
+publish = false
 
 # Versions are PINNED. The winit <-> egui <-> egui-wgpu <-> wgpu <-> naga_oil cluster is
 # tightly coupled; upgrade the whole cluster in one dedicated PR, verified by the

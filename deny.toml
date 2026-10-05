@@ -15,6 +15,13 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # ttf-parser is unmaintained and there is no maintained release to move
+    # to; it arrives through ab_glyph, which egui and winit's Wayland
+    # decorations use, and the graphics cluster is pinned. Revisit when egui
+    # moves its font parsing (skrifa is the named successor).
+    { id = "RUSTSEC-2026-0192", reason = "no safe upgrade; pinned by the egui/winit cluster" },
+]
 
 [licenses]
 version = 2
@@ -29,12 +36,23 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",          # file-level copyleft only; safe to link
     "CC0-1.0",
+    "BSL-1.0",          # Boost: permissive, like MIT (clipboard-win, error-code)
 ]
 confidence-threshold = 0.9
+
+# egui's built-in fonts are fonts, under font licences: the Open Font Licence
+# and the Ubuntu Font Licence both allow bundling a font with any software.
+# Granted to that crate alone, so no code under them slips in.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace crates refer to each other by path with no version. That is a
+# wildcard to cargo-deny, and harmless for crates that are never published.
+allow-wildcard-paths = true
 # The graphics cluster (winit / egui / egui-wgpu / wgpu) is upgraded as a unit in
 # one dedicated PR, verified by the renderer smoke test. Anything that drags in a
 # second copy of wgpu has broken that.
