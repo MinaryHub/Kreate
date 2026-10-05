@@ -1142,7 +1142,7 @@ mod tests {
 
         h.undo(&mut doc);
         assert!(!h.can_undo() && h.can_redo());
-        assert!(!h.redo(&r, &mut doc, &Context::default()).is_err());
+        assert!(h.redo(&r, &mut doc, &Context::default()).is_ok());
         assert!(h.can_undo() && !h.can_redo());
     }
 

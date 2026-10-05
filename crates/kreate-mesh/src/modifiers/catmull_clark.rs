@@ -1003,6 +1003,6 @@ mod tests {
         let crease = after.attributes().get_f32(names::CREASE).unwrap();
         assert!(crease.iter().all(|c| *c == 0.0), "the sharpness was not spent");
         let full = subdivide_once(&top_ring(1.0));
-        assert!(full.attributes().get_f32(names::CREASE).unwrap().iter().any(|c| *c == 1.0));
+        assert!(full.attributes().get_f32(names::CREASE).unwrap().contains(&1.0));
     }
 }

@@ -1,0 +1,10 @@
+{
+  "name": "kreate-contact",
+  "private": true,
+  "description": "Relays messages from Kreate's Help > Contact to the developers through Brevo.",
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "test": "node --test"
+  }
+}

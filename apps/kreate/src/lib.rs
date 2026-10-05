@@ -7,9 +7,11 @@
 //! invisible to everything except a human looking at the screen.
 
 pub mod appcall;
+pub mod version;
 pub mod breadcrumbs;
 pub mod bridge;
 pub mod claude;
+pub mod contact;
 pub mod crashreport;
 pub mod docfile;
 pub mod dragpreview;

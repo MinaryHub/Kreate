@@ -548,6 +548,8 @@ struct App {
     bridge: Option<kreate::bridge::Bridge>,
     /// The Claude panel's conversation. See `kreate::claude`.
     chat: Option<kreate::claude::Chat>,
+    /// Help ▸ Contact's messages on their way. See `kreate::contact`.
+    outbox: Option<kreate::contact::Outbox>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     egui_ctx: egui::Context,
@@ -806,6 +808,7 @@ impl App {
         Self {
             bridge: None,
             chat: None,
+            outbox: None,
             window: None,
             gfx: None,
             egui_ctx: egui::Context::default(),
@@ -3110,6 +3113,21 @@ impl App {
     // What `kreate-mcp` asks for, served on the main thread, where the
     // document is. See `kreate::bridge`.
 
+    /// What became of the messages Help ▸ Contact sent.
+    fn serve_outbox(&mut self) {
+        use kreate_ui::contact::ContactStatus;
+        let Some(outbox) = &self.outbox else { return };
+        for answer in outbox.poll() {
+            self.ui.contact.status = match answer {
+                Ok(()) => ContactStatus::Sent,
+                Err(why) => ContactStatus::Failed(why),
+            };
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Says something to Claude from the Claude panel.
     fn chat_send(&mut self, text: String) {
         use kreate_ui::chat::{ChatMessage, ChatRole};
@@ -3869,6 +3887,19 @@ impl App {
                 Command::ChatSignInCancel => {
                     if let Some(chat) = &mut self.chat {
                         chat.cancel_sign_in();
+                    }
+                }
+                Command::OpenContact => self.ui.contact.open(),
+                Command::OpenAbout => self.ui.about_open = true,
+                Command::ContactSend { kind, name, email, message, include_details } => {
+                    let details = include_details
+                        .then(|| (kreate::version::describe(), kreate::version::platform()));
+                    match &self.outbox {
+                        Some(outbox) => outbox.send(&kreate::contact::Message { kind, name, email, message, details }),
+                        None => {
+                            self.ui.contact.status =
+                                kreate_ui::contact::ContactStatus::Failed("messages cannot be sent from here".into())
+                        }
                     }
                 }
                 Command::ChatNew => {
@@ -7761,6 +7792,7 @@ impl ApplicationHandler for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         self.serve_bridge();
         self.serve_chat();
+        self.serve_outbox();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -8360,6 +8392,12 @@ fn main() {
     // talk as before anything is typed.
     chat.check_account();
     app.chat = Some(chat);
+    let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    app.outbox = Some(kreate::contact::Outbox::new(move || {
+        if let Ok(proxy) = outbox_proxy.lock() {
+            let _ = proxy.send_event(());
+        }
+    }));
     let proxy = std::sync::Mutex::new(event_loop.create_proxy());
     if let Some(info) = kreate::bridge::info_path() {
         match kreate::bridge::start(&info, move || {
@@ -8402,7 +8440,7 @@ fn install_panic_hook() {
         let report = dir.join("crash.txt");
         let _ = std::fs::create_dir_all(&dir);
         let mut text = String::new();
-        text.push_str(&format!("kreate {}\n", env!("CARGO_PKG_VERSION")));
+        text.push_str(&format!("kreate {}\n", kreate::version::describe()));
         text.push_str(&format!("panic: {info}\n"));
         text.push_str(&format!(
             "backtrace:\n{}\n",

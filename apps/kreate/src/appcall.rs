@@ -24,8 +24,15 @@ pub enum AppCall {
     OpenImage { path: String, color: bool },
 }
 
+/// One listed call: its id, what it does, and its parameters with theirs.
+pub type Listed = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
 /// What [`AppCall`]s look like, for the operator listing.
-pub const LISTING: [(&str, &str, &[(&str, &str)]); 2] = [
+pub const LISTING: [Listed; 2] = [
     (
         "object.mode_set",
         "Switch the editing mode. mesh.* and uv.* operators need edit mode; leave it with mode=\"object\".",
@@ -80,7 +87,9 @@ fn read(name: &str, rest: &str) -> Result<AppCall, String> {
             let color = match get("color") {
                 None | Some("True") | Some("true") => true,
                 Some("False") | Some("false") => false,
-                Some(other) => return Err(format!("image.open: `color` is True or False, not {other}")),
+                Some(other) => {
+                    return Err(format!("image.open: `color` is True or False, not {other}"))
+                }
             };
             Ok(AppCall::OpenImage {
                 path: path.to_string(),
@@ -144,7 +153,10 @@ mod tests {
             parse("kreate.ops.object.mode_set(mode=\"edit\")"),
             Some(Ok(AppCall::ModeSet("edit".into())))
         );
-        assert_eq!(parse("object.mode_set( mode = \"object\" )"), Some(Ok(AppCall::ModeSet("object".into()))));
+        assert_eq!(
+            parse("object.mode_set( mode = \"object\" )"),
+            Some(Ok(AppCall::ModeSet("object".into())))
+        );
     }
 
     #[test]
@@ -167,14 +179,20 @@ mod tests {
 
     #[test]
     fn operators_are_left_to_the_history() {
-        assert_eq!(parse("kreate.ops.object.add_primitive(shape=\"cube\")"), None);
+        assert_eq!(
+            parse("kreate.ops.object.add_primitive(shape=\"cube\")"),
+            None
+        );
         assert_eq!(parse("object.mode_setting(mode=\"edit\")"), None);
     }
 
     #[test]
     fn mistakes_are_reported() {
         assert!(matches!(parse("object.mode_set()"), Some(Err(_))));
-        assert!(matches!(parse("object.mode_set(mod=\"edit\")"), Some(Err(_))));
+        assert!(matches!(
+            parse("object.mode_set(mod=\"edit\")"),
+            Some(Err(_))
+        ));
         assert!(matches!(parse("image.open(path=\"/a.png\""), Some(Err(_))));
         assert!(matches!(parse("image.open(path=\"/a.png)"), Some(Err(_))));
     }

@@ -1941,6 +1941,25 @@ fn shot_claude_sign_in() {
     }
 }
 
+/// Help ▸ Contact's form, with a message being written, and About.
+#[test]
+fn shot_contact() {
+    let doc = doc_with_cube();
+    let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
+        state.contact.open();
+        state.contact.kind = 1;
+        state.contact.email = "artist@studio.kr".into();
+        state.contact.message = "회전체 단면을 곡선으로 그릴 수 있으면 좋겠습니다.".into();
+        state.contact.status = kreate_ui::contact::ContactStatus::Failed("the contact service is not set up".into());
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("contact-ko");
+    let Some(shot) = composite_with(&doc, "ko-KR", false, |state| state.about_open = true) else { return };
+    shot.dump("about-ko");
+}
+
 /// A picture of the Shading workspace, with a textured material's graph.
 #[test]
 fn shot_shading() {

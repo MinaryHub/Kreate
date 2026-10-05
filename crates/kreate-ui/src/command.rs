@@ -164,6 +164,19 @@ pub enum Command {
     },
     /// From the Claude panel: give up on signing in.
     ChatSignInCancel,
+    /// Help ▸ Contact.
+    OpenContact,
+    /// Help ▸ About Kreate.
+    OpenAbout,
+    /// From the contact form: send this to the developers. `kind` is one of
+    /// `contact::KINDS`.
+    ContactSend {
+        kind: String,
+        name: String,
+        email: String,
+        message: String,
+        include_details: bool,
+    },
     /// Run an action the way a key press would.
     ///
     /// **The other door into the application.** `RunOperator` goes through
