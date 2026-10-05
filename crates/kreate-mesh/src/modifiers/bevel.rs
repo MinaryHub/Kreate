@@ -14,11 +14,13 @@ pub struct BevelParams {
     pub width: f32,
     /// Edges whose faces turn by more than this, in radians, are bevelled.
     pub angle: f32,
+    /// Strips across each edge: one is a flat chamfer, more round it.
+    pub segments: u32,
 }
 
 impl Default for BevelParams {
     fn default() -> Self {
-        Self { width: 0.1, angle: 30f32.to_radians() }
+        Self { width: 0.1, angle: 30f32.to_radians(), segments: 1 }
     }
 }
 
@@ -41,7 +43,7 @@ pub fn bevel(input: &MeshData, params: &BevelParams) -> MeshData {
     if edges.is_empty() {
         return input.clone();
     }
-    match crate::edit::bevel_edges(&mut bm, &edges, params.width) {
+    match crate::edit::bevel_edges_segments(&mut bm, &edges, params.width, params.segments) {
         Ok(_) => bm.to_mesh_data(),
         // A bevel that cannot be built draws the cage rather than nothing.
         Err(_) => input.clone(),

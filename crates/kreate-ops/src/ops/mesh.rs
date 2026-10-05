@@ -117,7 +117,7 @@ pub fn edit_targets(doc: &Document) -> Vec<EditTarget> {
 /// Takes the coarse undo path: every one of these changes topology, and a
 /// declared write set over positions cannot describe a mesh that has grown
 /// faces.
-fn with_bmesh_id<T>(
+pub(crate) fn with_bmesh_id<T>(
     doc: &mut DocMut<'_>,
     mesh_id: MeshId,
     f: impl FnOnce(&mut BMesh) -> Result<T, OpError>,
@@ -1246,11 +1246,14 @@ pub struct BevelParams {
     /// How wide the chamfer is, measured along the neighbouring edges.
     #[param(min = 0.0, soft_max = 1.0, unit = "length")]
     pub width: f64,
+    /// Strips across each edge: one is a flat chamfer, more round it off.
+    #[param(min = 1, max = 64, unit = "count")]
+    pub segments: u32,
 }
 
 impl Default for BevelParams {
     fn default() -> Self {
-        Self { width: 0.1 }
+        Self { width: 0.1, segments: 1 }
     }
 }
 
@@ -1276,7 +1279,7 @@ impl Operator for BevelEdges {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let built: usize = each_bmesh(doc, |bm| {
-            edit::bevel_selected(bm, params.width as f32)
+            edit::bevel_selected_segments(bm, params.width as f32, params.segments)
                 .map(|out| out.faces.len())
                 .map_err(|e| OpError::Failed(e.to_string()))
         })?
@@ -2823,7 +2826,203 @@ impl Operator for Separate {
     }
 }
 
+// --- crease -------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct CreaseParams {
+    /// How sharp the selected edges stay under a subdivide modifier: 0 is
+    /// smooth, 1 is sharp at every level, and between them the edge is sharp
+    /// for a few levels and then relaxes — a softly rounded edge.
+    #[param(min = 0.0, max = 1.0)]
+    pub value: f64,
+}
+
+impl Default for CreaseParams {
+    fn default() -> Self {
+        Self { value: 1.0 }
+    }
+}
+
+/// Sets the subdivision crease of the selected edges — Blender's Shift+E.
+pub struct Crease;
+
+impl Operator for Crease {
+    type Params = CreaseParams;
+
+    fn id() -> &'static str {
+        "mesh.crease"
+    }
+    fn label() -> &'static str {
+        "Edge Crease"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let changed: usize = each_bmesh(doc, |bm| {
+            let edges = bm.selected_edges();
+            Ok(edit::set_crease(bm, &edges, params.value as f32))
+        })?
+        .into_iter()
+        .sum();
+        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+    }
+}
+
+// --- select by condition ------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SelectWhereParams {
+    /// Which elements to test: a vertex by its position, an edge by its
+    /// midpoint, a face by its centre.
+    #[param(variants("vert", "edge", "face"))]
+    pub mode: u32,
+    /// The low corner of a world-space box the element must be in, metres.
+    #[param(unit = "length")]
+    pub min: [f64; 3],
+    /// The high corner of that box.
+    #[param(unit = "length")]
+    pub max: [f64; 3],
+    /// The world direction the element must face, e.g. (0, 0, -1) for
+    /// undersides: a face's normal, a vertex's (the average of its faces'),
+    /// an edge's (its two vertices'). Zero: any direction.
+    pub normal: [f64; 3],
+    /// How far from `normal` a face may point, in radians.
+    #[param(min = 0.0, max = 3.15, unit = "angle")]
+    pub angle: f64,
+    /// Faces only: the material slot the face must use. −1: any.
+    #[param(min = -1.0)]
+    pub material: i64,
+    /// Add to the selection instead of replacing it.
+    pub extend: bool,
+    /// Remove the matches from the selection instead of adding them.
+    pub deselect: bool,
+}
+
+impl Default for SelectWhereParams {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            min: [-1.0e6; 3],
+            max: [1.0e6; 3],
+            normal: [0.0; 3],
+            angle: 0.35,
+            material: -1,
+            extend: false,
+            deselect: false,
+        }
+    }
+}
+
+/// Selects the elements that meet a condition rather than a list of indices:
+/// the vertices below a height, the faces that point down, the faces of one
+/// material — what a script can say without knowing a mesh's numbering.
+///
+/// Every mesh in edit mode, each in world space, so a box read off
+/// `get_scene`'s bounds means the same thing for all of them.
+pub struct SelectWhere;
+
+impl Operator for SelectWhere {
+    type Params = SelectWhereParams;
+
+    fn id() -> &'static str {
+        "mesh.select_where"
+    }
+    fn label() -> &'static str {
+        "Select Where"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let mode = match params.mode {
+            1 => SelectMode::Edge,
+            2 => SelectMode::Face,
+            _ => SelectMode::Vert,
+        };
+        let (lo, hi) = (glam::DVec3::from_array(params.min), glam::DVec3::from_array(params.max));
+        let inside = |p: glam::DVec3| p.cmpge(lo).all() && p.cmple(hi).all();
+        let wanted = glam::DVec3::from_array(params.normal).normalize_or_zero();
+        let cos_limit = params.angle.cos();
+        let mut matched = 0usize;
+        let changed = for_each_edit_mesh(doc, |target, mesh| {
+            let world = target.to_world;
+            let to_world_normal = world.matrix3.inverse().transpose();
+            let at = |p: glam::Vec3| world.transform_point3(p.as_dvec3());
+            let positions = mesh.positions().to_vec();
+            let facing = |n: glam::Vec3| {
+                wanted == glam::DVec3::ZERO
+                    || (to_world_normal * n.as_dvec3()).normalize_or_zero().dot(wanted) >= cos_limit
+            };
+            let vertex_normals = if wanted != glam::DVec3::ZERO && mode != SelectMode::Face {
+                mesh.compute_vertex_normals()
+            } else {
+                Vec::new()
+            };
+            let hits: Vec<u32> = match mode {
+                SelectMode::Vert => (0..mesh.num_verts())
+                    .filter(|v| {
+                        inside(at(positions[*v as usize]))
+                            && (vertex_normals.is_empty() || facing(vertex_normals[*v as usize]))
+                    })
+                    .collect(),
+                SelectMode::Edge => mesh
+                    .edges()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, [a, b])| {
+                        inside(at((positions[*a as usize] + positions[*b as usize]) * 0.5))
+                            && (vertex_normals.is_empty()
+                                || facing(vertex_normals[*a as usize] + vertex_normals[*b as usize]))
+                    })
+                    .map(|(e, _)| e as u32)
+                    .collect(),
+                SelectMode::Face => {
+                    let normals = mesh.compute_face_normals();
+                    let slots = mesh
+                        .attributes()
+                        .get_i32(kreate_mesh::attribute::names::MATERIAL_INDEX)
+                        .map(<[i32]>::to_vec);
+                    (0..mesh.num_faces())
+                        .filter(|f| {
+                            let ring = mesh.face_verts(*f);
+                            let centre = ring.iter().map(|v| positions[*v as usize]).sum::<glam::Vec3>() / ring.len() as f32;
+                            if !inside(at(centre)) {
+                                return false;
+                            }
+                            if !facing(normals[*f as usize]) {
+                                return false;
+                            }
+                            params.material < 0
+                                || slots.as_ref().and_then(|s| s.get(*f as usize)).copied().unwrap_or(0) as i64
+                                    == params.material
+                        })
+                        .collect()
+                }
+            };
+            if !params.extend {
+                selection::select_none(mesh);
+            }
+            let domain = mode.domain();
+            for index in &hits {
+                selection::set_selected(mesh, domain, *index, !params.deselect);
+            }
+            selection::flush(mesh, mode);
+            matched += hits.len();
+            !hits.is_empty() || !params.extend
+        })?;
+        if matched == 0 && params.extend {
+            return Ok(OpResult::Cancelled);
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<SelectWhere>();
+    registry.register::<Crease>();
     registry.register::<DeleteElements>();
     registry.register::<SelectPick>();
     registry.register::<SelectSet>();

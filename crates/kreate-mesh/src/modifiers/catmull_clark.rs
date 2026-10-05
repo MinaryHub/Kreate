@@ -36,13 +36,19 @@
 //! level, and a plane subdivided four times ends up noticeably smaller than the
 //! plane.
 //!
+//! # Partial creases
+//!
+//! A crease of 1, an edge marked sharp, a boundary and a non-manifold edge are
+//! sharp at every level. A crease between 0 and 1 is sharp for a while: it is
+//! worth [`CREASE_LEVELS`] levels at full weight, and each level spends one —
+//! the semi-sharp creases of Pixar's subdivision, which is what a softly
+//! rounded edge on a cushion or a phone wants. While it lasts, a sharpness of
+//! one or more takes the sharp rule; a fraction of one blends the smooth and
+//! the sharp results by that fraction, so the edge relaxes rather than
+//! snapping smooth. A vertex takes the average sharpness of its creased edges.
+//!
 //! # What is deliberately not here
 //!
-//! - **Fractional crease sharpness.** An edge is creased or it is not. Blender's
-//!   `crease` is a 0–1 weight that interpolates between smooth and sharp over
-//!   levels; that needs the sharpness to decay per level and the rules to blend,
-//!   and it is a separate piece of work. A crease at or above [`CREASE_SHARP`] is
-//!   treated as fully sharp, which is what marking one is nearly always for.
 //! - **Adaptive or GPU evaluation.** This is the CPU cage evaluator. The plan
 //!   puts limit-surface evaluation and adaptive tessellation in OpenSubdiv's
 //!   territory, as a separate project.
@@ -55,8 +61,29 @@ use kreate_math::Vec3;
 use crate::attribute::{names, Domain};
 use crate::MeshData;
 
-/// Crease weight at or above which an edge counts as fully sharp.
-pub const CREASE_SHARP: f32 = 0.5;
+/// How many levels a crease just under 1 stays sharp for. A crease of `c`
+/// below 1 has a sharpness of `c * CREASE_LEVELS`, and each level of
+/// subdivision spends one.
+pub const CREASE_LEVELS: f32 = 4.0;
+
+/// How sharp an edge with crease weight `c` is: infinite at 1 and over.
+fn crease_sharpness(c: f32) -> f32 {
+    if c >= 1.0 {
+        f32::INFINITY
+    } else {
+        c.max(0.0) * CREASE_LEVELS
+    }
+}
+
+/// The crease an edge's halves carry to the next level: one level's
+/// sharpness spent, or unchanged at full.
+fn crease_after_a_level(c: f32) -> f32 {
+    if c >= 1.0 {
+        c
+    } else {
+        (c - 1.0 / CREASE_LEVELS).max(0.0)
+    }
+}
 
 /// Applies one level of Catmull–Clark subdivision.
 pub fn subdivide_once(input: &MeshData) -> MeshData {
@@ -92,15 +119,18 @@ pub fn subdivide_once(input: &MeshData) -> MeshData {
             let midpoint = (positions[a as usize] + positions[b as usize]) * 0.5;
             // A sharp or boundary edge takes the midpoint: its point must lie on
             // the polyline, or the crease is not a crease. An interior smooth
-            // edge is pulled toward the two faces it joins.
-            if topology.sharp[e] || topology.edge_face_count[e] != 2 {
+            // edge is pulled toward the two faces it joins; a partly sharp one
+            // goes part of the way.
+            let sharpness = topology.sharpness[e];
+            if sharpness >= 1.0 || topology.edge_face_count[e] != 2 {
                 return midpoint;
             }
-            (positions[a as usize]
+            let smooth = (positions[a as usize]
                 + positions[b as usize]
                 + face_points[topology.edge_faces[e][0] as usize]
                 + face_points[topology.edge_faces[e][1] as usize])
-                * 0.25
+                * 0.25;
+            smooth.lerp(midpoint, sharpness)
         })
         .collect();
 
@@ -167,6 +197,12 @@ pub fn subdivide_once(input: &MeshData) -> MeshData {
     carry_corner_data(&mut out, input, &corner_offsets, &corner_sources);
     carry_face_data(&mut out, input, &face_order);
     carry_edge_data(&mut out, input, nv, ne);
+    // A partial crease spends a level's worth of its sharpness.
+    if let Some(crease) = out.attributes_mut().make_mut_f32(names::CREASE) {
+        for c in crease.iter_mut() {
+            *c = crease_after_a_level(*c);
+        }
+    }
     out
 }
 
@@ -187,27 +223,52 @@ fn vertex_point(input: &MeshData, topology: &Topology, face_points: &[Vec3], v: 
     let sharp: Vec<u32> = edges
         .iter()
         .copied()
-        .filter(|e| topology.sharp[*e as usize] || topology.edge_face_count[*e as usize] != 2)
+        .filter(|e| topology.creased(*e as usize))
         .collect();
 
     // Three or more creases meeting is a corner: it stays put. Anything else
     // rounds it off, and a cube whose corners have been creased on all three
     // edges would still come out spherical.
-    if sharp.len() >= 3 {
-        return here;
-    }
-
+    //
     // Exactly two: the vertex lies along a crease or a boundary, and follows the
     // cubic B-spline curve through its two neighbours. Without this an open mesh
     // shrinks away from its own border on every level.
-    if sharp.len() == 2 {
-        let mut sum = here * 6.0;
-        for e in sharp {
-            let [a, b] = input.edges()[e as usize];
-            let other = if a as usize == v { b } else { a };
-            sum += positions[other as usize];
+    let rule = match sharp.len() {
+        0 | 1 => None,
+        2 => {
+            let mut sum = here * 6.0;
+            for e in &sharp {
+                let [a, b] = input.edges()[*e as usize];
+                let other = if a as usize == v { b } else { a };
+                sum += positions[other as usize];
+            }
+            Some(sum / 8.0)
         }
-        return sum / 8.0;
+        _ => Some(here),
+    };
+    // How sharp the vertex is: its creased edges' average, where a boundary or
+    // a full crease is sharp outright.
+    let sharpness = if sharp.is_empty() {
+        0.0
+    } else {
+        sharp.iter().map(|e| topology.edge_sharpness(*e as usize)).sum::<f32>() / sharp.len() as f32
+    };
+    match rule {
+        Some(rule) if sharpness >= 1.0 => return rule,
+        Some(rule) => return smooth_vertex(input, topology, face_points, v).lerp(rule, sharpness),
+        None => {}
+    }
+    smooth_vertex(input, topology, face_points, v)
+}
+
+/// The interior rule for one vertex: where it moves with no crease about.
+fn smooth_vertex(input: &MeshData, topology: &Topology, face_points: &[Vec3], v: usize) -> Vec3 {
+    let positions = input.positions();
+    let here = positions[v];
+    let edges = topology.vertex_edges(v);
+    let valence = edges.len();
+    if valence == 0 {
+        return here;
     }
 
     // The interior rule. These weights are what make the limit surface C² away
@@ -238,7 +299,9 @@ struct Topology {
     /// see [`Topology::of`].
     edge_faces: Vec<[u32; 2]>,
     edge_face_count: Vec<u32>,
-    sharp: Vec<bool>,
+    /// How sharp each edge is at this level: zero smooth, infinite for a full
+    /// crease, a mark or a non-manifold fan, and a number of levels between.
+    sharpness: Vec<f32>,
     vertex_edge_offsets: Vec<u32>,
     vertex_edge_list: Vec<u32>,
     vertex_face_offsets: Vec<u32>,
@@ -307,16 +370,16 @@ impl Topology {
 
         let crease = input.attributes().get_f32(names::CREASE);
         let marked = input.attributes().get_bool(names::SHARP_EDGE);
-        let sharp: Vec<bool> = (0..ne)
+        let sharpness: Vec<f32> = (0..ne)
             .map(|e| {
-                let creased = crease
-                    .and_then(|c| c.get(e))
-                    .is_some_and(|w| *w >= CREASE_SHARP);
                 let flagged = marked.and_then(|m| m.get(e)).copied().unwrap_or(false);
                 // Non-manifold counts as sharp: the interior rule needs exactly
                 // two faces, and averaging over "the two of the three" would pick
                 // an answer out of the face order.
-                creased || flagged || edge_face_count[e] > 2
+                if flagged || edge_face_count[e] > 2 {
+                    return f32::INFINITY;
+                }
+                crease_sharpness(crease.and_then(|c| c.get(e)).copied().unwrap_or(0.0))
             })
             .collect();
 
@@ -326,7 +389,7 @@ impl Topology {
             corner_edge,
             edge_faces,
             edge_face_count,
-            sharp,
+            sharpness,
             vertex_edge_offsets,
             vertex_edge_list,
             vertex_face_offsets,
@@ -342,11 +405,26 @@ impl Topology {
         slice_of(&self.vertex_face_offsets, &self.vertex_face_list, v)
     }
 
+    /// Whether an edge takes part in a crease rule: sharp at all, or a
+    /// boundary.
+    fn creased(&self, e: usize) -> bool {
+        self.sharpness[e] > 0.0 || self.edge_face_count[e] != 2
+    }
+
+    /// An edge's sharpness, with a boundary as sharp as it gets.
+    fn edge_sharpness(&self, e: usize) -> f32 {
+        if self.edge_face_count[e] != 2 {
+            f32::INFINITY
+        } else {
+            self.sharpness[e]
+        }
+    }
+
     /// How many sharp or boundary edges meet at a vertex.
     fn sharp_at(&self, v: usize) -> usize {
         self.vertex_edges(v)
             .iter()
-            .filter(|e| self.sharp[**e as usize] || self.edge_face_count[**e as usize] != 2)
+            .filter(|e| self.creased(**e as usize))
             .count()
     }
 }
@@ -718,9 +796,9 @@ mod tests {
             .expect("the layer survived");
         assert_eq!(crease.len(), out.num_edges() as usize);
         assert!(
-            crease.iter().filter(|c| **c >= CREASE_SHARP).count() >= 24,
+            crease.iter().filter(|c| **c >= 1.0).count() >= 24,
             "the creases did not propagate: {} of {}",
-            crease.iter().filter(|c| **c >= CREASE_SHARP).count(),
+            crease.iter().filter(|c| **c >= 1.0).count(),
             crease.len()
         );
     }
@@ -888,5 +966,43 @@ mod tests {
                 "face {index} at {mid:?} faces inward: {normal:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_partial_crease_lands_between_smooth_and_sharp_and_relaxes() {
+        // The top ring of a cube at no crease, half a crease and a full one: the
+        // half crease holds the outline wider than smooth and narrower than
+        // sharp — and over levels it spends its sharpness and relaxes.
+        let top_ring = |weight: f32| {
+            let mut mesh = primitives::cube(2.0);
+            let ring: Vec<f32> = mesh
+                .edges()
+                .iter()
+                .map(|[a, b]| {
+                    let up = mesh.positions()[*a as usize].z > 0.9 && mesh.positions()[*b as usize].z > 0.9;
+                    if up { weight } else { 0.0 }
+                })
+                .collect();
+            mesh.attributes_mut()
+                .insert(names::CREASE, Domain::Edge, AttrData::F32(Arc::new(ring)));
+            mesh
+        };
+        let width = |m: &MeshData| {
+            m.positions()
+                .iter()
+                .filter(|p| p.z > 0.5)
+                .map(|p| p.x.abs().max(p.y.abs()))
+                .fold(0.0f32, f32::max)
+        };
+        let once = |w: f32| width(&subdivide_once(&top_ring(w)));
+        let (smooth, half, sharp) = (once(0.0), once(0.1), once(1.0));
+        assert!(smooth < half && half < sharp, "{smooth} < {half} < {sharp}");
+
+        // 0.1 is less than one level's worth: it is gone after the first.
+        let after = subdivide_once(&top_ring(0.1));
+        let crease = after.attributes().get_f32(names::CREASE).unwrap();
+        assert!(crease.iter().all(|c| *c == 0.0), "the sharpness was not spent");
+        let full = subdivide_once(&top_ring(1.0));
+        assert!(full.attributes().get_f32(names::CREASE).unwrap().iter().any(|c| *c == 1.0));
     }
 }

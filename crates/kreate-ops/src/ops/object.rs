@@ -7,6 +7,7 @@ use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
 use crate::OpParams;
+use crate::property::PropertyMap;
 
 /// The primitive shapes `object.add_primitive` can build.
 ///
@@ -38,7 +39,11 @@ pub struct AddPrimitiveParams {
         "torus"
     ))]
     pub shape: u32,
-    /// Overall size, in metres.
+    /// Overall size, in metres: a plane's, grid's or cube's edge; a sphere's
+    /// diameter; a cylinder's or cone's diameter and also its height; a
+    /// torus's ring diameter through the tube's centre, with a tube 0.3 of it
+    /// thick. Centred on `location`. `object.set_dimensions` sizes it exactly
+    /// afterwards.
     #[param(min = 0.0001, soft_max = 100.0, unit = "length")]
     pub size: f64,
     /// Segments around the main axis, for the rounded shapes.
@@ -430,6 +435,10 @@ impl Operator for SetLight {
         active_light(doc).is_some()
     }
 
+    fn current(_ctx: &Context, doc: &Document, _given: &PropertyMap) -> Option<Self::Params> {
+        doc.light(active_light(doc)?).map(light_params)
+    }
+
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
@@ -646,6 +655,10 @@ impl Operator for SetWorld {
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         doc.active_world().is_some()
+    }
+
+    fn current(_ctx: &Context, doc: &Document, _given: &PropertyMap) -> Option<Self::Params> {
+        doc.world(doc.active_world()?).map(world_params)
     }
 
     fn execute(
@@ -876,6 +889,15 @@ impl Operator for SetMaterial {
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_slot_count(doc) > 0
+    }
+
+    fn current(_ctx: &Context, doc: &Document, given: &PropertyMap) -> Option<Self::Params> {
+        let slot = match given.get("slot") {
+            Some(kreate_reflect::PropertyValue::Int(i)) => u32::try_from(*i).ok()?,
+            _ => 0,
+        };
+        let material = doc.material(doc.material_id_at(doc.selection.active?, slot as usize)?)?;
+        Some(material_params(material, slot))
     }
 
     fn execute(
@@ -1331,18 +1353,26 @@ impl Operator for LinkMaterial {
         "Link Material"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        active_slot_count(doc) > 0
+        active_mesh(doc).is_some()
     }
 
     fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
-        let Ok(raw) = params.uid.trim().parse::<u64>() else { return Ok(OpResult::Cancelled) };
-        let Some(material) = doc.document().material_by_uid(kreate_scene::Uid::from_raw(raw)) else {
-            return Ok(OpResult::Cancelled);
-        };
+        let uid = params.uid.trim();
+        let material = uid
+            .parse::<u64>()
+            .ok()
+            .and_then(|raw| doc.document().material_by_uid(kreate_scene::Uid::from_raw(raw)))
+            .ok_or_else(|| OpError::Failed(format!("no material has uid {uid:?}; get_scene lists them")))?;
+        // The next slot as well as an existing one: a freshly added object
+        // has none, and making the slot first is a step a script should not
+        // have to know about.
         let slot = params.slot as usize;
         let slots = doc.document().mesh_slots(mesh);
-        if slot >= slots.len() || slots[slot] == Some(material) {
+        if slot > slots.len() {
+            return Err(OpError::Failed(format!("the object has {} slot(s); slot {slot} would leave a gap", slots.len())));
+        }
+        if slots.get(slot) == Some(&Some(material)) {
             return Ok(OpResult::Cancelled);
         }
         doc.document_mut().set_mesh_slot(mesh, slot, Some(material));
@@ -1523,6 +1553,10 @@ impl Operator for SetCamera {
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_camera(doc).is_some()
+    }
+
+    fn current(_ctx: &Context, doc: &Document, _given: &PropertyMap) -> Option<Self::Params> {
+        doc.camera(active_camera(doc)?).map(camera_params)
     }
 
     fn execute(
@@ -1927,6 +1961,17 @@ impl Operator for SetTransform {
         doc.selection.active.is_some()
     }
 
+    fn current(_ctx: &Context, doc: &Document, _given: &PropertyMap) -> Option<Self::Params> {
+        let t = &doc.object(doc.selection.active?)?.transform;
+        let r = kreate_scene::animation::to_euler(t.rotation);
+        Some(SetTransformParams {
+            location: t.translation.to_array(),
+            rotation: r.to_array(),
+            scale: t.scale.to_array(),
+            ..SetTransformParams::default()
+        })
+    }
+
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
@@ -2232,6 +2277,50 @@ impl Operator for SelectAll {
         }
         // Selection changes are undoable: users expect Ctrl+Z to restore a
         // selection, and losing a careful one is more annoying than losing an edit.
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SelectParams {
+    /// The object's name, exactly as the outliner shows it.
+    pub name: String,
+    /// Add to the selection rather than replace it.
+    pub extend: bool,
+}
+
+/// Selects an object by its name, and makes it the active one.
+///
+/// What a script has instead of a click. Every object operator acts on the
+/// selection, so without this a script that lost its selection — to a click
+/// in the viewport, or an undo to before the object it wanted was made — had
+/// no way back to it short of making the object again.
+pub struct Select;
+
+impl Operator for Select {
+    type Params = SelectParams;
+
+    fn id() -> &'static str {
+        "object.select"
+    }
+    fn label() -> &'static str {
+        "Select Object"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let Some(id) = doc
+            .document()
+            .objects()
+            .find(|(_, o)| o.name == params.name)
+            .map(|(id, _)| id)
+        else {
+            return Err(OpError::Failed(format!("no object called {}", params.name)));
+        };
+        let d = doc.document_mut();
+        if !params.extend {
+            d.selection.clear();
+        }
+        d.selection.add(id);
         Ok(OpResult::Finished)
     }
 }
@@ -2589,6 +2678,555 @@ impl Operator for Join {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddLatheParams {
+    /// The silhouette as radius, height pairs: r0, z0, r1, z1, … in metres,
+    /// from one end to the other. A point at radius zero closes that end; an
+    /// end off the axis is left open, like a cup's mouth. Come back down the
+    /// inside to give a wall thickness.
+    pub points: Vec<f64>,
+    /// Segments around the axis.
+    #[param(min = 3, max = 512, unit = "count")]
+    pub segments: u32,
+    /// Curve steps between neighbouring profile points: 1 joins them with
+    /// straight lines, more with a smooth curve through every point — a
+    /// rounded belly rather than a polygon's.
+    #[param(min = 1, max = 64, unit = "count")]
+    pub resolution: u32,
+    /// Where the axis stands; the profile's heights are measured from here.
+    pub location: [f64; 3],
+}
+
+impl Default for AddLatheParams {
+    fn default() -> Self {
+        Self {
+            points: vec![0.0, 0.0, 0.4, 0.0, 0.5, 0.6, 0.25, 1.0, 0.0, 1.0],
+            segments: 32,
+            resolution: 1,
+            location: [0.0; 3],
+        }
+    }
+}
+
+/// Adds a mesh made by turning a profile about the vertical axis: a vase, a
+/// cup, a bottle, a lampshade — the silhouette itself rather than a sphere
+/// squashed towards it.
+pub struct AddLathe;
+
+impl Operator for AddLathe {
+    type Params = AddLatheParams;
+
+    fn id() -> &'static str {
+        "object.add_lathe"
+    }
+    fn label() -> &'static str {
+        "Add Lathe"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        if params.points.len() < 4 || params.points.len() % 2 != 0 {
+            return Err(OpError::Failed(
+                "points wants radius, height pairs: at least two points, an even count of numbers".into(),
+            ));
+        }
+        let given: Vec<glam::Vec3> =
+            params.points.chunks(2).map(|p| glam::Vec3::new(p[0] as f32, 0.0, p[1] as f32)).collect();
+        let profile: Vec<(f32, f32)> = kreate_mesh::primitives::smooth_path(&given, params.resolution, false)
+            .into_iter()
+            .map(|p| (p.x.max(0.0), p.z))
+            .collect();
+        let mesh = kreate_mesh::primitives::lathe(&profile, params.segments);
+        let violations = mesh.validate();
+        if !violations.is_empty() {
+            return Err(OpError::Failed(format!("the profile makes an invalid mesh: {violations:?}")));
+        }
+        let d = doc.document_mut();
+        let id = d.add_mesh_object("Lathe", mesh);
+        d.object_mut(id).expect("just added").transform.translation = DVec3::from_array(params.location);
+        d.selection.clear();
+        d.selection.add(id);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddSweepParams {
+    /// The points the path passes through: x0, y0, z0, x1, y1, z1, … in
+    /// metres from `location`. At least two.
+    pub path: Vec<f64>,
+    /// A round profile's radius, in metres. Ignored when `profile` is given.
+    #[param(min = 0.0001, soft_max = 1.0, unit = "length")]
+    pub radius: f64,
+    /// A round profile's segments.
+    #[param(min = 3, max = 256, unit = "count")]
+    pub segments: u32,
+    /// A profile of its own instead of a circle: x0, y0, x1, y1, … across the
+    /// path, a closed outline — a moulding, a rail, a frame's section.
+    pub profile: Vec<f64>,
+    /// Curve steps between neighbouring path points; 1 joins them straight.
+    #[param(min = 1, max = 64, unit = "count")]
+    pub resolution: u32,
+    /// The path is a loop: its end joins its start.
+    pub closed: bool,
+    /// The profile's size at the start of the path…
+    #[param(min = 0.0, soft_max = 4.0)]
+    pub scale_start: f64,
+    /// …and at its end: a spout that narrows.
+    #[param(min = 0.0, soft_max = 4.0)]
+    pub scale_end: f64,
+    /// Close the ends of an open path.
+    pub caps: bool,
+    pub location: [f64; 3],
+}
+
+impl Default for AddSweepParams {
+    fn default() -> Self {
+        Self {
+            path: vec![0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 1.0, 0.5],
+            radius: 0.05,
+            segments: 16,
+            profile: Vec::new(),
+            resolution: 8,
+            closed: false,
+            scale_start: 1.0,
+            scale_end: 1.0,
+            caps: true,
+            location: [0.0; 3],
+        }
+    }
+}
+
+/// Adds a mesh made by carrying a profile along a path: a pipe, a handle, a
+/// kettle's spout, a cable, a picture frame, a moulding.
+pub struct AddSweep;
+
+impl Operator for AddSweep {
+    type Params = AddSweepParams;
+
+    fn id() -> &'static str {
+        "object.add_sweep"
+    }
+    fn label() -> &'static str {
+        "Add Sweep"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        if params.path.len() < 6 || params.path.len() % 3 != 0 {
+            return Err(OpError::Failed("path wants x, y, z triples: at least two points".into()));
+        }
+        if !params.profile.is_empty() && (params.profile.len() < 6 || params.profile.len() % 2 != 0) {
+            return Err(OpError::Failed("profile wants x, y pairs: at least three points".into()));
+        }
+        let path: Vec<glam::Vec3> =
+            params.path.chunks(3).map(|p| glam::Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)).collect();
+        let profile: Vec<glam::Vec2> = if params.profile.is_empty() {
+            kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments)
+        } else {
+            params.profile.chunks(2).map(|p| glam::Vec2::new(p[0] as f32, p[1] as f32)).collect()
+        };
+        let mesh = kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
+            path: &path,
+            profile: &profile,
+            resolution: params.resolution,
+            closed: params.closed,
+            scale: (params.scale_start as f32, params.scale_end as f32),
+            caps: params.caps,
+        });
+        if mesh.num_faces() == 0 {
+            return Err(OpError::Failed("the path is too short to sweep along".into()));
+        }
+        let violations = mesh.validate();
+        if !violations.is_empty() {
+            return Err(OpError::Failed(format!("the sweep makes an invalid mesh: {violations:?}")));
+        }
+        let d = doc.document_mut();
+        let id = d.add_mesh_object("Sweep", mesh);
+        d.object_mut(id).expect("just added").transform.translation = DVec3::from_array(params.location);
+        d.selection.clear();
+        d.selection.add(id);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PurgeParams {}
+
+/// Removes meshes, materials and images that nothing uses — Blender's Purge.
+///
+/// What an experiment leaves behind: every `material.new` that was tried and
+/// replaced is still in the file, and still in a list a script reads to find
+/// one to reuse.
+pub struct Purge;
+
+impl Operator for Purge {
+    type Params = PurgeParams;
+
+    fn id() -> &'static str {
+        "data.purge"
+    }
+    fn label() -> &'static str {
+        "Purge Unused Data"
+    }
+
+    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let purged = doc.document_mut().purge_unused();
+        Ok(if purged == kreate_scene::document::Purged::default() {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
+/// An object's box in world space, or its origin as a point when it has no
+/// mesh: a lamp or an empty is aligned by where it is.
+fn bounds_or_point(doc: &Document, id: ObjectId) -> Option<(DVec3, DVec3)> {
+    doc.object_world_bounds(id).or_else(|| {
+        doc.object(id)?;
+        let p = doc.world_transform(id).translation;
+        Some((p, p))
+    })
+}
+
+/// Moves an object by a distance given in world space, whatever its parent.
+fn move_in_world(doc: &mut Document, id: ObjectId, delta: DVec3) {
+    let local = match doc.object(id).and_then(|o| o.parent) {
+        Some(parent) => doc.world_transform(parent).inverse().transform_vector3(delta),
+        None => delta,
+    };
+    if let Some(object) = doc.object_mut(id) {
+        object.transform.translation += local;
+    }
+}
+
+fn object_named(doc: &Document, name: &str) -> Option<ObjectId> {
+    doc.objects().find(|(_, o)| o.name == name).map(|(id, _)| id)
+}
+
+/// Where along one axis of a box `side` is: its low face, its middle, its
+/// high face.
+fn side_of(bounds: (DVec3, DVec3), axis: usize, side: u32) -> f64 {
+    match side {
+        0 => bounds.0[axis],
+        2 => bounds.1[axis],
+        _ => (bounds.0[axis] + bounds.1[axis]) * 0.5,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AlignParams {
+    /// The object to line up with, by name. Empty: the 3D cursor.
+    pub target: String,
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+    /// Which side of the active object is moved into line.
+    #[param(variants("min", "center", "max"))]
+    pub side: u32,
+    /// Which side of the target it is lined up with.
+    #[param(variants("min", "center", "max"))]
+    pub to: u32,
+    /// Then this much further along the axis, in metres.
+    #[param(unit = "length")]
+    pub offset: f64,
+}
+
+impl Default for AlignParams {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            axis: 2,
+            side: 0,
+            to: 2,
+            offset: 0.0,
+        }
+    }
+}
+
+/// Moves the active object along one axis until one side of its box lines up
+/// with a side of another object's box, by their world-space bounds.
+///
+/// The defaults stand it on top of the target: its bottom (min Z) to the
+/// target's top (max Z). `side="center", to="center"` centres it; `side="max",
+/// to="min"` puts it against the near face.
+pub struct Align;
+
+impl Operator for Align {
+    type Params = AlignParams;
+
+    fn id() -> &'static str {
+        "object.align"
+    }
+    fn label() -> &'static str {
+        "Align to Object"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.active.is_some()
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let target = match params.target.trim() {
+            "" => (d.cursor, d.cursor),
+            name => {
+                let id = object_named(d, name).ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
+                if id == active {
+                    return Err(OpError::Failed("an object cannot be aligned to itself".into()));
+                }
+                bounds_or_point(d, id).ok_or_else(|| OpError::Failed(format!("{name:?} has no position")))?
+            }
+        };
+        let Some(own) = bounds_or_point(d, active) else { return Ok(OpResult::Cancelled) };
+        let axis = (params.axis as usize).min(2);
+        let distance = side_of(target, axis, params.to) + params.offset - side_of(own, axis, params.side);
+        if distance.abs() < 1e-12 {
+            return Ok(OpResult::Cancelled);
+        }
+        let mut delta = DVec3::ZERO;
+        delta[axis] = distance;
+        move_in_world(doc.document_mut(), active, delta);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PlaceOnParams {
+    /// The object to stand it on, by name.
+    pub target: String,
+    /// Also centre it on the target in X and Y.
+    pub center: bool,
+}
+
+/// Stands the active object on top of another: its lowest point on the
+/// target's highest, by their world-space bounds — a vase on a table. With
+/// `center`, in the middle of it as well.
+pub struct PlaceOn;
+
+impl Operator for PlaceOn {
+    type Params = PlaceOnParams;
+
+    fn id() -> &'static str {
+        "object.place_on"
+    }
+    fn label() -> &'static str {
+        "Place On"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.active.is_some()
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let name = params.target.trim();
+        let target = object_named(d, name).ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
+        if target == active {
+            return Err(OpError::Failed("an object cannot be placed on itself".into()));
+        }
+        let (Some(under), Some(own)) = (bounds_or_point(d, target), bounds_or_point(d, active)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut delta = DVec3::new(0.0, 0.0, under.1.z - own.0.z);
+        if params.center {
+            for axis in 0..2 {
+                delta[axis] = side_of(under, axis, 1) - side_of(own, axis, 1);
+            }
+        }
+        if delta.length() < 1e-12 {
+            return Ok(OpResult::Cancelled);
+        }
+        move_in_world(doc.document_mut(), active, delta);
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- for scripts: sizes, shading, names --------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetDimensionsParams {
+    /// The size wanted along the object's own X, Y and Z, in metres. Zero
+    /// leaves that axis as it is.
+    #[param(min = 0.0, unit = "length")]
+    pub dimensions: [f64; 3],
+}
+
+impl Default for SetDimensionsParams {
+    fn default() -> Self {
+        Self { dimensions: [0.0; 3] }
+    }
+}
+
+/// Scales the active mesh object so its bounding box is the size asked for.
+///
+/// Blender's Dimensions field: the mesh's extent along each of its own axes,
+/// times the scale. A script knows the size it wants — a table top 1.6 m by
+/// 0.9 m — and working the scale out from a primitive's size means knowing how
+/// each primitive was built. An axis the mesh has no extent along (a plane's
+/// Z) cannot be sized and is left alone.
+pub struct SetDimensions;
+
+impl Operator for SetDimensions {
+    type Params = SetDimensionsParams;
+
+    fn id() -> &'static str {
+        "object.set_dimensions"
+    }
+    fn label() -> &'static str {
+        "Set Dimensions"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| o.mesh().is_some())
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(mesh) = d.object(active).and_then(|o| o.mesh()).and_then(|m| d.mesh(m)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let extent = mesh.bounds();
+        let extent = (extent.max - extent.min).as_dvec3();
+        let Some(object) = doc.document_mut().object_mut(active) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut scale = object.transform.scale;
+        for axis in 0..3 {
+            if params.dimensions[axis] > 0.0 && extent[axis] > 1e-9 {
+                scale[axis] = params.dimensions[axis] / extent[axis];
+            }
+        }
+        if scale == object.transform.scale {
+            return Ok(OpResult::Cancelled);
+        }
+        object.transform.scale = scale;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ShadeObjectParams {
+    /// Smooth, or flat.
+    pub smooth: bool,
+    /// With smooth: keep edges sharper than this angle sharp — Blender's Auto
+    /// Smooth. Zero smooths every edge.
+    #[param(min = 0.0, max = 3.15, unit = "angle")]
+    pub angle: f64,
+}
+
+impl Default for ShadeObjectParams {
+    fn default() -> Self {
+        Self {
+            smooth: true,
+            angle: 0.0,
+        }
+    }
+}
+
+/// Shades the selected mesh objects smooth or flat, every face — Blender's
+/// object-mode Shade Smooth and Shade Auto Smooth.
+///
+/// `mesh.shade` does the same to the selected faces and needs edit mode;
+/// this is the whole object, which is what is usually meant.
+pub struct ShadeObjects;
+
+impl Operator for ShadeObjects {
+    type Params = ShadeObjectParams;
+
+    fn id() -> &'static str {
+        "object.shade_smooth"
+    }
+    fn label() -> &'static str {
+        "Shade Smooth"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !selected_mesh_ids(doc).is_empty()
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let mut changed = 0;
+        for mesh in selected_mesh_ids(doc.document()) {
+            changed += crate::ops::mesh::with_bmesh_id(doc, mesh, |bm| {
+                let faces: Vec<_> = bm.face_ids().collect();
+                let mut n = edit::set_shade_smooth(bm, &faces, params.smooth);
+                if params.smooth && params.angle > 0.0 {
+                    n += edit::auto_smooth(bm, params.angle as f32);
+                }
+                Ok(n)
+            })?;
+        }
+        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+    }
+}
+
+/// The meshes of the selected objects, each once: two linked copies share one.
+fn selected_mesh_ids(doc: &Document) -> Vec<MeshId> {
+    let mut out = Vec::new();
+    for id in doc.selection.objects.iter() {
+        if let Some(mesh) = doc.object(*id).and_then(|o| o.mesh()) {
+            if !out.contains(&mesh) {
+                out.push(mesh);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RenameMaterialParams {
+    /// Which of the active object's slots holds the material.
+    #[param(min = 0.0)]
+    pub slot: u32,
+    pub name: String,
+}
+
+/// Renames the material in one of the active object's slots.
+///
+/// Numbered (`.001`) when another material has the name, as objects are: a
+/// script finds a material to reuse by its name.
+pub struct RenameMaterial;
+
+impl Operator for RenameMaterial {
+    type Params = RenameMaterialParams;
+
+    fn id() -> &'static str {
+        "material.rename"
+    }
+    fn label() -> &'static str {
+        "Rename Material"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection.active.is_some_and(|id| doc.material_id_at(id, 0).is_some())
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(id) = d.material_id_at(active, params.slot as usize) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let base = params.name.trim();
+        if base.is_empty() || d.material(id).is_some_and(|m| m.name == base) {
+            return Ok(OpResult::Cancelled);
+        }
+        let taken = |name: &str| d.materials().any(|(other, m)| other != id && m.name == name);
+        let name = if taken(base) {
+            (1..)
+                .map(|i| format!("{base}.{i:03}"))
+                .find(|n| !taken(n))
+                .expect("names run out after integers")
+        } else {
+            base.to_string()
+        };
+        if let Some(material) = doc.document_mut().material_mut(id) {
+            material.name = name;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
     registry.register::<AddCamera>();
@@ -2615,12 +3253,21 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Rotate>();
     registry.register::<Scale>();
     registry.register::<SelectAll>();
+    registry.register::<Select>();
     registry.register::<Parent>();
     registry.register::<Rename>();
     registry.register::<ParentOne>();
     registry.register::<HideObjects>();
     registry.register::<RevealObjects>();
     registry.register::<Join>();
+    registry.register::<SetDimensions>();
+    registry.register::<ShadeObjects>();
+    registry.register::<RenameMaterial>();
+    registry.register::<AddLathe>();
+    registry.register::<AddSweep>();
+    registry.register::<Purge>();
+    registry.register::<Align>();
+    registry.register::<PlaceOn>();
 }
 
 #[cfg(test)]
@@ -3116,6 +3763,37 @@ mod tests {
         );
         assert_eq!(d.selection.objects.len(), 1);
         assert_ne!(d.selection.active, Some(original));
+    }
+
+    #[test]
+    fn an_object_is_selected_by_name() {
+        let (r, mut h, mut d, c) = setup();
+        run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
+        run(&r, &mut h, &mut d, &c, "object.rename", &[("name", PropertyValue::Text("Boiler".into()))]);
+        let boiler = d.selection.active.unwrap();
+        run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
+        let other = d.selection.active.unwrap();
+        run(&r, &mut h, &mut d, &c, "object.select", &[("name", PropertyValue::Text("Boiler".into()))]);
+        assert_eq!(d.selection.objects, vec![boiler]);
+        assert_eq!(d.selection.active, Some(boiler));
+        // Extending keeps what was there, and the named one becomes active.
+        d.selection.clear();
+        d.selection.add(other);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.select",
+            &[("name", PropertyValue::Text("Boiler".into())), ("extend", PropertyValue::Bool(true))],
+        );
+        assert_eq!(d.selection.objects.len(), 2);
+        assert_eq!(d.selection.active, Some(boiler));
+        // A name nobody has is an error that says so, and changes nothing.
+        let mut p = PropertyMap::new();
+        p.set("name", PropertyValue::Text("Nobody".into()));
+        assert!(h.dispatch(&r, &mut d, &c, "object.select", &p).is_err());
+        assert_eq!(d.selection.objects.len(), 2);
     }
 
     #[test]

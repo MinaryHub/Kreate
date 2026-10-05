@@ -10,6 +10,7 @@ pub mod arena;
 pub mod attribute;
 pub mod bmesh;
 pub mod edit;
+pub mod intersect;
 pub mod mesh_data;
 pub mod modifiers;
 pub mod primitives;

@@ -62,7 +62,7 @@ fn every_modifier_is_saved_and_a_boolean_still_finds_its_cutter() {
             constant: kreate_math::Vec3::new(0.5, 0.0, 0.0),
         })),
         ModifierInstance::new(ModifierKind::Solidify(SolidifyParams { thickness: 0.3, offset: 0.5 })),
-        ModifierInstance { kind: ModifierKind::Bevel(BevelParams { width: 0.05, angle: 0.4 }), enabled: false },
+        ModifierInstance { kind: ModifierKind::Bevel(BevelParams { width: 0.05, angle: 0.4, segments: 3 }), enabled: false },
         ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Intersect })),
     ];
     doc.object_mut(target).unwrap().modifiers = stack.clone();

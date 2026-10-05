@@ -18,6 +18,7 @@ pub mod paint;
 pub mod pose;
 pub mod sculpt;
 pub mod shape;
+pub mod texture;
 pub mod uv;
 
 /// Registers every built-in operator.
@@ -35,5 +36,6 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     pose::register(registry);
     sculpt::register(registry);
     shape::register(registry);
+    texture::register(registry);
     uv::register(registry);
 }

@@ -429,6 +429,266 @@ pub fn ico_sphere(radius: f32, subdivisions: u32) -> MeshData {
     MeshData::from_faces(positions, &faces)
 }
 
+/// A profile turned about Z: a lathe, for a vase, a cup, a bottle, a lamp.
+///
+/// `profile` is the silhouette as (radius, height) points, read from one end
+/// to the other — bottom to top for the outside of a vase. A point on the axis
+/// (radius zero) becomes one pole vertex, so a profile that starts and ends on
+/// the axis gives a closed solid; one that ends off it stays open there, which
+/// is the mouth of a cup. A profile that comes back down the inside gives the
+/// wall a thickness.
+///
+/// Faces point the way the profile's right-hand side faces when walked from
+/// the first point to the last with the axis on the left, which for a profile
+/// drawn upward on the outside is outward.
+pub fn lathe(profile: &[(f32, f32)], segments: u32) -> MeshData {
+    let seg = segments.max(3);
+    const ON_AXIS: f32 = 1e-6;
+    // Each profile point's ring: one vertex on the axis, `seg` off it.
+    let mut rings: Vec<Vec<u32>> = Vec::with_capacity(profile.len());
+    let mut positions = Vec::new();
+    for &(r, z) in profile {
+        let r = r.max(0.0);
+        let start = positions.len() as u32;
+        if r <= ON_AXIS {
+            positions.push(Vec3::new(0.0, 0.0, z));
+            rings.push(vec![start; seg as usize]);
+        } else {
+            for s in 0..seg {
+                let a = TAU * s as f32 / seg as f32;
+                let (sa, ca) = a.sin_cos();
+                positions.push(Vec3::new(r * ca, r * sa, z));
+            }
+            rings.push((start..start + seg).collect());
+        }
+    }
+    // V along the profile by length, so a texture is not stretched where the
+    // points are far apart.
+    let mut along = vec![0.0f32];
+    for pair in profile.windows(2) {
+        let (a, b) = (Vec2::new(pair[0].0, pair[0].1), Vec2::new(pair[1].0, pair[1].1));
+        along.push(along.last().copied().unwrap_or(0.0) + a.distance(b));
+    }
+    let total = along.last().copied().unwrap_or(0.0).max(1e-9);
+
+    let mut faces = Vec::new();
+    let mut uvs = Vec::new();
+    let fu = 1.0 / seg as f32;
+    for i in 0..profile.len().saturating_sub(1) {
+        let (lo, hi) = (&rings[i], &rings[i + 1]);
+        let (v0, v1) = (along[i] / total, along[i + 1] / total);
+        for s in 0..seg as usize {
+            let s1 = (s + 1) % seg as usize;
+            let quad = [lo[s], lo[s1], hi[s1], hi[s]];
+            let corners = [
+                Vec2::new(s as f32 * fu, v0),
+                Vec2::new((s + 1) as f32 * fu, v0),
+                Vec2::new((s + 1) as f32 * fu, v1),
+                Vec2::new(s as f32 * fu, v1),
+            ];
+            // A pole collapses one side of the quad to a point: a triangle.
+            let mut face = Vec::with_capacity(4);
+            let mut face_uvs = Vec::with_capacity(4);
+            for (k, v) in quad.iter().enumerate() {
+                if !face.contains(v) {
+                    face.push(*v);
+                    face_uvs.push(corners[k]);
+                }
+            }
+            if face.len() >= 3 {
+                faces.push(face);
+                uvs.extend(face_uvs);
+            }
+        }
+    }
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
+}
+
+/// What [`sweep`] carries along its path.
+#[derive(Clone, Debug)]
+pub struct Sweep<'a> {
+    /// The points the path passes through. Joined by a smooth curve through
+    /// each of them, `resolution` steps between neighbours; a resolution of
+    /// one joins them with straight lines.
+    pub path: &'a [Vec3],
+    /// The cross-section, in the plane across the path: x along the path's
+    /// normal, y along its binormal. Closed: the last point joins the first.
+    pub profile: &'a [Vec2],
+    pub resolution: u32,
+    /// The path is a loop: its end joins its start.
+    pub closed: bool,
+    /// The profile's size at the start and at the end, blended by distance
+    /// along the path — a spout that narrows, a horn.
+    pub scale: (f32, f32),
+    /// Close the two ends of an open path with a face each.
+    pub caps: bool,
+}
+
+/// A circle of `radius` in `segments`, the commonest profile: a tube.
+pub fn circle_profile(radius: f32, segments: u32) -> Vec<Vec2> {
+    let n = segments.max(3);
+    (0..n)
+        .map(|i| {
+            let a = TAU * i as f32 / n as f32;
+            Vec2::new(a.cos(), a.sin()) * radius
+        })
+        .collect()
+}
+
+/// A profile swept along a path: a pipe, a handle, a spout, a picture frame.
+///
+/// The cross-section is carried along the path on rotation-minimising frames
+/// (Wang et al.'s double reflection), so it does not twist about the path
+/// except where the path itself turns — the naive Frenet frame flips over at
+/// every inflection and has no answer at all on a straight run. A closed path
+/// has whatever twist is left over when the frame comes back round spread
+/// evenly along it, so the ends meet.
+pub fn sweep(s: &Sweep<'_>) -> MeshData {
+    let points = smooth_path(s.path, s.resolution.max(1), s.closed);
+    let mut profile: Vec<Vec2> = s.profile.to_vec();
+    if points.len() < 2 || profile.len() < 2 {
+        return MeshData::from_faces(Vec::new(), &[]);
+    }
+    // Counter-clockwise, so the walls face out whatever order it came in.
+    let area: f32 = (0..profile.len())
+        .map(|i| {
+            let (a, b) = (profile[i], profile[(i + 1) % profile.len()]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    if area < 0.0 {
+        profile.reverse();
+    }
+
+    let n = points.len();
+    let tangent = |i: usize| -> Vec3 {
+        let (prev, next) = if s.closed {
+            (points[(i + n - 1) % n], points[(i + 1) % n])
+        } else {
+            (points[i.saturating_sub(1)], points[(i + 1).min(n - 1)])
+        };
+        (next - prev).normalize_or_zero()
+    };
+    let tangents: Vec<Vec3> = (0..n).map(tangent).collect();
+    let first = tangents[0];
+    let up = if first.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+    let mut normals = vec![first.cross(up).cross(first).normalize_or_zero(); n];
+    for i in 0..n - 1 {
+        let v1 = points[i + 1] - points[i];
+        let c1 = v1.dot(v1);
+        if c1 < 1e-20 {
+            normals[i + 1] = normals[i];
+            continue;
+        }
+        let r_l = normals[i] - v1 * (2.0 / c1 * v1.dot(normals[i]));
+        let t_l = tangents[i] - v1 * (2.0 / c1 * v1.dot(tangents[i]));
+        let v2 = tangents[i + 1] - t_l;
+        let c2 = v2.dot(v2);
+        normals[i + 1] = if c2 < 1e-20 { r_l } else { r_l - v2 * (2.0 / c2 * v2.dot(r_l)) };
+    }
+    if s.closed {
+        // Carried once more round to the start, the frame comes back turned by
+        // some angle; undo it a little at each step.
+        let v1 = points[0] - points[n - 1];
+        let c1 = v1.dot(v1).max(1e-20);
+        let r_l = normals[n - 1] - v1 * (2.0 / c1 * v1.dot(normals[n - 1]));
+        let t_l = tangents[n - 1] - v1 * (2.0 / c1 * v1.dot(tangents[n - 1]));
+        let v2 = tangents[0] - t_l;
+        let c2 = v2.dot(v2);
+        let back = if c2 < 1e-20 { r_l } else { r_l - v2 * (2.0 / c2 * v2.dot(r_l)) };
+        let angle = back.cross(normals[0]).dot(tangents[0]).atan2(back.dot(normals[0]));
+        for (i, normal) in normals.iter_mut().enumerate() {
+            let turn = glam::Quat::from_axis_angle(tangents[i], angle * i as f32 / n as f32);
+            *normal = turn * *normal;
+        }
+    }
+
+    // Distance along the path, for the taper and for V.
+    let mut along = vec![0.0f32; n];
+    for i in 1..n {
+        along[i] = along[i - 1] + points[i].distance(points[i - 1]);
+    }
+    let total = if s.closed { along[n - 1] + points[0].distance(points[n - 1]) } else { along[n - 1] }.max(1e-9);
+
+    let m = profile.len();
+    let mut positions = Vec::with_capacity(n * m);
+    for i in 0..n {
+        let t = along[i] / total;
+        let size = s.scale.0 + (s.scale.1 - s.scale.0) * t;
+        let normal = normals[i].normalize_or_zero();
+        let binormal = tangents[i].cross(normal).normalize_or_zero();
+        for p in &profile {
+            positions.push(points[i] + (normal * p.x + binormal * p.y) * size);
+        }
+    }
+
+    let mut faces: Vec<Vec<u32>> = Vec::new();
+    let mut uvs: Vec<Vec2> = Vec::new();
+    let rings = if s.closed { n } else { n - 1 };
+    let v_at = |i: usize| if i == n { 1.0 } else { along[i] / total };
+    for i in 0..rings {
+        let next = (i + 1) % n;
+        for j in 0..m {
+            let k = (j + 1) % m;
+            let at = |ring: usize, p: usize| (ring * m + p) as u32;
+            faces.push(vec![at(i, j), at(i, k), at(next, k), at(next, j)]);
+            let (u0, u1) = (j as f32 / m as f32, (j + 1) as f32 / m as f32);
+            let (v0, v1) = (v_at(i), v_at(i + 1));
+            uvs.extend_from_slice(&[Vec2::new(u0, v0), Vec2::new(u1, v0), Vec2::new(u1, v1), Vec2::new(u0, v1)]);
+        }
+    }
+    if s.caps && !s.closed && m >= 3 {
+        let bounds = profile.iter().fold((Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        let span = (bounds.1 - bounds.0).max(Vec2::splat(1e-9));
+        let flat = |p: &Vec2| (*p - bounds.0) / span;
+        // The start faces back along the path, the end along it.
+        faces.push((0..m as u32).rev().collect());
+        uvs.extend(profile.iter().rev().map(flat));
+        faces.push(((n - 1) * m..n * m).map(|v| v as u32).collect());
+        uvs.extend(profile.iter().map(flat));
+    }
+    let mut mesh = MeshData::from_faces(positions, &faces);
+    set_uvs(&mut mesh, uvs);
+    mesh
+}
+
+/// The path's points with `resolution` steps of a Catmull–Rom curve between
+/// each pair: through every given point, with no overshoot to speak of.
+pub fn smooth_path(points: &[Vec3], resolution: u32, closed: bool) -> Vec<Vec3> {
+    let n = points.len();
+    if n < 2 || resolution <= 1 {
+        let mut out: Vec<Vec3> = points.to_vec();
+        out.dedup();
+        return out;
+    }
+    let at = |i: isize| -> Vec3 {
+        if closed {
+            points[i.rem_euclid(n as isize) as usize]
+        } else {
+            points[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    let spans = if closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(spans * resolution as usize + 1);
+    for span in 0..spans as isize {
+        let (p0, p1, p2, p3) = (at(span - 1), at(span), at(span + 1), at(span + 2));
+        for step in 0..resolution {
+            let t = step as f32 / resolution as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            out.push(
+                (p1 * 2.0 + (p2 - p0) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3)
+                    * 0.5,
+            );
+        }
+    }
+    if !closed {
+        out.push(points[n - 1]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,5 +1022,82 @@ mod tests {
         // unwrapped on purpose.
         let mesh = ico_sphere(1.0, 2);
         assert!(mesh.attributes().get_f32x2(names::UV).is_none());
+    }
+
+    #[test]
+    fn a_lathe_from_axis_to_axis_is_closed_and_faces_out() {
+        // A vase: closed at the bottom, round, closed at the top.
+        let mesh = lathe(&[(0.0, 0.0), (0.4, 0.0), (0.5, 0.6), (0.2, 1.0), (0.0, 1.0)], 16);
+        mesh.assert_valid();
+        assert_eq!(mesh.num_verts(), 2 + 3 * 16, "one vertex per pole");
+        assert_eq!(mesh.num_faces(), 4 * 16);
+        let normals = mesh.compute_face_normals();
+        let centre = Vec3::new(0.0, 0.0, 0.5);
+        for (f, n) in normals.iter().enumerate() {
+            let ring = mesh.face_verts(f as u32);
+            let mid: Vec3 = ring.iter().map(|v| mesh.positions()[*v as usize]).sum::<Vec3>() / ring.len() as f32;
+            assert!(n.dot(mid - centre) > 0.0, "face {f} points in");
+        }
+    }
+
+    #[test]
+    fn a_lathe_that_ends_off_the_axis_is_open_there() {
+        // A cup: a bottom, a wall, no lid.
+        let mesh = lathe(&[(0.0, 0.0), (0.3, 0.0), (0.35, 0.8)], 12);
+        mesh.assert_valid();
+        assert_eq!(mesh.num_faces(), 2 * 12);
+        let b = mesh.bounds();
+        assert!((b.max.z - 0.8).abs() < 1e-6 && (b.max.x - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_tube_swept_along_a_bend_is_closed_and_faces_out() {
+        let path = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.5), Vec3::new(1.5, 0.0, 1.5), Vec3::new(1.2, 0.3, 2.2)];
+        let profile = circle_profile(0.1, 12);
+        let mesh = sweep(&Sweep { path: &path, profile: &profile, resolution: 6, closed: false, scale: (1.0, 0.5), caps: true });
+        mesh.assert_valid();
+        let rings = 3 * 6 + 1;
+        assert_eq!(mesh.num_verts() as usize, rings * 12);
+        assert_eq!(mesh.num_faces() as usize, (rings - 1) * 12 + 2);
+        // Every edge has two faces: capped, it is a solid.
+        let mut uses = std::collections::HashMap::new();
+        for f in mesh.faces() {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                *uses.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(uses.values().all(|c| *c == 2));
+        // The walls face away from the path: each wall's normal points from the
+        // nearest path point out to the wall.
+        let normals = mesh.compute_face_normals();
+        let dense = smooth_path(&path, 6, false);
+        for (f, normal) in normals.iter().enumerate().take((rings - 1) * 12) {
+            let ring = mesh.face_verts(f as u32);
+            let mid: Vec3 = ring.iter().map(|v| mesh.positions()[*v as usize]).sum::<Vec3>() / 4.0;
+            let near = dense.iter().copied().min_by(|a, b| a.distance(mid).total_cmp(&b.distance(mid))).unwrap();
+            assert!(normal.dot(mid - near) > 0.0, "wall {f} faces in");
+        }
+        // And it tapers: the last ring is half the first.
+        let ring_size = |r: usize| mesh.positions()[r * 12].distance(mesh.positions()[r * 12 + 6]);
+        assert!((ring_size(rings - 1) / ring_size(0) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_frame_swept_round_a_loop_closes_without_a_seam() {
+        // A square profile round a rectangle: a picture frame.
+        let path = [Vec3::new(-1.0, 0.0, -0.7), Vec3::new(1.0, 0.0, -0.7), Vec3::new(1.0, 0.0, 0.7), Vec3::new(-1.0, 0.0, 0.7)];
+        let profile = [Vec2::new(-0.05, -0.02), Vec2::new(0.05, -0.02), Vec2::new(0.05, 0.02), Vec2::new(-0.05, 0.02)];
+        let mesh = sweep(&Sweep { path: &path, profile: &profile, resolution: 1, closed: true, scale: (1.0, 1.0), caps: true });
+        mesh.assert_valid();
+        assert_eq!(mesh.num_faces(), 16, "four sides of four faces, no caps on a loop");
+        let mut uses = std::collections::HashMap::new();
+        for f in mesh.faces() {
+            for i in 0..f.len() {
+                let (a, b) = (f[i], f[(i + 1) % f.len()]);
+                *uses.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(uses.values().all(|c| *c == 2), "the loop's ends met");
     }
 }
