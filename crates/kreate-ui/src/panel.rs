@@ -31,10 +31,8 @@ pub fn section<R>(
 
     // The header bar: full width, raised, a chevron and the title.
     let height = theme.row_height;
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), height),
-        Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
     let response: Response = response;
     if response.clicked() {
         open = !open;
@@ -65,13 +63,14 @@ pub fn section<R>(
                 Pos2::new(c.x + s * 0.6, c.y),
             ]
         };
-        painter.add(egui::Shape::convex_polygon(points, theme.text_dim, Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            theme.text_dim,
+            Stroke::NONE,
+        ));
         let font = egui::TextStyle::Body.resolve(ui.style());
         let galley = painter.layout_no_wrap(title.to_string(), font, theme.text);
-        let text_pos = Pos2::new(
-            rect.min.x + 24.0,
-            rect.center().y - galley.size().y * 0.5,
-        );
+        let text_pos = Pos2::new(rect.min.x + 24.0, rect.center().y - galley.size().y * 0.5);
         painter.galley(text_pos, galley, theme.text);
     }
 

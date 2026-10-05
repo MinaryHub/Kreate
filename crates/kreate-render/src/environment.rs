@@ -175,7 +175,8 @@ pub fn irradiance_sh9(width: u32, height: u32, pixels: &[u8]) -> [Vec3; 9] {
         let theta = v * std::f32::consts::PI;
         // The solid angle of a cell at this latitude. Without the sine the
         // poles count as much as the equator and every environment tilts.
-        let weight = theta.sin() * (std::f32::consts::PI / ROWS as f32)
+        let weight = theta.sin()
+            * (std::f32::consts::PI / ROWS as f32)
             * (std::f32::consts::TAU / COLUMNS as f32);
         for column in 0..COLUMNS {
             let u = (column as f32 + 0.5) / COLUMNS as f32;
@@ -241,9 +242,8 @@ fn texel(pixels: &[u8], width: u32, x: u32, y: u32) -> Vec3 {
     if at + 6 > pixels.len() {
         return Vec3::ZERO;
     }
-    let channel = |i: usize| {
-        half::f16::from_le_bytes([pixels[at + i * 2], pixels[at + i * 2 + 1]]).to_f32()
-    };
+    let channel =
+        |i: usize| half::f16::from_le_bytes([pixels[at + i * 2], pixels[at + i * 2 + 1]]).to_f32();
     Vec3::new(channel(0), channel(1), channel(2))
 }
 
@@ -260,7 +260,6 @@ pub fn sh9_bytes(sh: &[Vec3; 9]) -> [[f32; 4]; 9] {
     }
     out
 }
-
 
 /// What the two compute passes need to know.
 #[repr(C)]
@@ -340,8 +339,9 @@ impl Environment {
         });
 
         let passes = Passes::new(device);
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("environment") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("environment"),
+        });
         passes.to_cube(device, &mut encoder, &equirect, &sampler, &cube);
         // Level zero is the environment itself, so the filtering starts at one.
         for level in 1..MIPS {
@@ -609,12 +609,7 @@ impl Passes {
         let params = uniform(
             device,
             Params {
-                size: [
-                    size as f32,
-                    0.0,
-                    roughness_of(level),
-                    SAMPLES as f32,
-                ],
+                size: [size as f32, 0.0, roughness_of(level), SAMPLES as f32],
                 source: [FACE as f32, level as f32, 0.0, 0.0],
             },
         );
@@ -897,7 +892,11 @@ mod tests {
         assert!((equirect_uv(Vec3::Z).y - 0.0).abs() < 1e-6);
         assert!((equirect_uv(Vec3::NEG_Z).y - 1.0).abs() < 1e-6);
         let forward = equirect_uv(Vec3::NEG_Y);
-        assert!((forward.x - 0.5).abs() < 1e-6, "forward is at {}", forward.x);
+        assert!(
+            (forward.x - 0.5).abs() < 1e-6,
+            "forward is at {}",
+            forward.x
+        );
         assert!((forward.y - 0.5).abs() < 1e-6);
         // And `u` increases to the right, so an image is not mirrored.
         assert!(equirect_uv(Vec3::X).x > 0.5);
@@ -923,7 +922,10 @@ mod tests {
             // `u` wraps, so the two ends of the image are the same column.
             let du = (back.x - u).abs().min(1.0 - (back.x - u).abs());
             assert!(du < 1e-5, "({u}, {v}) came back at {back:?}");
-            assert!((back.y - v).abs() < 1e-5, "({u}, {v}) came back at {back:?}");
+            assert!(
+                (back.y - v).abs() < 1e-5,
+                "({u}, {v}) came back at {back:?}"
+            );
         }
     }
 
@@ -963,7 +965,8 @@ mod tests {
         let mut total = 0.0f32;
         for row in 0..ROWS {
             let theta = (row as f32 + 0.5) / ROWS as f32 * std::f32::consts::PI;
-            let weight = theta.sin() * (std::f32::consts::PI / ROWS as f32)
+            let weight = theta.sin()
+                * (std::f32::consts::PI / ROWS as f32)
                 * (std::f32::consts::TAU / COLUMNS as f32);
             for column in 0..COLUMNS {
                 let phi = ((column as f32 + 0.5) / COLUMNS as f32 - 0.5) * std::f32::consts::TAU;

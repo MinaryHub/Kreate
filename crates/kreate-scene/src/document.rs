@@ -403,9 +403,7 @@ impl MaterialMap {
     pub fn color_space(self) -> crate::image::ColorSpace {
         match self {
             MaterialMap::BaseColor => crate::image::ColorSpace::Srgb,
-            MaterialMap::MetallicRoughness | MaterialMap::Normal => {
-                crate::image::ColorSpace::Raw
-            }
+            MaterialMap::MetallicRoughness | MaterialMap::Normal => crate::image::ColorSpace::Raw,
         }
     }
 }
@@ -415,7 +413,11 @@ impl Material {
     /// nits. The number the renderer adds to what it reflects.
     pub fn emitted(&self) -> kreate_math::SceneRgb {
         let k = self.emission_strength.max(0.0);
-        kreate_math::SceneRgb::new(self.emission.r * k, self.emission.g * k, self.emission.b * k)
+        kreate_math::SceneRgb::new(
+            self.emission.r * k,
+            self.emission.g * k,
+            self.emission.b * k,
+        )
     }
 
     /// The graph this material shades with: its own, or the one its flat
@@ -435,7 +437,10 @@ impl Material {
     pub fn images(&self) -> Vec<ImageId> {
         match &self.graph {
             Some(graph) => graph.images(),
-            None => MaterialMap::ALL.iter().filter_map(|m| self.map(*m)).collect(),
+            None => MaterialMap::ALL
+                .iter()
+                .filter_map(|m| self.map(*m))
+                .collect(),
         }
     }
 
@@ -682,7 +687,11 @@ impl Document {
             return name.to_string();
         }
         let stem = match name.rsplit_once('.') {
-            Some((stem, digits)) if digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()) => stem,
+            Some((stem, digits))
+                if digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                stem
+            }
             _ => name,
         };
         (1..)
@@ -814,7 +823,8 @@ impl Document {
     /// reached an image. Returns how many of each went.
     pub fn purge_unused(&mut self) -> Purged {
         let mut purged = Purged::default();
-        let shown: std::collections::HashSet<MeshId> = self.objects.values().filter_map(|o| o.mesh()).collect();
+        let shown: std::collections::HashSet<MeshId> =
+            self.objects.values().filter_map(|o| o.mesh()).collect();
         let meshes: Vec<MeshId> = self.meshes.ids().filter(|m| !shown.contains(m)).collect();
         for mesh in meshes {
             self.meshes.remove(mesh);
@@ -826,8 +836,13 @@ impl Document {
             .values()
             .flat_map(|entry| entry.slots.iter().flatten().copied())
             .collect();
-        held.extend(self.objects.values().flat_map(|o| o.material_overrides.iter().flatten().copied()));
-        let materials: Vec<MaterialId> = self.materials.ids().filter(|m| !held.contains(m)).collect();
+        held.extend(
+            self.objects
+                .values()
+                .flat_map(|o| o.material_overrides.iter().flatten().copied()),
+        );
+        let materials: Vec<MaterialId> =
+            self.materials.ids().filter(|m| !held.contains(m)).collect();
         for material in materials {
             self.materials.remove(material);
             purged.materials += 1;
@@ -1154,18 +1169,24 @@ impl Document {
     pub fn add_armature(&mut self, armature: crate::armature::Armature) -> ArmatureId {
         let uid = self.issue(DatablockKind::Armature);
         self.touch();
-        self.armatures.insert(Arc::new(crate::armature::Armature { uid, ..armature }))
+        self.armatures
+            .insert(Arc::new(crate::armature::Armature { uid, ..armature }))
     }
 
     /// Adds an armature with an identity it already had. See
     /// [`Document::restore_object`].
-    pub fn restore_armature(&mut self, armature: crate::armature::Armature, uid: Uid) -> ArmatureId {
+    pub fn restore_armature(
+        &mut self,
+        armature: crate::armature::Armature,
+        uid: Uid,
+    ) -> ArmatureId {
         if uid.is_none() {
             return self.add_armature(armature);
         }
         self.uids.armature = self.uids.armature.max(uid);
         self.touch();
-        self.armatures.insert(Arc::new(crate::armature::Armature { uid, ..armature }))
+        self.armatures
+            .insert(Arc::new(crate::armature::Armature { uid, ..armature }))
     }
 
     pub fn armature(&self, id: ArmatureId) -> Option<&crate::armature::Armature> {
@@ -1188,7 +1209,10 @@ impl Document {
     }
 
     /// The armature an object is, if it is one.
-    pub fn armature_of(&self, object: ObjectId) -> Option<(ArmatureId, &crate::armature::Armature)> {
+    pub fn armature_of(
+        &self,
+        object: ObjectId,
+    ) -> Option<(ArmatureId, &crate::armature::Armature)> {
         match self.object(object)?.data {
             ObjectData::Armature(id) => Some((id, self.armature(id)?)),
             _ => None,
@@ -1203,11 +1227,15 @@ impl Document {
     /// the bone's pose and animation. Returns false, changing nothing, if the
     /// new name is taken or the old one is not there.
     pub fn rename_bone(&mut self, armature: ArmatureId, old: &str, new: &str) -> bool {
-        let Some(a) = self.armature(armature) else { return false };
+        let Some(a) = self.armature(armature) else {
+            return false;
+        };
         if old == new || new.is_empty() || a.bone_index(new).is_some() {
             return false;
         }
-        let Some(i) = a.bone_index(old) else { return false };
+        let Some(i) = a.bone_index(old) else {
+            return false;
+        };
         if let Some(a) = self.armature_mut(armature) {
             a.bones[i].name = new.to_string();
         }
@@ -1223,7 +1251,9 @@ impl Document {
         );
         for id in holders {
             let action = {
-                let Some(o) = self.objects.get_mut(id) else { continue };
+                let Some(o) = self.objects.get_mut(id) else {
+                    continue;
+                };
                 for b in &mut o.pose.bones {
                     if b.name == old {
                         b.name = new.to_string();
@@ -1255,7 +1285,9 @@ impl Document {
             // And the weight layers of every mesh that follows this armature:
             // a vertex group is named after its bone, and one left behind is
             // a mesh that stops moving with it.
-            let Some(uid) = self.object_uid(id) else { continue };
+            let Some(uid) = self.object_uid(id) else {
+                continue;
+            };
             let meshes: Vec<MeshId> = self
                 .objects
                 .iter()
@@ -1263,8 +1295,14 @@ impl Document {
                 .filter_map(|(_, o)| o.mesh())
                 .collect();
             for mesh in meshes {
-                let (from, to) = (crate::skin::weight_layer(old), crate::skin::weight_layer(new));
-                if self.mesh(mesh).is_some_and(|m| m.attributes().contains(&from)) {
+                let (from, to) = (
+                    crate::skin::weight_layer(old),
+                    crate::skin::weight_layer(new),
+                );
+                if self
+                    .mesh(mesh)
+                    .is_some_and(|m| m.attributes().contains(&from))
+                {
                     if let Some(m) = self.mesh_mut(mesh) {
                         if let Some(layer) = m.attributes_mut().remove(&from) {
                             m.attributes_mut().insert(&to, layer.domain, layer.data);
@@ -1283,17 +1321,28 @@ impl Document {
     pub fn skin_matrices(&self, object: ObjectId) -> Option<(ArmatureId, Vec<DAffine3>)> {
         let target = self.object_by_uid(self.object(object)?.skin?)?;
         let (id, armature) = self.armature_of(target)?;
-        let mesh_to_armature = self.world_transform(target).inverse() * self.world_transform(object);
+        let mesh_to_armature =
+            self.world_transform(target).inverse() * self.world_transform(object);
         let pose = &self.object(target)?.pose;
-        Some((id, crate::skin::skin_matrices(armature, pose, mesh_to_armature)))
+        Some((
+            id,
+            crate::skin::skin_matrices(armature, pose, mesh_to_armature),
+        ))
     }
 
     /// An armature object's bones, posed, in world space.
     pub fn posed_bones(&self, object: ObjectId) -> Vec<DAffine3> {
-        let Some((_, armature)) = self.armature_of(object) else { return Vec::new() };
-        let Some(o) = self.object(object) else { return Vec::new() };
+        let Some((_, armature)) = self.armature_of(object) else {
+            return Vec::new();
+        };
+        let Some(o) = self.object(object) else {
+            return Vec::new();
+        };
         let world = self.world_transform(object);
-        crate::armature::posed(armature, &o.pose).into_iter().map(|f| world * f).collect()
+        crate::armature::posed(armature, &o.pose)
+            .into_iter()
+            .map(|f| world * f)
+            .collect()
     }
 
     // --- cameras ------------------------------------------------------------
@@ -1407,7 +1456,8 @@ impl Document {
     pub fn add_action(&mut self, action: crate::animation::Action) -> ActionId {
         let uid = self.issue(DatablockKind::Action);
         self.touch();
-        self.actions.insert(Arc::new(crate::animation::Action { uid, ..action }))
+        self.actions
+            .insert(Arc::new(crate::animation::Action { uid, ..action }))
     }
 
     /// Adds an action with an identity it already had. See
@@ -1418,7 +1468,8 @@ impl Document {
         }
         self.uids.action = self.uids.action.max(uid);
         self.touch();
-        self.actions.insert(Arc::new(crate::animation::Action { uid, ..action }))
+        self.actions
+            .insert(Arc::new(crate::animation::Action { uid, ..action }))
     }
 
     pub fn action(&self, id: ActionId) -> Option<&crate::animation::Action> {
@@ -1444,7 +1495,10 @@ impl Document {
     }
 
     pub fn action_by_uid(&self, uid: Uid) -> Option<ActionId> {
-        self.actions.iter().find(|(_, a)| a.uid == uid).map(|(id, _)| id)
+        self.actions
+            .iter()
+            .find(|(_, a)| a.uid == uid)
+            .map(|(id, _)| id)
     }
 
     /// Plays every animated object's action at `frame`, and moves the clock
@@ -1475,15 +1529,19 @@ impl Document {
             .filter_map(|(id, m)| m.action.map(|a| (id, a)))
             .collect();
         for (id, action) in materials {
-            let Some(action) = self.actions.get(action).cloned() else { continue };
+            let Some(action) = self.actions.get(action).cloned() else {
+                continue;
+            };
             if let Some(m) = self.materials.get_mut(id).map(Arc::make_mut) {
                 let before = m.clone();
                 crate::animation::apply_to_material(&action, frame, m);
-                moved += usize::from(m.base_color != before.base_color
-                    || m.metallic != before.metallic
-                    || m.roughness != before.roughness
-                    || m.alpha != before.alpha
-                    || m.normal_strength != before.normal_strength);
+                moved += usize::from(
+                    m.base_color != before.base_color
+                        || m.metallic != before.metallic
+                        || m.roughness != before.roughness
+                        || m.alpha != before.alpha
+                        || m.normal_strength != before.normal_strength,
+                );
             }
         }
         let lights: Vec<(LightId, ActionId)> = self
@@ -1492,7 +1550,9 @@ impl Document {
             .filter_map(|(id, l)| l.action.map(|a| (id, a)))
             .collect();
         for (id, action) in lights {
-            let Some(action) = self.actions.get(action).cloned() else { continue };
+            let Some(action) = self.actions.get(action).cloned() else {
+                continue;
+            };
             if let Some(l) = self.lights.get_mut(id).map(Arc::make_mut) {
                 let before = (l.color, l.intensity, l.exposure);
                 crate::animation::apply_to_light(&action, frame, l);
@@ -1671,7 +1731,8 @@ impl Document {
     pub fn add_material(&mut self, material: Material) -> MaterialId {
         let uid = self.issue(DatablockKind::Material);
         self.touch();
-        self.materials.insert(Arc::new(Material { uid, ..material }))
+        self.materials
+            .insert(Arc::new(Material { uid, ..material }))
     }
 
     /// Adds a material with an identity it already had. See
@@ -1682,7 +1743,8 @@ impl Document {
         }
         self.uids.material = self.uids.material.max(uid);
         self.touch();
-        self.materials.insert(Arc::new(Material { uid, ..material }))
+        self.materials
+            .insert(Arc::new(Material { uid, ..material }))
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
@@ -1804,12 +1866,18 @@ impl Document {
 
     /// The collection called `name`, if there is one.
     pub fn find_collection(&self, name: &str) -> Option<CollectionId> {
-        self.collections.iter().find(|(_, c)| c.name == name).map(|(id, _)| id)
+        self.collections
+            .iter()
+            .find(|(_, c)| c.name == name)
+            .map(|(id, _)| id)
     }
 
     /// The collection `object` is in, if any.
     pub fn collection_of(&self, object: ObjectId) -> Option<CollectionId> {
-        self.collections.iter().find(|(_, c)| c.objects.contains(&object)).map(|(id, _)| id)
+        self.collections
+            .iter()
+            .find(|(_, c)| c.objects.contains(&object))
+            .map(|(id, _)| id)
     }
 
     /// Puts `object` in `into` — out of whichever it was in — or, with
@@ -1836,7 +1904,10 @@ impl Document {
     /// none is hidden, which is the ordinary case.
     pub fn is_shown(&self, object: ObjectId) -> bool {
         self.objects.get(object).is_some_and(|o| o.visible)
-            && !self.collections.iter().any(|(_, c)| c.hide && c.objects.contains(&object))
+            && !self
+                .collections
+                .iter()
+                .any(|(_, c)| c.hide && c.objects.contains(&object))
     }
 
     // --- convenience --------------------------------------------------------
@@ -1918,8 +1989,8 @@ impl Document {
             match object.mesh().and_then(|m| self.mesh(m)) {
                 Some(mesh) => {
                     for p in mesh.positions() {
-                        let w = world
-                            .transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+                        let w =
+                            world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64));
                         bounds = bounds.extend(w.as_vec3());
                     }
                 }
@@ -1929,7 +2000,8 @@ impl Document {
                     if let Some((_, armature)) = self.armature_of(id) {
                         for (bone, frame) in armature.bones.iter().zip(self.posed_bones(id)) {
                             bounds = bounds.extend(frame.translation.as_vec3());
-                            bounds = bounds.extend(frame.transform_point3(DVec3::Y * bone.length()).as_vec3());
+                            bounds = bounds
+                                .extend(frame.transform_point3(DVec3::Y * bone.length()).as_vec3());
                         }
                     }
                 }
@@ -2062,8 +2134,18 @@ mod tests {
         let mut d = Document::new();
         let cube = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
         let gone = d.add_mesh_object("Gone", kreate_mesh::primitives::cube(2.0));
-        let image = d.add_image(crate::Image::new("wood.png", 2, 2, crate::PixelFormat::Rgba8));
-        let stray = d.add_image(crate::Image::new("stray.png", 2, 2, crate::PixelFormat::Rgba8));
+        let image = d.add_image(crate::Image::new(
+            "wood.png",
+            2,
+            2,
+            crate::PixelFormat::Rgba8,
+        ));
+        let stray = d.add_image(crate::Image::new(
+            "stray.png",
+            2,
+            2,
+            crate::PixelFormat::Rgba8,
+        ));
         let used = d.add_material(Material::default());
         let textured = d.add_material(Material {
             base_color_image: Some(image),
@@ -2077,11 +2159,22 @@ mod tests {
         d.remove_object(gone);
 
         let purged = d.purge_unused();
-        assert_eq!(purged, Purged { meshes: 1, materials: 2, images: 2 });
+        assert_eq!(
+            purged,
+            Purged {
+                meshes: 1,
+                materials: 2,
+                images: 2
+            }
+        );
         assert!(d.material(used).is_some() && d.mesh(cube_mesh).is_some());
         assert!(d.material(textured).is_none(), "its only mesh went first");
         assert!(d.image(image).is_none() && d.image(stray).is_none());
-        assert_eq!(d.purge_unused(), Purged::default(), "a second purge finds nothing");
+        assert_eq!(
+            d.purge_unused(),
+            Purged::default(),
+            "a second purge finds nothing"
+        );
     }
 
     #[test]
@@ -2090,7 +2183,10 @@ mod tests {
         let a = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
         let b = d.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
         let c = d.duplicate_full(b).unwrap();
-        let names: Vec<_> = [a, b, c].iter().map(|id| d.object(*id).unwrap().name.clone()).collect();
+        let names: Vec<_> = [a, b, c]
+            .iter()
+            .map(|id| d.object(*id).unwrap().name.clone())
+            .collect();
         assert_eq!(names, ["Cube", "Cube.001", "Cube.002"]);
     }
 
@@ -2339,9 +2435,15 @@ mod tests {
         lamp.transform.translation = DVec3::new(3.0, -3.0, 5.0);
         d.add_object(lamp);
         let after = d.world_bounds();
-        assert!(after.max.z >= 5.0 - 1e-6, "the lamp at z=5 is outside {after:?}");
+        assert!(
+            after.max.z >= 5.0 - 1e-6,
+            "the lamp at z=5 is outside {after:?}"
+        );
         assert!(after.max.x >= 3.0 - 1e-6 && after.min.y <= -3.0 + 1e-6);
-        assert!(after.max.z > before.max.z, "the lamp did not extend the bounds");
+        assert!(
+            after.max.z > before.max.z,
+            "the lamp did not extend the bounds"
+        );
     }
 
     #[test]

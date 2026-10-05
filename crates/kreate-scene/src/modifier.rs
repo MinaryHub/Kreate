@@ -55,11 +55,11 @@ use std::sync::Arc;
 
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
-    array, bevel, boolean, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp, MirrorParams,
-    SolidifyParams, SubdivideParams,
+    array, bevel, boolean, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp,
+    MirrorParams, SolidifyParams, SubdivideParams,
 };
-use kreate_reflect::Uid;
 use kreate_mesh::MeshData;
+use kreate_reflect::Uid;
 
 use crate::document::{Document, ObjectId};
 
@@ -239,7 +239,9 @@ pub struct Operand {
 
 impl PartialEq for Operand {
     fn eq(&self, other: &Self) -> bool {
-        self.uid == other.uid && Arc::ptr_eq(&self.mesh, &other.mesh) && self.to_local == other.to_local
+        self.uid == other.uid
+            && Arc::ptr_eq(&self.mesh, &other.mesh)
+            && self.to_local == other.to_local
     }
 }
 
@@ -280,7 +282,9 @@ pub fn apply_stack_with(
 ) -> MeshData {
     let mut current: Option<MeshData> = None;
     for modifier in stack.iter().filter(|m| m.enabled) {
-        let next = modifier.kind.apply(current.as_ref().unwrap_or(input), ctx, operands);
+        let next = modifier
+            .kind
+            .apply(current.as_ref().unwrap_or(input), ctx, operands);
         current = Some(next);
     }
     current.unwrap_or_else(|| input.clone())
@@ -301,7 +305,9 @@ pub fn boolean_cutters(doc: &Document) -> Vec<ObjectId> {
             continue;
         }
         for m in object.modifiers.iter().filter(|m| m.enabled) {
-            let ModifierKind::Boolean(b) = m.kind else { continue };
+            let ModifierKind::Boolean(b) = m.kind else {
+                continue;
+            };
             if let Some(cutter) = doc.object_by_uid(b.operand).filter(|c| *c != id) {
                 if !out.contains(&cutter) {
                     out.push(cutter);
@@ -319,7 +325,10 @@ pub fn apply_one(doc: &Document, object: ObjectId, index: usize) -> Option<MeshD
     let o = doc.object(object)?;
     let modifier = *o.modifiers.get(index)?;
     let input = doc.mesh(o.mesh()?)?;
-    let one = [ModifierInstance { enabled: true, ..modifier }];
+    let one = [ModifierInstance {
+        enabled: true,
+        ..modifier
+    }];
     let operands = operands_of(doc, object, &one);
     Some(apply_stack_with(input, &one, &EvalCtx::still(), &operands))
 }
@@ -331,13 +340,27 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
     let mut out: Vec<Operand> = Vec::new();
     let to_local = doc.world_transform(id).inverse();
     for m in stack.iter().filter(|m| m.enabled) {
-        let ModifierKind::Boolean(b) = m.kind else { continue };
+        let ModifierKind::Boolean(b) = m.kind else {
+            continue;
+        };
         if out.iter().any(|o| o.uid == b.operand) {
             continue;
         }
-        let Some(other) = doc.object_by_uid(b.operand).filter(|o| *o != id) else { continue };
-        let Some(mesh) = doc.object(other).and_then(|o| o.mesh()).and_then(|m| doc.mesh_arc(m)) else { continue };
-        out.push(Operand { uid: b.operand, mesh: mesh.clone(), to_local: to_local * doc.world_transform(other) });
+        let Some(other) = doc.object_by_uid(b.operand).filter(|o| *o != id) else {
+            continue;
+        };
+        let Some(mesh) = doc
+            .object(other)
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh_arc(m))
+        else {
+            continue;
+        };
+        out.push(Operand {
+            uid: b.operand,
+            mesh: mesh.clone(),
+            to_local: to_local * doc.world_transform(other),
+        });
     }
     out
 }
@@ -439,11 +462,12 @@ impl ModifierCache {
         let stored = doc.mesh_arc(object.mesh()?)?;
         // Shape keys first, as Blender's are — under the armature and the
         // stack — and not while edit mode has a key traded into the mesh.
-        let shaped = if object.editing_shape.is_none() && object.shape_keys.iter().any(|k| k.value != 0.0) {
-            self.shaped(stored, &object.shape_keys)
-        } else {
-            stored.clone()
-        };
+        let shaped =
+            if object.editing_shape.is_none() && object.shape_keys.iter().any(|k| k.value != 0.0) {
+                self.shaped(stored, &object.shape_keys)
+            } else {
+                stored.clone()
+            };
         let input = &shaped;
         // A mesh bound to an armature is skinned first, as Blender's Armature
         // modifier usually sits at the top of the stack, and the stack runs on
@@ -459,13 +483,24 @@ impl ModifierCache {
     /// The mesh with its keys mixed in, from the cache while the input and the
     /// values are the same. A new mix of one input replaces the old.
     fn shaped(&mut self, input: &Arc<MeshData>, keys: &[crate::shape::ShapeKey]) -> Arc<MeshData> {
-        if let Some(entry) = self.shapes.iter_mut().find(|e| Arc::ptr_eq(&e.input, input) && e.keys == keys) {
+        if let Some(entry) = self
+            .shapes
+            .iter_mut()
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.keys == keys)
+        {
             entry.used = self.generation;
             return entry.output.clone();
         }
-        let output = crate::shape::mix(input, keys).map(Arc::new).unwrap_or_else(|| input.clone());
+        let output = crate::shape::mix(input, keys)
+            .map(Arc::new)
+            .unwrap_or_else(|| input.clone());
         self.shapes.retain(|e| !Arc::ptr_eq(&e.input, input));
-        self.shapes.push(ShapeEntry { input: input.clone(), keys: keys.to_vec(), output: output.clone(), used: self.generation });
+        self.shapes.push(ShapeEntry {
+            input: input.clone(),
+            keys: keys.to_vec(),
+            output: output.clone(),
+            used: self.generation,
+        });
         output
     }
 
@@ -493,7 +528,12 @@ impl ModifierCache {
             .map(Arc::new)
             .unwrap_or_else(|| input.clone());
         self.skins.retain(|e| !Arc::ptr_eq(&e.input, input));
-        self.skins.push(SkinEntry { input: input.clone(), matrices, output: output.clone(), used: self.generation });
+        self.skins.push(SkinEntry {
+            input: input.clone(),
+            matrices,
+            output: output.clone(),
+            used: self.generation,
+        });
         output
     }
 
@@ -527,11 +567,9 @@ impl ModifierCache {
         // `Arc::make_mut` copies on write only while a handle is shared, so an
         // entry storing an id would watch the document mutate in place behind an
         // unchanged pointer and go on serving stale geometry.
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at && e.operands == operands)
-        {
+        if let Some(entry) = self.entries.iter_mut().find(|e| {
+            Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at && e.operands == operands
+        }) {
             entry.used = self.generation;
             self.hits += 1;
             return entry.output.clone();
@@ -637,8 +675,15 @@ impl ModifierCache {
     ///
     /// Only the outputs: the inputs are the document's and are counted there.
     pub fn memory_bytes(&self) -> usize {
-        self.entries.iter().map(|e| e.output.memory_bytes()).sum::<usize>()
-            + self.skins.iter().map(|e| e.output.memory_bytes()).sum::<usize>()
+        self.entries
+            .iter()
+            .map(|e| e.output.memory_bytes())
+            .sum::<usize>()
+            + self
+                .skins
+                .iter()
+                .map(|e| e.output.memory_bytes())
+                .sum::<usize>()
     }
 }
 
@@ -1208,12 +1253,18 @@ mod time_tests {
         let mut doc = Document::new();
         let target = doc.add_mesh_object("Target", kreate_mesh::primitives::cube(2.0));
         let cutter = doc.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
-        doc.object_mut(cutter).unwrap().transform.translation = kreate_math::DVec3::new(1.0, 0.0, 0.0);
+        doc.object_mut(cutter).unwrap().transform.translation =
+            kreate_math::DVec3::new(1.0, 0.0, 0.0);
         let operand = doc.object_uid(cutter).unwrap();
         doc.object_mut(target)
             .unwrap()
             .modifiers
-            .push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Difference })));
+            .push(ModifierInstance::new(ModifierKind::Boolean(
+                BooleanModifier {
+                    operand,
+                    op: BooleanOp::Difference,
+                },
+            )));
         let mut cache = ModifierCache::new();
         let ctx = EvalCtx::still();
         let a = cache.evaluated(&doc, target, &ctx).unwrap();
@@ -1221,13 +1272,17 @@ mod time_tests {
         let b = cache.evaluated(&doc, target, &ctx).unwrap();
         assert!(Arc::ptr_eq(&a, &b), "an unchanged cutter evaluated again");
         // The cutter moves away: a whole cube again.
-        doc.object_mut(cutter).unwrap().transform.translation = kreate_math::DVec3::new(9.0, 0.0, 0.0);
+        doc.object_mut(cutter).unwrap().transform.translation =
+            kreate_math::DVec3::new(9.0, 0.0, 0.0);
         let c = cache.evaluated(&doc, target, &ctx).unwrap();
         assert!(!Arc::ptr_eq(&a, &c), "the moved cutter was not noticed");
         assert!((c.bounds().max.x - 1.0).abs() < 1e-5);
         // No cutter picked: the input as it was.
         doc.object_mut(target).unwrap().modifiers[0].kind =
-            ModifierKind::Boolean(BooleanModifier { operand: kreate_reflect::Uid::NONE, op: BooleanOp::Difference });
+            ModifierKind::Boolean(BooleanModifier {
+                operand: kreate_reflect::Uid::NONE,
+                op: BooleanOp::Difference,
+            });
         assert_eq!(cache.evaluated(&doc, target, &ctx).unwrap().num_faces(), 6);
     }
 
@@ -1242,7 +1297,12 @@ mod time_tests {
         doc.object_mut(target)
             .unwrap()
             .modifiers
-            .push(ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Difference })));
+            .push(ModifierInstance::new(ModifierKind::Boolean(
+                BooleanModifier {
+                    operand,
+                    op: BooleanOp::Difference,
+                },
+            )));
         assert_eq!(boolean_cutters(&doc), vec![cutter]);
         // Off: the cutter is an ordinary object again.
         doc.object_mut(target).unwrap().modifiers[0].enabled = false;

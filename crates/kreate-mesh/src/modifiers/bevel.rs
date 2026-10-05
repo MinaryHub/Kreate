@@ -20,7 +20,11 @@ pub struct BevelParams {
 
 impl Default for BevelParams {
     fn default() -> Self {
-        Self { width: 0.1, angle: 30f32.to_radians(), segments: 1 }
+        Self {
+            width: 0.1,
+            angle: 30f32.to_radians(),
+            segments: 1,
+        }
     }
 }
 
@@ -36,7 +40,10 @@ pub fn bevel(input: &MeshData, params: &BevelParams) -> MeshData {
         .filter(|e| {
             let faces = bm.edge_faces(*e);
             let [a, b] = faces[..] else { return false };
-            let (na, nb) = (bm.face_normal(a).normalize_or_zero(), bm.face_normal(b).normalize_or_zero());
+            let (na, nb) = (
+                bm.face_normal(a).normalize_or_zero(),
+                bm.face_normal(b).normalize_or_zero(),
+            );
             na.dot(nb) < cos_limit
         })
         .collect();

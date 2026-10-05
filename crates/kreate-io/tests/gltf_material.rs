@@ -104,7 +104,9 @@ fn every_map_comes_back_with_its_pixels_and_its_space() {
         (m.metallic_roughness_image, 22, ColorSpace::Raw),
         (m.normal_image, 33, ColorSpace::Raw),
     ] {
-        let image = back.image(slot.expect("the slot is filled")).expect("the image exists");
+        let image = back
+            .image(slot.expect("the slot is filled"))
+            .expect("the image exists");
         assert_eq!(image.color_space, space);
         assert_eq!((image.width(), image.height()), (5, 3));
         let pixels = kreate_io::image_import::rgba8_of(image, space);
@@ -134,8 +136,14 @@ fn the_file_says_it_the_way_other_readers_expect() {
     assert_eq!(json["images"].as_array().map(Vec::len), Some(3));
     for image in json["images"].as_array().unwrap() {
         assert_eq!(image["mimeType"], "image/png");
-        assert!(image["bufferView"].is_u64(), "an image is not in the buffer: {image}");
-        assert!(image.get("uri").is_none(), "an image points outside the file");
+        assert!(
+            image["bufferView"].is_u64(),
+            "an image is not in the buffer: {image}"
+        );
+        assert!(
+            image.get("uri").is_none(),
+            "an image points outside the file"
+        );
     }
     assert_eq!(json["textures"].as_array().map(Vec::len), Some(3));
     let material = &json["materials"][0];
@@ -146,7 +154,10 @@ fn the_file_says_it_the_way_other_readers_expect() {
         json["images"][source]["name"].as_str().unwrap().to_string()
     };
     assert_eq!(image_name(texture_of(&pbr["baseColorTexture"])), "Albedo");
-    assert_eq!(image_name(texture_of(&pbr["metallicRoughnessTexture"])), "ORM");
+    assert_eq!(
+        image_name(texture_of(&pbr["metallicRoughnessTexture"])),
+        "ORM"
+    );
     assert_eq!(image_name(texture_of(&material["normalTexture"])), "Normal");
     let scale = material["normalTexture"]["scale"].as_f64().unwrap();
     assert!((scale - 0.6).abs() < 1e-6);
@@ -169,7 +180,11 @@ fn a_shared_image_is_written_once() {
     let bytes = write(&doc, true);
     assert_eq!(glb_json(&bytes)["images"].as_array().map(Vec::len), Some(1));
     let (back, _) = read(&bytes);
-    assert_eq!(back.images().count(), 1, "the import split one image into two");
+    assert_eq!(
+        back.images().count(),
+        1,
+        "the import split one image into two"
+    );
 }
 
 #[test]
@@ -199,7 +214,11 @@ fn each_mesh_gets_the_materials_it_uses_as_its_own_slots() {
             .find(|(_, o)| o.name == object_name)
             .expect("the object arrived");
         let mesh = back.object(id).unwrap().mesh().expect("a mesh");
-        assert_eq!(back.mesh_slots(mesh).len(), 1, "{object_name} has the wrong slot count");
+        assert_eq!(
+            back.mesh_slots(mesh).len(),
+            1,
+            "{object_name} has the wrong slot count"
+        );
         assert_eq!(
             back.material_at(id, 0).map(|m| m.name.as_str()),
             Some(material_name),

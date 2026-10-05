@@ -4,9 +4,9 @@
 //! right — which is why each gets a test that names the exact quantity rather
 //! than checking that something loaded.
 
-use kreate_mesh::attribute::names;
 use kreate_io::gltf_import::{self, GltfOptions};
 use kreate_io::ir::{LossyNote, UvOrigin};
+use kreate_mesh::attribute::names;
 use serde_json::json;
 
 /// Builds a self-contained glTF with one triangle mesh.

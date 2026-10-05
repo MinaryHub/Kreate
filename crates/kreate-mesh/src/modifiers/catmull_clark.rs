@@ -251,7 +251,11 @@ fn vertex_point(input: &MeshData, topology: &Topology, face_points: &[Vec3], v: 
     let sharpness = if sharp.is_empty() {
         0.0
     } else {
-        sharp.iter().map(|e| topology.edge_sharpness(*e as usize)).sum::<f32>() / sharp.len() as f32
+        sharp
+            .iter()
+            .map(|e| topology.edge_sharpness(*e as usize))
+            .sum::<f32>()
+            / sharp.len() as f32
     };
     match rule {
         Some(rule) if sharpness >= 1.0 => return rule,
@@ -979,12 +983,20 @@ mod tests {
                 .edges()
                 .iter()
                 .map(|[a, b]| {
-                    let up = mesh.positions()[*a as usize].z > 0.9 && mesh.positions()[*b as usize].z > 0.9;
-                    if up { weight } else { 0.0 }
+                    let up = mesh.positions()[*a as usize].z > 0.9
+                        && mesh.positions()[*b as usize].z > 0.9;
+                    if up {
+                        weight
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
-            mesh.attributes_mut()
-                .insert(names::CREASE, Domain::Edge, AttrData::F32(Arc::new(ring)));
+            mesh.attributes_mut().insert(
+                names::CREASE,
+                Domain::Edge,
+                AttrData::F32(Arc::new(ring)),
+            );
             mesh
         };
         let width = |m: &MeshData| {
@@ -1001,8 +1013,15 @@ mod tests {
         // 0.1 is less than one level's worth: it is gone after the first.
         let after = subdivide_once(&top_ring(0.1));
         let crease = after.attributes().get_f32(names::CREASE).unwrap();
-        assert!(crease.iter().all(|c| *c == 0.0), "the sharpness was not spent");
+        assert!(
+            crease.iter().all(|c| *c == 0.0),
+            "the sharpness was not spent"
+        );
         let full = subdivide_once(&top_ring(1.0));
-        assert!(full.attributes().get_f32(names::CREASE).unwrap().contains(&1.0));
+        assert!(full
+            .attributes()
+            .get_f32(names::CREASE)
+            .unwrap()
+            .contains(&1.0));
     }
 }

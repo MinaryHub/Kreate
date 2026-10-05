@@ -451,15 +451,10 @@ impl ImportTransform {
     pub fn to_kreate(&self, source: &SourceMetadata) -> kreate_math::DAffine3 {
         let axis = source.axis.to_kreate();
         let inverse = axis.transpose();
-        let linear = axis
-            * Mat3::from_quat(self.rotation)
-            * Mat3::from_diagonal(self.scale)
-            * inverse;
+        let linear =
+            axis * Mat3::from_quat(self.rotation) * Mat3::from_diagonal(self.scale) * inverse;
         let translation = axis * (self.translation * source.unit_scale);
-        kreate_math::DAffine3::from_mat3_translation(
-            linear.as_dmat3(),
-            translation.as_dvec3(),
-        )
+        kreate_math::DAffine3::from_mat3_translation(linear.as_dmat3(), translation.as_dvec3())
     }
 
     /// The same placement, back in the file's space.
@@ -597,7 +592,6 @@ pub struct ImportCamera {
     pub clip_far: Option<f32>,
 }
 
-
 /// One node on the way out, in Kreate space.
 ///
 /// Its own type rather than a reused [`ImportNode`], and the difference is the
@@ -677,7 +671,11 @@ impl ImportChannel {
             ChannelValues::Translation(v) | ChannelValues::Scale(v) => v.len(),
             ChannelValues::Rotation(v) => v.len(),
         };
-        let per = if self.interpolation == ChannelInterpolation::CubicSpline { 3 } else { 1 };
+        let per = if self.interpolation == ChannelInterpolation::CubicSpline {
+            3
+        } else {
+            1
+        };
         (len / per).min(self.times.len())
     }
 
@@ -706,7 +704,11 @@ impl ImportChannel {
         let next = self.times[..n].partition_point(|k| *k <= t).clamp(1, n - 1);
         let prev = next - 1;
         let width = self.times[next] - self.times[prev];
-        let u = if width > 0.0 { (t - self.times[prev]) / width } else { 0.0 };
+        let u = if width > 0.0 {
+            (t - self.times[prev]) / width
+        } else {
+            0.0
+        };
         Some((prev, next, u))
     }
 
@@ -737,7 +739,9 @@ impl ImportChannel {
 
     /// The rotation at `t`.
     pub fn quat_at(&self, t: f32) -> Option<Quat> {
-        let ChannelValues::Rotation(v) = &self.values else { return None };
+        let ChannelValues::Rotation(v) = &self.values else {
+            return None;
+        };
         let (a, b, u) = self.span(t)?;
         let (qa, qb) = (v[self.at(a)], v[self.at(b)]);
         Some(match self.interpolation {
@@ -764,7 +768,10 @@ impl ImportChannel {
 fn hermite(p: Vec4, m: Vec4, q: Vec4, n: Vec4, u: f32) -> Vec4 {
     let u2 = u * u;
     let u3 = u2 * u;
-    p * (2.0 * u3 - 3.0 * u2 + 1.0) + m * (u3 - 2.0 * u2 + u) + q * (-2.0 * u3 + 3.0 * u2) + n * (u3 - u2)
+    p * (2.0 * u3 - 3.0 * u2 + 1.0)
+        + m * (u3 - 2.0 * u2 + u)
+        + q * (-2.0 * u3 + 3.0 * u2)
+        + n * (u3 - u2)
 }
 
 /// One clip: glTF's `animation`, a set of channels played together.
@@ -834,7 +841,8 @@ pub struct ExportScene<'a> {
     pub cameras: Vec<ImportCamera>,
     /// The hierarchy. Empty means the format should place each mesh at the
     /// origin, which is what OBJ and STL can say and what a bare mesh list is.
-    pub nodes: Vec<ExportNode>,    /// What moves. Empty for a still scene and for every format without time.
+    pub nodes: Vec<ExportNode>,
+    /// What moves. Empty for a still scene and for every format without time.
     pub animations: Vec<ExportAnimation>,
 }
 
@@ -974,8 +982,11 @@ fn convert_mesh(m: &ImportMesh, src: &SourceMetadata) -> MeshData {
                 .into_iter()
                 .map(|uv| src.uv_origin.to_kreate(uv))
                 .collect();
-            mesh.attributes_mut()
-                .insert(names::UV, Domain::Corner, AttrData::F32x2(Arc::new(vals)));
+            mesh.attributes_mut().insert(
+                names::UV,
+                Domain::Corner,
+                AttrData::F32x2(Arc::new(vals)),
+            );
         }
     }
     if let Some(ns) = &m.corner_normals {
@@ -1777,5 +1788,4 @@ mod tests {
         );
         assert!((back.translation - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
     }
-
 }

@@ -33,10 +33,16 @@ fn collections_are_saved_with_what_is_in_them_and_whether_hidden() {
     let mut doc = Document::new();
     let a = doc.add_object(Object::new("A", ObjectData::Empty));
     let _b = doc.add_object(Object::new("B", ObjectData::Empty));
-    let set = doc.add_collection(Collection { name: "Set".into(), hide: true, ..Default::default() });
+    let set = doc.add_collection(Collection {
+        name: "Set".into(),
+        hide: true,
+        ..Default::default()
+    });
     doc.move_to_collection(a, Some(set));
     let back = round_trip(&doc);
-    let id = back.find_collection("Set").expect("the collection came back");
+    let id = back
+        .find_collection("Set")
+        .expect("the collection came back");
     let c = back.collection(id).unwrap();
     assert!(c.hide);
     assert_eq!(c.objects.len(), 1);
@@ -54,23 +60,53 @@ fn every_modifier_is_saved_and_a_boolean_still_finds_its_cutter() {
     let target = doc.add_object(Object::new("Target", ObjectData::Mesh(mesh)));
     let operand = doc.object_uid(cutter).unwrap();
     let stack = vec![
-        ModifierInstance::new(ModifierKind::Mirror(MirrorParams { x: false, y: true, z: true, merge_threshold: 0.01 })),
-        ModifierInstance::new(ModifierKind::Subdivide(SubdivideParams { levels: 2, smooth: false })),
+        ModifierInstance::new(ModifierKind::Mirror(MirrorParams {
+            x: false,
+            y: true,
+            z: true,
+            merge_threshold: 0.01,
+        })),
+        ModifierInstance::new(ModifierKind::Subdivide(SubdivideParams {
+            levels: 2,
+            smooth: false,
+        })),
         ModifierInstance::new(ModifierKind::Array(ArrayParams {
             count: 3,
             relative: kreate_math::Vec3::Y,
             constant: kreate_math::Vec3::new(0.5, 0.0, 0.0),
         })),
-        ModifierInstance::new(ModifierKind::Solidify(SolidifyParams { thickness: 0.3, offset: 0.5 })),
-        ModifierInstance { kind: ModifierKind::Bevel(BevelParams { width: 0.05, angle: 0.4, segments: 3 }), enabled: false },
-        ModifierInstance::new(ModifierKind::Boolean(BooleanModifier { operand, op: BooleanOp::Intersect })),
+        ModifierInstance::new(ModifierKind::Solidify(SolidifyParams {
+            thickness: 0.3,
+            offset: 0.5,
+        })),
+        ModifierInstance {
+            kind: ModifierKind::Bevel(BevelParams {
+                width: 0.05,
+                angle: 0.4,
+                segments: 3,
+            }),
+            enabled: false,
+        },
+        ModifierInstance::new(ModifierKind::Boolean(BooleanModifier {
+            operand,
+            op: BooleanOp::Intersect,
+        })),
     ];
     doc.object_mut(target).unwrap().modifiers = stack.clone();
     let back = round_trip(&doc);
-    let t = back.objects().find(|(_, o)| o.name == "Target").map(|(id, _)| id).unwrap();
+    let t = back
+        .objects()
+        .find(|(_, o)| o.name == "Target")
+        .map(|(id, _)| id)
+        .unwrap();
     assert_eq!(back.object(t).unwrap().modifiers, stack);
-    let ModifierKind::Boolean(b) = back.object(t).unwrap().modifiers[5].kind else { unreachable!() };
-    let found = back.object_by_uid(b.operand).and_then(|id| back.object(id)).map(|o| o.name.clone());
+    let ModifierKind::Boolean(b) = back.object(t).unwrap().modifiers[5].kind else {
+        unreachable!()
+    };
+    let found = back
+        .object_by_uid(b.operand)
+        .and_then(|id| back.object(id))
+        .map(|o| o.name.clone());
     assert_eq!(found.as_deref(), Some("Cutter"));
 }
 
@@ -81,7 +117,13 @@ fn ik_is_saved_with_the_pose() {
     let mut doc = Document::new();
     let arm = doc.add_armature(Armature::new("Arm"));
     let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
-    let ik = IkConstraint { bone: "Bone".into(), target: "Goal".into(), chain: 3, enabled: false, pole: "Knee".into() };
+    let ik = IkConstraint {
+        bone: "Bone".into(),
+        target: "Goal".into(),
+        chain: 3,
+        enabled: false,
+        pole: "Knee".into(),
+    };
     doc.object_mut(rig).unwrap().pose.ik.push(ik.clone());
     let back = round_trip(&doc);
     let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();
@@ -98,11 +140,24 @@ fn shape_keys_are_saved_with_their_offsets() {
     let mesh = doc.add_mesh(mesh);
     let id = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
     let o = doc.object_mut(id).unwrap();
-    o.shape_keys = vec![ShapeKey { name: "Tall".into(), value: 0.25 }];
+    o.shape_keys = vec![ShapeKey {
+        name: "Tall".into(),
+        value: 0.25,
+    }];
     o.active_shape = Some("Tall".into());
     let back = round_trip(&doc);
     let (_, o) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
-    assert_eq!(o.shape_keys, vec![ShapeKey { name: "Tall".into(), value: 0.25 }]);
+    assert_eq!(
+        o.shape_keys,
+        vec![ShapeKey {
+            name: "Tall".into(),
+            value: 0.25
+        }]
+    );
     assert_eq!(o.active_shape.as_deref(), Some("Tall"));
-    assert!(back.mesh(o.mesh().unwrap()).unwrap().attributes().contains("shape:Tall"));
+    assert!(back
+        .mesh(o.mesh().unwrap())
+        .unwrap()
+        .attributes()
+        .contains("shape:Tall"));
 }

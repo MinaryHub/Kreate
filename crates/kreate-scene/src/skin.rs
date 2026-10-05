@@ -45,7 +45,11 @@ pub fn weight_layer(bone: &str) -> String {
 /// `mesh_to_armature` takes the mesh object's space to the armature object's:
 /// `W_armature⁻¹ · W_mesh`. The matrix is that, then the bone's rest undone and
 /// its pose applied, then back: `M⁻¹ · P · R⁻¹ · M`.
-pub fn skin_matrices(armature: &Armature, pose: &Pose, mesh_to_armature: DAffine3) -> Vec<DAffine3> {
+pub fn skin_matrices(
+    armature: &Armature,
+    pose: &Pose,
+    mesh_to_armature: DAffine3,
+) -> Vec<DAffine3> {
     let back = mesh_to_armature.inverse();
     posed(armature, pose)
         .iter()
@@ -109,7 +113,11 @@ pub fn skin(mesh: &MeshData, armature: &Armature, matrices: &[DAffine3]) -> Opti
 ///
 /// `mesh_to_armature` as for [`skin_matrices`]. One layer per bone, every
 /// bone's, so a bone that ends up with no weight still has a group to paint.
-pub fn automatic_weights(mesh: &MeshData, armature: &Armature, mesh_to_armature: DAffine3) -> Vec<(String, Vec<f32>)> {
+pub fn automatic_weights(
+    mesh: &MeshData,
+    armature: &Armature,
+    mesh_to_armature: DAffine3,
+) -> Vec<(String, Vec<f32>)> {
     let segments: Vec<(DVec3, DVec3)> = armature.bones.iter().map(|b| (b.head, b.tail)).collect();
     let mut layers: Vec<Vec<f32>> = vec![vec![0.0; mesh.num_verts() as usize]; segments.len()];
     for (v, p) in mesh.positions().iter().enumerate() {
@@ -121,7 +129,10 @@ pub fn automatic_weights(mesh: &MeshData, armature: &Armature, mesh_to_armature:
             .collect();
         near.sort_by(|x, y| x.1.total_cmp(&y.1));
         near.truncate(4);
-        let raw: Vec<(usize, f64)> = near.iter().map(|&(i, d)| (i, 1.0 / d.max(1e-4).powi(4))).collect();
+        let raw: Vec<(usize, f64)> = near
+            .iter()
+            .map(|&(i, d)| (i, 1.0 / d.max(1e-4).powi(4)))
+            .collect();
         let total: f64 = raw.iter().map(|(_, w)| w).sum();
         if total > 0.0 {
             for (i, w) in raw {
@@ -129,12 +140,21 @@ pub fn automatic_weights(mesh: &MeshData, armature: &Armature, mesh_to_armature:
             }
         }
     }
-    armature.bones.iter().map(|b| weight_layer(&b.name)).zip(layers).collect()
+    armature
+        .bones
+        .iter()
+        .map(|b| weight_layer(&b.name))
+        .zip(layers)
+        .collect()
 }
 
 fn distance_to_segment(p: DVec3, a: DVec3, b: DVec3) -> f64 {
     let ab = b - a;
-    let t = if ab.length_squared() > 0.0 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if ab.length_squared() > 0.0 {
+        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (a + ab * t - p).length()
 }
 
@@ -172,15 +192,24 @@ mod tests {
     fn automatic_weights_follow_the_nearest_bone_and_sum_to_one() {
         let m = column();
         let weights = automatic_weights(&m, &arm(), DAffine3::IDENTITY);
-        assert_eq!(weights.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["weight:Upper", "weight:Lower"]);
+        assert_eq!(
+            weights.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["weight:Upper", "weight:Lower"]
+        );
         for (v, p) in m.positions().iter().enumerate() {
             let (up, low) = (weights[0].1[v], weights[1].1[v]);
             assert!(((up + low) - 1.0).abs() < 1e-5);
             if p.z < 0.5 {
-                assert!(up > 0.9, "a vertex at the bottom follows the upper bone: {up}");
+                assert!(
+                    up > 0.9,
+                    "a vertex at the bottom follows the upper bone: {up}"
+                );
             }
             if p.z > 1.5 {
-                assert!(low > 0.9, "a vertex at the top follows the lower bone: {low}");
+                assert!(
+                    low > 0.9,
+                    "a vertex at the top follows the lower bone: {low}"
+                );
             }
         }
     }
@@ -189,20 +218,29 @@ mod tests {
     fn bending_the_lower_bone_bends_the_top_of_the_column_and_leaves_the_bottom() {
         let mut m = column();
         for (name, w) in automatic_weights(&m, &arm(), DAffine3::IDENTITY) {
-            m.attributes_mut().insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+            m.attributes_mut()
+                .insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
         }
         let a = arm();
         let mut pose = Pose::default();
         // A quarter turn about the lower bone's own X, at the elbow.
-        pose.entry("Lower").transform.rotation = DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
-        let bent = skin(&m, &a, &skin_matrices(&a, &pose, DAffine3::IDENTITY)).expect("the mesh is weighted");
+        pose.entry("Lower").transform.rotation =
+            DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
+        let bent = skin(&m, &a, &skin_matrices(&a, &pose, DAffine3::IDENTITY))
+            .expect("the mesh is weighted");
         for (rest, now) in m.positions().iter().zip(bent.positions()) {
             if rest.z < 0.5 {
-                assert!((*rest - *now).length() < 0.05, "the bottom moved: {rest:?} -> {now:?}");
+                assert!(
+                    (*rest - *now).length() < 0.05,
+                    "the bottom moved: {rest:?} -> {now:?}"
+                );
             }
             if rest.z > 1.9 {
                 // Turned about the elbow: the top swings out sideways and down.
-                assert!(now.z < 1.2, "the top did not bend over: {rest:?} -> {now:?}");
+                assert!(
+                    now.z < 1.2,
+                    "the top did not bend over: {rest:?} -> {now:?}"
+                );
             }
         }
     }
@@ -211,11 +249,22 @@ mod tests {
     fn at_rest_nothing_moves_and_an_unweighted_mesh_is_left_alone() {
         let mut m = column();
         let a = arm();
-        assert!(skin(&m, &a, &skin_matrices(&a, &Pose::default(), DAffine3::IDENTITY)).is_none());
+        assert!(skin(
+            &m,
+            &a,
+            &skin_matrices(&a, &Pose::default(), DAffine3::IDENTITY)
+        )
+        .is_none());
         for (name, w) in automatic_weights(&m, &a, DAffine3::IDENTITY) {
-            m.attributes_mut().insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+            m.attributes_mut()
+                .insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
         }
-        let still = skin(&m, &a, &skin_matrices(&a, &Pose::default(), DAffine3::IDENTITY)).unwrap();
+        let still = skin(
+            &m,
+            &a,
+            &skin_matrices(&a, &Pose::default(), DAffine3::IDENTITY),
+        )
+        .unwrap();
         for (a, b) in m.positions().iter().zip(still.positions()) {
             assert!((*a - *b).length() < 1e-5);
         }
@@ -253,11 +302,19 @@ mod cost {
         let n = m.num_verts() as usize;
         let a = {
             let mut a = Armature::new("Arm");
-            a.add_bone(crate::armature::Bone { name: "B".into(), parent: Some(0), head: DVec3::Z, tail: DVec3::Z * 2.0, connected: true, ..Default::default() });
+            a.add_bone(crate::armature::Bone {
+                name: "B".into(),
+                parent: Some(0),
+                head: DVec3::Z,
+                tail: DVec3::Z * 2.0,
+                connected: true,
+                ..Default::default()
+            });
             a
         };
         for (name, w) in automatic_weights(&m, &a, DAffine3::IDENTITY) {
-            m.attributes_mut().insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+            m.attributes_mut()
+                .insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
         }
         let mut pose = Pose::default();
         pose.entry("B").transform.rotation = kreate_math::DQuat::from_rotation_x(0.5);
@@ -267,6 +324,9 @@ mod cost {
         for _ in 0..runs {
             std::hint::black_box(skin(&m, &a, &matrices));
         }
-        eprintln!("skin {n} vertices: {:.2} ms", start.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+        eprintln!(
+            "skin {n} vertices: {:.2} ms",
+            start.elapsed().as_secs_f64() * 1000.0 / runs as f64
+        );
     }
 }

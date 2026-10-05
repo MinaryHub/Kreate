@@ -99,7 +99,15 @@ pub fn apply(mesh: &mut MeshData, dabs: &[Dab], stroke: &Stroke) -> bool {
     // The dabs, and their reflections when mirrored.
     let mut all: Vec<(Dab, bool)> = dabs.iter().map(|d| (*d, false)).collect();
     if stroke.mirror_x {
-        all.extend(dabs.iter().map(|d| (Dab { centre: Vec3::new(-d.centre.x, d.centre.y, d.centre.z), ..*d }, true)));
+        all.extend(dabs.iter().map(|d| {
+            (
+                Dab {
+                    centre: Vec3::new(-d.centre.x, d.centre.y, d.centre.z),
+                    ..*d
+                },
+                true,
+            )
+        }));
     }
     let mut moved = false;
     match stroke.brush {
@@ -109,7 +117,13 @@ pub fn apply(mesh: &mut MeshData, dabs: &[Dab], stroke: &Stroke) -> bool {
             let mut grabs = vec![(first, stroke.grab)];
             if stroke.mirror_x {
                 let flip = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
-                grabs.push((Dab { centre: flip(first.centre), ..first }, flip(stroke.grab)));
+                grabs.push((
+                    Dab {
+                        centre: flip(first.centre),
+                        ..first
+                    },
+                    flip(stroke.grab),
+                ));
             }
             for (dab, delta) in &grabs {
                 let (dab, delta) = (*dab, *delta);
@@ -164,7 +178,8 @@ pub fn apply(mesh: &mut MeshData, dabs: &[Dab], stroke: &Stroke) -> bool {
                     if w <= 0.0 || near[i].is_empty() {
                         continue;
                     }
-                    let average = near[i].iter().fold(Vec3::ZERO, |s, n| s + now[*n as usize]) / near[i].len() as f32;
+                    let average = near[i].iter().fold(Vec3::ZERO, |s, n| s + now[*n as usize])
+                        / near[i].len() as f32;
                     p[i] = now[i].lerp(average, w);
                     moved = true;
                 }
@@ -184,7 +199,13 @@ mod tests {
     }
 
     fn stroke(brush: Brush) -> Stroke {
-        Stroke { brush, strength: 1.0, invert: false, grab: Vec3::ZERO, mirror_x: false }
+        Stroke {
+            brush,
+            strength: 1.0,
+            invert: false,
+            grab: Vec3::ZERO,
+            mirror_x: false,
+        }
     }
 
     fn top(m: &MeshData) -> f32 {
@@ -194,48 +215,114 @@ mod tests {
     #[test]
     fn draw_raises_under_the_brush_and_nowhere_else_and_inverted_carves() {
         let mut m = grid();
-        let dab = Dab { centre: Vec3::ZERO, radius: 1.0 };
+        let dab = Dab {
+            centre: Vec3::ZERO,
+            radius: 1.0,
+        };
         assert!(apply(&mut m, &[dab], &stroke(Brush::Draw)));
         assert!(top(&m) > 0.1, "{}", top(&m));
         // Outside the radius, untouched.
-        assert!(m.positions().iter().filter(|p| p.x.abs() > 1.1 || p.y.abs() > 1.1).all(|p| p.z == 0.0));
+        assert!(m
+            .positions()
+            .iter()
+            .filter(|p| p.x.abs() > 1.1 || p.y.abs() > 1.1)
+            .all(|p| p.z == 0.0));
         let mut m = grid();
-        apply(&mut m, &[dab], &Stroke { invert: true, ..stroke(Brush::Draw) });
+        apply(
+            &mut m,
+            &[dab],
+            &Stroke {
+                invert: true,
+                ..stroke(Brush::Draw)
+            },
+        );
         assert!(m.positions().iter().map(|p| p.z).fold(f32::MAX, f32::min) < -0.1);
     }
 
     #[test]
     fn smooth_takes_a_spike_down() {
         let mut m = grid();
-        apply(&mut m, &[Dab { centre: Vec3::ZERO, radius: 0.3 }], &stroke(Brush::Draw));
+        apply(
+            &mut m,
+            &[Dab {
+                centre: Vec3::ZERO,
+                radius: 0.3,
+            }],
+            &stroke(Brush::Draw),
+        );
         let spike = top(&m);
-        apply(&mut m, &[Dab { centre: Vec3::ZERO, radius: 1.0 }; 4], &stroke(Brush::Smooth));
+        apply(
+            &mut m,
+            &[Dab {
+                centre: Vec3::ZERO,
+                radius: 1.0,
+            }; 4],
+            &stroke(Brush::Smooth),
+        );
         assert!(top(&m) < spike * 0.7, "{} from {spike}", top(&m));
     }
 
     #[test]
     fn grab_carries_what_was_under_the_first_dab() {
         let mut m = grid();
-        let s = Stroke { grab: Vec3::new(0.0, 0.0, 2.0), ..stroke(Brush::Grab) };
-        apply(&mut m, &[Dab { centre: Vec3::ZERO, radius: 1.0 }], &s);
+        let s = Stroke {
+            grab: Vec3::new(0.0, 0.0, 2.0),
+            ..stroke(Brush::Grab)
+        };
+        apply(
+            &mut m,
+            &[Dab {
+                centre: Vec3::ZERO,
+                radius: 1.0,
+            }],
+            &s,
+        );
         assert!((top(&m) - 2.0).abs() < 0.05, "{}", top(&m));
     }
 
     #[test]
     fn x_symmetry_does_the_same_on_the_other_side() {
         let mut m = grid();
-        let s = Stroke { mirror_x: true, ..stroke(Brush::Draw) };
-        apply(&mut m, &[Dab { centre: Vec3::new(1.0, 0.0, 0.0), radius: 0.5 }], &s);
-        let at = |x: f32| m.positions().iter().find(|p| (p.x - x).abs() < 1e-4 && p.y.abs() < 1e-4).unwrap().z;
+        let s = Stroke {
+            mirror_x: true,
+            ..stroke(Brush::Draw)
+        };
+        apply(
+            &mut m,
+            &[Dab {
+                centre: Vec3::new(1.0, 0.0, 0.0),
+                radius: 0.5,
+            }],
+            &s,
+        );
+        let at = |x: f32| {
+            m.positions()
+                .iter()
+                .find(|p| (p.x - x).abs() < 1e-4 && p.y.abs() < 1e-4)
+                .unwrap()
+                .z
+        };
         assert!(at(1.0) > 0.0);
-        assert!((at(1.0) - at(-1.0)).abs() < 1e-5, "{} vs {}", at(1.0), at(-1.0));
+        assert!(
+            (at(1.0) - at(-1.0)).abs() < 1e-5,
+            "{} vs {}",
+            at(1.0),
+            at(-1.0)
+        );
     }
 
     #[test]
     fn inflate_swells_a_sphere() {
         let mut m = primitives::uv_sphere(1.0, 16, 8);
         let r0 = m.positions().iter().map(|p| p.length()).fold(0.0, f32::max);
-        apply(&mut m, &[Dab { centre: Vec3::Z, radius: 0.8 }], &stroke(Brush::Inflate));
+        apply(
+            &mut m,
+            &[Dab {
+                centre: Vec3::Z,
+                radius: 0.8,
+            }],
+            &stroke(Brush::Inflate),
+        );
         let r1 = m.positions().iter().map(|p| p.length()).fold(0.0, f32::max);
         assert!(r1 > r0 + 0.01);
     }

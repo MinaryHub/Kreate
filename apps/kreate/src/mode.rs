@@ -142,7 +142,11 @@ mod tests {
         assert_eq!(toggled(Mode::EditMesh, Has::EVERYTHING), Mode::Object);
         // And it always leads somewhere else, from every mode there is.
         for mode in Mode::ALL {
-            assert_ne!(toggled(mode, Has::EVERYTHING), mode, "{mode:?} toggles to itself");
+            assert_ne!(
+                toggled(mode, Has::EVERYTHING),
+                mode,
+                "{mode:?} toggles to itself"
+            );
         }
     }
 }

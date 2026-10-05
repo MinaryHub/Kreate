@@ -41,7 +41,9 @@ pub fn decode(text: &str) -> Option<Document> {
     for i in (0..text.len()).step_by(2) {
         bytes.push(u8::from_str_radix(text.get(i..i + 2)?, 16).ok()?);
     }
-    container::read(Cursor::new(bytes)).ok().map(|loaded| loaded.document)
+    container::read(Cursor::new(bytes))
+        .ok()
+        .map(|loaded| loaded.document)
 }
 
 #[cfg(test)]
@@ -74,7 +76,10 @@ mod tests {
         assert!(decode("").is_none());
         assert!(decode("hello").is_none());
         assert!(decode("zz").is_none());
-        assert!(decode("504b0304").is_none(), "a zip header alone is not a document");
+        assert!(
+            decode("504b0304").is_none(),
+            "a zip header alone is not a document"
+        );
     }
 
     #[test]

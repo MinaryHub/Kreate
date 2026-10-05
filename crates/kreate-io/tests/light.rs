@@ -146,7 +146,10 @@ fn the_intensity_is_stored_in_the_kinds_own_unit() {
     assert_eq!(light.exposure, -1.5);
     assert_eq!(light.kind.intensity_unit(), kreate_scene::Intensity::Lux);
     // Which is the point: the two numbers still mean what they meant.
-    assert_eq!(light.illuminance_at(50.0), Some(105_000.0 * 2f64.powf(-1.5)));
+    assert_eq!(
+        light.illuminance_at(50.0),
+        Some(105_000.0 * 2f64.powf(-1.5))
+    );
 }
 
 #[test]
@@ -200,7 +203,10 @@ fn identities_with_gaps_in_them_come_back_as_they_were() {
         Light::of_kind("A", LightKind::BULB),
         doc.light_uid(a).unwrap(),
     );
-    let last = sparse.restore_light(Light::of_kind("D", LightKind::SUN), doc.light_uid(d).unwrap());
+    let last = sparse.restore_light(
+        Light::of_kind("D", LightKind::SUN),
+        doc.light_uid(d).unwrap(),
+    );
     sparse.add_object(Object::new("A", ObjectData::Light(first)));
     sparse.add_object(Object::new("D", ObjectData::Light(last)));
 
@@ -222,7 +228,10 @@ fn a_new_light_after_a_load_cannot_collide_with_a_loaded_one() {
     // including the ones it skipped. A loader counting what it loaded would
     // hand the next light number 3 while the file already used 4.
     let mut doc = Document::new();
-    let sparse = doc.restore_light(Light::of_kind("D", LightKind::SUN), kreate_scene::Uid::from_raw(9));
+    let sparse = doc.restore_light(
+        Light::of_kind("D", LightKind::SUN),
+        kreate_scene::Uid::from_raw(9),
+    );
     doc.add_object(Object::new("D", ObjectData::Light(sparse)));
 
     let mut back = round_trip(&doc);
@@ -247,7 +256,14 @@ fn an_object_comes_back_pointing_at_its_own_light() {
             panic!("{} came back as something else", object.name)
         };
         let light = back.light(id).expect("its datablock");
-        assert_eq!(light.name, if object.name == "Outdoor" { "Sun" } else { "Bulb" });
+        assert_eq!(
+            light.name,
+            if object.name == "Outdoor" {
+                "Sun"
+            } else {
+                "Bulb"
+            }
+        );
     }
 }
 
@@ -319,11 +335,7 @@ fn an_area_lights_shape_and_size_come_back() {
         doc.add_object(Object::new("Panel", ObjectData::Light(id)));
 
         let back = round_trip(&doc);
-        let LightKind::Area {
-            shape: got,
-            spread,
-        } = only_light(&back).kind
-        else {
+        let LightKind::Area { shape: got, spread } = only_light(&back).kind else {
             panic!("not an area light")
         };
         assert_eq!(got, shape);
@@ -424,7 +436,9 @@ fn an_hdri_background_finds_its_image_again() {
     let back = container::read(std::io::Cursor::new(bytes.clone()))
         .expect("read")
         .document;
-    let world = back.world(back.active_world().expect("active")).expect("world");
+    let world = back
+        .world(back.active_world().expect("active"))
+        .expect("world");
     let Background::Image(id) = world.background else {
         panic!("the background came back as {:?}", world.background);
     };
@@ -466,7 +480,9 @@ fn a_background_naming_an_image_that_is_not_there_lands_on_a_colour() {
     let back = container::read(std::io::Cursor::new(broken))
         .expect("read")
         .document;
-    let world = back.world(back.active_world().expect("active")).expect("world");
+    let world = back
+        .world(back.active_world().expect("active"))
+        .expect("world");
     assert!(
         matches!(world.background, Background::Flat(_)),
         "an identity nothing answers to came back as a pointer"

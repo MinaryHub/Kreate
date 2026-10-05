@@ -85,7 +85,10 @@ impl Ssr {
             label: Some("ssr result"),
             entries: &[texture(0, false)],
         });
-        let pipeline = |label: &str, layouts: &[Option<&wgpu::BindGroupLayout>], entry: &str, blend: Option<wgpu::BlendState>| {
+        let pipeline = |label: &str,
+                        layouts: &[Option<&wgpu::BindGroupLayout>],
+                        entry: &str,
+                        blend: Option<wgpu::BlendState>| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: layouts,
@@ -104,7 +107,11 @@ impl Ssr {
                     module: &shader,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -129,7 +136,12 @@ impl Ssr {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let composite = pipeline("ssr composite", &[None, Some(&result_layout)], "ssr_composite", Some(add));
+        let composite = pipeline(
+            "ssr composite",
+            &[None, Some(&result_layout)],
+            "ssr_composite",
+            Some(add),
+        );
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ssr params"),
             size: std::mem::size_of::<Params>() as u64,
@@ -153,32 +165,51 @@ impl Ssr {
         }
     }
 
-    fn images(device: &wgpu::Device, size: (u32, u32)) -> ([wgpu::TextureView; 3], wgpu::TextureView) {
+    fn images(
+        device: &wgpu::Device,
+        size: (u32, u32),
+    ) -> ([wgpu::TextureView; 3], wgpu::TextureView) {
         let image = |label| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: FORMAT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         (
-            [image("ssr surface"), image("ssr share"), image("ssr environment")],
+            [
+                image("ssr surface"),
+                image("ssr share"),
+                image("ssr environment"),
+            ],
             image("ssr reflections"),
         )
     }
 
-    fn bind_result(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn bind_result(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ssr result"),
             layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
         })
     }
 
@@ -217,12 +248,30 @@ impl Ssr {
             label: Some("ssr trace"),
             layout: &self.trace_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(picture) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.gbuffer[0]) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.gbuffer[1]) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.gbuffer[2]) },
-                wgpu::BindGroupEntry { binding: 5, resource: self.params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(picture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.gbuffer[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.gbuffer[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.gbuffer[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.params.as_entire_binding(),
+                },
             ],
         }));
         let p = Params {
@@ -237,8 +286,15 @@ impl Ssr {
     }
 
     /// Swaps the sky's reflection for what the screen holds, on `picture`.
-    pub fn apply(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView, region: (u32, u32)) {
-        let Some(trace_bind) = &self.trace_bind else { return };
+    pub fn apply(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::TextureView,
+        region: (u32, u32),
+    ) {
+        let Some(trace_bind) = &self.trace_bind else {
+            return;
+        };
         let pass = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: bool| {
             encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -248,7 +304,11 @@ impl Ssr {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load },
+                            load: if clear {
+                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
                             store: wgpu::StoreOp::Store,
                         },
                     })],

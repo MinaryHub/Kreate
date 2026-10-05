@@ -52,24 +52,45 @@ impl Operator for AddKey {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc) && ctx.mode.acts_on() == crate::mode::ActsOn::Objects
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = target(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let o = doc.document().object(id).expect("target");
         let taken: Vec<String> = o.shape_keys.iter().map(|k| k.name.clone()).collect();
         let name = if params.name.trim().is_empty() {
-            (1..).map(|i| format!("Key {i}")).find(|n| !taken.contains(n)).expect("names run out after integers")
+            (1..)
+                .map(|i| format!("Key {i}"))
+                .find(|n| !taken.contains(n))
+                .expect("names run out after integers")
         } else if taken.contains(&params.name) {
-            (1..).map(|i| format!("{}.{i:03}", params.name)).find(|n| !taken.contains(n)).expect("names")
+            (1..)
+                .map(|i| format!("{}.{i:03}", params.name))
+                .find(|n| !taken.contains(n))
+                .expect("names")
         } else {
             params.name.clone()
         };
-        let mix = if params.from_mix { o.shape_keys.clone() } else { Vec::new() };
+        let mix = if params.from_mix {
+            o.shape_keys.clone()
+        } else {
+            Vec::new()
+        };
         let mesh = o.mesh().expect("target");
         let d = doc.document_mut();
-        let Some(m) = d.mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
+        let Some(m) = d.mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
         shape::add_layer(m, &name, &mix);
         let o = d.object_mut(id).expect("target");
-        o.shape_keys.push(ShapeKey { name: name.clone(), value: 0.0 });
+        o.shape_keys.push(ShapeKey {
+            name: name.clone(),
+            value: 0.0,
+        });
         o.active_shape = Some(name);
         Ok(OpResult::Finished)
     }
@@ -95,8 +116,14 @@ impl Operator for RemoveKey {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc) && ctx.mode.acts_on() == crate::mode::ActsOn::Objects
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = target(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let o = doc.document().object(id).expect("target");
         if !o.shape_keys.iter().any(|k| k.name == params.name) {
             return Ok(OpResult::Cancelled);
@@ -139,16 +166,23 @@ impl Operator for SetKey {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = target(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let o = doc.document().object(id).expect("target");
         let Some(key) = o.shape_keys.iter().find(|k| k.name == params.name).cloned() else {
             return Ok(OpResult::Cancelled);
         };
         let value = params.value.clamp(0.0, 1.0) as f32;
-        let rename = (!params.new_name.trim().is_empty() && params.new_name != params.name
+        let rename = (!params.new_name.trim().is_empty()
+            && params.new_name != params.name
             && !o.shape_keys.iter().any(|k| k.name == params.new_name))
-            .then(|| params.new_name.clone());
+        .then(|| params.new_name.clone());
         if rename.is_none() && key.value == value {
             return Ok(OpResult::Cancelled);
         }
@@ -158,7 +192,8 @@ impl Operator for SetKey {
             if let Some(m) = d.mesh_mut(mesh) {
                 if let Some(layer) = m.attributes().get(&shape::layer(&params.name)).cloned() {
                     m.attributes_mut().remove(&shape::layer(&params.name));
-                    m.attributes_mut().insert(&shape::layer(new), layer.domain, layer.data);
+                    m.attributes_mut()
+                        .insert(&shape::layer(new), layer.domain, layer.data);
                 }
             }
         }
@@ -192,14 +227,27 @@ impl Operator for SetActiveKey {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc) && ctx.mode.acts_on() == crate::mode::ActsOn::Objects
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = target(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let o = doc.document().object(id).expect("target");
         let wanted = (!params.name.is_empty()).then(|| params.name.clone());
-        if wanted.as_ref().is_some_and(|n| !o.shape_keys.iter().any(|k| &k.name == n)) || o.active_shape == wanted {
+        if wanted
+            .as_ref()
+            .is_some_and(|n| !o.shape_keys.iter().any(|k| &k.name == n))
+            || o.active_shape == wanted
+        {
             return Ok(OpResult::Cancelled);
         }
-        doc.document_mut().object_mut(id).expect("target").active_shape = wanted;
+        doc.document_mut()
+            .object_mut(id)
+            .expect("target")
+            .active_shape = wanted;
         Ok(OpResult::Finished)
     }
 }
@@ -226,8 +274,14 @@ impl Operator for EditKey {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(id) = target(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = target(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let o = doc.document().object(id).expect("target");
         let mesh = o.mesh().expect("target");
         let key = if params.enter {
@@ -242,8 +296,14 @@ impl Operator for EditKey {
             }
         };
         let d = doc.document_mut();
-        let Some(m) = d.mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
-        let traded = if params.enter { shape::trade_in(m, &key) } else { shape::trade_out(m, &key) };
+        let Some(m) = d.mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let traded = if params.enter {
+            shape::trade_in(m, &key)
+        } else {
+            shape::trade_out(m, &key)
+        };
         if !traded {
             return Ok(OpResult::Cancelled);
         }

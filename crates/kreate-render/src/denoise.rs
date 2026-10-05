@@ -110,7 +110,11 @@ impl Denoise {
                     module: &shader,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -120,7 +124,11 @@ impl Denoise {
             })
         };
         let step = pipeline("denoise step", &[Some(&layout)], "denoise_step");
-        let blend = pipeline("denoise blend", &[Some(&layout), Some(&filtered_layout)], "denoise_blend");
+        let blend = pipeline(
+            "denoise blend",
+            &[Some(&layout), Some(&filtered_layout)],
+            "denoise_blend",
+        );
         let params = (0..=PASSES)
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -133,18 +141,37 @@ impl Denoise {
             .collect();
         let size = (width.max(1), height.max(1));
         let (raw, ping) = Self::images(device, size);
-        Self { step, blend, layout, filtered_layout, params, raw, ping, binds: Vec::new(), filtered_bind: None, size }
+        Self {
+            step,
+            blend,
+            layout,
+            filtered_layout,
+            params,
+            raw,
+            ping,
+            binds: Vec::new(),
+            filtered_bind: None,
+            size,
+        }
     }
 
-    fn images(device: &wgpu::Device, size: (u32, u32)) -> ((wgpu::Texture, wgpu::TextureView), [wgpu::TextureView; 2]) {
+    fn images(
+        device: &wgpu::Device,
+        size: (u32, u32),
+    ) -> ((wgpu::Texture, wgpu::TextureView), [wgpu::TextureView; 2]) {
         let image = |label, copy: bool| {
-            let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+            let mut usage =
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
             if copy {
                 usage |= wgpu::TextureUsages::COPY_DST;
             }
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -188,10 +215,22 @@ impl Denoise {
                 label: Some("denoise"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(normals) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth) },
-                    wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(normals),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: params.as_entire_binding(),
+                    },
                 ],
             })
         };
@@ -199,7 +238,11 @@ impl Denoise {
         // it wrote; the blend reads the raw again, beside the last.
         let mut binds = Vec::with_capacity(PASSES + 1);
         for i in 0..PASSES {
-            let source = if i == 0 { &self.raw.1 } else { &self.ping[(i - 1) % 2] };
+            let source = if i == 0 {
+                &self.raw.1
+            } else {
+                &self.ping[(i - 1) % 2]
+            };
             binds.push(bind(source, &self.params[i]));
             let p = Params {
                 region: [region.0 as f32, region.1 as f32],
@@ -238,14 +281,20 @@ impl Denoise {
         picture_view: &wgpu::TextureView,
         region: (u32, u32),
     ) {
-        let Some(filtered_bind) = &self.filtered_bind else { return };
+        let Some(filtered_bind) = &self.filtered_bind else {
+            return;
+        };
         if self.binds.len() != PASSES + 1 {
             return;
         }
         encoder.copy_texture_to_texture(
             picture.as_image_copy(),
             self.raw.0.as_image_copy(),
-            wgpu::Extent3d { width: region.0, height: region.1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: region.0,
+                height: region.1,
+                depth_or_array_layers: 1,
+            },
         );
         let run = |encoder: &mut wgpu::CommandEncoder,
                    target: &wgpu::TextureView,
@@ -258,7 +307,10 @@ impl Denoise {
                     view: target,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -276,7 +328,13 @@ impl Denoise {
         for i in 0..PASSES {
             run(encoder, &self.ping[i % 2], &self.step, &self.binds[i], None);
         }
-        run(encoder, picture_view, &self.blend, &self.binds[PASSES], Some(filtered_bind));
+        run(
+            encoder,
+            picture_view,
+            &self.blend,
+            &self.binds[PASSES],
+            Some(filtered_bind),
+        );
     }
 }
 

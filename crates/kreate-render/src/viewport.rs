@@ -2109,9 +2109,21 @@ impl Viewport {
                     }),
                     // The pass's reflection images, which a background does
                     // not write: they stay clear, which is "nothing here".
-                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
-                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
-                    Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::ssr::FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::ssr::FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::ssr::FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
                 ],
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -2147,71 +2159,74 @@ impl Viewport {
         // Two of them: the opaque one, and X-ray's — blended over what is
         // behind and writing no depth, so every surface and every edge behind
         // it shows through, as Blender's Alt+Z does.
-        let solid_pipeline = |label: &str, blend: Option<wgpu::BlendState>, depth: wgpu::DepthStencilState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&solid_pl),
-            vertex: wgpu::VertexState {
-                module: &solid_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    // Positions: tightly packed, 12 bytes.
-                    wgpu::VertexBufferLayout {
-                        array_stride: 12,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        }],
+        let solid_pipeline =
+            |label: &str, blend: Option<wgpu::BlendState>, depth: wgpu::DepthStencilState| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&solid_pl),
+                    vertex: wgpu::VertexState {
+                        module: &solid_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            // Positions: tightly packed, 12 bytes.
+                            wgpu::VertexBufferLayout {
+                                array_stride: 12,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 0,
+                                    shader_location: 0,
+                                }],
+                            },
+                            // Normals: one octahedron-encoded u32.
+                            wgpu::VertexBufferLayout {
+                                array_stride: 4,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Uint32,
+                                    offset: 0,
+                                    shader_location: 1,
+                                }],
+                            },
+                            // Surface coordinates, read only for the weight ramp.
+                            wgpu::VertexBufferLayout {
+                                array_stride: 8,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 2,
+                                }],
+                            },
+                        ],
                     },
-                    // Normals: one octahedron-encoded u32.
-                    wgpu::VertexBufferLayout {
-                        array_stride: 4,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 0,
-                            shader_location: 1,
-                        }],
+                    fragment: Some(wgpu::FragmentState {
+                        module: &solid_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color_format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        // Backface culling stays off in the solid pass. A modeller
+                        // routinely has open and inconsistently wound geometry mid-edit,
+                        // and hiding it is worse than showing it: the fragment shader
+                        // flips the normal instead, so a backface is lit rather than
+                        // black or missing.
+                        cull_mode: None,
+                        ..Default::default()
                     },
-                    // Surface coordinates, read only for the weight ramp.
-                    wgpu::VertexBufferLayout {
-                        array_stride: 8,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 2,
-                        }],
-                    },
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &solid_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Backface culling stays off in the solid pass. A modeller
-                // routinely has open and inconsistently wound geometry mid-edit,
-                // and hiding it is worse than showing it: the fragment shader
-                // flips the normal instead, so a backface is lit rather than
-                // black or missing.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(depth),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                    depth_stencil: Some(depth),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
         let solid = solid_pipeline("solid", None, gpu::depth_write_state());
         let solid_xray = solid_pipeline(
             "solid x-ray",
@@ -2532,9 +2547,9 @@ impl Viewport {
             // reallocated every frame is a stall — and the bind group holds
             // the old view, so it is remade with it.
             self.hdr.resize(device, size.0, size.1);
-            self.screen_bind =
-                self.screen
-                    .bind_group(device, self.hdr.view(), &self.screen_params);
+            self.screen_bind = self
+                .screen
+                .bind_group(device, self.hdr.view(), &self.screen_params);
         }
         self.render_size = self.render_size.clamp_to(size);
     }
@@ -2594,10 +2609,7 @@ impl Viewport {
         //
         // What comes out of it is a direction, so the precision that matters is
         // angular and a metre at the far plane is nothing.
-        self.inv_view_proj = camera
-            .view_projection(aspect)
-            .inverse()
-            .to_cols_array_2d();
+        self.inv_view_proj = camera.view_projection(aspect).inverse().to_cols_array_2d();
         queue.write_buffer(
             &self.shading_globals_buf,
             0,
@@ -2760,7 +2772,11 @@ impl Viewport {
             (camera.distance * 0.1).max(1e-4) as f32,
             // Gentler in the rendered view, where the lights already shade
             // the form and the occlusion is grounding rather than drawing it.
-            if self.shading == ShadingMode::Rendered { 0.6 } else { 1.0 },
+            if self.shading == ShadingMode::Rendered {
+                0.6
+            } else {
+                1.0
+            },
         );
 
         let right = camera.right().as_vec3();
@@ -2945,7 +2961,8 @@ impl Viewport {
             );
             // The shadow pass draws the same geometry from a different
             // camera, so it needs the same model matrix and nothing else.
-            self.shadows.set_object(queue, i, &m, self.see_through(draw), self.accum_samples);
+            self.shadows
+                .set_object(queue, i, &m, self.see_through(draw), self.accum_samples);
             drawn = drawn.union(transformed_bounds(&m, draw.mesh.bounds));
             queue.write_buffer(
                 &self.rendered_objects.buffer,
@@ -3239,8 +3256,11 @@ impl Viewport {
         // Kept for `prepare`, which fits the shadow frames: it is the call
         // that sees the geometry, and a frustum is fitted to geometry.
         self.packed_lights.clear();
-        self.packed_lights
-            .extend(lights.iter().map(|light| crate::lights::GpuLight::pack(light, eye)));
+        self.packed_lights.extend(
+            lights
+                .iter()
+                .map(|light| crate::lights::GpuLight::pack(light, eye)),
+        );
         queue.write_buffer(
             &self.shading_globals_buf,
             0,
@@ -3280,7 +3300,12 @@ impl Viewport {
             sh9: crate::environment::sh9_bytes(self.environment.sh9()),
             inv_view_proj: self.inv_view_proj,
             view_proj: self.shading_view_proj,
-            flags: [if self.contact_applies() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            flags: [
+                if self.contact_applies() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+                0.0,
+            ],
         }
     }
 
@@ -3297,7 +3322,10 @@ impl Viewport {
     }
 
     fn transmission(&self, material: u32) -> f32 {
-        self.material_transmissive.get(material as usize).copied().unwrap_or(0.0)
+        self.material_transmissive
+            .get(material as usize)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     fn transmissive(&self, material: u32) -> bool {
@@ -4021,7 +4049,11 @@ impl Viewport {
                 pass.draw_indirect(self.cull.args_buffer(), slot.args_offset as u64);
             }
         } else {
-            pass.set_pipeline(if self.xray { &self.solid_xray } else { &self.solid });
+            pass.set_pipeline(if self.xray {
+                &self.solid_xray
+            } else {
+                &self.solid
+            });
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
@@ -4190,7 +4222,11 @@ impl Viewport {
             pass.set_bind_group(0, &self.element_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
-                if mesh.counts.verts == 0 || !draw.detail.draw || draw.detail.point_alpha <= 0.0 || !shows_elements(draw) {
+                if mesh.counts.verts == 0
+                    || !draw.detail.draw
+                    || draw.detail.point_alpha <= 0.0
+                    || !shows_elements(draw)
+                {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.id_bind, &[]);
@@ -4286,7 +4322,8 @@ impl Viewport {
             match self.frame_sample.filter(|_| self.accum_applies) {
                 // Into the mean, and the mean onto the target.
                 Some(n) => {
-                    self.aa.resolve(encoder, self.accum.frame(), self.render_size);
+                    self.aa
+                        .resolve(encoder, self.accum.frame(), self.render_size);
                     self.accum.add(encoder, self.render_size, n);
                     self.accum.present(encoder, target, self.render_size);
                 }
@@ -4303,7 +4340,12 @@ impl Viewport {
     }
 
     /// The selection outline, over the surfaces and under the overlays.
-    fn draw_outline(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, draws: &[Draw]) {
+    fn draw_outline(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[Draw],
+    ) {
         if !self.show_outline || !draws.iter().any(|d| d.selected) {
             return;
         }
@@ -4318,7 +4360,14 @@ impl Viewport {
                 .iter()
                 .enumerate()
                 .filter(|(_, d)| d.selected && d.detail.draw && d.mesh.counts.triangles > 0)
-                .map(|(i, d)| (self.objects.offset(i as u32), &d.mesh.positions, &d.mesh.indices, d.mesh.counts.triangles)),
+                .map(|(i, d)| {
+                    (
+                        self.objects.offset(i as u32),
+                        &d.mesh.positions,
+                        &d.mesh.indices,
+                        d.mesh.counts.triangles,
+                    )
+                }),
         );
     }
 
@@ -4361,7 +4410,8 @@ impl Viewport {
         surfaces: &[crate::pathtrace::PtSurface],
         images: &[crate::pathtrace::PtImage<'_>],
     ) {
-        self.pathtracer.set_scene(device, queue, meshes, surfaces, images);
+        self.pathtracer
+            .set_scene(device, queue, meshes, surfaces, images);
         self.accum_samples = 0;
     }
 
@@ -4376,7 +4426,12 @@ impl Viewport {
 
     /// Decides this frame's place in the mean and returns the projection to
     /// draw it with — nudged by a fraction of a pixel after the first.
-    fn next_sample(&mut self, view_proj: glam::Mat4, eye: glam::DVec3, draws: &[Draw]) -> glam::Mat4 {
+    fn next_sample(
+        &mut self,
+        view_proj: glam::Mat4,
+        eye: glam::DVec3,
+        draws: &[Draw],
+    ) -> glam::Mat4 {
         use std::hash::{Hash, Hasher};
         self.accum_applies = self.accumulate
             && (self.smoothing() || self.shading == ShadingMode::Rendered)
@@ -4400,7 +4455,16 @@ impl Viewport {
             v.to_bits().hash(&mut h);
         }
         self.render_size.hash(&mut h);
-        (self.shading as u8, self.ambient_occlusion, self.xray, self.face_orientation, self.show_bloom, self.show_reflections, self.path_trace).hash(&mut h);
+        (
+            self.shading as u8,
+            self.ambient_occlusion,
+            self.xray,
+            self.face_orientation,
+            self.show_bloom,
+            self.show_reflections,
+            self.path_trace,
+        )
+            .hash(&mut h);
         format!("{:?}", self.path_trace_lens).hash(&mut h);
         // The lighting inputs since the last frame, folded together, and
         // started afresh for the next: the same calls with the same values
@@ -4426,7 +4490,10 @@ impl Viewport {
         let (jx, jy) = crate::accum::jitter(self.accum_samples);
         self.accum_samples += 1;
         self.frame_sample = Some(self.accum_samples);
-        let (w, h) = (self.render_size.0.max(1) as f32, self.render_size.1.max(1) as f32);
+        let (w, h) = (
+            self.render_size.0.max(1) as f32,
+            self.render_size.1.max(1) as f32,
+        );
         glam::Mat4::from_translation(glam::Vec3::new(2.0 * jx / w, -2.0 * jy / h, 0.0)) * view_proj
     }
 
@@ -4440,7 +4507,10 @@ impl Viewport {
     /// which is lit to show shape, and only through the smoothing path — the
     /// occlusion goes into the surfaces' own image, never onto the overlays.
     fn occluding(&self) -> bool {
-        self.ambient_occlusion && !self.xray && self.shading == ShadingMode::Studio && self.smoothing()
+        self.ambient_occlusion
+            && !self.xray
+            && self.shading == ShadingMode::Studio
+            && self.smoothing()
     }
 
     /// The rendered mode, in three passes.
@@ -4508,7 +4578,14 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, self.render_size.0 as f32, self.render_size.1 as f32, 0.0, 1.0);
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.render_size.0 as f32,
+                self.render_size.1 as f32,
+                0.0,
+                1.0,
+            );
             pass.set_pipeline(&self.contact_pipeline);
             pass.set_bind_group(0, &self.globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
@@ -4517,7 +4594,11 @@ impl Viewport {
                 if mesh.counts.triangles == 0 || !draw.surface() || self.see_through(draw) >= 0.5 {
                     continue;
                 }
-                pass.set_bind_group(1, &self.rendered_objects.bind, &[self.rendered_objects.offset(i as u32)]);
+                pass.set_bind_group(
+                    1,
+                    &self.rendered_objects.bind,
+                    &[self.rendered_objects.offset(i as u32)],
+                );
                 pass.set_vertex_buffer(0, mesh.positions.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
@@ -4552,19 +4633,28 @@ impl Viewport {
                         view: &self.ssr.gbuffer()[0],
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.ssr.gbuffer()[1],
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &self.ssr.gbuffer()[2],
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
                     }),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -4618,14 +4708,21 @@ impl Viewport {
             encoder.copy_texture_to_texture(
                 self.hdr.texture().as_image_copy(),
                 self.behind.0.as_image_copy(),
-                wgpu::Extent3d { width: self.render_size.0, height: self.render_size.1, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: self.render_size.0,
+                    height: self.render_size.1,
+                    depth_or_array_layers: 1,
+                },
             );
             let load = |view| {
                 Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4638,14 +4735,24 @@ impl Viewport {
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, self.render_size.0 as f32, self.render_size.1 as f32, 0.0, 1.0);
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.render_size.0 as f32,
+                self.render_size.1 as f32,
+                0.0,
+                1.0,
+            );
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_bind_group(2, &self.shading_bind, &[]);
             self.draw_rendered_runs(&mut pass, draws, true);
@@ -4654,54 +4761,59 @@ impl Viewport {
 
     /// The rendered pass's draws: the solid runs, or the glass ones. Returns
     /// whether a run of the other kind was passed over.
-    fn draw_rendered_runs(&self, pass: &mut wgpu::RenderPass<'_>, draws: &[Draw<'_>], glass: bool) -> bool {
+    fn draw_rendered_runs(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        draws: &[Draw<'_>],
+        glass: bool,
+    ) -> bool {
         let mut skipped = false;
-            let mut current: Option<&str> = None;
-            for (i, draw) in draws.iter().enumerate() {
-                let mesh = draw.mesh;
-                if mesh.counts.triangles == 0 || !draw.surface() {
+        let mut current: Option<&str> = None;
+        for (i, draw) in draws.iter().enumerate() {
+            let mesh = draw.mesh;
+            if mesh.counts.triangles == 0 || !draw.surface() {
+                continue;
+            }
+            pass.set_bind_group(
+                1,
+                &self.rendered_objects.bind,
+                &[self.rendered_objects.offset(i as u32)],
+            );
+            pass.set_vertex_buffer(0, mesh.positions.slice(..));
+            pass.set_vertex_buffer(1, mesh.normals.slice(..));
+            pass.set_vertex_buffer(2, mesh.uvs.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+
+            // One call per run of triangles sharing a material slot. Nearly
+            // every mesh has exactly one run, so this is the same single
+            // call it always was — the loop is what lets a mesh whose faces
+            // carry different materials draw in more than one of them,
+            // which until now it could not: `material_index` reached the
+            // glTF exporter and never reached the screen.
+            for run in &mesh.submeshes {
+                let material = draw.material_for(run.slot);
+                if self.transmissive(material) != glass {
+                    skipped = true;
                     continue;
                 }
-                pass.set_bind_group(
-                    1,
-                    &self.rendered_objects.bind,
-                    &[self.rendered_objects.offset(i as u32)],
-                );
-                pass.set_vertex_buffer(0, mesh.positions.slice(..));
-                pass.set_vertex_buffer(1, mesh.normals.slice(..));
-                pass.set_vertex_buffer(2, mesh.uvs.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-
-                // One call per run of triangles sharing a material slot. Nearly
-                // every mesh has exactly one run, so this is the same single
-                // call it always was — the loop is what lets a mesh whose faces
-                // carry different materials draw in more than one of them,
-                // which until now it could not: `material_index` reached the
-                // glTF exporter and never reached the screen.
-                for run in &mesh.submeshes {
-                    let material = draw.material_for(run.slot);
-                    if self.transmissive(material) != glass {
-                        skipped = true;
-                        continue;
-                    }
-                    // A run naming a material that was never set draws nothing.
-                    // Skipped rather than substituted: a stand-in would be a
-                    // grey face where the user put a red one, and a missing
-                    // face is the complaint that gets reported.
-                    let Some(source) = self.material_pipeline_of.get(material as usize) else {
+                // A run naming a material that was never set draws nothing.
+                // Skipped rather than substituted: a stand-in would be a
+                // grey face where the user put a red one, and a missing
+                // face is the complaint that gets reported.
+                let Some(source) = self.material_pipeline_of.get(material as usize) else {
+                    continue;
+                };
+                if current != Some(source.as_str()) {
+                    let Some(pipeline) = self.material_pipelines.peek(source) else {
                         continue;
                     };
-                    if current != Some(source.as_str()) {
-                        let Some(pipeline) = self.material_pipelines.peek(source) else {
-                            continue;
-                        };
-                        pass.set_pipeline(pipeline);
-                        current = Some(source.as_str());
-                    }
-                    pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
-                    pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
+                    pass.set_pipeline(pipeline);
+                    current = Some(source.as_str());
                 }
+                pass.set_bind_group(3, self.materials[material as usize].bind_group(), &[]);
+                pass.draw_indexed(run.start..run.start + run.count, 0, 0..1);
             }
+        }
         skipped
     }
 
@@ -4717,9 +4829,15 @@ impl Viewport {
             // against. A full mean is left on the picture and shown again.
             if self.frame_sample.is_some() || !self.accum_applies {
                 self.encode_lit_scene(encoder, draws);
-                self.pathtracer.render(encoder, &self.shading_bind, self.hdr.view());
+                self.pathtracer
+                    .render(encoder, &self.shading_bind, self.hdr.view());
                 if self.path_trace_denoise {
-                    self.denoise.apply(encoder, self.hdr.texture(), self.hdr.view(), self.render_size);
+                    self.denoise.apply(
+                        encoder,
+                        self.hdr.texture(),
+                        self.hdr.view(),
+                        self.render_size,
+                    );
                 }
                 if self.show_bloom {
                     self.bloom.apply(encoder, self.hdr.view());
@@ -4738,7 +4856,8 @@ impl Viewport {
                 self.ssr.apply(encoder, self.hdr.view(), self.render_size);
             }
             if self.ambient_occlusion && !self.xray {
-                self.ao.apply_linear(encoder, self.hdr.view(), self.render_size);
+                self.ao
+                    .apply_linear(encoder, self.hdr.view(), self.render_size);
             }
             if self.show_bloom {
                 self.bloom.apply(encoder, self.hdr.view());
@@ -4748,7 +4867,8 @@ impl Viewport {
                 // transform's picture, averaged — which is what smooths the
                 // rendered view's edges.
                 Some(n) => {
-                    self.screen.draw_with(encoder, &self.screen_bind, self.accum.frame());
+                    self.screen
+                        .draw_with(encoder, &self.screen_bind, self.accum.frame());
                     self.accum.add(encoder, self.render_size, n);
                     self.accum.present(encoder, target, self.render_size);
                 }
@@ -4862,9 +4982,7 @@ fn rendered_pipeline(
 ) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("rendered"),
-        source: wgpu::ShaderSource::Wgsl(
-            crate::shading::rendered_source_with(material).into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(crate::shading::rendered_source_with(material).into()),
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("rendered"),
@@ -4916,9 +5034,21 @@ fn rendered_pipeline(
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
                 // What the reflections need, beside it: see `Ssr`.
-                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                Some(wgpu::ColorTargetState { format: crate::ssr::FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                Some(wgpu::ColorTargetState {
+                    format: crate::ssr::FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: crate::ssr::FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: crate::ssr::FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
             ],
         }),
         primitive: wgpu::PrimitiveState {
@@ -4983,11 +5113,17 @@ mod bounds_tests {
     #[test]
     fn a_moved_box_moves_and_a_scaled_one_grows() {
         let unit = kreate_math::Aabb::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5));
-        let moved = transformed_bounds(&glam::Mat4::from_translation(glam::Vec3::new(3.0, 0.0, 0.0)), unit);
+        let moved = transformed_bounds(
+            &glam::Mat4::from_translation(glam::Vec3::new(3.0, 0.0, 0.0)),
+            unit,
+        );
         assert!((moved.center().x - 3.0).abs() < 1e-6);
         assert!((moved.size().x - 1.0).abs() < 1e-6);
 
-        let scaled = transformed_bounds(&glam::Mat4::from_scale(glam::Vec3::new(4.0, 1.0, 1.0)), unit);
+        let scaled = transformed_bounds(
+            &glam::Mat4::from_scale(glam::Vec3::new(4.0, 1.0, 1.0)),
+            unit,
+        );
         assert!((scaled.size().x - 4.0).abs() < 1e-6);
 
         // Nothing is not somewhere: an empty box through any matrix stays
@@ -5114,10 +5250,18 @@ mod tests {
 }
 
 /// The copy of the solids' picture glass reads.
-fn behind_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn behind_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("behind glass"),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

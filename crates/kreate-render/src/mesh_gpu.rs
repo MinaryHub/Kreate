@@ -583,8 +583,7 @@ impl RenderMeshCpu {
         // so they read `tri_to_face[vi / 3]` against this ordering — the two
         // disagreeing would make a click report a different face than the one
         // under the pointer.
-        let (indices, tri_to_face, submeshes) =
-            group_by_material(mesh, indices, tri.tri_to_face);
+        let (indices, tri_to_face, submeshes) = group_by_material(mesh, indices, tri.tri_to_face);
 
         // Which face each corner belongs to, for the groups below. One pass,
         // because the CSR walk needs it per corner and `tri_to_face` answers a
@@ -1000,10 +999,18 @@ mod tests {
         let full = RenderMeshCpu::extract(&m).tri_to_face.len();
         let mut hidden = vec![false; m.num_faces() as usize];
         hidden[1] = true;
-        m.attributes_mut().insert(names::HIDE_FACE, kreate_mesh::Domain::Face, kreate_mesh::AttrData::Bool(hidden.into()));
+        m.attributes_mut().insert(
+            names::HIDE_FACE,
+            kreate_mesh::Domain::Face,
+            kreate_mesh::AttrData::Bool(hidden.into()),
+        );
         let mut verts = vec![false; m.num_verts() as usize];
         verts[0] = true;
-        m.attributes_mut().insert(names::HIDE_VERT, kreate_mesh::Domain::Point, kreate_mesh::AttrData::Bool(verts.into()));
+        m.attributes_mut().insert(
+            names::HIDE_VERT,
+            kreate_mesh::Domain::Point,
+            kreate_mesh::AttrData::Bool(verts.into()),
+        );
         let r = RenderMeshCpu::extract(&m);
         assert_eq!(r.tri_to_face.len(), full - 2, "a quad is two triangles");
         assert!(!r.tri_to_face.contains(&1));
@@ -1419,9 +1426,7 @@ mod submesh_tests {
         for run in &cpu.submeshes {
             for t in (run.start / 3)..((run.start + run.count) / 3) {
                 let face = cpu.tri_to_face[t as usize] as usize;
-                let want = face_material
-                    .map(|m| m[face].max(0) as u32)
-                    .unwrap_or(0);
+                let want = face_material.map(|m| m[face].max(0) as u32).unwrap_or(0);
                 assert_eq!(
                     want, run.slot,
                     "a triangle of face {face} is in the run for slot {}",

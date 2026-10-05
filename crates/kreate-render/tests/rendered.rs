@@ -459,11 +459,7 @@ fn shadow_lights(scene: ShadowScene) -> Vec<PlacedLight> {
             // for is filling the layer budget to a known depth, and a light
             // whose cost depends on the camera cannot do that.
             lights.push(PlacedLight {
-                position: glam::DVec3::new(
-                    (a.cos() * 9.0) as f64,
-                    (a.sin() * 9.0) as f64,
-                    7.0,
-                ),
+                position: glam::DVec3::new((a.cos() * 9.0) as f64, (a.sin() * 9.0) as f64, 7.0),
                 direction: glam::Vec3::new(-a.cos() * 0.5, -a.sin() * 0.5, -0.85).normalize(),
                 cone: Some((80f32.to_radians(), 0.3)),
                 amount: [60_000.0; 3],
@@ -594,15 +590,22 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     } else {
         0.8
     };
-    let floor_mesh =
-        RenderMeshCpu::extract(&kreate_mesh::primitives::plane(if long { 1600.0 } else { 16.0 }));
+    let floor_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::plane(if long {
+        1600.0
+    } else {
+        16.0
+    }));
     let box_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.6));
     // A sphere for the angles a box does not have. Every incidence from
     // head-on to grazing appears on one, and the band where it turns away from
     // the light is where acne lives in every renderer that has it.
     let ball_mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::uv_sphere(0.9, 24, 16));
-    let floor =
-        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_mesh, glam::Vec4::ONE);
+    let floor = kreate_render::GpuMesh::upload(
+        &gpu.device,
+        &viewport.layouts,
+        &floor_mesh,
+        glam::Vec4::ONE,
+    );
     let boxes =
         kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &box_mesh, glam::Vec4::ONE);
     let balls =
@@ -643,12 +646,7 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
                 1 => Draw::new(
                     &boxes,
                     glam::DAffine3::from_rotation_translation(
-                        glam::DQuat::from_euler(
-                            glam::EulerRot::XYZ,
-                            0.6,
-                            0.4,
-                            n as f64 * 0.5,
-                        ),
+                        glam::DQuat::from_euler(glam::EulerRot::XYZ, 0.6, 0.4, n as f64 * 0.5),
                         at,
                     ),
                 ),
@@ -986,10 +984,7 @@ fn more_casters_than_layers_are_dropped_and_not_wrapped() {
     );
     // And the scene is still lit by all of them: a light denied a map is not a
     // light denied.
-    let brightest = crowd
-        .pixels
-        .iter()
-        .fold(0.0f32, |acc, p| acc.max(p[0]));
+    let brightest = crowd.pixels.iter().fold(0.0f32, |acc, p| acc.max(p[0]));
     assert!(brightest > 0.2, "the crowd lit nothing: {brightest}");
 }
 
@@ -1115,13 +1110,7 @@ fn a_shadow_is_sharp_where_it_touches_and_soft_where_it_does_not() {
             ..ShadowScene::default()
         };
         let lit = shadow_shot(&gpu, base);
-        let shadowed = shadow_shot(
-            &gpu,
-            ShadowScene {
-                cast: true,
-                ..base
-            },
-        );
+        let shadowed = shadow_shot(&gpu, ShadowScene { cast: true, ..base });
         let (darker, _) = difference(&lit, &shadowed);
         assert!(darker > 100, "nothing to measure at {source}/{lifted}");
         edge_pixels(&lit, &shadowed) as f32
@@ -1174,7 +1163,10 @@ fn past_the_cascades_a_sun_stops_shadowing_rather_than_going_black() {
     );
 
     let (darker, brighter) = difference(&lit, &shadowed);
-    assert!(darker > 100, "nothing near the camera is shadowed: {darker}");
+    assert!(
+        darker > 100,
+        "nothing near the camera is shadowed: {darker}"
+    );
     assert_eq!(brighter, 0, "{brighter} pixels got brighter");
 
     // The far floor is most of the frame at this framing, so treating it as
@@ -1338,7 +1330,10 @@ fn a_lamp_swung_away_from_the_scene_stops_shadowing_it() {
         ],
     );
     assert_eq!(frames[0].passes, 1);
-    assert_eq!(frames[1].passes, 0, "a lamp aimed at nothing rendered a map");
+    assert_eq!(
+        frames[1].passes, 0,
+        "a lamp aimed at nothing rendered a map"
+    );
 
     let never = shadow_shot(
         &gpu,
@@ -1425,7 +1420,10 @@ fn a_point_light_overhead_casts_a_shadow() {
     );
 
     let (darker, brighter) = difference(&lit, &shadowed);
-    assert!(darker > 200, "the lamp overhead casts nothing: {darker} pixels");
+    assert!(
+        darker > 200,
+        "the lamp overhead casts nothing: {darker} pixels"
+    );
     assert_eq!(brighter, 0, "{brighter} pixels got brighter");
 
     // And not acne: a cube's faces meet at right angles and a bias that worked
@@ -1474,7 +1472,10 @@ fn a_lamp_among_the_boxes_shadows_in_every_direction() {
     );
 
     let (darker, brighter) = difference(&lit, &shadowed);
-    assert!(darker > 300, "the lamp casts almost nothing: {darker} pixels");
+    assert!(
+        darker > 300,
+        "the lamp casts almost nothing: {darker} pixels"
+    );
     assert_eq!(brighter, 0, "{brighter} pixels got brighter");
 
     // A face picked wrongly compares a fragment against a map drawn from
@@ -1587,7 +1588,10 @@ fn ending_a_light_where_it_goes_black_changes_no_pixel() {
         .zip(&uncut.pixels)
         .filter(|(a, b)| a != b)
         .count();
-    assert_eq!(moved, 0, "{moved} pixels moved when the lights were given ends");
+    assert_eq!(
+        moved, 0,
+        "{moved} pixels moved when the lights were given ends"
+    );
 
     // And this rig can see a range when one bites, which is the half that
     // stops the assertion above from being satisfied by measuring nothing. It
@@ -1760,27 +1764,9 @@ fn the_three_modes_are_three_different_pictures() {
     // clamp, and only this would notice.
     let gpu = gpu_or_skip!(gpu());
     let light = [key_light(20_000.0)];
-    let studio = summary(&shoot(
-        &gpu,
-        ShadingMode::Studio,
-        grey(),
-        &light,
-        FRAMED,
-    ));
-    let flat = summary(&shoot(
-        &gpu,
-        ShadingMode::Flat,
-        grey(),
-        &light,
-        FRAMED,
-    ));
-    let rendered = summary(&shoot(
-        &gpu,
-        ShadingMode::Rendered,
-        grey(),
-        &light,
-        FRAMED,
-    ));
+    let studio = summary(&shoot(&gpu, ShadingMode::Studio, grey(), &light, FRAMED));
+    let flat = summary(&shoot(&gpu, ShadingMode::Flat, grey(), &light, FRAMED));
+    let rendered = summary(&shoot(&gpu, ShadingMode::Rendered, grey(), &light, FRAMED));
 
     // All three draw the cube.
     for (name, shot) in [
@@ -1869,13 +1855,7 @@ fn more_lights_than_the_buffer_started_with_still_light_the_scene() {
             ..PlacedLight::default()
         })
         .collect();
-    let shot = shoot(
-        &gpu,
-        ShadingMode::Rendered,
-        grey(),
-        &many,
-        FRAMED,
-    );
+    let shot = shoot(&gpu, ShadingMode::Rendered, grey(), &many, FRAMED);
     let shot = summary(&shot);
     assert!(
         shot.brightest > 0.05,
@@ -1899,8 +1879,12 @@ fn light_past_white_glows_and_the_rest_does_not() {
         viewport.show_wireframe = false;
         viewport.set_display(&gpu.queue, FRAMED);
         let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
-        let uploaded = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
-        let camera = Camera { distance: 6.0, ..Camera::default() };
+        let uploaded =
+            kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+        let camera = Camera {
+            distance: 6.0,
+            ..Camera::default()
+        };
         one_material(&gpu, &mut viewport, grey());
         let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
         viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(lux)]);
@@ -1909,11 +1893,19 @@ fn light_past_white_glows_and_the_rest_does_not() {
     };
     // Far past white: the glow brightens the background around the cube.
     let (plain, glowing) = (shot(false, 2_000_000.0), shot(true, 2_000_000.0));
-    let lift: f32 = plain.iter().zip(&glowing).map(|(a, b)| (b[0] - a[0]).max(0.0)).sum();
+    let lift: f32 = plain
+        .iter()
+        .zip(&glowing)
+        .map(|(a, b)| (b[0] - a[0]).max(0.0))
+        .sum();
     assert!(lift > 1.0, "the glow reached nothing: {lift}");
     // Nothing past white: the same picture either way.
     let (dim_plain, dim_glow) = (shot(false, 2.0), shot(true, 2.0));
-    let most: f32 = dim_plain.iter().zip(&dim_glow).map(|(a, b)| (a[0] - b[0]).abs()).fold(0.0, f32::max);
+    let most: f32 = dim_plain
+        .iter()
+        .zip(&dim_glow)
+        .map(|(a, b)| (a[0] - b[0]).abs())
+        .fold(0.0, f32::max);
     assert!(most < 0.02, "a dim picture changed by {most}");
 }
 
@@ -1921,7 +1913,11 @@ fn light_past_white_glows_and_the_rest_does_not() {
 fn read_frame(gpu: &Gpu, viewport: &mut Viewport, draws: &[Draw]) -> Vec<[f32; 4]> {
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frame"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1930,7 +1926,9 @@ fn read_frame(gpu: &Gpu, viewport: &mut Viewport, draws: &[Draw]) -> Vec<[f32; 4
         view_formats: &[],
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     viewport.render(&mut encoder, &view, draws);
     let row = (SIZE * 4).div_ceil(256) * 256;
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1940,23 +1938,43 @@ fn read_frame(gpu: &Gpu, viewport: &mut Viewport, draws: &[Draw]) -> Vec<[f32; 4
         mapped_at_creation: false,
     });
     encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &staging,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(SIZE) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE),
+            },
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
     staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = staging.slice(..).get_mapped_range().to_vec();
     staging.unmap();
     (0..SIZE as usize)
         .flat_map(|y| {
             let line = data[y * row as usize..y * row as usize + (SIZE * 4) as usize].to_vec();
             (0..SIZE as usize).map(move |x| {
-                [line[x * 4] as f32 / 255.0, line[x * 4 + 1] as f32 / 255.0, line[x * 4 + 2] as f32 / 255.0, line[x * 4 + 3] as f32 / 255.0]
+                [
+                    line[x * 4] as f32 / 255.0,
+                    line[x * 4 + 1] as f32 / 255.0,
+                    line[x * 4 + 2] as f32 / 255.0,
+                    line[x * 4 + 3] as f32 / 255.0,
+                ]
             })
         })
         .collect()
@@ -1979,8 +1997,10 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
         viewport.set_display(&gpu.queue, FRAMED);
         let cube = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
         let floor = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
-        let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube, glam::Vec4::ONE);
-        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor, glam::Vec4::ONE);
+        let cube =
+            kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube, glam::Vec4::ONE);
+        let floor =
+            kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor, glam::Vec4::ONE);
         // A matte cube, lit, on a polished metal floor — whose picture is all
         // reflection: black sky and a lit cube.
         let compile = |base: f32, metallic: f32, roughness: f32| {
@@ -2010,9 +2030,17 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
         };
         let mut draws = vec![
             Draw::new(&floor, glam::DAffine3::IDENTITY).with_material(1),
-            Draw::new(&cube, glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.8))),
+            Draw::new(
+                &cube,
+                glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.8)),
+            ),
         ];
-        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+        viewport.set_lights(
+            &gpu.device,
+            &gpu.queue,
+            camera.eye(),
+            &[key_light(20_000.0)],
+        );
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
         read_frame(&gpu, &mut viewport, &draws)
     };
@@ -2033,7 +2061,12 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
 
 /// The cube on a floor under a sun, rasterised or path traced over `frames`
 /// frames, through `lens` when it has one.
-fn traced_shot(gpu: &Gpu, traced: bool, frames: u32, lens: Option<kreate_render::pathtrace::Lens>) -> Vec<[f32; 4]> {
+fn traced_shot(
+    gpu: &Gpu,
+    traced: bool,
+    frames: u32,
+    lens: Option<kreate_render::pathtrace::Lens>,
+) -> Vec<[f32; 4]> {
     traced_shot_with(gpu, traced, frames, lens, false)
 }
 
@@ -2044,7 +2077,12 @@ fn traced_shot_with(
     lens: Option<kreate_render::pathtrace::Lens>,
     denoise: bool,
 ) -> Vec<[f32; 4]> {
-    let grey = kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], metallic: 0.0, roughness: 0.5, ..Default::default() };
+    let grey = kreate_render::pathtrace::PtSurface {
+        base_color: [0.8, 0.8, 0.8],
+        metallic: 0.0,
+        roughness: 0.5,
+        ..Default::default()
+    };
     traced_scene(gpu, traced, frames, lens, denoise, grey, &[])
 }
 
@@ -2072,14 +2110,21 @@ fn traced_scene(
     viewport.set_display(&gpu.queue, FRAMED);
     let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
     let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
-    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
-    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
     let cube_kind = CUBE.with(|c| c.get());
     if cube_kind == CubeKind::Glass {
-        let floor_graph = kreate_scene::shader::ShaderGraph::standard("floor", grey().base_color, 0.0, 0.5);
+        let floor_graph =
+            kreate_scene::shader::ShaderGraph::standard("floor", grey().base_color, 0.0, 0.5);
         let mut glass_graph = floor_graph.clone();
-        if let kreate_scene::shader::NodeKind::Surface { base_color, transmission, roughness, .. } =
-            &mut glass_graph.nodes[0].kind
+        if let kreate_scene::shader::NodeKind::Surface {
+            base_color,
+            transmission,
+            roughness,
+            ..
+        } = &mut glass_graph.nodes[0].kind
         {
             *base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
             *transmission = GLASS.with(|g| g.get());
@@ -2104,7 +2149,11 @@ fn traced_scene(
         one_material(gpu, &mut viewport, grey());
     }
     let lift = if cube_kind == CubeKind::None {
-        glam::DAffine3::from_scale_rotation_translation(glam::DVec3::splat(1e-6), glam::DQuat::IDENTITY, glam::DVec3::new(0.0, 0.0, 0.5))
+        glam::DAffine3::from_scale_rotation_translation(
+            glam::DVec3::splat(1e-6),
+            glam::DQuat::IDENTITY,
+            glam::DVec3::new(0.0, 0.0, 0.5),
+        )
     } else {
         glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5))
     };
@@ -2121,7 +2170,10 @@ fn traced_scene(
         .map(|(m, _)| {
             (
                 m.positions.iter().map(|p| p.0).collect(),
-                m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
+                m.normals
+                    .iter()
+                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                    .collect(),
             )
         })
         .collect();
@@ -2149,14 +2201,11 @@ fn traced_scene(
         ior: 1.5,
         ..Default::default()
     };
-    viewport.set_path_trace_scene(
-        &gpu.device,
-        &gpu.queue,
-        &meshes,
-        &[surface, glass],
-        images,
-    );
-    let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[surface, glass], images);
+    let mut draws = vec![
+        Draw::new(&cube, lift),
+        Draw::new(&floor, glam::DAffine3::IDENTITY),
+    ];
     if cube_kind == CubeKind::Glass {
         draws[0].material = 1;
     }
@@ -2188,19 +2237,25 @@ fn the_path_tracer_agrees_with_the_rasteriser_and_bounces_light() {
     let gpu = gpu_or_skip!(gpu());
     let raster = traced_shot(&gpu, false, 1, None);
     let traced = traced_shot(&gpu, true, 64, None);
-    let mean = |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / p.len() as f32;
+    let mean =
+        |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / p.len() as f32;
     let (r, t) = (mean(&raster), mean(&traced));
     assert!(t > 0.05, "the traced picture is black: {t}");
     // The same light in the same units: within a factor of two overall — the
     // tracer adds the bounced light the rasteriser does not have.
-    assert!(t > r * 0.5 && t < r * 2.0, "traced {t} against rasterised {r}");
+    assert!(
+        t > r * 0.5 && t < r * 2.0,
+        "traced {t} against rasterised {r}"
+    );
 }
 
 /// Hard steps between neighbouring pixels: what a sharp edge is made of.
 fn sharp_steps(p: &[[f32; 4]]) -> usize {
     let lum = |c: [f32; 4]| c[0] + c[1] + c[2];
     let w = SIZE as usize;
-    (0..p.len()).filter(|i| i % w + 1 < w && (lum(p[*i]) - lum(p[i + 1])).abs() > 0.3).count()
+    (0..p.len())
+        .filter(|i| i % w + 1 < w && (lum(p[*i]) - lum(p[i + 1])).abs() > 0.3)
+        .count()
 }
 
 /// Depth of field: through a wide lens focused far beyond it, the cube's
@@ -2209,11 +2264,17 @@ fn sharp_steps(p: &[[f32; 4]]) -> usize {
 fn a_wide_lens_focused_away_blurs_the_cube() {
     let gpu = gpu_or_skip!(gpu());
     let pinhole = traced_shot(&gpu, true, 96, None);
-    let lens = kreate_render::pathtrace::Lens { radius: 0.25, focus: 40.0 };
+    let lens = kreate_render::pathtrace::Lens {
+        radius: 0.25,
+        focus: 40.0,
+    };
     let blurred = traced_shot(&gpu, true, 96, Some(lens));
     let (p, b) = (sharp_steps(&pinhole), sharp_steps(&blurred));
     assert!(p > 10, "the pinhole picture has no edges to blur: {p}");
-    assert!(b * 2 < p, "{b} sharp steps through the lens against {p} through a pinhole");
+    assert!(
+        b * 2 < p,
+        "{b} sharp steps through the lens against {p} through a pinhole"
+    );
 }
 
 /// Denoising: eight samples, filtered, are nearer the converged picture than
@@ -2225,12 +2286,23 @@ fn a_young_mean_denoised_is_nearer_the_converged_picture() {
     let raw = traced_shot_with(&gpu, true, 8, None, false);
     let filtered = traced_shot_with(&gpu, true, 8, None, true);
     let error = |p: &Vec<[f32; 4]>| -> f32 {
-        p.iter().zip(&converged).map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>()).sum()
+        p.iter()
+            .zip(&converged)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+            .sum()
     };
     if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
-        for (name, img) in [("dn-converged", &converged), ("dn-raw", &raw), ("dn-filtered", &filtered)] {
-            let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
-            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes).map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+        for (name, img) in [
+            ("dn-converged", &converged),
+            ("dn-raw", &raw),
+            ("dn-filtered", &filtered),
+        ] {
+            let bytes: Vec<u8> = img
+                .iter()
+                .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8))
+                .collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                .map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
         }
     }
     let (r, f) = (error(&raw), error(&filtered));
@@ -2244,7 +2316,12 @@ fn the_path_tracer_reads_the_base_colour_image() {
     let gpu = gpu_or_skip!(gpu());
     // Two texels: red, then blue — sRGB-encoded, as a colour image is.
     let pixels = [230u8, 20, 20, 255, 20, 20, 230, 255];
-    let image = kreate_render::pathtrace::PtImage { width: 2, height: 1, pixels: &pixels, color: true };
+    let image = kreate_render::pathtrace::PtImage {
+        width: 2,
+        height: 1,
+        pixels: &pixels,
+        color: true,
+    };
     let white = kreate_render::pathtrace::PtSurface {
         base_color: [1.0, 1.0, 1.0],
         metallic: 0.0,
@@ -2255,7 +2332,10 @@ fn the_path_tracer_reads_the_base_colour_image() {
     let shot = traced_scene(&gpu, true, 32, None, true, white, &[image]);
     let reddish = shot.iter().filter(|p| p[0] > p[2] + 0.15).count();
     let bluish = shot.iter().filter(|p| p[2] > p[0] + 0.15).count();
-    assert!(reddish > 100 && bluish > 100, "{reddish} red and {bluish} blue pixels");
+    assert!(
+        reddish > 100 && bluish > 100,
+        "{reddish} red and {bluish} blue pixels"
+    );
 }
 
 /// Emission: a glowing cube is seen with no light in the scene at all, and
@@ -2284,12 +2364,24 @@ fn a_glowing_surface_is_seen_in_the_dark() {
 #[test]
 fn the_path_tracer_sees_a_glow() {
     let gpu = gpu_or_skip!(gpu());
-    let plain = kreate_render::pathtrace::PtSurface { base_color: [0.8, 0.8, 0.8], roughness: 0.5, ..Default::default() };
-    let glowing = kreate_render::pathtrace::PtSurface { emission: [8000.0, 2000.0, 400.0], ..plain };
+    let plain = kreate_render::pathtrace::PtSurface {
+        base_color: [0.8, 0.8, 0.8],
+        roughness: 0.5,
+        ..Default::default()
+    };
+    let glowing = kreate_render::pathtrace::PtSurface {
+        emission: [8000.0, 2000.0, 400.0],
+        ..plain
+    };
     let mean = |p: &Vec<[f32; 4]>| p.iter().map(|c| c[0] - c[2]).sum::<f32>() / p.len() as f32;
     let a = traced_scene(&gpu, true, 16, None, false, plain, &[]);
     let b = traced_scene(&gpu, true, 16, None, false, glowing, &[]);
-    assert!(mean(&b) > mean(&a) + 0.1, "glowing {} against plain {}", mean(&b), mean(&a));
+    assert!(
+        mean(&b) > mean(&a) + 0.1,
+        "glowing {} against plain {}",
+        mean(&b),
+        mean(&a)
+    );
 }
 
 thread_local! {
@@ -2319,10 +2411,21 @@ fn contact_shadows_darken_where_things_touch_and_nowhere_brighten() {
     let with = traced_shot(&gpu, false, 1, None);
     DECOYS.with(|d| d.set(0));
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
-    let darker = with.iter().zip(&without).filter(|(a, b)| lum(a) < lum(b) - 0.03).count();
-    let brighter = with.iter().zip(&without).filter(|(a, b)| lum(a) > lum(b) + 0.03).count();
+    let darker = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| lum(a) < lum(b) - 0.03)
+        .count();
+    let brighter = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| lum(a) > lum(b) + 0.03)
+        .count();
     assert!(darker > 0, "contact shadows changed nothing");
-    assert!(brighter <= darker / 20, "{brighter} pixels brighter against {darker} darker");
+    assert!(
+        brighter <= darker / 20,
+        "{brighter} pixels brighter against {darker} darker"
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2348,7 +2451,10 @@ fn cube_shot(gpu: &Gpu, kind: CubeKind, traced: bool, frames: u32) -> Vec<[f32; 
 }
 
 fn distance(a: &[[f32; 4]], b: &[[f32; 4]]) -> f32 {
-    a.iter().zip(b).map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>()).sum()
+    a.iter()
+        .zip(b)
+        .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>())
+        .sum()
 }
 
 /// Glass lets the light through: where a solid cube throws its shadow, a
@@ -2369,22 +2475,44 @@ fn a_glass_cube_lets_the_light_through() {
         let glass = cube_shot(&gpu, CubeKind::Glass, traced, frames);
         if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
             for (name, img) in [("none", &none), ("solid", &solid), ("glass", &glass)] {
-                let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
-                let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
-                    .map(|i| i.save(std::path::Path::new(&dir).join(format!("glass-{traced}-{name}.png"))));
+                let bytes: Vec<u8> = img
+                    .iter()
+                    .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8))
+                    .collect();
+                let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes).map(|i| {
+                    i.save(std::path::Path::new(&dir).join(format!("glass-{traced}-{name}.png")))
+                });
             }
         }
         assert!(glass.iter().all(|p| p.iter().all(|v| v.is_finite())));
         // The solid's shadow: floor that is lit with no cube and dark with one.
-        let shadow: Vec<usize> = (0..none.len()).filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i])).collect();
-        assert!(shadow.len() > 20, "traced {traced}: the solid cube casts no shadow to test against");
-        let lit = shadow.iter().filter(|&&i| lum(&glass[i]) > 0.6 * lum(&none[i])).count();
-        assert!(lit * 10 > shadow.len() * 8, "traced {traced}: {lit} of {} shadow pixels lit through glass", shadow.len());
+        let shadow: Vec<usize> = (0..none.len())
+            .filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i]))
+            .collect();
+        assert!(
+            shadow.len() > 20,
+            "traced {traced}: the solid cube casts no shadow to test against"
+        );
+        let lit = shadow
+            .iter()
+            .filter(|&&i| lum(&glass[i]) > 0.6 * lum(&none[i]))
+            .count();
+        assert!(
+            lit * 10 > shadow.len() * 8,
+            "traced {traced}: {lit} of {} shadow pixels lit through glass",
+            shadow.len()
+        );
         let to_glass = distance(&glass, &none);
-        assert!(to_glass > 0.0, "traced {traced}: the glass cube is invisible");
+        assert!(
+            to_glass > 0.0,
+            "traced {traced}: the glass cube is invisible"
+        );
         if !traced {
             let to_solid = distance(&solid, &none);
-            assert!(to_glass < to_solid * 0.6, "the glass cube is {to_glass} from no cube, the solid one {to_solid}");
+            assert!(
+                to_glass < to_solid * 0.6,
+                "the glass cube is {to_glass} from no cube, the solid one {to_solid}"
+            );
         }
     }
 }
@@ -2399,17 +2527,27 @@ fn a_pan_starts_the_mean_over() {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
-    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
     one_material(&gpu, &mut viewport, grey());
     let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
-    let mut camera = Camera { distance: 6.0, ..Camera::default() };
+    let mut camera = Camera {
+        distance: 6.0,
+        ..Camera::default()
+    };
     for _ in 0..64 {
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     }
-    assert!(!viewport.accumulating(), "a still view never finished its mean");
+    assert!(
+        !viewport.accumulating(),
+        "a still view never finished its mean"
+    );
     camera.pivot += glam::DVec3::new(0.5, 0.0, 0.25);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
-    assert!(viewport.accumulating(), "the pan was averaged into the old picture");
+    assert!(
+        viewport.accumulating(),
+        "the pan was averaged into the old picture"
+    );
 }
 
 /// The cube on the floor under a lamp beside and above it, rendered through
@@ -2425,11 +2563,16 @@ fn orbit_frames(gpu: &Gpu, cameras: &[Camera]) -> Vec<[f32; 4]> {
     viewport.set_display(&gpu.queue, FRAMED);
     let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
     let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
-    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
-    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
     one_material(gpu, &mut viewport, grey());
     let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
-    let mut draws = vec![Draw::new(&cube, lift), Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    let mut draws = vec![
+        Draw::new(&cube, lift),
+        Draw::new(&floor, glam::DAffine3::IDENTITY),
+    ];
     let lamp = PlacedLight {
         falloff: Falloff::InverseSquare,
         position: glam::DVec3::new(2.0, 1.0, 3.0),
@@ -2463,9 +2606,22 @@ fn shadows_stay_while_the_view_moves() {
     let moved = orbit_frames(&gpu, &path);
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
     let dark = |p: &Vec<[f32; 4]>| p.iter().filter(|c| lum(c) < 0.05).count();
-    let differ = still.iter().zip(&moved).filter(|(a, b)| (lum(a) - lum(b)).abs() > 0.1).count();
-    assert!(dark(&still) > 50, "the still frame has no shadow: {}", dark(&still));
-    assert!(differ < 40, "{differ} pixels differ mid-orbit; dark {} still against {} moving", dark(&still), dark(&moved));
+    let differ = still
+        .iter()
+        .zip(&moved)
+        .filter(|(a, b)| (lum(a) - lum(b)).abs() > 0.1)
+        .count();
+    assert!(
+        dark(&still) > 50,
+        "the still frame has no shadow: {}",
+        dark(&still)
+    );
+    assert!(
+        differ < 40,
+        "{differ} pixels differ mid-orbit; dark {} still against {} moving",
+        dark(&still),
+        dark(&moved)
+    );
 }
 
 /// The path tracer's first frame — what every frame of a moving view is —
@@ -2476,17 +2632,27 @@ fn one_traced_sample_filtered_keeps_the_shadow() {
     let converged = traced_shot_with(&gpu, true, 128, None, true);
     let first = traced_shot_with(&gpu, true, 1, None, true);
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
-    let shadow: Vec<usize> = (0..converged.len()).filter(|&i| lum(&converged[i]) < 0.2).collect();
+    let shadow: Vec<usize> = (0..converged.len())
+        .filter(|&i| lum(&converged[i]) < 0.2)
+        .collect();
     let kept = shadow.iter().filter(|&&i| lum(&first[i]) < 0.4).count();
     eprintln!("TRACED shadow {} kept {kept}", shadow.len());
     if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
         for (name, img) in [("pt-1", &first), ("pt-128", &converged)] {
-            let bytes: Vec<u8> = img.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8)).collect();
-            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes).map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+            let bytes: Vec<u8> = img
+                .iter()
+                .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8))
+                .collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                .map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
         }
     }
     assert!(shadow.len() > 30, "no shadow to keep");
-    assert!(kept * 10 >= shadow.len() * 8, "{kept} of {} shadow pixels dark after one sample", shadow.len());
+    assert!(
+        kept * 10 >= shadow.len() * 8,
+        "{kept} of {} shadow pixels dark after one sample",
+        shadow.len()
+    );
 }
 
 /// A cube that lets a little light through keeps most of its shadow — in the
@@ -2503,15 +2669,25 @@ fn a_mostly_solid_cube_keeps_most_of_its_shadow() {
         let faint = cube_shot(&gpu, CubeKind::Glass, traced, frames);
         GLASS.with(|g| g.set(1.0));
         // The floor the solid cube shadows: dark with it, lit without.
-        let shadow: Vec<usize> = (0..none.len()).filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i])).collect();
+        let shadow: Vec<usize> = (0..none.len())
+            .filter(|&i| lum(&solid[i]) < 0.3 * lum(&none[i]))
+            .collect();
         assert!(shadow.len() > 20, "traced {traced}: no shadow to compare");
-        let mean = |p: &Vec<[f32; 4]>| shadow.iter().map(|&i| lum(&p[i])).sum::<f32>() / shadow.len() as f32;
+        let mean = |p: &Vec<[f32; 4]>| {
+            shadow.iter().map(|&i| lum(&p[i])).sum::<f32>() / shadow.len() as f32
+        };
         let (dark, lit, here) = (mean(&solid), mean(&none), mean(&faint));
         // Four fifths of the light stopped: much nearer the solid's shadow
         // than the open floor, and not quite as dark.
         let depth = (lit - here) / (lit - dark).max(1e-6);
-        assert!(depth > 0.6, "traced {traced}: a fifth-transmissive cube keeps {depth:.2} of the shadow");
-        assert!(depth < 0.97, "traced {traced}: its shadow is as dark as a solid's ({depth:.2})");
+        assert!(
+            depth > 0.6,
+            "traced {traced}: a fifth-transmissive cube keeps {depth:.2} of the shadow"
+        );
+        assert!(
+            depth < 0.97,
+            "traced {traced}: its shadow is as dark as a solid's ({depth:.2})"
+        );
     }
 }
 
@@ -2523,20 +2699,33 @@ fn a_material_change_on_a_settled_view_is_drawn() {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
-    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
     let compiled = |r: f32| {
-        let graph = kreate_scene::shader::ShaderGraph::standard("m", kreate_math::SceneRgb::new(r, 0.5, 0.5), 0.0, 0.5);
+        let graph = kreate_scene::shader::ShaderGraph::standard(
+            "m",
+            kreate_math::SceneRgb::new(r, 0.5, 0.5),
+            0.0,
+            0.5,
+        );
         kreate_shader::compile(&graph).expect("compiles")
     };
     let (grey, red) = (compiled(0.5), compiled(0.9));
-    graph_material(&gpu, &mut viewport, &kreate_scene::shader::ShaderGraph::standard(
-        "m",
-        kreate_math::SceneRgb::new(0.5, 0.5, 0.5),
-        0.0,
-        0.5,
-    ));
+    graph_material(
+        &gpu,
+        &mut viewport,
+        &kreate_scene::shader::ShaderGraph::standard(
+            "m",
+            kreate_math::SceneRgb::new(0.5, 0.5, 0.5),
+            0.0,
+            0.5,
+        ),
+    );
     let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
-    let camera = Camera { distance: 6.0, ..Camera::default() };
+    let camera = Camera {
+        distance: 6.0,
+        ..Camera::default()
+    };
     // The frame loop hands the constants over every frame.
     for _ in 0..64 {
         viewport.set_material_constants(&gpu.queue, 0, &grey.constants, &grey.image_slots);

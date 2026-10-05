@@ -74,7 +74,12 @@ impl Point {
 ///
 /// An *image* background goes through the same function with a lookup in place
 /// of the constant — see [`ambient_from`] and [`crate::environment`].
-pub fn ambient(surface: &Surface, normal: glam::Vec3, view: glam::Vec3, radiance: [f32; 3]) -> [f32; 3] {
+pub fn ambient(
+    surface: &Surface,
+    normal: glam::Vec3,
+    view: glam::Vec3,
+    radiance: [f32; 3],
+) -> [f32; 3] {
     let nov = normal.dot(view).clamp(1e-4, 1.0);
     // A uniform environment irradiates every direction with `πL` and
     // prefilters to `L` at every roughness. Spelled that way rather than
@@ -201,7 +206,11 @@ pub fn shader_source() -> String {
 /// built-in surface is the second implementation §3's fifth decision exists to
 /// prevent. Use [`rendered_source_with`].
 pub fn rendered_source() -> String {
-    format!("{}\n{}", shader_source(), include_str!("shaders/rendered.wgsl"))
+    format!(
+        "{}\n{}",
+        shader_source(),
+        include_str!("shaders/rendered.wgsl")
+    )
 }
 
 /// The same with one material's compiled code on the end, which is what a
@@ -504,11 +513,18 @@ mod tests {
 
         let mut up = grey_point(glam::Vec3::Z);
         up.view = glam::Vec3::Z;
-        assert!(shade(&up, &[overhead], NO_WORLD)[0] > 0.0, "the ground is unlit");
+        assert!(
+            shade(&up, &[overhead], NO_WORLD)[0] > 0.0,
+            "the ground is unlit"
+        );
 
         let mut down = grey_point(glam::Vec3::NEG_Z);
         down.view = glam::Vec3::NEG_Z;
-        assert_eq!(shade(&down, &[overhead], NO_WORLD), [0.0; 3], "the underside is lit");
+        assert_eq!(
+            shade(&down, &[overhead], NO_WORLD),
+            [0.0; 3],
+            "the underside is lit"
+        );
     }
 
     #[test]
@@ -574,8 +590,16 @@ mod tests {
         // exposure controls behave. A tone curve applied here would break it.
         let mut point = grey_point(glam::Vec3::Z);
         point.view = glam::Vec3::Z;
-        let one = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 100.0)], NO_WORLD)[0];
-        let ten = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 1000.0)], NO_WORLD)[0];
+        let one = shade(
+            &point,
+            &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 100.0)],
+            NO_WORLD,
+        )[0];
+        let ten = shade(
+            &point,
+            &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 1000.0)],
+            NO_WORLD,
+        )[0];
         assert!((ten - one * 10.0).abs() < one * 1e-4, "{one} then {ten}");
     }
 
@@ -584,13 +608,13 @@ mod tests {
         // Reachable: a fragment exactly at the near plane's origin in
         // eye-relative space. The view direction is undefined there, and a NaN
         // in a fragment spreads through the blend.
-        let point = Point::facing_the_eye(
-            glam::Vec3::ZERO,
-            glam::Vec3::Z,
-            Surface::default(),
-        );
+        let point = Point::facing_the_eye(glam::Vec3::ZERO, glam::Vec3::Z, Surface::default());
         assert!(point.view.is_finite());
-        let lit = shade(&point, &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 500.0)], NO_WORLD);
+        let lit = shade(
+            &point,
+            &[bulb(glam::Vec3::new(0.0, 0.0, 2.0), 500.0)],
+            NO_WORLD,
+        );
         assert!(lit.iter().all(|c| c.is_finite()), "{lit:?}");
     }
 
@@ -649,7 +673,9 @@ mod tests {
         // One `shade_point`, and the fragment stage calls it rather than
         // reimplementing it.
         assert_eq!(source.matches("fn shade_point").count(), 1);
-        assert!(source.contains("shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy))"));
+        assert!(
+            source.contains("shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy))")
+        );
         // And no probe: those declare buffers a drawing pass does not bind.
         assert!(!source.contains("fn probe_shading"));
         // One material function, from the material, and the fragment calls it.

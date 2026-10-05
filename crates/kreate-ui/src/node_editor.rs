@@ -61,7 +61,13 @@ pub enum FieldView {
     /// A number, with the range its control drags over. `label` is drawn in
     /// the control when the field stands alone — a strength on its own row —
     /// and left empty when a socket's label already sits beside it.
-    Value { field: u32, value: f32, min: f32, max: f32, label: String },
+    Value {
+        field: u32,
+        value: f32,
+        min: f32,
+        max: f32,
+        label: String,
+    },
     /// Which image a texture node reads; `None` is empty.
     Image { name: Option<String> },
 }
@@ -134,17 +140,50 @@ pub struct GraphView {
 /// What the pointer asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeEdit {
-    Translate { nodes: Vec<u32>, x: f32, y: f32 },
-    Link { from_node: u32, from_socket: u32, to_node: u32, to_socket: u32 },
-    Unlink { to_node: u32, to_socket: u32 },
-    Add { kind: u32, x: f32, y: f32 },
-    Remove { nodes: Vec<u32> },
+    Translate {
+        nodes: Vec<u32>,
+        x: f32,
+        y: f32,
+    },
+    Link {
+        from_node: u32,
+        from_socket: u32,
+        to_node: u32,
+        to_socket: u32,
+    },
+    Unlink {
+        to_node: u32,
+        to_socket: u32,
+    },
+    Add {
+        kind: u32,
+        x: f32,
+        y: f32,
+    },
+    Remove {
+        nodes: Vec<u32>,
+    },
     /// `continuing` while the pointer that is changing it is still down.
-    SetColor { node: u32, field: u32, swatch: [f32; 3], continuing: bool },
-    SetValue { node: u32, field: u32, value: f32, continuing: bool },
-    SetImage { node: u32, uid: String },
+    SetColor {
+        node: u32,
+        field: u32,
+        swatch: [f32; 3],
+        continuing: bool,
+    },
+    SetValue {
+        node: u32,
+        field: u32,
+        value: f32,
+        continuing: bool,
+    },
+    SetImage {
+        node: u32,
+        uid: String,
+    },
     /// Ask for a file and put it in this texture node.
-    OpenImage { node: u32 },
+    OpenImage {
+        node: u32,
+    },
 }
 
 /// The editor's strings.
@@ -170,10 +209,15 @@ enum Drag {
     #[default]
     None,
     /// Moving the selection; the offset is in graph units.
-    Nodes { offset: Vec2 },
+    Nodes {
+        offset: Vec2,
+    },
     /// A wire from `from` following the pointer. `detached` is the input it
     /// was picked up from, if it was lifted off one.
-    Wire { from: End, detached: Option<(usize, usize)> },
+    Wire {
+        from: End,
+        detached: Option<(usize, usize)>,
+    },
     Pan,
 }
 
@@ -284,7 +328,9 @@ pub fn hit_socket(view: &GraphView, camera: &Camera, pointer: Pos2) -> Option<En
             .map(move |s| End::Output(n, s))
             .chain((0..node.inputs.len()).map(move |s| End::Input(n, s)));
         for end in ends {
-            let Some(at) = socket_position(view, end) else { continue };
+            let Some(at) = socket_position(view, end) else {
+                continue;
+            };
             let d = camera.to_screen(at).distance(pointer);
             if d <= reach && best.is_none_or(|(b, _)| d < b) {
                 best = Some((d, end));
@@ -320,12 +366,7 @@ pub fn compatible(view: &GraphView, a: End, b: End) -> Option<(usize, usize, usi
 
 /// The pan and zoom that fit every node in `size`.
 pub fn frame(view: &GraphView, size: Vec2) -> (Vec2, f32) {
-    let Some(bounds) = view
-        .nodes
-        .iter()
-        .map(node_rect)
-        .reduce(|a, b| a.union(b))
-    else {
+    let Some(bounds) = view.nodes.iter().map(node_rect).reduce(|a, b| a.union(b)) else {
         return (Vec2::ZERO, 1.0);
     };
     let margin = 40.0;
@@ -393,10 +434,18 @@ pub fn node_editor(
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-                let before = Camera { centre: rect.center(), pan: state.pan, zoom: state.zoom };
+                let before = Camera {
+                    centre: rect.center(),
+                    pan: state.pan,
+                    zoom: state.zoom,
+                };
                 let anchor = before.to_graph(pointer);
                 state.zoom = (state.zoom * (1.0 + scroll * 0.0015)).clamp(MIN_ZOOM, MAX_ZOOM);
-                let after = Camera { centre: rect.center(), pan: state.pan, zoom: state.zoom };
+                let after = Camera {
+                    centre: rect.center(),
+                    pan: state.pan,
+                    zoom: state.zoom,
+                };
                 // Keep the graph point under the pointer where it was.
                 state.pan += after.to_graph(pointer) - anchor;
             }
@@ -407,7 +456,11 @@ pub fn node_editor(
         state.drag = Drag::Pan;
     }
 
-    let camera = Camera { centre: rect.center(), pan: state.pan, zoom: state.zoom };
+    let camera = Camera {
+        centre: rect.center(),
+        pan: state.pan,
+        zoom: state.zoom,
+    };
     draw_grid(&painter, rect, &camera, theme.base);
 
     // Where each node is drawn this frame: moved by a drag in progress.
@@ -416,7 +469,11 @@ pub fn node_editor(
         _ => Vec2::ZERO,
     };
     let shown = |n: usize| -> Vec2 {
-        if state.selected.contains(&n) { offset } else { Vec2::ZERO }
+        if state.selected.contains(&n) {
+            offset
+        } else {
+            Vec2::ZERO
+        }
     };
 
     // Wires under the boxes.
@@ -444,7 +501,19 @@ pub fn node_editor(
     // The boxes, and the controls inside them.
     let pointer = ui.input(|i| i.pointer.interact_pos());
     for (n, node) in view.nodes.iter().enumerate() {
-        draw_node(ui, &painter, view, n, node, &camera, shown(n), state, &theme, text, &mut out);
+        draw_node(
+            ui,
+            &painter,
+            view,
+            n,
+            node,
+            &camera,
+            shown(n),
+            state,
+            &theme,
+            text,
+            &mut out,
+        );
     }
 
     // A wire being dragged.
@@ -482,9 +551,15 @@ pub fn node_editor(
                             from: End::Output(link.from.0, link.from.1),
                             detached: Some((n, s)),
                         },
-                        None => Drag::Wire { from: end, detached: None },
+                        None => Drag::Wire {
+                            from: end,
+                            detached: None,
+                        },
                     },
-                    End::Output(..) => Drag::Wire { from: end, detached: None },
+                    End::Output(..) => Drag::Wire {
+                        from: end,
+                        detached: None,
+                    },
                 };
             } else if let Some(n) = hit_node(view, &camera, p) {
                 if shift {
@@ -515,7 +590,11 @@ pub fn node_editor(
             Drag::Nodes { offset } if offset.length() > 0.0 => {
                 let mut nodes: Vec<u32> = state.selected.iter().map(|n| *n as u32).collect();
                 nodes.sort_unstable();
-                out.push(NodeEdit::Translate { nodes, x: offset.x, y: offset.y });
+                out.push(NodeEdit::Translate {
+                    nodes,
+                    x: offset.x,
+                    y: offset.y,
+                });
             }
             Drag::Wire { from, detached } => {
                 let target = pointer.and_then(|p| hit_socket(view, &camera, p));
@@ -524,7 +603,10 @@ pub fn node_editor(
                     (Some((fnode, fsock, tnode, tsock)), detached) => {
                         if let Some((dn, ds)) = detached {
                             if (dn, ds) != (tnode, tsock) {
-                                out.push(NodeEdit::Unlink { to_node: dn as u32, to_socket: ds as u32 });
+                                out.push(NodeEdit::Unlink {
+                                    to_node: dn as u32,
+                                    to_socket: ds as u32,
+                                });
                             }
                         }
                         out.push(NodeEdit::Link {
@@ -535,7 +617,10 @@ pub fn node_editor(
                         });
                     }
                     (None, Some((dn, ds))) => {
-                        out.push(NodeEdit::Unlink { to_node: dn as u32, to_socket: ds as u32 });
+                        out.push(NodeEdit::Unlink {
+                            to_node: dn as u32,
+                            to_socket: ds as u32,
+                        });
                     }
                     (None, None) => {}
                 }
@@ -583,7 +668,11 @@ pub fn node_editor(
                     ui.separator();
                     for (kind, label) in view.addable.iter().enumerate() {
                         if ui.button(label).clicked() {
-                            out.push(NodeEdit::Add { kind: kind as u32, x: at.x, y: at.y });
+                            out.push(NodeEdit::Add {
+                                kind: kind as u32,
+                                x: at.x,
+                                y: at.y,
+                            });
                             close = true;
                         }
                     }
@@ -662,7 +751,12 @@ fn draw_node(
     let header = Rect::from_min_size(r.min, Vec2::new(r.width(), HEADER * z));
     painter.rect_filled(
         header,
-        egui::CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 },
+        egui::CornerRadius {
+            nw: radius,
+            ne: radius,
+            sw: 0,
+            se: 0,
+        },
         node.family.header(),
     );
     let font = egui::FontId::proportional(12.5 * z);
@@ -689,12 +783,18 @@ fn draw_node(
         ))
     };
     let dot = |at: Pos2, ty: SocketType| {
-        painter.circle(at, SOCKET_RADIUS * z, ty.color(), Stroke::new(1.0, Color32::BLACK));
+        painter.circle(
+            at,
+            SOCKET_RADIUS * z,
+            ty.color(),
+            Stroke::new(1.0, Color32::BLACK),
+        );
     };
 
     let mut row = 0;
     for (s, socket) in node.outputs.iter().enumerate() {
-        let at = camera.to_screen(socket_position(view, End::Output(n, s)).unwrap_or_default() + offset);
+        let at =
+            camera.to_screen(socket_position(view, End::Output(n, s)).unwrap_or_default() + offset);
         dot(at, socket.ty);
         painter.text(
             row_rect(row).right_center(),
@@ -713,18 +813,31 @@ fn draw_node(
         row += 1;
     }
     for (s, socket) in node.inputs.iter().enumerate() {
-        let at = camera.to_screen(socket_position(view, End::Input(n, s)).unwrap_or_default() + offset);
+        let at =
+            camera.to_screen(socket_position(view, End::Input(n, s)).unwrap_or_default() + offset);
         dot(at, socket.ty);
         let cell = row_rect(row);
         match (&socket.default, socket.connected, show_controls) {
             (Some(field), false, true) => {
                 // Label on the left half, the value it takes on the right.
                 let (left, right) = cell.split_left_right_at_fraction(0.45);
-                painter.text(left.left_center(), egui::Align2::LEFT_CENTER, &socket.label, font.clone(), theme.text_dim);
+                painter.text(
+                    left.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &socket.label,
+                    font.clone(),
+                    theme.text_dim,
+                );
                 control(ui, right, (n, row), field, &font, view, text, out);
             }
             _ => {
-                painter.text(cell.left_center(), egui::Align2::LEFT_CENTER, &socket.label, font.clone(), theme.text_dim);
+                painter.text(
+                    cell.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &socket.label,
+                    font.clone(),
+                    theme.text_dim,
+                );
             }
         }
         row += 1;
@@ -744,57 +857,97 @@ fn control(
     out: &mut Vec<NodeEdit>,
 ) {
     let down = ui.input(|i| i.pointer.any_down());
-    ui.scope_builder(egui::UiBuilder::new().max_rect(cell).id_salt(("node-field", n, row)), |ui| {
-        ui.style_mut().override_font_id = Some(font.clone());
-        ui.spacing_mut().interact_size.y = cell.height();
-        match field {
-            FieldView::Color { field, swatch } => {
-                let mut value = *swatch;
-                let response = ui.add_sized(cell.size(), |ui: &mut Ui| {
-                    egui::color_picker::color_edit_button_rgb(ui, &mut value)
-                });
-                if response.changed() || value != *swatch {
-                    out.push(NodeEdit::SetColor { node: n as u32, field: *field, swatch: value, continuing: down });
-                }
-            }
-            FieldView::Value { field, value, min, max, label } => {
-                let mut v = *value;
-                let prefix = if label.is_empty() { String::new() } else { format!("{label}  ") };
-                let response = ui.add_sized(
-                    cell.size(),
-                    egui::DragValue::new(&mut v)
-                        .range(*min..=*max)
-                        .speed(((*max - *min) / 200.0) as f64)
-                        .max_decimals(3)
-                        .prefix(prefix),
-                );
-                if response.changed() && v != *value {
-                    out.push(NodeEdit::SetValue { node: n as u32, field: *field, value: v, continuing: down });
-                }
-            }
-            FieldView::Image { name } => {
-                let shown = name.clone().unwrap_or_else(|| text.no_image.clone());
-                egui::ComboBox::from_id_salt(("node-image", n))
-                    .width(cell.width())
-                    .selected_text(shown)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(name.is_none(), &text.no_image).clicked() {
-                            out.push(NodeEdit::SetImage { node: n as u32, uid: String::new() });
-                        }
-                        for (uid, label) in &view.images {
-                            // i18n-exempt: an image's name is the user's own text
-                            if ui.selectable_label(name.as_deref() == Some(label.as_str()), label).clicked() {
-                                out.push(NodeEdit::SetImage { node: n as u32, uid: uid.clone() });
-                            }
-                        }
-                        ui.separator();
-                        if ui.button(&text.open_image).clicked() {
-                            out.push(NodeEdit::OpenImage { node: n as u32 });
-                        }
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(cell)
+            .id_salt(("node-field", n, row)),
+        |ui| {
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.spacing_mut().interact_size.y = cell.height();
+            match field {
+                FieldView::Color { field, swatch } => {
+                    let mut value = *swatch;
+                    let response = ui.add_sized(cell.size(), |ui: &mut Ui| {
+                        egui::color_picker::color_edit_button_rgb(ui, &mut value)
                     });
+                    if response.changed() || value != *swatch {
+                        out.push(NodeEdit::SetColor {
+                            node: n as u32,
+                            field: *field,
+                            swatch: value,
+                            continuing: down,
+                        });
+                    }
+                }
+                FieldView::Value {
+                    field,
+                    value,
+                    min,
+                    max,
+                    label,
+                } => {
+                    let mut v = *value;
+                    let prefix = if label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{label}  ")
+                    };
+                    let response = ui.add_sized(
+                        cell.size(),
+                        egui::DragValue::new(&mut v)
+                            .range(*min..=*max)
+                            .speed(((*max - *min) / 200.0) as f64)
+                            .max_decimals(3)
+                            .prefix(prefix),
+                    );
+                    if response.changed() && v != *value {
+                        out.push(NodeEdit::SetValue {
+                            node: n as u32,
+                            field: *field,
+                            value: v,
+                            continuing: down,
+                        });
+                    }
+                }
+                FieldView::Image { name } => {
+                    let shown = name.clone().unwrap_or_else(|| text.no_image.clone());
+                    egui::ComboBox::from_id_salt(("node-image", n))
+                        .width(cell.width())
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(name.is_none(), &text.no_image)
+                                .clicked()
+                            {
+                                out.push(NodeEdit::SetImage {
+                                    node: n as u32,
+                                    uid: String::new(),
+                                });
+                            }
+                            for (uid, label) in &view.images {
+                                // i18n-exempt: an image's name is the user's own text
+                                if ui
+                                    .selectable_label(
+                                        name.as_deref() == Some(label.as_str()),
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    out.push(NodeEdit::SetImage {
+                                        node: n as u32,
+                                        uid: uid.clone(),
+                                    });
+                                }
+                            }
+                            ui.separator();
+                            if ui.button(&text.open_image).clicked() {
+                                out.push(NodeEdit::OpenImage { node: n as u32 });
+                            }
+                        });
+                }
             }
-        }
-    });
+        },
+    );
 }
 
 #[cfg(test)]
@@ -802,7 +955,12 @@ mod tests {
     use super::*;
 
     fn socket(label: &str, ty: SocketType) -> SocketView {
-        SocketView { label: label.into(), ty, connected: false, default: None }
+        SocketView {
+            label: label.into(),
+            ty,
+            connected: false,
+            default: None,
+        }
     }
 
     /// A Value node on the left feeding a surface on the right.
@@ -843,7 +1001,11 @@ mod tests {
     }
 
     fn camera() -> Camera {
-        Camera { centre: Pos2::new(400.0, 300.0), pan: Vec2::new(50.0, -20.0), zoom: 1.5 }
+        Camera {
+            centre: Pos2::new(400.0, 300.0),
+            pan: Vec2::new(50.0, -20.0),
+            zoom: 1.5,
+        }
     }
 
     #[test]
@@ -860,12 +1022,19 @@ mod tests {
         let view = two();
         let out = socket_position(&view, End::Output(0, 0)).unwrap();
         assert_eq!(out.x, -300.0 + NODE_WIDTH);
-        let inputs: Vec<Pos2> = (0..3).map(|s| socket_position(&view, End::Input(1, s)).unwrap()).collect();
+        let inputs: Vec<Pos2> = (0..3)
+            .map(|s| socket_position(&view, End::Input(1, s)).unwrap())
+            .collect();
         assert!(inputs.iter().all(|p| p.x == 0.0));
-        assert!(inputs.windows(2).all(|w| w[0].y < w[1].y), "inputs are not in order down the box");
+        assert!(
+            inputs.windows(2).all(|w| w[0].y < w[1].y),
+            "inputs are not in order down the box"
+        );
         // Every socket is inside its box's height.
         let r = node_rect(&view.nodes[1]);
-        assert!(inputs.iter().all(|p| p.y > r.min.y + HEADER && p.y < r.max.y));
+        assert!(inputs
+            .iter()
+            .all(|p| p.y > r.min.y + HEADER && p.y < r.max.y));
         assert_eq!(socket_position(&view, End::Input(1, 3)), None);
     }
 
@@ -873,7 +1042,12 @@ mod tests {
     fn the_socket_under_the_pointer_is_the_one_it_is_on() {
         let view = two();
         let c = camera();
-        for end in [End::Output(0, 0), End::Input(1, 0), End::Input(1, 1), End::Input(1, 2)] {
+        for end in [
+            End::Output(0, 0),
+            End::Input(1, 0),
+            End::Input(1, 1),
+            End::Input(1, 2),
+        ] {
             let at = c.to_screen(socket_position(&view, end).unwrap());
             assert_eq!(hit_socket(&view, &c, at + Vec2::new(2.0, 1.0)), Some(end));
         }
@@ -881,15 +1055,24 @@ mod tests {
         let middle = c.to_screen(node_rect(&view.nodes[1]).center());
         assert_eq!(hit_socket(&view, &c, middle), None);
         assert_eq!(hit_node(&view, &c, middle), Some(1));
-        assert_eq!(hit_node(&view, &c, c.to_screen(Pos2::new(-1000.0, -1000.0))), None);
+        assert_eq!(
+            hit_node(&view, &c, c.to_screen(Pos2::new(-1000.0, -1000.0))),
+            None
+        );
     }
 
     #[test]
     fn a_wire_joins_an_output_to_an_input_of_its_own_type_only() {
         let view = two();
         // A number into roughness, from either end.
-        assert_eq!(compatible(&view, End::Output(0, 0), End::Input(1, 2)), Some((0, 0, 1, 2)));
-        assert_eq!(compatible(&view, End::Input(1, 2), End::Output(0, 0)), Some((0, 0, 1, 2)));
+        assert_eq!(
+            compatible(&view, End::Output(0, 0), End::Input(1, 2)),
+            Some((0, 0, 1, 2))
+        );
+        assert_eq!(
+            compatible(&view, End::Input(1, 2), End::Output(0, 0)),
+            Some((0, 0, 1, 2))
+        );
         // A number into a colour, an input into an input.
         assert_eq!(compatible(&view, End::Output(0, 0), End::Input(1, 0)), None);
         assert_eq!(compatible(&view, End::Input(1, 1), End::Input(1, 2)), None);
@@ -900,11 +1083,19 @@ mod tests {
         let view = two();
         let size = Vec2::new(500.0, 300.0);
         let (pan, zoom) = frame(&view, size);
-        let c = Camera { centre: Pos2::new(250.0, 150.0), pan, zoom };
+        let c = Camera {
+            centre: Pos2::new(250.0, 150.0),
+            pan,
+            zoom,
+        };
         let screen = Rect::from_min_size(Pos2::ZERO, size);
         for node in &view.nodes {
             let r = c.rect(node_rect(node));
-            assert!(screen.contains_rect(r), "{} is off screen: {r:?}", node.title);
+            assert!(
+                screen.contains_rect(r),
+                "{} is off screen: {r:?}",
+                node.title
+            );
         }
     }
 
@@ -969,7 +1160,8 @@ mod tests {
         }
 
         fn screen(&self, end: End) -> Pos2 {
-            self.camera().to_screen(socket_position(&self.view, end).unwrap())
+            self.camera()
+                .to_screen(socket_position(&self.view, end).unwrap())
         }
 
         /// Press at `a`, drag to `b` over a few frames, release; every edit
@@ -1000,13 +1192,20 @@ mod tests {
         let zoom = rig.state.zoom;
         let body = rig.camera().body_of(0);
         let edits = rig.drag(body, body + Vec2::new(60.0, 30.0));
-        let moves: Vec<&NodeEdit> =
-            edits.iter().filter(|e| matches!(e, NodeEdit::Translate { .. })).collect();
+        let moves: Vec<&NodeEdit> = edits
+            .iter()
+            .filter(|e| matches!(e, NodeEdit::Translate { .. }))
+            .collect();
         assert_eq!(moves.len(), 1, "a drag was not one edit: {edits:?}");
-        let NodeEdit::Translate { nodes, x, y } = moves[0] else { unreachable!() };
+        let NodeEdit::Translate { nodes, x, y } = moves[0] else {
+            unreachable!()
+        };
         assert_eq!(nodes, &vec![0]);
         // Screen points back to graph units.
-        assert!((x - 60.0 / zoom).abs() < 0.5 && (y - 30.0 / zoom).abs() < 0.5, "{x} {y}");
+        assert!(
+            (x - 60.0 / zoom).abs() < 0.5 && (y - 30.0 / zoom).abs() < 0.5,
+            "{x} {y}"
+        );
     }
 
     #[test]
@@ -1017,7 +1216,12 @@ mod tests {
         let edits = rig.drag(from, to);
         assert_eq!(
             edits,
-            vec![NodeEdit::Link { from_node: 0, from_socket: 0, to_node: 1, to_socket: 2 }]
+            vec![NodeEdit::Link {
+                from_node: 0,
+                from_socket: 0,
+                to_node: 1,
+                to_socket: 2
+            }]
         );
     }
 
@@ -1032,18 +1236,30 @@ mod tests {
     #[test]
     fn a_wire_lifted_off_an_input_and_dropped_on_nothing_is_disconnected() {
         let mut view = two();
-        view.links.push(LinkView { from: (0, 0), to: (1, 2) });
+        view.links.push(LinkView {
+            from: (0, 0),
+            to: (1, 2),
+        });
         view.nodes[1].inputs[2].connected = true;
         let mut rig = Rig::new(view);
         let from = rig.screen(End::Input(1, 2));
         let edits = rig.drag(from, from + Vec2::new(-40.0, 120.0));
-        assert_eq!(edits, vec![NodeEdit::Unlink { to_node: 1, to_socket: 2 }]);
+        assert_eq!(
+            edits,
+            vec![NodeEdit::Unlink {
+                to_node: 1,
+                to_socket: 2
+            }]
+        );
     }
 
     #[test]
     fn a_wire_lifted_off_one_input_onto_another_moves_there() {
         let mut view = two();
-        view.links.push(LinkView { from: (0, 0), to: (1, 2) });
+        view.links.push(LinkView {
+            from: (0, 0),
+            to: (1, 2),
+        });
         view.nodes[1].inputs[2].connected = true;
         let mut rig = Rig::new(view);
         let from = rig.screen(End::Input(1, 2));
@@ -1051,8 +1267,16 @@ mod tests {
         assert_eq!(
             rig.drag(from, to),
             vec![
-                NodeEdit::Unlink { to_node: 1, to_socket: 2 },
-                NodeEdit::Link { from_node: 0, from_socket: 0, to_node: 1, to_socket: 1 },
+                NodeEdit::Unlink {
+                    to_node: 1,
+                    to_socket: 2
+                },
+                NodeEdit::Link {
+                    from_node: 0,
+                    from_socket: 0,
+                    to_node: 1,
+                    to_socket: 1
+                },
             ]
         );
     }
@@ -1083,17 +1307,25 @@ mod tests {
         // The control sits on top of the box. A drag there is the control's:
         // the value changes, and the node stays where it is.
         let mut rig = Rig::new(two());
-        let field = rig.camera().to_screen(Pos2::new(
-            -300.0 + NODE_WIDTH / 2.0,
-            HEADER + ROW * 1.5,
-        ));
+        let field = rig
+            .camera()
+            .to_screen(Pos2::new(-300.0 + NODE_WIDTH / 2.0, HEADER + ROW * 1.5));
         let edits = rig.drag(field, field + Vec2::new(80.0, 0.0));
         assert!(
-            !edits.iter().any(|e| matches!(e, NodeEdit::Translate { .. })),
+            !edits
+                .iter()
+                .any(|e| matches!(e, NodeEdit::Translate { .. })),
             "a drag in a field moved the node: {edits:?}"
         );
         assert!(
-            edits.iter().any(|e| matches!(e, NodeEdit::SetValue { node: 0, field: 0, .. })),
+            edits.iter().any(|e| matches!(
+                e,
+                NodeEdit::SetValue {
+                    node: 0,
+                    field: 0,
+                    ..
+                }
+            )),
             "the field did not change: {edits:?}"
         );
     }
@@ -1107,4 +1339,3 @@ mod tests {
         }
     }
 }
-

@@ -253,7 +253,6 @@ pub fn write_gltf_scene(
     (bytes, notes)
 }
 
-
 /// Writes the lights, as `KHR_lights_punctual`.
 ///
 /// glTF keeps its lights in a table on the root and a node points at one by
@@ -443,10 +442,11 @@ fn write_nodes(
                     json_node
                         .extensions
                         .get_or_insert_with(Default::default)
-                        .khr_lights_punctual =
-                        Some(json::extensions::scene::khr_lights_punctual::KhrLightsPunctual {
+                        .khr_lights_punctual = Some(
+                        json::extensions::scene::khr_lights_punctual::KhrLightsPunctual {
                             light: json::Index::new(i as u32),
-                        });
+                        },
+                    );
                 } else {
                     notes.push(LossyNote::Unsupported {
                         what: format!("{}: its light is not in the scene", node.name),
@@ -535,15 +535,27 @@ fn write_animations(
                 Some(serde_json::json!([first])),
                 Some(serde_json::json!([last])),
             );
-            let interpolation = if track.step { Interpolation::Step } else { Interpolation::Linear };
+            let interpolation = if track.step {
+                Interpolation::Step
+            } else {
+                Interpolation::Linear
+            };
             let channel = |root: &mut json::Root,
-                               bin: &mut Vec<u8>,
-                               out: &mut json::Animation,
-                               data: Vec<f32>,
-                               ty: json::accessor::Type,
-                               path: Property| {
+                           bin: &mut Vec<u8>,
+                           out: &mut json::Animation,
+                           data: Vec<f32>,
+                           ty: json::accessor::Type,
+                           path: Property| {
                 let view = push_view(root, bin, bytemuck::cast_slice(&data), None);
-                let output = push_accessor(root, view, count, json::accessor::ComponentType::F32, ty, None, None);
+                let output = push_accessor(
+                    root,
+                    view,
+                    count,
+                    json::accessor::ComponentType::F32,
+                    ty,
+                    None,
+                    None,
+                );
                 let sampler = out.samplers.len() as u32;
                 out.samplers.push(Sampler {
                     extensions: None,
@@ -565,8 +577,18 @@ fn write_animations(
                 });
             };
             if track.translation {
-                let data = placed.iter().flat_map(|p| p.translation.to_array()).collect();
-                channel(root, bin, &mut out, data, json::accessor::Type::Vec3, Property::Translation);
+                let data = placed
+                    .iter()
+                    .flat_map(|p| p.translation.to_array())
+                    .collect();
+                channel(
+                    root,
+                    bin,
+                    &mut out,
+                    data,
+                    json::accessor::Type::Vec3,
+                    Property::Translation,
+                );
             }
             if track.rotation {
                 // Each quaternion on the same side as the one before: `q` and
@@ -580,17 +602,35 @@ fn write_animations(
                         // A sample scaled to nothing has no rotation to take
                         // apart, and NaN in a file is a file nobody opens: it
                         // keeps the one before, which is what it looked like.
-                        let r = if p.rotation.is_finite() { p.rotation } else { previous };
+                        let r = if p.rotation.is_finite() {
+                            p.rotation
+                        } else {
+                            previous
+                        };
                         let q = if r.dot(previous) < 0.0 { -r } else { r };
                         previous = q;
                         q.to_array()
                     })
                     .collect();
-                channel(root, bin, &mut out, data, json::accessor::Type::Vec4, Property::Rotation);
+                channel(
+                    root,
+                    bin,
+                    &mut out,
+                    data,
+                    json::accessor::Type::Vec4,
+                    Property::Rotation,
+                );
             }
             if track.scale {
                 let data = placed.iter().flat_map(|p| p.scale.to_array()).collect();
-                channel(root, bin, &mut out, data, json::accessor::Type::Vec3, Property::Scale);
+                channel(
+                    root,
+                    bin,
+                    &mut out,
+                    data,
+                    json::accessor::Type::Vec3,
+                    Property::Scale,
+                );
             }
         }
         if !out.channels.is_empty() {
@@ -644,7 +684,10 @@ fn write_mesh(
     };
 
     let face_materials = mesh.attributes().get_i32(names::MATERIAL_INDEX);
-    let has_slots = scene.mesh_slots.get(index).is_some_and(|slots| !slots.is_empty());
+    let has_slots = scene
+        .mesh_slots
+        .get(index)
+        .is_some_and(|slots| !slots.is_empty());
     let tri = mesh.triangulate();
 
     // Which faces go in which primitive. Sorted by material index so the output
@@ -831,11 +874,14 @@ fn write_mesh(
             // Resolved through the scene's table before it reaches the material
             // map, or the second mesh in a file would be given the first one's
             // materials — which looks right until a file has two of them.
-            material: scene
-                .material_of(index, source_material)
-                .map(|resolved| {
-                    json::Index::new(emit_material(root, &scene.materials, material_map, resolved))
-                }),
+            material: scene.material_of(index, source_material).map(|resolved| {
+                json::Index::new(emit_material(
+                    root,
+                    &scene.materials,
+                    material_map,
+                    resolved,
+                ))
+            }),
             mode: Checked::Valid(json::mesh::Mode::Triangles),
             targets: None,
         });
@@ -940,7 +986,10 @@ fn write_textures(
         // texture index onto its neighbour's picture.
         let png = png.unwrap_or_else(|| {
             notes.push(LossyNote::Unsupported {
-                what: format!("{}: the image could not be encoded and was written blank", image.name),
+                what: format!(
+                    "{}: the image could not be encoded and was written blank",
+                    image.name
+                ),
             });
             let mut out = std::io::Cursor::new(Vec::new());
             image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(

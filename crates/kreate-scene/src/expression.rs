@@ -112,7 +112,11 @@ pub const FUNCTIONS: &[(&str, usize)] = &[
 
 /// Parses `text`.
 pub fn parse(text: &str) -> Result<Expr, ExprError> {
-    let mut p = Parser { bytes: text.as_bytes(), at: 0, depth: 0 };
+    let mut p = Parser {
+        bytes: text.as_bytes(),
+        at: 0,
+        depth: 0,
+    };
     p.skip_space();
     if p.at >= p.bytes.len() {
         return Err(ExprError::Empty);
@@ -205,9 +209,15 @@ impl Expr {
                     return Err(ExprError::UnknownFunction(f.clone()));
                 };
                 if args.len() != *expected {
-                    return Err(ExprError::Arguments { function: f.clone(), expected: *expected });
+                    return Err(ExprError::Arguments {
+                        function: f.clone(),
+                        expected: *expected,
+                    });
                 }
-                let v: Vec<f64> = args.iter().map(|a| a.value(name)).collect::<Result<_, _>>()?;
+                let v: Vec<f64> = args
+                    .iter()
+                    .map(|a| a.value(name))
+                    .collect::<Result<_, _>>()?;
                 match f.as_str() {
                     "sin" => v[0].sin(),
                     "cos" => v[0].cos(),
@@ -249,7 +259,11 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn skip_space(&mut self) {
-        while self.bytes.get(self.at).is_some_and(|b| b.is_ascii_whitespace()) {
+        while self
+            .bytes
+            .get(self.at)
+            .is_some_and(|b| b.is_ascii_whitespace())
+        {
             self.at += 1;
         }
     }
@@ -373,7 +387,11 @@ impl Parser<'_> {
             Some(b) if b.is_ascii_digit() || b == b'.' => self.number(),
             Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
                 let start = self.at;
-                while self.bytes.get(self.at).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                while self
+                    .bytes
+                    .get(self.at)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
                     self.at += 1;
                 }
                 let name = String::from_utf8_lossy(&self.bytes[start..self.at]).into_owned();
@@ -402,7 +420,11 @@ impl Parser<'_> {
 
     fn number(&mut self) -> Result<Expr, ExprError> {
         let start = self.at;
-        while self.bytes.get(self.at).is_some_and(|b| b.is_ascii_digit() || *b == b'.') {
+        while self
+            .bytes
+            .get(self.at)
+            .is_some_and(|b| b.is_ascii_digit() || *b == b'.')
+        {
             self.at += 1;
         }
         // An exponent: `1e-3`. Only when a digit follows, so `2e` stays a
@@ -444,10 +466,22 @@ mod tests {
         assert_eq!(eval("1 + 2 * 3"), Ok(7.0));
         assert_eq!(eval("(1 + 2) * 3"), Ok(9.0));
         assert_eq!(eval("2 ** 3 ** 2"), Ok(512.0), "power is right-associative");
-        assert_eq!(eval("-2 ** 2"), Ok(-4.0), "power binds tighter than a leading minus");
+        assert_eq!(
+            eval("-2 ** 2"),
+            Ok(-4.0),
+            "power binds tighter than a leading minus"
+        );
         assert_eq!(eval("2 ** -1"), Ok(0.5));
-        assert_eq!(eval("10 - 4 - 3"), Ok(3.0), "subtraction is left-associative");
-        assert_eq!(eval("-1 % 24"), Ok(23.0), "remainder takes the divisor's sign");
+        assert_eq!(
+            eval("10 - 4 - 3"),
+            Ok(3.0),
+            "subtraction is left-associative"
+        );
+        assert_eq!(
+            eval("-1 % 24"),
+            Ok(23.0),
+            "remainder takes the divisor's sign"
+        );
         assert_eq!(eval("1e-3 * 1000"), Ok(1.0));
     }
 
@@ -475,9 +509,21 @@ mod tests {
         assert_eq!(eval("1 +"), Err(ExprError::Syntax { at: 3 }));
         assert_eq!(eval("(1"), Err(ExprError::Syntax { at: 2 }));
         assert_eq!(eval("1 2"), Err(ExprError::Syntax { at: 2 }));
-        assert_eq!(eval("height * 2"), Err(ExprError::UnknownName("height".into())));
-        assert_eq!(eval("sinh(1)"), Err(ExprError::UnknownFunction("sinh".into())));
-        assert_eq!(eval("min(1)"), Err(ExprError::Arguments { function: "min".into(), expected: 2 }));
+        assert_eq!(
+            eval("height * 2"),
+            Err(ExprError::UnknownName("height".into()))
+        );
+        assert_eq!(
+            eval("sinh(1)"),
+            Err(ExprError::UnknownFunction("sinh".into()))
+        );
+        assert_eq!(
+            eval("min(1)"),
+            Err(ExprError::Arguments {
+                function: "min".into(),
+                expected: 2
+            })
+        );
         assert_eq!(eval("1 / 0"), Err(ExprError::NotFinite));
         assert_eq!(eval("sqrt(-1)"), Err(ExprError::NotFinite));
         assert_eq!(eval("2e"), Err(ExprError::Syntax { at: 1 }));

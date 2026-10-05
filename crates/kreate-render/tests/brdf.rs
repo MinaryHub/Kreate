@@ -303,11 +303,11 @@ fn geometry() -> Vec<(glam::Vec3, glam::Vec3)> {
             glam::Vec3::new(-0.5, 0.4, 0.77).normalize(),
         ),
         // A light behind the surface, and a viewer behind it. Both are taken by
-            // the early return — which is also what makes the exactly-opposite
-            // case unreachable, since `l = -v` forces the two cosines to have
-            // opposite signs. A sweep proved the half-vector guard that used to
-            // stand here was dead, so this pair is testing the return and not a
-            // `normalize`.
+        // the early return — which is also what makes the exactly-opposite
+        // case unreachable, since `l = -v` forces the two cosines to have
+        // opposite signs. A sweep proved the half-vector guard that used to
+        // stand here was dead, so this pair is testing the return and not a
+        // `normalize`.
         (glam::Vec3::Z, glam::Vec3::NEG_Z),
         (glam::Vec3::NEG_Z, glam::Vec3::Z),
     ];
@@ -456,6 +456,9 @@ fn a_mirror_is_finite_on_the_device() {
     let (_, specular) = on_gpu(&gpu, &samples)[0];
     let want = brdf::evaluate(&mirror, n, glam::Vec3::Z, glam::Vec3::Z);
     assert!(specular[0].is_finite(), "{specular:?}");
-    assert!(specular[0] > 100.0, "a mirror should be bright: {specular:?}");
+    assert!(
+        specular[0] > 100.0,
+        "a mirror should be bright: {specular:?}"
+    );
     assert!(close(specular[0], want.specular[0]));
 }

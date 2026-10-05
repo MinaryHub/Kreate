@@ -209,7 +209,11 @@ pub fn handle(message: &Value, app: &mut dyn App) -> Option<Value> {
                 .pointer("/params/protocolVersion")
                 .and_then(Value::as_str)
                 .unwrap_or(PROTOCOL_VERSION);
-            let version = if KNOWN_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSION };
+            let version = if KNOWN_VERSIONS.contains(&asked) {
+                asked
+            } else {
+                PROTOCOL_VERSION
+            };
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false } },
@@ -220,8 +224,14 @@ pub fn handle(message: &Value, app: &mut dyn App) -> Option<Value> {
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => {
-            let name = message.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
-            let args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+            let name = message
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let args = message
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             call_tool(name, &args, app)
         }
         other => Err((-32601, format!("method not found: {other}"))),
@@ -253,8 +263,14 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "run_script" => ("run", pick(&["script"])),
         "capture_viewport" => ("capture", pick(&["camera", "path"])),
         "check_overlaps" => ("overlaps", pick(&["tolerance", "exact"])),
-        "get_mesh" => ("mesh", pick(&["object", "space", "faces", "selected", "limit"])),
-        "render_image" => ("render", pick(&["path", "camera", "width", "height", "samples", "time_limit"])),
+        "get_mesh" => (
+            "mesh",
+            pick(&["object", "space", "faces", "selected", "limit"]),
+        ),
+        "render_image" => (
+            "render",
+            pick(&["path", "camera", "width", "height", "samples", "time_limit"]),
+        ),
         "undo" => ("undo", pick(&["steps"])),
         "redo" => ("redo", pick(&["steps"])),
         "open_file" => ("open", pick(&["path"])),
@@ -266,14 +282,22 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
         Ok(value) if method == "capture" || method == "render" => {
-            let data = value.get("png_base64").and_then(Value::as_str).unwrap_or("").to_string();
+            let data = value
+                .get("png_base64")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let size = if method == "render" {
                 format!(
                     "rendered {} x {} at {} samples{} to {}",
                     value.get("width").unwrap_or(&json!(0)),
                     value.get("height").unwrap_or(&json!(0)),
                     value.get("samples").unwrap_or(&json!(0)),
-                    if value.get("finished") == Some(&json!(false)) { " (stopped at the time limit)" } else { "" },
+                    if value.get("finished") == Some(&json!(false)) {
+                        " (stopped at the time limit)"
+                    } else {
+                        ""
+                    },
                     value.get("path").and_then(Value::as_str).unwrap_or("?"),
                 )
             } else {
@@ -306,7 +330,11 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
 
 /// The running Kreate, reached through the port and token it wrote down.
 pub struct Socket {
-    stream: Option<(std::io::BufReader<std::net::TcpStream>, std::net::TcpStream, String)>,
+    stream: Option<(
+        std::io::BufReader<std::net::TcpStream>,
+        std::net::TcpStream,
+        String,
+    )>,
 }
 
 impl Default for Socket {
@@ -331,7 +359,9 @@ impl Socket {
         } else {
             std::env::var_os("XDG_CONFIG_HOME")
                 .map(|base| Path::new(&base).join("kreate"))
-                .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/kreate")))
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/kreate"))
+                })
         };
         dir.map(|d| d.join("bridge.json"))
     }
@@ -340,10 +370,19 @@ impl Socket {
         const NOT_RUNNING: &str = "Kreate is not running, or was started before the connector existed. Start Kreate and try again.";
         let path = Self::info_path().ok_or("cannot find Kreate's settings folder")?;
         let text = std::fs::read_to_string(&path).map_err(|_| NOT_RUNNING.to_string())?;
-        let info: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let port = info.get("port").and_then(Value::as_u64).ok_or("no port in bridge.json")? as u16;
-        let token = info.get("token").and_then(Value::as_str).ok_or("no token in bridge.json")?.to_string();
-        let stream = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|_| NOT_RUNNING.to_string())?;
+        let info: Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let port = info
+            .get("port")
+            .and_then(Value::as_u64)
+            .ok_or("no port in bridge.json")? as u16;
+        let token = info
+            .get("token")
+            .and_then(Value::as_str)
+            .ok_or("no token in bridge.json")?
+            .to_string();
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port))
+            .map_err(|_| NOT_RUNNING.to_string())?;
         let reader = std::io::BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         self.stream = Some((reader, stream, token));
         Ok(())
@@ -359,7 +398,8 @@ impl Socket {
         if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
             return Err("Kreate closed the connection".into());
         }
-        serde_json::from_str(&line).map_err(|e| format!("Kreate answered something unreadable: {e}"))
+        serde_json::from_str(&line)
+            .map_err(|e| format!("Kreate answered something unreadable: {e}"))
     }
 }
 
@@ -381,7 +421,10 @@ impl App for Socket {
         let answer = answer?;
         match (answer.get("ok"), answer.get("error")) {
             (Some(ok), _) => Ok(ok.clone()),
-            (_, Some(err)) => Err(err.as_str().unwrap_or("Kreate reported an error").to_string()),
+            (_, Some(err)) => Err(err
+                .as_str()
+                .unwrap_or("Kreate reported an error")
+                .to_string()),
             _ => Err("Kreate's answer had neither a result nor an error".into()),
         }
     }
@@ -405,7 +448,10 @@ mod tests {
     }
 
     fn fake(answer: Result<Value, String>) -> Fake {
-        Fake { asked: Vec::new(), answer }
+        Fake {
+            asked: Vec::new(),
+            answer,
+        }
     }
 
     #[test]
@@ -430,7 +476,11 @@ mod tests {
     #[test]
     fn a_notification_gets_no_answer() {
         let mut app = fake(Ok(json!({})));
-        assert!(handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}), &mut app).is_none());
+        assert!(handle(
+            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            &mut app
+        )
+        .is_none());
     }
 
     #[test]
@@ -454,14 +504,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.asked[0].0, "run");
-        assert_eq!(app.asked[0].1, json!({"script":"kreate.ops.object.delete()"}));
+        assert_eq!(
+            app.asked[0].1,
+            json!({"script":"kreate.ops.object.delete()"})
+        );
         assert_eq!(reply["result"]["content"][0]["type"], "text");
         assert_eq!(reply["result"]["isError"], false);
     }
 
     #[test]
     fn a_failed_script_line_is_an_error_result_the_model_reads() {
-        let mut app = fake(Ok(json!({"lines":[{"line":"x","ok":false,"error":"no operator"}]})));
+        let mut app = fake(Ok(
+            json!({"lines":[{"line":"x","ok":false,"error":"no operator"}]}),
+        ));
         let reply = handle(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run_script","arguments":{"script":"x"}}}),
             &mut app,
@@ -480,7 +535,10 @@ mod tests {
         .unwrap();
         assert!(reply.get("error").is_none());
         assert_eq!(reply["result"]["isError"], true);
-        assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("not running"));
+        assert!(reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not running"));
     }
 
     #[test]
@@ -506,7 +564,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tool["error"]["code"], -32602);
-        let method = handle(&json!({"jsonrpc":"2.0","id":8,"method":"resources/list"}), &mut app).unwrap();
+        let method = handle(
+            &json!({"jsonrpc":"2.0","id":8,"method":"resources/list"}),
+            &mut app,
+        )
+        .unwrap();
         assert_eq!(method["error"]["code"], -32601);
         assert!(app.asked.is_empty());
     }

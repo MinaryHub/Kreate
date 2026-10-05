@@ -104,24 +104,47 @@ pub struct FCurve {
 
 impl FCurve {
     pub fn new(path: PropertyPath) -> Self {
-        Self { path, keys: Vec::new() }
+        Self {
+            path,
+            keys: Vec::new(),
+        }
     }
 
     /// An empty curve for one component of a property of whoever plays it —
     /// the kind every action curve is. See the module docs on the target.
     pub fn owned(property: &str, index: u8) -> Self {
-        Self::new(PropertyPath::component(DatablockKind::Object, Uid::NONE, property, index))
+        Self::new(PropertyPath::component(
+            DatablockKind::Object,
+            Uid::NONE,
+            property,
+            index,
+        ))
     }
 
     /// Puts a key at `frame`, replacing one already there.
     pub fn insert(&mut self, frame: f64, value: f64, interpolation: Interpolation) {
         // A key just put down is selected, so the next move or delete in the
         // dope sheet acts on what was just keyed.
-        let key = Keyframe { frame, value, interpolation, selected: true, slope: None };
-        match self.keys.iter().position(|k| (k.frame - frame).abs() < SAME_FRAME) {
+        let key = Keyframe {
+            frame,
+            value,
+            interpolation,
+            selected: true,
+            slope: None,
+        };
+        match self
+            .keys
+            .iter()
+            .position(|k| (k.frame - frame).abs() < SAME_FRAME)
+        {
             // A handle somebody set survives the key being set again: keying a
             // new value is not a request to forget how the curve bends there.
-            Some(at) => self.keys[at] = Keyframe { slope: self.keys[at].slope, ..key },
+            Some(at) => {
+                self.keys[at] = Keyframe {
+                    slope: self.keys[at].slope,
+                    ..key
+                }
+            }
             None => {
                 let at = self.keys.partition_point(|k| k.frame < frame);
                 self.keys.insert(at, key);
@@ -138,9 +161,11 @@ impl FCurve {
 
     /// Sorts, and drops keys that share a frame — for keys read from a file.
     pub fn normalise(&mut self) {
-        self.keys.retain(|k| k.frame.is_finite() && k.value.is_finite());
+        self.keys
+            .retain(|k| k.frame.is_finite() && k.value.is_finite());
         self.keys.sort_by(|a, b| a.frame.total_cmp(&b.frame));
-        self.keys.dedup_by(|b, a| (b.frame - a.frame).abs() < SAME_FRAME);
+        self.keys
+            .dedup_by(|b, a| (b.frame - a.frame).abs() < SAME_FRAME);
     }
 
     /// The curve's value at `frame`, or `None` for a curve with no keys.
@@ -190,7 +215,10 @@ impl FCurve {
         if let Some(slope) = self.keys.get(i).and_then(|k| k.slope) {
             return slope;
         }
-        let (Some(prev), Some(next)) = (i.checked_sub(1).and_then(|p| self.keys.get(p)), self.keys.get(i + 1)) else {
+        let (Some(prev), Some(next)) = (
+            i.checked_sub(1).and_then(|p| self.keys.get(p)),
+            self.keys.get(i + 1),
+        ) else {
             return 0.0;
         };
         let here = self.keys[i].value;
@@ -265,7 +293,13 @@ impl Action {
 
     /// Selects (or, with `select` false, deselects) the keys of `property` —
     /// or of every curve — whose frames are within `min..=max`.
-    pub fn select_range(&mut self, property: Option<&str>, min: f64, max: f64, select: bool) -> bool {
+    pub fn select_range(
+        &mut self,
+        property: Option<&str>,
+        min: f64,
+        max: f64,
+        select: bool,
+    ) -> bool {
         let mut changed = false;
         for curve in self
             .curves
@@ -296,7 +330,9 @@ impl Action {
     }
 
     pub fn any_selected(&self) -> bool {
-        self.curves.iter().any(|c| c.keys.iter().any(|k| k.selected))
+        self.curves
+            .iter()
+            .any(|c| c.keys.iter().any(|k| k.selected))
     }
 
     /// Selects the keys of one component of one property within a frame
@@ -406,7 +442,11 @@ impl Action {
 
     /// Every frame some curve has a key on, sorted, once each.
     pub fn key_frames(&self) -> Vec<f64> {
-        let mut frames: Vec<f64> = self.curves.iter().flat_map(|c| c.keys.iter().map(|k| k.frame)).collect();
+        let mut frames: Vec<f64> = self
+            .curves
+            .iter()
+            .flat_map(|c| c.keys.iter().map(|k| k.frame))
+            .collect();
         frames.sort_by(f64::total_cmp);
         frames.dedup_by(|b, a| (*b - *a).abs() < SAME_FRAME);
         frames
@@ -430,7 +470,12 @@ impl Default for Playback {
     /// Frames 1 to 250 at 24 a second: Blender's defaults, which is to say
     /// ten seconds of film.
     fn default() -> Self {
-        Self { frame: 1.0, start: 1, end: 250, fps: 24.0 }
+        Self {
+            frame: 1.0,
+            start: 1,
+            end: 250,
+            fps: 24.0,
+        }
     }
 }
 
@@ -477,18 +522,58 @@ pub const OBJECT_ANIMATABLE: &[AnimatableDesc] = &[
 /// the graph, so animating these changes what it would be without one — the
 /// graph's own values are keyed when the node editor learns to key them.
 pub const MATERIAL_ANIMATABLE: &[AnimatableDesc] = &[
-    AnimatableDesc { name: "base_color", kind: PropertyKind::Color, components: 3, doc: "The surface's colour, linear." },
-    AnimatableDesc { name: "metallic", kind: PropertyKind::Float, components: 1, doc: "Metal or not." },
-    AnimatableDesc { name: "roughness", kind: PropertyKind::Float, components: 1, doc: "How blurred reflections are." },
-    AnimatableDesc { name: "alpha", kind: PropertyKind::Float, components: 1, doc: "Opacity." },
-    AnimatableDesc { name: "normal_strength", kind: PropertyKind::Float, components: 1, doc: "How far the normal map tilts the surface." },
+    AnimatableDesc {
+        name: "base_color",
+        kind: PropertyKind::Color,
+        components: 3,
+        doc: "The surface's colour, linear.",
+    },
+    AnimatableDesc {
+        name: "metallic",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "Metal or not.",
+    },
+    AnimatableDesc {
+        name: "roughness",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "How blurred reflections are.",
+    },
+    AnimatableDesc {
+        name: "alpha",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "Opacity.",
+    },
+    AnimatableDesc {
+        name: "normal_strength",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "How far the normal map tilts the surface.",
+    },
 ];
 
 /// The properties of a light a curve can drive.
 pub const LIGHT_ANIMATABLE: &[AnimatableDesc] = &[
-    AnimatableDesc { name: "color", kind: PropertyKind::Color, components: 3, doc: "The light's tint, linear." },
-    AnimatableDesc { name: "intensity", kind: PropertyKind::Float, components: 1, doc: "How much light, in the kind's unit." },
-    AnimatableDesc { name: "exposure", kind: PropertyKind::Float, components: 1, doc: "Brightness in stops, on top of the intensity." },
+    AnimatableDesc {
+        name: "color",
+        kind: PropertyKind::Color,
+        components: 3,
+        doc: "The light's tint, linear.",
+    },
+    AnimatableDesc {
+        name: "intensity",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "How much light, in the kind's unit.",
+    },
+    AnimatableDesc {
+        name: "exposure",
+        kind: PropertyKind::Float,
+        components: 1,
+        doc: "Brightness in stops, on top of the intensity.",
+    },
 ];
 
 /// What a kind of datablock can have animated.
@@ -517,7 +602,9 @@ pub fn read_material(m: &crate::document::Material, property: &str) -> Option<Ve
 pub fn apply_to_material(action: &Action, frame: f64, m: &mut crate::document::Material) {
     let mut colour = m.base_color.to_array();
     for curve in &action.curves {
-        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else {
+            continue;
+        };
         let v = v as f32;
         match (curve.path.property.as_ref(), i) {
             ("base_color", 0..=2) => colour[i as usize] = v.max(0.0),
@@ -545,7 +632,9 @@ pub fn read_light(l: &crate::light::Light, property: &str) -> Option<Vec<f64>> {
 pub fn apply_to_light(action: &Action, frame: f64, l: &mut crate::light::Light) {
     let mut colour = l.color.to_array();
     for curve in &action.curves {
-        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        let (Some(i), Some(v)) = (curve.path.index, curve.evaluate(frame)) else {
+            continue;
+        };
         match (curve.path.property.as_ref(), i) {
             ("color", 0..=2) => colour[i as usize] = (v as f32).max(0.0),
             // A light cannot give out less than nothing: a Bézier easing to
@@ -565,14 +654,24 @@ pub fn apply_to_light(action: &Action, frame: f64, l: &mut crate::light::Light) 
 /// turns in every direction, and Euler angles lock up exactly where a
 /// shoulder does.
 pub const BONE_ANIMATABLE: &[AnimatableDesc] = &[
-    AnimatableDesc { name: "location", kind: PropertyKind::Vec3, components: 3, doc: "Where the bone is moved from rest, in its own axes." },
+    AnimatableDesc {
+        name: "location",
+        kind: PropertyKind::Vec3,
+        components: 3,
+        doc: "Where the bone is moved from rest, in its own axes.",
+    },
     AnimatableDesc {
         name: "rotation_quaternion",
         kind: PropertyKind::Float,
         components: 4,
         doc: "How it is turned from rest, as W, X, Y, Z.",
     },
-    AnimatableDesc { name: "scale", kind: PropertyKind::Vec3, components: 3, doc: "Its size along its own axes." },
+    AnimatableDesc {
+        name: "scale",
+        kind: PropertyKind::Vec3,
+        components: 3,
+        doc: "Its size along its own axes.",
+    },
 ];
 
 /// The path a curve on a bone's pose has: Blender's, so it reads as the same
@@ -586,8 +685,12 @@ pub fn bone_path(bone: &str, property: &str) -> String {
 
 /// A shape key's value, as a curve drives it: Blender's path,
 /// `key_blocks["Smile"].value`, on the object's action.
-pub const SHAPE_ANIMATABLE: &[AnimatableDesc] =
-    &[AnimatableDesc { name: "value", kind: PropertyKind::Float, components: 1, doc: "How far the shape key is turned up." }];
+pub const SHAPE_ANIMATABLE: &[AnimatableDesc] = &[AnimatableDesc {
+    name: "value",
+    kind: PropertyKind::Float,
+    components: 1,
+    doc: "How far the shape key is turned up.",
+}];
 
 pub fn shape_path(key: &str) -> String {
     format!("key_blocks[\"{key}\"].value")
@@ -595,14 +698,19 @@ pub fn shape_path(key: &str) -> String {
 
 /// The key a shape-key path names, if it is one.
 pub fn parse_shape_path(path: &str) -> Option<&str> {
-    path.strip_prefix("key_blocks[\"")?.strip_suffix("\"].value")
+    path.strip_prefix("key_blocks[\"")?
+        .strip_suffix("\"].value")
 }
 
 /// Plays the shape-key curves of `action` onto `keys` at `frame`.
 pub fn apply_to_shapes(action: &Action, frame: f64, keys: &mut [crate::shape::ShapeKey]) {
     for curve in &action.curves {
-        let Some(name) = parse_shape_path(&curve.path.property) else { continue };
-        let Some(value) = curve.evaluate(frame) else { continue };
+        let Some(name) = parse_shape_path(&curve.path.property) else {
+            continue;
+        };
+        let Some(value) = curve.evaluate(frame) else {
+            continue;
+        };
         if let Some(k) = keys.iter_mut().find(|k| k.name == name) {
             k.value = value.clamp(0.0, 1.0) as f32;
         }
@@ -647,8 +755,12 @@ pub fn read_bone(t: &DTransform, property: &str) -> Option<Vec<f64>> {
 pub fn apply_to_pose(action: &Action, frame: f64, pose: &mut crate::armature::Pose) {
     let mut turned: Vec<(String, [f64; 4])> = Vec::new();
     for curve in &action.curves {
-        let Some((bone, property)) = parse_bone_path(&curve.path.property) else { continue };
-        let (Some(index), Some(value)) = (curve.path.index, curve.evaluate(frame)) else { continue };
+        let Some((bone, property)) = parse_bone_path(&curve.path.property) else {
+            continue;
+        };
+        let (Some(index), Some(value)) = (curve.path.index, curve.evaluate(frame)) else {
+            continue;
+        };
         let i = index as usize;
         match property {
             "location" if i < 3 => pose.entry(bone).transform.translation[i] = value,
@@ -683,7 +795,12 @@ pub fn to_euler(q: DQuat) -> DVec3 {
 
 /// The inverse of [`to_euler`].
 pub fn from_euler(angles: DVec3) -> DQuat {
-    DQuat::from_euler(kreate_math::glam::EulerRot::ZYX, angles.z, angles.y, angles.x)
+    DQuat::from_euler(
+        kreate_math::glam::EulerRot::ZYX,
+        angles.z,
+        angles.y,
+        angles.x,
+    )
 }
 
 /// A transform's animatable values, as the curves see them.
@@ -732,7 +849,12 @@ mod tests {
     use super::*;
 
     fn curve(keys: &[(f64, f64, Interpolation)]) -> FCurve {
-        let mut c = FCurve::new(PropertyPath::component(DatablockKind::Object, Uid::NONE, "location", 0));
+        let mut c = FCurve::new(PropertyPath::component(
+            DatablockKind::Object,
+            Uid::NONE,
+            "location",
+            0,
+        ));
         for (f, v, i) in keys {
             c.insert(*f, *v, *i);
         }
@@ -741,12 +863,18 @@ mod tests {
 
     #[test]
     fn a_key_lands_in_order_and_replaces_one_at_its_frame() {
-        let mut c = curve(&[(10.0, 1.0, Interpolation::Linear), (1.0, 0.0, Interpolation::Linear)]);
+        let mut c = curve(&[
+            (10.0, 1.0, Interpolation::Linear),
+            (1.0, 0.0, Interpolation::Linear),
+        ]);
         c.insert(5.0, 3.0, Interpolation::Linear);
         c.insert(10.0, 7.0, Interpolation::Linear);
         let frames: Vec<f64> = c.keys.iter().map(|k| k.frame).collect();
         assert_eq!(frames, vec![1.0, 5.0, 10.0]);
-        assert_eq!(c.keys[2].value, 7.0, "a second key at a frame stacked instead of replacing");
+        assert_eq!(
+            c.keys[2].value, 7.0,
+            "a second key at a frame stacked instead of replacing"
+        );
         assert!(c.remove(5.0));
         assert!(!c.remove(5.0));
         assert_eq!(c.keys.len(), 2);
@@ -755,7 +883,11 @@ mod tests {
     #[test]
     fn each_interpolation_travels_the_way_it_says() {
         use Interpolation::*;
-        let at = |i| curve(&[(0.0, 0.0, i), (10.0, 10.0, i)]).evaluate(2.5).unwrap();
+        let at = |i| {
+            curve(&[(0.0, 0.0, i), (10.0, 10.0, i)])
+                .evaluate(2.5)
+                .unwrap()
+        };
         assert_eq!(at(Constant), 0.0);
         assert!((at(Linear) - 2.5).abs() < 1e-12);
         // Eased: slower than linear leaving the first key.
@@ -770,7 +902,10 @@ mod tests {
 
     #[test]
     fn before_the_first_key_and_after_the_last_the_value_holds() {
-        let c = curve(&[(5.0, 2.0, Interpolation::Linear), (9.0, 6.0, Interpolation::Linear)]);
+        let c = curve(&[
+            (5.0, 2.0, Interpolation::Linear),
+            (9.0, 6.0, Interpolation::Linear),
+        ]);
         assert_eq!(c.evaluate(-100.0), Some(2.0));
         assert_eq!(c.evaluate(1000.0), Some(6.0));
         assert_eq!(FCurve::new(c.path.clone()).evaluate(3.0), None);
@@ -788,7 +923,11 @@ mod tests {
         ]);
         for step in 0..=220 {
             let v = c.evaluate(step as f64 / 10.0).unwrap();
-            assert!((-1e-9..=5.0 + 1e-9).contains(&v), "frame {}: {v}", step as f64 / 10.0);
+            assert!(
+                (-1e-9..=5.0 + 1e-9).contains(&v),
+                "frame {}: {v}",
+                step as f64 / 10.0
+            );
         }
     }
 
@@ -800,7 +939,10 @@ mod tests {
             DVec3::new(0.0, 0.0, -2.5),
         ] {
             let back = to_euler(from_euler(angles));
-            assert!((back - angles).length() < 1e-9, "{angles:?} came back as {back:?}");
+            assert!(
+                (back - angles).length() < 1e-9,
+                "{angles:?} came back as {back:?}"
+            );
         }
         // X first, then Y, then Z: rotating +X by 90° about Z after nothing
         // else lands on +Y.
@@ -811,8 +953,12 @@ mod tests {
     #[test]
     fn playing_keyed_components_leaves_the_rest_alone() {
         let mut action = Action::new("Move");
-        action.curve_mut("location", 0).insert(1.0, 0.0, Interpolation::Linear);
-        action.curve_mut("location", 0).insert(11.0, 10.0, Interpolation::Linear);
+        action
+            .curve_mut("location", 0)
+            .insert(1.0, 0.0, Interpolation::Linear);
+        action
+            .curve_mut("location", 0)
+            .insert(11.0, 10.0, Interpolation::Linear);
         let mut t = DTransform {
             translation: DVec3::new(99.0, 5.0, 6.0),
             ..DTransform::IDENTITY
@@ -820,12 +966,21 @@ mod tests {
         apply_to_object(&action, 6.0, &mut t);
         assert!((t.translation.x - 5.0).abs() < 1e-12);
         assert_eq!((t.translation.y, t.translation.z), (5.0, 6.0));
-        assert_eq!(t.rotation, DQuat::IDENTITY, "an unkeyed rotation was rewritten");
+        assert_eq!(
+            t.rotation,
+            DQuat::IDENTITY,
+            "an unkeyed rotation was rewritten"
+        );
     }
 
     #[test]
     fn playback_loops_at_the_end_of_the_range() {
-        let p = Playback { frame: 249.0, start: 1, end: 250, fps: 24.0 };
+        let p = Playback {
+            frame: 249.0,
+            start: 1,
+            end: 250,
+            fps: 24.0,
+        };
         // One frame on: 250, still inside.
         assert!((p.advanced(1.0 / 24.0) - 250.0).abs() < 1e-9);
         // Two on: past the end, back to the start.
@@ -836,10 +991,34 @@ mod tests {
     fn a_file_with_keys_out_of_order_is_put_right() {
         let mut c = curve(&[]);
         c.keys = vec![
-            Keyframe { frame: 5.0, value: 1.0, interpolation: Interpolation::Linear, selected: false, slope: None },
-            Keyframe { frame: 1.0, value: 0.0, interpolation: Interpolation::Linear, selected: false, slope: None },
-            Keyframe { frame: 5.0, value: 9.0, interpolation: Interpolation::Linear, selected: false, slope: None },
-            Keyframe { frame: f64::NAN, value: 0.0, interpolation: Interpolation::Linear, selected: false, slope: None },
+            Keyframe {
+                frame: 5.0,
+                value: 1.0,
+                interpolation: Interpolation::Linear,
+                selected: false,
+                slope: None,
+            },
+            Keyframe {
+                frame: 1.0,
+                value: 0.0,
+                interpolation: Interpolation::Linear,
+                selected: false,
+                slope: None,
+            },
+            Keyframe {
+                frame: 5.0,
+                value: 9.0,
+                interpolation: Interpolation::Linear,
+                selected: false,
+                slope: None,
+            },
+            Keyframe {
+                frame: f64::NAN,
+                value: 0.0,
+                interpolation: Interpolation::Linear,
+                selected: false,
+                slope: None,
+            },
         ];
         c.normalise();
         let frames: Vec<f64> = c.keys.iter().map(|k| k.frame).collect();
@@ -849,7 +1028,8 @@ mod tests {
     fn two_curve_action() -> Action {
         let mut a = Action::new("A");
         for (f, v) in [(1.0, 0.0), (10.0, 5.0), (20.0, 2.0)] {
-            a.curve_mut("location", 0).insert(f, v, Interpolation::Linear);
+            a.curve_mut("location", 0)
+                .insert(f, v, Interpolation::Linear);
             a.curve_mut("scale", 1).insert(f, v, Interpolation::Linear);
         }
         a.select_all_with(|_| false);
@@ -869,8 +1049,14 @@ mod tests {
         let mut a = two_curve_action();
         assert!(a.select_range(Some("location"), 9.5, 20.5, true));
         assert_eq!(selected(&a, "location"), vec![10.0, 20.0]);
-        assert!(selected(&a, "scale").is_empty(), "a location row selected scale keys");
-        assert!(!a.select_range(Some("location"), 9.5, 20.5, true), "reselecting reported a change");
+        assert!(
+            selected(&a, "scale").is_empty(),
+            "a location row selected scale keys"
+        );
+        assert!(
+            !a.select_range(Some("location"), 9.5, 20.5, true),
+            "reselecting reported a change"
+        );
     }
 
     #[test]
@@ -894,7 +1080,10 @@ mod tests {
         assert!(a.delete_selected());
         assert_eq!(a.curves.len(), 1, "the emptied scale curve stayed");
         assert_eq!(a.curves[0].keys.len(), 2);
-        assert!(!a.delete_selected(), "nothing selected, and something was deleted");
+        assert!(
+            !a.delete_selected(),
+            "nothing selected, and something was deleted"
+        );
     }
 
     #[test]
@@ -910,7 +1099,10 @@ mod tests {
 
     #[test]
     fn a_hand_set_slope_bends_the_curve_and_auto_gives_it_back() {
-        let mut c = curve(&[(0.0, 0.0, Interpolation::Bezier), (10.0, 0.0, Interpolation::Bezier)]);
+        let mut c = curve(&[
+            (0.0, 0.0, Interpolation::Bezier),
+            (10.0, 0.0, Interpolation::Bezier),
+        ]);
         // Flat keys at the same value: auto is a straight line.
         assert!(c.evaluate(5.0).unwrap().abs() < 1e-12);
         c.keys[0].slope = Some(1.0);
@@ -934,29 +1126,48 @@ mod tests {
         assert!(a.select_region("location", 0, (5.0, 25.0), (1.0, 6.0)));
         assert_eq!(selected(&a, "location"), vec![10.0, 20.0]);
         assert!(a.offset_selected_values(1.0));
-        let x = a.curves.iter().find(|c| c.path.property.as_ref() == "location").unwrap();
-        assert_eq!(x.keys.iter().map(|k| k.value).collect::<Vec<_>>(), vec![0.0, 6.0, 3.0]);
+        let x = a
+            .curves
+            .iter()
+            .find(|c| c.path.property.as_ref() == "location")
+            .unwrap();
+        assert_eq!(
+            x.keys.iter().map(|k| k.value).collect::<Vec<_>>(),
+            vec![0.0, 6.0, 3.0]
+        );
     }
 
     #[test]
     fn a_bone_path_reads_back_and_plays_onto_the_pose() {
         let path = bone_path("Upper Arm", "rotation_quaternion");
         assert_eq!(path, "pose.bones[\"Upper Arm\"].rotation_quaternion");
-        assert_eq!(parse_bone_path(&path), Some(("Upper Arm", "rotation_quaternion")));
+        assert_eq!(
+            parse_bone_path(&path),
+            Some(("Upper Arm", "rotation_quaternion"))
+        );
         assert_eq!(parse_bone_path("location"), None);
-        assert_eq!(describe(DatablockKind::Object, &path).map(|d| d.components), Some(4));
-        assert_eq!(describe(DatablockKind::Object, "location").map(|d| d.components), Some(3));
+        assert_eq!(
+            describe(DatablockKind::Object, &path).map(|d| d.components),
+            Some(4)
+        );
+        assert_eq!(
+            describe(DatablockKind::Object, "location").map(|d| d.components),
+            Some(3)
+        );
 
         // Half a turn about X over ten frames, keyed as a quaternion.
         let mut a = Action::new("Wave");
         let q1 = DQuat::from_rotation_x(1.0);
         for (i, v) in [1.0, 0.0, 0.0, 0.0].into_iter().enumerate() {
-            a.curve_mut(&path, i as u8).insert(1.0, v, Interpolation::Linear);
+            a.curve_mut(&path, i as u8)
+                .insert(1.0, v, Interpolation::Linear);
         }
         for (i, v) in [q1.w, q1.x, q1.y, q1.z].into_iter().enumerate() {
-            a.curve_mut(&path, i as u8).insert(11.0, v, Interpolation::Linear);
+            a.curve_mut(&path, i as u8)
+                .insert(11.0, v, Interpolation::Linear);
         }
-        a.curve_mut(&bone_path("Upper Arm", "location"), 2).insert(1.0, 0.5, Interpolation::Linear);
+        a.curve_mut(&bone_path("Upper Arm", "location"), 2)
+            .insert(1.0, 0.5, Interpolation::Linear);
         let mut pose = crate::armature::Pose::default();
         apply_to_pose(&a, 11.0, &mut pose);
         let t = pose.transform("Upper Arm");
@@ -971,4 +1182,3 @@ mod tests {
         assert_eq!(t, DTransform::IDENTITY);
     }
 }
-

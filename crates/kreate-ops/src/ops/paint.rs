@@ -13,8 +13,8 @@
 //! weights change under the brush while it moves and the whole stroke is one
 //! step to undo.
 
-use kreate_ops_derive::OpParams;
 use kreate_mesh::attribute::{AttrData, Domain};
+use kreate_ops_derive::OpParams;
 use kreate_scene::skin::{weight_layer, WEIGHT_PREFIX};
 use kreate_scene::{DocMut, Document, MeshId, ObjectId};
 
@@ -50,7 +50,9 @@ pub fn groups(doc: &Document, mesh: MeshId) -> Vec<String> {
 /// The weights of one group of `mesh`, one per vertex; zeros when the mesh has
 /// no such group.
 pub fn weights(doc: &Document, mesh: MeshId, group: &str) -> Vec<f32> {
-    let Some(m) = doc.mesh(mesh) else { return Vec::new() };
+    let Some(m) = doc.mesh(mesh) else {
+        return Vec::new();
+    };
     let n = m.num_verts() as usize;
     match m.attributes().get(&weight_layer(group)).map(|l| &l.data) {
         Some(AttrData::F32(w)) if w.len() == n => w.to_vec(),
@@ -82,19 +84,38 @@ impl Operator for AddGroup {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((object, mesh)) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((object, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let taken = groups(doc.document(), mesh);
-        let base = if params.name.trim().is_empty() { "Group".to_string() } else { params.name.trim().to_string() };
+        let base = if params.name.trim().is_empty() {
+            "Group".to_string()
+        } else {
+            params.name.trim().to_string()
+        };
         let name = if taken.contains(&base) {
-            (1..).map(|i| format!("{base}.{i:03}")).find(|n| !taken.contains(n)).expect("names run out after integers")
+            (1..)
+                .map(|i| format!("{base}.{i:03}"))
+                .find(|n| !taken.contains(n))
+                .expect("names run out after integers")
         } else {
             base
         };
         let d = doc.document_mut();
-        let Some(m) = d.mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
+        let Some(m) = d.mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
         let n = m.num_verts() as usize;
-        m.attributes_mut().insert(&weight_layer(&name), Domain::Point, AttrData::F32(std::sync::Arc::new(vec![0.0; n])));
+        m.attributes_mut().insert(
+            &weight_layer(&name),
+            Domain::Point,
+            AttrData::F32(std::sync::Arc::new(vec![0.0; n])),
+        );
         if let Some(o) = d.object_mut(object) {
             o.active_group = Some(name);
         }
@@ -121,8 +142,14 @@ impl Operator for RemoveGroup {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((object, mesh)) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((object, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         if !groups(doc.document(), mesh).contains(&params.name) {
             return Ok(OpResult::Cancelled);
         }
@@ -154,14 +181,26 @@ impl Operator for SetActiveGroup {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((object, mesh)) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((object, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         if !groups(doc.document(), mesh).contains(&params.name)
-            || doc.document().object(object).and_then(|o| o.active_group.as_deref()) == Some(params.name.as_str())
+            || doc
+                .document()
+                .object(object)
+                .and_then(|o| o.active_group.as_deref())
+                == Some(params.name.as_str())
         {
             return Ok(OpResult::Cancelled);
         }
-        let Some(o) = doc.document_mut().object_mut(object) else { return Ok(OpResult::Cancelled) };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
         o.active_group = Some(params.name.clone());
         Ok(OpResult::Finished)
     }
@@ -187,7 +226,13 @@ pub struct StrokeParams {
 
 impl Default for StrokeParams {
     fn default() -> Self {
-        Self { group: String::new(), vertices: Vec::new(), weight: 1.0, strength: 1.0, amounts: Vec::new() }
+        Self {
+            group: String::new(),
+            vertices: Vec::new(),
+            weight: 1.0,
+            strength: 1.0,
+            amounts: Vec::new(),
+        }
     }
 }
 
@@ -210,19 +255,37 @@ impl Operator for Stroke {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((_, mesh)) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         if params.group.is_empty() || !params.weight.is_finite() || !params.strength.is_finite() {
             return Ok(OpResult::Cancelled);
         }
         let mut w = weights(doc.document(), mesh, &params.group);
-        let (target, k) = (params.weight.clamp(0.0, 1.0) as f32, params.strength.clamp(0.0, 1.0) as f32);
+        let (target, k) = (
+            params.weight.clamp(0.0, 1.0) as f32,
+            params.strength.clamp(0.0, 1.0) as f32,
+        );
         // Each vertex once, with the most the brush gave it.
         let mut once: Vec<(u32, f32)> = params
             .vertices
             .iter()
             .enumerate()
-            .map(|(i, v)| (*v, params.amounts.get(i).map(|a| a.clamp(0.0, 1.0) as f32).unwrap_or(1.0)))
+            .map(|(i, v)| {
+                (
+                    *v,
+                    params
+                        .amounts
+                        .get(i)
+                        .map(|a| a.clamp(0.0, 1.0) as f32)
+                        .unwrap_or(1.0),
+                )
+            })
             .collect();
         once.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
         once.dedup_by_key(|(v, _)| *v);
@@ -231,8 +294,14 @@ impl Operator for Stroke {
                 *x += (target - *x) * k * amount;
             }
         }
-        let Some(m) = doc.document_mut().mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
-        m.attributes_mut().insert(&weight_layer(&params.group), Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        m.attributes_mut().insert(
+            &weight_layer(&params.group),
+            Domain::Point,
+            AttrData::F32(std::sync::Arc::new(w)),
+        );
         Ok(OpResult::Finished)
     }
 }
@@ -255,13 +324,22 @@ impl Operator for Normalize {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some((_, mesh)) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let names = groups(doc.document(), mesh);
         if names.is_empty() {
             return Ok(OpResult::Cancelled);
         }
-        let mut all: Vec<Vec<f32>> = names.iter().map(|g| weights(doc.document(), mesh, g)).collect();
+        let mut all: Vec<Vec<f32>> = names
+            .iter()
+            .map(|g| weights(doc.document(), mesh, g))
+            .collect();
         let n = all[0].len();
         let mut changed = false;
         for v in 0..n {
@@ -276,9 +354,15 @@ impl Operator for Normalize {
         if !changed {
             return Ok(OpResult::Cancelled);
         }
-        let Some(m) = doc.document_mut().mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
         for (name, w) in names.iter().zip(all) {
-            m.attributes_mut().insert(&weight_layer(name), Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+            m.attributes_mut().insert(
+                &weight_layer(name),
+                Domain::Point,
+                AttrData::F32(std::sync::Arc::new(w)),
+            );
         }
         Ok(OpResult::Finished)
     }
@@ -289,11 +373,18 @@ impl Operator for Normalize {
 /// corner. The document's mesh is not touched — its real UVs are its own.
 pub fn weight_display(mesh: &kreate_mesh::MeshData, group: Option<&str>) -> kreate_mesh::MeshData {
     let n = mesh.num_verts() as usize;
-    let w: Vec<f32> = match group.and_then(|g| mesh.attributes().get(&weight_layer(g))).map(|l| &l.data) {
+    let w: Vec<f32> = match group
+        .and_then(|g| mesh.attributes().get(&weight_layer(g)))
+        .map(|l| &l.data)
+    {
         Some(AttrData::F32(w)) if w.len() == n => w.to_vec(),
         _ => vec![0.0; n],
     };
-    let uv: Vec<glam::Vec2> = mesh.corner_verts().iter().map(|v| glam::Vec2::new(w[*v as usize], 0.0)).collect();
+    let uv: Vec<glam::Vec2> = mesh
+        .corner_verts()
+        .iter()
+        .map(|v| glam::Vec2::new(w[*v as usize], 0.0))
+        .collect();
     let mut out = mesh.clone();
     out.attributes_mut().insert(
         kreate_mesh::attribute::names::UV,

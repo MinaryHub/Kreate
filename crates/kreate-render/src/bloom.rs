@@ -108,7 +108,11 @@ impl Bloom {
                     module: &shader,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -161,9 +165,18 @@ impl Bloom {
             label: Some("bloom"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params.as_entire_binding(),
+                },
             ],
         })
     }
@@ -190,12 +203,17 @@ impl Bloom {
                     device
                         .create_texture(&wgpu::TextureDescriptor {
                             label: Some("bloom level"),
-                            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                            size: wgpu::Extent3d {
+                                width: w,
+                                height: h,
+                                depth_or_array_layers: 1,
+                            },
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
                             format: FORMAT,
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                | wgpu::TextureUsages::TEXTURE_BINDING,
                             view_formats: &[],
                         })
                         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -216,7 +234,9 @@ impl Bloom {
 
     /// Adds the glow to `picture`, the view prepared for.
     pub fn apply(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView) {
-        let Some(picture_bind) = &self.picture_bind else { return };
+        let Some(picture_bind) = &self.picture_bind else {
+            return;
+        };
         if self.levels.len() != LEVELS {
             return;
         }
@@ -235,7 +255,11 @@ impl Bloom {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load },
+                        load: if clear {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -249,13 +273,45 @@ impl Bloom {
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, level..level + 1);
         };
-        run(encoder, &self.levels[0], Self::level_size(region, 0), &self.prefilter, picture_bind, 0, true);
+        run(
+            encoder,
+            &self.levels[0],
+            Self::level_size(region, 0),
+            &self.prefilter,
+            picture_bind,
+            0,
+            true,
+        );
         for i in 0..LEVELS - 1 {
-            run(encoder, &self.levels[i + 1], Self::level_size(region, i + 1), &self.down, &self.level_binds[i], i as u32, true);
+            run(
+                encoder,
+                &self.levels[i + 1],
+                Self::level_size(region, i + 1),
+                &self.down,
+                &self.level_binds[i],
+                i as u32,
+                true,
+            );
         }
         for i in (0..LEVELS - 1).rev() {
-            run(encoder, &self.levels[i], Self::level_size(region, i), &self.up, &self.level_binds[i + 1], i as u32, false);
+            run(
+                encoder,
+                &self.levels[i],
+                Self::level_size(region, i),
+                &self.up,
+                &self.level_binds[i + 1],
+                i as u32,
+                false,
+            );
         }
-        run(encoder, picture, region, &self.composite, &self.level_binds[0], 0, false);
+        run(
+            encoder,
+            picture,
+            region,
+            &self.composite,
+            &self.level_binds[0],
+            0,
+            false,
+        );
     }
 }

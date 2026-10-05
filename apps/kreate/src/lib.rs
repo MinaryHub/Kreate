@@ -7,7 +7,6 @@
 //! invisible to everything except a human looking at the screen.
 
 pub mod appcall;
-pub mod version;
 pub mod breadcrumbs;
 pub mod bridge;
 pub mod claude;
@@ -24,12 +23,13 @@ pub mod modal;
 pub mod mode;
 pub mod pick;
 pub mod prefs;
-pub mod startup;
 pub mod scenelights;
 pub mod shell;
 pub mod snap;
+pub mod startup;
 pub mod uvmodal;
 pub mod uvview;
+pub mod version;
 
 /// The recently run operator ids, for the crash report.
 ///

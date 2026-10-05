@@ -84,7 +84,10 @@ fn a_face_index_names_a_slot_and_the_slot_names_the_material() {
     let blue = blue(&mut doc);
 
     assert!(doc.set_mesh_slots(mesh, vec![Some(red), Some(blue)]));
-    assert_eq!(doc.material_at(object, 0).map(|m| m.name.as_str()), Some("Red"));
+    assert_eq!(
+        doc.material_at(object, 0).map(|m| m.name.as_str()),
+        Some("Red")
+    );
     assert_eq!(
         doc.material_at(object, 1).map(|m| m.name.as_str()),
         Some("Blue")
@@ -136,7 +139,10 @@ fn two_linked_copies_share_their_mesh_and_so_share_its_materials() {
     let red = red(&mut doc);
 
     doc.set_mesh_slot(mesh, 0, Some(red));
-    assert_eq!(doc.material_at(left, 0).map(|m| m.name.as_str()), Some("Red"));
+    assert_eq!(
+        doc.material_at(left, 0).map(|m| m.name.as_str()),
+        Some("Red")
+    );
     assert_eq!(
         doc.material_at(right, 0).map(|m| m.name.as_str()),
         Some("Red")
@@ -158,7 +164,10 @@ fn an_object_can_override_one_slot_and_leave_the_rest() {
 
     doc.object_mut(right).expect("right").material_overrides = vec![Some(blue)];
 
-    assert_eq!(doc.material_at(left, 0).map(|m| m.name.as_str()), Some("Red"));
+    assert_eq!(
+        doc.material_at(left, 0).map(|m| m.name.as_str()),
+        Some("Red")
+    );
     assert_eq!(
         doc.material_at(right, 0).map(|m| m.name.as_str()),
         Some("Blue")
@@ -302,7 +311,12 @@ use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 /// A cube whose first slot holds a material, selected and active.
@@ -345,7 +359,10 @@ fn a_texture_arrives_and_can_be_taken_off_again() {
     let uid = doc.image_uid(image).expect("an identity").raw().to_string();
 
     set_image(&registry, &mut history, &mut doc, &ctx, &uid);
-    assert_eq!(doc.material(material).unwrap().base_color_image, Some(image));
+    assert_eq!(
+        doc.material(material).unwrap().base_color_image,
+        Some(image)
+    );
 
     // Empty rather than a second operator, the same way a world goes back to a
     // colour: one thing to undo and one place the rule lives.
@@ -418,7 +435,10 @@ fn the_parameters_that_read_a_material_back_leave_it_alone() {
     );
     assert_eq!(read.uid, uid);
     set_image(&registry, &mut history, &mut doc, &ctx, &read.uid);
-    assert_eq!(doc.material(material).unwrap().base_color_image, Some(image));
+    assert_eq!(
+        doc.material(material).unwrap().base_color_image,
+        Some(image)
+    );
 }
 
 // --- getting the first material -------------------------------------------
@@ -505,8 +525,16 @@ fn a_second_press_does_not_replace_the_material_that_is_there() {
         Some(first),
         "a second press replaced the material that was already there"
     );
-    assert_eq!(doc.material_count(), 1, "a material was left with nothing using it");
-    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+    assert_eq!(
+        doc.material_count(),
+        1,
+        "a material was left with nothing using it"
+    );
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a refusal left a step to undo"
+    );
 }
 
 #[test]
@@ -525,7 +553,11 @@ fn a_lamp_is_refused_rather_than_given_a_material() {
     let depth = history.entries().len();
     new_material_refused(&registry, &mut history, &mut doc, &ctx);
     assert_eq!(doc.material_count(), 0, "a lamp was given a material");
-    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a refusal left a step to undo"
+    );
 }
 
 // --- more than one slot ----------------------------------------------------
@@ -555,11 +587,25 @@ fn a_slot_is_added_empty_and_the_new_button_fills_it() {
     let (mesh, object) = cube(&mut doc);
     doc.selection.add(object);
 
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.add_slot",
+        None
+    ));
     assert_eq!(doc.mesh_slots(mesh), &[None], "the slot arrived filled");
     assert_eq!(doc.material_count(), 0, "adding a slot made a material");
 
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.new",
+        Some(0)
+    ));
     assert!(doc.material_at(object, 0).is_some());
 }
 
@@ -571,8 +617,22 @@ fn a_second_slot_gets_its_own_material() {
     let (mesh, object) = cube(&mut doc);
     doc.selection.add(object);
     for slot in 0..2 {
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.add_slot",
+            None
+        ));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.new",
+            Some(slot)
+        ));
     }
     assert_eq!(doc.mesh_slots(mesh).len(), 2);
     let first = doc.material_id_at(object, 0).expect("slot 0");
@@ -587,7 +647,13 @@ fn a_second_slot_gets_its_own_material() {
     params.set("roughness", PropertyValue::Float(0.5));
     params.set("alpha", PropertyValue::Float(1.0));
     history
-        .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &params)
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "material.set_properties",
+            &params,
+        )
         .expect("it ran");
     let red = doc.material(second).expect("still there").base_color;
     let untouched = doc.material(first).expect("still there").base_color;
@@ -602,13 +668,42 @@ fn filling_a_slot_that_already_holds_a_material_is_refused() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (_, object) = cube(&mut doc);
     doc.selection.add(object);
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.add_slot",
+        None
+    ));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.new",
+        Some(0)
+    ));
     let first = doc.material_id_at(object, 0);
 
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(0)));
-    assert_eq!(doc.material_id_at(object, 0), first, "the material was replaced");
-    assert_eq!(doc.material_count(), 1, "a material was left with nothing using it");
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.new",
+        Some(0)
+    ));
+    assert_eq!(
+        doc.material_id_at(object, 0),
+        first,
+        "the material was replaced"
+    );
+    assert_eq!(
+        doc.material_count(),
+        1,
+        "a material was left with nothing using it"
+    );
 }
 
 #[test]
@@ -621,16 +716,44 @@ fn removing_a_slot_keeps_the_faces_and_the_datablock() {
     let (mesh, object) = cube(&mut doc);
     doc.selection.add(object);
     for slot in 0..2 {
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.add_slot",
+            None
+        ));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.new",
+            Some(slot)
+        ));
     }
     let faces = doc.mesh(mesh).expect("a mesh").num_faces();
     let second = doc.material_id_at(object, 1).expect("slot 1");
 
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(1)));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.remove_slot",
+        Some(1)
+    ));
     assert_eq!(doc.mesh_slots(mesh).len(), 1);
-    assert_eq!(doc.mesh(mesh).expect("a mesh").num_faces(), faces, "faces were deleted");
-    assert!(doc.material(second).is_some(), "the datablock was deleted with the slot");
+    assert_eq!(
+        doc.mesh(mesh).expect("a mesh").num_faces(),
+        faces,
+        "faces were deleted"
+    );
+    assert!(
+        doc.material(second).is_some(),
+        "the datablock was deleted with the slot"
+    );
 }
 
 #[test]
@@ -638,12 +761,30 @@ fn removing_a_slot_that_is_not_there_is_refused() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (mesh, object) = cube(&mut doc);
     doc.selection.add(object);
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.add_slot",
+        None
+    ));
 
     let depth = history.entries().len();
-    run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(7));
+    run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.remove_slot",
+        Some(7),
+    );
     assert_eq!(doc.mesh_slots(mesh).len(), 1, "a slot went missing");
-    assert_eq!(history.entries().len(), depth, "a refusal left a step to undo");
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a refusal left a step to undo"
+    );
 }
 
 #[test]
@@ -652,12 +793,33 @@ fn undoing_a_slot_removal_puts_the_material_back_where_it_was() {
     let (_, object) = cube(&mut doc);
     doc.selection.add(object);
     for slot in 0..2 {
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
-        assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.new", Some(slot)));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.add_slot",
+            None
+        ));
+        assert!(run_op(
+            &registry,
+            &mut history,
+            &mut doc,
+            &ctx,
+            "material.new",
+            Some(slot)
+        ));
     }
     let before: Vec<_> = (0..2).map(|s| doc.material_id_at(object, s)).collect();
 
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.remove_slot", Some(0)));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.remove_slot",
+        Some(0)
+    ));
     assert!(history.undo(&mut doc), "there was nothing to undo");
     let after: Vec<_> = (0..2).map(|s| doc.material_id_at(object, s)).collect();
     assert_eq!(before, after, "undo did not restore the slot list");
@@ -671,7 +833,14 @@ fn an_operator_naming_a_slot_that_is_empty_declines() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (_, object) = cube(&mut doc);
     doc.selection.add(object);
-    assert!(run_op(&registry, &mut history, &mut doc, &ctx, "material.add_slot", None));
+    assert!(run_op(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.add_slot",
+        None
+    ));
 
     let mut params = PropertyMap::new();
     params.set("slot", PropertyValue::Int(0));
@@ -692,7 +861,9 @@ fn each_map_goes_in_its_own_slot_and_leaves_the_others() {
     let material = a_cube_with_a_material(&mut doc);
     let colour = an_image(&mut doc);
     let normal = an_image(&mut doc);
-    let uid = |doc: &kreate_scene::Document, id| doc.image_uid(id).expect("an identity").raw().to_string();
+    let uid = |doc: &kreate_scene::Document, id| {
+        doc.image_uid(id).expect("an identity").raw().to_string()
+    };
 
     let (colour_uid, normal_uid) = (uid(&doc, colour), uid(&doc, normal));
     set_image(&registry, &mut history, &mut doc, &ctx, &colour_uid);
@@ -704,7 +875,11 @@ fn each_map_goes_in_its_own_slot_and_leaves_the_others() {
         .expect("the operator ran");
 
     let m = doc.material(material).unwrap();
-    assert_eq!(m.base_color_image, Some(colour), "the normal map replaced the colour");
+    assert_eq!(
+        m.base_color_image,
+        Some(colour),
+        "the normal map replaced the colour"
+    );
     assert_eq!(m.normal_image, Some(normal));
     assert_eq!(m.metallic_roughness_image, None);
 
@@ -729,9 +904,18 @@ fn the_normal_strength_reads_back_as_it_was_set() {
     ));
     params.set("normal_strength", PropertyValue::Float(0.25));
     history
-        .dispatch(&registry, &mut doc, &ctx, "material.set_properties", &params)
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "material.set_properties",
+            &params,
+        )
         .expect("ran");
     let m = doc.material(material).unwrap();
     assert_eq!(m.normal_strength, 0.25);
-    assert_eq!(kreate_ops::ops::object::material_params(m, 0).normal_strength, 0.25);
+    assert_eq!(
+        kreate_ops::ops::object::material_params(m, 0).normal_strength,
+        0.25
+    );
 }

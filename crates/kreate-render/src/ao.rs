@@ -113,7 +113,11 @@ impl Ao {
                     module: &shader,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -122,7 +126,13 @@ impl Ao {
                 cache: None,
             })
         };
-        let estimate = pipeline("ao estimate", &[Some(&depth_layout)], "ao_fragment", FORMAT, None);
+        let estimate = pipeline(
+            "ao estimate",
+            &[Some(&depth_layout)],
+            "ao_fragment",
+            FORMAT,
+            None,
+        );
         // Destination times source: the image darkened by the occlusion, its
         // alpha left as it was.
         let multiply = wgpu::BlendState {
@@ -137,7 +147,13 @@ impl Ao {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let apply = pipeline("ao apply", &[None, Some(&occlusion_layout)], "ao_apply", surfaces, Some(multiply));
+        let apply = pipeline(
+            "ao apply",
+            &[None, Some(&occlusion_layout)],
+            "ao_apply",
+            surfaces,
+            Some(multiply),
+        );
         let apply_linear = pipeline(
             "ao apply linear",
             &[None, Some(&occlusion_layout)],
@@ -155,19 +171,35 @@ impl Ao {
         let occlusion = Self::image(device, size);
         let depth_bind = Self::depth_bind(device, &depth_layout, depth, &params);
         let occlusion_bind = Self::occlusion_bind(device, &occlusion_layout, &occlusion);
-        Self { estimate, apply, apply_linear, depth_layout, occlusion_layout, params, occlusion, depth_bind, occlusion_bind, size }
+        Self {
+            estimate,
+            apply,
+            apply_linear,
+            depth_layout,
+            occlusion_layout,
+            params,
+            occlusion,
+            depth_bind,
+            occlusion_bind,
+            size,
+        }
     }
 
     fn image(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
         device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("ao"),
-                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
@@ -183,8 +215,14 @@ impl Ao {
             label: Some("ao depth"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
             ],
         })
     }
@@ -197,25 +235,42 @@ impl Ao {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ao occlusion"),
             layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(occlusion) }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(occlusion),
+            }],
         })
     }
 
     /// Follows the viewport's allocation. The depth is always rebound — the
     /// viewport remakes it on a resize, and the old view would be read.
-    pub fn resize(&mut self, device: &wgpu::Device, depth: &wgpu::TextureView, width: u32, height: u32) {
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        depth: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
         let size = (width.max(1), height.max(1));
         if size != self.size {
             self.size = size;
             self.occlusion = Self::image(device, size);
-            self.occlusion_bind = Self::occlusion_bind(device, &self.occlusion_layout, &self.occlusion);
+            self.occlusion_bind =
+                Self::occlusion_bind(device, &self.occlusion_layout, &self.occlusion);
         }
         self.depth_bind = Self::depth_bind(device, &self.depth_layout, depth, &self.params);
     }
 
     /// The view this frame: its projection, the region drawn, and how far the
     /// occlusion reaches in view units.
-    pub fn set_view(&self, queue: &wgpu::Queue, projection: Mat4, region: (u32, u32), radius: f32, strength: f32) {
+    pub fn set_view(
+        &self,
+        queue: &wgpu::Queue,
+        projection: Mat4,
+        region: (u32, u32),
+        radius: f32,
+        strength: f32,
+    ) {
         let params = Params {
             projection: projection.to_cols_array_2d(),
             inverse_projection: projection.inverse().to_cols_array_2d(),
@@ -228,12 +283,22 @@ impl Ao {
 
     /// Darkens `surfaces` where geometry closes it in. Reads the depth the
     /// surfaces wrote, so it runs after them and outside their pass.
-    pub fn apply(&self, encoder: &mut wgpu::CommandEncoder, surfaces: &wgpu::TextureView, region: (u32, u32)) {
+    pub fn apply(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        surfaces: &wgpu::TextureView,
+        region: (u32, u32),
+    ) {
         self.apply_with(encoder, surfaces, region, &self.apply);
     }
 
     /// [`Ao::apply`], into the rendered view's linear picture.
-    pub fn apply_linear(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView, region: (u32, u32)) {
+    pub fn apply_linear(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::TextureView,
+        region: (u32, u32),
+    ) {
         self.apply_with(encoder, picture, region, &self.apply_linear);
     }
 
@@ -272,7 +337,11 @@ fn begin<'a>(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: if clear { wgpu::LoadOp::Clear(wgpu::Color::WHITE) } else { wgpu::LoadOp::Load },
+                load: if clear {
+                    wgpu::LoadOp::Clear(wgpu::Color::WHITE)
+                } else {
+                    wgpu::LoadOp::Load
+                },
                 store: wgpu::StoreOp::Store,
             },
         })],

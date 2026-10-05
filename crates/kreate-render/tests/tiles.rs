@@ -156,11 +156,7 @@ fn a_small_lamp_reaches_some_tiles_and_not_others() {
         ..Camera::default()
     };
     // Off to one side, and reaching a metre.
-    let lists = cull(
-        &gpu,
-        &[lamp(glam::DVec3::new(6.0, 0.0, 0.0), 1.0)],
-        &camera,
-    );
+    let lists = cull(&gpu, &[lamp(glam::DVec3::new(6.0, 0.0, 0.0), 1.0)], &camera);
     let with = lists.iter().filter(|t| !t.is_empty()).count();
     assert!(with > 0, "the lamp reached no tile at all");
     assert!(

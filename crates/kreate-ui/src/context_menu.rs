@@ -161,11 +161,21 @@ mod tests {
         // The right-click menu's Add opens the Add menu, which is the
         // application's and not an operator: queued as one, it did nothing.
         let mut queue = CommandQueue::default();
-        choose(&Entry::new("app.menu", info("Add...", "Shift A")), &mut queue);
-        choose(&Entry::new("object.delete", info("Delete", "X")), &mut queue);
+        choose(
+            &Entry::new("app.menu", info("Add...", "Shift A")),
+            &mut queue,
+        );
+        choose(
+            &Entry::new("object.delete", info("Delete", "X")),
+            &mut queue,
+        );
         let commands = queue.drain();
-        assert!(matches!(&commands[0], crate::Command::Dispatch { op_id, .. } if op_id == "app.menu"));
-        assert!(matches!(&commands[1], crate::Command::RunOperator { op_id, .. } if op_id == "object.delete"));
+        assert!(
+            matches!(&commands[0], crate::Command::Dispatch { op_id, .. } if op_id == "app.menu")
+        );
+        assert!(
+            matches!(&commands[1], crate::Command::RunOperator { op_id, .. } if op_id == "object.delete")
+        );
     }
 
     #[test]

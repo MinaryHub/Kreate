@@ -16,7 +16,11 @@
 use glam::{DAffine3, Mat4, Vec3};
 
 fn source() -> String {
-    format!("{}\n{}", crate::shading::shader_source(), include_str!("shaders/pathtrace.wgsl"))
+    format!(
+        "{}\n{}",
+        crate::shading::shader_source(),
+        include_str!("shaders/pathtrace.wgsl")
+    )
 }
 
 /// The tracer's shader as a device receives it, for the portability tests.
@@ -160,15 +164,17 @@ impl PathTracer {
     /// `shading` is the layout of the shading library's group: the tracer
     /// reads the lights and the environment through it.
     pub fn new(device: &wgpu::Device, shading: &wgpu::BindGroupLayout) -> Self {
-        let storage = |binding: u32, read_only: bool, visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
+        let storage = |binding: u32, read_only: bool, visibility: wgpu::ShaderStages| {
+            wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
         };
         let uniform = |binding: u32, visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
             binding,
@@ -248,11 +254,12 @@ impl PathTracer {
             label: Some("path trace resolve"),
             source: wgpu::ShaderSource::Wgsl(resolve_source().into()),
         });
-        let resolve_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("path trace resolve"),
-            bind_group_layouts: &[Some(&resolve_layout)],
-            immediate_size: 0,
-        });
+        let resolve_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("path trace resolve"),
+                bind_group_layouts: &[Some(&resolve_layout)],
+                immediate_size: 0,
+            });
         let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("path trace resolve"),
             layout: Some(&resolve_pipeline_layout),
@@ -279,14 +286,23 @@ impl PathTracer {
             cache: None,
         });
         let buffer = |label, size: u64, usage| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
         };
         let params = buffer(
             "path trace params",
             std::mem::size_of::<Params>() as u64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let resolve_params = buffer("path trace resolve params", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let resolve_params = buffer(
+            "path trace resolve params",
+            16,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         let sum = buffer("path trace sum", 16, wgpu::BufferUsages::STORAGE);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("path trace images"),
@@ -338,7 +354,9 @@ impl PathTracer {
             let base = positions.len() as u32;
             let to_world = mesh.transform;
             let normal_matrix = to_world.matrix3.inverse().transpose();
-            uvs.extend((0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])));
+            uvs.extend(
+                (0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])),
+            );
             for (p, n) in mesh.positions.iter().zip(mesh.normals) {
                 let w = to_world.transform_point3(glam::DVec3::from_array(p.map(|c| c as f64)));
                 positions.push(w.as_vec3());
@@ -354,12 +372,22 @@ impl PathTracer {
         let mut nodes: Vec<GpuNode> = bvh
             .flat_nodes()
             .into_iter()
-            .map(|(b, first, count)| GpuNode { min: b.min.to_array(), first, max: b.max.to_array(), count })
+            .map(|(b, first, count)| GpuNode {
+                min: b.min.to_array(),
+                first,
+                max: b.max.to_array(),
+                count,
+            })
             .collect();
         let mut order = bvh.order().to_vec();
         // An empty scene still binds: one node that nothing enters.
         if nodes.is_empty() {
-            nodes.push(GpuNode { min: [1.0; 3], first: 0, max: [-1.0; 3], count: 0 });
+            nodes.push(GpuNode {
+                min: [1.0; 3],
+                first: 0,
+                max: [-1.0; 3],
+                count: 0,
+            });
         }
         if order.is_empty() {
             order.push(0);
@@ -379,13 +407,24 @@ impl PathTracer {
                 data_layers.push(pixels);
             }
         }
-        let layer = |i: Option<usize>| i.and_then(|i| layer_of.get(i).copied()).unwrap_or(-1) as f32;
+        let layer =
+            |i: Option<usize>| i.and_then(|i| layer_of.get(i).copied()).unwrap_or(-1) as f32;
         let mut surface_data: Vec<[f32; 4]> = surfaces
             .iter()
             .flat_map(|s| {
                 [
-                    [s.base_color[0], s.base_color[1], s.base_color[2], s.metallic],
-                    [s.roughness, layer(s.base_color_image), layer(s.metallic_roughness_image), s.transmission],
+                    [
+                        s.base_color[0],
+                        s.base_color[1],
+                        s.base_color[2],
+                        s.metallic,
+                    ],
+                    [
+                        s.roughness,
+                        layer(s.base_color_image),
+                        layer(s.metallic_roughness_image),
+                        s.transmission,
+                    ],
                     [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
                 ]
             })
@@ -394,7 +433,11 @@ impl PathTracer {
             let count = layers.len().max(1) as u32;
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: IMAGE_SIZE, height: IMAGE_SIZE, depth_or_array_layers: count },
+                size: wgpu::Extent3d {
+                    width: IMAGE_SIZE,
+                    height: IMAGE_SIZE,
+                    depth_or_array_layers: count,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -407,12 +450,24 @@ impl PathTracer {
                     wgpu::TexelCopyTextureInfo {
                         texture: &texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: i as u32 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: i as u32,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     pixels,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IMAGE_SIZE * 4), rows_per_image: Some(IMAGE_SIZE) },
-                    wgpu::Extent3d { width: IMAGE_SIZE, height: IMAGE_SIZE, depth_or_array_layers: 1 },
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(IMAGE_SIZE * 4),
+                        rows_per_image: Some(IMAGE_SIZE),
+                    },
+                    wgpu::Extent3d {
+                        width: IMAGE_SIZE,
+                        height: IMAGE_SIZE,
+                        depth_or_array_layers: 1,
+                    },
                 );
             }
             texture.create_view(&wgpu::TextureViewDescriptor {
@@ -420,17 +475,33 @@ impl PathTracer {
                 ..Default::default()
             })
         };
-        let colour_images = array("path trace colour images", wgpu::TextureFormat::Rgba8UnormSrgb, &colour_layers);
-        let data_images = array("path trace data images", wgpu::TextureFormat::Rgba8Unorm, &data_layers);
+        let colour_images = array(
+            "path trace colour images",
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            &colour_layers,
+        );
+        let data_images = array(
+            "path trace data images",
+            wgpu::TextureFormat::Rgba8Unorm,
+            &data_layers,
+        );
         if surface_data.is_empty() {
             surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, -1.0, -1.0, 0.0]]);
         }
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let upload = |label, bytes: &[u8]| {
-            let bytes = if bytes.is_empty() { &[0u8; 16][..] } else { bytes };
+            let bytes = if bytes.is_empty() {
+                &[0u8; 16][..]
+            } else {
+                bytes
+            };
             wgpu::util::DeviceExt::create_buffer_init(
                 device,
-                &wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytes, usage: wgpu::BufferUsages::STORAGE },
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytes,
+                    usage: wgpu::BufferUsages::STORAGE,
+                },
             )
         };
         self.scene = Some(Scene {
@@ -498,11 +569,23 @@ impl PathTracer {
             ]
             .iter()
             .enumerate()
-            .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
             .collect();
-            entries.push(wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&scene.colour_images) });
-            entries.push(wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&scene.data_images) });
-            entries.push(wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(&self.image_sampler) });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&scene.colour_images),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(&scene.data_images),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+            });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,
@@ -514,8 +597,14 @@ impl PathTracer {
                 label: Some("path trace resolve"),
                 layout: &self.resolve_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.sum.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.resolve_params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.sum.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.resolve_params.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -537,7 +626,11 @@ impl PathTracer {
             _pad: [0; 3],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
-        queue.write_buffer(&self.resolve_params, 0, bytemuck::cast_slice(&[region.0, region.1, 0, 0]));
+        queue.write_buffer(
+            &self.resolve_params,
+            0,
+            bytemuck::cast_slice(&[region.0, region.1, 0, 0]),
+        );
     }
 
     /// One sample per pixel into the sum, then the mean onto `picture`.
@@ -547,9 +640,14 @@ impl PathTracer {
         shading: &wgpu::BindGroup,
         picture: &wgpu::TextureView,
     ) {
-        let (Some(scene_bind), Some(resolve_bind)) = (&self.scene_bind, &self.resolve_bind) else { return };
+        let (Some(scene_bind), Some(resolve_bind)) = (&self.scene_bind, &self.resolve_bind) else {
+            return;
+        };
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("path trace"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("path trace"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.trace);
             pass.set_bind_group(0, scene_bind, &[]);
             pass.set_bind_group(2, shading, &[]);
@@ -561,7 +659,10 @@ impl PathTracer {
                 view: picture,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

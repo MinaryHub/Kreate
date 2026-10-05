@@ -6,7 +6,9 @@
 //! it does not. Nothing but a picture can check that, so this takes one.
 
 use kreate_render::GpuOptions;
-use kreate_render::{Camera, Draw, MarkerShape, OverlayLine, OverlayPoint, RenderMeshCpu, ShadingMode, Viewport};
+use kreate_render::{
+    Camera, Draw, MarkerShape, OverlayLine, OverlayPoint, RenderMeshCpu, ShadingMode, Viewport,
+};
 
 struct Gpu {
     device: wgpu::Device,

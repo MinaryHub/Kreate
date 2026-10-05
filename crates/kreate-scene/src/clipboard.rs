@@ -25,23 +25,41 @@ impl Document {
     /// transform alone would put it. Ids that name nothing are skipped.
     pub fn extract_objects(&self, ids: &[ObjectId]) -> Document {
         let mut out = Document::new();
-        let taken: Vec<ObjectId> = ids.iter().copied().filter(|id| self.object(*id).is_some()).collect();
+        let taken: Vec<ObjectId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.object(*id).is_some())
+            .collect();
         let mut new_ids: HashMap<ObjectId, ObjectId> = HashMap::new();
         let mut materials: HashMap<MaterialId, MaterialId> = HashMap::new();
         let mut images: HashMap<ImageId, ImageId> = HashMap::new();
         let mut actions: HashMap<ActionId, ActionId> = HashMap::new();
 
         for id in &taken {
-            let Some(object) = self.object(*id) else { continue };
+            let Some(object) = self.object(*id) else {
+                continue;
+            };
             let mut copy = object.clone();
             copy.data = match &object.data {
                 ObjectData::Mesh(mesh) => {
-                    let Some(data) = self.mesh(*mesh) else { continue };
+                    let Some(data) = self.mesh(*mesh) else {
+                        continue;
+                    };
                     let new_mesh = out.add_mesh(data.clone());
                     let slots: Vec<Option<MaterialId>> = self
                         .mesh_slots(*mesh)
                         .iter()
-                        .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images, &mut actions)))
+                        .map(|slot| {
+                            slot.map(|m| {
+                                self.copy_material(
+                                    m,
+                                    &mut out,
+                                    &mut materials,
+                                    &mut images,
+                                    &mut actions,
+                                )
+                            })
+                        })
                         .collect();
                     out.set_mesh_slots(new_mesh, slots);
                     ObjectData::Mesh(new_mesh)
@@ -49,7 +67,9 @@ impl Document {
                 ObjectData::Light(light) => match self.light(*light) {
                     Some(l) => {
                         let mut l = l.clone();
-                        l.action = l.action.and_then(|a| self.copy_action(a, &mut out, &mut actions));
+                        l.action = l
+                            .action
+                            .and_then(|a| self.copy_action(a, &mut out, &mut actions));
                         ObjectData::Light(out.add_light(l))
                     }
                     None => continue,
@@ -67,11 +87,17 @@ impl Document {
             copy.material_overrides = object
                 .material_overrides
                 .iter()
-                .map(|slot| slot.map(|m| self.copy_material(m, &mut out, &mut materials, &mut images, &mut actions)))
+                .map(|slot| {
+                    slot.map(|m| {
+                        self.copy_material(m, &mut out, &mut materials, &mut images, &mut actions)
+                    })
+                })
                 .collect();
             // The action comes along, once however many copies play it, so
             // two pasted objects sharing a walk cycle still share one.
-            copy.action = object.action.and_then(|a| self.copy_action(a, &mut out, &mut actions));
+            copy.action = object
+                .action
+                .and_then(|a| self.copy_action(a, &mut out, &mut actions));
             // Parents are settled below, once every copy exists. Until then
             // the copy stands alone at its world placement.
             copy.parent = None;
@@ -85,9 +111,15 @@ impl Document {
         // transform and parent inverse are restored from the source, since the
         // pair is the same pair.
         for id in &taken {
-            let Some(object) = self.object(*id) else { continue };
-            let (Some(parent), Some(new_id)) = (object.parent, new_ids.get(id)) else { continue };
-            let Some(new_parent) = new_ids.get(&parent) else { continue };
+            let Some(object) = self.object(*id) else {
+                continue;
+            };
+            let (Some(parent), Some(new_id)) = (object.parent, new_ids.get(id)) else {
+                continue;
+            };
+            let Some(new_parent) = new_ids.get(&parent) else {
+                continue;
+            };
             if let Some(copy) = out.object_mut(*new_id) {
                 copy.transform = object.transform;
                 copy.parent_inverse = object.parent_inverse;
@@ -113,17 +145,31 @@ impl Document {
 
         let source_ids: Vec<ObjectId> = other.objects().map(|(id, _)| id).collect();
         for id in &source_ids {
-            let Some(object) = other.object(*id) else { continue };
+            let Some(object) = other.object(*id) else {
+                continue;
+            };
             let mut copy = object.clone();
             copy.name = format!("{}.001", object.name);
             copy.data = match &object.data {
                 ObjectData::Mesh(mesh) => {
-                    let Some(data) = other.mesh(*mesh) else { continue };
+                    let Some(data) = other.mesh(*mesh) else {
+                        continue;
+                    };
                     let new_mesh = self.add_mesh(data.clone());
                     let slots: Vec<Option<MaterialId>> = other
                         .mesh_slots(*mesh)
                         .iter()
-                        .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images, &mut actions)))
+                        .map(|slot| {
+                            slot.map(|m| {
+                                other.copy_material(
+                                    m,
+                                    self,
+                                    &mut materials,
+                                    &mut images,
+                                    &mut actions,
+                                )
+                            })
+                        })
                         .collect();
                     self.set_mesh_slots(new_mesh, slots);
                     ObjectData::Mesh(new_mesh)
@@ -131,7 +177,9 @@ impl Document {
                 ObjectData::Light(light) => match other.light(*light) {
                     Some(l) => {
                         let mut l = l.clone();
-                        l.action = l.action.and_then(|a| other.copy_action(a, self, &mut actions));
+                        l.action = l
+                            .action
+                            .and_then(|a| other.copy_action(a, self, &mut actions));
                         ObjectData::Light(self.add_light(l))
                     }
                     None => continue,
@@ -149,17 +197,27 @@ impl Document {
             copy.material_overrides = object
                 .material_overrides
                 .iter()
-                .map(|slot| slot.map(|m| other.copy_material(m, self, &mut materials, &mut images, &mut actions)))
+                .map(|slot| {
+                    slot.map(|m| {
+                        other.copy_material(m, self, &mut materials, &mut images, &mut actions)
+                    })
+                })
                 .collect();
-            copy.action = object.action.and_then(|a| other.copy_action(a, self, &mut actions));
+            copy.action = object
+                .action
+                .and_then(|a| other.copy_action(a, self, &mut actions));
             copy.parent = None;
             let new_id = self.add_object(copy);
             new_ids.insert(*id, new_id);
             added.push(new_id);
         }
         for id in &source_ids {
-            let Some(object) = other.object(*id) else { continue };
-            let (Some(parent), Some(new_id)) = (object.parent, new_ids.get(id)) else { continue };
+            let Some(object) = other.object(*id) else {
+                continue;
+            };
+            let (Some(parent), Some(new_id)) = (object.parent, new_ids.get(id)) else {
+                continue;
+            };
             if let Some(new_parent) = new_ids.get(&parent) {
                 if let Some(copy) = self.object_mut(*new_id) {
                     copy.parent = Some(*new_parent);
@@ -184,10 +242,7 @@ impl Document {
         if let Some(done) = materials.get(&id) {
             return *done;
         }
-        let mut material = self
-            .material(id)
-            .cloned()
-            .unwrap_or_default();
+        let mut material = self.material(id).cloned().unwrap_or_default();
         // Every map, through the one image table: a file used as both the
         // colour and the roughness is one image in the result, as it was here.
         let mut carry = |image: ImageId| -> Option<ImageId> {
@@ -212,7 +267,9 @@ impl Document {
         }
         // Its action, through the same table, so a material and the lamp
         // beside it sharing one blink still share it in the paste.
-        material.action = material.action.and_then(|a| self.copy_action(a, into, actions));
+        material.action = material
+            .action
+            .and_then(|a| self.copy_action(a, into, actions));
         let new_id = into.add_material(material);
         materials.insert(id, new_id);
         new_id
@@ -287,9 +344,17 @@ mod tests {
         assert_eq!(pasted.len(), 1);
         assert_eq!(doc.object_count(), before + 1);
         assert_ne!(pasted[0], a);
-        assert_ne!(doc.object_uid(pasted[0]), doc.object_uid(a), "a paste is a new identity");
+        assert_ne!(
+            doc.object_uid(pasted[0]),
+            doc.object_uid(a),
+            "a paste is a new identity"
+        );
         assert_eq!(doc.object(pasted[0]).unwrap().name, "A.001");
-        assert_eq!(doc.object(a).unwrap().name, "A", "the original kept its name");
+        assert_eq!(
+            doc.object(a).unwrap().name,
+            "A",
+            "the original kept its name"
+        );
         // And its own mesh: editing the paste must not edit the original.
         assert_ne!(
             doc.object(pasted[0]).unwrap().mesh(),
@@ -308,7 +373,11 @@ mod tests {
             doc.set_mesh_slots(mesh, vec![Some(material)]);
         }
         let fragment = doc.extract_objects(&[a, b]);
-        assert_eq!(fragment.material_count(), 1, "one material, not one per object");
+        assert_eq!(
+            fragment.material_count(),
+            1,
+            "one material, not one per object"
+        );
         let pasted = doc.merge_from(&fragment);
         let m0 = doc.material_id_at(pasted[0], 0);
         let m1 = doc.material_id_at(pasted[1], 0);

@@ -134,9 +134,12 @@ impl NodeKind {
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &[Socket::Color],
             NodeKind::MultiplyValue => &[Socket::Scalar, Socket::Scalar],
             // Base colour, metallic, roughness, normal.
-            NodeKind::Surface { .. } => {
-                &[Socket::Color, Socket::Scalar, Socket::Scalar, Socket::Vector]
-            }
+            NodeKind::Surface { .. } => &[
+                Socket::Color,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Vector,
+            ],
         }
     }
 
@@ -185,10 +188,25 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
-            NodeKind::Surface { base_color, metallic, roughness, emission, transmission, ior } => {
+            NodeKind::Surface {
+                base_color,
+                metallic,
+                roughness,
+                emission,
+                transmission,
+                ior,
+            } => {
                 vec![
-                    base_color.r, base_color.g, base_color.b, *metallic, *roughness,
-                    emission.r, emission.g, emission.b, *transmission, *ior,
+                    base_color.r,
+                    base_color.g,
+                    base_color.b,
+                    *metallic,
+                    *roughness,
+                    emission.r,
+                    emission.g,
+                    emission.b,
+                    *transmission,
+                    *ior,
                 ]
             }
             NodeKind::Image { .. }
@@ -214,7 +232,9 @@ impl NodeKind {
             "multiply" => NodeKind::Multiply,
             "separate_rgb" => NodeKind::SeparateRgb,
             "multiply_value" => NodeKind::MultiplyValue,
-            "normal_map" => NodeKind::NormalMap { strength: at(0, 1.0) },
+            "normal_map" => NodeKind::NormalMap {
+                strength: at(0, 1.0),
+            },
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -336,7 +356,12 @@ impl ShaderGraph {
     /// because it is the claim the fast path rests on: if the compiler's short
     /// route and this graph ever stop agreeing, every material in every scene
     /// changes and nothing says why.
-    pub fn standard(name: impl Into<String>, base_color: SceneRgb, metallic: f32, roughness: f32) -> Self {
+    pub fn standard(
+        name: impl Into<String>,
+        base_color: SceneRgb,
+        metallic: f32,
+        roughness: f32,
+    ) -> Self {
         Self {
             name: name.into(),
             linkage: Linkage::Local,
@@ -382,7 +407,13 @@ impl ShaderGraph {
             material.metallic,
             material.roughness,
         );
-        if let NodeKind::Surface { emission, transmission, ior, .. } = &mut graph.nodes[0].kind {
+        if let NodeKind::Surface {
+            emission,
+            transmission,
+            ior,
+            ..
+        } = &mut graph.nodes[0].kind
+        {
             *emission = material.emitted();
             *transmission = material.transmission;
             *ior = material.ior;
@@ -398,11 +429,20 @@ impl ShaderGraph {
         };
         let wire = |graph: &mut Self, from_node, from_socket, to_node, to_socket| {
             graph
-                .link(Link { from_node, from_socket, to_node, to_socket })
+                .link(Link {
+                    from_node,
+                    from_socket,
+                    to_node,
+                    to_socket,
+                })
                 .expect("the sockets agree")
         };
         if let Some(image) = material.base_color_image {
-            let texture = add(&mut graph, "Base Colour", NodeKind::Image { image: Some(image) });
+            let texture = add(
+                &mut graph,
+                "Base Colour",
+                NodeKind::Image { image: Some(image) },
+            );
             let factor = add(&mut graph, "Tint", NodeKind::Color(material.base_color));
             let product = add(&mut graph, "Base Colour x Tint", NodeKind::Multiply);
             wire(&mut graph, texture, 0, product, 0);
@@ -435,7 +475,9 @@ impl ShaderGraph {
             let decode = add(
                 &mut graph,
                 "Normal Map",
-                NodeKind::NormalMap { strength: material.normal_strength },
+                NodeKind::NormalMap {
+                    strength: material.normal_strength,
+                },
             );
             wire(&mut graph, texture, 0, decode, 0);
             wire(&mut graph, decode, 0, 0, 3);
@@ -535,7 +577,10 @@ impl ShaderGraph {
     /// onto a taken socket means "this one instead", which is what every node
     /// editor does and what the gesture means.
     pub fn link(&mut self, link: Link) -> Result<(), LinkError> {
-        let from = self.nodes.get(link.from_node).ok_or(LinkError::NoSuchNode)?;
+        let from = self
+            .nodes
+            .get(link.from_node)
+            .ok_or(LinkError::NoSuchNode)?;
         let to = self.nodes.get(link.to_node).ok_or(LinkError::NoSuchNode)?;
         let from_type = *from
             .kind
@@ -666,7 +711,10 @@ mod tests {
         // accident — the sockets are next to each other.
         let mut g = graph();
         let colour = g
-            .add_node(Node::new("Red", NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0))))
+            .add_node(Node::new(
+                "Red",
+                NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0)),
+            ))
             .expect("added");
         let surface = g.output().expect("a surface");
         assert_eq!(
@@ -747,7 +795,10 @@ mod tests {
         let mut g = graph();
         let surface = g.output().expect("a surface");
         let colour = g
-            .add_node(Node::new("C", NodeKind::Color(SceneRgb::new(1.0, 1.0, 1.0))))
+            .add_node(Node::new(
+                "C",
+                NodeKind::Color(SceneRgb::new(1.0, 1.0, 1.0)),
+            ))
             .expect("added");
         // A node cannot feed itself, whatever its sockets say.
         assert_eq!(
@@ -772,10 +823,16 @@ mod tests {
         let mut g = graph();
         let surface = g.output().expect("a surface");
         let red = g
-            .add_node(Node::new("Red", NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0))))
+            .add_node(Node::new(
+                "Red",
+                NodeKind::Color(SceneRgb::new(1.0, 0.0, 0.0)),
+            ))
             .expect("added");
         let blue = g
-            .add_node(Node::new("Blue", NodeKind::Color(SceneRgb::new(0.0, 0.0, 1.0))))
+            .add_node(Node::new(
+                "Blue",
+                NodeKind::Color(SceneRgb::new(0.0, 0.0, 1.0)),
+            ))
             .expect("added");
         g.link(Link {
             from_node: red,
@@ -875,10 +932,7 @@ mod tests {
         // the same rule `Mode::tag` follows and for the same reason.
         assert_eq!(NodeKind::Value(0.0).tag(), "value");
         assert_eq!(NodeKind::Image { image: None }.tag(), "image");
-        assert_eq!(
-            NodeKind::Color(SceneRgb::new(0.0, 0.0, 0.0)).tag(),
-            "color"
-        );
+        assert_eq!(NodeKind::Color(SceneRgb::new(0.0, 0.0, 0.0)).tag(), "color");
     }
 
     // --- a material as a graph -----------------------------------------
@@ -920,9 +974,15 @@ mod tests {
         };
         let graph = ShaderGraph::for_material(&material);
         let surface = graph.output().expect("a surface");
-        let into_base = graph.incoming(surface, 0).expect("the base colour is wired");
+        let into_base = graph
+            .incoming(surface, 0)
+            .expect("the base colour is wired");
         let product = &graph.nodes[into_base.from_node];
-        assert_eq!(product.kind, NodeKind::Multiply, "a texture replaced the colour");
+        assert_eq!(
+            product.kind,
+            NodeKind::Multiply,
+            "a texture replaced the colour"
+        );
 
         // And both factors are there: the image on one side and the colour on
         // the other, in some order.
@@ -977,7 +1037,10 @@ mod tests {
         }
         let surface = graph.output().expect("a surface");
         for socket in 0..4 {
-            assert!(graph.incoming(surface, socket).is_some(), "socket {socket} is unwired");
+            assert!(
+                graph.incoming(surface, socket).is_some(),
+                "socket {socket} is unwired"
+            );
         }
     }
 
@@ -991,11 +1054,24 @@ mod tests {
             .add_node(Node::new("N", NodeKind::NormalMap { strength: 1.0 }))
             .expect("added");
         assert_eq!(
-            graph.link(Link { from_node: decode, from_socket: 0, to_node: 0, to_socket: 0 }),
-            Err(LinkError::TypeMismatch { from: Socket::Vector, to: Socket::Color })
+            graph.link(Link {
+                from_node: decode,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 0
+            }),
+            Err(LinkError::TypeMismatch {
+                from: Socket::Vector,
+                to: Socket::Color
+            })
         );
         assert!(graph
-            .link(Link { from_node: decode, from_socket: 0, to_node: 0, to_socket: 3 })
+            .link(Link {
+                from_node: decode,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 3
+            })
             .is_ok());
     }
 
@@ -1033,8 +1109,18 @@ mod tests {
                 "{} did not come back",
                 kind.tag()
             );
-            assert_eq!(kind.input_names().len(), kind.inputs().len(), "{}", kind.tag());
-            assert_eq!(kind.output_names().len(), kind.outputs().len(), "{}", kind.tag());
+            assert_eq!(
+                kind.input_names().len(),
+                kind.inputs().len(),
+                "{}",
+                kind.tag()
+            );
+            assert_eq!(
+                kind.output_names().len(),
+                kind.outputs().len(),
+                "{}",
+                kind.tag()
+            );
         }
         assert_eq!(NodeKind::from_parts("from_the_future", &[], None), None);
         for tag in NodeKind::ADDABLE {
@@ -1068,4 +1154,3 @@ mod tests {
         }
     }
 }
-

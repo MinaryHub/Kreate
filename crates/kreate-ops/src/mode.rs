@@ -57,14 +57,24 @@ pub struct Has {
 }
 
 impl Has {
-    pub const NOTHING: Has = Has { mesh: false, armature: false };
-    pub const EVERYTHING: Has = Has { mesh: true, armature: true };
+    pub const NOTHING: Has = Has {
+        mesh: false,
+        armature: false,
+    };
+    pub const EVERYTHING: Has = Has {
+        mesh: true,
+        armature: true,
+    };
 
     /// What `doc` has, as the header and the application both ask it.
     pub fn of(doc: &kreate_scene::Document) -> Self {
         Self {
             mesh: crate::ops::mesh::target_mesh(doc).is_some(),
-            armature: doc.selection.active.and_then(|a| doc.armature_of(a)).is_some(),
+            armature: doc
+                .selection
+                .active
+                .and_then(|a| doc.armature_of(a))
+                .is_some(),
         }
     }
 }
@@ -228,7 +238,14 @@ pub const MODES: [ModeInfo; 6] = [
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 6] = [Mode::Object, Mode::EditMesh, Mode::EditArmature, Mode::Pose, Mode::WeightPaint, Mode::Sculpt];
+    pub const ALL: [Mode; 6] = [
+        Mode::Object,
+        Mode::EditMesh,
+        Mode::EditArmature,
+        Mode::Pose,
+        Mode::WeightPaint,
+        Mode::Sculpt,
+    ];
 
     /// This mode's card.
     ///
@@ -335,7 +352,11 @@ mod tests {
     #[test]
     fn every_mode_has_its_own_card_and_the_cards_are_in_order() {
         for (index, mode) in Mode::ALL.iter().enumerate() {
-            assert_eq!(mode.info().mode, *mode, "{mode:?} reads another mode's card");
+            assert_eq!(
+                mode.info().mode,
+                *mode,
+                "{mode:?} reads another mode's card"
+            );
             assert_eq!(MODES[index].mode, *mode);
             assert_eq!(Mode::from_tag(mode.tag()), Some(*mode));
         }
@@ -364,14 +385,26 @@ mod tests {
         // purpose rather than by accident.
         for mode in Mode::ALL {
             let info = mode.info();
-            assert_eq!(info.shows_elements, info.acts_on == ActsOn::MeshElements, "{mode:?}");
+            assert_eq!(
+                info.shows_elements,
+                info.acts_on == ActsOn::MeshElements,
+                "{mode:?}"
+            );
             assert_eq!(info.element_buttons, info.shows_elements, "{mode:?}");
             // Whatever it acts on, it needs what that lives on.
             if info.acts_on == ActsOn::MeshElements {
-                assert_eq!(info.needs, Needs::Mesh, "{mode:?} edits a mesh it may not have");
+                assert_eq!(
+                    info.needs,
+                    Needs::Mesh,
+                    "{mode:?} edits a mesh it may not have"
+                );
             }
             if matches!(info.acts_on, ActsOn::Bones | ActsOn::BoneJoints) {
-                assert_eq!(info.needs, Needs::Armature, "{mode:?} poses an armature it may not have");
+                assert_eq!(
+                    info.needs,
+                    Needs::Armature,
+                    "{mode:?} poses an armature it may not have"
+                );
             }
         }
     }
@@ -395,8 +428,14 @@ mod tests {
 
     #[test]
     fn tab_edits_whatever_is_active() {
-        let mesh = Has { mesh: true, armature: false };
-        let armature = Has { mesh: false, armature: true };
+        let mesh = Has {
+            mesh: true,
+            armature: false,
+        };
+        let armature = Has {
+            mesh: false,
+            armature: true,
+        };
         assert_eq!(Mode::Object.toggled(mesh), Mode::EditMesh);
         assert_eq!(Mode::Object.toggled(armature), Mode::EditArmature);
         assert_eq!(Mode::EditArmature.toggled(armature), Mode::Object);

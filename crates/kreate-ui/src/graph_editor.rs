@@ -54,13 +54,25 @@ pub struct GraphView {
 /// What was asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphEdit {
-    Select { targets: Vec<String>, frames: (f64, f64), values: (f64, f64), extend: bool },
+    Select {
+        targets: Vec<String>,
+        frames: (f64, f64),
+        values: (f64, f64),
+        extend: bool,
+    },
     SelectAll(u32),
-    Move { frames: f64, value: f64 },
+    Move {
+        frames: f64,
+        value: f64,
+    },
     Delete,
     Interpolation(u32),
     HandleType(u32),
-    SetSlope { target: String, frame: f64, slope: f64 },
+    SetSlope {
+        target: String,
+        frame: f64,
+        slope: f64,
+    },
     SetFrame(f64),
 }
 
@@ -81,11 +93,20 @@ enum Drag {
     #[default]
     None,
     /// Moving the selection from where the pointer started, in graph units.
-    Move { from: [f64; 2] },
-    Grab { from: [f64; 2] },
+    Move {
+        from: [f64; 2],
+    },
+    Grab {
+        from: [f64; 2],
+    },
     /// A handle of one key, on one curve.
-    Handle { curve: usize, key: usize },
-    Box { from: Pos2 },
+    Handle {
+        curve: usize,
+        key: usize,
+    },
+    Box {
+        from: Pos2,
+    },
     Scrub,
     Pan,
 }
@@ -145,10 +166,12 @@ impl Layout {
 
 /// The view that shows every key and every curve, with a margin — Home.
 pub fn frame_all(view: &GraphView) -> (f64, f64, f64, f64) {
-    let points = view
-        .curves
-        .iter()
-        .flat_map(|c| c.keys.iter().map(|k| [k.frame, k.value]).chain(c.samples.iter().copied()));
+    let points = view.curves.iter().flat_map(|c| {
+        c.keys
+            .iter()
+            .map(|k| [k.frame, k.value])
+            .chain(c.samples.iter().copied())
+    });
     let mut b: Option<(f64, f64, f64, f64)> = None;
     for [f, v] in points {
         b = Some(match b {
@@ -157,8 +180,16 @@ pub fn frame_all(view: &GraphView) -> (f64, f64, f64, f64) {
         });
     }
     let (f0, f1, v0, v1) = b.unwrap_or((view.start as f64, view.end as f64, -1.0, 1.0));
-    let (f0, f1) = if f1 - f0 < 2.0 { (f0 - 5.0, f1 + 5.0) } else { (f0, f1) };
-    let (v0, v1) = if v1 - v0 < 1e-3 { (v0 - 1.0, v1 + 1.0) } else { (v0, v1) };
+    let (f0, f1) = if f1 - f0 < 2.0 {
+        (f0 - 5.0, f1 + 5.0)
+    } else {
+        (f0, f1)
+    };
+    let (v0, v1) = if v1 - v0 < 1e-3 {
+        (v0 - 1.0, v1 + 1.0)
+    } else {
+        (v0, v1)
+    };
     let (df, dv) = ((f1 - f0) * 0.08, (v1 - v0) * 0.12);
     (f0 - df, f1 + df, v0 - dv, v1 + dv)
 }
@@ -228,68 +259,109 @@ const CHANNELS: f32 = 170.0;
 /// name and an eye. A hidden curve is left out of the plot, so its keys can be
 /// neither seen nor picked — the way to work on one curve among twelve.
 /// Clicking a row selects that curve's keys, Shift adding to what is selected.
-pub fn graph_editor(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &GraphText) -> Vec<GraphEdit> {
+pub fn graph_editor(
+    ui: &mut Ui,
+    view: &GraphView,
+    state: &mut GraphState,
+    text: &GraphText,
+) -> Vec<GraphEdit> {
     let full = ui.available_rect_before_wrap();
     // A narrow editor keeps the whole width for the curves.
-    let list_width = if full.width() > CHANNELS * 2.5 { CHANNELS } else { 0.0 };
+    let list_width = if full.width() > CHANNELS * 2.5 {
+        CHANNELS
+    } else {
+        0.0
+    };
     let mut out = Vec::new();
     if list_width > 0.0 && !view.curves.is_empty() {
         let list = Rect::from_min_max(full.min, Pos2::new(full.min.x + list_width, full.max.y));
         let theme = crate::theme::from_ui(ui);
         ui.painter().rect_filled(list, 0.0, theme.base);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(list.shrink2(egui::vec2(4.0, 2.0))), |ui| {
-            ui.add_space(RULER - 2.0);
-            egui::ScrollArea::vertical().id_salt("graph-channels").show(ui, |ui| {
-                for curve in &view.curves {
-                    let hidden = state.hidden.contains(&curve.target);
-                    ui.horizontal(|ui| {
-                        // The eye: a filled dot shown, a ring hidden.
-                        let (eye, eye_response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
-                        let ink = if hidden { theme.text_faint } else { theme.text_dim };
-                        if hidden {
-                            ui.painter().circle_stroke(eye.center(), 4.0, Stroke::new(1.2, ink));
-                        } else {
-                            ui.painter().circle_filled(eye.center(), 4.0, ink);
-                        }
-                        if eye_response.clicked() {
-                            if hidden {
-                                state.hidden.remove(&curve.target);
-                            } else {
-                                state.hidden.insert(curve.target.clone());
-                            }
-                        }
-                        let (swatch, _) = ui.allocate_exact_size(egui::vec2(4.0, 14.0), Sense::hover());
-                        ui.painter().rect_filled(swatch, 1.0, curve.color);
-                        let label = egui::RichText::new(&curve.label).size(11.0);
-                        let label = if hidden { label.color(theme.text_faint) } else { label };
-                        let row = ui.add(egui::Label::new(label).truncate().sense(Sense::click()));
-                        if row.clicked() {
-                            let extend = ui.input(|i| i.modifiers.shift);
-                            out.push(GraphEdit::Select {
-                                targets: vec![curve.target.clone()],
-                                frames: (f64::MIN, f64::MAX),
-                                values: (f64::MIN, f64::MAX),
-                                extend,
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(list.shrink2(egui::vec2(4.0, 2.0))),
+            |ui| {
+                ui.add_space(RULER - 2.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("graph-channels")
+                    .show(ui, |ui| {
+                        for curve in &view.curves {
+                            let hidden = state.hidden.contains(&curve.target);
+                            ui.horizontal(|ui| {
+                                // The eye: a filled dot shown, a ring hidden.
+                                let (eye, eye_response) =
+                                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+                                let ink = if hidden {
+                                    theme.text_faint
+                                } else {
+                                    theme.text_dim
+                                };
+                                if hidden {
+                                    ui.painter().circle_stroke(
+                                        eye.center(),
+                                        4.0,
+                                        Stroke::new(1.2, ink),
+                                    );
+                                } else {
+                                    ui.painter().circle_filled(eye.center(), 4.0, ink);
+                                }
+                                if eye_response.clicked() {
+                                    if hidden {
+                                        state.hidden.remove(&curve.target);
+                                    } else {
+                                        state.hidden.insert(curve.target.clone());
+                                    }
+                                }
+                                let (swatch, _) =
+                                    ui.allocate_exact_size(egui::vec2(4.0, 14.0), Sense::hover());
+                                ui.painter().rect_filled(swatch, 1.0, curve.color);
+                                let label = egui::RichText::new(&curve.label).size(11.0);
+                                let label = if hidden {
+                                    label.color(theme.text_faint)
+                                } else {
+                                    label
+                                };
+                                let row = ui
+                                    .add(egui::Label::new(label).truncate().sense(Sense::click()));
+                                if row.clicked() {
+                                    let extend = ui.input(|i| i.modifiers.shift);
+                                    out.push(GraphEdit::Select {
+                                        targets: vec![curve.target.clone()],
+                                        frames: (f64::MIN, f64::MAX),
+                                        values: (f64::MIN, f64::MAX),
+                                        extend,
+                                    });
+                                }
                             });
                         }
                     });
-                }
-            });
-        });
+            },
+        );
     }
     let plot = Rect::from_min_max(Pos2::new(full.min.x + list_width, full.min.y), full.max);
     let shown = GraphView {
-        curves: view.curves.iter().filter(|c| !state.hidden.contains(&c.target)).cloned().collect(),
+        curves: view
+            .curves
+            .iter()
+            .filter(|c| !state.hidden.contains(&c.target))
+            .cloned()
+            .collect(),
         ..view.clone()
     };
     let edits = ui
-        .scope_builder(egui::UiBuilder::new().max_rect(plot), |ui| graph_plot(ui, &shown, state, text))
+        .scope_builder(egui::UiBuilder::new().max_rect(plot), |ui| {
+            graph_plot(ui, &shown, state, text)
+        })
         .inner;
     out.extend(edits);
     out
 }
 
-fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &GraphText) -> Vec<GraphEdit> {
+fn graph_plot(
+    ui: &mut Ui,
+    view: &GraphView,
+    state: &mut GraphState,
+    text: &GraphText,
+) -> Vec<GraphEdit> {
     let mut out = Vec::new();
     let theme = crate::theme::from_ui(ui);
     let rect = ui.available_rect_before_wrap();
@@ -311,7 +383,12 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
                 let at = Layout::new(rect, viewed).to_graph(p);
                 let k = (1.0 - scroll as f64 * 0.0015).clamp(0.5, 2.0);
                 let (f0, f1, v0, v1) = viewed;
-                viewed = (at[0] + (f0 - at[0]) * k, at[0] + (f1 - at[0]) * k, at[1] + (v0 - at[1]) * k, at[1] + (v1 - at[1]) * k);
+                viewed = (
+                    at[0] + (f0 - at[0]) * k,
+                    at[0] + (f1 - at[0]) * k,
+                    at[1] + (v0 - at[1]) * k,
+                    at[1] + (v1 - at[1]) * k,
+                );
             }
         }
         if ui.input(|i| i.key_pressed(Key::Home)) {
@@ -336,13 +413,33 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
     let (f0, f1, v0, v1) = viewed;
     let fstep = nice_step((f1 - f0) / layout.plot.width() as f64, 50.0).max(1.0);
     let vstep = nice_step((v1 - v0) / layout.plot.height() as f64, 30.0);
-    painter.rect_filled(Rect::from_min_max(rect.min, Pos2::new(rect.max.x, layout.plot.min.y)), 0.0, theme.base);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(rect.min.x, layout.plot.min.y), Pos2::new(layout.plot.min.x, rect.max.y)), 0.0, theme.base);
+    painter.rect_filled(
+        Rect::from_min_max(rect.min, Pos2::new(rect.max.x, layout.plot.min.y)),
+        0.0,
+        theme.base,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(rect.min.x, layout.plot.min.y),
+            Pos2::new(layout.plot.min.x, rect.max.y),
+        ),
+        0.0,
+        theme.base,
+    );
     let mut f = (f0 / fstep).ceil() * fstep;
     while f <= f1 {
         let x = layout.to_screen(f, 0.0).x;
-        painter.line_segment([Pos2::new(x, layout.plot.min.y), Pos2::new(x, rect.max.y)], Stroke::new(1.0, theme.border));
-        painter.text(Pos2::new(x, rect.min.y + 3.0), egui::Align2::CENTER_TOP, format!("{}", f as i64), egui::FontId::proportional(10.0), theme.text_faint);
+        painter.line_segment(
+            [Pos2::new(x, layout.plot.min.y), Pos2::new(x, rect.max.y)],
+            Stroke::new(1.0, theme.border),
+        );
+        painter.text(
+            Pos2::new(x, rect.min.y + 3.0),
+            egui::Align2::CENTER_TOP,
+            format!("{}", f as i64),
+            egui::FontId::proportional(10.0),
+            theme.text_faint,
+        );
         f += fstep;
     }
     let mut v = (v0 / vstep).ceil() * vstep;
@@ -351,7 +448,14 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
         let strong = v.abs() < vstep * 1e-6;
         painter.line_segment(
             [Pos2::new(layout.plot.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(if strong { 1.5 } else { 1.0 }, if strong { theme.border_strong } else { theme.border }),
+            Stroke::new(
+                if strong { 1.5 } else { 1.0 },
+                if strong {
+                    theme.border_strong
+                } else {
+                    theme.border
+                },
+            ),
         );
         // The line at zero is reached by adding steps and lands a hair off it,
         // which prints as "-0".
@@ -363,17 +467,40 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
         } else {
             format!("{shown:.2}")
         };
-        painter.text(Pos2::new(layout.plot.min.x - 4.0, y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(10.0), theme.text_faint);
+        painter.text(
+            Pos2::new(layout.plot.min.x - 4.0, y),
+            egui::Align2::RIGHT_CENTER,
+            label,
+            egui::FontId::proportional(10.0),
+            theme.text_faint,
+        );
         v += vstep;
     }
     let dim = Color32::from_black_alpha(45);
     let sx = layout.to_screen(view.start as f64, 0.0).x;
     let ex = layout.to_screen(view.end as f64, 0.0).x;
-    painter.rect_filled(Rect::from_min_max(layout.plot.min, Pos2::new(sx.max(layout.plot.min.x), rect.max.y)), 0.0, dim);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(ex.min(rect.max.x), layout.plot.min.y), rect.max), 0.0, dim);
+    painter.rect_filled(
+        Rect::from_min_max(
+            layout.plot.min,
+            Pos2::new(sx.max(layout.plot.min.x), rect.max.y),
+        ),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(ex.min(rect.max.x), layout.plot.min.y), rect.max),
+        0.0,
+        dim,
+    );
 
     if view.curves.is_empty() {
-        painter.text(layout.plot.center(), egui::Align2::CENTER_CENTER, &text.empty, egui::FontId::proportional(12.0), theme.text_faint);
+        painter.text(
+            layout.plot.center(),
+            egui::Align2::CENTER_CENTER,
+            &text.empty,
+            egui::FontId::proportional(12.0),
+            theme.text_faint,
+        );
     }
 
     // How far a drag in progress has taken the selection: whole frames, any value.
@@ -388,12 +515,20 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
     // --- curves, keys and handles -----------------------------------------------------
     let plot_painter = ui.painter().with_clip_rect(layout.plot);
     for (c, curve) in view.curves.iter().enumerate() {
-        let line: Vec<Pos2> = curve.samples.iter().map(|[f, v]| layout.to_screen(*f, *v)).collect();
+        let line: Vec<Pos2> = curve
+            .samples
+            .iter()
+            .map(|[f, v]| layout.to_screen(*f, *v))
+            .collect();
         if line.len() > 1 {
             plot_painter.add(egui::Shape::line(line, Stroke::new(1.5, curve.color)));
         }
         for (k, key) in curve.keys.iter().enumerate() {
-            let (frame, value) = if key.selected { (key.frame + offset[0], key.value + offset[1]) } else { (key.frame, key.value) };
+            let (frame, value) = if key.selected {
+                (key.frame + offset[0], key.value + offset[1])
+            } else {
+                (key.frame, key.value)
+            };
             let at = layout.to_screen(frame, value);
             if key.selected {
                 let mut shown = *key;
@@ -414,7 +549,11 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
             plot_painter.circle(
                 at,
                 if key.selected { 4.5 } else { 3.5 },
-                if key.selected { theme.accent } else { Color32::from_gray(220) },
+                if key.selected {
+                    theme.accent
+                } else {
+                    Color32::from_gray(220)
+                },
                 Stroke::new(1.0, Color32::BLACK),
             );
         }
@@ -422,12 +561,20 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
 
     // The clock.
     let x = layout.to_screen(view.frame, 0.0).x;
-    painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], Stroke::new(2.0, theme.accent));
+    painter.line_segment(
+        [Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)],
+        Stroke::new(2.0, theme.accent),
+    );
 
     if let (Drag::Box { from }, Some(p)) = (&state.drag, pointer) {
         let b = Rect::from_two_pos(*from, p);
         painter.rect_filled(b, 0.0, theme.accent_wash);
-        painter.rect_stroke(b, 0.0, Stroke::new(1.0, theme.accent), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            b,
+            0.0,
+            Stroke::new(1.0, theme.accent),
+            egui::StrokeKind::Inside,
+        );
     }
 
     // --- the pointer -------------------------------------------------------------------
@@ -442,7 +589,10 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
             state.drag = Drag::None;
         } else if confirm {
             if offset != [0.0, 0.0] {
-                out.push(GraphEdit::Move { frames: offset[0], value: offset[1] });
+                out.push(GraphEdit::Move {
+                    frames: offset[0],
+                    value: offset[1],
+                });
             }
             state.drag = Drag::None;
         }
@@ -450,7 +600,9 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
         if let Some(p) = pointer {
             if p.y < layout.plot.min.y && p.x >= layout.plot.min.x {
                 state.drag = Drag::Scrub;
-            } else if let Some((c, k)) = handle_at(view, &layout, p).filter(|_| key_at(view, &layout, p).is_none()) {
+            } else if let Some((c, k)) =
+                handle_at(view, &layout, p).filter(|_| key_at(view, &layout, p).is_none())
+            {
                 state.drag = Drag::Handle { curve: c, key: k };
             } else if let Some((c, k)) = key_at(view, &layout, p) {
                 let key = &view.curves[c].keys[k];
@@ -462,7 +614,9 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
                         extend: shift,
                     });
                 }
-                state.drag = Drag::Move { from: layout.to_graph(p) };
+                state.drag = Drag::Move {
+                    from: layout.to_graph(p),
+                };
             } else if layout.plot.contains(p) {
                 state.drag = Drag::Box { from: p };
             }
@@ -478,12 +632,22 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
 
     if release {
         match std::mem::take(&mut state.drag) {
-            Drag::Move { .. } if offset != [0.0, 0.0] => out.push(GraphEdit::Move { frames: offset[0], value: offset[1] }),
+            Drag::Move { .. } if offset != [0.0, 0.0] => out.push(GraphEdit::Move {
+                frames: offset[0],
+                value: offset[1],
+            }),
             Drag::Handle { curve, key } => {
-                if let (Some(p), Some(k)) = (pointer, view.curves.get(curve).and_then(|c| c.keys.get(key))) {
+                if let (Some(p), Some(k)) = (
+                    pointer,
+                    view.curves.get(curve).and_then(|c| c.keys.get(key)),
+                ) {
                     let slope = dragged_slope(k, layout.to_graph(p));
                     if (slope - k.slope).abs() > 1e-12 {
-                        out.push(GraphEdit::SetSlope { target: view.curves[curve].target.clone(), frame: k.frame, slope });
+                        out.push(GraphEdit::SetSlope {
+                            target: view.curves[curve].target.clone(),
+                            frame: k.frame,
+                            slope,
+                        });
                     }
                 }
             }
@@ -523,7 +687,9 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
         }
         if pressed(Key::G) {
             if let Some(p) = pointer {
-                state.drag = Drag::Grab { from: layout.to_graph(p) };
+                state.drag = Drag::Grab {
+                    from: layout.to_graph(p),
+                };
             }
         }
         if pressed(Key::T) {
@@ -537,7 +703,11 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
     // --- menus -------------------------------------------------------------------------
     if let Some(menu) = state.menu {
         let (at, title, entries): (Pos2, &str, Vec<&str>) = match menu {
-            Menu::Interpolation(at) => (at, &text.interpolation, vec![&text.constant, &text.linear, &text.bezier]),
+            Menu::Interpolation(at) => (
+                at,
+                &text.interpolation,
+                vec![&text.constant, &text.linear, &text.bezier],
+            ),
             Menu::Handles(at) => (at, &text.handles, vec![&text.auto, &text.flat]),
         };
         let mut close = false;
@@ -559,7 +729,8 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
                     }
                 });
             });
-        let away = ui.input(|i| i.pointer.any_pressed()) && pointer.is_some_and(|p| !area.response.rect.contains(p));
+        let away = ui.input(|i| i.pointer.any_pressed())
+            && pointer.is_some_and(|p| !area.response.rect.contains(p));
         if close || away || ui.input(|i| i.key_pressed(Key::Escape)) {
             state.menu = None;
         }
@@ -573,7 +744,11 @@ fn graph_plot(ui: &mut Ui, view: &GraphView, state: &mut GraphState, text: &Grap
 /// on whichever side the pointer is.
 fn dragged_slope(key: &GraphKey, to: [f64; 2]) -> f64 {
     let run = to[0] - key.frame;
-    let run = if run.abs() < 1e-3 { 1e-3f64.copysign(run) } else { run };
+    let run = if run.abs() < 1e-3 {
+        1e-3f64.copysign(run)
+    } else {
+        run
+    };
     (to[1] - key.value) / run
 }
 
@@ -582,7 +757,14 @@ mod tests {
     use super::*;
 
     fn key(frame: f64, value: f64) -> GraphKey {
-        GraphKey { frame, value, selected: false, slope: 0.0, before: 9.0, after: 9.0 }
+        GraphKey {
+            frame,
+            value,
+            selected: false,
+            slope: 0.0,
+            before: 9.0,
+            after: 9.0,
+        }
     }
 
     fn view() -> GraphView {
@@ -602,10 +784,16 @@ mod tests {
 
     #[test]
     fn a_point_goes_to_the_screen_and_back() {
-        let l = Layout::new(Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0)), (0.0, 30.0, -2.0, 6.0));
+        let l = Layout::new(
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0)),
+            (0.0, 30.0, -2.0, 6.0),
+        );
         for p in [[0.0, -2.0], [12.5, 3.3], [30.0, 6.0]] {
             let back = l.to_graph(l.to_screen(p[0], p[1]));
-            assert!((back[0] - p[0]).abs() < 1e-3 && (back[1] - p[1]).abs() < 1e-3, "{p:?} came back as {back:?}");
+            assert!(
+                (back[0] - p[0]).abs() < 1e-3 && (back[1] - p[1]).abs() < 1e-3,
+                "{p:?} came back as {back:?}"
+            );
         }
         // Up is up: a larger value is higher on screen.
         assert!(l.to_screen(0.0, 5.0).y < l.to_screen(0.0, 1.0).y);
@@ -616,7 +804,10 @@ mod tests {
         let v = view();
         let (f0, f1, v0, v1) = frame_all(&v);
         for k in &v.curves[0].keys {
-            assert!(k.frame > f0 && k.frame < f1 && k.value > v0 && k.value < v1, "{k:?} is off screen");
+            assert!(
+                k.frame > f0 && k.frame < f1 && k.value > v0 && k.value < v1,
+                "{k:?} is off screen"
+            );
         }
     }
 
@@ -626,19 +817,32 @@ mod tests {
             let step = nice_step(upp, 30.0);
             assert!(step / upp >= 30.0 - 1e-9, "{upp}: {step}");
             let mantissa = step / 10f64.powf(step.log10().floor());
-            assert!([1.0, 2.0, 5.0, 10.0].iter().any(|m| (mantissa - m).abs() < 1e-9), "{step}");
+            assert!(
+                [1.0, 2.0, 5.0, 10.0]
+                    .iter()
+                    .any(|m| (mantissa - m).abs() < 1e-9),
+                "{step}"
+            );
         }
     }
 
     #[test]
     fn a_handle_sits_a_third_of_the_way_to_each_neighbour_along_the_slope() {
-        let k = GraphKey { slope: 0.5, before: 3.0, after: 9.0, ..key(10.0, 4.0) };
+        let k = GraphKey {
+            slope: 0.5,
+            before: 3.0,
+            after: 9.0,
+            ..key(10.0, 4.0)
+        };
         let (a, b) = handles(&k);
         assert_eq!(a, [9.0, 3.5]);
         assert_eq!(b, [13.0, 5.5]);
         // And dragging one to a point gives the slope through that point.
         assert!((dragged_slope(&k, [12.0, 8.0]) - 2.0).abs() < 1e-12);
-        assert!(dragged_slope(&k, [10.0, 8.0]).is_finite(), "straight above is a finite slope");
+        assert!(
+            dragged_slope(&k, [10.0, 8.0]).is_finite(),
+            "straight above is a finite slope"
+        );
     }
 
     struct Rig {
@@ -650,7 +854,12 @@ mod tests {
 
     impl Rig {
         fn new(view: GraphView) -> Self {
-            let mut rig = Self { ctx: egui::Context::default(), state: GraphState::default(), view, time: 0.0 };
+            let mut rig = Self {
+                ctx: egui::Context::default(),
+                state: GraphState::default(),
+                view,
+                time: 0.0,
+            };
             rig.frame(vec![]);
             rig.frame(vec![]);
             rig
@@ -675,19 +884,28 @@ mod tests {
             };
             let mut out = Vec::new();
             let (state, view) = (&mut self.state, &self.view);
-            let _ = self.ctx.run_ui(raw, |ui| out = graph_editor(ui, view, state, &text));
+            let _ = self
+                .ctx
+                .run_ui(raw, |ui| out = graph_editor(ui, view, state, &text));
             out
         }
         fn layout(&self) -> Layout {
             Layout::new(self.state.rect.unwrap(), self.state.view.unwrap())
         }
         fn drag(&mut self, a: Pos2, b: Pos2) -> Vec<GraphEdit> {
-            let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
             let mut out = Vec::new();
             out.extend(self.frame(vec![egui::Event::PointerMoved(a)]));
             out.extend(self.frame(vec![button(a, true)]));
             for i in 1..=4 {
-                out.extend(self.frame(vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 4.0))]));
+                out.extend(self.frame(vec![egui::Event::PointerMoved(
+                    a + (b - a) * (i as f32 / 4.0),
+                )]));
             }
             out.extend(self.frame(vec![button(b, false)]));
             out
@@ -701,7 +919,10 @@ mod tests {
         let a = l.to_screen(10.0, 4.0);
         let b = l.to_screen(13.4, 5.0);
         let edits = rig.drag(a, b);
-        assert!(matches!(edits.first(), Some(GraphEdit::Select { .. })), "{edits:?}");
+        assert!(
+            matches!(edits.first(), Some(GraphEdit::Select { .. })),
+            "{edits:?}"
+        );
         match edits.last() {
             Some(GraphEdit::Move { frames, value }) => {
                 assert_eq!(*frames, 3.0);
@@ -722,7 +943,11 @@ mod tests {
         let b = l.to_screen(13.0, 7.0);
         let edits = rig.drag(a, b);
         match edits.as_slice() {
-            [GraphEdit::SetSlope { target, frame, slope }] => {
+            [GraphEdit::SetSlope {
+                target,
+                frame,
+                slope,
+            }] => {
                 assert_eq!((target.as_str(), *frame), ("7/location/0", 10.0));
                 assert!((slope - 1.0).abs() < 0.05, "{slope}");
             }
@@ -738,8 +963,14 @@ mod tests {
         let edits = rig.drag(l.to_screen(5.0, 4.3), l.to_screen(18.0, 0.5));
         match edits.as_slice() {
             [GraphEdit::Select { frames, values, .. }] => {
-                assert!((frames.0 - 5.0).abs() < 0.2 && (frames.1 - 18.0).abs() < 0.2, "{frames:?}");
-                assert!((values.0 - 0.5).abs() < 0.05 && (values.1 - 4.3).abs() < 0.05, "{values:?}");
+                assert!(
+                    (frames.0 - 5.0).abs() < 0.2 && (frames.1 - 18.0).abs() < 0.2,
+                    "{frames:?}"
+                );
+                assert!(
+                    (values.0 - 0.5).abs() < 0.05 && (values.1 - 4.3).abs() < 0.05,
+                    "{values:?}"
+                );
             }
             other => panic!("{other:?}"),
         }

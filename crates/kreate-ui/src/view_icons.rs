@@ -43,8 +43,16 @@ pub fn shading_button(ui: &mut Ui, mode: ShadingMode, selected: bool) -> Respons
         ShadingMode::Wireframe => {
             let s = Stroke::new(1.0, ink);
             p.circle_stroke(centre, r, s);
-            p.add(egui::Shape::ellipse_stroke(centre, Vec2::new(r, r * 0.35), s));
-            p.add(egui::Shape::ellipse_stroke(centre, Vec2::new(r * 0.35, r), s));
+            p.add(egui::Shape::ellipse_stroke(
+                centre,
+                Vec2::new(r, r * 0.35),
+                s,
+            ));
+            p.add(egui::Shape::ellipse_stroke(
+                centre,
+                Vec2::new(r * 0.35, r),
+                s,
+            ));
         }
         // A flat disc: no light, just the colour.
         ShadingMode::Flat => {
@@ -62,7 +70,11 @@ pub fn shading_button(ui: &mut Ui, mode: ShadingMode, selected: bool) -> Respons
                     Pos2::new(centre.x + r * t.cos(), centre.y + r * t.sin())
                 })
                 .collect();
-            p.add(egui::Shape::convex_polygon(lower, ink.gamma_multiply(0.9), Stroke::NONE));
+            p.add(egui::Shape::convex_polygon(
+                lower,
+                ink.gamma_multiply(0.9),
+                Stroke::NONE,
+            ));
             p.circle_stroke(centre, r, Stroke::new(1.0, ink));
             let _ = sphere;
         }

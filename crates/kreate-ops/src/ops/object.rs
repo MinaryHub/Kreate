@@ -6,8 +6,8 @@ use kreate_scene::document::{MeshId, ObjectId};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
-use crate::OpParams;
 use crate::property::PropertyMap;
+use crate::OpParams;
 
 /// The primitive shapes `object.add_primitive` can build.
 ///
@@ -171,9 +171,7 @@ pub struct AddEmptyParams {
 
 impl Default for AddEmptyParams {
     fn default() -> Self {
-        Self {
-            location: [0.0; 3],
-        }
+        Self { location: [0.0; 3] }
     }
 }
 
@@ -204,10 +202,8 @@ impl Operator for AddEmpty {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let d = doc.document_mut();
-        let mut object = kreate_scene::document::Object::new(
-            "Empty",
-            kreate_scene::document::ObjectData::Empty,
-        );
+        let mut object =
+            kreate_scene::document::Object::new("Empty", kreate_scene::document::ObjectData::Empty);
         object.transform.translation = DVec3::from_array(params.location);
         let id = d.add_object(object);
         // What was just added is what the user is about to move.
@@ -307,7 +303,6 @@ impl Default for AddLightParams {
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct SetLightParams {
@@ -470,8 +465,14 @@ impl Operator for SetLight {
                 kreate_scene::LightKind::Area {
                     shape: match params.shape {
                         1 => kreate_scene::AreaShape::Disc { radius: w * 0.5 },
-                        2 => kreate_scene::AreaShape::Ellipse { width: w, height: h },
-                        _ => kreate_scene::AreaShape::Rect { width: w, height: h },
+                        2 => kreate_scene::AreaShape::Ellipse {
+                            width: w,
+                            height: h,
+                        },
+                        _ => kreate_scene::AreaShape::Rect {
+                            width: w,
+                            height: h,
+                        },
                     },
                     spread: params.spread.clamp(0.0, std::f64::consts::PI),
                 }
@@ -536,9 +537,7 @@ pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
     // changes.
     match light.kind {
         kreate_scene::LightKind::Point { radius } => p.radius = radius,
-        kreate_scene::LightKind::Sun { angular_diameter } => {
-            p.angular_diameter = angular_diameter
-        }
+        kreate_scene::LightKind::Sun { angular_diameter } => p.angular_diameter = angular_diameter,
         kreate_scene::LightKind::Spot {
             radius,
             cone_angle,
@@ -565,7 +564,6 @@ pub fn light_params(light: &kreate_scene::Light) -> SetLightParams {
     }
     p
 }
-
 
 /// Whether a parameter means anything for a light of this kind.
 ///
@@ -710,7 +708,6 @@ pub fn world_params(world: &kreate_scene::World) -> SetWorldParams {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Default, OpParams)]
 pub struct SetWorldImageParams {
     /// The image datablock's identity, in decimal. Empty goes back to a colour.
@@ -773,7 +770,10 @@ impl Operator for SetWorldImage {
                 let Ok(raw) = text.parse::<u64>() else {
                     return Ok(OpResult::Cancelled);
                 };
-                match doc.document().image_by_uid(kreate_scene::Uid::from_raw(raw)) {
+                match doc
+                    .document()
+                    .image_by_uid(kreate_scene::Uid::from_raw(raw))
+                {
                     Some(image) => Some(image),
                     None => return Ok(OpResult::Cancelled),
                 }
@@ -940,8 +940,12 @@ impl Operator for SetMaterial {
         let emitted = material.emitted();
         if let Some(graph) = material.graph.as_mut() {
             if let Some(o) = graph.output() {
-                if let kreate_scene::shader::NodeKind::Surface { emission, transmission, ior, .. } =
-                    &mut graph.nodes[o].kind
+                if let kreate_scene::shader::NodeKind::Surface {
+                    emission,
+                    transmission,
+                    ior,
+                    ..
+                } = &mut graph.nodes[o].kind
                 {
                     *emission = emitted;
                     *transmission = glass;
@@ -1046,7 +1050,10 @@ impl Operator for SetMaterialImage {
                 let Ok(raw) = text.parse::<u64>() else {
                     return Ok(OpResult::Cancelled);
                 };
-                match doc.document().image_by_uid(kreate_scene::Uid::from_raw(raw)) {
+                match doc
+                    .document()
+                    .image_by_uid(kreate_scene::Uid::from_raw(raw))
+                {
                     Some(image) => Some(image),
                     None => return Ok(OpResult::Cancelled),
                 }
@@ -1252,7 +1259,11 @@ impl Operator for AssignMaterial {
         ctx.mode.edits_elements() && active_slot_count(doc) > 0
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         use kreate_mesh::attribute::{names, AttrType, Domain};
         let slot = params.slot as i32;
         let changed: usize = crate::ops::mesh::each_bmesh(doc, |bm| {
@@ -1261,7 +1272,8 @@ impl Operator for AssignMaterial {
                 return Ok(0);
             }
             let len = bm.slot_count(Domain::Face);
-            bm.attributes_mut().ensure(names::MATERIAL_INDEX, Domain::Face, AttrType::I32, len);
+            bm.attributes_mut()
+                .ensure(names::MATERIAL_INDEX, Domain::Face, AttrType::I32, len);
             let Some(layer) = bm.attributes_mut().make_mut_i32(names::MATERIAL_INDEX) else {
                 return Ok(0);
             };
@@ -1278,7 +1290,11 @@ impl Operator for AssignMaterial {
         })?
         .into_iter()
         .sum();
-        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+        Ok(if changed == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
     }
 }
 
@@ -1298,7 +1314,11 @@ impl Operator for SelectByMaterial {
         ctx.mode.edits_elements() && active_slot_count(doc) > 0
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         use kreate_mesh::attribute::names;
         let slot = params.slot as i32;
         let found: usize = crate::ops::mesh::each_bmesh(doc, |bm| {
@@ -1310,7 +1330,10 @@ impl Operator for SelectByMaterial {
                     let index = bm
                         .attributes()
                         .get_i32(names::MATERIAL_INDEX)
-                        .and_then(|l| l.get(kreate_mesh::arena::ArenaIndex::index(*f) as usize).copied())
+                        .and_then(|l| {
+                            l.get(kreate_mesh::arena::ArenaIndex::index(*f) as usize)
+                                .copied()
+                        })
                         .unwrap_or(0);
                     index == slot
                 })
@@ -1325,7 +1348,11 @@ impl Operator for SelectByMaterial {
         })?
         .into_iter()
         .sum();
-        Ok(if found == 0 { OpResult::Cancelled } else { OpResult::Finished })
+        Ok(if found == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
     }
 }
 
@@ -1356,21 +1383,35 @@ impl Operator for LinkMaterial {
         active_mesh(doc).is_some()
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let Some(mesh) = active_mesh(doc.document()) else { return Ok(OpResult::Cancelled) };
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
         let uid = params.uid.trim();
         let material = uid
             .parse::<u64>()
             .ok()
-            .and_then(|raw| doc.document().material_by_uid(kreate_scene::Uid::from_raw(raw)))
-            .ok_or_else(|| OpError::Failed(format!("no material has uid {uid:?}; get_scene lists them")))?;
+            .and_then(|raw| {
+                doc.document()
+                    .material_by_uid(kreate_scene::Uid::from_raw(raw))
+            })
+            .ok_or_else(|| {
+                OpError::Failed(format!("no material has uid {uid:?}; get_scene lists them"))
+            })?;
         // The next slot as well as an existing one: a freshly added object
         // has none, and making the slot first is a step a script should not
         // have to know about.
         let slot = params.slot as usize;
         let slots = doc.document().mesh_slots(mesh);
         if slot > slots.len() {
-            return Err(OpError::Failed(format!("the object has {} slot(s); slot {slot} would leave a gap", slots.len())));
+            return Err(OpError::Failed(format!(
+                "the object has {} slot(s); slot {slot} would leave a gap",
+                slots.len()
+            )));
         }
         if slots.get(slot) == Some(&Some(material)) {
             return Ok(OpResult::Cancelled);
@@ -1422,7 +1463,10 @@ impl Operator for SetVisible {
         let Ok(raw) = params.uid.trim().parse::<u64>() else {
             return Ok(OpResult::Cancelled);
         };
-        let Some(id) = doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)) else {
+        let Some(id) = doc
+            .document()
+            .object_by_uid(kreate_scene::Uid::from_raw(raw))
+        else {
             return Ok(OpResult::Cancelled);
         };
         if doc.document().object(id).map(|o| o.visible) == Some(params.visible) {
@@ -1467,10 +1511,7 @@ pub fn material_image_params(
 }
 
 /// The parameters that would leave the material in `slot` exactly as it is.
-pub fn material_params(
-    material: &kreate_scene::Material,
-    slot: u32,
-) -> SetMaterialParams {
+pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMaterialParams {
     let c = material.base_color.as_swatch();
     SetMaterialParams {
         slot,
@@ -1488,8 +1529,6 @@ pub fn material_params(
         ior: material.ior as f64,
     }
 }
-
-
 
 // --- a camera --------------------------------------------------------------
 
@@ -1606,7 +1645,6 @@ pub fn camera_params(camera: &kreate_scene::Camera) -> SetCameraParams {
         exposure_compensation: camera.exposure_compensation,
     }
 }
-
 
 /// Adds a light object and the datablock behind it.
 ///
@@ -1988,7 +2026,8 @@ impl Operator for SetTransform {
             // Blender's XYZ Euler — X first, then Y, then Z — the convention
             // the rotation curves are keyed in, so the numbers in the sidebar
             // and the values on a curve are the same numbers.
-            rotation: kreate_scene::animation::from_euler(DVec3::from_array(params.rotation)).normalize(),
+            rotation: kreate_scene::animation::from_euler(DVec3::from_array(params.rotation))
+                .normalize(),
             scale: DVec3::from_array(params.scale),
         };
         let d = doc.document_mut();
@@ -2089,7 +2128,12 @@ impl Operator for Rotate {
         if params.autokey {
             // Location too: turning about any pivot but an object's own origin
             // moves it, and a key of the rotation alone would snap it back.
-            crate::ops::anim::key_objects(d, &targets, params.key_frame, &["location", "rotation_euler"]);
+            crate::ops::anim::key_objects(
+                d,
+                &targets,
+                params.key_frame,
+                &["location", "rotation_euler"],
+            );
         }
         Ok(OpResult::Finished)
     }
@@ -2307,7 +2351,11 @@ impl Operator for Select {
         "Select Object"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(id) = doc
             .document()
             .objects()
@@ -2348,14 +2396,20 @@ impl Operator for ParentOne {
         "Parent"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let find = |text: &str| {
-            text.trim()
-                .parse::<u64>()
-                .ok()
-                .and_then(|raw| doc.document().object_by_uid(kreate_scene::Uid::from_raw(raw)))
+            text.trim().parse::<u64>().ok().and_then(|raw| {
+                doc.document()
+                    .object_by_uid(kreate_scene::Uid::from_raw(raw))
+            })
         };
-        let Some(child) = find(&params.child) else { return Ok(OpResult::Cancelled) };
+        let Some(child) = find(&params.child) else {
+            return Ok(OpResult::Cancelled);
+        };
         let parent = if params.parent.trim().is_empty() {
             None
         } else {
@@ -2394,7 +2448,11 @@ impl Operator for HideObjects {
         "Hide"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
         let targets: Vec<ObjectId> = d
             .objects()
@@ -2429,8 +2487,17 @@ impl Operator for RevealObjects {
         "Reveal Hidden"
     }
 
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let hidden: Vec<ObjectId> = doc.document().objects().filter(|(_, o)| !o.visible).map(|(id, _)| id).collect();
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let hidden: Vec<ObjectId> = doc
+            .document()
+            .objects()
+            .filter(|(_, o)| !o.visible)
+            .map(|(id, _)| id)
+            .collect();
         if hidden.is_empty() {
             return Ok(OpResult::Cancelled);
         }
@@ -2471,9 +2538,15 @@ impl Operator for Rename {
         doc.selection.active.is_some()
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(id) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(id) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
         let base = params.name.trim();
         if base.is_empty() || d.object(id).is_some_and(|o| o.name == base) {
             return Ok(OpResult::Cancelled);
@@ -2723,26 +2796,38 @@ impl Operator for AddLathe {
         "Add Lathe"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         if params.points.len() < 4 || params.points.len() % 2 != 0 {
             return Err(OpError::Failed(
-                "points wants radius, height pairs: at least two points, an even count of numbers".into(),
+                "points wants radius, height pairs: at least two points, an even count of numbers"
+                    .into(),
             ));
         }
-        let given: Vec<glam::Vec3> =
-            params.points.chunks(2).map(|p| glam::Vec3::new(p[0] as f32, 0.0, p[1] as f32)).collect();
-        let profile: Vec<(f32, f32)> = kreate_mesh::primitives::smooth_path(&given, params.resolution, false)
-            .into_iter()
-            .map(|p| (p.x.max(0.0), p.z))
+        let given: Vec<glam::Vec3> = params
+            .points
+            .chunks(2)
+            .map(|p| glam::Vec3::new(p[0] as f32, 0.0, p[1] as f32))
             .collect();
+        let profile: Vec<(f32, f32)> =
+            kreate_mesh::primitives::smooth_path(&given, params.resolution, false)
+                .into_iter()
+                .map(|p| (p.x.max(0.0), p.z))
+                .collect();
         let mesh = kreate_mesh::primitives::lathe(&profile, params.segments);
         let violations = mesh.validate();
         if !violations.is_empty() {
-            return Err(OpError::Failed(format!("the profile makes an invalid mesh: {violations:?}")));
+            return Err(OpError::Failed(format!(
+                "the profile makes an invalid mesh: {violations:?}"
+            )));
         }
         let d = doc.document_mut();
         let id = d.add_mesh_object("Lathe", mesh);
-        d.object_mut(id).expect("just added").transform.translation = DVec3::from_array(params.location);
+        d.object_mut(id).expect("just added").transform.translation =
+            DVec3::from_array(params.location);
         d.selection.clear();
         d.selection.add(id);
         Ok(OpResult::Finished)
@@ -2810,19 +2895,35 @@ impl Operator for AddSweep {
         "Add Sweep"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         if params.path.len() < 6 || params.path.len() % 3 != 0 {
-            return Err(OpError::Failed("path wants x, y, z triples: at least two points".into()));
+            return Err(OpError::Failed(
+                "path wants x, y, z triples: at least two points".into(),
+            ));
         }
-        if !params.profile.is_empty() && (params.profile.len() < 6 || params.profile.len() % 2 != 0) {
-            return Err(OpError::Failed("profile wants x, y pairs: at least three points".into()));
+        if !params.profile.is_empty() && (params.profile.len() < 6 || params.profile.len() % 2 != 0)
+        {
+            return Err(OpError::Failed(
+                "profile wants x, y pairs: at least three points".into(),
+            ));
         }
-        let path: Vec<glam::Vec3> =
-            params.path.chunks(3).map(|p| glam::Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)).collect();
+        let path: Vec<glam::Vec3> = params
+            .path
+            .chunks(3)
+            .map(|p| glam::Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+            .collect();
         let profile: Vec<glam::Vec2> = if params.profile.is_empty() {
             kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments)
         } else {
-            params.profile.chunks(2).map(|p| glam::Vec2::new(p[0] as f32, p[1] as f32)).collect()
+            params
+                .profile
+                .chunks(2)
+                .map(|p| glam::Vec2::new(p[0] as f32, p[1] as f32))
+                .collect()
         };
         let mesh = kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
             path: &path,
@@ -2833,15 +2934,20 @@ impl Operator for AddSweep {
             caps: params.caps,
         });
         if mesh.num_faces() == 0 {
-            return Err(OpError::Failed("the path is too short to sweep along".into()));
+            return Err(OpError::Failed(
+                "the path is too short to sweep along".into(),
+            ));
         }
         let violations = mesh.validate();
         if !violations.is_empty() {
-            return Err(OpError::Failed(format!("the sweep makes an invalid mesh: {violations:?}")));
+            return Err(OpError::Failed(format!(
+                "the sweep makes an invalid mesh: {violations:?}"
+            )));
         }
         let d = doc.document_mut();
         let id = d.add_mesh_object("Sweep", mesh);
-        d.object_mut(id).expect("just added").transform.translation = DVec3::from_array(params.location);
+        d.object_mut(id).expect("just added").transform.translation =
+            DVec3::from_array(params.location);
         d.selection.clear();
         d.selection.add(id);
         Ok(OpResult::Finished)
@@ -2868,7 +2974,11 @@ impl Operator for Purge {
         "Purge Unused Data"
     }
 
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let purged = doc.document_mut().purge_unused();
         Ok(if purged == kreate_scene::document::Purged::default() {
             OpResult::Cancelled
@@ -2891,7 +3001,10 @@ fn bounds_or_point(doc: &Document, id: ObjectId) -> Option<(DVec3, DVec3)> {
 /// Moves an object by a distance given in world space, whatever its parent.
 fn move_in_world(doc: &mut Document, id: ObjectId, delta: DVec3) {
     let local = match doc.object(id).and_then(|o| o.parent) {
-        Some(parent) => doc.world_transform(parent).inverse().transform_vector3(delta),
+        Some(parent) => doc
+            .world_transform(parent)
+            .inverse()
+            .transform_vector3(delta),
         None => delta,
     };
     if let Some(object) = doc.object_mut(id) {
@@ -2900,7 +3013,9 @@ fn move_in_world(doc: &mut Document, id: ObjectId, delta: DVec3) {
 }
 
 fn object_named(doc: &Document, name: &str) -> Option<ObjectId> {
-    doc.objects().find(|(_, o)| o.name == name).map(|(id, _)| id)
+    doc.objects()
+        .find(|(_, o)| o.name == name)
+        .map(|(id, _)| id)
 }
 
 /// Where along one axis of a box `side` is: its low face, its middle, its
@@ -2963,22 +3078,35 @@ impl Operator for Align {
         doc.selection.active.is_some()
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(active) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
         let target = match params.target.trim() {
             "" => (d.cursor, d.cursor),
             name => {
-                let id = object_named(d, name).ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
+                let id = object_named(d, name)
+                    .ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
                 if id == active {
-                    return Err(OpError::Failed("an object cannot be aligned to itself".into()));
+                    return Err(OpError::Failed(
+                        "an object cannot be aligned to itself".into(),
+                    ));
                 }
-                bounds_or_point(d, id).ok_or_else(|| OpError::Failed(format!("{name:?} has no position")))?
+                bounds_or_point(d, id)
+                    .ok_or_else(|| OpError::Failed(format!("{name:?} has no position")))?
             }
         };
-        let Some(own) = bounds_or_point(d, active) else { return Ok(OpResult::Cancelled) };
+        let Some(own) = bounds_or_point(d, active) else {
+            return Ok(OpResult::Cancelled);
+        };
         let axis = (params.axis as usize).min(2);
-        let distance = side_of(target, axis, params.to) + params.offset - side_of(own, axis, params.side);
+        let distance =
+            side_of(target, axis, params.to) + params.offset - side_of(own, axis, params.side);
         if distance.abs() < 1e-12 {
             return Ok(OpResult::Cancelled);
         }
@@ -3015,15 +3143,25 @@ impl Operator for PlaceOn {
         doc.selection.active.is_some()
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(active) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
         let name = params.target.trim();
-        let target = object_named(d, name).ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
+        let target = object_named(d, name)
+            .ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
         if target == active {
-            return Err(OpError::Failed("an object cannot be placed on itself".into()));
+            return Err(OpError::Failed(
+                "an object cannot be placed on itself".into(),
+            ));
         }
-        let (Some(under), Some(own)) = (bounds_or_point(d, target), bounds_or_point(d, active)) else {
+        let (Some(under), Some(own)) = (bounds_or_point(d, target), bounds_or_point(d, active))
+        else {
             return Ok(OpResult::Cancelled);
         };
         let mut delta = DVec3::new(0.0, 0.0, under.1.z - own.0.z);
@@ -3052,7 +3190,9 @@ pub struct SetDimensionsParams {
 
 impl Default for SetDimensionsParams {
     fn default() -> Self {
-        Self { dimensions: [0.0; 3] }
+        Self {
+            dimensions: [0.0; 3],
+        }
     }
 }
 
@@ -3081,10 +3221,20 @@ impl Operator for SetDimensions {
             .is_some_and(|o| o.mesh().is_some())
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
-        let Some(mesh) = d.object(active).and_then(|o| o.mesh()).and_then(|m| d.mesh(m)) else {
+        let Some(active) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(mesh) = d
+            .object(active)
+            .and_then(|o| o.mesh())
+            .and_then(|m| d.mesh(m))
+        else {
             return Ok(OpResult::Cancelled);
         };
         let extent = mesh.bounds();
@@ -3145,7 +3295,11 @@ impl Operator for ShadeObjects {
         !selected_mesh_ids(doc).is_empty()
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let mut changed = 0;
         for mesh in selected_mesh_ids(doc.document()) {
             changed += crate::ops::mesh::with_bmesh_id(doc, mesh, |bm| {
@@ -3157,7 +3311,11 @@ impl Operator for ShadeObjects {
                 Ok(n)
             })?;
         }
-        Ok(if changed == 0 { OpResult::Cancelled } else { OpResult::Finished })
+        Ok(if changed == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
     }
 }
 
@@ -3198,12 +3356,20 @@ impl Operator for RenameMaterial {
         "Rename Material"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        doc.selection.active.is_some_and(|id| doc.material_id_at(id, 0).is_some())
+        doc.selection
+            .active
+            .is_some_and(|id| doc.material_id_at(id, 0).is_some())
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(active) = d.selection.active else { return Ok(OpResult::Cancelled) };
+        let Some(active) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
         let Some(id) = d.material_id_at(active, params.slot as usize) else {
             return Ok(OpResult::Cancelled);
         };
@@ -3211,7 +3377,10 @@ impl Operator for RenameMaterial {
         if base.is_empty() || d.material(id).is_some_and(|m| m.name == base) {
             return Ok(OpResult::Cancelled);
         }
-        let taken = |name: &str| d.materials().any(|(other, m)| other != id && m.name == name);
+        let taken = |name: &str| {
+            d.materials()
+                .any(|(other, m)| other != id && m.name == name)
+        };
         let name = if taken(base) {
             (1..)
                 .map(|i| format!("{base}.{i:03}"))
@@ -3282,14 +3451,34 @@ mod tests {
             let mut r = OperatorRegistry::new();
             crate::ops::register_builtin(&mut r);
             let mut doc = Document::new();
-            let light = doc.add_light(kreate_scene::Light::of_kind("Panel", kreate_scene::LightKind::PANEL));
+            let light = doc.add_light(kreate_scene::Light::of_kind(
+                "Panel",
+                kreate_scene::LightKind::PANEL,
+            ));
             let o = doc.add_object(Object::new("Panel", ObjectData::Light(light)));
             doc.selection.add(o);
-            let wanted = SetLightParams { kind: 3, shape, width: w, height: h, spread: 1.2, ..light_params(doc.light(light).unwrap()) };
+            let wanted = SetLightParams {
+                kind: 3,
+                shape,
+                width: w,
+                height: h,
+                spread: 1.2,
+                ..light_params(doc.light(light).unwrap())
+            };
             let mut h_ = History::new();
-            h_.dispatch(&r, &mut doc, &Context::default(), "light.set_properties", &kreate_reflect::OpParams::to_map(&wanted)).unwrap();
+            h_.dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "light.set_properties",
+                &kreate_reflect::OpParams::to_map(&wanted),
+            )
+            .unwrap();
             let back = light_params(doc.light(light).unwrap());
-            assert_eq!((back.shape, back.width, back.height, back.spread), (shape, w, h, 1.2));
+            assert_eq!(
+                (back.shape, back.width, back.height, back.spread),
+                (shape, w, h, 1.2)
+            );
         }
     }
 
@@ -3305,15 +3494,31 @@ mod tests {
         let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
         let o = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
         doc.selection.add(o);
-        let edit = Context { mode: crate::operator::Mode::EditMesh };
+        let edit = Context {
+            mode: crate::operator::Mode::EditMesh,
+        };
         let mut h = History::new();
         let slot = |n: i64| {
             let mut p = crate::PropertyMap::new();
             p.set("slot", crate::PropertyValue::Int(n));
             p
         };
-        h.dispatch(&r, &mut doc, &edit, "material.add_slot", &crate::PropertyMap::new()).unwrap();
-        h.dispatch(&r, &mut doc, &edit, "material.add_slot", &crate::PropertyMap::new()).unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &edit,
+            "material.add_slot",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &edit,
+            "material.add_slot",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
         // One face selected.
         {
             let m = doc.mesh_mut(mesh).unwrap();
@@ -3324,21 +3529,36 @@ mod tests {
             bm.flush_selection(kreate_mesh::bmesh::SelectMode::Face);
             *m = bm.to_mesh_data();
         }
-        h.dispatch(&r, &mut doc, &edit, "material.assign", &slot(1)).unwrap();
-        let index = doc.mesh(mesh).unwrap().attributes().get_i32(names::MATERIAL_INDEX).unwrap().to_vec();
+        h.dispatch(&r, &mut doc, &edit, "material.assign", &slot(1))
+            .unwrap();
+        let index = doc
+            .mesh(mesh)
+            .unwrap()
+            .attributes()
+            .get_i32(names::MATERIAL_INDEX)
+            .unwrap()
+            .to_vec();
         assert_eq!(index.iter().filter(|i| **i == 1).count(), 1, "{index:?}");
 
         kreate_mesh::selection::select_none(doc.mesh_mut(mesh).unwrap());
-        h.dispatch(&r, &mut doc, &edit, "material.select", &slot(1)).unwrap();
-        let picked = kreate_mesh::selection::selected(doc.mesh(mesh).unwrap(), kreate_mesh::attribute::Domain::Face);
+        h.dispatch(&r, &mut doc, &edit, "material.select", &slot(1))
+            .unwrap();
+        let picked = kreate_mesh::selection::selected(
+            doc.mesh(mesh).unwrap(),
+            kreate_mesh::attribute::Domain::Face,
+        );
         assert_eq!(picked.len(), 1);
         assert_eq!(index[picked[0] as usize], 1);
 
-        let red = doc.add_material(kreate_scene::document::Material { name: "Red".into(), ..Default::default() });
+        let red = doc.add_material(kreate_scene::document::Material {
+            name: "Red".into(),
+            ..Default::default()
+        });
         let uid = doc.material(red).unwrap().uid.raw().to_string();
         let mut p = slot(0);
         p.set("uid", crate::PropertyValue::Text(uid));
-        h.dispatch(&r, &mut doc, &Context::default(), "material.link", &p).unwrap();
+        h.dispatch(&r, &mut doc, &Context::default(), "material.link", &p)
+            .unwrap();
         assert_eq!(doc.mesh_slots(mesh)[0], Some(red));
     }
 
@@ -3355,14 +3575,28 @@ mod tests {
         doc.selection.add(a);
         let mut h = History::new();
         let ctx = Context::default();
-        h.dispatch(&r, &mut doc, &ctx, "object.hide", &crate::PropertyMap::new()).unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "object.hide",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
         assert!(!doc.object(a).unwrap().visible && doc.object(b).unwrap().visible);
         assert!(!doc.selection.objects.contains(&a));
         let mut p = crate::PropertyMap::new();
         p.set("unselected", crate::PropertyValue::Bool(true));
         h.dispatch(&r, &mut doc, &ctx, "object.hide", &p).unwrap();
         assert!(!doc.object(b).unwrap().visible);
-        h.dispatch(&r, &mut doc, &ctx, "object.reveal", &crate::PropertyMap::new()).unwrap();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "object.reveal",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
         assert!(doc.object(a).unwrap().visible && doc.object(b).unwrap().visible);
         assert!(doc.selection.objects.contains(&a) && doc.selection.objects.contains(&b));
     }
@@ -3377,18 +3611,29 @@ mod tests {
         let mut doc = Document::new();
         let a = doc.add_object(Object::new("A", ObjectData::Empty));
         let b = doc.add_object(Object::new("B", ObjectData::Empty));
-        let uid = |doc: &Document, id| crate::PropertyValue::Text(doc.object_uid(id).unwrap().raw().to_string());
+        let uid = |doc: &Document, id| {
+            crate::PropertyValue::Text(doc.object_uid(id).unwrap().raw().to_string())
+        };
         let mut h = History::new();
         let mut p = crate::PropertyMap::new();
         p.set("child", uid(&doc, b));
         p.set("parent", uid(&doc, a));
-        h.dispatch(&r, &mut doc, &Context::default(), "object.parent_one", &p).unwrap();
+        h.dispatch(&r, &mut doc, &Context::default(), "object.parent_one", &p)
+            .unwrap();
         assert_eq!(doc.object(b).unwrap().parent, Some(a));
         assert!(doc.selection.objects.is_empty());
         let mut back = crate::PropertyMap::new();
         back.set("child", uid(&doc, a));
         back.set("parent", uid(&doc, b));
-        assert!(h.dispatch(&r, &mut doc, &Context::default(), "object.parent_one", &back).is_err());
+        assert!(h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "object.parent_one",
+                &back
+            )
+            .is_err());
     }
 
     #[test]
@@ -3403,10 +3648,12 @@ mod tests {
         let mut h = History::new();
         let mut p = crate::PropertyMap::new();
         p.set("name", crate::PropertyValue::Text("Lamp".into()));
-        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p).unwrap();
+        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p)
+            .unwrap();
         assert_eq!(doc.object(b).unwrap().name, "Lamp.001");
         p.set("name", crate::PropertyValue::Text("  Box ".into()));
-        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p).unwrap();
+        h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p)
+            .unwrap();
         assert_eq!(doc.object(b).unwrap().name, "Box");
         assert!(h.undo(&mut doc));
         assert_eq!(doc.object(b).unwrap().name, "Lamp.001");
@@ -3769,11 +4016,25 @@ mod tests {
     fn an_object_is_selected_by_name() {
         let (r, mut h, mut d, c) = setup();
         run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
-        run(&r, &mut h, &mut d, &c, "object.rename", &[("name", PropertyValue::Text("Boiler".into()))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.rename",
+            &[("name", PropertyValue::Text("Boiler".into()))],
+        );
         let boiler = d.selection.active.unwrap();
         run(&r, &mut h, &mut d, &c, "object.add_primitive", &[]);
         let other = d.selection.active.unwrap();
-        run(&r, &mut h, &mut d, &c, "object.select", &[("name", PropertyValue::Text("Boiler".into()))]);
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.select",
+            &[("name", PropertyValue::Text("Boiler".into()))],
+        );
         assert_eq!(d.selection.objects, vec![boiler]);
         assert_eq!(d.selection.active, Some(boiler));
         // Extending keeps what was there, and the named one becomes active.
@@ -3785,7 +4046,10 @@ mod tests {
             &mut d,
             &c,
             "object.select",
-            &[("name", PropertyValue::Text("Boiler".into())), ("extend", PropertyValue::Bool(true))],
+            &[
+                ("name", PropertyValue::Text("Boiler".into())),
+                ("extend", PropertyValue::Bool(true)),
+            ],
         );
         assert_eq!(d.selection.objects.len(), 2);
         assert_eq!(d.selection.active, Some(boiler));

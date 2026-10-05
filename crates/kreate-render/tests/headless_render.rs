@@ -72,7 +72,14 @@ fn render_scene_full(
     show_wireframe: bool,
     configure_camera: impl FnOnce(&mut Camera),
 ) -> Option<(Rendered, [u8; 4])> {
-    render_scene_flags(meshes, shading, show_grid, show_wireframe, false, configure_camera)
+    render_scene_flags(
+        meshes,
+        shading,
+        show_grid,
+        show_wireframe,
+        false,
+        configure_camera,
+    )
 }
 
 fn render_scene_flags(
@@ -139,7 +146,11 @@ fn render_scene_flags(
     // frame the application would have drawn.
     for _ in 1..FRAMES.with(|f| f.get()) {
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut refs);
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("earlier") });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("earlier"),
+            });
         viewport.render(&mut encoder, &view, &refs);
         gpu.queue.submit(Some(encoder.finish()));
     }
@@ -582,27 +593,53 @@ fn face_orientation_is_blue_from_the_front_and_red_from_the_back() {
     // A plane facing +Z, seen from above and then from below.
     let plane = || vec![(kreate_mesh::primitives::plane(4.0), DAffine3::IDENTITY)];
     let centre = |r: &Rendered| r.at(SIZE / 2, SIZE / 2);
-    let (above, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, true, |c| {
-        *c = c.looking_along(kreate_render::ViewAxis::PosZ);
-    }));
+    let (above, _) = gpu_or_skip!(render_scene_flags(
+        &plane(),
+        ShadingMode::Studio,
+        false,
+        false,
+        true,
+        |c| {
+            *c = c.looking_along(kreate_render::ViewAxis::PosZ);
+        }
+    ));
     let p = centre(&above);
     assert!(p[2] > p[0] + 40, "the front is not blue: {p:?}");
-    let (below, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, true, |c| {
-        *c = c.looking_along(kreate_render::ViewAxis::NegZ);
-    }));
+    let (below, _) = gpu_or_skip!(render_scene_flags(
+        &plane(),
+        ShadingMode::Studio,
+        false,
+        false,
+        true,
+        |c| {
+            *c = c.looking_along(kreate_render::ViewAxis::NegZ);
+        }
+    ));
     let p = centre(&below);
     assert!(p[0] > p[2] + 40, "the back is not red: {p:?}");
     // Off, neither.
-    let (plain, _) = gpu_or_skip!(render_scene_flags(&plane(), ShadingMode::Studio, false, false, false, |c| {
-        *c = c.looking_along(kreate_render::ViewAxis::PosZ);
-    }));
+    let (plain, _) = gpu_or_skip!(render_scene_flags(
+        &plane(),
+        ShadingMode::Studio,
+        false,
+        false,
+        false,
+        |c| {
+            *c = c.looking_along(kreate_render::ViewAxis::PosZ);
+        }
+    ));
     let p = centre(&plain);
-    assert!((p[0] as i32 - p[2] as i32).abs() < 40, "tinted with the overlay off: {p:?}");
+    assert!(
+        (p[0] as i32 - p[2] as i32).abs() < 40,
+        "tinted with the overlay off: {p:?}"
+    );
 }
 
 /// Writes the picture where `KREATE_SHOT_DIR` says, to look at by eye.
 fn save_shot(img: &Rendered, name: &str) {
-    let Ok(dir) = std::env::var("KREATE_SHOT_DIR") else { return };
+    let Ok(dir) = std::env::var("KREATE_SHOT_DIR") else {
+        return;
+    };
     let bytes: Vec<u8> = img.pixels.iter().flatten().copied().collect();
     if let Some(buffer) = image::RgbaImage::from_raw(SIZE, SIZE, bytes) {
         let _ = buffer.save(std::path::Path::new(&dir).join(format!("{name}.png")));
@@ -631,8 +668,18 @@ fn flat_is_one_colour_and_studio_models_the_form() {
     // Tones counted without edge smoothing, whose blends along the outline
     // are tones too.
     ANTIALIAS.with(|a| a.set(false));
-    let (flat, bg) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Flat, false, |_| {}));
-    let (studio, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |_| {}));
+    let (flat, bg) = gpu_or_skip!(render_scene_opts(
+        &sphere_scene(),
+        ShadingMode::Flat,
+        false,
+        |_| {}
+    ));
+    let (studio, _) = gpu_or_skip!(render_scene_opts(
+        &sphere_scene(),
+        ShadingMode::Studio,
+        false,
+        |_| {}
+    ));
     save_shot(&flat, "shading-flat");
     save_shot(&studio, "shading-studio");
     let (f, s) = (object_tones(&flat, bg), object_tones(&studio, bg));
@@ -645,32 +692,65 @@ fn flat_is_one_colour_and_studio_models_the_form() {
 /// so its picture must not change as the view goes round it.
 #[test]
 fn studio_lights_follow_the_camera() {
-    let (front, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |_| {}));
-    let (behind, _) = gpu_or_skip!(render_scene_opts(&sphere_scene(), ShadingMode::Studio, false, |c| {
-        c.rotation = kreate_math::DQuat::from_rotation_z(std::f64::consts::PI) * c.rotation;
-    }));
+    let (front, _) = gpu_or_skip!(render_scene_opts(
+        &sphere_scene(),
+        ShadingMode::Studio,
+        false,
+        |_| {}
+    ));
+    let (behind, _) = gpu_or_skip!(render_scene_opts(
+        &sphere_scene(),
+        ShadingMode::Studio,
+        false,
+        |c| {
+            c.rotation = kreate_math::DQuat::from_rotation_z(std::f64::consts::PI) * c.rotation;
+        }
+    ));
     let differ = front
         .pixels
         .iter()
         .zip(&behind.pixels)
         .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 6))
         .count();
-    assert!(differ < front.pixels.len() / 50, "{differ} pixels changed going round a sphere");
+    assert!(
+        differ < front.pixels.len() / 50,
+        "{differ} pixels changed going round a sphere"
+    );
 }
 
 /// The report: wireframe showed the faces too. Wireframe mode draws edges
 /// only — and with no surfaces in front, the back edges show through.
 #[test]
 fn wireframe_mode_draws_edges_and_no_surfaces() {
-    let (wire, bg) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Wireframe, false, false, false, |_| {}));
-    let (solid, _) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {}));
+    let (wire, bg) = gpu_or_skip!(render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Wireframe,
+        false,
+        false,
+        false,
+        |_| {}
+    ));
+    let (solid, _) = gpu_or_skip!(render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        false,
+        false,
+        |_| {}
+    ));
     save_shot(&wire, "shading-wireframe");
     let (w, s) = (wire.covered_fraction(bg), solid.covered_fraction(bg));
     assert!(w > 0.002, "nothing drawn: {w}");
-    assert!(w < s * 0.3, "wireframe covers {w} against solid {s}: the faces are drawn");
+    assert!(
+        w < s * 0.3,
+        "wireframe covers {w} against solid {s}: the faces are drawn"
+    );
     // The middle of the front face is empty in wireframe: no surface there.
     let centre = wire.at(SIZE / 2 + 3, SIZE / 2 + 7);
-    assert!((0..3).all(|i| (centre[i] as i32 - bg[i] as i32).abs() <= 8), "{centre:?} against {bg:?}");
+    assert!(
+        (0..3).all(|i| (centre[i] as i32 - bg[i] as i32).abs() <= 8),
+        "{centre:?} against {bg:?}"
+    );
 }
 
 /// Pixels part way between the background and the darkest face: the blend a
@@ -679,15 +759,28 @@ fn wireframe_mode_draws_edges_and_no_surfaces() {
 fn blended(img: &Rendered, background: [u8; 4]) -> usize {
     let lum = |p: [u8; 4]| (p[0] as i32 * 30 + p[1] as i32 * 59 + p[2] as i32 * 11) / 100;
     let floor = lum(background);
-    img.pixels.iter().filter(|p| (floor + 20..floor + 90).contains(&lum(**p))).count()
+    img.pixels
+        .iter()
+        .filter(|p| (floor + 20..floor + 90).contains(&lum(**p)))
+        .count()
 }
 
 /// The edges of the surfaces are smoothed, and nothing else changes: a face
 /// is the same colour in its middle either way.
 #[test]
 fn surface_edges_are_smoothed() {
-    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.3))];
-    let (smooth, _) = gpu_or_skip!(render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {}));
+    let scene = || {
+        vec![(
+            kreate_mesh::primitives::cube(2.0),
+            DAffine3::from_rotation_z(0.3),
+        )]
+    };
+    let (smooth, _) = gpu_or_skip!(render_scene_opts(
+        &scene(),
+        ShadingMode::Studio,
+        false,
+        |_| {}
+    ));
     ANTIALIAS.with(|a| a.set(false));
     let rough = render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {});
     ANTIALIAS.with(|a| a.set(true));
@@ -696,17 +789,30 @@ fn surface_edges_are_smoothed() {
     save_shot(&rough, "aa-off");
     let (_, bg) = gpu_or_skip!(render_scene_opts(&[], ShadingMode::Studio, false, |_| {}));
     let (s, r) = (blended(&smooth, bg), blended(&rough, bg));
-    assert!(s > r * 3 + 40, "{s} blended pixels smoothed against {r} rough: the edges are not smoothed");
+    assert!(
+        s > r * 3 + 40,
+        "{s} blended pixels smoothed against {r} rough: the edges are not smoothed"
+    );
     let middle = (SIZE / 2, SIZE / 2);
-    assert_eq!(smooth.at(middle.0, middle.1), rough.at(middle.0, middle.1), "a flat face changed");
+    assert_eq!(
+        smooth.at(middle.0, middle.1),
+        rough.at(middle.0, middle.1),
+        "a flat face changed"
+    );
 }
 
 /// A cube standing on a floor: the corner where they meet is what ambient
 /// occlusion is for.
 fn cube_on_floor() -> Vec<(kreate_mesh::MeshData, DAffine3)> {
     vec![
-        (kreate_mesh::primitives::cube(2.0), DAffine3::from_translation(DVec3::new(0.0, 0.0, 1.0))),
-        (kreate_mesh::primitives::grid(12.0, 4, 4), DAffine3::IDENTITY),
+        (
+            kreate_mesh::primitives::cube(2.0),
+            DAffine3::from_translation(DVec3::new(0.0, 0.0, 1.0)),
+        ),
+        (
+            kreate_mesh::primitives::grid(12.0, 4, 4),
+            DAffine3::IDENTITY,
+        ),
     ]
 }
 
@@ -721,13 +827,19 @@ fn occlusion_darkens_where_the_cube_meets_the_floor() {
     let aim = |c: &mut Camera| {
         c.pivot = DVec3::new(0.0, 0.0, 0.5);
         c.distance = 9.0;
-        c.rotation = kreate_math::DQuat::from_rotation_z(0.6) * kreate_math::DQuat::from_rotation_x(1.1);
+        c.rotation =
+            kreate_math::DQuat::from_rotation_z(0.6) * kreate_math::DQuat::from_rotation_x(1.1);
     };
     OCCLUSION.with(|a| a.set(true));
     let with = render_scene_opts(&cube_on_floor(), ShadingMode::Studio, false, aim);
     OCCLUSION.with(|a| a.set(false));
     let (with, _) = gpu_or_skip!(with);
-    let (without, _) = gpu_or_skip!(render_scene_opts(&cube_on_floor(), ShadingMode::Studio, false, aim));
+    let (without, _) = gpu_or_skip!(render_scene_opts(
+        &cube_on_floor(),
+        ShadingMode::Studio,
+        false,
+        aim
+    ));
     save_shot(&with, "ao-on");
     save_shot(&without, "ao-off");
 
@@ -743,7 +855,10 @@ fn occlusion_darkens_where_the_cube_meets_the_floor() {
             lighter += 1;
         }
     }
-    assert!(lighter * 20 < darker, "{lighter} pixels lightened against {darker} darkened");
+    assert!(
+        lighter * 20 < darker,
+        "{lighter} pixels lightened against {darker} darkened"
+    );
     assert!(darker > 200, "only {darker} pixels darkened");
     // The open floor, far from the cube, is left alone.
     let corner = (8, SIZE - 8);
@@ -754,15 +869,36 @@ fn occlusion_darkens_where_the_cube_meets_the_floor() {
 /// between the surface and the background.
 #[test]
 fn xray_shows_what_is_behind_the_surfaces() {
-    let (solid, bg) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, true, false, |_| {}));
+    let (solid, bg) = gpu_or_skip!(render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        true,
+        false,
+        |_| {}
+    ));
     XRAY.with(|a| a.set(true));
-    let seen = render_scene_flags(&cube_scene(), ShadingMode::Studio, false, true, false, |_| {});
+    let seen = render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        true,
+        false,
+        |_| {},
+    );
     XRAY.with(|a| a.set(false));
     let (xray, _) = gpu_or_skip!(seen);
     save_shot(&xray, "xray");
     let middle = (SIZE / 2 + 5, SIZE / 2 + 9);
-    let (s, x, b) = (lum(solid.at(middle.0, middle.1)), lum(xray.at(middle.0, middle.1)), lum(bg));
-    assert!(x < s - 20 && x > b + 10, "x-ray {x} between background {b} and surface {s}");
+    let (s, x, b) = (
+        lum(solid.at(middle.0, middle.1)),
+        lum(xray.at(middle.0, middle.1)),
+        lum(bg),
+    );
+    assert!(
+        x < s - 20 && x > b + 10,
+        "x-ray {x} between background {b} and surface {s}"
+    );
 }
 
 /// Orange: the selection outline's colour, and nothing else in these scenes.
@@ -774,9 +910,23 @@ fn orange(p: &[u8; 4]) -> bool {
 /// none.
 #[test]
 fn a_selected_object_is_outlined() {
-    let (plain, _) = gpu_or_skip!(render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {}));
+    let (plain, _) = gpu_or_skip!(render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        false,
+        false,
+        |_| {}
+    ));
     SELECTED.with(|a| a.set(true));
-    let picked = render_scene_flags(&cube_scene(), ShadingMode::Studio, false, false, false, |_| {});
+    let picked = render_scene_flags(
+        &cube_scene(),
+        ShadingMode::Studio,
+        false,
+        false,
+        false,
+        |_| {},
+    );
     SELECTED.with(|a| a.set(false));
     let (picked, _) = gpu_or_skip!(picked);
     save_shot(&picked, "outline");
@@ -792,8 +942,18 @@ fn a_selected_object_is_outlined() {
 /// to be drawn.
 #[test]
 fn a_still_view_refines_and_then_rests() {
-    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.3))];
-    let (first, bg) = gpu_or_skip!(render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {}));
+    let scene = || {
+        vec![(
+            kreate_mesh::primitives::cube(2.0),
+            DAffine3::from_rotation_z(0.3),
+        )]
+    };
+    let (first, bg) = gpu_or_skip!(render_scene_opts(
+        &scene(),
+        ShadingMode::Studio,
+        false,
+        |_| {}
+    ));
     let still_after_one = STILL_REFINING.with(|r| r.get());
     FRAMES.with(|f| f.set(kreate_render::accum::SAMPLES));
     let refined = render_scene_opts(&scene(), ShadingMode::Studio, false, |_| {});
@@ -807,10 +967,16 @@ fn a_still_view_refines_and_then_rests() {
     // More in-between tones along the outline: the edge has been sampled
     // sixteen ways.
     let (a, b) = (blended(&first, bg), blended(&refined, bg));
-    assert!(b > a, "{b} blended pixels after sixteen frames against {a} after one");
+    assert!(
+        b > a,
+        "{b} blended pixels after sixteen frames against {a} after one"
+    );
     let middle = (SIZE / 2, SIZE / 2);
     let (p, q) = (first.at(middle.0, middle.1), refined.at(middle.0, middle.1));
-    assert!((0..3).all(|i| (p[i] as i32 - q[i] as i32).abs() <= 2), "{p:?} -> {q:?}");
+    assert!(
+        (0..3).all(|i| (p[i] as i32 - q[i] as i32).abs() <= 2),
+        "{p:?} -> {q:?}"
+    );
 }
 
 /// The floor grid does not break the wireframe. A cube at the origin is half
@@ -820,7 +986,12 @@ fn a_still_view_refines_and_then_rests() {
 /// showed as dotted lines.
 #[test]
 fn the_grid_does_not_break_the_wireframe() {
-    let scene = || vec![(kreate_mesh::primitives::cube(2.0), DAffine3::from_rotation_z(0.6))];
+    let scene = || {
+        vec![(
+            kreate_mesh::primitives::cube(2.0),
+            DAffine3::from_rotation_z(0.6),
+        )]
+    };
     // Above, looking down at the cube: the floor plane cuts it in half.
     let camera = |c: &mut Camera| {
         c.frame_sphere(DVec3::ZERO, 1.8, 1.0);
@@ -841,7 +1012,10 @@ fn the_grid_does_not_break_the_wireframe() {
     };
     let without = gpu_or_skip!(edges(false));
     let with = edges(true).expect("the device was there a moment ago");
-    assert!(without > 100, "only {without} wireframe pixels without the grid");
+    assert!(
+        without > 100,
+        "only {without} wireframe pixels without the grid"
+    );
     assert!(
         with * 100 >= without * 97,
         "{with} wireframe pixels over the grid against {without} without it"

@@ -302,9 +302,7 @@ mod tests {
     fn the_active_world_lights_the_scene_and_its_strength_is_applied() {
         let mut doc = Document::new();
         let id = doc.add_world(kreate_scene::World {
-            background: kreate_scene::Background::Flat(kreate_math::SceneRgb::new(
-                0.1, 0.2, 0.4,
-            )),
+            background: kreate_scene::Background::Flat(kreate_math::SceneRgb::new(0.1, 0.2, 0.4)),
             strength: 2.0,
             ..kreate_scene::World::new("Studio")
         });
@@ -435,7 +433,11 @@ mod tests {
 
         let placed = placed_lights(&doc)[0];
         assert_eq!(placed.falloff, Falloff::InverseSquare);
-        assert!((placed.amount[0] - 1000.0).abs() < 1e-3, "{:?}", placed.amount);
+        assert!(
+            (placed.amount[0] - 1000.0).abs() < 1e-3,
+            "{:?}",
+            placed.amount
+        );
 
         // And the source arrives as the disc of the same area, which is what a
         // soft shadow is sampled from.
@@ -504,8 +506,7 @@ mod tests {
         let mut doc = Document::new();
         let id = doc.add_light(Light::of_kind("Lamp", LightKind::SUN));
         let mut object = Object::new("Lamp", ObjectData::Light(id));
-        object.transform.rotation =
-            glam::DQuat::from_rotation_x(-std::f64::consts::FRAC_PI_2);
+        object.transform.rotation = glam::DQuat::from_rotation_x(-std::f64::consts::FRAC_PI_2);
         doc.add_object(object);
 
         let placed = placed_lights(&doc)[0];

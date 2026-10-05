@@ -103,8 +103,7 @@ pub fn pixels_of(image: &Image) -> Vec<u8> {
                     // Opaque. An environment has no transparency to carry, and
                     // a zero here would make a reader that respects alpha see
                     // nothing at all.
-                    out[to + 6..to + 8]
-                        .copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+                    out[to + 6..to + 8].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
                 }
             }
         }
@@ -119,9 +118,8 @@ fn read(image: &Image, texel: &[u8]) -> [f32; 3] {
         // bound and this is the format that respects it — a sky is mostly above
         // one, and the whole reason an HDRI is not a PNG.
         PixelFormat::Rgba16F => {
-            let channel = |i: usize| {
-                half::f16::from_le_bytes([texel[i * 2], texel[i * 2 + 1]]).to_f32()
-            };
+            let channel =
+                |i: usize| half::f16::from_le_bytes([texel[i * 2], texel[i * 2 + 1]]).to_f32();
             [channel(0), channel(1), channel(2)]
         }
         // Eight bits, decoded by what the datablock says they mean. Guessing
@@ -145,8 +143,9 @@ mod tests {
 
     fn at(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 3] {
         let base = ((y as usize * width as usize) + x as usize) * 8;
-        let channel =
-            |i: usize| half::f16::from_le_bytes([pixels[base + i * 2], pixels[base + i * 2 + 1]]).to_f32();
+        let channel = |i: usize| {
+            half::f16::from_le_bytes([pixels[base + i * 2], pixels[base + i * 2 + 1]]).to_f32()
+        };
         [channel(0), channel(1), channel(2)]
     }
 
@@ -312,8 +311,7 @@ mod tests {
         doc.set_active_world(Some(world));
         let with_a = key_of(&doc).expect("an image background");
 
-        doc.world_mut(world).expect("the world").background =
-            kreate_scene::Background::Image(b);
+        doc.world_mut(world).expect("the world").background = kreate_scene::Background::Image(b);
         let with_b = key_of(&doc).expect("an image background");
         assert_ne!(
             with_a, with_b,

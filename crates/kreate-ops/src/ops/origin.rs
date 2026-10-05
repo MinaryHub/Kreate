@@ -51,7 +51,11 @@ impl Operator for CursorSet {
     fn label() -> &'static str {
         "Set 3D Cursor"
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let at = DVec3::from_array(params.location);
         if !at.is_finite() || at == doc.document().cursor {
             return Ok(OpResult::Cancelled);
@@ -73,8 +77,15 @@ fn objects_mode(ctx: &Context, doc: &Document) -> bool {
 /// of each, which is the one the new origin is measured against.
 fn selected_meshes(doc: &Document) -> Vec<(ObjectId, MeshId)> {
     let mut out: Vec<(ObjectId, MeshId)> = Vec::new();
-    for id in doc.selection.active.into_iter().chain(doc.selection.objects.iter().copied()) {
-        let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) else { continue };
+    for id in doc
+        .selection
+        .active
+        .into_iter()
+        .chain(doc.selection.objects.iter().copied())
+    {
+        let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) else {
+            continue;
+        };
         if !out.iter().any(|(_, m)| *m == mesh) {
             out.push((id, mesh));
         }
@@ -91,7 +102,12 @@ fn selected_meshes(doc: &Document) -> Vec<(ObjectId, MeshId)> {
 /// the applied parts taken out. The vertex change is then whatever makes the
 /// two agree, `keep⁻¹ · old`, worked out per object — and it has to be the
 /// same for every user of the mesh, which the callers see to.
-fn rebase(doc: &mut Document, mesh: MeshId, change: DAffine3, keep: impl Fn(&DTransform) -> DTransform) {
+fn rebase(
+    doc: &mut Document,
+    mesh: MeshId,
+    change: DAffine3,
+    keep: impl Fn(&DTransform) -> DTransform,
+) {
     if let Some(m) = doc.mesh_mut(mesh) {
         for p in m.positions_mut() {
             *p = change.transform_point3(p.as_dvec3()).as_vec3();
@@ -103,7 +119,9 @@ fn rebase(doc: &mut Document, mesh: MeshId, change: DAffine3, keep: impl Fn(&DTr
         .map(|(id, _)| id)
         .collect();
     for id in users {
-        let Some(old) = doc.object(id).map(|o| o.transform) else { continue };
+        let Some(old) = doc.object(id).map(|o| o.transform) else {
+            continue;
+        };
         let new = keep(&old);
         // The children hang from the object's frame, which just moved by
         // `new⁻¹ · old` — the same `change` — so their link takes it back.
@@ -148,7 +166,11 @@ impl Operator for OriginSet {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         objects_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let targets = selected_meshes(doc.document());
         let mut changed = false;
         for (object, mesh) in targets {
@@ -159,7 +181,11 @@ impl Operator for OriginSet {
             }
             // Where the new origin is, in the mesh's own space. The middle is
             // the median of the vertices, Blender's default for this.
-            let middle = data.positions().iter().fold(DVec3::ZERO, |s, p| s + p.as_dvec3()) / data.num_verts() as f64;
+            let middle = data
+                .positions()
+                .iter()
+                .fold(DVec3::ZERO, |s, p| s + p.as_dvec3())
+                / data.num_verts() as f64;
             let target = match params.kind {
                 1 => {
                     let to_local = d.world_transform(object).inverse();
@@ -194,7 +220,11 @@ impl Operator for OriginSet {
             }
             changed = true;
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -209,7 +239,11 @@ pub struct TransformApplyParams {
 
 impl Default for TransformApplyParams {
     fn default() -> Self {
-        Self { location: false, rotation: true, scale: true }
+        Self {
+            location: false,
+            rotation: true,
+            scale: true,
+        }
     }
 }
 
@@ -233,7 +267,11 @@ impl Operator for TransformApply {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         objects_mode(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let targets = selected_meshes(doc.document());
         let mut changed = false;
         let mut shared = 0;
@@ -243,10 +281,20 @@ impl Operator for TransformApply {
                 shared += 1;
                 continue;
             }
-            let Some(old) = d.object(object).map(|o| o.transform) else { continue };
+            let Some(old) = d.object(object).map(|o| o.transform) else {
+                continue;
+            };
             let keep = DTransform {
-                translation: if params.location { DVec3::ZERO } else { old.translation },
-                rotation: if params.rotation { DQuat::IDENTITY } else { old.rotation },
+                translation: if params.location {
+                    DVec3::ZERO
+                } else {
+                    old.translation
+                },
+                rotation: if params.rotation {
+                    DQuat::IDENTITY
+                } else {
+                    old.rotation
+                },
                 scale: if params.scale { DVec3::ONE } else { old.scale },
             };
             if keep == old {
@@ -265,9 +313,15 @@ impl Operator for TransformApply {
             changed = true;
         }
         if !changed && shared > 0 {
-            return Err(OpError::Failed("a mesh used by more than one object cannot have its transform applied".into()));
+            return Err(OpError::Failed(
+                "a mesh used by more than one object cannot have its transform applied".into(),
+            ));
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -279,7 +333,11 @@ mod tests {
     use crate::{PropertyMap, PropertyValue};
     use kreate_scene::document::{Object, ObjectData};
 
-    fn run(doc: &mut Document, op: &str, pairs: &[(&'static str, PropertyValue)]) -> Result<OpResult, OpError> {
+    fn run(
+        doc: &mut Document,
+        op: &str,
+        pairs: &[(&'static str, PropertyValue)],
+    ) -> Result<OpResult, OpError> {
         let mut r = OperatorRegistry::new();
         crate::ops::register_builtin(&mut r);
         let mut p = PropertyMap::new();
@@ -325,7 +383,10 @@ mod tests {
     fn drawn(doc: &Document, cube: ObjectId) -> Vec<DVec3> {
         let world = doc.world_transform(cube);
         let mesh = doc.mesh(doc.object(cube).unwrap().mesh().unwrap()).unwrap();
-        mesh.positions().iter().map(|p| world.transform_point3(p.as_dvec3())).collect()
+        mesh.positions()
+            .iter()
+            .map(|p| world.transform_point3(p.as_dvec3()))
+            .collect()
     }
 
     fn same(a: &[DVec3], b: &[DVec3]) -> bool {
@@ -336,9 +397,25 @@ mod tests {
     fn the_cursor_is_set_and_setting_it_where_it_is_does_nothing() {
         let mut doc = Document::new();
         let at = [1.0, -2.0, 0.5];
-        assert_eq!(run(&mut doc, "scene.cursor_set", &[("location", PropertyValue::Vec3(at))]).unwrap(), OpResult::Finished);
+        assert_eq!(
+            run(
+                &mut doc,
+                "scene.cursor_set",
+                &[("location", PropertyValue::Vec3(at))]
+            )
+            .unwrap(),
+            OpResult::Finished
+        );
         assert_eq!(doc.cursor, DVec3::from_array(at));
-        assert_eq!(run(&mut doc, "scene.cursor_set", &[("location", PropertyValue::Vec3(at))]).unwrap(), OpResult::Cancelled);
+        assert_eq!(
+            run(
+                &mut doc,
+                "scene.cursor_set",
+                &[("location", PropertyValue::Vec3(at))]
+            )
+            .unwrap(),
+            OpResult::Cancelled
+        );
     }
 
     #[test]
@@ -346,9 +423,17 @@ mod tests {
         let (mut doc, cube, child) = scene();
         let before = drawn(&doc, cube);
         let child_before = doc.world_transform(child).translation;
-        run(&mut doc, "object.origin_set", &[("kind", PropertyValue::Enum(0))]).unwrap();
+        run(
+            &mut doc,
+            "object.origin_set",
+            &[("kind", PropertyValue::Enum(0))],
+        )
+        .unwrap();
         assert!(same(&before, &drawn(&doc, cube)), "the cube moved");
-        assert!((doc.world_transform(child).translation - child_before).length() < 1e-6, "the child moved");
+        assert!(
+            (doc.world_transform(child).translation - child_before).length() < 1e-6,
+            "the child moved"
+        );
         // The origin is now the middle of what is drawn.
         let middle = before.iter().fold(DVec3::ZERO, |s, p| s + *p) / before.len() as f64;
         assert!((doc.object(cube).unwrap().transform.translation - middle).length() < 1e-6);
@@ -359,7 +444,12 @@ mod tests {
         let (mut doc, cube, _) = scene();
         doc.cursor = DVec3::new(-1.0, 2.0, 0.5);
         let before = drawn(&doc, cube);
-        run(&mut doc, "object.origin_set", &[("kind", PropertyValue::Enum(1))]).unwrap();
+        run(
+            &mut doc,
+            "object.origin_set",
+            &[("kind", PropertyValue::Enum(1))],
+        )
+        .unwrap();
         assert!(same(&before, &drawn(&doc, cube)));
         assert!((doc.world_transform(cube).translation - doc.cursor).length() < 1e-6);
     }
@@ -368,10 +458,18 @@ mod tests {
     fn geometry_to_origin_moves_the_geometry_instead() {
         let (mut doc, cube, _) = scene();
         let at = doc.object(cube).unwrap().transform.translation;
-        run(&mut doc, "object.origin_set", &[("kind", PropertyValue::Enum(2))]).unwrap();
+        run(
+            &mut doc,
+            "object.origin_set",
+            &[("kind", PropertyValue::Enum(2))],
+        )
+        .unwrap();
         let now = drawn(&doc, cube);
         let middle = now.iter().fold(DVec3::ZERO, |s, p| s + *p) / now.len() as f64;
-        assert!((middle - at).length() < 1e-6, "the geometry did not come to the origin");
+        assert!(
+            (middle - at).length() < 1e-6,
+            "the geometry did not come to the origin"
+        );
     }
 
     #[test]
@@ -382,11 +480,23 @@ mod tests {
         run(&mut doc, "object.transform_apply", &[]).unwrap();
         let t = doc.object(cube).unwrap().transform;
         assert_eq!((t.rotation, t.scale), (DQuat::IDENTITY, DVec3::ONE));
-        assert_eq!(t.translation, DVec3::new(0.0, 0.0, 3.0), "location was not asked for");
+        assert_eq!(
+            t.translation,
+            DVec3::new(0.0, 0.0, 3.0),
+            "location was not asked for"
+        );
         assert!(same(&before, &drawn(&doc, cube)));
-        assert!(doc.world_transform(child).abs_diff_eq(child_before, 1e-6), "the child moved");
+        assert!(
+            doc.world_transform(child).abs_diff_eq(child_before, 1e-6),
+            "the child moved"
+        );
         // All of it, location too.
-        run(&mut doc, "object.transform_apply", &[("location", PropertyValue::Bool(true))]).unwrap();
+        run(
+            &mut doc,
+            "object.transform_apply",
+            &[("location", PropertyValue::Bool(true))],
+        )
+        .unwrap();
         assert_eq!(doc.object(cube).unwrap().transform, DTransform::IDENTITY);
         assert!(same(&before, &drawn(&doc, cube)));
     }
@@ -399,7 +509,12 @@ mod tests {
         assert!(run(&mut doc, "object.transform_apply", &[]).is_err());
         // Moving the origin is fine: every user is compensated.
         let before = drawn(&doc, cube);
-        run(&mut doc, "object.origin_set", &[("kind", PropertyValue::Enum(0))]).unwrap();
+        run(
+            &mut doc,
+            "object.origin_set",
+            &[("kind", PropertyValue::Enum(0))],
+        )
+        .unwrap();
         assert!(same(&before, &drawn(&doc, cube)));
     }
 }

@@ -50,7 +50,10 @@ pub struct InsertKeyframeParams {
 
 impl Default for InsertKeyframeParams {
     fn default() -> Self {
-        Self { frame: 1.0, what: 0 }
+        Self {
+            frame: 1.0,
+            what: 0,
+        }
     }
 }
 
@@ -83,13 +86,20 @@ impl Operator for InsertKeyframe {
         // same key and the same keying sets, with a bone's rotation its
         // quaternion.
         if posing(ctx) {
-            let properties = BONE_KEYING_SETS.get(params.what as usize).copied().unwrap_or(BONE_KEYING_SETS[0]);
+            let properties = BONE_KEYING_SETS
+                .get(params.what as usize)
+                .copied()
+                .unwrap_or(BONE_KEYING_SETS[0]);
             let Some(object) = crate::ops::pose::posed_object(doc.document()) else {
                 return Ok(OpResult::Cancelled);
             };
             let bones = selected_bones(doc.document(), object);
             let keyed = key_bones(doc.document_mut(), object, &bones, params.frame, properties);
-            return Ok(if keyed { OpResult::Finished } else { OpResult::Cancelled });
+            return Ok(if keyed {
+                OpResult::Finished
+            } else {
+                OpResult::Cancelled
+            });
         }
         let properties = KEYING_SETS
             .get(params.what as usize)
@@ -122,7 +132,12 @@ pub fn selected_bones(doc: &Document, object: kreate_scene::ObjectId) -> Vec<Str
     let (Some((_, armature)), Some(o)) = (doc.armature_of(object), doc.object(object)) else {
         return Vec::new();
     };
-    armature.bones.iter().filter(|b| o.pose.is_selected(&b.name)).map(|b| b.name.clone()).collect()
+    armature
+        .bones
+        .iter()
+        .filter(|b| o.pose.is_selected(&b.name))
+        .map(|b| b.name.clone())
+        .collect()
 }
 
 /// Keys `properties` of each of `bones` of `object`'s pose at `frame`, on the
@@ -139,7 +154,9 @@ pub fn key_bones(
     frame: f64,
     properties: &[&str],
 ) -> bool {
-    let Some(o) = d.object(object) else { return false };
+    let Some(o) = d.object(object) else {
+        return false;
+    };
     if bones.is_empty() {
         return false;
     }
@@ -154,11 +171,15 @@ pub fn key_bones(
             action
         }
     };
-    let Some(action) = d.action_mut(action) else { return false };
+    let Some(action) = d.action_mut(action) else {
+        return false;
+    };
     for bone in bones {
         let transform = pose.transform(bone);
         for property in properties {
-            let Some(mut values) = animation::read_bone(&transform, property) else { continue };
+            let Some(mut values) = animation::read_bone(&transform, property) else {
+                continue;
+            };
             let path = animation::bone_path(bone, property);
             if *property == "rotation_quaternion" {
                 let there: Vec<Option<f64>> = (0..4u8)
@@ -171,14 +192,20 @@ pub fn key_bones(
                     })
                     .collect();
                 if there.iter().all(Option::is_some) {
-                    let dot: f64 = there.iter().zip(&values).map(|(a, b)| a.unwrap_or(0.0) * b).sum();
+                    let dot: f64 = there
+                        .iter()
+                        .zip(&values)
+                        .map(|(a, b)| a.unwrap_or(0.0) * b)
+                        .sum();
                     if dot < 0.0 {
                         values.iter_mut().for_each(|v| *v = -*v);
                     }
                 }
             }
             for (index, value) in values.into_iter().enumerate() {
-                action.curve_mut(&path, index as u8).insert(frame, value, Interpolation::default());
+                action
+                    .curve_mut(&path, index as u8)
+                    .insert(frame, value, Interpolation::default());
             }
         }
     }
@@ -199,7 +226,9 @@ pub fn key_objects(
 ) -> bool {
     let mut keyed = false;
     for id in objects {
-        let Some(object) = d.object(*id) else { continue };
+        let Some(object) = d.object(*id) else {
+            continue;
+        };
         let transform = object.transform;
         let action = match object.action.filter(|a| d.action(*a).is_some()) {
             Some(action) => action,
@@ -212,15 +241,19 @@ pub fn key_objects(
                 action
             }
         };
-        let Some(action) = d.action_mut(action) else { continue };
+        let Some(action) = d.action_mut(action) else {
+            continue;
+        };
         for property in properties {
             let Some(value) = animation::read_object(&transform, property) else {
                 continue;
             };
             for index in 0..3u8 {
-                action
-                    .curve_mut(property, index)
-                    .insert(frame, value[index as usize], Interpolation::default());
+                action.curve_mut(property, index).insert(
+                    frame,
+                    value[index as usize],
+                    Interpolation::default(),
+                );
             }
         }
         keyed = true;
@@ -275,10 +308,15 @@ impl Operator for DeleteKeyframe {
                 return Ok(OpResult::Cancelled);
             };
             let ours = |c: &animation::FCurve| {
-                animation::parse_bone_path(&c.path.property).is_some_and(|(b, _)| bones.iter().any(|n| n == b))
+                animation::parse_bone_path(&c.path.property)
+                    .is_some_and(|(b, _)| bones.iter().any(|n| n == b))
             };
             let any = doc.document().action(action).is_some_and(|a| {
-                a.curves.iter().filter(|c| ours(c)).any(|c| c.keys.iter().any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME))
+                a.curves.iter().filter(|c| ours(c)).any(|c| {
+                    c.keys
+                        .iter()
+                        .any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)
+                })
             });
             if !any {
                 return Ok(OpResult::Cancelled);
@@ -305,9 +343,13 @@ impl Operator for DeleteKeyframe {
         // Asked before anything is borrowed mutably, so a frame with nothing
         // on it is a cancel with no step to undo.
         let any = actions.iter().any(|a| {
-            doc.document()
-                .action(*a)
-                .is_some_and(|a| a.curves.iter().any(|c| c.keys.iter().any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)))
+            doc.document().action(*a).is_some_and(|a| {
+                a.curves.iter().any(|c| {
+                    c.keys
+                        .iter()
+                        .any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)
+                })
+            })
         });
         if !any {
             return Ok(OpResult::Cancelled);
@@ -338,7 +380,9 @@ pub fn shown_actions(doc: &Document) -> Vec<kreate_scene::ActionId> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for id in &doc.selection.objects {
-        let Some(object) = doc.object(*id) else { continue };
+        let Some(object) = doc.object(*id) else {
+            continue;
+        };
         let mut push = |a: Option<kreate_scene::ActionId>| {
             if let Some(a) = a.filter(|a| doc.action(*a).is_some() && seen.insert(*a)) {
                 out.push(a);
@@ -370,11 +414,17 @@ pub fn row_target(action_uid: u64, property: Option<&str>) -> String {
 /// A property as a target writes it: a bone's name can hold a space, which
 /// separates targets, or a slash, which separates a target's parts.
 fn escape(property: &str) -> String {
-    property.replace('%', "%25").replace(' ', "%20").replace('/', "%2F")
+    property
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('/', "%2F")
 }
 
 fn unescape(property: &str) -> String {
-    property.replace("%2F", "/").replace("%20", " ").replace("%25", "%")
+    property
+        .replace("%2F", "/")
+        .replace("%20", " ")
+        .replace("%25", "%")
 }
 
 fn parse_targets(text: &str) -> Vec<(u64, Option<String>)> {
@@ -434,14 +484,26 @@ impl Operator for SelectKeysBox {
         for (uid, property) in targets {
             // Only the actions on show: a target naming another is a stale
             // script line, and selecting keys nobody can see is a surprise.
-            let Some(id) = d.action_by_uid(kreate_scene::Uid::from_raw(uid)).filter(|a| shown.contains(a)) else {
+            let Some(id) = d
+                .action_by_uid(kreate_scene::Uid::from_raw(uid))
+                .filter(|a| shown.contains(a))
+            else {
                 continue;
             };
             if let Some(a) = d.action_mut(id) {
-                changed |= a.select_range(property.as_deref(), params.frame_min, params.frame_max, true);
+                changed |= a.select_range(
+                    property.as_deref(),
+                    params.frame_min,
+                    params.frame_max,
+                    true,
+                );
             }
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -482,7 +544,11 @@ impl Operator for SelectAllKeys {
                 };
             }
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -521,7 +587,10 @@ impl Operator for MoveKeys {
             return Ok(OpResult::Cancelled);
         }
         let shown = shown_actions(doc.document());
-        if !shown.iter().any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected())) {
+        if !shown
+            .iter()
+            .any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected()))
+        {
             return Ok(OpResult::Cancelled);
         }
         let d = doc.document_mut();
@@ -562,7 +631,10 @@ impl Operator for DeleteKeys {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let shown = shown_actions(doc.document());
-        if !shown.iter().any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected())) {
+        if !shown
+            .iter()
+            .any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected()))
+        {
             return Ok(OpResult::Cancelled);
         }
         let d = doc.document_mut();
@@ -600,13 +672,18 @@ impl Operator for SetKeyInterpolation {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let Some(kind) = Interpolation::ALL.get(params.interpolation as usize).copied() else {
+        let Some(kind) = Interpolation::ALL
+            .get(params.interpolation as usize)
+            .copied()
+        else {
             return Ok(OpResult::Cancelled);
         };
         let shown = shown_actions(doc.document());
         let any = shown.iter().any(|a| {
             doc.document().action(*a).is_some_and(|a| {
-                a.curves.iter().any(|c| c.keys.iter().any(|k| k.selected && k.interpolation != kind))
+                a.curves
+                    .iter()
+                    .any(|c| c.keys.iter().any(|k| k.selected && k.interpolation != kind))
             })
         });
         if !any {
@@ -648,7 +725,12 @@ pub struct KeyPropertyParams {
 
 impl Default for KeyPropertyParams {
     fn default() -> Self {
-        Self { frame: 1.0, datablock: 0, slot: 0, property: String::new() }
+        Self {
+            frame: 1.0,
+            datablock: 0,
+            slot: 0,
+            property: String::new(),
+        }
     }
 }
 
@@ -672,7 +754,9 @@ fn property_action(
         // The active object's own transform: a diamond in the Object tab.
         kreate_scene::DatablockKind::Object => {
             let o = d.object(object)?;
-            let value = animation::read_object(&o.transform, property)?.to_array().to_vec();
+            let value = animation::read_object(&o.transform, property)?
+                .to_array()
+                .to_vec();
             let action = match o.action.filter(|a| d.action(*a).is_some()) {
                 Some(a) => a,
                 None => {
@@ -743,24 +827,44 @@ impl Operator for KeyProperty {
             if let Some((bone, property)) = animation::parse_bone_path(&params.property) {
                 let d = doc.document();
                 let Some(object) = d.selection.active.filter(|o| {
-                    d.armature_of(*o).is_some_and(|(_, a)| a.bone_index(bone).is_some())
+                    d.armature_of(*o)
+                        .is_some_and(|(_, a)| a.bone_index(bone).is_some())
                 }) else {
                     return Ok(OpResult::Cancelled);
                 };
-                if !animation::BONE_ANIMATABLE.iter().any(|b| b.name == property) {
+                if !animation::BONE_ANIMATABLE
+                    .iter()
+                    .any(|b| b.name == property)
+                {
                     return Ok(OpResult::Cancelled);
                 }
                 let (bone, property) = (bone.to_string(), property.to_string());
-                let keyed = key_bones(doc.document_mut(), object, &[bone], params.frame, &[property.as_str()]);
-                return Ok(if keyed { OpResult::Finished } else { OpResult::Cancelled });
+                let keyed = key_bones(
+                    doc.document_mut(),
+                    object,
+                    &[bone],
+                    params.frame,
+                    &[property.as_str()],
+                );
+                return Ok(if keyed {
+                    OpResult::Finished
+                } else {
+                    OpResult::Cancelled
+                });
             }
         }
         // A shape key's value: on the object's action, under Blender's path.
         if kind == kreate_scene::DatablockKind::Object {
             if let Some(name) = animation::parse_shape_path(&params.property) {
                 let d = doc.document_mut();
-                let Some(object) = d.selection.active else { return Ok(OpResult::Cancelled) };
-                let Some(value) = d.object(object).and_then(|o| o.shape_keys.iter().find(|k| k.name == name)).map(|k| k.value) else {
+                let Some(object) = d.selection.active else {
+                    return Ok(OpResult::Cancelled);
+                };
+                let Some(value) = d
+                    .object(object)
+                    .and_then(|o| o.shape_keys.iter().find(|k| k.name == name))
+                    .map(|k| k.value)
+                else {
                     return Ok(OpResult::Cancelled);
                 };
                 let o = d.object(object).expect("active");
@@ -772,27 +876,40 @@ impl Operator for KeyProperty {
                         a
                     }
                 };
-                let Some(action) = d.action_mut(action) else { return Ok(OpResult::Cancelled) };
-                action.curve_mut(&params.property, 0).insert(params.frame, value as f64, Interpolation::default());
+                let Some(action) = d.action_mut(action) else {
+                    return Ok(OpResult::Cancelled);
+                };
+                action.curve_mut(&params.property, 0).insert(
+                    params.frame,
+                    value as f64,
+                    Interpolation::default(),
+                );
                 return Ok(OpResult::Finished);
             }
         }
         // Checked against what the kind declares before anything is made: a
         // misspelt property must not leave an empty action behind.
-        if !animation::animatable(kind).iter().any(|d| d.name == params.property) {
+        if !animation::animatable(kind)
+            .iter()
+            .any(|d| d.name == params.property)
+        {
             return Ok(OpResult::Cancelled);
         }
         let d = doc.document_mut();
-        let Some((action, value)) = property_action(d, params.datablock, params.slot, &params.property) else {
+        let Some((action, value)) =
+            property_action(d, params.datablock, params.slot, &params.property)
+        else {
             return Ok(OpResult::Cancelled);
         };
         let Some(action) = d.action_mut(action) else {
             return Ok(OpResult::Cancelled);
         };
         for (index, v) in value.iter().enumerate() {
-            action
-                .curve_mut(&params.property, index as u8)
-                .insert(params.frame, *v, Interpolation::default());
+            action.curve_mut(&params.property, index as u8).insert(
+                params.frame,
+                *v,
+                Interpolation::default(),
+            );
         }
         Ok(OpResult::Finished)
     }
@@ -810,7 +927,12 @@ pub struct UnkeyPropertyParams {
 
 impl Default for UnkeyPropertyParams {
     fn default() -> Self {
-        Self { frame: 1.0, datablock: 0, slot: 0, property: String::new() }
+        Self {
+            frame: 1.0,
+            datablock: 0,
+            slot: 0,
+            property: String::new(),
+        }
     }
 }
 
@@ -839,12 +961,14 @@ impl Operator for UnkeyProperty {
             return Ok(OpResult::Cancelled);
         };
         let action = match datablock_of(params.datablock) {
-            kreate_scene::DatablockKind::Material => {
-                d.material_at(object, params.slot as usize).and_then(|m| m.action)
-            }
+            kreate_scene::DatablockKind::Material => d
+                .material_at(object, params.slot as usize)
+                .and_then(|m| m.action),
             kreate_scene::DatablockKind::Object => d.object(object).and_then(|o| o.action),
             _ => match d.object(object).map(|o| &o.data) {
-                Some(kreate_scene::document::ObjectData::Light(l)) => d.light(*l).and_then(|l| l.action),
+                Some(kreate_scene::document::ObjectData::Light(l)) => {
+                    d.light(*l).and_then(|l| l.action)
+                }
                 _ => None,
             },
         };
@@ -854,14 +978,20 @@ impl Operator for UnkeyProperty {
         let has = d.action(action).is_some_and(|a| {
             a.curves.iter().any(|c| {
                 c.path.property.as_ref() == params.property
-                    && c.keys.iter().any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)
+                    && c.keys
+                        .iter()
+                        .any(|k| (k.frame - params.frame).abs() < animation::SAME_FRAME)
             })
         });
         if !has {
             return Ok(OpResult::Cancelled);
         }
         if let Some(a) = doc.document_mut().action_mut(action) {
-            for curve in a.curves.iter_mut().filter(|c| c.path.property.as_ref() == params.property) {
+            for curve in a
+                .curves
+                .iter_mut()
+                .filter(|c| c.path.property.as_ref() == params.property)
+            {
                 curve.remove(params.frame);
             }
             a.curves.retain(|c| !c.keys.is_empty());
@@ -928,7 +1058,10 @@ impl Operator for SelectKeysRegion {
             }
         }
         for (uid, property, index) in params.targets.split_whitespace().filter_map(parse_curve) {
-            let Some(id) = d.action_by_uid(kreate_scene::Uid::from_raw(uid)).filter(|a| shown.contains(a)) else {
+            let Some(id) = d
+                .action_by_uid(kreate_scene::Uid::from_raw(uid))
+                .filter(|a| shown.contains(a))
+            else {
                 continue;
             };
             if let Some(a) = d.action_mut(id) {
@@ -940,7 +1073,11 @@ impl Operator for SelectKeysRegion {
                 );
             }
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -973,9 +1110,11 @@ impl Operator for SetHandleType {
         let slope = if params.kind == 1 { Some(0.0) } else { None };
         let shown = shown_actions(doc.document());
         let any = shown.iter().any(|a| {
-            doc.document()
-                .action(*a)
-                .is_some_and(|a| a.curves.iter().any(|c| c.keys.iter().any(|k| k.selected && k.slope != slope)))
+            doc.document().action(*a).is_some_and(|a| {
+                a.curves
+                    .iter()
+                    .any(|c| c.keys.iter().any(|k| k.selected && k.slope != slope))
+            })
         });
         if !any {
             return Ok(OpResult::Cancelled);
@@ -1052,4 +1191,3 @@ impl Operator for SetKeySlope {
         Ok(OpResult::Finished)
     }
 }
-

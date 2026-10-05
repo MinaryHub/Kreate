@@ -15,7 +15,15 @@ fn setup() -> (OperatorRegistry, History, Document, MeshId, Context) {
     let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
     let object = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
     doc.selection.add(object);
-    (registry, History::new(), doc, mesh, Context { mode: Mode::EditMesh })
+    (
+        registry,
+        History::new(),
+        doc,
+        mesh,
+        Context {
+            mode: Mode::EditMesh,
+        },
+    )
 }
 
 fn params(pairs: &[(&'static str, PropertyValue)]) -> PropertyMap {
@@ -36,7 +44,14 @@ fn edge_where(doc: &Document, mesh: MeshId, at: impl Fn(Vec3) -> bool) -> u32 {
         .expect("such an edge") as u32
 }
 
-fn pick_edge(r: &OperatorRegistry, h: &mut History, d: &mut Document, c: &Context, edge: u32, extend: bool) {
+fn pick_edge(
+    r: &OperatorRegistry,
+    h: &mut History,
+    d: &mut Document,
+    c: &Context,
+    edge: u32,
+    extend: bool,
+) {
     h.dispatch(
         r,
         d,
@@ -55,7 +70,12 @@ fn pick_edge(r: &OperatorRegistry, h: &mut History, d: &mut Document, c: &Contex
 fn faces(doc: &Document, mesh: MeshId) -> Vec<Vec<Vec3>> {
     let m = doc.mesh(mesh).unwrap();
     (0..m.num_faces())
-        .map(|f| m.face_verts(f).iter().map(|v| m.positions()[*v as usize]).collect())
+        .map(|f| {
+            m.face_verts(f)
+                .iter()
+                .map(|v| m.positions()[*v as usize])
+                .collect()
+        })
         .collect()
 }
 
@@ -95,12 +115,24 @@ fn f_on_two_picked_edges_spans_those_two_edges() {
     let corners = ends(&d, mesh, &[top_front, bottom_back]);
     let before = faces(&d, mesh);
 
-    h.dispatch_in_session(&r, &mut d, Some(&mut session), &c, "mesh.fill", &PropertyMap::new())
-        .expect("mesh.fill");
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.fill",
+        &PropertyMap::new(),
+    )
+    .expect("mesh.fill");
 
     let made = new_faces(&d, mesh, &before);
     assert_eq!(made.len(), 1, "{made:?}");
-    assert!(same_points(&made[0], &corners), "made {:?}, selected {:?}", made[0], corners);
+    assert!(
+        same_points(&made[0], &corners),
+        "made {:?}, selected {:?}",
+        made[0],
+        corners
+    );
 }
 
 #[test]
@@ -127,12 +159,24 @@ fn f_on_two_edges_of_an_open_strip_closes_between_them() {
     let corners = ends(&d, mesh, &[front, back]);
     let before = faces(&d, mesh);
 
-    h.dispatch_in_session(&r, &mut d, Some(&mut session), &c, "mesh.fill", &PropertyMap::new())
-        .expect("mesh.fill");
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.fill",
+        &PropertyMap::new(),
+    )
+    .expect("mesh.fill");
 
     let made = new_faces(&d, mesh, &before);
     assert_eq!(made.len(), 1, "{made:?}");
-    assert!(same_points(&made[0], &corners), "made {:?}, selected {:?}", made[0], corners);
+    assert!(
+        same_points(&made[0], &corners),
+        "made {:?}, selected {:?}",
+        made[0],
+        corners
+    );
 }
 
 /// The report: delete a face, pick two edges, F — and the face came out on
@@ -148,7 +192,11 @@ fn f_after_a_delete_in_the_session_still_spans_the_picked_edges() {
     let top = {
         let m = d.mesh(mesh).unwrap();
         (0..m.num_faces())
-            .find(|f| m.face_verts(*f).iter().all(|v| m.positions()[*v as usize].z > 0.5))
+            .find(|f| {
+                m.face_verts(*f)
+                    .iter()
+                    .all(|v| m.positions()[*v as usize].z > 0.5)
+            })
             .unwrap()
     };
     h.dispatch(
@@ -156,7 +204,10 @@ fn f_after_a_delete_in_the_session_still_spans_the_picked_edges() {
         &mut d,
         &c,
         "mesh.select_pick",
-        &params(&[("element", PropertyValue::Int(top as i64)), ("mode", PropertyValue::Enum(2))]),
+        &params(&[
+            ("element", PropertyValue::Int(top as i64)),
+            ("mode", PropertyValue::Enum(2)),
+        ]),
     )
     .expect("mesh.select_pick");
     h.dispatch_in_session(
@@ -177,10 +228,22 @@ fn f_after_a_delete_in_the_session_still_spans_the_picked_edges() {
     let corners = ends(&d, mesh, &[front, back]);
     let before = faces(&d, mesh);
 
-    h.dispatch_in_session(&r, &mut d, Some(&mut session), &c, "mesh.fill", &PropertyMap::new())
-        .expect("mesh.fill");
+    h.dispatch_in_session(
+        &r,
+        &mut d,
+        Some(&mut session),
+        &c,
+        "mesh.fill",
+        &PropertyMap::new(),
+    )
+    .expect("mesh.fill");
 
     let made = new_faces(&d, mesh, &before);
     assert_eq!(made.len(), 1, "{made:?}");
-    assert!(same_points(&made[0], &corners), "made {:?}, selected {:?}", made[0], corners);
+    assert!(
+        same_points(&made[0], &corners),
+        "made {:?}, selected {:?}",
+        made[0],
+        corners
+    );
 }

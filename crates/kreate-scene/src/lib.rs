@@ -5,33 +5,34 @@
 
 pub mod animation;
 pub mod armature;
-pub mod skin;
-pub mod shape;
 pub mod camera;
 pub mod clipboard;
 pub mod document;
+pub mod driver;
 pub mod edit_session;
 pub mod expression;
-pub mod driver;
 pub mod image;
-pub mod shader;
 pub mod light;
 pub mod modifier;
+pub mod shader;
+pub mod shape;
+pub mod skin;
 pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    ActionId, ArmatureId, Collection, CollectionId, Document, Linkage, LightId, Material, MaterialId, MaterialMap, MaterialOverrides,
-    MeshId, Object, ObjectData, ObjectId, ReparentError, Selection, WorldId,
+    ActionId, ArmatureId, Collection, CollectionId, Document, LightId, Linkage, Material,
+    MaterialId, MaterialMap, MaterialOverrides, MeshId, Object, ObjectData, ObjectId,
+    ReparentError, Selection, WorldId,
 };
 pub use edit_session::{EditSession, EditSessions};
 pub use image::{ColorSpace, Image, PixelFormat, Source, Tile, TILE};
-pub use light::{AreaShape, Background, Intensity, Light, LightKind, World};
 /// A datablock's persistent identity and what kind of thing it names.
 ///
 /// Re-exported rather than re-declared: the type lives in `kreate-reflect`
 /// because a property path has to be holdable by the interface, which cannot
 /// see a document. Anything that has a document in hand gets it from here.
 pub use kreate_reflect::{DatablockKind, PropertyPath, Uid};
+pub use light::{AreaShape, Background, Intensity, Light, LightKind, World};
 pub use modifier::{apply_stack, ModifierCache, ModifierInstance, ModifierKind};
 pub use undo::{DocMut, EditError, UndoPayload};

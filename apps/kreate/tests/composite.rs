@@ -324,17 +324,26 @@ fn composite_with(
             let mesh = cache.evaluated(doc, id, &kreate_scene::modifier::EvalCtx::still())?;
             // In weight paint mode the painted mesh shows its weights, as the
             // application shows it.
-            let painting = mode.acts_on() == kreate_ops::mode::ActsOn::Weights && doc.selection.active == Some(id);
+            let painting = mode.acts_on() == kreate_ops::mode::ActsOn::Weights
+                && doc.selection.active == Some(id);
             let mesh = if painting {
                 let group = doc.object(id).and_then(|o| o.active_group.clone());
-                std::sync::Arc::new(kreate_ops::ops::paint::weight_display(&mesh, group.as_deref()))
+                std::sync::Arc::new(kreate_ops::ops::paint::weight_display(
+                    &mesh,
+                    group.as_deref(),
+                ))
             } else {
                 mesh
             };
             let cpu = kreate_render::RenderMeshCpu::extract(&mesh);
             Some((
                 id,
-                kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::new(0.75, 0.72, 0.68, 1.0)),
+                kreate_render::GpuMesh::upload(
+                    &gpu.device,
+                    &viewport.layouts,
+                    &cpu,
+                    glam::Vec4::new(0.75, 0.72, 0.68, 1.0),
+                ),
             ))
         })
         .collect();
@@ -343,7 +352,10 @@ fn composite_with(
         .map(|(id, m)| {
             kreate_render::Draw::new(m, doc.world_transform(*id))
                 .selected(!edit_mode && doc.selection.contains(*id))
-                .weights(mode.acts_on() == kreate_ops::mode::ActsOn::Weights && doc.selection.active == Some(*id))
+                .weights(
+                    mode.acts_on() == kreate_ops::mode::ActsOn::Weights
+                        && doc.selection.active == Some(*id),
+                )
         })
         .collect();
 
@@ -354,12 +366,24 @@ fn composite_with(
         });
     // The lamp and camera glyphs, the way the frame loop hands them over.
     let shown = match mode.acts_on() {
-        kreate_ops::mode::ActsOn::Bones => doc.selection.active.map(|id| (id, kreate::glyphs::Bones::Pose)),
-        kreate_ops::mode::ActsOn::BoneJoints => doc.selection.active.map(|id| (id, kreate::glyphs::Bones::Edit)),
+        kreate_ops::mode::ActsOn::Bones => doc
+            .selection
+            .active
+            .map(|id| (id, kreate::glyphs::Bones::Pose)),
+        kreate_ops::mode::ActsOn::BoneJoints => doc
+            .selection
+            .active
+            .map(|id| (id, kreate::glyphs::Bones::Edit)),
         _ => None,
     };
     let (marker_lines, marker_points) = kreate::glyphs::markers_with(doc, shown);
-    viewport.set_markers(&gpu.device, &gpu.queue, camera.eye(), &marker_lines, &marker_points);
+    viewport.set_markers(
+        &gpu.device,
+        &gpu.queue,
+        camera.eye(),
+        &marker_lines,
+        &marker_points,
+    );
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     viewport.render(&mut encoder, &vp_view, &draws);
 
@@ -1417,8 +1441,7 @@ fn edit_mode_shows_element_selection_instead_of_the_object_outline() {
         for y in (r.top().max(0.0) as u32)..(r.bottom().min(H as f32) as u32) {
             for x in (r.left().max(0.0) as u32)..(r.right().min(W as f32) as u32) {
                 let p = c.at(x, y);
-                if i32::from(p[0]) - i32::from(p[2]) > 60
-                    && i32::from(p[1]) - i32::from(p[2]) > 40
+                if i32::from(p[0]) - i32::from(p[2]) > 60 && i32::from(p[1]) - i32::from(p[2]) > 40
                 {
                     n += 1;
                 }
@@ -1792,7 +1815,9 @@ fn a_lamp_is_drawn_where_it_is() {
     with.dump("lamp");
 
     let projector = with.state.projector.expect("the frame knew its camera");
-    let centre = projector.project(at).expect("the lamp is in front of the camera");
+    let centre = projector
+        .project(at)
+        .expect("the lamp is in front of the camera");
     assert!(
         with.viewport_rect.contains(centre),
         "the fixture's lamp is off screen at {centre:?}; move it"
@@ -1817,7 +1842,10 @@ fn a_lamp_is_drawn_where_it_is() {
         n
     };
     let near = differ(0.0, 14.0);
-    assert!(near > 30, "only {near} pixels changed around the lamp at {centre:?}");
+    assert!(
+        near > 30,
+        "only {near} pixels changed around the lamp at {centre:?}"
+    );
     // The ground line runs from the lamp down to z = 0, so the band between
     // is allowed to differ; well beyond both, nothing may.
     let foot = projector
@@ -1928,7 +1956,12 @@ fn shot_claude_sign_in() {
     let doc = doc_with_cube();
     for (label, account) in [
         ("claude-signed-out-ko", ChatAccount::SignedOut),
-        ("claude-signing-in-ko", ChatAccount::SigningIn { url: Some("https://claude.com/cai/oauth/authorize".into()) }),
+        (
+            "claude-signing-in-ko",
+            ChatAccount::SigningIn {
+                url: Some("https://claude.com/cai/oauth/authorize".into()),
+            },
+        ),
     ] {
         let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
             state.switch_workspace(5);
@@ -1950,13 +1983,16 @@ fn shot_contact() {
         state.contact.kind = 1;
         state.contact.email = "artist@studio.kr".into();
         state.contact.message = "회전체 단면을 곡선으로 그릴 수 있으면 좋겠습니다.".into();
-        state.contact.status = kreate_ui::contact::ContactStatus::Failed("the contact service is not set up".into());
+        state.contact.status =
+            kreate_ui::contact::ContactStatus::Failed("the contact service is not set up".into());
     }) else {
         eprintln!("no GPU; skipping");
         return;
     };
     shot.dump("contact-ko");
-    let Some(shot) = composite_with(&doc, "ko-KR", false, |state| state.about_open = true) else { return };
+    let Some(shot) = composite_with(&doc, "ko-KR", false, |state| state.about_open = true) else {
+        return;
+    };
     shot.dump("about-ko");
 }
 
@@ -2025,12 +2061,14 @@ fn shot_search() {
     }
 }
 
-
 /// A picture of the shading and view pies, open at the middle of the window.
 #[test]
 fn shot_pies() {
     let doc = doc_with_cube();
-    for (label, locale, pie) in [("pie-shading", "en", "shading"), ("pie-view-ko", "ko-KR", "view")] {
+    for (label, locale, pie) in [
+        ("pie-shading", "en", "shading"),
+        ("pie-view-ko", "ko-KR", "view"),
+    ] {
         let Some(shot) = composite_with(&doc, locale, false, |state| {
             state.pie.open(pie, egui::pos2(500.0, 400.0), None, 0.0);
         }) else {
@@ -2075,11 +2113,17 @@ fn shot_dope_sheet() {
         let mut action = Action::new("CubeAction");
         for (frame, x) in [(1.0, 0.0), (24.0, 2.0), (60.0, -1.0)] {
             for i in 0..3u8 {
-                action.curve_mut("location", i).insert(frame, if i == 0 { x } else { 0.0 }, Interpolation::Bezier);
+                action.curve_mut("location", i).insert(
+                    frame,
+                    if i == 0 { x } else { 0.0 },
+                    Interpolation::Bezier,
+                );
             }
         }
         for i in 0..3u8 {
-            action.curve_mut("scale", i).insert(40.0, 1.5, Interpolation::Bezier);
+            action
+                .curve_mut("scale", i)
+                .insert(40.0, 1.5, Interpolation::Bezier);
         }
         action.select_all_with(|_| false);
         action.select_range(Some("location"), 24.0, 24.0, true);
@@ -2107,9 +2151,18 @@ fn shot_graph_editor() {
         let mut doc = doc_with_cube();
         let cube = doc.objects().next().map(|(id, _)| id).expect("a cube");
         let mut action = Action::new("CubeAction");
-        for (frame, x, z) in [(1.0, 0.0, 0.0), (24.0, 2.0, 1.0), (48.0, -1.0, 0.5), (72.0, 1.0, 0.0)] {
-            action.curve_mut("location", 0).insert(frame, x, Interpolation::Bezier);
-            action.curve_mut("location", 2).insert(frame, z, Interpolation::Bezier);
+        for (frame, x, z) in [
+            (1.0, 0.0, 0.0),
+            (24.0, 2.0, 1.0),
+            (48.0, -1.0, 0.5),
+            (72.0, 1.0, 0.0),
+        ] {
+            action
+                .curve_mut("location", 0)
+                .insert(frame, x, Interpolation::Bezier);
+            action
+                .curve_mut("location", 2)
+                .insert(frame, z, Interpolation::Bezier);
         }
         action.select_all_with(|_| false);
         action.select_region("location", 0, (24.0, 24.0), (1.9, 2.1));
@@ -2131,7 +2184,9 @@ fn shot_graph_editor() {
                 .collect();
             assert!(!timelines.is_empty(), "Layout has a timeline");
             for area in timelines {
-                state.screen_mut().set_editor(area, kreate_ui::EditorId::GRAPH);
+                state
+                    .screen_mut()
+                    .set_editor(area, kreate_ui::EditorId::GRAPH);
             }
         }) else {
             eprintln!("no GPU; skipping");
@@ -2175,7 +2230,9 @@ fn shot_drivers() {
                 .map(|(a, _)| a)
                 .collect();
             for area in timelines {
-                state.screen_mut().set_editor(area, kreate_ui::EditorId::DRIVERS);
+                state
+                    .screen_mut()
+                    .set_editor(area, kreate_ui::EditorId::DRIVERS);
             }
         }) else {
             eprintln!("no GPU; skipping");
@@ -2210,7 +2267,10 @@ fn shot_armature() {
         ..Default::default()
     });
     let id = doc.add_armature(arm);
-    let mut object = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id));
+    let mut object = kreate_scene::document::Object::new(
+        "Rig",
+        kreate_scene::document::ObjectData::Armature(id),
+    );
     object.transform.translation = kreate_math::DVec3::new(0.6, -2.0, 0.0);
     object.pose.entry("Lower").transform.rotation = kreate_math::DQuat::from_rotation_x(-0.9);
     object.pose.entry("Hand").transform.rotation = kreate_math::DQuat::from_rotation_x(-0.6);
@@ -2232,15 +2292,24 @@ fn shot_pose_keys() {
     for (label, locale) in [("pose-keys", "en"), ("pose-keys-ko", "ko-KR")] {
         let mut doc = doc_with_cube();
         let id = doc.add_armature(kreate_scene::armature::Armature::new("Arm"));
-        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id)));
+        let rig = doc.add_object(kreate_scene::document::Object::new(
+            "Rig",
+            kreate_scene::document::ObjectData::Armature(id),
+        ));
         let mut action = Action::new("RigAction");
         for frame in [1.0, 12.0, 24.0] {
             for i in 0..4u8 {
-                action.curve_mut(&bone_path("Bone", "rotation_quaternion"), i).insert(frame, if i == 0 { 1.0 } else { 0.0 }, Interpolation::Bezier);
+                action
+                    .curve_mut(&bone_path("Bone", "rotation_quaternion"), i)
+                    .insert(frame, if i == 0 { 1.0 } else { 0.0 }, Interpolation::Bezier);
             }
         }
         for i in 0..3u8 {
-            action.curve_mut(&bone_path("Bone", "location"), i).insert(12.0, 0.0, Interpolation::Bezier);
+            action.curve_mut(&bone_path("Bone", "location"), i).insert(
+                12.0,
+                0.0,
+                Interpolation::Bezier,
+            );
         }
         let action = doc.add_action(action);
         doc.object_mut(rig).unwrap().action = Some(action);
@@ -2282,7 +2351,10 @@ fn shot_pose_mode() {
         });
         arm.in_front = true;
         let id = doc.add_armature(arm);
-        let mut object = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id));
+        let mut object = kreate_scene::document::Object::new(
+            "Rig",
+            kreate_scene::document::ObjectData::Armature(id),
+        );
         object.transform.translation = kreate_math::DVec3::new(0.6, -2.0, 0.0);
         let lower = object.pose.entry("Forearm");
         lower.transform.rotation = kreate_math::DQuat::from_rotation_x(-0.9);
@@ -2291,13 +2363,18 @@ fn shot_pose_mode() {
         let rig = doc.add_object(object);
         doc.selection.clear();
         doc.selection.add(rig);
-        let Some(shot) = composite_in_mode(&doc, locale, kreate_ops::Mode::from_tag(mode).unwrap(), |state| {
-            let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
-            for area in areas {
-                state.set_properties_tab(area, kreate::shell::PropertiesTab::Bone);
-            }
-            state.toggle_sidebar();
-        }) else {
+        let Some(shot) = composite_in_mode(
+            &doc,
+            locale,
+            kreate_ops::Mode::from_tag(mode).unwrap(),
+            |state| {
+                let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+                for area in areas {
+                    state.set_properties_tab(area, kreate::shell::PropertiesTab::Bone);
+                }
+                state.toggle_sidebar();
+            },
+        ) else {
             eprintln!("no GPU; skipping");
             return;
         };
@@ -2317,18 +2394,27 @@ fn shot_animation_workspace() {
         let mut cube_action = Action::new("CubeAction");
         for (frame, x) in [(1.0, 0.0), (24.0, 2.0), (48.0, 0.5)] {
             for i in 0..3u8 {
-                cube_action.curve_mut("location", i).insert(frame, if i == 0 { x } else { 0.0 }, Interpolation::Bezier);
+                cube_action.curve_mut("location", i).insert(
+                    frame,
+                    if i == 0 { x } else { 0.0 },
+                    Interpolation::Bezier,
+                );
             }
         }
         let cube_action = doc.add_action(cube_action);
         doc.object_mut(cube).unwrap().action = Some(cube_action);
         let id = doc.add_armature(kreate_scene::armature::Armature::new("Arm"));
-        let rig = doc.add_object(kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(id)));
+        let rig = doc.add_object(kreate_scene::document::Object::new(
+            "Rig",
+            kreate_scene::document::ObjectData::Armature(id),
+        ));
         let mut action = Action::new("RigAction");
         for (frame, w) in [(1.0, 1.0), (12.0, 0.8), (36.0, 1.0)] {
             let q = [w, (1.0f64 - w * w).max(0.0).sqrt(), 0.0, 0.0];
             for (i, v) in q.into_iter().enumerate() {
-                action.curve_mut(&bone_path("Bone", "rotation_quaternion"), i as u8).insert(frame, v, Interpolation::Bezier);
+                action
+                    .curve_mut(&bone_path("Bone", "rotation_quaternion"), i as u8)
+                    .insert(frame, v, Interpolation::Bezier);
             }
         }
         let action = doc.add_action(action);
@@ -2359,7 +2445,9 @@ fn shot_animation_workspace() {
                 .map(|(a, _)| a)
                 .collect();
             for area in timelines {
-                state.screen_mut().set_editor(area, kreate_ui::EditorId::GRAPH);
+                state
+                    .screen_mut()
+                    .set_editor(area, kreate_ui::EditorId::GRAPH);
             }
         }) else {
             return;
@@ -2390,15 +2478,25 @@ fn shot_skinned() {
         ..Default::default()
     });
     arm.in_front = true;
-    for (name, w) in kreate_scene::skin::automatic_weights(&body, &arm, kreate_math::DAffine3::IDENTITY) {
-        body.attributes_mut().insert(&name, kreate_mesh::attribute::Domain::Point, kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(w)));
+    for (name, w) in
+        kreate_scene::skin::automatic_weights(&body, &arm, kreate_math::DAffine3::IDENTITY)
+    {
+        body.attributes_mut().insert(
+            &name,
+            kreate_mesh::attribute::Domain::Point,
+            kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(w)),
+        );
     }
     let arm = doc.add_armature(arm);
-    let mut rig = kreate_scene::document::Object::new("Rig", kreate_scene::document::ObjectData::Armature(arm));
+    let mut rig = kreate_scene::document::Object::new(
+        "Rig",
+        kreate_scene::document::ObjectData::Armature(arm),
+    );
     rig.pose.entry("Lower").transform.rotation = kreate_math::DQuat::from_rotation_x(-1.1);
     let rig = doc.add_object(rig);
     let body = doc.add_mesh(body);
-    let mut object = kreate_scene::document::Object::new("Body", kreate_scene::document::ObjectData::Mesh(body));
+    let mut object =
+        kreate_scene::document::Object::new("Body", kreate_scene::document::ObjectData::Mesh(body));
     object.skin = doc.object_uid(rig);
     let body = doc.add_object(object);
     doc.set_parent(body, Some(rig)).unwrap();
@@ -2413,12 +2511,17 @@ fn shot_skinned() {
     doc.selection.clear();
     doc.selection.add(body);
     doc.object_mut(body).unwrap().active_group = Some("Lower".into());
-    let Some(shot) = composite_in_mode(&doc, "ko-KR", kreate_ops::Mode::from_tag("weight_paint").unwrap(), |state| {
-        let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
-        for area in areas {
-            state.set_properties_tab(area, kreate::shell::PropertiesTab::Data);
-        }
-    }) else {
+    let Some(shot) = composite_in_mode(
+        &doc,
+        "ko-KR",
+        kreate_ops::Mode::from_tag("weight_paint").unwrap(),
+        |state| {
+            let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+            for area in areas {
+                state.set_properties_tab(area, kreate::shell::PropertiesTab::Data);
+            }
+        },
+    ) else {
         return;
     };
     shot.dump("weight-paint");
@@ -2432,9 +2535,13 @@ fn shot_keyed_material() {
     let mesh = doc.meshes().next().map(|(id, _)| id).expect("a mesh");
     let mut action = Action::for_kind("RedAction", kreate_scene::DatablockKind::Material);
     for i in 0..3u8 {
-        action.curve_mut("base_color", i).insert(1.0, 0.5, Interpolation::Bezier);
+        action
+            .curve_mut("base_color", i)
+            .insert(1.0, 0.5, Interpolation::Bezier);
     }
-    action.curve_mut("roughness", 0).insert(30.0, 0.2, Interpolation::Bezier);
+    action
+        .curve_mut("roughness", 0)
+        .insert(30.0, 0.2, Interpolation::Bezier);
     let action = doc.add_action(action);
     let material = doc.add_material(kreate_scene::Material {
         name: "Red".into(),

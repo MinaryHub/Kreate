@@ -102,7 +102,12 @@ pub fn tick_step(points_per_frame: f32, min_gap: f32) -> i32 {
 }
 
 /// Draws the timeline. Returns what the pointer and the controls asked for.
-pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, text: &TimelineText) -> Vec<TimelineEdit> {
+pub fn timeline(
+    ui: &mut Ui,
+    view: &TimelineView,
+    state: &mut TimelineState,
+    text: &TimelineText,
+) -> Vec<TimelineEdit> {
     let mut out = Vec::new();
     let theme = crate::theme::from_ui(ui);
     let full = ui.available_rect_before_wrap();
@@ -116,7 +121,10 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), bar_height));
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
         ui.horizontal_centered(|ui| {
-            if icon_button(ui, Icon::JumpStart).on_hover_text(&text.jump_start).clicked() {
+            if icon_button(ui, Icon::JumpStart)
+                .on_hover_text(&text.jump_start)
+                .clicked()
+            {
                 out.push(TimelineEdit::JumpStart);
             }
             let (icon, tip) = if view.playing {
@@ -127,18 +135,27 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
             if icon_button(ui, icon).on_hover_text(tip).clicked() {
                 out.push(TimelineEdit::TogglePlay);
             }
-            if icon_button(ui, Icon::JumpEnd).on_hover_text(&text.jump_end).clicked() {
+            if icon_button(ui, Icon::JumpEnd)
+                .on_hover_text(&text.jump_end)
+                .clicked()
+            {
                 out.push(TimelineEdit::JumpEnd);
             }
             ui.separator();
             // The record button: a red dot, lit while on — Blender's, and a
             // state rather than an action, so it shows which it is in.
-            if record_button(ui, view.autokey).on_hover_text(&text.autokey).clicked() {
+            if record_button(ui, view.autokey)
+                .on_hover_text(&text.autokey)
+                .clicked()
+            {
                 out.push(TimelineEdit::ToggleAutokey);
             }
             ui.separator();
             let mut frame = view.frame.round() as i32;
-            if ui.add(egui::DragValue::new(&mut frame).speed(0.25)).changed() {
+            if ui
+                .add(egui::DragValue::new(&mut frame).speed(0.25))
+                .changed()
+            {
                 out.push(TimelineEdit::SetFrame(frame as f64));
             }
             ui.separator();
@@ -146,9 +163,16 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
             ui.label(&text.start);
             let a = ui.add(egui::DragValue::new(&mut start).speed(0.25));
             ui.label(&text.end);
-            let b = ui.add(egui::DragValue::new(&mut end).speed(0.25).range(start + 1..=i32::MAX));
+            let b = ui.add(
+                egui::DragValue::new(&mut end)
+                    .speed(0.25)
+                    .range(start + 1..=i32::MAX),
+            );
             if a.changed() || b.changed() {
-                out.push(TimelineEdit::SetRange { start, end: end.max(start + 1) });
+                out.push(TimelineEdit::SetRange {
+                    start,
+                    end: end.max(start + 1),
+                });
             }
         });
     });
@@ -165,8 +189,16 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
     let dim = Color32::from_black_alpha(60);
     let a = frame_to_x(view.start as f64, range, track);
     let b = frame_to_x(view.end as f64, range, track);
-    painter.rect_filled(Rect::from_min_max(track.min, Pos2::new(a, track.max.y)), 0.0, dim);
-    painter.rect_filled(Rect::from_min_max(Pos2::new(b, track.min.y), track.max), 0.0, dim);
+    painter.rect_filled(
+        Rect::from_min_max(track.min, Pos2::new(a, track.max.y)),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(b, track.min.y), track.max),
+        0.0,
+        dim,
+    );
 
     let label_band = 16.0;
     let step = tick_step(points_per_frame, 44.0);
@@ -175,7 +207,10 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
     while (f as f64) <= range.1 {
         let x = frame_to_x(f as f64, range, track);
         painter.line_segment(
-            [Pos2::new(x, track.min.y + label_band), Pos2::new(x, track.max.y)],
+            [
+                Pos2::new(x, track.min.y + label_band),
+                Pos2::new(x, track.max.y),
+            ],
             Stroke::new(1.0, theme.border),
         );
         painter.text(
@@ -208,10 +243,16 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
 
     // The clock: a line through the track and its frame in a box on the ruler.
     let x = frame_to_x(view.frame, range, track);
-    painter.line_segment([Pos2::new(x, track.min.y), Pos2::new(x, track.max.y)], Stroke::new(2.0, theme.accent));
+    painter.line_segment(
+        [Pos2::new(x, track.min.y), Pos2::new(x, track.max.y)],
+        Stroke::new(2.0, theme.accent),
+    );
     let label = format!("{}", view.frame.round() as i64);
     let galley = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), Color32::BLACK);
-    let tag = Rect::from_center_size(Pos2::new(x, track.min.y + 8.0), galley.size() + Vec2::new(8.0, 2.0));
+    let tag = Rect::from_center_size(
+        Pos2::new(x, track.min.y + 8.0),
+        galley.size() + Vec2::new(8.0, 2.0),
+    );
     painter.rect_filled(tag, 3.0, theme.accent);
     painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::BLACK);
 
@@ -220,7 +261,10 @@ pub fn timeline(ui: &mut Ui, view: &TimelineView, state: &mut TimelineState, tex
         state.scrubbing = true;
     }
     if state.scrubbing {
-        if let Some(p) = response.interact_pointer_pos().or_else(|| ui.input(|i| i.pointer.interact_pos())) {
+        if let Some(p) = response
+            .interact_pointer_pos()
+            .or_else(|| ui.input(|i| i.pointer.interact_pos()))
+        {
             let frame = x_to_frame(p.x, range, track).round();
             if (frame - view.frame).abs() > 1e-9 {
                 out.push(TimelineEdit::SetFrame(frame));
@@ -239,9 +283,22 @@ fn record_button(ui: &mut Ui, on: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let visuals = ui.style().interact(&response);
     let theme = crate::theme::from_ui(ui);
-    ui.painter().rect_filled(rect, 3.0, if on { theme.accent_wash } else { visuals.weak_bg_fill });
-    let dot = if on { Color32::from_rgb(0xe0, 0x3c, 0x3c) } else { visuals.fg_stroke.color };
-    ui.painter().circle_filled(rect.center(), rect.height() * 0.2, dot);
+    ui.painter().rect_filled(
+        rect,
+        3.0,
+        if on {
+            theme.accent_wash
+        } else {
+            visuals.weak_bg_fill
+        },
+    );
+    let dot = if on {
+        Color32::from_rgb(0xe0, 0x3c, 0x3c)
+    } else {
+        visuals.fg_stroke.color
+    };
+    ui.painter()
+        .circle_filled(rect.center(), rect.height() * 0.2, dot);
     response
 }
 
@@ -273,22 +330,37 @@ fn icon_button(ui: &mut Ui, icon: Icon) -> egui::Response {
     let painter = ui.painter();
     match icon {
         Icon::Play => {
-            painter.add(egui::Shape::convex_polygon(triangle(1.0), colour, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(
+                triangle(1.0),
+                colour,
+                Stroke::NONE,
+            ));
         }
         Icon::Pause => {
             for dx in [-s * 0.55, s * 0.55] {
-                painter.rect_filled(Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(s * 0.5, s * 2.0)), 0.0, colour);
+                painter.rect_filled(
+                    Rect::from_center_size(Pos2::new(c.x + dx, c.y), Vec2::new(s * 0.5, s * 2.0)),
+                    0.0,
+                    colour,
+                );
             }
         }
         Icon::JumpStart | Icon::JumpEnd => {
-            let flip = if matches!(icon, Icon::JumpEnd) { 1.0 } else { -1.0 };
+            let flip = if matches!(icon, Icon::JumpEnd) {
+                1.0
+            } else {
+                -1.0
+            };
             let pts: Vec<Pos2> = triangle(0.8)
                 .into_iter()
                 .map(|p| Pos2::new(c.x + (p.x - c.x) * flip, p.y))
                 .collect();
             painter.add(egui::Shape::convex_polygon(pts, colour, Stroke::NONE));
             let bar_x = c.x + flip * s * 1.0;
-            painter.line_segment([Pos2::new(bar_x, c.y - s), Pos2::new(bar_x, c.y + s)], Stroke::new(2.0, colour));
+            painter.line_segment(
+                [Pos2::new(bar_x, c.y - s), Pos2::new(bar_x, c.y + s)],
+                Stroke::new(2.0, colour),
+            );
         }
     }
     response
@@ -315,7 +387,10 @@ mod tests {
     fn the_numbers_never_crowd() {
         for ppf in [0.1f32, 0.5, 1.0, 3.0, 12.0, 80.0] {
             let step = tick_step(ppf, 44.0);
-            assert!(step as f32 * ppf >= 44.0, "{ppf} points a frame gave a step of {step}");
+            assert!(
+                step as f32 * ppf >= 44.0,
+                "{ppf} points a frame gave a step of {step}"
+            );
             // And not needlessly sparse: the next smaller step would crowd.
             let smaller = [1, 2, 5]
                 .iter()
@@ -323,7 +398,10 @@ mod tests {
                 .filter(|s| *s < step)
                 .max();
             if let Some(smaller) = smaller {
-                assert!((smaller as f32) * ppf < 44.0, "{ppf}: {smaller} would have fitted");
+                assert!(
+                    (smaller as f32) * ppf < 44.0,
+                    "{ppf}: {smaller} would have fitted"
+                );
             }
         }
     }
@@ -332,7 +410,14 @@ mod tests {
     fn scrub(from_frame: f64, to_frame: f64) -> Vec<TimelineEdit> {
         let ctx = egui::Context::default();
         let mut state = TimelineState::default();
-        let view = TimelineView { frame: 1.0, start: 1, end: 100, playing: false, autokey: false, keys: vec![10.0] };
+        let view = TimelineView {
+            frame: 1.0,
+            start: 1,
+            end: 100,
+            playing: false,
+            autokey: false,
+            keys: vec![10.0],
+        };
         let text = TimelineText {
             play: String::new(),
             pause: String::new(),
@@ -344,16 +429,17 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut time = 0.0;
-        let mut run = |events: Vec<egui::Event>, out: &mut Vec<TimelineEdit>, state: &mut TimelineState| {
-            time += 1.0 / 60.0;
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 120.0))),
-                time: Some(time),
-                events,
-                ..Default::default()
+        let mut run =
+            |events: Vec<egui::Event>, out: &mut Vec<TimelineEdit>, state: &mut TimelineState| {
+                time += 1.0 / 60.0;
+                let raw = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 120.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(raw, |ui| out.extend(timeline(ui, &view, state, &text)));
             };
-            let _ = ctx.run_ui(raw, |ui| out.extend(timeline(ui, &view, state, &text)));
-        };
         run(vec![], &mut Vec::new(), &mut state);
         run(vec![], &mut Vec::new(), &mut state);
         let track = {
@@ -363,7 +449,14 @@ mod tests {
         let at = |f: f64| {
             let range = visible(1, 100);
             // The track starts below the control bar; any y inside it will do.
-            Pos2::new(frame_to_x(f, range, Rect::from_min_max(Pos2::new(track.min.x, 0.0), Pos2::new(track.max.x, 1.0))), track.center().y)
+            Pos2::new(
+                frame_to_x(
+                    f,
+                    range,
+                    Rect::from_min_max(Pos2::new(track.min.x, 0.0), Pos2::new(track.max.x, 1.0)),
+                ),
+                track.center().y,
+            )
         };
         let button = |pos, pressed| egui::Event::PointerButton {
             pos,
@@ -375,7 +468,11 @@ mod tests {
         run(vec![egui::Event::PointerMoved(a)], &mut out, &mut state);
         run(vec![button(a, true)], &mut out, &mut state);
         for i in 1..=4 {
-            run(vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 4.0))], &mut out, &mut state);
+            run(
+                vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 4.0))],
+                &mut out,
+                &mut state,
+            );
         }
         run(vec![button(b, false)], &mut out, &mut state);
         out
@@ -392,9 +489,18 @@ mod tests {
             })
             .collect();
         assert!(!frames.is_empty(), "a scrub moved nothing: {edits:?}");
-        assert!(frames.iter().all(|f| f.fract() == 0.0), "a scrub landed between frames: {frames:?}");
+        assert!(
+            frames.iter().all(|f| f.fract() == 0.0),
+            "a scrub landed between frames: {frames:?}"
+        );
         let last = *frames.last().unwrap();
-        assert!((last - 60.0).abs() <= 1.0, "the scrub ended at {last}, not under the pointer");
-        assert!(frames.windows(2).all(|w| w[0] <= w[1]), "the clock went backwards on a forward drag");
+        assert!(
+            (last - 60.0).abs() <= 1.0,
+            "the scrub ended at {last}, not under the pointer"
+        );
+        assert!(
+            frames.windows(2).all(|w| w[0] <= w[1]),
+            "the clock went backwards on a forward drag"
+        );
     }
 }

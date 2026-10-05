@@ -151,10 +151,7 @@ fn a_light_arrives_with_its_units_unchanged() {
     };
     let light = doc.light(id).expect("its datablock");
     assert_eq!(light.intensity, 1234.5, "candela did not survive");
-    assert!(matches!(
-        light.kind,
-        kreate_scene::LightKind::Point { .. }
-    ));
+    assert!(matches!(light.kind, kreate_scene::LightKind::Point { .. }));
 
     // Three metres up in the file is three metres up here, which is a different
     // axis and the same place.
@@ -442,7 +439,10 @@ fn a_child_is_still_a_child_on_the_far_side_of_a_file() {
     doc.set_parent(child, Some(parent)).expect("a fresh chain");
 
     let (mut out, made) = round_trip(&doc);
-    assert_eq!(out.object(made[1]).expect("the child").parent, Some(made[0]));
+    assert_eq!(
+        out.object(made[1]).expect("the child").parent,
+        Some(made[0])
+    );
     assert!(
         (out.world_transform(made[1]).translation - doc.world_transform(child).translation)
             .length()
@@ -552,8 +552,7 @@ fn a_camera_comes_back_looking_through_the_same_angle() {
     // does. A note raised where the document is read would claim the loss for
     // every format at once.
     let (scene, _) = kreate_io::scene_from_document(&doc);
-    let (_, notes) =
-        kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let (_, notes) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
     assert!(
         notes.iter().any(|n| format!("{n:?}").contains("shutter")),
         "the photographic parameters went missing quietly: {notes:?}"
@@ -772,7 +771,11 @@ fn an_orthographic_camera_is_still_orthographic_on_the_far_side() {
         "near is {}",
         back.clip_near
     );
-    assert!((back.clip_far - 250.0).abs() < 1e-2, "far is {}", back.clip_far);
+    assert!(
+        (back.clip_far - 250.0).abs() < 1e-2,
+        "far is {}",
+        back.clip_far
+    );
 }
 
 #[test]
@@ -802,7 +805,9 @@ fn an_area_light_leaves_as_a_point_light_of_the_same_axial_intensity() {
 
     let (scene, notes) = kreate_io::scene_from_document(&doc);
     assert!(
-        notes.iter().any(|n| format!("{n:?}").contains("area light")),
+        notes
+            .iter()
+            .any(|n| format!("{n:?}").contains("area light")),
         "the shape went missing quietly: {notes:?}"
     );
     assert!(

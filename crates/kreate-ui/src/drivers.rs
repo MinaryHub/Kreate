@@ -59,10 +59,20 @@ pub struct DriversView {
 pub enum DriverEdit {
     Add(String),
     Remove(String),
-    Expression { target: String, expression: String },
+    Expression {
+        target: String,
+        expression: String,
+    },
     AddVariable(String),
-    SetVariable { target: String, variable: u32, value: VariableView },
-    RemoveVariable { target: String, variable: u32 },
+    SetVariable {
+        target: String,
+        variable: u32,
+        value: VariableView,
+    },
+    RemoveVariable {
+        target: String,
+        variable: u32,
+    },
 }
 
 /// The words, translated by the caller.
@@ -90,9 +100,23 @@ pub struct DriversState {
 const EXPRESSION: usize = usize::MAX;
 
 /// A text field that keeps what is typed until it loses focus, then sends it.
-fn field(ui: &mut Ui, state: &mut DriversState, key: (String, usize), shown: &str, width: f32) -> Option<String> {
-    let mut text = state.typing.get(&key).cloned().unwrap_or_else(|| shown.to_string());
-    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width).font(egui::TextStyle::Monospace));
+fn field(
+    ui: &mut Ui,
+    state: &mut DriversState,
+    key: (String, usize),
+    shown: &str,
+    width: f32,
+) -> Option<String> {
+    let mut text = state
+        .typing
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| shown.to_string());
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(width)
+            .font(egui::TextStyle::Monospace),
+    );
     if response.has_focus() {
         state.typing.insert(key, text);
         None
@@ -105,7 +129,12 @@ fn field(ui: &mut Ui, state: &mut DriversState, key: (String, usize), shown: &st
     }
 }
 
-pub fn drivers_editor(ui: &mut Ui, view: &DriversView, state: &mut DriversState, text: &DriversText) -> Vec<DriverEdit> {
+pub fn drivers_editor(
+    ui: &mut Ui,
+    view: &DriversView,
+    state: &mut DriversState,
+    text: &DriversText,
+) -> Vec<DriverEdit> {
     let mut edits = Vec::new();
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!view.addable.is_empty(), |ui| {
@@ -125,101 +154,138 @@ pub fn drivers_editor(ui: &mut Ui, view: &DriversView, state: &mut DriversState,
         return edits;
     }
     let object_name = |uid: Option<u64>| -> String {
-        uid.and_then(|u| view.objects.iter().find(|(o, _)| *o == u).map(|(_, n)| n.clone()))
-            .unwrap_or_else(|| text.none.clone())
+        uid.and_then(|u| {
+            view.objects
+                .iter()
+                .find(|(o, _)| *o == u)
+                .map(|(_, n)| n.clone())
+        })
+        .unwrap_or_else(|| text.none.clone())
     };
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for driver in &view.drivers {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&driver.label).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(&text.remove).clicked() {
-                            edits.push(DriverEdit::Remove(driver.target.clone()));
-                        }
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.label(&text.expression);
-                    let width = ui.available_width();
-                    if let Some(expression) =
-                        field(ui, state, (driver.target.clone(), EXPRESSION), &driver.expression, width)
-                    {
-                        edits.push(DriverEdit::Expression { target: driver.target.clone(), expression });
-                    }
-                });
-                match &driver.result {
-                    // i18n-exempt: a number, formatted
-                    Ok(v) => ui.label(RichText::new(format!("= {v:.4}")).monospace()),
-                    Err(e) => ui.label(RichText::new(e).color(Color32::from_rgb(0xe0, 0x60, 0x50))),
-                };
-                for (i, v) in driver.variables.iter().enumerate() {
-                    // Two rows: a Drivers editor is often a side panel, and a
-                    // row that runs off its edge widens every row above it.
-                    let mut value = v.clone();
-                    let mut changed = false;
-                    let mut remove = false;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for driver in &view.drivers {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        if let Some(name) = field(ui, state, (driver.target.clone(), i), &v.name, 70.0) {
-                            value.name = name;
-                            changed = true;
-                        }
-                        egui::ComboBox::from_id_salt((&driver.target, i, "object"))
-                            .selected_text(object_name(v.object))
-                            .width((ui.available_width() - 8.0).clamp(60.0, 160.0))
-                            .show_ui(ui, |ui| {
-                                if ui.selectable_label(v.object.is_none(), &text.none).clicked() {
-                                    value.object = None;
-                                    changed = true;
-                                }
-                                for (uid, name) in &view.objects {
-                                    if ui.selectable_label(v.object == Some(*uid), name).clicked() {
-                                        value.object = Some(*uid);
-                                        changed = true;
-                                    }
-                                }
-                            });
+                        ui.label(RichText::new(&driver.label).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(&text.remove).clicked() {
+                                edits.push(DriverEdit::Remove(driver.target.clone()));
+                            }
+                        });
                     });
                     ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        egui::ComboBox::from_id_salt((&driver.target, i, "property"))
-                            .selected_text(text.properties[(v.property as usize).min(2)].clone())
-                            .width(70.0)
-                            .show_ui(ui, |ui| {
-                                for (p, label) in text.properties.iter().enumerate() {
-                                    if ui.selectable_label(v.property == p as u32, label).clicked() {
-                                        value.property = p as u32;
-                                        changed = true;
-                                    }
-                                }
+                        ui.label(&text.expression);
+                        let width = ui.available_width();
+                        if let Some(expression) = field(
+                            ui,
+                            state,
+                            (driver.target.clone(), EXPRESSION),
+                            &driver.expression,
+                            width,
+                        ) {
+                            edits.push(DriverEdit::Expression {
+                                target: driver.target.clone(),
+                                expression,
                             });
-                        egui::ComboBox::from_id_salt((&driver.target, i, "axis"))
-                            .selected_text(text.axes[(v.index as usize).min(2)].clone())
-                            .width(36.0)
-                            .show_ui(ui, |ui| {
-                                for (a, label) in text.axes.iter().enumerate() {
-                                    if ui.selectable_label(v.index == a as u32, label).clicked() {
-                                        value.index = a as u32;
-                                        changed = true;
-                                    }
-                                }
-                            });
-                        remove = ui.small_button(&text.remove_variable).clicked();
+                        }
                     });
-                    if remove {
-                        edits.push(DriverEdit::RemoveVariable { target: driver.target.clone(), variable: i as u32 });
-                    } else if changed && value != *v {
-                        edits.push(DriverEdit::SetVariable { target: driver.target.clone(), variable: i as u32, value });
+                    match &driver.result {
+                        // i18n-exempt: a number, formatted
+                        Ok(v) => ui.label(RichText::new(format!("= {v:.4}")).monospace()),
+                        Err(e) => {
+                            ui.label(RichText::new(e).color(Color32::from_rgb(0xe0, 0x60, 0x50)))
+                        }
+                    };
+                    for (i, v) in driver.variables.iter().enumerate() {
+                        // Two rows: a Drivers editor is often a side panel, and a
+                        // row that runs off its edge widens every row above it.
+                        let mut value = v.clone();
+                        let mut changed = false;
+                        let mut remove = false;
+                        ui.horizontal(|ui| {
+                            if let Some(name) =
+                                field(ui, state, (driver.target.clone(), i), &v.name, 70.0)
+                            {
+                                value.name = name;
+                                changed = true;
+                            }
+                            egui::ComboBox::from_id_salt((&driver.target, i, "object"))
+                                .selected_text(object_name(v.object))
+                                .width((ui.available_width() - 8.0).clamp(60.0, 160.0))
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(v.object.is_none(), &text.none)
+                                        .clicked()
+                                    {
+                                        value.object = None;
+                                        changed = true;
+                                    }
+                                    for (uid, name) in &view.objects {
+                                        if ui
+                                            .selectable_label(v.object == Some(*uid), name)
+                                            .clicked()
+                                        {
+                                            value.object = Some(*uid);
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            egui::ComboBox::from_id_salt((&driver.target, i, "property"))
+                                .selected_text(
+                                    text.properties[(v.property as usize).min(2)].clone(),
+                                )
+                                .width(70.0)
+                                .show_ui(ui, |ui| {
+                                    for (p, label) in text.properties.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(v.property == p as u32, label)
+                                            .clicked()
+                                        {
+                                            value.property = p as u32;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            egui::ComboBox::from_id_salt((&driver.target, i, "axis"))
+                                .selected_text(text.axes[(v.index as usize).min(2)].clone())
+                                .width(36.0)
+                                .show_ui(ui, |ui| {
+                                    for (a, label) in text.axes.iter().enumerate() {
+                                        if ui.selectable_label(v.index == a as u32, label).clicked()
+                                        {
+                                            value.index = a as u32;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            remove = ui.small_button(&text.remove_variable).clicked();
+                        });
+                        if remove {
+                            edits.push(DriverEdit::RemoveVariable {
+                                target: driver.target.clone(),
+                                variable: i as u32,
+                            });
+                        } else if changed && value != *v {
+                            edits.push(DriverEdit::SetVariable {
+                                target: driver.target.clone(),
+                                variable: i as u32,
+                                value,
+                            });
+                        }
                     }
-                }
-                if ui.small_button(&text.add_variable).clicked() {
-                    edits.push(DriverEdit::AddVariable(driver.target.clone()));
-                }
-            });
-            ui.add_space(4.0);
-        }
-    });
+                    if ui.small_button(&text.add_variable).clicked() {
+                        edits.push(DriverEdit::AddVariable(driver.target.clone()));
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        });
     edits
 }
 
@@ -234,7 +300,12 @@ mod tests {
                 target: "2/rotation_euler/2".into(),
                 expression: "h * 2".into(),
                 result: Ok(0.8),
-                variables: vec![VariableView { name: "h".into(), object: Some(1), property: 0, index: 0 }],
+                variables: vec![VariableView {
+                    name: "h".into(),
+                    object: Some(1),
+                    property: 0,
+                    index: 0,
+                }],
             }],
             objects: vec![(1, "Handle".into()), (2, "Door".into())],
             addable: vec![("Location X".into(), "2/location/0".into())],
@@ -261,7 +332,10 @@ mod tests {
         let mut out = Vec::new();
         for batch in events {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
                 events: batch,
                 ..Default::default()
             };
@@ -288,7 +362,10 @@ mod tests {
         let mut sent = Vec::new();
         let mut run = |events: Vec<egui::Event>, sent: &mut Vec<DriverEdit>| {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
                 events,
                 ..Default::default()
             };
@@ -324,7 +401,10 @@ mod tests {
         );
         assert_eq!(
             sent,
-            vec![DriverEdit::Expression { target: "2/rotation_euler/2".into(), expression: "h * 2+1".into() }]
+            vec![DriverEdit::Expression {
+                target: "2/rotation_euler/2".into(),
+                expression: "h * 2+1".into()
+            }]
         );
     }
 }

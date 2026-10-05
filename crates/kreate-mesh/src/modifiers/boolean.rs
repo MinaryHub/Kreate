@@ -59,7 +59,10 @@ impl Plane {
             return None;
         }
         let normal = n / len;
-        Some(Plane { normal, w: normal.dot(a) })
+        Some(Plane {
+            normal,
+            w: normal.dot(a),
+        })
     }
 
     fn flip(&mut self) {
@@ -84,18 +87,33 @@ impl Polygon {
         let mut n = DVec3::ZERO;
         for i in 0..verts.len() {
             let (p, q) = (verts[i], verts[(i + 1) % verts.len()]);
-            n += DVec3::new((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y));
+            n += DVec3::new(
+                (p.y - q.y) * (p.z + q.z),
+                (p.z - q.z) * (p.x + q.x),
+                (p.x - q.x) * (p.y + q.y),
+            );
         }
         let len = n.length();
         if verts.len() < 3 {
             return None;
         }
         if len < 1e-12 {
-            return Plane::from_points(verts[0], verts[1], verts[2]).map(|plane| Polygon { verts, plane, source });
+            return Plane::from_points(verts[0], verts[1], verts[2]).map(|plane| Polygon {
+                verts,
+                plane,
+                source,
+            });
         }
         let normal = n / len;
         let centre = verts.iter().fold(DVec3::ZERO, |s, p| s + *p) / verts.len() as f64;
-        Some(Polygon { plane: Plane { normal, w: normal.dot(centre) }, verts, source })
+        Some(Polygon {
+            plane: Plane {
+                normal,
+                w: normal.dot(centre),
+            },
+            verts,
+            source,
+        })
     }
 
     fn flip(&mut self) {
@@ -166,10 +184,18 @@ fn split(
                 }
             }
             if f.len() >= 3 {
-                front.push(Polygon { verts: f, plane: polygon.plane, source: polygon.source });
+                front.push(Polygon {
+                    verts: f,
+                    plane: polygon.plane,
+                    source: polygon.source,
+                });
             }
             if b.len() >= 3 {
-                back.push(Polygon { verts: b, plane: polygon.plane, source: polygon.source });
+                back.push(Polygon {
+                    verts: b,
+                    plane: polygon.plane,
+                    source: polygon.source,
+                });
             }
         }
     }
@@ -192,7 +218,9 @@ struct Node {
 
 impl Tree {
     fn new(polygons: Vec<Polygon>) -> Tree {
-        let mut tree = Tree { nodes: vec![Node::default()] };
+        let mut tree = Tree {
+            nodes: vec![Node::default()],
+        };
         tree.build(0, polygons);
         tree
     }
@@ -222,7 +250,11 @@ impl Tree {
     }
 
     fn child(&mut self, at: usize, front: bool) -> usize {
-        let existing = if front { self.nodes[at].front } else { self.nodes[at].back };
+        let existing = if front {
+            self.nodes[at].front
+        } else {
+            self.nodes[at].back
+        };
         if let Some(c) = existing {
             return c;
         }
@@ -287,7 +319,10 @@ impl Tree {
     }
 
     fn all_polygons(&self) -> Vec<Polygon> {
-        self.nodes.iter().flat_map(|n| n.polygons.iter().cloned()).collect()
+        self.nodes
+            .iter()
+            .flat_map(|n| n.polygons.iter().cloned())
+            .collect()
     }
 }
 
@@ -296,7 +331,11 @@ fn polygons_of(mesh: &MeshData, first: u32) -> Vec<Polygon> {
     let positions = mesh.positions();
     (0..mesh.num_faces())
         .filter_map(|f| {
-            let verts: Vec<DVec3> = mesh.face_verts(f).iter().map(|v| positions[*v as usize].as_dvec3()).collect();
+            let verts: Vec<DVec3> = mesh
+                .face_verts(f)
+                .iter()
+                .map(|v| positions[*v as usize].as_dvec3())
+                .collect();
             Polygon::new(verts, first + f)
         })
         .collect()
@@ -392,7 +431,11 @@ fn assemble(polygons: Vec<Polygon>) -> MeshData {
     let mut at = 0;
     while at < pieces.len() {
         let source = pieces[at].0;
-        let end = at + pieces[at..].iter().take_while(|(s, _)| *s == source).count();
+        let end = at
+            + pieces[at..]
+                .iter()
+                .take_while(|(s, _)| *s == source)
+                .count();
         let group: Vec<Vec<u32>> = pieces[at..end].iter().map(|(_, r)| r.clone()).collect();
         faces.extend(merge_pieces(group));
         at = end;
@@ -426,7 +469,11 @@ struct Welder {
 
 impl Welder {
     fn cell(p: DVec3) -> [i64; 3] {
-        [(p.x / WELD).floor() as i64, (p.y / WELD).floor() as i64, (p.z / WELD).floor() as i64]
+        [
+            (p.x / WELD).floor() as i64,
+            (p.y / WELD).floor() as i64,
+            (p.z / WELD).floor() as i64,
+        ]
     }
 
     fn index(&mut self, p: DVec3) -> u32 {
@@ -435,7 +482,10 @@ impl Welder {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     if let Some(list) = self.cells.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
-                        if let Some(&i) = list.iter().find(|i| self.positions[**i as usize].distance(p) <= WELD) {
+                        if let Some(&i) = list
+                            .iter()
+                            .find(|i| self.positions[**i as usize].distance(p) <= WELD)
+                        {
                             return i;
                         }
                     }
@@ -487,7 +537,10 @@ fn split_t_junctions(positions: &[DVec3], pieces: &mut [(u32, Vec<u32>)]) {
             let list = &sorted[axis];
             let from = list.partition_point(|i| positions[*i as usize][axis] < lo);
             on_edge.clear();
-            for &v in list[from..].iter().take_while(|i| positions[**i as usize][axis] <= hi) {
+            for &v in list[from..]
+                .iter()
+                .take_while(|i| positions[**i as usize][axis] <= hi)
+            {
                 if v == a || v == b {
                     continue;
                 }
@@ -537,14 +590,19 @@ fn merge_pieces(mut rings: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
 fn merge_two(p: &[u32], q: &[u32]) -> Option<Vec<u32>> {
     let (n, m) = (p.len(), q.len());
     // Shared: p's edge a→b is q's edge b→a.
-    let q_edges: std::collections::HashSet<(u32, u32)> = (0..m).map(|k| (q[k], q[(k + 1) % m])).collect();
-    let shared: Vec<bool> = (0..n).map(|k| q_edges.contains(&(p[(k + 1) % n], p[k]))).collect();
+    let q_edges: std::collections::HashSet<(u32, u32)> =
+        (0..m).map(|k| (q[k], q[(k + 1) % m])).collect();
+    let shared: Vec<bool> = (0..n)
+        .map(|k| q_edges.contains(&(p[(k + 1) % n], p[k])))
+        .collect();
     let count = shared.iter().filter(|s| **s).count();
     if count == 0 || count == n {
         return None;
     }
     // One run: exactly one place where an unshared edge is followed by a shared one.
-    let starts: Vec<usize> = (0..n).filter(|k| shared[*k] && !shared[(k + n - 1) % n]).collect();
+    let starts: Vec<usize> = (0..n)
+        .filter(|k| shared[*k] && !shared[(k + n - 1) % n])
+        .collect();
     if starts.len() != 1 {
         return None;
     }
@@ -597,7 +655,9 @@ fn dissolve_straight_vertices(positions: &[DVec3], faces: &mut [Vec<u32>]) {
     }
     let mut straight: Vec<bool> = (0..positions.len())
         .map(|v| {
-            let [a, b] = neighbours[v][..] else { return false };
+            let [a, b] = neighbours[v][..] else {
+                return false;
+            };
             let (pa, pb, p) = (positions[a as usize], positions[b as usize], positions[v]);
             let d = pb - pa;
             let t = (p - pa).dot(d) / d.length_squared().max(f64::MIN_POSITIVE);
@@ -637,7 +697,11 @@ mod tests {
         for f in 0..m.num_faces() {
             let ring = m.face_verts(f);
             for i in 1..ring.len() - 1 {
-                let (a, b, c) = (p[ring[0] as usize].as_dvec3(), p[ring[i] as usize].as_dvec3(), p[ring[i + 1] as usize].as_dvec3());
+                let (a, b, c) = (
+                    p[ring[0] as usize].as_dvec3(),
+                    p[ring[i] as usize].as_dvec3(),
+                    p[ring[i + 1] as usize].as_dvec3(),
+                );
                 v += a.dot(b.cross(c)) / 6.0;
             }
         }
@@ -668,7 +732,11 @@ mod tests {
             .indices
             .chunks(3)
             .map(|t| {
-                let (a, b, c) = (p[t[0] as usize].as_dvec3(), p[t[1] as usize].as_dvec3(), p[t[2] as usize].as_dvec3());
+                let (a, b, c) = (
+                    p[t[0] as usize].as_dvec3(),
+                    p[t[1] as usize].as_dvec3(),
+                    p[t[2] as usize].as_dvec3(),
+                );
                 a.dot(b.cross(c)) / 6.0
             })
             .sum()
@@ -687,19 +755,63 @@ mod tests {
         let rod = primitives::cylinder(0.5, 4.0, 32);
         let cases = [
             ("hole", boolean(&cube, &rod, BooleanOp::Difference)),
-            ("sphere out", boolean(&cube, &primitives::uv_sphere(1.2, 32, 16), BooleanOp::Difference)),
-            ("sphere in", boolean(&cube, &primitives::uv_sphere(1.2, 32, 16), BooleanOp::Intersect)),
-            ("pocket", boolean(&cube, &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 0.5)), BooleanOp::Difference)),
-            ("stacked", boolean(&cube, &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 1.5)), BooleanOp::Union)),
-            ("torus", boolean(&cube, &primitives::torus(1.0, 0.3, 24, 12), BooleanOp::Difference)),
+            (
+                "sphere out",
+                boolean(
+                    &cube,
+                    &primitives::uv_sphere(1.2, 32, 16),
+                    BooleanOp::Difference,
+                ),
+            ),
+            (
+                "sphere in",
+                boolean(
+                    &cube,
+                    &primitives::uv_sphere(1.2, 32, 16),
+                    BooleanOp::Intersect,
+                ),
+            ),
+            (
+                "pocket",
+                boolean(
+                    &cube,
+                    &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 0.5)),
+                    BooleanOp::Difference,
+                ),
+            ),
+            (
+                "stacked",
+                boolean(
+                    &cube,
+                    &moved(primitives::cube(1.0), Vec3::new(0.0, 0.0, 1.5)),
+                    BooleanOp::Union,
+                ),
+            ),
+            (
+                "torus",
+                boolean(
+                    &cube,
+                    &primitives::torus(1.0, 0.3, 24, 12),
+                    BooleanOp::Difference,
+                ),
+            ),
         ];
         for (name, m) in &cases {
             assert_eq!(open_edges(m), 0, "{name}: open edges");
-            assert!((drawn_volume(m) - volume(m)).abs() < 1e-3, "{name}: drawn {} encloses {}", drawn_volume(m), volume(m));
+            assert!(
+                (drawn_volume(m) - volume(m)).abs() < 1e-3,
+                "{name}: drawn {} encloses {}",
+                drawn_volume(m),
+                volume(m)
+            );
         }
         // A second hole across the first, on the first's result: what a stack
         // of two booleans does.
-        let twice = boolean(&cases[0].1, &rotated_to_x(rod.clone()), BooleanOp::Difference);
+        let twice = boolean(
+            &cases[0].1,
+            &rotated_to_x(rod.clone()),
+            BooleanOp::Difference,
+        );
         assert_eq!(open_edges(&twice), 0, "second hole: open edges");
         assert!((drawn_volume(&twice) - volume(&twice)).abs() < 1e-3);
     }
@@ -709,20 +821,32 @@ mod tests {
         // A rod through the top and bottom: the four sides are untouched and
         // come back as the four quads they were, not as strips cut along the
         // rod's facets.
-        let out = boolean(&primitives::cube(2.0), &primitives::cylinder(0.5, 4.0, 32), BooleanOp::Difference);
+        let out = boolean(
+            &primitives::cube(2.0),
+            &primitives::cylinder(0.5, 4.0, 32),
+            BooleanOp::Difference,
+        );
         let p = out.positions();
         let sides = (0..out.num_faces())
             .filter(|f| {
                 let ring = out.face_verts(*f);
-                let n = crate::tessellate::newell_normal(&ring.iter().map(|v| p[*v as usize]).collect::<Vec<_>>());
+                let n = crate::tessellate::newell_normal(
+                    &ring.iter().map(|v| p[*v as usize]).collect::<Vec<_>>(),
+                );
                 n.z.abs() < 0.5
-                    && ring.iter().all(|v| p[*v as usize].x.abs() > 0.999 || p[*v as usize].y.abs() > 0.999)
+                    && ring
+                        .iter()
+                        .all(|v| p[*v as usize].x.abs() > 0.999 || p[*v as usize].y.abs() > 0.999)
             })
             .count();
         assert_eq!(sides, 4, "the sides came back in pieces");
         // The top and bottom each have a hole, so each is a few polygons
         // rather than one — but a few, not the fan of 32 slivers it was.
-        assert!(out.num_faces() < 6 + 32 + 2 * 12, "{} faces", out.num_faces());
+        assert!(
+            out.num_faces() < 6 + 32 + 2 * 12,
+            "{} faces",
+            out.num_faces()
+        );
     }
 
     #[test]
@@ -733,11 +857,19 @@ mod tests {
         let b = moved(primitives::cube(2.0), Vec3::X);
         let near = |got: f64, want: f64| (got - want).abs() < 1e-3;
         let difference = boolean(&a, &b, BooleanOp::Difference);
-        assert!(near(volume(&difference), 4.0), "difference {}", volume(&difference));
+        assert!(
+            near(volume(&difference), 4.0),
+            "difference {}",
+            volume(&difference)
+        );
         let union = boolean(&a, &b, BooleanOp::Union);
         assert!(near(volume(&union), 12.0), "union {}", volume(&union));
         let intersect = boolean(&a, &b, BooleanOp::Intersect);
-        assert!(near(volume(&intersect), 4.0), "intersect {}", volume(&intersect));
+        assert!(
+            near(volume(&intersect), 4.0),
+            "intersect {}",
+            volume(&intersect)
+        );
         assert!(intersect.bounds().min.x > -0.01 && intersect.bounds().max.x < 1.01);
     }
 

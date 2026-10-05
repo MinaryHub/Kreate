@@ -860,7 +860,12 @@ mod tests {
                 Input::key("G"),
                 Action::new("object.translate"),
             ),
-            Binding::new("sculpt.nothing", Context::Sculpt, Input::key("G"), Action::new("object.translate")),
+            Binding::new(
+                "sculpt.nothing",
+                Context::Sculpt,
+                Input::key("G"),
+                Action::new("object.translate"),
+            ),
         ]);
         let conflicts = k.conflicts();
         assert_eq!(

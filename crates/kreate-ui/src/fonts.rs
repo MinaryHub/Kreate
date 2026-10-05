@@ -323,7 +323,7 @@ mod glyph_tests {
         // widget it goes in this string too — the list is short and the
         // failure it prevents is an empty button.
         let drawn = concat!(
-            "\u{2190}", // keymap_editor: reset a binding
+            "\u{2190}",         // keymap_editor: reset a binding
             "\u{25B6}\u{25BC}", // collapsing headers
         );
         assert_eq!(

@@ -401,11 +401,17 @@ fn draw_root(ui: &mut Ui, catalog: &Catalog, queue: &mut CommandQueue) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
-        let response = ui.label(egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[])).strong());
+        let response = ui.label(
+            egui::RichText::new(catalog.format("outliner-scene-collection", TextKind::Ui, &[]))
+                .strong(),
+        );
         // Dropped on the scene: out of any collection.
         drop_highlight(ui, &response);
         if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
-            queue.push(Command::MoveObjectToCollection { object: dragged.0, collection: String::new() });
+            queue.push(Command::MoveObjectToCollection {
+                object: dragged.0,
+                collection: String::new(),
+            });
         }
     });
 }
@@ -430,9 +436,18 @@ fn draw_collection_row(
             if let Some(keep) = rename_field(ui, text) {
                 if keep {
                     let mut params = kreate_reflect::PropertyMap::new();
-                    params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
-                    params.set("new_name", kreate_reflect::PropertyValue::Text(text.clone()));
-                    queue.push(Command::RunOperator { op_id: "collection.rename".into(), params });
+                    params.set(
+                        "name",
+                        kreate_reflect::PropertyValue::Text(group.name.clone()),
+                    );
+                    params.set(
+                        "new_name",
+                        kreate_reflect::PropertyValue::Text(text.clone()),
+                    );
+                    queue.push(Command::RunOperator {
+                        op_id: "collection.rename".into(),
+                        params,
+                    });
                 }
                 *renaming = None;
             }
@@ -448,36 +463,62 @@ fn draw_collection_row(
             // Dropped on a collection: into it, as Blender's.
             drop_highlight(ui, &response);
             if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
-                queue.push(Command::MoveObjectToCollection { object: dragged.0, collection: group.name.clone() });
+                queue.push(Command::MoveObjectToCollection {
+                    object: dragged.0,
+                    collection: group.name.clone(),
+                });
             }
             // Blender's right-click on a collection: rename it, or take it
             // away and leave what was in it in the scene.
             response.context_menu(|ui| {
-                if ui.button(catalog.format("outliner-rename", TextKind::Ui, &[])).clicked() {
+                if ui
+                    .button(catalog.format("outliner-rename", TextKind::Ui, &[]))
+                    .clicked()
+                {
                     *renaming = Some(Renaming::Collection(group.name.clone(), group.name.clone()));
                     ui.close();
                 }
-                if ui.button(catalog.format("outliner-remove-collection", TextKind::Ui, &[])).clicked() {
+                if ui
+                    .button(catalog.format("outliner-remove-collection", TextKind::Ui, &[]))
+                    .clicked()
+                {
                     let mut params = kreate_reflect::PropertyMap::new();
-                    params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
-                    queue.push(Command::RunOperator { op_id: "collection.remove".into(), params });
+                    params.set(
+                        "name",
+                        kreate_reflect::PropertyValue::Text(group.name.clone()),
+                    );
+                    queue.push(Command::RunOperator {
+                        op_id: "collection.remove".into(),
+                        params,
+                    });
                     ui.close();
                 }
             });
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (eye, response) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+            let (eye, response) =
+                ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
             eye_icon(ui, eye, !group.hidden, response.hovered());
             let response = response.on_hover_text(catalog.format(
-                if group.hidden { "outliner-show" } else { "outliner-hide" },
+                if group.hidden {
+                    "outliner-show"
+                } else {
+                    "outliner-hide"
+                },
                 TextKind::Tooltip,
                 &[],
             ));
             if response.clicked() {
                 let mut params = kreate_reflect::PropertyMap::new();
-                params.set("name", kreate_reflect::PropertyValue::Text(group.name.clone()));
+                params.set(
+                    "name",
+                    kreate_reflect::PropertyValue::Text(group.name.clone()),
+                );
                 params.set("visible", kreate_reflect::PropertyValue::Bool(group.hidden));
-                queue.push(Command::RunOperator { op_id: "collection.set_visible".into(), params });
+                queue.push(Command::RunOperator {
+                    op_id: "collection.set_visible".into(),
+                    params,
+                });
             }
         });
     });
@@ -517,8 +558,12 @@ fn draw_object_row(
         // mesh, light or camera before the name does.
         let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         object_icon(ui, row.kind, icon_rect, row.visible);
-        ui.interact(icon_rect, ui.id().with(("kind", row.id)), egui::Sense::hover())
-            .on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
+        ui.interact(
+            icon_rect,
+            ui.id().with(("kind", row.id)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
 
         let mut label = egui::RichText::new(&row.name);
         if row.active {
@@ -539,12 +584,17 @@ fn draw_object_row(
                     // that began this made this one.
                     let mut params = kreate_reflect::PropertyMap::new();
                     params.set("name", kreate_reflect::PropertyValue::Text(text.clone()));
-                    queue.push(Command::RunOperator { op_id: "object.rename".into(), params });
+                    queue.push(Command::RunOperator {
+                        op_id: "object.rename".into(),
+                        params,
+                    });
                 }
                 *renaming = None;
             }
         } else {
-            let response = ui.add(egui::Button::selectable(row.selected, label).sense(egui::Sense::click_and_drag()));
+            let response = ui.add(
+                egui::Button::selectable(row.selected, label).sense(egui::Sense::click_and_drag()),
+            );
             // Drag the name onto another to parent it there, or onto a
             // collection's heading to move it in — Blender's outliner.
             if response.drag_started() {
@@ -553,7 +603,10 @@ fn draw_object_row(
             drop_highlight(ui, &response);
             if let Some(dragged) = response.dnd_release_payload::<DraggedObject>() {
                 if dragged.0 != row.id {
-                    queue.push(Command::ParentObject { child: dragged.0, parent: row.id });
+                    queue.push(Command::ParentObject {
+                        child: dragged.0,
+                        parent: row.id,
+                    });
                 }
             }
             if response.clicked() {
@@ -567,12 +620,21 @@ fn draw_object_row(
             // Blender's double-click: rename in place. Framing it is the
             // numpad's full stop.
             if response.double_clicked() {
-                queue.push(Command::SetSelection { objects: vec![row.id], active: Some(row.id) });
+                queue.push(Command::SetSelection {
+                    objects: vec![row.id],
+                    active: Some(row.id),
+                });
                 *renaming = Some(Renaming::Object(row.id, row.name.clone()));
             }
             response.context_menu(|ui| {
-                if ui.button(catalog.format("outliner-rename", TextKind::Ui, &[])).clicked() {
-                    queue.push(Command::SetSelection { objects: vec![row.id], active: Some(row.id) });
+                if ui
+                    .button(catalog.format("outliner-rename", TextKind::Ui, &[]))
+                    .clicked()
+                {
+                    queue.push(Command::SetSelection {
+                        objects: vec![row.id],
+                        active: Some(row.id),
+                    });
                     *renaming = Some(Renaming::Object(row.id, row.name.clone()));
                     ui.close();
                 }
@@ -593,7 +655,8 @@ fn draw_object_row(
         // The eye, against the right edge where Blender keeps it. On the row
         // and not on the selection: hiding acts on what is in the way.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (eye, response) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+            let (eye, response) =
+                ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
             eye_icon(ui, eye, row.visible, response.hovered());
             let response = response.on_hover_text(catalog.format(
                 if row.visible {
@@ -628,19 +691,23 @@ fn draw_data_row(ui: &mut Ui, catalog: &Catalog, row: &OutlinerRow) {
             RowKind::Mesh { verts, faces } => format!("{name}  {verts}v {faces}f"),
             _ => name.clone(),
         };
-        ui.weak(text).on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
+        ui.weak(text)
+            .on_hover_text(catalog.format(row.kind.i18n_key(), TextKind::Tooltip, &[]));
     });
 }
 
 /// One material slot under an expanded object.
 fn draw_material_row(ui: &mut Ui, row: &OutlinerRow, slot: usize) {
-    let Some(name) = row.materials.get(slot) else { return };
+    let Some(name) = row.materials.get(slot) else {
+        return;
+    };
     ui.horizontal(|ui| {
         ui.add_space(INDENT * (row.depth as f32 + 3.0) + 12.0);
         let theme = crate::theme::from_ui(ui);
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         // The material's sphere, the same mark the properties tab wears.
-        ui.painter().circle_filled(rect.center(), 4.0, theme.text_dim);
+        ui.painter()
+            .circle_filled(rect.center(), 4.0, theme.text_dim);
         ui.weak(name);
     });
 }
@@ -648,14 +715,20 @@ fn draw_material_row(ui: &mut Ui, row: &OutlinerRow, slot: usize) {
 /// One bone under an expanded armature. A click selects it, as a click on
 /// the bone in the viewport would.
 fn draw_bone_row(ui: &mut Ui, row: &OutlinerRow, bone: usize, queue: &mut CommandQueue) {
-    let Some((name, depth, selected)) = row.bones.get(bone) else { return };
+    let Some((name, depth, selected)) = row.bones.get(bone) else {
+        return;
+    };
     ui.horizontal(|ui| {
         ui.add_space(INDENT * (row.depth as f32 + 3.0 + *depth as f32) + 12.0);
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         object_icon(ui, RowKind::Armature, rect, true);
         if ui.selectable_label(*selected, name).clicked() {
             let extend = ui.input(|i| i.modifiers.shift);
-            queue.push(crate::Command::SelectBone { object: row.id, bone: name.clone(), extend });
+            queue.push(crate::Command::SelectBone {
+                object: row.id,
+                bone: name.clone(),
+                extend,
+            });
         }
     });
 }
@@ -691,7 +764,8 @@ fn collection_icon(ui: &Ui, rect: egui::Rect) {
         rect.center() + egui::Vec2::new(0.0, 1.5),
         egui::Vec2::new(11.0, 8.0),
     );
-    ui.painter().rect_stroke(body, 1.0, line, egui::StrokeKind::Middle);
+    ui.painter()
+        .rect_stroke(body, 1.0, line, egui::StrokeKind::Middle);
     ui.painter().line_segment(
         [
             egui::Pos2::new(body.min.x - 1.0, body.min.y),
@@ -704,7 +778,11 @@ fn collection_icon(ui: &Ui, rect: egui::Rect) {
 /// The icon for what an object is.
 pub(crate) fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: bool) {
     let theme = crate::theme::from_ui(ui);
-    let ink = if visible { theme.text_dim } else { theme.text_faint };
+    let ink = if visible {
+        theme.text_dim
+    } else {
+        theme.text_faint
+    };
     let p = ui.painter();
     let c = rect.center();
     let s = rect.width() * 0.34;
@@ -718,7 +796,10 @@ pub(crate) fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: boo
             let bottom = egui::Pos2::new(c.x, c.y + s);
             let bl = egui::Pos2::new(c.x - s, c.y + s * 0.5);
             let br = egui::Pos2::new(c.x + s, c.y + s * 0.5);
-            p.add(egui::Shape::closed_line(vec![top, right, br, bottom, bl, left], line));
+            p.add(egui::Shape::closed_line(
+                vec![top, right, br, bottom, bl, left],
+                line,
+            ));
             p.line_segment([left, c], line);
             p.line_segment([right, c], line);
             p.line_segment([c, bottom], line);
@@ -727,17 +808,26 @@ pub(crate) fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: boo
         RowKind::Light => {
             p.circle_stroke(egui::Pos2::new(c.x, c.y - s * 0.25), s * 0.8, line);
             p.line_segment(
-                [egui::Pos2::new(c.x - s * 0.35, c.y + s * 0.75), egui::Pos2::new(c.x + s * 0.35, c.y + s * 0.75)],
+                [
+                    egui::Pos2::new(c.x - s * 0.35, c.y + s * 0.75),
+                    egui::Pos2::new(c.x + s * 0.35, c.y + s * 0.75),
+                ],
                 line,
             );
             p.line_segment(
-                [egui::Pos2::new(c.x - s * 0.25, c.y + s * 1.05), egui::Pos2::new(c.x + s * 0.25, c.y + s * 1.05)],
+                [
+                    egui::Pos2::new(c.x - s * 0.25, c.y + s * 1.05),
+                    egui::Pos2::new(c.x + s * 0.25, c.y + s * 1.05),
+                ],
                 line,
             );
         }
         // A camera: a body with a lens pointing right.
         RowKind::Camera => {
-            let body = egui::Rect::from_center_size(egui::Pos2::new(c.x - s * 0.25, c.y), egui::Vec2::new(s * 1.5, s * 1.2));
+            let body = egui::Rect::from_center_size(
+                egui::Pos2::new(c.x - s * 0.25, c.y),
+                egui::Vec2::new(s * 1.5, s * 1.2),
+            );
             p.rect_stroke(body, 1.0, line, egui::StrokeKind::Middle);
             p.add(egui::Shape::convex_polygon(
                 vec![
@@ -758,12 +848,21 @@ pub(crate) fn object_icon(ui: &Ui, kind: RowKind, rect: egui::Rect, visible: boo
             // A quarter of the way up, a little either side of the axis.
             let waist = head + (tail - head) * 0.25;
             let side = egui::vec2(s * 0.3, s * 0.3);
-            p.add(egui::Shape::closed_line(vec![head, waist + side, tail, waist - side], line));
+            p.add(egui::Shape::closed_line(
+                vec![head, waist + side, tail, waist - side],
+                line,
+            ));
         }
         // An empty: three axes from a point.
         RowKind::Empty => {
-            p.line_segment([egui::Pos2::new(c.x - s, c.y), egui::Pos2::new(c.x + s, c.y)], line);
-            p.line_segment([egui::Pos2::new(c.x, c.y - s), egui::Pos2::new(c.x, c.y + s)], line);
+            p.line_segment(
+                [egui::Pos2::new(c.x - s, c.y), egui::Pos2::new(c.x + s, c.y)],
+                line,
+            );
+            p.line_segment(
+                [egui::Pos2::new(c.x, c.y - s), egui::Pos2::new(c.x, c.y + s)],
+                line,
+            );
         }
     }
 }
@@ -808,7 +907,10 @@ fn eye_icon(ui: &Ui, rect: egui::Rect, open: bool, hovered: bool) {
         for dx in [-0.6f32, 0.0, 0.6] {
             let x = c.x + dx * w;
             p.line_segment(
-                [egui::Pos2::new(x, c.y - h * 0.2), egui::Pos2::new(x + dx * 1.5, c.y + h * 0.9)],
+                [
+                    egui::Pos2::new(x, c.y - h * 0.2),
+                    egui::Pos2::new(x + dx * 1.5, c.y + h * 0.9),
+                ],
                 line,
             );
         }
@@ -953,7 +1055,10 @@ mod tests {
         // sibling of the parent at depth 0 again.
         let depths = [0u16, 1, 2, 1, 0];
         let rows = visible_rows(&depths, |_| false, |i| Some(leaf(i as u32)));
-        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Object(4)]);
+        assert_eq!(
+            rows,
+            vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Object(4)]
+        );
     }
 
     #[test]
@@ -987,7 +1092,13 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Data(0), TreeRow::Bone(0, 0), TreeRow::Bone(0, 1)]
+            vec![
+                TreeRow::Root,
+                TreeRow::Object(0),
+                TreeRow::Data(0),
+                TreeRow::Bone(0, 0),
+                TreeRow::Bone(0, 1)
+            ]
         );
         // Folded, no bones.
         let rows = visible_rows(&[0u16], |_| false, |_| None);
@@ -1043,6 +1154,9 @@ mod tests {
         );
         // A collection with nothing after it at all.
         let rows = visible_rows_grouped(&[0u16], &[1], |_| false, |_| None);
-        assert_eq!(rows, vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Collection(0)]);
+        assert_eq!(
+            rows,
+            vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Collection(0)]
+        );
     }
 }

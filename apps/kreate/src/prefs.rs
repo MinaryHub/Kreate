@@ -89,7 +89,13 @@ pub const RECENT_LIMIT: usize = 12;
 /// The recent documents, newest first. Missing or unreadable is none.
 pub fn load_recent(path: &Path) -> Vec<PathBuf> {
     std::fs::read_to_string(path)
-        .map(|text| text.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).take(RECENT_LIMIT).collect())
+        .map(|text| {
+            text.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(PathBuf::from)
+                .take(RECENT_LIMIT)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -428,7 +434,10 @@ mod recent_tests {
     fn a_document_opened_again_moves_to_the_front_once() {
         let mut list = vec![PathBuf::from("a.kreate"), PathBuf::from("b.kreate")];
         note_recent(&mut list, Path::new("b.kreate"));
-        assert_eq!(list, vec![PathBuf::from("b.kreate"), PathBuf::from("a.kreate")]);
+        assert_eq!(
+            list,
+            vec![PathBuf::from("b.kreate"), PathBuf::from("a.kreate")]
+        );
         for i in 0..20 {
             note_recent(&mut list, &PathBuf::from(format!("{i}.kreate")));
         }
@@ -440,7 +449,10 @@ mod recent_tests {
     fn the_list_survives_a_save_and_a_load() {
         let dir = std::env::temp_dir().join(format!("kreate-recent-{}", std::process::id()));
         let path = dir.join("recent.txt");
-        let list = vec![PathBuf::from("C:/x/one.kreate"), PathBuf::from("/y/two.kreate")];
+        let list = vec![
+            PathBuf::from("C:/x/one.kreate"),
+            PathBuf::from("/y/two.kreate"),
+        ];
         save_recent(&path, &list).unwrap();
         assert_eq!(load_recent(&path), list);
         let _ = std::fs::remove_dir_all(&dir);

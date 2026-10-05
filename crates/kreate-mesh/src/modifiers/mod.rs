@@ -34,8 +34,8 @@ pub mod subdivide;
 pub use array::{array, ArrayParams};
 pub use bevel::{bevel, BevelParams};
 pub use boolean::{boolean, BooleanOp};
-pub use solidify::{solidify, SolidifyParams};
 pub use mirror::{mirror, MirrorParams};
+pub use solidify::{solidify, SolidifyParams};
 pub use subdivide::{subdivide, SubdivideParams};
 
 use crate::attribute::{AttributeStore, Domain};

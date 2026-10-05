@@ -88,9 +88,17 @@ mod tests {
             let t = &object.transform;
             let forward = t.rotation * DVec3::NEG_Z;
             let to_cube = (DVec3::ZERO - t.translation).normalize();
-            assert!(forward.dot(to_cube) > 0.9999, "{} looks along {forward:?}", object.name);
+            assert!(
+                forward.dot(to_cube) > 0.9999,
+                "{} looks along {forward:?}",
+                object.name
+            );
             // Upright: the camera's up has a positive world Z.
-            assert!((t.rotation * DVec3::Y).z > 0.0, "{} is upside down", object.name);
+            assert!(
+                (t.rotation * DVec3::Y).z > 0.0,
+                "{} is upside down",
+                object.name
+            );
             aimed += 1;
         }
         assert_eq!(aimed, 2);

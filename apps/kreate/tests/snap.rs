@@ -344,7 +344,6 @@ fn projection_is_camera_relative() {
     );
 }
 
-
 /// Vertex, then edge, then face: the smaller thing is the more deliberate aim.
 #[test]
 fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
@@ -356,7 +355,8 @@ fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
         edges: vec![[a, b], [b, c], [c, a]],
         tris: vec![[a, b, c]],
     };
-    let hit = |p: DVec3| snap::resolve(&world, Mode::Element, at_point(p), &camera(), VIEWPORT).unwrap();
+    let hit =
+        |p: DVec3| snap::resolve(&world, Mode::Element, at_point(p), &camera(), VIEWPORT).unwrap();
 
     let vertex = hit(c);
     assert_eq!(vertex.element, snap::Element::Vertex);

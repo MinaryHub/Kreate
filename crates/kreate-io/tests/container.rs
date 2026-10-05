@@ -346,12 +346,7 @@ fn a_truncated_archive_is_an_error_and_never_a_panic() {
 /// The hole is the point: an image that is fully resident passes whether the
 /// residency survives or not, and residency is what the tiling exists for.
 fn patchy_image() -> kreate_scene::Image {
-    let mut image = kreate_scene::Image::new(
-        "Sky",
-        400,
-        300,
-        kreate_scene::PixelFormat::Rgba8,
-    );
+    let mut image = kreate_scene::Image::new("Sky", 400, 300, kreate_scene::PixelFormat::Rgba8);
     image.color_space = kreate_scene::ColorSpace::Raw;
     let tile = image.tile_mut(0, 0).expect("in range");
     tile.bytes_mut()[0..4].copy_from_slice(&[9, 8, 7, 255]);
@@ -413,7 +408,11 @@ fn a_worlds_background_finds_its_image_again() {
     doc.set_active_world(Some(world));
 
     let loaded = round_trip(&doc);
-    let (_, world) = loaded.document.worlds().next().expect("the world came back");
+    let (_, world) = loaded
+        .document
+        .worlds()
+        .next()
+        .expect("the world came back");
     let kreate_scene::Background::Image(id) = world.background else {
         panic!("the background came back as {:?}", world.background);
     };
@@ -679,7 +678,9 @@ fn a_mesh_that_really_has_a_layer_called_uv_map_keeps_it() {
     let loaded = round_trip(&doc);
     let (_, back) = loaded.document.meshes().next().expect("the mesh");
     assert_eq!(
-        back.attributes().get_f32x2(names::UV).expect("the real one")[0],
+        back.attributes()
+            .get_f32x2(names::UV)
+            .expect("the real one")[0],
         glam::Vec2::new(1.0, 1.0)
     );
     assert_eq!(
@@ -793,7 +794,12 @@ fn a_texture_the_file_does_not_carry_comes_back_as_no_texture() {
 
     let after = container::read(Cursor::new(out)).expect("reads").document;
     assert_eq!(
-        after.materials().next().expect("a material").1.base_color_image,
+        after
+            .materials()
+            .next()
+            .expect("a material")
+            .1
+            .base_color_image,
         None,
         "a uid naming nothing resolved to something"
     );
@@ -830,11 +836,15 @@ fn every_map_and_the_normal_strength_survive_a_save() {
     let after = round_trip(&doc).document;
     let (_, m) = after.materials().next().expect("the material came back");
     let name_of = |id: Option<kreate_scene::document::ImageId>| {
-        id.and_then(|id| after.image(id)).map(|i| (i.name.clone(), i.color_space))
+        id.and_then(|id| after.image(id))
+            .map(|i| (i.name.clone(), i.color_space))
     };
     use kreate_scene::ColorSpace::{Raw, Srgb};
     assert_eq!(name_of(m.base_color_image), Some(("Albedo".into(), Srgb)));
-    assert_eq!(name_of(m.metallic_roughness_image), Some(("ORM".into(), Raw)));
+    assert_eq!(
+        name_of(m.metallic_roughness_image),
+        Some(("ORM".into(), Raw))
+    );
     assert_eq!(name_of(m.normal_image), Some(("Normal".into(), Raw)));
     assert_eq!(m.normal_strength, 0.35);
     assert_eq!(m.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
@@ -865,7 +875,12 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         extra: Default::default(),
     };
     let text = serde_json::to_string(&record).expect("serialises");
-    for field in ["metallic_roughness_uid", "normal_uid", "normal_strength", "emission"] {
+    for field in [
+        "metallic_roughness_uid",
+        "normal_uid",
+        "normal_strength",
+        "emission",
+    ] {
         assert!(!text.contains(field), "{field} was written: {text}");
     }
 }
@@ -875,7 +890,12 @@ fn a_materials_node_graph_survives_a_save() {
     // Nodes, their numbers, their places, the image a texture node reads and
     // every wire — the graph that comes back is the graph that went.
     let mut doc = Document::new();
-    let image = doc.add_image(kreate_scene::Image::new("Bricks", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let image = doc.add_image(kreate_scene::Image::new(
+        "Bricks",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
     let mut material = kreate_scene::Material {
         name: "Noded".into(),
         base_color_image: Some(image),
@@ -901,7 +921,9 @@ fn a_materials_node_graph_survives_a_save() {
     assert_eq!(back.links, graph.links);
     let images = back.images();
     assert_eq!(images.len(), 2);
-    assert!(images.iter().all(|id| after.image(*id).map(|i| i.name.as_str()) == Some("Bricks")));
+    assert!(images
+        .iter()
+        .all(|id| after.image(*id).map(|i| i.name.as_str()) == Some("Bricks")));
 }
 
 #[test]
@@ -937,12 +959,15 @@ fn a_graph_with_a_node_this_build_does_not_know_falls_back_to_the_flat_material(
                 }
                 data = edited.into_bytes();
             }
-            out.start_file(name, zip::write::SimpleFileOptions::default()).expect("start");
+            out.start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("start");
             out.write_all(&data).expect("write");
         }
         out.finish().expect("finish").into_inner()
     };
-    let after = container::read(Cursor::new(bytes)).expect("still opens").document;
+    let after = container::read(Cursor::new(bytes))
+        .expect("still opens")
+        .document;
     let (_, m) = after.materials().next().expect("the material came back");
     assert!(m.graph.is_none(), "an unreadable graph was half-read");
     assert_eq!(m.name, "Future");
@@ -953,19 +978,33 @@ fn an_animation_and_the_clock_survive_a_save() {
     use kreate_scene::animation::{Action, Interpolation, Playback};
     let mut doc = Document::new();
     let mut action = Action::new("Bounce");
-    action.curve_mut("location", 2).insert(1.0, 0.0, Interpolation::Bezier);
-    action.curve_mut("location", 2).insert(12.0, 3.5, Interpolation::Constant);
-    action.curve_mut("rotation_euler", 1).insert(6.0, 1.25, Interpolation::Linear);
+    action
+        .curve_mut("location", 2)
+        .insert(1.0, 0.0, Interpolation::Bezier);
+    action
+        .curve_mut("location", 2)
+        .insert(12.0, 3.5, Interpolation::Constant);
+    action
+        .curve_mut("rotation_euler", 1)
+        .insert(6.0, 1.25, Interpolation::Linear);
     let action = doc.add_action(action);
-    let mut object = kreate_scene::document::Object::new("Ball", kreate_scene::document::ObjectData::Empty);
+    let mut object =
+        kreate_scene::document::Object::new("Ball", kreate_scene::document::ObjectData::Empty);
     object.action = Some(action);
     doc.add_object(object);
-    doc.playback = Playback { frame: 37.0, start: 10, end: 90, fps: 30.0 };
+    doc.playback = Playback {
+        frame: 37.0,
+        start: 10,
+        end: 90,
+        fps: 30.0,
+    };
 
     let after = round_trip(&doc).document;
     assert_eq!(after.playback, doc.playback);
     let (_, ball) = after.objects().next().expect("the object came back");
-    let played = after.action(ball.action.expect("the link came back")).expect("the action came back");
+    let played = after
+        .action(ball.action.expect("the link came back"))
+        .expect("the action came back");
     let before = doc.action(action).unwrap();
     assert_eq!(played.name, "Bounce");
     assert_eq!(played.uid, before.uid, "the action's identity changed");
@@ -980,8 +1019,15 @@ fn a_scene_that_never_touched_the_timeline_writes_no_clock() {
     let bytes = container::write(&doc, &Manifest::default(), &[]).expect("writes");
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("a zip");
     let mut text = String::new();
-    std::io::Read::read_to_string(&mut archive.by_name("scene.json").expect("scene"), &mut text).expect("read");
-    assert!(!text.contains("playback") && !text.contains("actions"), "{text}");
+    std::io::Read::read_to_string(
+        &mut archive.by_name("scene.json").expect("scene"),
+        &mut text,
+    )
+    .expect("read");
+    assert!(
+        !text.contains("playback") && !text.contains("actions"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -989,30 +1035,47 @@ fn a_materials_and_a_lights_animation_survive_a_save() {
     use kreate_scene::animation::{Action, Interpolation};
     let mut doc = Document::new();
     let mut blink = Action::for_kind("Blink", kreate_scene::DatablockKind::Material);
-    blink.curve_mut("base_color", 0).insert(1.0, 1.0, Interpolation::Constant);
+    blink
+        .curve_mut("base_color", 0)
+        .insert(1.0, 1.0, Interpolation::Constant);
     let blink = doc.add_action(blink);
     let mut dim = Action::for_kind("Dim", kreate_scene::DatablockKind::Light);
-    dim.curve_mut("intensity", 0).insert(5.0, 20.0, Interpolation::Linear);
+    dim.curve_mut("intensity", 0)
+        .insert(5.0, 20.0, Interpolation::Linear);
     let dim = doc.add_action(dim);
-    doc.add_material(kreate_scene::Material { name: "Warn".into(), action: Some(blink), ..Default::default() });
+    doc.add_material(kreate_scene::Material {
+        name: "Warn".into(),
+        action: Some(blink),
+        ..Default::default()
+    });
     let mut light = kreate_scene::Light::new("Lamp");
     light.action = Some(dim);
     doc.add_light(light);
 
     let after = round_trip(&doc).document;
     let (_, m) = after.materials().next().unwrap();
-    let a = after.action(m.action.expect("the material's link came back")).unwrap();
-    assert_eq!((a.name.as_str(), a.animates), ("Blink", kreate_scene::DatablockKind::Material));
+    let a = after
+        .action(m.action.expect("the material's link came back"))
+        .unwrap();
+    assert_eq!(
+        (a.name.as_str(), a.animates),
+        ("Blink", kreate_scene::DatablockKind::Material)
+    );
     assert_eq!(a.curves[0].path.kind, kreate_scene::DatablockKind::Material);
     let (_, l) = after.lights().next().unwrap();
-    let a = after.action(l.action.expect("the light's link came back")).unwrap();
-    assert_eq!((a.name.as_str(), a.animates), ("Dim", kreate_scene::DatablockKind::Light));
+    let a = after
+        .action(l.action.expect("the light's link came back"))
+        .unwrap();
+    assert_eq!(
+        (a.name.as_str(), a.animates),
+        ("Dim", kreate_scene::DatablockKind::Light)
+    );
 }
 
 #[test]
 fn a_driver_comes_back_driving_the_same_thing_from_the_same_object() {
-    use kreate_scene::driver::{Driver, DriverVariable};
     use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::driver::{Driver, DriverVariable};
     let mut doc = Document::new();
     let handle = doc.add_object(Object::new("Handle", ObjectData::Empty));
     let door = doc.add_object(Object::new("Door", ObjectData::Empty));
@@ -1029,11 +1092,24 @@ fn a_driver_comes_back_driving_the_same_thing_from_the_same_object() {
 
     let loaded = round_trip(&doc);
     let after = &loaded.document;
-    let (door_after, o) = after.objects().find(|(_, o)| o.name == "Door").expect("the door");
-    assert_eq!(o.drivers, vec![driver], "the driver changed on the way through");
+    let (door_after, o) = after
+        .objects()
+        .find(|(_, o)| o.name == "Door")
+        .expect("the door");
+    assert_eq!(
+        o.drivers,
+        vec![driver],
+        "the driver changed on the way through"
+    );
     // The variable's identity still names the handle.
-    let (handle_after, _) = after.objects().find(|(_, o)| o.name == "Handle").expect("the handle");
-    assert_eq!(after.object_by_uid(o.drivers[0].variables[0].target), Some(handle_after));
+    let (handle_after, _) = after
+        .objects()
+        .find(|(_, o)| o.name == "Handle")
+        .expect("the handle");
+    assert_eq!(
+        after.object_by_uid(o.drivers[0].variables[0].target),
+        Some(handle_after)
+    );
     let _ = door_after;
 }
 
@@ -1066,7 +1142,10 @@ fn an_armature_and_its_pose_come_back() {
 
     let loaded = round_trip(&doc);
     let after = &loaded.document;
-    let (rig_after, o) = after.objects().find(|(_, o)| o.name == "Rig").expect("the rig");
+    let (rig_after, o) = after
+        .objects()
+        .find(|(_, o)| o.name == "Rig")
+        .expect("the rig");
     let (_, arm) = after.armature_of(rig_after).expect("still an armature");
     assert_eq!(arm.bones, a.bones);
     assert_eq!(o.pose.active.as_deref(), Some("Lower"));
@@ -1100,6 +1179,13 @@ fn a_bound_mesh_still_follows_its_armature_after_a_save() {
     let (rig_after, _) = after.objects().find(|(_, o)| o.name == "Rig").unwrap();
     let (body_after, body) = after.objects().find(|(_, o)| o.name == "Body").unwrap();
     assert_eq!(body.skin, after.object_uid(rig_after));
-    assert!(after.mesh(body.mesh().unwrap()).unwrap().attributes().contains("weight:Bone"), "the weights did not survive");
+    assert!(
+        after
+            .mesh(body.mesh().unwrap())
+            .unwrap()
+            .attributes()
+            .contains("weight:Bone"),
+        "the weights did not survive"
+    );
     assert!(after.skin_matrices(body_after).is_some());
 }

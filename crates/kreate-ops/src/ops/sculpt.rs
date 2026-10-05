@@ -33,7 +33,14 @@ pub struct StrokeParams {
 
 impl Default for StrokeParams {
     fn default() -> Self {
-        Self { brush: 0, dabs: Vec::new(), strength: 0.5, invert: false, grab: [0.0; 3], mirror_x: false }
+        Self {
+            brush: 0,
+            dabs: Vec::new(),
+            strength: 0.5,
+            invert: false,
+            grab: [0.0; 3],
+            mirror_x: false,
+        }
     }
 }
 
@@ -49,11 +56,24 @@ impl Operator for SculptStroke {
         "Sculpt"
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
-        doc.selection.active.and_then(|a| doc.object(a)).and_then(|o| o.mesh()).is_some()
+        doc.selection
+            .active
+            .and_then(|a| doc.object(a))
+            .and_then(|o| o.mesh())
+            .is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let Some(mesh) = d.selection.active.and_then(|a| d.object(a)).and_then(|o| o.mesh()) else {
+        let Some(mesh) = d
+            .selection
+            .active
+            .and_then(|a| d.object(a))
+            .and_then(|o| o.mesh())
+        else {
             return Ok(OpResult::Cancelled);
         };
         let dabs: Vec<Dab> = params
@@ -61,7 +81,10 @@ impl Operator for SculptStroke {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|c| Dab { centre: Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32), radius: c[3] as f32 })
+            .map(|c| Dab {
+                centre: Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32),
+                radius: c[3] as f32,
+            })
             .filter(|d| d.centre.is_finite() && d.radius.is_finite() && d.radius > 0.0)
             .collect();
         if dabs.is_empty() {
@@ -79,7 +102,13 @@ impl Operator for SculptStroke {
             grab: kreate_math::DVec3::from_array(params.grab).as_vec3(),
             mirror_x: params.mirror_x,
         };
-        let Some(m) = doc.document_mut().mesh_mut(mesh) else { return Ok(OpResult::Cancelled) };
-        Ok(if sculpt::apply(m, &dabs, &stroke) { OpResult::Finished } else { OpResult::Cancelled })
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        Ok(if sculpt::apply(m, &dabs, &stroke) {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }

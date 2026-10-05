@@ -87,8 +87,7 @@ pub fn element_button(ui: &mut Ui, element: Element, selected: bool) -> Response
     // The square the three share. Inset by half a line width so the stroke
     // lands inside the rectangle rather than straddling its edge, which at
     // this size is the difference between crisp and smudged.
-    let square = egui::Rect::from_center_size(rect.center(), Vec2::splat(GLYPH))
-        .shrink(1.0);
+    let square = egui::Rect::from_center_size(rect.center(), Vec2::splat(GLYPH)).shrink(1.0);
     // A strong/weak pair from one base, rather than two theme colours. The
     // first attempt used `text_dim` against `text_faint` for the unselected
     // state, and at thirteen points those two are the same grey: the edge icon

@@ -148,7 +148,12 @@ fn look_along(forward: glam::Vec3) -> glam::Mat4 {
 /// and nothing to catch, and a pass that ran anyway would render a map nothing
 /// samples.
 pub fn sun_view(direction: glam::Vec3, bounds: Aabb) -> Option<ShadowView> {
-    sun_view_of(direction, &bounds.corners(), bounds, SourceSize::Angular(0.0))
+    sun_view_of(
+        direction,
+        &bounds.corners(),
+        bounds,
+        SourceSize::Angular(0.0),
+    )
 }
 
 /// The same, fitted across `wanted` rather than across the whole scene.
@@ -777,8 +782,7 @@ impl ShadowMaps {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: crate::gpu::DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let layers = (0..MAX_SHADOWS)
@@ -825,41 +829,43 @@ impl ShadowMaps {
             bind_group_layouts: &[Some(&globals_layout), Some(&object_layout)],
             immediate_size: 0,
         });
-        let pipeline_of = |label: &str, fragment: Option<&str>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 12,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
+        let pipeline_of = |label: &str, fragment: Option<&str>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 12,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
                     }],
-                }],
-            },
-            // None for a solid: a shadow map is a depth buffer. See the
-            // shader's header. A see-through object's texels drop out.
-            fragment: fragment.map(|entry| wgpu::FragmentState {
-                module: &module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                targets: &[],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(crate::gpu::depth_write_state()),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                },
+                // None for a solid: a shadow map is a depth buffer. See the
+                // shader's header. A see-through object's texels drop out.
+                fragment: fragment.map(|entry| wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(crate::gpu::depth_write_state()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let pipeline = pipeline_of("shadow", None);
         let hashed = pipeline_of("shadow see-through", Some("fs_hashed"));
 
@@ -965,12 +971,23 @@ impl ShadowMaps {
 
     /// Writes one draw's model matrix, how much light passes through it, and
     /// the frame's seed for the texels that drop out.
-    pub fn set_object(&self, queue: &wgpu::Queue, index: u32, model: &glam::Mat4, see_through: f32, seed: u32) {
+    pub fn set_object(
+        &self,
+        queue: &wgpu::Queue,
+        index: u32,
+        model: &glam::Mat4,
+        see_through: f32,
+        seed: u32,
+    ) {
         let mut data = [0.0f32; 20];
         data[..16].copy_from_slice(&model.to_cols_array());
         data[16] = see_through.clamp(0.0, 1.0);
         data[17] = (seed % 4096) as f32;
-        queue.write_buffer(&self.objects, (self.object_stride * index) as u64, bytemuck::cast_slice(&data));
+        queue.write_buffer(
+            &self.objects,
+            (self.object_stride * index) as u64,
+            bytemuck::cast_slice(&data),
+        );
     }
 
     /// Writes the light's view-projection for one layer.
@@ -1026,7 +1043,11 @@ impl ShadowMaps {
                 continue;
             }
             if see_through != hashing {
-                pass.set_pipeline(if see_through { &self.hashed } else { &self.pipeline });
+                pass.set_pipeline(if see_through {
+                    &self.hashed
+                } else {
+                    &self.pipeline
+                });
                 hashing = see_through;
             }
             pass.set_bind_group(1, &self.object_bind, &[self.object_stride * index]);
@@ -1160,7 +1181,10 @@ mod tests {
             frames.len()
         );
         // And the one looking down is among them, or it shadows nothing at all.
-        assert!(frames.iter().any(|(face, _)| *face == 5), "no downward face");
+        assert!(
+            frames.iter().any(|(face, _)| *face == 5),
+            "no downward face"
+        );
     }
 
     #[test]
@@ -1203,19 +1227,23 @@ mod tests {
         // A bulb twice as wide is twice the penumbra; a near plane twice as
         // far is half of it.
         assert!(
-            (penumbra_scale(SourceSize::Radius(1.0), 0.1, 40.0, texel) / perspective - 2.0)
-                .abs()
+            (penumbra_scale(SourceSize::Radius(1.0), 0.1, 40.0, texel) / perspective - 2.0).abs()
                 < 1e-4
         );
         assert!(
-            (penumbra_scale(SourceSize::Radius(0.5), 0.2, 40.0, texel) / perspective - 0.5)
-                .abs()
+            (penumbra_scale(SourceSize::Radius(0.5), 0.2, 40.0, texel) / perspective - 0.5).abs()
                 < 1e-4
         );
 
         // And no size is a hard shadow, whichever unit the nothing is in.
-        assert_eq!(penumbra_scale(SourceSize::Angular(0.0), 1.0, 51.0, texel), 0.0);
-        assert_eq!(penumbra_scale(SourceSize::Radius(0.0), 0.1, 40.0, texel), 0.0);
+        assert_eq!(
+            penumbra_scale(SourceSize::Angular(0.0), 1.0, 51.0, texel),
+            0.0
+        );
+        assert_eq!(
+            penumbra_scale(SourceSize::Radius(0.0), 0.1, 40.0, texel),
+            0.0
+        );
     }
 
     #[test]
@@ -1400,8 +1428,7 @@ mod tests {
             direction: glam::Vec3::new(0.3, 0.4, -0.87).normalize(),
             ..PlacedLight::default()
         });
-        let one = sun_view(glam::Vec3::new(0.3, 0.4, -0.87).normalize(), big)
-            .expect("one frustum");
+        let one = sun_view(glam::Vec3::new(0.3, 0.4, -0.87).normalize(), big).expect("one frustum");
         let cascades = shadow_views(&sun, big, Some(a_camera(0.1)));
         let near = cascades.first().expect("a near cascade").1;
 
@@ -1486,9 +1513,7 @@ mod tests {
         let frames = shadow_views(&sun, far_away, Some(a_camera(0.1)));
         assert!(!frames.is_empty(), "a distant scene got no cascade at all");
         for corner in far_away.corners() {
-            let covered = frames
-                .iter()
-                .any(|(_, v)| inside(project(v, corner)));
+            let covered = frames.iter().any(|(_, v)| inside(project(v, corner)));
             assert!(covered, "no cascade covers {corner}");
         }
     }
@@ -1596,9 +1621,12 @@ mod tests {
         //
         // Measured by how far the scene actually spreads across the map. A
         // snug fit touches both edges.
-        let view = sun_view(glam::Vec3::new(0.3, -0.5, -0.81).normalize(), scene())
-            .expect("a scene");
-        let (mut lo, mut hi) = (glam::Vec2::splat(f32::INFINITY), glam::Vec2::splat(f32::NEG_INFINITY));
+        let view =
+            sun_view(glam::Vec3::new(0.3, -0.5, -0.81).normalize(), scene()).expect("a scene");
+        let (mut lo, mut hi) = (
+            glam::Vec2::splat(f32::INFINITY),
+            glam::Vec2::splat(f32::NEG_INFINITY),
+        );
         for corner in scene().corners() {
             let p = project(&view, corner);
             lo = lo.min(p.truncate());
@@ -1652,7 +1680,14 @@ mod tests {
         // Nothing to cast and nothing to catch. A pass that ran anyway would
         // render a map nothing samples, every frame.
         assert!(sun_view(glam::Vec3::NEG_Z, Aabb::EMPTY).is_none());
-        assert!(spot_view(glam::Vec3::ZERO, glam::Vec3::NEG_Z, 1.0, Aabb::EMPTY, SourceSize::Radius(0.0)).is_none());
+        assert!(spot_view(
+            glam::Vec3::ZERO,
+            glam::Vec3::NEG_Z,
+            1.0,
+            Aabb::EMPTY,
+            SourceSize::Radius(0.0)
+        )
+        .is_none());
         assert!(point_view(glam::Vec3::ZERO, 0, Aabb::EMPTY, SourceSize::Radius(0.0)).is_none());
     }
 
@@ -1660,8 +1695,14 @@ mod tests {
     fn a_spot_frames_what_is_in_front_of_it() {
         // On the axis at any distance the scene reaches, and not behind.
         let position = glam::Vec3::new(0.0, 0.0, 8.0);
-        let view = spot_view(position, glam::Vec3::NEG_Z, 60f32.to_radians(), scene(), SourceSize::Radius(0.0))
-            .expect("a scene");
+        let view = spot_view(
+            position,
+            glam::Vec3::NEG_Z,
+            60f32.to_radians(),
+            scene(),
+            SourceSize::Radius(0.0),
+        )
+        .expect("a scene");
         for z in [6.0f32, 4.0, 1.0] {
             let p = project(&view, glam::Vec3::new(0.0, 0.0, z));
             assert!(inside(p), "a point on the axis at {z} landed at {p}");
@@ -1669,7 +1710,11 @@ mod tests {
         // Behind the light is outside, and the divide does not make it look
         // inside — which is what a missing `w` check does.
         let behind = view.view_proj * glam::Vec3::new(0.0, 0.0, 10.0).extend(1.0);
-        assert!(behind.w <= 0.0, "a point behind the light had w {}", behind.w);
+        assert!(
+            behind.w <= 0.0,
+            "a point behind the light had w {}",
+            behind.w
+        );
     }
 
     #[test]
@@ -1693,10 +1738,22 @@ mod tests {
         // the resolution being wasted where it is most visible.
         let position = glam::Vec3::new(0.0, 0.0, 8.0);
         let off_axis = glam::Vec3::new(2.0, 0.0, 4.0);
-        let narrow = spot_view(position, glam::Vec3::NEG_Z, 20f32.to_radians(), scene(), SourceSize::Radius(0.0))
-            .expect("a scene");
-        let wide = spot_view(position, glam::Vec3::NEG_Z, 100f32.to_radians(), scene(), SourceSize::Radius(0.0))
-            .expect("a scene");
+        let narrow = spot_view(
+            position,
+            glam::Vec3::NEG_Z,
+            20f32.to_radians(),
+            scene(),
+            SourceSize::Radius(0.0),
+        )
+        .expect("a scene");
+        let wide = spot_view(
+            position,
+            glam::Vec3::NEG_Z,
+            100f32.to_radians(),
+            scene(),
+            SourceSize::Radius(0.0),
+        )
+        .expect("a scene");
         let n = project(&narrow, off_axis).x.abs();
         let w = project(&wide, off_axis).x.abs();
         assert!(w < n, "the wider cone did not frame more: {w} against {n}");
@@ -1775,11 +1832,15 @@ mod tests {
         // Straight down and out along +X at 45°: the edge of -Z and +X.
         let point = light + glam::Vec3::new(1.0, 0.0, -1.0);
         for face in [0, 5] {
-            let view = point_view(light, face, scene, SourceSize::Radius(0.1)).expect("the face sees the scene");
+            let view = point_view(light, face, scene, SourceSize::Radius(0.1))
+                .expect("the face sees the scene");
             let clip = view.view_proj * point.extend(1.0);
             let ndc = clip.truncate() / clip.w;
             let texels_in = (1.0 - ndc.x.abs().max(ndc.y.abs())) * 0.5 * SHADOW_RESOLUTION as f32;
-            assert!(texels_in >= 16.0, "face {face}: only {texels_in} texels inside the map");
+            assert!(
+                texels_in >= 16.0,
+                "face {face}: only {texels_in} texels inside the map"
+            );
         }
     }
 }

@@ -130,7 +130,10 @@ fn a_meshs_slots_come_back_pointing_at_the_same_materials() {
         .objects()
         .find(|(_, o)| o.name == "Cube")
         .expect("the cube");
-    assert_eq!(back.material_at(id, 0).map(|m| m.name.as_str()), Some("Red"));
+    assert_eq!(
+        back.material_at(id, 0).map(|m| m.name.as_str()),
+        Some("Red")
+    );
     // A hole in the slot list is a slot nothing is assigned to, and it has to
     // stay a hole rather than closing up — the indices after it are face data.
     assert!(back.material_at(id, 1).is_none());
@@ -193,10 +196,7 @@ fn two_linked_copies_still_share_one_mesh_and_one_slot_list() {
     doc.add_object(Object::new("Right", ObjectData::Mesh(mesh)));
 
     let back = round_trip(&doc);
-    let meshes: Vec<MeshId> = back
-        .objects()
-        .filter_map(|(_, o)| o.mesh())
-        .collect();
+    let meshes: Vec<MeshId> = back.objects().filter_map(|(_, o)| o.mesh()).collect();
     assert_eq!(meshes.len(), 2);
     assert_eq!(meshes[0], meshes[1], "the mesh was saved twice");
     assert_eq!(back.material_count(), 1);
@@ -221,7 +221,10 @@ fn an_objects_override_survives_and_a_hole_in_it_stays_a_hole() {
         match object.name.as_str() {
             "Plain" => {
                 assert!(object.material_overrides.is_empty());
-                assert_eq!(back.material_at(id, 1).map(|m| m.name.as_str()), Some("Red"));
+                assert_eq!(
+                    back.material_at(id, 1).map(|m| m.name.as_str()),
+                    Some("Red")
+                );
             }
             "Odd" => {
                 assert_eq!(object.material_overrides.len(), 2);
@@ -286,8 +289,7 @@ fn scene_text(archive: &[u8]) -> String {
 }
 
 fn retarget_first_slot(archive: &[u8], to: u64) -> Vec<u8> {
-    let mut scene: serde_json::Value =
-        serde_json::from_str(&scene_text(archive)).expect("json");
+    let mut scene: serde_json::Value = serde_json::from_str(&scene_text(archive)).expect("json");
     let slots = scene["mesh_slots"]
         .as_object_mut()
         .expect("mesh_slots")

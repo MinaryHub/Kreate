@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -35,19 +37,35 @@ fn no_code_outside_the_mode_module_branches_on_a_mode_variant() {
     for top in ["apps", "crates"] {
         sources(&root.join(top), &mut files);
     }
-    assert!(files.len() > 50, "the gate found only {} files; it is looking in the wrong place", files.len());
+    assert!(
+        files.len() > 50,
+        "the gate found only {} files; it is looking in the wrong place",
+        files.len()
+    );
 
     let mut offences = Vec::new();
     for file in &files {
-        let shown = file.strip_prefix(&root).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        let shown = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
         if shown.ends_with("kreate-ops/src/mode.rs") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
         let live = text.split("#[cfg(test)]").next().unwrap_or("");
         for (number, line) in live.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
-            for variant in ["Mode::EditMesh", "Mode::Object", "Mode::Pose", "Mode::EditArmature", "Mode::WeightPaint"] {
+            for variant in [
+                "Mode::EditMesh",
+                "Mode::Object",
+                "Mode::Pose",
+                "Mode::EditArmature",
+                "Mode::WeightPaint",
+            ] {
                 let mut at = 0;
                 while let Some(found) = code[at..].find(variant) {
                     let end = at + found + variant.len();

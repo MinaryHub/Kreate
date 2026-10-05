@@ -428,7 +428,10 @@ mod tests {
         let mut v = 1e-7f32;
         while v < 1e5 {
             let out = DisplayTransform::DEFAULT.apply(grey(v)).r;
-            assert!(out >= previous - 1e-7, "{v} dropped to {out} from {previous}");
+            assert!(
+                out >= previous - 1e-7,
+                "{v} dropped to {out} from {previous}"
+            );
             previous = out;
             v *= 1.02;
         }
@@ -525,7 +528,10 @@ mod tests {
         }
         .apply(hot);
         assert_eq!(clipped.r, 1.0);
-        assert!(clipped.g < 0.6, "clipping did something clever: {clipped:?}");
+        assert!(
+            clipped.g < 0.6,
+            "clipping did something clever: {clipped:?}"
+        );
     }
 
     #[test]

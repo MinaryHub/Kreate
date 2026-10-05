@@ -110,7 +110,9 @@ fn face(gpu: &Gpu, environment: &Environment, level: u32, layer: u32) -> Vec<[f3
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = slice.get_mapped_range();
     let mut out = Vec::with_capacity((size * size) as usize);
     for row in 0..size {
@@ -299,7 +301,9 @@ fn an_environment_with_no_pixels_is_black_rather_than_whatever_was_there() {
     for layer in 0..6 {
         let texels = face(&gpu, &env, 0, layer);
         assert!(
-            texels.iter().all(|t| t[0] == 0.0 && t[1] == 0.0 && t[2] == 0.0),
+            texels
+                .iter()
+                .all(|t| t[0] == 0.0 && t[1] == 0.0 && t[2] == 0.0),
             "face {layer} of an empty environment is not black"
         );
     }

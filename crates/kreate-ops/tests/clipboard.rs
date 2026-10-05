@@ -14,7 +14,12 @@ use kreate_scene::Document;
 fn wired() -> (OperatorRegistry, History, Document, Context) {
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    (registry, History::new(), Document::new(), Context::default())
+    (
+        registry,
+        History::new(),
+        Document::new(),
+        Context::default(),
+    )
 }
 
 fn cube(doc: &mut Document, name: &str) -> kreate_scene::ObjectId {
@@ -59,7 +64,11 @@ fn a_pasted_object_is_a_new_object_and_becomes_the_selection() {
     assert_ne!(pasted, a);
     assert_eq!(doc.selection.active, Some(pasted));
     assert_eq!(doc.object(pasted).unwrap().name, "A.001");
-    assert_eq!(doc.object(a).unwrap().name, "A", "the original is untouched");
+    assert_eq!(
+        doc.object(a).unwrap().name,
+        "A",
+        "the original is untouched"
+    );
 }
 
 #[test]
@@ -87,7 +96,13 @@ fn a_paste_survives_the_originals_being_deleted() {
     doc.selection.add(a);
     let text = copy(&doc);
     history
-        .dispatch(&registry, &mut doc, &ctx, "object.delete", &PropertyMap::new())
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "object.delete",
+            &PropertyMap::new(),
+        )
         .expect("delete");
     assert_eq!(doc.object_count(), 0);
 
@@ -117,10 +132,20 @@ fn text_that_is_not_a_fragment_is_declined_without_a_history_step() {
     let (registry, mut history, mut doc, ctx) = wired();
     cube(&mut doc, "A");
     let depth = history.entries().len();
-    assert!(paste(&registry, &mut history, &mut doc, &ctx, "not a fragment"));
+    assert!(paste(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "not a fragment"
+    ));
     assert!(paste(&registry, &mut history, &mut doc, &ctx, ""));
     assert_eq!(doc.object_count(), 1);
-    assert_eq!(history.entries().len(), depth, "a declined paste left a step to undo");
+    assert_eq!(
+        history.entries().len(),
+        depth,
+        "a declined paste left a step to undo"
+    );
 }
 
 #[test]
@@ -145,9 +170,14 @@ fn a_material_and_its_texture_come_along() {
 
     assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
     let pasted = doc.selection.active.expect("the paste is active");
-    let pasted_material = doc.material_at(pasted, 0).expect("the paste has a material");
+    let pasted_material = doc
+        .material_at(pasted, 0)
+        .expect("the paste has a material");
     assert_eq!(pasted_material.name, "Brick");
-    assert!(pasted_material.base_color_image.is_some(), "the texture did not come along");
+    assert!(
+        pasted_material.base_color_image.is_some(),
+        "the texture did not come along"
+    );
     assert_ne!(
         doc.material_id_at(pasted, 0),
         Some(material),
@@ -175,8 +205,18 @@ fn every_map_comes_along_and_a_shared_image_stays_shared() {
     // to do with a grey mask. It is one image in the paste too, as it was here.
     let (registry, mut history, mut doc, ctx) = wired();
     let a = cube(&mut doc, "A");
-    let mask = doc.add_image(kreate_scene::Image::new("Mask", 4, 4, kreate_scene::PixelFormat::Rgba8));
-    let normal = doc.add_image(kreate_scene::Image::new("N", 4, 4, kreate_scene::PixelFormat::Rgba8));
+    let mask = doc.add_image(kreate_scene::Image::new(
+        "Mask",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
+    let normal = doc.add_image(kreate_scene::Image::new(
+        "N",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
     let material = doc.add_material(kreate_scene::Material {
         base_color_image: Some(mask),
         metallic_roughness_image: Some(mask),
@@ -192,9 +232,19 @@ fn every_map_comes_along_and_a_shared_image_stays_shared() {
     assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
     let pasted = doc.selection.active.expect("the paste is active");
     let m = doc.material_at(pasted, 0).expect("a material");
-    assert!(m.normal_image.is_some(), "the normal map did not come along");
-    assert_eq!(m.base_color_image, m.metallic_roughness_image, "a shared image was split");
-    assert_eq!(doc.images().count(), images_before + 2, "two images, not three");
+    assert!(
+        m.normal_image.is_some(),
+        "the normal map did not come along"
+    );
+    assert_eq!(
+        m.base_color_image, m.metallic_roughness_image,
+        "a shared image was split"
+    );
+    assert_eq!(
+        doc.images().count(),
+        images_before + 2,
+        "two images, not three"
+    );
 }
 
 #[test]
@@ -202,15 +252,23 @@ fn an_animated_object_pastes_with_its_animation_and_shares_it_with_nothing() {
     let (registry, mut history, mut doc, ctx) = wired();
     let a = cube(&mut doc, "A");
     let mut action = kreate_scene::animation::Action::new("Spin");
-    action.curve_mut("location", 0).insert(1.0, 0.0, Default::default());
-    action.curve_mut("location", 0).insert(9.0, 4.0, Default::default());
+    action
+        .curve_mut("location", 0)
+        .insert(1.0, 0.0, Default::default());
+    action
+        .curve_mut("location", 0)
+        .insert(9.0, 4.0, Default::default());
     let action = doc.add_action(action);
     doc.object_mut(a).unwrap().action = Some(action);
     doc.selection.add(a);
     let text = copy(&doc);
     assert!(paste(&registry, &mut history, &mut doc, &ctx, &text));
     let pasted = doc.selection.active.expect("the paste is active");
-    let its = doc.object(pasted).unwrap().action.expect("the animation did not come along");
+    let its = doc
+        .object(pasted)
+        .unwrap()
+        .action
+        .expect("the animation did not come along");
     assert_ne!(its, action, "the paste plays the original's action");
     assert_eq!(doc.action(its).unwrap().key_frames(), vec![1.0, 9.0]);
 }
