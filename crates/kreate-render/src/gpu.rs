@@ -390,7 +390,10 @@ pub fn create_depth_texture(device: &Device, width: u32, height: u32) -> wgpu::T
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // Copyable: a render reads the depth out as its Z pass.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())

@@ -28,6 +28,8 @@ pub enum Icon {
     World,
     /// A wrench.
     Modifiers,
+    /// A camera's body and lens: how the picture is made.
+    Render,
 }
 
 /// Paints `icon` into `rect` in `ink`.
@@ -48,6 +50,21 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, ink: Color32) {
         Icon::Object => {
             let r = Rect::from_center_size(c, Vec2::splat(s * 1.5));
             p.rect_filled(r, 1.5, ink);
+        }
+        Icon::Render => {
+            let body = Rect::from_center_size(c + Vec2::new(-s * 0.25, 0.0), Vec2::new(s * 1.3, s * 1.0));
+            p.rect_stroke(body, 1.5, line, egui::StrokeKind::Middle);
+            let x = body.max.x;
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(x, c.y - s * 0.15),
+                    Pos2::new(x + s * 0.6, c.y - s * 0.45),
+                    Pos2::new(x + s * 0.6, c.y + s * 0.45),
+                    Pos2::new(x, c.y + s * 0.15),
+                ],
+                ink,
+                Stroke::NONE,
+            ));
         }
         Icon::Data(kind) => crate::outliner::object_icon(ui, kind, rect, true),
         Icon::Bone => {

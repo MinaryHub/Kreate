@@ -9,6 +9,56 @@ use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetRenderSettings>();
+    registry.register::<SetFrameRange>();
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetFrameRangeParams {
+    /// The first frame played and rendered.
+    pub start: i64,
+    /// The last frame played and rendered.
+    pub end: i64,
+    /// Frames a second.
+    #[param(min = 1.0, max = 1000.0)]
+    pub fps: f64,
+}
+
+impl Default for SetFrameRangeParams {
+    fn default() -> Self {
+        let p = kreate_scene::animation::Playback::default();
+        Self { start: p.start as i64, end: p.end as i64, fps: p.fps }
+    }
+}
+
+/// Sets the scene's frame range and rate: what plays, and what an animation
+/// render writes.
+pub struct SetFrameRange;
+
+impl Operator for SetFrameRange {
+    type Params = SetFrameRangeParams;
+
+    fn id() -> &'static str {
+        "scene.set_frame_range"
+    }
+    fn label() -> &'static str {
+        "Frame Range"
+    }
+
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let start = params.start.clamp(i32::MIN as i64 / 2, i32::MAX as i64 / 2) as i32;
+        let end = (params.end.clamp(i32::MIN as i64 / 2, i32::MAX as i64 / 2) as i32).max(start);
+        let fps = if params.fps.is_finite() { params.fps.clamp(1.0, 1000.0) } else { 24.0 };
+        let p = doc.document().playback;
+        if (p.start, p.end, p.fps) == (start, end, fps) {
+            return Ok(OpResult::Cancelled);
+        }
+        let playback = &mut doc.document_mut().playback;
+        playback.start = start;
+        playback.end = end;
+        playback.fps = fps;
+        playback.frame = playback.frame.clamp(start as f64, end as f64);
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -86,6 +136,31 @@ impl Operator for SetRenderSettings {
         }
         doc.document_mut().render = next;
         Ok(OpResult::Finished)
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    use crate::operator::OperatorRegistry;
+    use kreate_reflect::{PropertyMap, PropertyValue};
+
+    #[test]
+    fn a_range_ends_no_earlier_than_it_starts_and_keeps_the_frame_inside() {
+        let mut registry = OperatorRegistry::new();
+        register(&mut registry);
+        let mut history = crate::history::History::new();
+        let mut doc = Document::new();
+        doc.playback.frame = 100.0;
+        let mut params = PropertyMap::new();
+        params.set("start", PropertyValue::Int(10));
+        params.set("end", PropertyValue::Int(5));
+        params.set("fps", PropertyValue::Float(30.0));
+        history
+            .dispatch(&registry, &mut doc, &Context::default(), "scene.set_frame_range", &params)
+            .expect("runs");
+        assert_eq!((doc.playback.start, doc.playback.end, doc.playback.fps), (10, 10, 30.0));
+        assert_eq!(doc.playback.frame, 10.0);
     }
 }
 

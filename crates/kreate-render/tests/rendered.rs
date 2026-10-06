@@ -2736,3 +2736,41 @@ fn a_material_change_on_a_settled_view_is_drawn() {
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     assert!(viewport.accumulating(), "the new colour was not drawn");
 }
+
+/// A render's passes, read back: the picture where the cube is, its normal
+/// facing the camera, and its distance along the view — and nothing in the
+/// empty corner.
+#[test]
+fn a_renders_passes_read_back_with_depth_and_normals() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    // Smaller than the allocation, as a window almost always is: a depth
+    // texture can only be copied whole, and a region-sized copy of it was
+    // refused — a crash the first time an EXR was rendered for real.
+    let (rw, rh) = (SIZE - 14, SIZE - 22);
+    viewport.set_render_size(rw, rh);
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
+    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    one_material(&gpu, &mut viewport, grey());
+    let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
+    let camera = Camera { distance: 6.0, ..Camera::default() };
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    let _ = read_frame(&gpu, &mut viewport, &draws);
+    let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
+    let passes = viewport
+        .read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward)
+        .expect("passes read back");
+    assert_eq!((passes.width, passes.height), (rw, rh));
+    let centre = (rh / 2 * rw + rw / 2) as usize;
+    let d = passes.depth[centre];
+    assert!(d > 3.5 && d < 5.5, "the cube's front is {d} m away along the view");
+    assert_eq!(passes.depth[0], 1e10, "the empty corner has no depth");
+    let n = glam::Vec3::from(passes.normal[centre]);
+    assert!(n.length() > 0.9 && n.dot(-forward) > 0.3, "the normal {n} does not face the camera");
+    assert!(passes.combined[centre][0] > 0.01, "the picture is black where the lit cube is");
+}

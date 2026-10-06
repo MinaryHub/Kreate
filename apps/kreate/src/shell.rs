@@ -112,6 +112,8 @@ pub struct ShellState {
     /// survives, and whether Help ▸ About is showing.
     pub contact: kreate_ui::contact::ContactForm,
     pub about_open: bool,
+    /// The last render, shown in its own window until closed.
+    pub render_result: Option<RenderResultView>,
     /// Which material slot the Material tab is editing.
     ///
     /// **Interface state, not document state.** Blender keeps this on the
@@ -561,6 +563,7 @@ impl Default for ShellState {
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
             about_open: false,
+            render_result: None,
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -1027,6 +1030,8 @@ pub enum PropertiesTab {
     World,
     /// The modifier stack.
     Modifiers,
+    /// How the scene renders: size, samples, where the file goes.
+    Render,
 }
 
 impl PropertiesTab {
@@ -1043,6 +1048,7 @@ impl PropertiesTab {
             Self::Material => Icon::Material,
             Self::World => Icon::World,
             Self::Modifiers => Icon::Modifiers,
+            Self::Render => Icon::Render,
         }
     }
 
@@ -1055,6 +1061,7 @@ impl PropertiesTab {
             Self::Material => "tab-material",
             Self::World => "tab-world",
             Self::Modifiers => "tab-modifiers",
+            Self::Render => "tab-render",
         }
     }
 }
@@ -1370,6 +1377,13 @@ struct Labels {
     tab_data_light: String,
     tab_data_camera: String,
     tab_world: String,
+    tab_render: String,
+    menu_render: String,
+    render_image: String,
+    render_animation: String,
+    render_view: String,
+    render_result_title: String,
+    render_hint: String,
     world_image: String,
     duplicate: String,
     object_copy: String,
@@ -1666,6 +1680,13 @@ impl Labels {
             tab_data_light: t("tab-data-light"),
             tab_data_camera: t("tab-data-camera"),
             tab_world: t("tab-world"),
+            tab_render: t("tab-render"),
+            menu_render: t("menu-render"),
+            render_image: t("render-image"),
+            render_animation: t("render-animation"),
+            render_view: t("render-view"),
+            render_result_title: t("render-result-title"),
+            render_hint: t("render-hint"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
             object_copy: t("object-copy"),
@@ -3115,6 +3136,19 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
             ],
         },
         TopMenu {
+            label: l.menu_render.clone(),
+            nodes: vec![
+                entry("render.image", &l.render_image, dispatch("render.image")),
+                entry(
+                    "render.animation",
+                    &l.render_animation,
+                    dispatch("render.animation"),
+                ),
+                Separator,
+                entry("render.view", &l.render_view, dispatch("render.view")),
+            ],
+        },
+        TopMenu {
             label: l.menu_help.clone(),
             nodes: vec![
                 entry(
@@ -4515,6 +4549,63 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         &crate::version::describe(),
         &crate::version::platform(),
     );
+    draw_render_result(ctx, state, l);
+}
+
+/// A finished render, shown as Blender's Render window shows it: the
+/// picture, and where it was written.
+pub struct RenderResultView {
+    pub texture: egui::TextureHandle,
+    pub size: (u32, u32),
+    /// What happened: where the file went, or why it did not.
+    pub message: String,
+}
+
+fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
+    let Some(result) = &state.render_result else { return };
+    let mut open = true;
+    let screen = ctx.content_rect();
+    // As big as fits in most of the window, never bigger than the picture.
+    let fit = ((screen.width() * 0.8) / result.size.0 as f32)
+        .min((screen.height() * 0.75) / result.size.1 as f32)
+        .min(1.0);
+    let shown = egui::vec2(result.size.0 as f32 * fit, result.size.1 as f32 * fit);
+    egui::Window::new(&l.render_result_title)
+        .id(egui::Id::new("render-result"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(screen.center())
+        .show(ctx, |ui| {
+            ui.add(egui::Image::new(&result.texture).fit_to_exact_size(shown));
+            // i18n-exempt: composed by the application from translated parts and a path
+            ui.label(&result.message);
+        });
+    if !open {
+        state.render_result = None;
+    }
+}
+
+/// The Render tab: the scene's render settings, and the buttons that use them.
+fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry, l: &Labels) {
+    ui.heading(&l.tab_render);
+    ui.horizontal(|ui| {
+        if ui.button(&l.render_image).clicked() {
+            state.queue.dispatch("render.image", PropertyMap::new());
+        }
+        if ui.button(&l.render_animation).clicked() {
+            state.queue.dispatch("render.animation", PropertyMap::new());
+        }
+    });
+    ui.weak(&l.render_hint);
+    ui.separator();
+    let Some(info) = registry.get("render.set_settings") else { return };
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::render::render_params(doc));
+    if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "render.set_settings", params, dragging);
+    }
 }
 
 /// The Claude panel: the conversation, and a box to say the next thing.
@@ -6682,6 +6773,7 @@ fn draw_properties(
                         ui.heading(&l.modifiers);
                         draw_modifier_stack(ui, state, modifier_rows);
                     }
+                    PropertiesTab::Render => draw_render_tab(ui, state, doc, registry, l),
                 });
         });
     });
@@ -6716,6 +6808,7 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         PropertiesTab::Material,
         PropertiesTab::World,
         PropertiesTab::Modifiers,
+        PropertiesTab::Render,
     ]
     .into_iter()
     .filter(|tab| match tab {
@@ -6741,6 +6834,8 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         // where a modifier gets added from.
         PropertiesTab::Modifiers => active.is_some(),
         PropertiesTab::Tool => true,
+        // The scene's, whatever is selected.
+        PropertiesTab::Render => true,
     })
     .collect()
 }
@@ -8346,6 +8441,12 @@ op-view-toggle-reflections-desc = In the rendered view, shiny surfaces reflect w
 op-view-toggle-contact-shadows = Contact Shadows
 op-view-toggle-contact-shadows-desc = In the rendered view, darkens the last centimetres where things touch, finer than the shadow maps can.
 op-view-toggle-bloom = Bloom
+op-render-image = Render Image
+op-render-image-desc = Renders the picture through the scene camera with the path tracer, at the Render tab's size and samples, and saves it. Esc stops it.
+op-render-animation = Render Animation
+op-render-animation-desc = Renders every frame of the frame range through the scene camera and saves each one, numbered. Esc stops it.
+op-render-view = View Render
+op-render-view-desc = Shows the last rendered picture again.
 op-view-toggle-bloom-desc = In the rendered view, light brighter than white glows into its surroundings.
 op-view-toggle-outline = Outline Selected
 op-view-toggle-outline-desc = Draws an orange line around the selected objects, lighter around the active one.
@@ -8404,6 +8505,15 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+tab-render = Render
+menu-render = Render
+render-image = Render Image
+render-animation = Render Animation
+render-view = View Render
+render-result-title = Render Result
+render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
+render-saved = Saved { $path }
+render-failed = Not saved: { $why }
 sidebar-tool = Tool
 sidebar-view = View
 sidebar-dimensions = Dimensions
@@ -9155,6 +9265,12 @@ op-view-toggle-reflections-desc = 렌더 보기에서 매끈한 면이 화면에
 op-view-toggle-contact-shadows = 접촉 그림자
 op-view-toggle-contact-shadows-desc = 렌더 보기에서 물체가 닿는 곳의 마지막 몇 센티미터를 그림자 맵보다 촘촘하게 어둡게 합니다.
 op-view-toggle-bloom = 블룸
+op-render-image = 이미지 렌더
+op-render-image-desc = 씬 카메라로 렌더 탭의 크기와 샘플 수만큼 패스 트레이싱해 저장합니다. Esc로 멈춥니다.
+op-render-animation = 애니메이션 렌더
+op-render-animation-desc = 프레임 범위의 모든 프레임을 씬 카메라로 렌더해 번호를 붙여 저장합니다. Esc로 멈춥니다.
+op-render-view = 렌더 결과 보기
+op-render-view-desc = 마지막 렌더 결과를 다시 보여 줍니다.
 op-view-toggle-bloom-desc = 렌더 보기에서 흰색보다 밝은 빛이 주변으로 번집니다.
 op-view-toggle-outline = 선택 외곽선
 op-view-toggle-outline-desc = 선택한 오브젝트 둘레에 주황 선을 그립니다. 활성 오브젝트는 더 밝게.
@@ -9229,6 +9345,15 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 영역
 sidebar-item = 항목
+tab-render = 렌더
+menu-render = 렌더
+render-image = 이미지 렌더
+render-animation = 애니메이션 렌더
+render-view = 렌더 결과 보기
+render-result-title = 렌더 결과
+render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
+render-saved = 저장됨: { $path }
+render-failed = 저장 안 됨: { $why }
 sidebar-tool = 도구
 sidebar-view = 보기
 sidebar-dimensions = 치수
@@ -10183,12 +10308,12 @@ mod tests {
     }
 
     #[test]
-    fn with_nothing_active_only_the_tool_tab_remains() {
+    fn with_nothing_active_only_the_document_wide_tabs_remain() {
         // An empty document still has a properties editor, and it still has to
-        // show something. The last operation is the one thing that does not
-        // need a selection.
+        // show something: the last operation, and the render settings, which
+        // are the scene's and need no selection.
         let doc = Document::new();
-        assert_eq!(available_tabs(&doc), vec![PropertiesTab::Tool]);
+        assert_eq!(available_tabs(&doc), vec![PropertiesTab::Tool, PropertiesTab::Render]);
     }
 
     #[test]

@@ -5272,3 +5272,124 @@ fn behind_texture(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
+
+/// A finished render's passes, read back from the viewport: what an EXR
+/// carries beside the picture. Rows from the top, `width * height` each.
+pub struct RenderPasses {
+    pub width: u32,
+    pub height: u32,
+    /// The picture, scene-linear, before the view transform — times the
+    /// exposure, so mid grey is near 0.18 as on screen.
+    pub combined: Vec<[f32; 4]>,
+    /// The surface's normal in the world, zero where nothing was drawn.
+    pub normal: Vec<[f32; 3]>,
+    /// Distance from the camera along its view axis, in metres; 1e10 where
+    /// nothing was drawn, as Blender writes it.
+    pub depth: Vec<f32>,
+}
+
+/// Reads `region` of one texture, `bytes` per pixel, rows from the top.
+///
+/// The whole texture is copied and the region cut out here: a depth texture
+/// may only be copied whole, and the allocation is rounded up past the
+/// region — which a region-sized copy of depth refuses.
+fn read_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    aspect: wgpu::TextureAspect,
+    bytes: u32,
+    (w, h): (u32, u32),
+) -> Result<Vec<u8>, String> {
+    let (full_w, full_h) = (texture.width(), texture.height());
+    let (w, h) = (w.min(full_w), h.min(full_h));
+    let row = (full_w * bytes).div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pass readback"),
+        size: (row * full_h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pass readback") });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(full_h) },
+        },
+        wgpu::Extent3d { width: full_w, height: full_h, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("the GPU did not finish: {e:?}"))?;
+    let mut out = Vec::with_capacity((w * h * bytes) as usize);
+    {
+        let data = buffer.slice(..).get_mapped_range();
+        for y in 0..h as usize {
+            let start = y * row as usize;
+            out.extend_from_slice(&data[start..start + (w * bytes) as usize]);
+        }
+    }
+    buffer.unmap();
+    Ok(out)
+}
+
+impl Viewport {
+    /// The last drawn frame's passes, for a render's EXR. `exposure` is the
+    /// display's, in stops; `forward` the camera's view direction.
+    pub fn read_passes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        exposure: f32,
+        forward: glam::Vec3,
+    ) -> Result<RenderPasses, String> {
+        let size = self.render_size;
+        let n = (size.0 * size.1) as usize;
+        let halves = |bytes: &[u8]| -> Vec<f32> {
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| half::f16::from_le_bytes(*c).to_f32())
+                .collect()
+        };
+        let scale = exposure.exp2();
+        let hdr = halves(&read_texture(device, queue, self.hdr.texture(), wgpu::TextureAspect::All, 8, size)?);
+        let combined = (0..n)
+            .map(|i| [hdr[i * 4] * scale, hdr[i * 4 + 1] * scale, hdr[i * 4 + 2] * scale, 1.0])
+            .collect();
+        let g = halves(&read_texture(
+            device,
+            queue,
+            self.ssr.gbuffer()[0].texture(),
+            wgpu::TextureAspect::All,
+            8,
+            size,
+        )?);
+        let normal = (0..n).map(|i| [g[i * 4], g[i * 4 + 1], g[i * 4 + 2]]).collect();
+        let d = read_texture(device, queue, self.depth.texture(), wgpu::TextureAspect::DepthOnly, 4, size)?;
+        let unproject = self.depth_view_proj.unwrap_or(glam::Mat4::IDENTITY).inverse();
+        let forward = forward.normalize_or_zero();
+        let depth = (0..n)
+            .map(|i| {
+                let z = f32::from_le_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]]);
+                // Reversed-Z clears to zero: nothing was drawn here.
+                if z <= 0.0 {
+                    return 1e10;
+                }
+                let (x, y) = ((i as u32 % size.0) as f32, (i as u32 / size.0) as f32);
+                let ndc = glam::Vec2::new(
+                    (x + 0.5) / size.0 as f32 * 2.0 - 1.0,
+                    1.0 - (y + 0.5) / size.1 as f32 * 2.0,
+                );
+                let p = unproject * glam::Vec4::new(ndc.x, ndc.y, z, 1.0);
+                // Eye-relative, so the eye is the origin.
+                (p.truncate() / p.w).dot(forward)
+            })
+            .collect();
+        Ok(RenderPasses { width: size.0, height: size.1, combined, normal, depth })
+    }
+}

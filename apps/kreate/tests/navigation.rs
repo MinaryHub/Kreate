@@ -296,6 +296,10 @@ const APP_ACTIONS: &[&str] = &[
     "view.selection_to_cursor",
     // Shift+A and Ctrl+A: a named menu under the pointer.
     "app.menu",
+    // F12 and Ctrl+F12: a render, which the application runs frame by frame.
+    "render.image",
+    "render.animation",
+    "render.view",
     // C: the selection brush, which is the application's until a stroke ends.
     "view.circle_select",
     // The sculpt brush is the application's setting, not the document's.

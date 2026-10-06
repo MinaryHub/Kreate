@@ -171,6 +171,15 @@ fn common() -> Vec<Binding> {
         // notices immediately.
         key("file.new", "N", Context::Global, Action::new("file.new"))
             .with_modifiers(Modifiers::ctrl()),
+        // Blender's render keys: the still, and the frames.
+        key("render.image", "F12", Context::Global, Action::new("render.image")),
+        key(
+            "render.animation",
+            "F12",
+            Context::Global,
+            Action::new("render.animation"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         key("file.open", "O", Context::Global, Action::new("file.open"))
             .with_modifiers(Modifiers::ctrl()),
         key("file.save", "S", Context::Global, Action::new("file.save"))

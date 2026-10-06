@@ -689,6 +689,10 @@ struct App {
     /// A still is being rendered: the viewport draws the picture alone, with
     /// no lamps' or cameras' glyphs and no element overlays.
     rendering_still: bool,
+    /// The render under way, F12's or Ctrl+F12's. See `RenderJob`.
+    render_job: Option<RenderJob>,
+    /// The last render's picture, for View Render.
+    last_render: Option<(u32, u32, Vec<u8>, String)>,
     /// A capture or a render is waiting on the viewport: draw it even when
     /// the window is hidden and there is no frame to show it in.
     capturing: bool,
@@ -860,6 +864,8 @@ impl App {
             ui: ShellState::with_catalog(shell::load_catalog(locale)),
             wanted_viewport: (0, 0),
             rendering_still: false,
+            render_job: None,
+            last_render: None,
             capturing: false,
             next_shape: 1,
             snap: kreate::modal::Snap::default(),
@@ -3719,6 +3725,29 @@ impl App {
                     .map(|o| o.name.clone());
                 Ok(json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active }))
             }
+            // An application action by its keymap id — `render.image`,
+            // `render.animation`, `view.frame_all` — as if its key were pressed.
+            // For what has no operator: a render runs frame by frame, so this
+            // starts it and `render_status` follows it.
+            "action" => {
+                let id = text("id").ok_or("`id` is required")?;
+                self.dispatch(&Action { op_id: id, params: PropertyMap::new() });
+                Ok(json!({ "message": self.ui.status.clone().unwrap_or_default() }))
+            }
+            "render_status" => Ok(match &self.render_job {
+                Some(job) => json!({
+                    "rendering": true,
+                    "frame": job.frames.map(|(f, _)| f),
+                    "last_frame": job.frames.map(|(_, e)| e),
+                    "samples": self.gfx.as_ref().map(|g| g.viewport.path_trace_samples()).unwrap_or(0),
+                    "of": job.settings.samples,
+                    "written": job.written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                }),
+                None => json!({
+                    "rendering": false,
+                    "last": self.last_render.as_ref().map(|(_, _, _, m)| m.clone()),
+                }),
+            }),
             "undo" | "redo" => {
                 let steps = params
                     .get("steps")
@@ -3897,6 +3926,263 @@ impl App {
             out["faces"] = json!(list);
         }
         Ok(out)
+    }
+
+    // --- rendering ---------------------------------------------------------
+
+    /// F12 and Ctrl+F12: a render through the scene camera, at the scene's
+    /// render settings, run a frame at a time by the frame loop.
+    fn start_render_job(&mut self, animation: bool) {
+        if self.render_job.is_some() || self.rendering_still || self.gfx.is_none() {
+            return;
+        }
+        let Some(camera) = self.scene_camera(None) else {
+            self.status("there is no camera to render through: add one with Add > Camera");
+            return;
+        };
+        let settings = self.doc.render.clone();
+        let folder = self.render_folder();
+        let gfx = self.gfx.as_mut().expect("checked");
+        let v = &gfx.viewport;
+        let saved = SavedView {
+            camera: self.camera,
+            motion: self.motion,
+            camera_view: self.camera_view,
+            camera_view_object: self.camera_view_object,
+            wanted_viewport: self.wanted_viewport,
+            look: (
+                v.shading,
+                v.path_trace,
+                v.show_grid,
+                v.show_wireframe,
+                v.show_outline,
+                v.xray,
+                v.face_orientation,
+                v.sample_cap,
+                v.path_trace_denoise,
+            ),
+            frame: self.doc.playback.frame,
+        };
+        {
+            let v = &mut gfx.viewport;
+            v.shading = kreate_render::ShadingMode::Rendered;
+            v.path_trace = true;
+            v.show_grid = false;
+            v.show_wireframe = false;
+            v.show_outline = false;
+            v.xray = false;
+            v.face_orientation = false;
+            v.sample_cap = Some(settings.samples);
+            v.path_trace_denoise = settings.denoise;
+        }
+        self.rendering_still = true;
+        self.capturing = true;
+        self.ui.render_result = None;
+        let frames = animation.then_some((self.doc.playback.start, self.doc.playback.end));
+        if let Some((first, _)) = frames {
+            self.set_frame(first as f64);
+        }
+        self.wanted_viewport = (settings.width, settings.height);
+        self.render_job = Some(RenderJob {
+            camera,
+            settings,
+            frames,
+            folder,
+            saved,
+            started: Instant::now(),
+            drawn: 0,
+            written: Vec::new(),
+        });
+        self.aim_render_camera();
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Looks through the render's camera, at the shot's aspect.
+    fn aim_render_camera(&mut self) {
+        let Some(job) = &self.render_job else { return };
+        let (object, before) = (job.camera, job.saved.camera);
+        self.motion.interrupt(&self.camera);
+        self.camera = self.view_through(object);
+        self.motion.target = self.camera;
+        if self.camera_view.is_none() {
+            self.camera_view = Some(before);
+        }
+        self.camera_view_object = Some(object);
+    }
+
+    /// Where renders go when the settings name no place: beside the
+    /// document, or in the pictures folder.
+    fn render_folder(&self) -> std::path::PathBuf {
+        if let Some(dir) = self.file.path().and_then(|p| p.parent()) {
+            return dir.to_path_buf();
+        }
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        home.join("Pictures").join("Kreate")
+    }
+
+    /// One step of the render under way, after each drawn frame: counts the
+    /// samples, and when the picture is done writes it and moves on.
+    fn advance_render_job(&mut self) {
+        let Some(job) = self.render_job.as_mut() else { return };
+        job.drawn += 1;
+        let (drawn, size, started) = (job.drawn, (job.settings.width, job.settings.height), job.started);
+        let frames = job.frames;
+        let total = job.settings.samples;
+        // The first frames of a picture still carry the last one's state —
+        // the old size, the old frame — so they are drawn and not judged.
+        if drawn <= 3 {
+            self.wanted_viewport = size;
+            self.aim_render_camera();
+        }
+        self.redraw.set(RedrawReason::ACCUMULATE);
+        let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else { return };
+        let samples = v.path_trace_samples();
+        let traced = v.path_tracing();
+        let settled = drawn > 3
+            && !v.accumulating()
+            && ((traced && samples > 0) || (!traced && started.elapsed().as_secs() >= 5));
+        if !settled {
+            let progress = match frames {
+                Some((f, end)) => format!("rendering frame {f} of {end}: {samples}/{total} samples"),
+                None => format!("rendering: {samples}/{total} samples"),
+            };
+            self.status(&format!("{progress}, {:.0} s (Esc stops)", started.elapsed().as_secs_f32()));
+            return;
+        }
+        let job = self.render_job.as_ref().expect("checked");
+        let path = match frames {
+            Some((f, _)) => job.settings.frame_path(&job.folder, f),
+            None => job.settings.still_path(&job.folder),
+        };
+        let format = job.settings.format;
+        match self.write_render(&path, format) {
+            Ok(()) => {
+                if let Some(job) = self.render_job.as_mut() {
+                    job.written.push(path.clone());
+                }
+            }
+            Err(e) => {
+                let message = self.ui.catalog.format(
+                    "render-failed",
+                    kreate_i18n::TextKind::Ui,
+                    &[("why", &e)],
+                );
+                self.finish_render_job(&message);
+                return;
+            }
+        }
+        if let Some((f, end)) = frames {
+            if f < end {
+                self.set_frame((f + 1) as f64);
+                if let Some(job) = self.render_job.as_mut() {
+                    job.frames = Some((f + 1, end));
+                    job.drawn = 0;
+                }
+                return;
+            }
+        }
+        let shown = match frames {
+            Some(_) => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            None => path.display().to_string(),
+        };
+        let message = self
+            .ui
+            .catalog
+            .format("render-saved", kreate_i18n::TextKind::Ui, &[("path", &shown)]);
+        self.finish_render_job(&message);
+    }
+
+    /// Writes the picture on screen to `path`: the display's PNG, or an EXR
+    /// of the scene-linear picture with its depth and normal passes.
+    fn write_render(&mut self, path: &std::path::Path, format: kreate_scene::render::OutputFormat) -> Result<(), String> {
+        let (w, h, png) = self.read_target_png()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let bytes = match format {
+            kreate_scene::render::OutputFormat::Png => png.clone(),
+            kreate_scene::render::OutputFormat::Exr => {
+                let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
+                let forward = (self.camera.pivot - self.camera.eye()).normalize_or_zero().as_vec3();
+                let gfx = self.gfx.as_ref().ok_or("the window closed")?;
+                let passes = gfx
+                    .viewport
+                    .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
+                exr_of(&passes)
+            }
+        };
+        std::fs::write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let rgba = image::load_from_memory(&png)
+            .map_err(|e| e.to_string())?
+            .to_rgba8()
+            .into_raw();
+        self.last_render = Some((w, h, rgba, path.display().to_string()));
+        Ok(())
+    }
+
+    /// Ends the render, done or stopped: the view goes back as it was and the
+    /// last picture is shown.
+    fn finish_render_job(&mut self, message: &str) {
+        let Some(job) = self.render_job.take() else { return };
+        let saved = job.saved;
+        self.rendering_still = false;
+        self.capturing = false;
+        if let Some(gfx) = self.gfx.as_mut() {
+            let v = &mut gfx.viewport;
+            (
+                v.shading,
+                v.path_trace,
+                v.show_grid,
+                v.show_wireframe,
+                v.show_outline,
+                v.xray,
+                v.face_orientation,
+                v.sample_cap,
+                v.path_trace_denoise,
+            ) = saved.look;
+        }
+        self.camera = saved.camera;
+        self.motion = saved.motion;
+        self.camera_view = saved.camera_view;
+        self.camera_view_object = saved.camera_view_object;
+        self.wanted_viewport = saved.wanted_viewport;
+        if job.frames.is_some() {
+            self.set_frame(saved.frame);
+        }
+        if let Some((_, _, _, path)) = &mut self.last_render {
+            if !job.written.is_empty() {
+                *path = message.to_string();
+            }
+        }
+        self.show_last_render();
+        if job.written.is_empty() {
+            if let Some(view) = &mut self.ui.render_result {
+                view.message = message.to_string();
+            }
+        }
+        self.status(message);
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+    }
+
+    /// View Render: the last render's picture, in its window.
+    fn show_last_render(&mut self) {
+        let Some((w, h, rgba, message)) = &self.last_render else {
+            self.status("nothing has been rendered yet: Render > Render Image (F12)");
+            return;
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+        let texture = self
+            .egui_ctx
+            .load_texture("render-result", image, egui::TextureOptions::LINEAR);
+        self.ui.render_result = Some(kreate::shell::RenderResultView {
+            texture,
+            size: (*w, *h),
+            message: message.clone(),
+        });
+        self.redraw.set(RedrawReason::UI);
     }
 
     /// Renders the scene through a camera at a size of its own: the rendered
@@ -7135,7 +7421,9 @@ impl App {
             (viewport_rect.width().max(0.0) * pixels_per_point) as u32,
             (viewport_rect.height().max(0.0) * pixels_per_point) as u32,
         );
-        if wanted != self.wanted_viewport && wanted.0 > 0 && wanted.1 > 0 {
+        // Not while a render runs: the picture is the render's size, not the
+        // panel's, and following the panel restarted its samples every frame.
+        if self.render_job.is_none() && wanted != self.wanted_viewport && wanted.0 > 0 && wanted.1 > 0 {
             self.wanted_viewport = wanted;
             self.redraw.set(RedrawReason::RESIZE);
         }
@@ -7971,6 +8259,11 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        // A render takes Escape first: it is the one way out of a long one.
+        if code == KeyCode::Escape && self.render_job.is_some() {
+            self.finish_render_job("render stopped");
+            return;
+        }
         // The modal stack, first. §2.1 puts it at the top of the pipeline and
         // this is why: while a transform runs, `X` means "constrain to X" and
         // `Escape` means "cancel the transform" — not "delete" and not "quit".
@@ -8378,6 +8671,9 @@ impl App {
             "file.run_script" => self.run_script_file(),
             "view.frame_all" => self.frame_all(),
             "view.toggle_edit_mode" => self.toggle_edit_mode(),
+            "render.image" => self.start_render_job(false),
+            "render.animation" => self.start_render_job(true),
+            "render.view" => self.show_last_render(),
             // The sidebar's View tab: the viewport's focal length, in mm.
             "view.set_lens" => {
                 if let Some(PropertyValue::Float(mm)) = action.params.get("lens") {
@@ -9089,6 +9385,7 @@ impl ApplicationHandler for App {
                 if self.redraw.any() {
                     self.restart_mean_if_changed();
                     self.render();
+                    self.advance_render_job();
                     self.redraw.clear();
                     if self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating()) {
                         self.redraw.set(RedrawReason::ACCUMULATE);
@@ -9124,6 +9421,70 @@ impl ApplicationHandler for App {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
+}
+
+/// A render's EXR: the picture as R, G, B and A, its depth as Z and its
+/// normals as N.X, N.Y and N.Z — the names compositors look for first.
+fn exr_of(p: &kreate_render::viewport::RenderPasses) -> Vec<u8> {
+    use kreate_io::exr::Channel;
+    let pick = |f: &dyn Fn(usize) -> f32| -> Vec<f32> { (0..p.combined.len()).map(f).collect() };
+    let r = pick(&|i| p.combined[i][0]);
+    let g = pick(&|i| p.combined[i][1]);
+    let b = pick(&|i| p.combined[i][2]);
+    let a = pick(&|i| p.combined[i][3]);
+    let nx = pick(&|i| p.normal[i][0]);
+    let ny = pick(&|i| p.normal[i][1]);
+    let nz = pick(&|i| p.normal[i][2]);
+    fn channel<'a>(name: &'a str, values: &'a [f32], full_float: bool) -> Channel<'a> {
+        Channel { name, values, full_float }
+    }
+    kreate_io::exr::write(
+        p.width,
+        p.height,
+        &[
+            channel("R", &r, false),
+            channel("G", &g, false),
+            channel("B", &b, false),
+            channel("A", &a, false),
+            // Full floats: a depth in halves loses centimetres at a few metres.
+            channel("Z", &p.depth, true),
+            channel("N.X", &nx, false),
+            channel("N.Y", &ny, false),
+            channel("N.Z", &nz, false),
+        ],
+        &[],
+    )
+}
+
+/// A render under way: F12's still, or Ctrl+F12's frames.
+///
+/// Run a frame at a time by the ordinary frame loop rather than in a loop of
+/// its own, so the window stays alive: the picture refines in the viewport,
+/// the status line counts the samples, and Escape stops it.
+struct RenderJob {
+    camera: kreate_scene::document::ObjectId,
+    settings: kreate_scene::render::RenderSettings,
+    /// The frame being rendered and the last one, for an animation.
+    frames: Option<(i32, i32)>,
+    /// Where files go when the settings name no place.
+    folder: std::path::PathBuf,
+    saved: SavedView,
+    started: Instant,
+    /// Frames drawn since this picture started: its first frames still show
+    /// the last one's samples.
+    drawn: u32,
+    written: Vec<std::path::PathBuf>,
+}
+
+/// The view a render borrows, to give back.
+struct SavedView {
+    camera: kreate_render::Camera,
+    motion: kreate_render::CameraMotion,
+    camera_view: Option<kreate_render::Camera>,
+    camera_view_object: Option<kreate_scene::document::ObjectId>,
+    wanted_viewport: (u32, u32),
+    look: (kreate_render::ShadingMode, bool, bool, bool, bool, bool, bool, Option<u32>, bool),
+    frame: f64,
 }
 
 /// The loading screen: the logo, the name, what is being done and the version,

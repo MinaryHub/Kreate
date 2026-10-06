@@ -182,8 +182,10 @@ impl Ssr {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: FORMAT,
+                    // Copyable: a render reads the normals out as a pass.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
