@@ -757,3 +757,61 @@ fn shift_i_puts_ik_on_the_active_bone_toward_the_other_selected_one() {
     assert!(doc.rename_bone(arm, "Goal", "Hand_IK"));
     assert_eq!(doc.object(rig).unwrap().pose.ik[0].target, "Hand_IK");
 }
+
+#[test]
+fn a_bone_constraint_is_added_set_and_removed_by_operators() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+    use kreate_scene::armature::{Armature, Bone, ConstraintKind};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut doc = kreate_scene::Document::new();
+    let mut a = Armature::new("Arm");
+    a.bones[0].name = "Head".into();
+    a.add_bone(Bone {
+        name: "Goal".into(),
+        head: kreate_math::DVec3::new(2.0, 0.0, 0.0),
+        tail: kreate_math::DVec3::new(2.0, 0.0, 1.0),
+        ..Default::default()
+    });
+    let arm = doc.add_armature(a);
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
+    doc.selection.add(rig);
+    {
+        let pose = &mut doc.object_mut(rig).unwrap().pose;
+        pose.entry("Goal").selected = true;
+        pose.entry("Head").selected = true;
+        pose.active = Some("Head".into());
+    }
+    let mut history = History::new();
+    let ctx = kreate_ops::operator::Context::default();
+    // Damped Track, at the other selected bone.
+    let mut p = PropertyMap::new();
+    p.set("kind", PropertyValue::Int(3));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "pose.constraint_add", &p)
+        .unwrap();
+    let c = doc.object(rig).unwrap().pose.constraints.clone();
+    assert_eq!(c.len(), 1);
+    assert_eq!((c[0].bone.as_str(), c[0].target.as_str()), ("Head", "Goal"));
+    assert_eq!(c[0].kind, ConstraintKind::DampedTrack);
+    // The head bone now points along +X, at the goal.
+    let along = doc.posed_bones(rig)[0].matrix3.mul_vec3(kreate_math::DVec3::Y);
+    assert!(along.normalize().dot(kreate_math::DVec3::X) > 0.999, "{along:?}");
+    // Halfway, through the operator the Bone tab sends.
+    let mut set = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::constraint_params(0, &c[0]));
+    set.set("influence", PropertyValue::Float(0.5));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "pose.constraint_set", &set)
+        .unwrap();
+    assert_eq!(doc.object(rig).unwrap().pose.constraints[0].influence, 0.5);
+    // Undone, then removed.
+    history.undo(&mut doc);
+    assert_eq!(doc.object(rig).unwrap().pose.constraints[0].influence, 1.0);
+    let mut p = PropertyMap::new();
+    p.set("index", PropertyValue::Int(0));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "pose.constraint_remove", &p)
+        .unwrap();
+    assert!(doc.object(rig).unwrap().pose.constraints.is_empty());
+}

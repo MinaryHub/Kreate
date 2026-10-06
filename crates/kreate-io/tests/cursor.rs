@@ -161,3 +161,37 @@ fn shape_keys_are_saved_with_their_offsets() {
         .attributes()
         .contains("shape:Tall"));
 }
+
+#[test]
+fn bone_constraints_are_saved_with_the_pose() {
+    use kreate_scene::armature::{Armature, BoneConstraint, ConstraintKind};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let arm = doc.add_armature(Armature::new("Arm"));
+    let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(arm)));
+    // Nothing at its default, so a field read back from the wrong place
+    // cannot pass by landing on its fallback.
+    let constraints = vec![
+        BoneConstraint {
+            bone: "Bone".into(),
+            kind: ConstraintKind::DampedTrack,
+            target: "Goal".into(),
+            influence: 0.35,
+            enabled: false,
+        },
+        BoneConstraint {
+            bone: "Hand".into(),
+            kind: ConstraintKind::LimitRotation {
+                min: DVec3::new(-0.5, -0.25, -0.125),
+                max: DVec3::new(0.75, 0.375, 1.5),
+            },
+            target: String::new(),
+            influence: 0.8,
+            enabled: true,
+        },
+    ];
+    doc.object_mut(rig).unwrap().pose.constraints = constraints.clone();
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();
+    assert_eq!(o.pose.constraints, constraints);
+}

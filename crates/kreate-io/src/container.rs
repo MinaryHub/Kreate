@@ -194,6 +194,9 @@ pub struct ObjectRecord {
     /// IK constraints on the pose's bones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ik: Vec<IkRecord>,
+    /// Bone constraints, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<ConstraintRecord>,
     /// The active bone, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_bone: Option<String>,
@@ -512,6 +515,29 @@ pub struct IkRecord {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pole: String,
+}
+
+/// One bone constraint: its kind by name, so a reader that does not know a
+/// kind can drop it rather than read it as another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstraintRecord {
+    pub bone: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    #[serde(default = "full_influence")]
+    pub influence: f64,
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+    /// A limit's range, radians.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<[f64; 3]>,
+}
+
+fn full_influence() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1531,6 +1557,29 @@ pub fn write(
                 armature,
                 pose,
                 active_bone: object.pose.active.clone(),
+                constraints: object
+                    .pose
+                    .constraints
+                    .iter()
+                    .map(|c| {
+                        let (min, max) = match &c.kind {
+                            kreate_scene::armature::ConstraintKind::LimitRotation { min, max } => {
+                                (Some(min.to_array()), Some(max.to_array()))
+                            }
+                            _ => (None, None),
+                        };
+                        ConstraintRecord {
+                            bone: c.bone.clone(),
+                            kind: kreate_scene::armature::ConstraintKind::NAMES[c.kind.index() as usize]
+                                .to_string(),
+                            target: c.target.clone(),
+                            influence: c.influence,
+                            enabled: c.enabled,
+                            min,
+                            max,
+                        }
+                    })
+                    .collect(),
                 ik: object
                     .pose
                     .ik
@@ -2012,6 +2061,30 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.selectable = record.selectable;
         object.action = record.action.and_then(|i| action_ids.get(i).copied());
         object.pose = kreate_scene::armature::Pose {
+            constraints: record
+                .constraints
+                .iter()
+                .filter_map(|r| {
+                    use kreate_scene::armature::ConstraintKind;
+                    let index = ConstraintKind::NAMES.iter().position(|n| *n == r.kind)?;
+                    let mut kind = ConstraintKind::from_index(index as u32)?;
+                    if let ConstraintKind::LimitRotation { min, max } = &mut kind {
+                        if let Some(m) = r.min {
+                            *min = glam::DVec3::from_array(m);
+                        }
+                        if let Some(m) = r.max {
+                            *max = glam::DVec3::from_array(m);
+                        }
+                    }
+                    Some(kreate_scene::armature::BoneConstraint {
+                        bone: r.bone.clone(),
+                        kind,
+                        target: r.target.clone(),
+                        influence: r.influence,
+                        enabled: r.enabled,
+                    })
+                })
+                .collect(),
             ik: record
                 .ik
                 .iter()

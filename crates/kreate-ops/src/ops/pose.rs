@@ -28,6 +28,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddIk>();
     registry.register::<SetIk>();
     registry.register::<RemoveIk>();
+    registry.register::<AddConstraint>();
+    registry.register::<SetConstraint>();
+    registry.register::<RemoveConstraint>();
     registry.register::<AddArmature>();
     registry.register::<SelectPick>();
     registry.register::<SelectAll>();
@@ -736,6 +739,203 @@ impl Operator for RemoveIk {
         } else {
             OpResult::Cancelled
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ConstraintParams {
+    /// Which of the pose's constraints, for setting and removing; ignored when
+    /// adding.
+    #[param(hidden, min = 0, max = 4096, unit = "count")]
+    pub index: u32,
+    /// The bone it is on; empty for the active bone. Adding only.
+    pub bone: String,
+    #[param(variants("copy_location", "copy_rotation", "copy_scale", "damped_track", "limit_rotation"))]
+    pub kind: u32,
+    /// The bone it reads; empty when adding takes the other selected bone.
+    pub target: String,
+    #[param(min = 0.0, max = 1.0)]
+    pub influence: f64,
+    pub enabled: bool,
+    /// A limit's lowest XYZ angles, in degrees.
+    pub min: [f64; 3],
+    /// A limit's highest XYZ angles, in degrees.
+    pub max: [f64; 3],
+}
+
+impl Default for ConstraintParams {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            bone: String::new(),
+            kind: 0,
+            target: String::new(),
+            influence: 1.0,
+            enabled: true,
+            min: [-180.0; 3],
+            max: [180.0; 3],
+        }
+    }
+}
+
+impl ConstraintParams {
+    /// The constraint these describe, on `bone`.
+    fn constraint(&self, bone: String) -> Option<armature::BoneConstraint> {
+        let mut kind = armature::ConstraintKind::from_index(self.kind)?;
+        if let armature::ConstraintKind::LimitRotation { min, max } = &mut kind {
+            *min = DVec3::from_array(self.min.map(f64::to_radians));
+            *max = DVec3::from_array(self.max.map(f64::to_radians));
+        }
+        Some(armature::BoneConstraint {
+            bone,
+            kind,
+            target: self.target.clone(),
+            influence: self.influence.clamp(0.0, 1.0),
+            enabled: self.enabled,
+        })
+    }
+}
+
+/// What the Bone tab shows for one constraint, as the operator's parameters.
+pub fn constraint_params(index: usize, c: &armature::BoneConstraint) -> ConstraintParams {
+    let (min, max) = match &c.kind {
+        armature::ConstraintKind::LimitRotation { min, max } => (
+            min.to_array().map(f64::to_degrees),
+            max.to_array().map(f64::to_degrees),
+        ),
+        _ => ([-180.0; 3], [180.0; 3]),
+    };
+    ConstraintParams {
+        index: index as u32,
+        bone: c.bone.clone(),
+        kind: c.kind.index(),
+        target: c.target.clone(),
+        influence: c.influence,
+        enabled: c.enabled,
+        min,
+        max,
+    }
+}
+
+/// A bone constraint on the active bone: Copy Location, Copy Rotation, Copy
+/// Scale, Damped Track or Limit Rotation. Blender's Shift+Ctrl+C. The target
+/// is the other selected bone when none is named.
+pub struct AddConstraint;
+
+impl Operator for AddConstraint {
+    type Params = ConstraintParams;
+    fn id() -> &'static str {
+        "pose.constraint_add"
+    }
+    fn label() -> &'static str {
+        "Add Bone Constraint"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document();
+        let Some(bone) = bone_or_active(d, object, &params.bone) else {
+            return Err(OpError::Failed("no active bone to constrain".into()));
+        };
+        let mut params = params.clone();
+        if params.target.is_empty() {
+            let (_, armature) = d.armature_of(object).expect("posed");
+            let pose = &d.object(object).expect("posed").pose;
+            params.target = armature
+                .bones
+                .iter()
+                .map(|b| b.name.clone())
+                .find(|n| *n != bone && pose.is_selected(n))
+                .unwrap_or_default();
+        }
+        let Some(constraint) = params.constraint(bone) else {
+            return Err(OpError::Failed("no such constraint".into()));
+        };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
+        o.pose.constraints.push(constraint);
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Changes one of the pose's constraints, by its place in the stack.
+pub struct SetConstraint;
+
+impl Operator for SetConstraint {
+    type Params = ConstraintParams;
+    fn id() -> &'static str {
+        "pose.constraint_set"
+    }
+    fn label() -> &'static str {
+        "Set Bone Constraint"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(c) = o.pose.constraints.get_mut(params.index as usize) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(wanted) = params.constraint(c.bone.clone()) else {
+            return Err(OpError::Failed("no such constraint".into()));
+        };
+        if *c == wanted {
+            return Ok(OpResult::Cancelled);
+        }
+        *c = wanted;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Takes one constraint off the pose, by its place in the stack.
+pub struct RemoveConstraint;
+
+impl Operator for RemoveConstraint {
+    type Params = ConstraintParams;
+    fn id() -> &'static str {
+        "pose.constraint_remove"
+    }
+    fn label() -> &'static str {
+        "Remove Bone Constraint"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        posed_object(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(object) = posed_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(o) = doc.document_mut().object_mut(object) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if (params.index as usize) >= o.pose.constraints.len() {
+            return Ok(OpResult::Cancelled);
+        }
+        o.pose.constraints.remove(params.index as usize);
+        Ok(OpResult::Finished)
     }
 }
 

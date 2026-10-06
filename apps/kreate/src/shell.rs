@@ -7731,6 +7731,103 @@ fn draw_bone_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: 
     kreate_ui::panel::section(ui, &title, true, |ui| {
         draw_ik_fields(ui, state, doc, object, &name);
     });
+    let title = state.catalog.get("panel-bone-constraints");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        draw_constraint_fields(ui, state, doc, registry, object, &name);
+    });
+}
+
+/// The bone's constraints, each drawn from the set operator's schema, and a
+/// menu to add one.
+fn draw_constraint_fields(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    object: ObjectId,
+    bone: &str,
+) {
+    use kreate_reflect::PropertyValue as V;
+    let Some(o) = doc.object(object) else { return };
+    let Some((_, armature)) = doc.armature_of(object) else {
+        return;
+    };
+    let kinds = [
+        "constraint-copy-location",
+        "constraint-copy-rotation",
+        "constraint-copy-scale",
+        "constraint-damped-track",
+        "constraint-limit-rotation",
+    ];
+    ui.menu_button(state.catalog.get("op-pose-constraint-add"), |ui| {
+        for (i, key) in kinds.iter().enumerate() {
+            if ui.button(state.catalog.get(key)).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("kind", V::Int(i as i64));
+                p.set("bone", V::Text(bone.to_string()));
+                state.queue.run("pose.constraint_add", p);
+                ui.close();
+            }
+        }
+    });
+    let Some(info) = registry.get("pose.constraint_set") else {
+        return;
+    };
+    for (index, c) in o.pose.constraints.iter().enumerate() {
+        if c.bone != bone {
+            continue;
+        }
+        ui.separator();
+        let params = kreate_ops::ops::pose::constraint_params(index, c);
+        let mut enabled = c.enabled;
+        let mut target = c.target.clone();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut enabled, "");
+            ui.strong(state.catalog.get(kinds[c.kind.index() as usize]));
+            if ui
+                .small_button("\u{2715}")
+                .on_hover_text(state.catalog.get("op-pose-constraint-remove"))
+                .clicked()
+            {
+                let mut p = PropertyMap::new();
+                p.set("index", V::Int(index as i64));
+                state.queue.run("pose.constraint_remove", p);
+            }
+        });
+        if c.kind.has_target() {
+            ui.horizontal(|ui| {
+                ui.label(state.catalog.get("ik-target"));
+                egui::ComboBox::from_id_salt(("constraint-target", index))
+                    .selected_text(if target.is_empty() {
+                        "\u{2014}".to_string()
+                    } else {
+                        target.clone()
+                    })
+                    .show_ui(ui, |ui| {
+                        for b in armature.bones.iter().filter(|b| b.name != bone) {
+                            ui.selectable_value(&mut target, b.name.clone(), b.name.as_str());
+                        }
+                    });
+            });
+        }
+        let mut map = kreate_reflect::OpParams::to_map(&params);
+        let shown = |field: &str| {
+            matches!(field, "influence") || (!c.kind.has_target() && matches!(field, "min" | "max"))
+        };
+        let changed = kreate_ui::property_editor::property_editor_where(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut map,
+            shown,
+        );
+        if changed || enabled != c.enabled || target != c.target {
+            map.set("enabled", V::Bool(enabled));
+            map.set("target", V::Text(target));
+            state.queue.run("pose.constraint_set", map);
+        }
+    }
 }
 
 /// The bone's IK constraint: which bone it reaches for, how many bones turn,
@@ -8407,6 +8504,18 @@ op-pose-ik-set-desc = Changes a bone's IK target, chain or whether it is on.
 op-pose-ik-remove = Remove IK
 op-pose-ik-remove-desc = Takes a bone's IK off.
 ik-enabled = On
+panel-bone-constraints = Bone Constraints
+op-pose-constraint-add = Add Bone Constraint
+op-pose-constraint-add-desc = Adds a constraint to the active bone: copy another bone's location, rotation or scale, point at it, or limit the bone's rotation.
+op-pose-constraint-set = Set Bone Constraint
+op-pose-constraint-set-desc = Changes one of the pose's bone constraints.
+op-pose-constraint-remove = Remove Bone Constraint
+op-pose-constraint-remove-desc = Takes a bone constraint off.
+constraint-copy-location = Copy Location
+constraint-copy-rotation = Copy Rotation
+constraint-copy-scale = Copy Scale
+constraint-damped-track = Damped Track
+constraint-limit-rotation = Limit Rotation
 ik-target = Target
 ik-chain = Chain
 ik-pole = Pole
@@ -9231,6 +9340,18 @@ op-pose-ik-set-desc = 뼈의 IK 목표·체인·켜짐을 바꿉니다.
 op-pose-ik-remove = IK 제거
 op-pose-ik-remove-desc = 뼈의 IK를 없앱니다.
 ik-enabled = 켜짐
+panel-bone-constraints = 뼈 컨스트레인트
+op-pose-constraint-add = 뼈 컨스트레인트 추가
+op-pose-constraint-add-desc = 활성 뼈에 컨스트레인트를 답니다: 다른 뼈의 위치·회전·크기 따라하기, 그 뼈를 향하기, 회전 제한.
+op-pose-constraint-set = 뼈 컨스트레인트 설정
+op-pose-constraint-set-desc = 포즈의 뼈 컨스트레인트 하나를 바꿉니다.
+op-pose-constraint-remove = 뼈 컨스트레인트 제거
+op-pose-constraint-remove-desc = 뼈 컨스트레인트를 없앱니다.
+constraint-copy-location = 위치 따라하기
+constraint-copy-rotation = 회전 따라하기
+constraint-copy-scale = 크기 따라하기
+constraint-damped-track = 향하기(Damped Track)
+constraint-limit-rotation = 회전 제한
 ik-target = 목표
 ik-chain = 체인
 ik-pole = 폴

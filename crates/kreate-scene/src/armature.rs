@@ -290,6 +290,78 @@ pub struct Pose {
     /// Inverse kinematics on this pose's bones, applied after the bones' own
     /// transforms, in order.
     pub ik: Vec<IkConstraint>,
+    /// Bone constraints, applied after the IK, in order: Blender's Bone
+    /// Constraints stack, flattened across bones.
+    pub constraints: Vec<BoneConstraint>,
+}
+
+/// What a bone constraint does. Copies and the track read the target bone;
+/// a limit reads nothing but the bone itself.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstraintKind {
+    /// The target's head, in armature space.
+    CopyLocation,
+    /// The target's orientation, in armature space.
+    CopyRotation,
+    /// The target's scale.
+    CopyScale,
+    /// Turned about its head, the shortest way, until it points at the
+    /// target's head: Blender's Damped Track on the bone's Y axis.
+    DampedTrack,
+    /// Its own rotation, as XYZ Euler angles relative to where its parent
+    /// carries its rest, held between `min` and `max` (radians).
+    LimitRotation { min: DVec3, max: DVec3 },
+}
+
+impl ConstraintKind {
+    /// Every kind, in the order the menus and the operators number them.
+    pub const NAMES: [&'static str; 5] = [
+        "copy_location",
+        "copy_rotation",
+        "copy_scale",
+        "damped_track",
+        "limit_rotation",
+    ];
+
+    pub fn index(&self) -> u32 {
+        match self {
+            Self::CopyLocation => 0,
+            Self::CopyRotation => 1,
+            Self::CopyScale => 2,
+            Self::DampedTrack => 3,
+            Self::LimitRotation { .. } => 4,
+        }
+    }
+
+    /// The kind numbered `index`, a limit starting with no limit at all.
+    pub fn from_index(index: u32) -> Option<Self> {
+        let full = DVec3::splat(std::f64::consts::PI);
+        Some(match index {
+            0 => Self::CopyLocation,
+            1 => Self::CopyRotation,
+            2 => Self::CopyScale,
+            3 => Self::DampedTrack,
+            4 => Self::LimitRotation { min: -full, max: full },
+            _ => return None,
+        })
+    }
+
+    /// Whether it reads another bone.
+    pub fn has_target(&self) -> bool {
+        !matches!(self, Self::LimitRotation { .. })
+    }
+}
+
+/// One constraint on one bone of a pose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoneConstraint {
+    pub bone: String,
+    pub kind: ConstraintKind,
+    /// The bone it reads, by name. Unused by a limit.
+    pub target: String,
+    /// How much of the constraint's answer the bone takes, 0 to 1.
+    pub influence: f64,
+    pub enabled: bool,
 }
 
 /// Blender's IK constraint: the tip of `bone` reaches for the head of
@@ -348,7 +420,84 @@ pub fn posed(armature: &Armature, pose: &Pose) -> Vec<DAffine3> {
     for ik in pose.ik.iter().filter(|c| c.enabled) {
         solve_ik(armature, pose, &mut frames, ik);
     }
+    for c in pose.constraints.iter().filter(|c| c.enabled) {
+        apply_constraint(armature, &mut frames, c);
+    }
     frames
+}
+
+/// One bone constraint, applied to the frames as they stand. The bones below
+/// the constrained one are carried along rigidly, so what a constraint or an
+/// IK solve earlier did to them is kept.
+fn apply_constraint(armature: &Armature, frames: &mut [DAffine3], c: &BoneConstraint) {
+    let Some(i) = armature.bone_index(&c.bone) else {
+        return;
+    };
+    let t = c.influence.clamp(0.0, 1.0);
+    if t == 0.0 {
+        return;
+    }
+    let target = armature.bone_index(&c.target);
+    if c.kind.has_target() && (target.is_none() || target == Some(i)) {
+        return;
+    }
+    let before = frames[i];
+    let (scale, rotation, translation) = before.to_scale_rotation_translation();
+    let after = match &c.kind {
+        ConstraintKind::CopyLocation => {
+            let goal = frames[target.expect("checked")].translation;
+            DAffine3::from_scale_rotation_translation(scale, rotation, translation.lerp(goal, t))
+        }
+        ConstraintKind::CopyRotation => {
+            let (_, goal, _) = frames[target.expect("checked")].to_scale_rotation_translation();
+            DAffine3::from_scale_rotation_translation(scale, rotation.slerp(goal, t), translation)
+        }
+        ConstraintKind::CopyScale => {
+            let (goal, _, _) = frames[target.expect("checked")].to_scale_rotation_translation();
+            DAffine3::from_scale_rotation_translation(scale.lerp(goal, t), rotation, translation)
+        }
+        ConstraintKind::DampedTrack => {
+            let to = frames[target.expect("checked")].translation - translation;
+            let along = before.matrix3.mul_vec3(DVec3::Y);
+            if to.length_squared() < 1e-18 || along.length_squared() < 1e-18 {
+                return;
+            }
+            let turn = DQuat::IDENTITY.slerp(
+                DQuat::from_rotation_arc(along.normalize(), to.normalize()),
+                t,
+            );
+            DAffine3::from_translation(translation)
+                * DAffine3::from_quat(turn)
+                * DAffine3::from_translation(-translation)
+                * before
+        }
+        ConstraintKind::LimitRotation { min, max } => {
+            let bone = &armature.bones[i];
+            let base = match bone
+                .parent
+                .and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?)))
+            {
+                Some((parent_posed, parent)) => *parent_posed * parent.rest().inverse() * bone.rest(),
+                None => bone.rest(),
+            };
+            let local = base.inverse() * before;
+            let (s, r, tr) = local.to_scale_rotation_translation();
+            let euler = crate::animation::to_euler(r);
+            let held = crate::animation::from_euler(euler.clamp(*min, max.max(*min)));
+            base * DAffine3::from_scale_rotation_translation(s, r.slerp(held, t), tr)
+        }
+    };
+    frames[i] = after;
+    // The bones hanging below follow it.
+    let carry = after * before.inverse();
+    let mut moved = vec![false; armature.bones.len()];
+    moved[i] = true;
+    for (j, bone) in armature.bones.iter().enumerate().skip(i + 1) {
+        if bone.parent.is_some_and(|p| moved[p]) {
+            frames[j] = carry * frames[j];
+            moved[j] = true;
+        }
+    }
 }
 
 /// The frames from the bones' own transforms alone, before any constraint.
@@ -692,6 +841,146 @@ mod tests {
             ..Default::default()
         });
         a
+    }
+
+    fn constrained(kind: ConstraintKind, target: &str, influence: f64) -> BoneConstraint {
+        BoneConstraint {
+            bone: "Hand".into(),
+            kind,
+            target: target.into(),
+            influence,
+            enabled: true,
+        }
+    }
+
+    /// A chain of four with a free bone beside it to copy from.
+    fn with_target() -> Armature {
+        let mut a = Armature::new("Rig");
+        a.bones[0].name = "Upper".into();
+        for (name, parent, from, to) in [
+            ("Lower", 0, 1.0, 2.0),
+            ("Hand", 1, 2.0, 2.5),
+            ("Finger", 2, 2.5, 2.7),
+        ] {
+            a.add_bone(Bone {
+                name: name.into(),
+                parent: Some(parent),
+                head: DVec3::new(0.0, 0.0, from),
+                tail: DVec3::new(0.0, 0.0, to),
+                connected: true,
+                ..Default::default()
+            });
+        }
+        a.add_bone(Bone {
+            name: "Goal".into(),
+            head: DVec3::new(2.0, 1.0, 0.5),
+            tail: DVec3::new(2.0, 1.0, 1.5),
+            ..Default::default()
+        });
+        a
+    }
+
+    fn goal_pose() -> Pose {
+        let mut pose = Pose::default();
+        pose.entry("Goal").transform.rotation =
+            DQuat::from_rotation_x(0.9) * DQuat::from_rotation_z(0.4);
+        pose.entry("Goal").transform.scale = DVec3::new(1.5, 0.5, 2.0);
+        pose.entry("Lower").transform.rotation = DQuat::from_rotation_y(0.3);
+        pose
+    }
+
+    #[test]
+    fn copy_location_puts_the_head_on_the_target_and_carries_the_children() {
+        let a = with_target();
+        let mut pose = goal_pose();
+        let free = posed(&a, &pose);
+        pose.constraints
+            .push(constrained(ConstraintKind::CopyLocation, "Goal", 1.0));
+        let f = posed(&a, &pose);
+        assert!(f[2].translation.distance(f[4].translation) < 1e-9);
+        // The finger kept its place on the hand.
+        let rel = |f: &[DAffine3]| f[2].inverse() * f[3];
+        assert!(rel(&f).abs_diff_eq(rel(&free), 1e-9));
+        // Half the influence: half the way.
+        pose.constraints[0].influence = 0.5;
+        let h = posed(&a, &pose);
+        let half = free[2].translation.lerp(f[4].translation, 0.5);
+        assert!(h[2].translation.distance(half) < 1e-9);
+    }
+
+    #[test]
+    fn copy_rotation_and_scale_take_the_target_s_and_keep_the_rest() {
+        let a = with_target();
+        let mut pose = goal_pose();
+        let free = posed(&a, &pose);
+        pose.constraints
+            .push(constrained(ConstraintKind::CopyRotation, "Goal", 1.0));
+        let f = posed(&a, &pose);
+        let (_, r, t) = f[2].to_scale_rotation_translation();
+        let (_, goal, _) = f[4].to_scale_rotation_translation();
+        assert!(r.angle_between(goal) < 1e-6);
+        assert!(t.distance(free[2].translation) < 1e-9);
+        pose.constraints[0].kind = ConstraintKind::CopyScale;
+        let f = posed(&a, &pose);
+        let (s, r, _) = f[2].to_scale_rotation_translation();
+        assert!(s.abs_diff_eq(DVec3::new(1.5, 0.5, 2.0), 1e-6), "{s}");
+        let (_, r0, _) = free[2].to_scale_rotation_translation();
+        assert!(r.angle_between(r0) < 1e-6);
+    }
+
+    #[test]
+    fn damped_track_points_the_bone_at_the_target() {
+        let a = with_target();
+        let mut pose = goal_pose();
+        pose.constraints
+            .push(constrained(ConstraintKind::DampedTrack, "Goal", 1.0));
+        let f = posed(&a, &pose);
+        let along = f[2].matrix3.mul_vec3(DVec3::Y).normalize();
+        let to = (f[4].translation - f[2].translation).normalize();
+        assert!(along.dot(to) > 1.0 - 1e-9);
+        // The head stays where it was.
+        let free = posed(&a, &goal_pose());
+        assert!(f[2].translation.distance(free[2].translation) < 1e-9);
+    }
+
+    #[test]
+    fn limit_rotation_holds_the_bone_inside_its_range() {
+        let a = with_target();
+        let mut pose = goal_pose();
+        pose.entry("Hand").transform.rotation = DQuat::from_rotation_x(1.2);
+        let limit = ConstraintKind::LimitRotation {
+            min: DVec3::new(-0.5, -0.1, -0.1),
+            max: DVec3::new(0.5, 0.1, 0.1),
+        };
+        pose.constraints.push(constrained(limit, "", 1.0));
+        let f = posed(&a, &pose);
+        let mut held = pose.clone();
+        held.constraints.clear();
+        held.entry("Hand").transform.rotation = DQuat::from_rotation_x(0.5);
+        let want = posed(&a, &held);
+        assert!(f[2].abs_diff_eq(want[2], 1e-9));
+        assert!(f[3].abs_diff_eq(want[3], 1e-9));
+        // Inside the range: nothing moves.
+        pose.entry("Hand").transform.rotation = DQuat::from_rotation_x(0.2);
+        let mut free = pose.clone();
+        free.constraints.clear();
+        assert!(posed(&a, &pose)[2].abs_diff_eq(posed(&a, &free)[2], 1e-9));
+    }
+
+    #[test]
+    fn a_disabled_or_targetless_constraint_does_nothing() {
+        let a = with_target();
+        let mut pose = goal_pose();
+        let free = posed(&a, &pose);
+        pose.constraints.push(BoneConstraint {
+            enabled: false,
+            ..constrained(ConstraintKind::CopyLocation, "Goal", 1.0)
+        });
+        pose.constraints
+            .push(constrained(ConstraintKind::CopyLocation, "Nobody", 1.0));
+        pose.constraints
+            .push(constrained(ConstraintKind::CopyLocation, "Hand", 1.0));
+        assert_eq!(posed(&a, &pose), free);
     }
 
     fn ik(chain: u32) -> IkConstraint {
