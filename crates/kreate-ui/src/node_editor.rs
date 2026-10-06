@@ -70,6 +70,12 @@ pub enum FieldView {
     },
     /// Which image a texture node reads; `None` is empty.
     Image { name: Option<String> },
+    /// One of a list, by index: a Math node's operation.
+    Choice {
+        field: u32,
+        value: u32,
+        options: Vec<String>,
+    },
 }
 
 /// One socket.
@@ -184,6 +190,19 @@ pub enum NodeEdit {
     OpenImage {
         node: u32,
     },
+    /// Copies of these nodes, a little way off: Shift+D.
+    Duplicate {
+        nodes: Vec<u32>,
+    },
+    /// Remember these nodes for a paste: Ctrl+C.
+    Copy {
+        nodes: Vec<u32>,
+    },
+    /// Put the remembered nodes here, in graph units: Ctrl+V.
+    Paste {
+        x: f32,
+        y: f32,
+    },
 }
 
 /// The editor's strings.
@@ -211,6 +230,10 @@ enum Drag {
     /// Moving the selection; the offset is in graph units.
     Nodes {
         offset: Vec2,
+    },
+    /// A box drawn on the background, from where the press was.
+    Box {
+        from: Pos2,
     },
     /// A wire from `from` following the pointer. `detached` is the input it
     /// was picked up from, if it was lifted off one.
@@ -574,10 +597,22 @@ pub fn node_editor(
                 if state.selected.contains(&n) {
                     state.drag = Drag::Nodes { offset: Vec2::ZERO };
                 }
-            } else if !shift {
-                state.selected.clear();
+            } else {
+                if !shift {
+                    state.selected.clear();
+                }
+                state.drag = Drag::Box { from: p };
             }
         }
+    }
+    if let (Drag::Box { from }, Some(p)) = (&state.drag, pointer) {
+        let r = Rect::from_two_pos(*from, p);
+        ui.painter().rect_stroke(
+            r,
+            0.0,
+            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
     }
 
     if let Drag::Nodes { offset } = &mut state.drag {
@@ -587,6 +622,23 @@ pub fn node_editor(
 
     if release {
         match std::mem::take(&mut state.drag) {
+            Drag::Box { from } => {
+                if let Some(p) = pointer {
+                    let r = Rect::from_two_pos(from, p);
+                    if r.width() > 3.0 || r.height() > 3.0 {
+                        for n in 0..view.nodes.len() {
+                            let at = node_rect(&view.nodes[n]);
+                            let on = Rect::from_two_pos(
+                                camera.to_screen(at.min),
+                                camera.to_screen(at.max),
+                            );
+                            if on.intersects(r) && !state.selected.contains(&n) {
+                                state.selected.push(n);
+                            }
+                        }
+                    }
+                }
+            }
             Drag::Nodes { offset } if offset.length() > 0.0 => {
                 let mut nodes: Vec<u32> = state.selected.iter().map(|n| *n as u32).collect();
                 nodes.sort_unstable();
@@ -638,6 +690,56 @@ pub fn node_editor(
                 i.key_pressed(egui::Key::Home),
             )
         });
+        // By the key event's own modifiers: a press arrives with them.
+        let pressed_with = |key: egui::Key, want: fn(egui::Modifiers) -> bool| {
+            ui.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
+                        if *k == key && want(*modifiers))
+                })
+            })
+        };
+        let all = pressed_with(egui::Key::A, |m| !m.shift && !m.alt && !m.command);
+        let none = pressed_with(egui::Key::A, |m| m.alt);
+        let duplicate = pressed_with(egui::Key::D, |m| m.shift);
+        // Copy and paste arrive as events of their own, not as key presses.
+        let (copy, paste) = ui.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            )
+        });
+        let sorted = |state: &NodeEditorState| {
+            let mut nodes: Vec<u32> = state.selected.iter().map(|n| *n as u32).collect();
+            nodes.sort_unstable();
+            nodes
+        };
+        if all {
+            state.selected = (0..view.nodes.len()).collect();
+        }
+        if none {
+            state.selected.clear();
+        }
+        if duplicate && !state.selected.is_empty() {
+            out.push(NodeEdit::Duplicate {
+                nodes: sorted(state),
+            });
+            // The copies are the next nodes; they are what is selected now.
+            let count = view.nodes.len();
+            let made = state.selected.len();
+            state.selected = (count..count + made).collect();
+        }
+        if copy && !state.selected.is_empty() {
+            out.push(NodeEdit::Copy {
+                nodes: sorted(state),
+            });
+        }
+        if paste {
+            if let Some(p) = pointer {
+                let at = camera.to_graph(p);
+                out.push(NodeEdit::Paste { x: at.x, y: at.y });
+            }
+        }
         if delete && !state.selected.is_empty() {
             let mut nodes: Vec<u32> = state.selected.iter().map(|n| *n as u32).collect();
             nodes.sort_unstable();
@@ -906,6 +1008,29 @@ fn control(
                             field: *field,
                             value: v,
                             continuing: down,
+                        });
+                    }
+                }
+                FieldView::Choice {
+                    field,
+                    value,
+                    options,
+                } => {
+                    let mut chosen = *value as usize;
+                    egui::ComboBox::from_id_salt(("node-choice", n, *field))
+                        .width(cell.width())
+                        .selected_text(options.get(chosen).cloned().unwrap_or_default())
+                        .show_ui(ui, |ui| {
+                            for (i, label) in options.iter().enumerate() {
+                                ui.selectable_value(&mut chosen, i, label);
+                            }
+                        });
+                    if chosen != *value as usize {
+                        out.push(NodeEdit::SetValue {
+                            node: n as u32,
+                            field: *field,
+                            value: chosen as f32,
+                            continuing: false,
                         });
                     }
                 }
@@ -1300,6 +1425,48 @@ mod tests {
         assert_eq!(edits, vec![NodeEdit::Remove { nodes: vec![1] }]);
         rig.frame(vec![key(false)]);
         assert!(rig.state.selected.is_empty());
+    }
+
+    #[test]
+    fn a_box_on_the_background_selects_what_it_touches() {
+        let mut rig = Rig::new(two());
+        let (a, b) = (rig.camera().body_of(0), rig.camera().body_of(1));
+        // From well outside both to past both: both.
+        let from = Pos2::new(a.x.min(b.x) - 150.0, a.y.min(b.y) - 150.0);
+        let to = Pos2::new(a.x.max(b.x) + 150.0, a.y.max(b.y) + 150.0);
+        let edits = rig.drag(from, to);
+        assert!(edits.is_empty(), "a box made an edit: {edits:?}");
+        let mut got = rig.state.selected.clone();
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 1]);
+        // A box from just outside the second's corner into it, starting
+        // fresh: only it.
+        let r = node_rect(&rig.view.nodes[1]);
+        let corner = rig.camera().to_screen(r.max);
+        let edits = rig.drag(
+            Pos2::new(corner.x + 10.0, corner.y + 10.0),
+            Pos2::new(corner.x - 20.0, corner.y - 20.0),
+        );
+        assert!(edits.is_empty());
+        assert_eq!(rig.state.selected, vec![1]);
+    }
+
+    #[test]
+    fn shift_d_duplicates_the_selection_and_selects_the_copies() {
+        let mut rig = Rig::new(two());
+        let body = rig.camera().body_of(1);
+        rig.drag(body, body);
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::D,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        let edits = rig.frame(vec![egui::Event::PointerMoved(body), key(true)]);
+        assert_eq!(edits, vec![NodeEdit::Duplicate { nodes: vec![1] }]);
+        // The copy is the next node, once the operator has made it.
+        assert_eq!(rig.state.selected, vec![2]);
     }
 
     #[test]

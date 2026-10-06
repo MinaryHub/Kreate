@@ -222,6 +222,9 @@ pub struct ShellState {
     pub recoverable: Vec<RecoveryOffer>,
     /// File ▸ Open Recent, newest first.
     pub recent_files: Vec<std::path::PathBuf>,
+    /// The nodes Ctrl+C remembered: the material they are in, by name, which
+    /// ones, and the corner of the box around them.
+    pub node_clipboard: Option<(String, Vec<u32>, [f32; 2])>,
     /// The viewport drawn at this fraction of its pixels on each side, and
     /// stretched to fit: Blender's Resolution Scale, for a slow machine.
     pub resolution_scale: f32,
@@ -594,6 +597,7 @@ impl Default for ShellState {
             status: None,
             recoverable: Vec::new(),
             recent_files: Vec::new(),
+            node_clipboard: None,
             resolution_scale: 1.0,
             capturing: None,
             palette: Default::default(),
@@ -5327,11 +5331,17 @@ fn draw_shader_editor(
             state.queue.push(Command::NewMaterial);
         }
     }
-    apply_node_edits(state, slot, edits);
+    let source = material.and_then(|m| Some((m.name.clone(), m.graph.clone()?)));
+    apply_node_edits(state, slot, edits, source);
 }
 
 /// Turns what the pointer did in the graph into the operators that do it.
-fn apply_node_edits(state: &mut ShellState, slot: u32, edits: Vec<kreate_ui::NodeEdit>) {
+fn apply_node_edits(
+    state: &mut ShellState,
+    slot: u32,
+    edits: Vec<kreate_ui::NodeEdit>,
+    material_name: Option<(String, kreate_scene::shader::ShaderGraph)>,
+) {
     use kreate_reflect::PropertyValue as V;
     use kreate_ui::NodeEdit as E;
     for edit in edits {
@@ -5400,6 +5410,34 @@ fn apply_node_edits(state: &mut ShellState, slot: u32, edits: Vec<kreate_ui::Nod
                 state.queue.run("node.set_image", p);
             }
             E::OpenImage { node } => state.queue.push(Command::PickNodeImage { slot, node }),
+            E::Duplicate { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                p.set("x", V::Float(30.0));
+                p.set("y", V::Float(30.0));
+                state.queue.run("node.duplicate", p);
+            }
+            E::Copy { nodes } => {
+                if let Some((name, graph)) = material_name.as_ref() {
+                    // Where the copies' corner was, so a paste lands them with
+                    // that corner at the pointer.
+                    let corner = nodes
+                        .iter()
+                        .filter_map(|n| graph.nodes.get(*n as usize))
+                        .fold([f32::MAX, f32::MAX], |c, n| {
+                            [c[0].min(n.position[0]), c[1].min(n.position[1])]
+                        });
+                    state.node_clipboard = Some((name.clone(), nodes, corner));
+                }
+            }
+            E::Paste { x, y } => {
+                if let Some((source, nodes, corner)) = state.node_clipboard.clone() {
+                    p.set("source", V::Text(source));
+                    p.set("nodes", V::Ints(nodes));
+                    p.set("x", V::Float((x - corner[0]) as f64));
+                    p.set("y", V::Float((y - corner[1]) as f64));
+                    state.queue.run("node.duplicate", p);
+                }
+            }
         }
     }
 }
@@ -5468,6 +5506,27 @@ fn graph_view(
                             max: 1.0,
                             label: String::new(),
                         }),
+                        (NodeKind::MixColor { factor }, 0) => Some(FieldView::Value {
+                            field: 0,
+                            value: *factor,
+                            min: 0.0,
+                            max: 1.0,
+                            label: String::new(),
+                        }),
+                        (NodeKind::Math { a, .. }, 0) => Some(FieldView::Value {
+                            field: 1,
+                            value: *a,
+                            min: -1000.0,
+                            max: 1000.0,
+                            label: String::new(),
+                        }),
+                        (NodeKind::Math { b, .. }, 1) => Some(FieldView::Value {
+                            field: 2,
+                            value: *b,
+                            min: -1000.0,
+                            max: 1000.0,
+                            label: String::new(),
+                        }),
                         _ => None,
                     },
                 })
@@ -5494,6 +5553,14 @@ fn graph_view(
                 NodeKind::Image { image } => vec![FieldView::Image {
                     name: image.and_then(|id| doc.image(id)).map(|i| i.name.clone()),
                 }],
+                NodeKind::Math { op, .. } => vec![FieldView::Choice {
+                    field: 0,
+                    value: op.index(),
+                    options: kreate_scene::shader::MathOp::ALL
+                        .iter()
+                        .map(|o| t(&format!("node-math-{}", o.tag())))
+                        .collect(),
+                }],
                 _ => Vec::new(),
             };
             NodeView {
@@ -5506,9 +5573,12 @@ fn graph_view(
                 family: match kind {
                     NodeKind::Color(_) | NodeKind::Value(_) => Family::Input,
                     NodeKind::Image { .. } => Family::Texture,
-                    NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::SeparateRgb => {
-                        Family::Converter
-                    }
+                    NodeKind::Multiply
+                    | NodeKind::MultiplyValue
+                    | NodeKind::SeparateRgb
+                    | NodeKind::MixColor { .. }
+                    | NodeKind::Math { .. }
+                    | NodeKind::Invert => Family::Converter,
                     NodeKind::NormalMap { .. } => Family::Vector,
                     NodeKind::Surface { .. } => Family::Shader,
                 },
@@ -8862,6 +8932,20 @@ node-kind-multiply = Mix (Multiply)
 node-kind-multiply-value = Math (Multiply)
 node-kind-separate-rgb = Separate RGB
 node-kind-normal-map = Normal Map
+node-kind-mix = Mix
+node-kind-math = Math
+node-kind-invert = Invert Color
+node-socket-factor = Factor
+node-socket-emission = Emission
+node-math-add = Add
+node-math-subtract = Subtract
+node-math-multiply = Multiply
+node-math-divide = Divide
+node-math-power = Power
+node-math-minimum = Minimum
+node-math-maximum = Maximum
+op-node-duplicate = Duplicate Nodes
+op-node-duplicate-desc = Copies nodes and the wires between them into this graph, from this material or another.
 node-socket-base-color = Base Color
 node-socket-metallic = Metallic
 node-socket-roughness = Roughness
@@ -9733,6 +9817,20 @@ node-kind-multiply = 혼합 (곱하기)
 node-kind-multiply-value = 수학 (곱하기)
 node-kind-separate-rgb = RGB 분리
 node-kind-normal-map = 노멀 맵
+node-kind-mix = 혼합
+node-kind-math = 수학
+node-kind-invert = 색 반전
+node-socket-factor = 비율
+node-socket-emission = 발광
+node-math-add = 더하기
+node-math-subtract = 빼기
+node-math-multiply = 곱하기
+node-math-divide = 나누기
+node-math-power = 거듭제곱
+node-math-minimum = 최솟값
+node-math-maximum = 최댓값
+op-node-duplicate = 노드 복제
+op-node-duplicate-desc = 노드와 그 사이의 연결을 이 그래프에 복사합니다. 이 재질이나 다른 재질에서.
 node-socket-base-color = 베이스 컬러
 node-socket-metallic = 메탈릭
 node-socket-roughness = 러프니스

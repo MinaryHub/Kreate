@@ -106,6 +106,14 @@ pub enum NodeKind {
     /// `strength` scales the tilt before renormalising, which is glTF's
     /// `normalTexture.scale`: zero is flat, one is the map as painted.
     NormalMap { strength: f32 },
+    /// Two colours mixed by a factor: Blender's Mix (Color, Mix). `factor` is
+    /// what an unwired Factor socket takes.
+    MixColor { factor: f32 },
+    /// Two numbers through an operation: Blender's Math. `a` and `b` are
+    /// what unwired sockets take.
+    Math { op: MathOp, a: f32, b: f32 },
+    /// One minus a colour: Blender's Invert Color.
+    Invert,
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -125,6 +133,51 @@ pub enum NodeKind {
     },
 }
 
+/// What a Math node does to its two numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MathOp {
+    #[default]
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Power,
+    Minimum,
+    Maximum,
+}
+
+impl MathOp {
+    pub const ALL: [Self; 7] = [
+        Self::Add,
+        Self::Subtract,
+        Self::Multiply,
+        Self::Divide,
+        Self::Power,
+        Self::Minimum,
+        Self::Maximum,
+    ];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Multiply => "multiply",
+            Self::Divide => "divide",
+            Self::Power => "power",
+            Self::Minimum => "minimum",
+            Self::Maximum => "maximum",
+        }
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+}
+
 impl NodeKind {
     /// The types of this node's inputs, in order.
     pub fn inputs(&self) -> &'static [Socket] {
@@ -132,13 +185,16 @@ impl NodeKind {
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
             NodeKind::Multiply => &[Socket::Color, Socket::Color],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &[Socket::Color],
-            NodeKind::MultiplyValue => &[Socket::Scalar, Socket::Scalar],
-            // Base colour, metallic, roughness, normal.
+            NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
+            NodeKind::MixColor { .. } => &[Socket::Scalar, Socket::Color, Socket::Color],
+            NodeKind::Invert => &[Socket::Color],
+            // Base colour, metallic, roughness, normal, and a tint on the glow.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Vector,
+                Socket::Color,
             ],
         }
     }
@@ -154,7 +210,8 @@ impl NodeKind {
             NodeKind::Image { .. } => &[Socket::Color, Socket::Scalar],
             NodeKind::Multiply => &[Socket::Color],
             NodeKind::SeparateRgb => &[Socket::Scalar, Socket::Scalar, Socket::Scalar],
-            NodeKind::MultiplyValue => &[Socket::Scalar],
+            NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar],
+            NodeKind::MixColor { .. } | NodeKind::Invert => &[Socket::Color],
             NodeKind::NormalMap { .. } => &[Socket::Vector],
             NodeKind::Surface { .. } => &[],
         }
@@ -175,6 +232,9 @@ impl NodeKind {
             NodeKind::SeparateRgb => "separate_rgb",
             NodeKind::MultiplyValue => "multiply_value",
             NodeKind::NormalMap { .. } => "normal_map",
+            NodeKind::MixColor { .. } => "mix",
+            NodeKind::Math { .. } => "math",
+            NodeKind::Invert => "invert",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -188,6 +248,8 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
+            NodeKind::MixColor { factor } => vec![*factor],
+            NodeKind::Math { op, a, b } => vec![op.index() as f32, *a, *b],
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -212,7 +274,8 @@ impl NodeKind {
             NodeKind::Image { .. }
             | NodeKind::Multiply
             | NodeKind::SeparateRgb
-            | NodeKind::MultiplyValue => Vec::new(),
+            | NodeKind::MultiplyValue
+            | NodeKind::Invert => Vec::new(),
         }
     }
 
@@ -235,6 +298,15 @@ impl NodeKind {
             "normal_map" => NodeKind::NormalMap {
                 strength: at(0, 1.0),
             },
+            "mix" => NodeKind::MixColor {
+                factor: at(0, 0.5),
+            },
+            "math" => NodeKind::Math {
+                op: MathOp::from_index(at(0, 0.0).max(0.0) as u32),
+                a: at(1, 0.5),
+                b: at(2, 0.5),
+            },
+            "invert" => NodeKind::Invert,
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -256,7 +328,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 7] = [
+    pub const ADDABLE: [&'static str; 10] = [
         "color",
         "value",
         "image",
@@ -264,14 +336,18 @@ impl NodeKind {
         "multiply_value",
         "separate_rgb",
         "normal_map",
+        "mix",
+        "math",
+        "invert",
     ];
 
     /// What each input is called, for a person.
     pub fn input_names(&self) -> &'static [&'static str] {
         match self {
-            NodeKind::Multiply | NodeKind::MultiplyValue => &["A", "B"],
-            NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &["Color"],
-            NodeKind::Surface { .. } => &["Base Color", "Metallic", "Roughness", "Normal"],
+            NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
+            NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
+            NodeKind::MixColor { .. } => &["Factor", "A", "B"],
+            NodeKind::Surface { .. } => &["Base Color", "Metallic", "Roughness", "Normal", "Emission"],
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
         }
     }
@@ -279,8 +355,10 @@ impl NodeKind {
     /// What each output is called.
     pub fn output_names(&self) -> &'static [&'static str] {
         match self {
-            NodeKind::Color(_) | NodeKind::Multiply => &["Color"],
-            NodeKind::Value(_) | NodeKind::MultiplyValue => &["Value"],
+            NodeKind::Color(_) | NodeKind::Multiply | NodeKind::MixColor { .. } | NodeKind::Invert => {
+                &["Color"]
+            }
+            NodeKind::Value(_) | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["Value"],
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],
             NodeKind::NormalMap { .. } => &["Normal"],

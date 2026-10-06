@@ -498,3 +498,68 @@ fn every_graph_edit_replays_from_the_history() {
     let b = replay.materials().next().unwrap().1.graph.clone();
     assert_eq!(a, b, "the replay built a different graph:\n{script}");
 }
+
+#[test]
+fn duplicating_copies_the_nodes_and_their_own_wires_and_never_the_surface() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (material, _) = textured_cube(&mut doc);
+    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    let before = graph(&doc, material);
+    // Every node, surface included: the surface is left out, and of the
+    // wires only those between two copied nodes are made again.
+    let all: Vec<u32> = (0..before.nodes.len() as u32).collect();
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.duplicate",
+        &[
+            ("nodes", PropertyValue::Ints(all)),
+            ("x", PropertyValue::Float(30.0)),
+            ("y", PropertyValue::Float(10.0)),
+        ]
+    ));
+    let after = graph(&doc, material);
+    let copied = before.nodes.len() - 1;
+    assert_eq!(after.nodes.len(), before.nodes.len() + copied);
+    assert_eq!(
+        after.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Surface { .. })).count(),
+        1
+    );
+    let surface = before.output().unwrap();
+    let internal = before
+        .links
+        .iter()
+        .filter(|l| l.from_node != surface && l.to_node != surface)
+        .count();
+    assert_eq!(after.links.len(), before.links.len() + internal);
+    // Moved by the offset.
+    let first = before.nodes.iter().position(|n| !matches!(n.kind, NodeKind::Surface { .. })).unwrap();
+    let copy = &after.nodes[before.nodes.len()];
+    assert_eq!(
+        copy.position,
+        [before.nodes[first].position[0] + 30.0, before.nodes[first].position[1] + 10.0]
+    );
+    // From another material, by name: a paste.
+    let other = doc.add_material(Material {
+        name: "Other".into(),
+        ..Default::default()
+    });
+    let _ = other;
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.duplicate",
+        &[
+            ("source", PropertyValue::Text("Brick".into())),
+            ("nodes", PropertyValue::Ints(vec![first as u32])),
+        ]
+    ));
+    assert_eq!(graph(&doc, material).nodes.len(), after.nodes.len() + 1);
+    // And undo takes the paste away.
+    assert!(history.undo(&mut doc));
+    assert_eq!(graph(&doc, material).nodes.len(), after.nodes.len());
+}

@@ -44,6 +44,101 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetNodeColor>();
     registry.register::<SetNodeValue>();
     registry.register::<SetNodeImage>();
+    registry.register::<DuplicateNodes>();
+}
+
+// --- duplicate and paste -----------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DuplicateNodesParams {
+    #[param(min = 0.0)]
+    pub slot: u32,
+    /// The material the nodes are copied from, by name; empty for this one.
+    pub source: String,
+    /// The nodes, by index in the source's graph.
+    pub nodes: Vec<u32>,
+    /// How far the copies land from the originals, in graph units.
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Copies nodes, and the wires between them, into this graph: Blender's
+/// Shift+D within one material, and Ctrl+C, Ctrl+V between two. The surface
+/// is never copied — a graph has exactly one.
+pub struct DuplicateNodes;
+
+impl Operator for DuplicateNodes {
+    type Params = DuplicateNodesParams;
+    fn id() -> &'static str {
+        "node.duplicate"
+    }
+    fn label() -> &'static str {
+        "Duplicate Nodes"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_graph(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let source: Option<ShaderGraph> = if params.source.is_empty() {
+            graph_in(doc, params.slot).map(|g| g.clone())
+        } else {
+            doc.document()
+                .materials()
+                .find(|(_, m)| m.name == params.source)
+                .and_then(|(_, m)| m.graph.clone())
+        };
+        let Some(source) = source else {
+            return Ok(OpResult::Cancelled);
+        };
+        let picked: Vec<usize> = params
+            .nodes
+            .iter()
+            .map(|n| *n as usize)
+            .filter(|n| {
+                source
+                    .nodes
+                    .get(*n)
+                    .is_some_and(|node| !matches!(node.kind, NodeKind::Surface { .. }))
+            })
+            .collect();
+        if picked.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(graph) = graph_in(doc, params.slot) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut new_index = std::collections::HashMap::new();
+        for &n in &picked {
+            let mut node = source.nodes[n].clone();
+            node.position = [
+                node.position[0] + params.x as f32,
+                node.position[1] + params.y as f32,
+            ];
+            if let Some(i) = graph.add_node(node) {
+                new_index.insert(n, i);
+            }
+        }
+        for link in &source.links {
+            if let (Some(&from), Some(&to)) =
+                (new_index.get(&link.from_node), new_index.get(&link.to_node))
+            {
+                let _ = graph.link(kreate_scene::shader::Link {
+                    from_node: from,
+                    to_node: to,
+                    ..*link
+                });
+            }
+        }
+        Ok(if new_index.is_empty() {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
 }
 
 /// The graph of the material in `slot`, to edit, or `None` when there is no
@@ -143,7 +238,10 @@ pub struct AddNodeParams {
         "multiply",
         "multiply_value",
         "separate_rgb",
-        "normal_map"
+        "normal_map",
+        "mix",
+        "math",
+        "invert"
     ))]
     pub kind: u32,
     /// Where it lands, in graph units.
@@ -198,6 +296,9 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::MultiplyValue => "Math (Multiply)",
         NodeKind::SeparateRgb => "Separate RGB",
         NodeKind::NormalMap { .. } => "Normal Map",
+        NodeKind::MixColor { .. } => "Mix",
+        NodeKind::Math { .. } => "Math",
+        NodeKind::Invert => "Invert Color",
         NodeKind::Surface { .. } => "Principled BSDF",
     }
 }
@@ -532,6 +633,12 @@ impl Operator for SetNodeValue {
         match (&mut node.kind, params.field) {
             (NodeKind::Value(x), 0) => *x = v,
             (NodeKind::NormalMap { strength }, 0) => *strength = v.max(0.0),
+            (NodeKind::MixColor { factor }, 0) => *factor = v.clamp(0.0, 1.0),
+            (NodeKind::Math { op, .. }, 0) => {
+                *op = kreate_scene::shader::MathOp::from_index(v.round().max(0.0) as u32)
+            }
+            (NodeKind::Math { a, .. }, 1) => *a = v,
+            (NodeKind::Math { b, .. }, 2) => *b = v,
             (NodeKind::Surface { metallic, .. }, 1) => *metallic = v.clamp(0.0, 1.0),
             (NodeKind::Surface { roughness, .. }, 2) => *roughness = v.clamp(0.0, 1.0),
             _ => return Ok(OpResult::Cancelled),

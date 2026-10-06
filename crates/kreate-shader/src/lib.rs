@@ -72,7 +72,7 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{NodeKind, ShaderGraph, Socket};
+use kreate_scene::shader::{MathOp, NodeKind, ShaderGraph, Socket};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -243,12 +243,28 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    var out: MaterialSample;");
     let _ = writeln!(wgsl, "    out.surface = s;");
     let _ = writeln!(wgsl, "    out.normal = {normal};");
-    // In the roughness's slot, beside it: emitted light, in nits.
-    let _ = writeln!(
-        wgsl,
-        "    out.emission = material.values[{}].yzw;",
-        surface_slot + 1
-    );
+    // In the roughness's slot, beside it: emitted light, in nits — tinted by
+    // whatever is wired to the Emission socket, so a texture can say where a
+    // surface glows and the material says how brightly.
+    // Unwired, the line is what it always was: the shader text is the
+    // pipeline cache's key, and a glow nobody tinted should not cost one.
+    match out.graph.incoming(output, 4) {
+        Some(_) => {
+            let tint = out.input_expr(output, 4, "vec3<f32>(1.0)")?;
+            let _ = writeln!(
+                wgsl,
+                "    out.emission = material.values[{}].yzw * {tint};",
+                surface_slot + 1
+            );
+        }
+        None => {
+            let _ = writeln!(
+                wgsl,
+                "    out.emission = material.values[{}].yzw;",
+                surface_slot + 1
+            );
+        }
+    }
     // The third slot: how much passes through, and how it bends.
     let _ = writeln!(
         wgsl,
@@ -391,6 +407,35 @@ impl Emitter<'_> {
                 let b = self.input_expr(node, 1, "1.0")?;
                 let _ = writeln!(self.body, "    let n{node} = {a} * {b};");
             }
+            NodeKind::MixColor { factor } => {
+                self.constants.push([factor, 0.0, 0.0, 0.0]);
+                let f = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let a = self.input_expr(node, 1, "vec3<f32>(0.5)")?;
+                let b = self.input_expr(node, 2, "vec3<f32>(0.5)")?;
+                let _ = writeln!(self.body, "    let n{node} = mix({a}, {b}, clamp({f}, 0.0, 1.0));");
+            }
+            NodeKind::Math { op, a, b } => {
+                self.constants.push([a, b, 0.0, 0.0]);
+                let x = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let y = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                // Blender's answers where the arithmetic has none: zero for a
+                // division by zero, and for a power of a negative number.
+                let e = match op {
+                    MathOp::Add => format!("{x} + {y}"),
+                    MathOp::Subtract => format!("{x} - {y}"),
+                    MathOp::Multiply => format!("{x} * {y}"),
+                    MathOp::Divide => format!("select(0.0, {x} / {y}, {y} != 0.0)"),
+                    MathOp::Power => format!("select(0.0, pow({x}, {y}), {x} > 0.0)"),
+                    MathOp::Minimum => format!("min({x}, {y})"),
+                    MathOp::Maximum => format!("max({x}, {y})"),
+                };
+                let _ = writeln!(self.body, "    let n{node} = {e};");
+            }
+            NodeKind::Invert => {
+                self.constants.push([0.0; 4]);
+                let c = self.input_expr(node, 0, "vec3<f32>(0.0)")?;
+                let _ = writeln!(self.body, "    let n{node} = vec3<f32>(1.0) - {c};");
+            }
             NodeKind::NormalMap { strength } => {
                 self.constants.push([strength, 0.0, 0.0, 0.0]);
                 // Unwired is the flat normal's encoding, so the node alone is
@@ -520,6 +565,65 @@ mod tests {
         );
         naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    #[test]
+    fn mix_math_invert_and_the_emission_socket_compile_and_type_check() {
+        // Every operation, each feeding the next, the last into a mix factor;
+        // an inverted colour into the glow. Validated, not only parsed: a
+        // vec3 where an f32 belongs parses and is still wrong.
+        for op in MathOp::ALL {
+            let mut g = flat();
+            let math = g
+                .add_node(Node::new("M", NodeKind::Math { op, a: 0.3, b: 2.0 }))
+                .unwrap();
+            let mix = g.add_node(Node::new("X", NodeKind::MixColor { factor: 0.5 })).unwrap();
+            let colour = g.add_node(Node::new("C", NodeKind::Color(SceneRgb::new(0.2, 0.4, 0.6)))).unwrap();
+            let invert = g.add_node(Node::new("I", NodeKind::Invert)).unwrap();
+            for (from, fs, to, ts) in [
+                (math, 0, mix, 0),
+                (colour, 0, mix, 1),
+                (mix, 0, 0, 0),
+                (colour, 0, invert, 0),
+                (invert, 0, 0, 4),
+            ] {
+                g.link(Link { from_node: from, from_socket: fs, to_node: to, to_socket: ts })
+                    .unwrap_or_else(|e| panic!("{op:?}: {from}->{to}: {e:?}"));
+            }
+            let compiled = compile(&g).expect("compiles");
+            let source = format!(
+                "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}
+{}",
+                compiled.wgsl
+            );
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{op:?}: {}", e.emit_to_string(&source)));
+            assert!(compiled.wgsl.contains("mix("), "{}", compiled.wgsl);
+            assert!(compiled.wgsl.contains("].yzw * n"), "{}", compiled.wgsl);
+        }
+    }
+
+    #[test]
+    fn the_math_node_keeps_its_two_numbers_and_the_operation_is_the_shape() {
+        // Wired into the roughness: a node nothing reads is not compiled.
+        let with = |op, a, b| {
+            let mut g = flat();
+            let m = g.add_node(Node::new("M", NodeKind::Math { op, a, b })).unwrap();
+            g.link(Link { from_node: m, from_socket: 0, to_node: 0, to_socket: 2 }).unwrap();
+            g
+        };
+        let a = with(MathOp::Add, 1.0, 2.0);
+        let b = with(MathOp::Add, 7.0, 9.0);
+        let c = with(MathOp::Power, 1.0, 2.0);
+        let (a, b, c) = (compile(&a).unwrap(), compile(&b).unwrap(), compile(&c).unwrap());
+        // The numbers are constants, so they share a pipeline; the operation
+        // is code, so it does not.
+        assert_eq!(a.wgsl, b.wgsl);
+        assert_ne!(a.wgsl, c.wgsl);
+        assert!(b.constants.contains(&[7.0, 9.0, 0.0, 0.0]));
     }
 
     #[test]
