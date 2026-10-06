@@ -278,6 +278,12 @@ pub struct Gesture {
     /// rotating the very thing this describes, and a constraint that followed
     /// its own result would curve.
     basis: [Vec3; 3],
+    /// The object's own axes, for an extrude: its `basis` is the faces'
+    /// normal frame, and a local X, Y or Z means the object's.
+    object_basis: [Vec3; 3],
+    /// An extrude travelling along its faces' normal — what `E` starts as —
+    /// rather than along an axis the user picked.
+    along_normal: bool,
     /// Snapping, as configured. `snap_inverted` flips it for this drag.
     pub snap: Snap,
     pub snap_inverted: bool,
@@ -384,6 +390,8 @@ impl Gesture {
             orientation: Orientation::Global,
             first_orientation: Orientation::Global,
             basis,
+            object_basis: basis,
+            along_normal: false,
             snap,
             snap_inverted: false,
             world,
@@ -453,9 +461,33 @@ impl Gesture {
     /// rather than inheriting the previous one's orientation — the second press
     /// is a new request, not a continuation.
     pub fn cycle_axis(&mut self, axis: Axis) {
-        // An extrude travels along its faces' normal and nowhere else, as
-        // Blender's does; X, Y and Z would take it off the line.
-        // An inset, a bevel and a loop cut have no direction to hold either.
+        // An extrude starts along its faces' normal. X, Y or Z sends it along
+        // that axis instead — the header's orientation first, the other one
+        // on a second press — and a third press brings it back to the normal.
+        if self.kind == Kind::Extrude {
+            let first = self.first_orientation;
+            let second = match first {
+                Orientation::Global => Orientation::Local,
+                Orientation::Local => Orientation::Global,
+            };
+            match self.axis {
+                Some(current)
+                    if !self.along_normal && current == axis && self.orientation == first =>
+                {
+                    self.orientation = second;
+                }
+                Some(current) if !self.along_normal && current == axis => {
+                    self.extrude_along_normal();
+                }
+                _ => {
+                    self.along_normal = false;
+                    self.axis = Some(axis);
+                    self.orientation = first;
+                }
+            }
+            return;
+        }
+        // An inset, a bevel and a loop cut have no direction to hold.
         if !self.kind.transforms() {
             return;
         }
@@ -479,6 +511,19 @@ impl Gesture {
         }
     }
 
+    /// The object's own axes, which a local constraint on an extrude follows.
+    pub fn set_object_basis(&mut self, basis: [Vec3; 3]) {
+        self.object_basis = basis;
+    }
+
+    /// Holds an extrude to its faces' normal: the local Z of the frame it was
+    /// begun with.
+    pub fn extrude_along_normal(&mut self) {
+        self.along_normal = true;
+        self.axis = Some(Axis::Z);
+        self.orientation = Orientation::Local;
+    }
+
     /// Sets what the first press of an axis key constrains to.
     pub fn set_first_orientation(&mut self, orientation: Orientation) {
         self.first_orientation = orientation;
@@ -497,7 +542,16 @@ impl Gesture {
             // Normalised, because the basis comes from an object transform and a
             // scaled object's axes are not unit vectors. Without this a
             // constrained move on a scaled object travels the wrong distance.
-            Orientation::Local => self.basis[axis.index() as usize].normalize_or(axis.direction()),
+            Orientation::Local => {
+                // An extrude sent along a local axis means the object's, not
+                // the faces' normal frame it was begun with.
+                let basis = if self.kind == Kind::Extrude && !self.along_normal {
+                    &self.object_basis
+                } else {
+                    &self.basis
+                };
+                basis[axis.index() as usize].normalize_or(axis.direction())
+            }
         }
     }
 
@@ -752,6 +806,10 @@ impl Gesture {
                     "offset",
                     PropertyValue::Float(self.extrude_distance(dx, dy)),
                 );
+                if !self.along_normal {
+                    let d = self.extrude_direction().as_dvec3();
+                    params.set("direction", PropertyValue::Vec3([d.x, d.y, d.z]));
+                }
             }
             Kind::Inset => {
                 let thickness = match self.depth_hold {
@@ -903,15 +961,22 @@ impl Gesture {
         }
     }
 
-    /// How far along the normal an extrude has gone: a typed number as it is,
-    /// otherwise the constrained move's offset measured along the normal — the
-    /// normal being the local Z the gesture was begun with.
+    /// How far an extrude has gone: a typed number as it is, otherwise the
+    /// constrained move's offset measured along the way it travels.
     fn extrude_distance(&self, dx: f32, dy: f32) -> f64 {
         if let Some(value) = self.typed() {
             return value;
         }
-        let normal = self.basis[2].normalize_or(Vec3::Z).as_dvec3();
-        self.offset(dx, dy).dot(normal)
+        self.offset(dx, dy).dot(self.extrude_direction().as_dvec3())
+    }
+
+    /// Which way an extrude travels, in the world: its faces' normal, or the
+    /// axis it was sent along.
+    fn extrude_direction(&self) -> Vec3 {
+        match self.axis {
+            Some(axis) if !self.along_normal => self.axis_direction(axis),
+            _ => self.basis[2].normalize_or(Vec3::Z),
+        }
     }
 
     /// How much nearer the selection's middle the pointer is than it started,
@@ -1032,6 +1097,7 @@ impl Gesture {
 
     pub fn status(&self) -> String {
         let axis = match (self.axis, self.orientation) {
+            _ if self.kind == Kind::Extrude && self.along_normal => " normal".to_string(),
             (Some(axis), Orientation::Global) => format!(" {}", axis.label()),
             // Doubled, the way it was typed, so the header says which of the two
             // constraints is active rather than leaving it to be inferred from

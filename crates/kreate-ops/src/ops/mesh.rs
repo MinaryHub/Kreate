@@ -1040,14 +1040,21 @@ impl Operator for ScaleSelection {
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct ExtrudeParams {
-    /// How far to move the new faces along the region normal.
+    /// How far to move the new faces.
     #[param(soft_min = -10.0, soft_max = 10.0, unit = "length")]
     pub offset: f64,
+    /// Which way, in the world; zero for along the region's normal. What an
+    /// axis key pressed during the extrude picks — the world's or the
+    /// object's own.
+    pub direction: [f64; 3],
 }
 
 impl Default for ExtrudeParams {
     fn default() -> Self {
-        Self { offset: 1.0 }
+        Self {
+            offset: 1.0,
+            direction: [0.0; 3],
+        }
     }
 }
 
@@ -1075,17 +1082,28 @@ impl Operator for ExtrudeRegion {
         // Every mesh in edit mode. A mesh with no faces selected returns
         // early and is left alone, which is what makes this safe to run over
         // the whole set.
+        let direction = glam::DVec3::from_array(params.direction);
+        let along_axis = direction.length_squared() > 1e-12;
         let grew = each_bmesh(doc, |bm| {
             let faces = bm.selected_faces();
             if faces.is_empty() {
                 return Ok(false);
             }
-            edit::extrude_selected_faces(bm, params.offset as f32)
+            // Along an axis: made where they are, then moved in the world,
+            // where the axis is.
+            let distance = if along_axis { 0.0 } else { params.offset as f32 };
+            edit::extrude_selected_faces(bm, distance)
                 .map_err(|e| OpError::Failed(e.to_string()))?;
             Ok(true)
         })?
         .into_iter()
         .any(|g| g);
+        if grew && along_axis {
+            let offset = direction.normalize() * params.offset;
+            run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+                p + offset * weight as f64
+            })?;
+        }
 
         // Cancelled rather than Finished, so nothing lands in the history and
         // the user's next undo still reaches the edit they actually made.
@@ -3480,6 +3498,52 @@ mod tests {
         assert_eq!(restored.num_faces(), before.num_faces());
         assert_eq!(restored.num_verts(), before.num_verts());
         assert_eq!(restored.positions(), before.positions());
+    }
+
+    #[test]
+    fn an_extrude_along_a_direction_goes_that_way_in_the_world() {
+        // A cube turned a quarter turn about Z: its top face extruded along
+        // world X lands two units along world X, whatever its own axes are.
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = cube_doc();
+        let obj = doc.selection.objects[0];
+        doc.object_mut(obj).unwrap().transform.rotation =
+            glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        {
+            let m = doc.mesh_mut(mesh).unwrap();
+            let mut bm = m.to_bmesh();
+            let top = bm
+                .face_ids()
+                .max_by(|a, b| {
+                    let za = bm.face_normal(*a).normalize_or_zero().z;
+                    let zb = bm.face_normal(*b).normalize_or_zero().z;
+                    za.partial_cmp(&zb).unwrap()
+                })
+                .unwrap();
+            bm.set_face_selected(top, true);
+            bm.flush_selection(SelectMode::Face);
+            *m = bm.to_mesh_data();
+        }
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.extrude_region",
+            &params(&[
+                ("offset", PropertyValue::Float(2.0)),
+                ("direction", PropertyValue::Vec3([1.0, 0.0, 0.0])),
+            ]),
+        )
+        .unwrap();
+
+        let after = doc.mesh(mesh).unwrap();
+        assert_eq!(after.num_faces(), 10);
+        // World +X is the turned cube's local -Y.
+        let b = after.bounds();
+        assert!((b.min.y + 3.0).abs() < 1e-5, "{b:?}");
+        assert!((b.max.z - 1.0).abs() < 1e-5, "{b:?}");
+        assert_eq!(after.validate(), Vec::new());
     }
 
     #[test]

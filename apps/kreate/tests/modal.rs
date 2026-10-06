@@ -1426,8 +1426,7 @@ fn extrude() -> Gesture {
         Snap::default(),
         SnapWorld::default(),
     );
-    g.axis = Some(Axis::Z);
-    g.orientation = Orientation::Local;
+    g.extrude_along_normal();
     g
 }
 
@@ -1456,8 +1455,12 @@ fn an_extrude_follows_the_pointer_along_the_normal_and_only_along_it() {
         across.abs() < 1e-6,
         "a drag across the normal moved along it: {across}"
     );
-    // Axis keys do not take it off the normal.
+    // An axis key takes it off the normal; the third press puts it back.
     g.cycle_axis(Axis::X);
+    assert!(g.params().get("direction").is_some());
+    g.cycle_axis(Axis::X);
+    g.cycle_axis(Axis::X);
+    assert!(g.params().get("direction").is_none());
     assert_eq!(g.axis, Some(Axis::Z));
     assert_eq!(g.orientation, Orientation::Local);
 }
@@ -1689,4 +1692,54 @@ fn a_rotation_is_not_snapped_to_elements() {
         kreate::snap::project(DVec3::new(1.0, 0.0, 0.0), &camera(), VIEWPORT).unwrap(),
     );
     assert!(g.snap_point().is_none());
+}
+
+#[test]
+fn an_extrude_goes_along_the_normal_then_a_world_axis_then_the_objects_own() {
+    // E starts on the faces' normal. X sends it along world X, X again along
+    // the object's X, and a third X brings it back to the normal.
+    let camera = camera();
+    let turned = [glam::Vec3::Y, -glam::Vec3::X, glam::Vec3::Z];
+    let mut g = Gesture::begin(
+        Kind::Extrude,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.set_object_basis(turned);
+    g.extrude_along_normal();
+    g.type_character('2');
+
+    let direction = |p: &kreate_ops::PropertyMap| match p.get("direction") {
+        Some(PropertyValue::Vec3(v)) => Some(*v),
+        None => None,
+        other => panic!("expected a direction, got {other:?}"),
+    };
+    let offset = |p: &kreate_ops::PropertyMap| match p.get("offset") {
+        Some(PropertyValue::Float(f)) => *f,
+        other => panic!("expected an offset, got {other:?}"),
+    };
+
+    let p = at(&mut g, (400.0, 300.0));
+    assert_eq!(direction(&p), None, "along the normal by default");
+    assert_eq!(offset(&p), 2.0);
+    assert!(g.status().contains("normal"));
+
+    g.cycle_axis(Axis::X);
+    let p = at(&mut g, (400.0, 300.0));
+    assert_eq!(direction(&p), Some([1.0, 0.0, 0.0]), "world X");
+    assert_eq!(offset(&p), 2.0);
+
+    g.cycle_axis(Axis::X);
+    let p = at(&mut g, (400.0, 300.0));
+    assert_eq!(direction(&p), Some([0.0, 1.0, 0.0]), "the object's X");
+
+    g.cycle_axis(Axis::X);
+    let p = at(&mut g, (400.0, 300.0));
+    assert_eq!(direction(&p), None, "back on the normal");
+    assert!(g.status().contains("normal"));
 }

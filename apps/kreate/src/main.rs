@@ -2250,8 +2250,8 @@ impl App {
             gesture.set_sources(self.snap_sources());
         }
         if extrude_normal.is_some() {
-            gesture.axis = Some(kreate::modal::Axis::Z);
-            gesture.orientation = kreate::modal::Orientation::Local;
+            gesture.set_object_basis(self.selection_basis());
+            gesture.extrude_along_normal();
         }
         // A loop cut slides along the edge it cuts across from.
         if kind == kreate::modal::Kind::LoopCut {
