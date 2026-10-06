@@ -111,6 +111,78 @@ pub fn write(width: u32, height: u32, channels: &[Channel<'_>], strings: &[(&str
     out
 }
 
+/// MurmurHash3, 32-bit, seed zero: what Cryptomatte hashes names with.
+pub fn murmur3_32(bytes: &[u8]) -> u32 {
+    const C1: u32 = 0xcc9e_2d51;
+    const C2: u32 = 0x1b87_3593;
+    let mut h: u32 = 0;
+    let (blocks, tail) = bytes.as_chunks::<4>();
+    for block in blocks {
+        let mut k = u32::from_le_bytes(*block);
+        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        h ^= k;
+        h = h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
+    }
+    let mut k = 0u32;
+    for (i, b) in tail.iter().enumerate() {
+        k |= (*b as u32) << (8 * i);
+    }
+    if !tail.is_empty() {
+        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        h ^= k;
+    }
+    h ^= bytes.len() as u32;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// A name's Cryptomatte id: its hash, nudged off the exponents that make a
+/// float infinite, NaN or denormal, and read as a float — the
+/// `uint32_to_float32` conversion the specification names. The bits are what
+/// the manifest lists.
+pub fn cryptomatte_id(name: &str) -> f32 {
+    let mut h = murmur3_32(name.as_bytes());
+    let exponent = (h >> 23) & 0xff;
+    if exponent == 0 || exponent == 0xff {
+        h ^= 1 << 23;
+    }
+    f32::from_bits(h)
+}
+
+/// The Cryptomatte header attributes for a layer called `layer` holding
+/// `names`: its name, hash, conversion and manifest, under the key the
+/// specification derives from the layer's name.
+pub fn cryptomatte_attributes(layer: &str, names: &[&str]) -> Vec<(String, String)> {
+    let key = format!("{:08x}", murmur3_32(layer.as_bytes()));
+    let key = &key[..7];
+    let mut manifest = String::from("{");
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            manifest.push(',');
+        }
+        let escaped: String = name
+            .chars()
+            .flat_map(|c| match c {
+                '"' => vec!['\\', '"'],
+                '\\' => vec!['\\', '\\'],
+                c => vec![c],
+            })
+            .collect();
+        manifest.push_str(&format!("\"{escaped}\":\"{:08x}\"", cryptomatte_id(name).to_bits()));
+    }
+    manifest.push('}');
+    vec![
+        (format!("cryptomatte/{key}/name"), layer.to_string()),
+        (format!("cryptomatte/{key}/hash"), "MurmurHash3_32".to_string()),
+        (format!("cryptomatte/{key}/conversion"), "uint32_to_float32".to_string()),
+        (format!("cryptomatte/{key}/manifest"), manifest),
+    ]
+}
+
 /// What [`read`] finds.
 #[derive(Debug)]
 pub struct Read {
@@ -231,6 +303,28 @@ mod tests {
             assert!((got - want).abs() <= want.abs() * 1e-3 + 1e-3, "{got} against {want}");
         }
         assert_eq!(back.strings, [("cryptomatte/abc/name".to_string(), "CryptoObject".to_string())]);
+    }
+
+    #[test]
+    fn murmur3_matches_the_reference_vectors() {
+        // From the reference implementation's own tests, seed zero.
+        assert_eq!(murmur3_32(b""), 0);
+        assert_eq!(murmur3_32(b"hello"), 0x248b_fa47);
+        assert_eq!(murmur3_32(b"Hello, world!"), 0xc036_3e43);
+        assert_eq!(murmur3_32(b"The quick brown fox jumps over the lazy dog"), 0x2e4f_f723);
+    }
+
+    #[test]
+    fn a_cryptomatte_id_is_always_an_ordinary_float_and_listed_by_its_bits() {
+        for name in ["Cube", "Lamp", "", "a much longer object name.001"] {
+            let id = cryptomatte_id(name);
+            assert!(id.is_finite() && (id == 0.0 || id.is_normal()), "{name}: {id}");
+        }
+        let attrs = cryptomatte_attributes("CryptoObject", &["Cube"]);
+        let manifest = &attrs.iter().find(|(k, _)| k.ends_with("/manifest")).unwrap().1;
+        assert_eq!(manifest, &format!("{{\"Cube\":\"{:08x}\"}}", cryptomatte_id("Cube").to_bits()));
+        // The key is the layer name's hash, seven hex digits.
+        assert!(attrs[0].0.starts_with("cryptomatte/") && attrs[0].0.len() == "cryptomatte/".len() + 7 + "/name".len());
     }
 
     #[test]

@@ -5397,3 +5397,42 @@ impl Viewport {
         Ok(RenderPasses { width: size.0, height: size.1, combined, normal, depth })
     }
 }
+
+impl Viewport {
+    /// Which object each pixel of the last drawn frame shows: the draw's
+    /// `object_id` plus one, zero where nothing is. Rows from the top, the
+    /// drawn region's size. For a render's Cryptomatte.
+    ///
+    /// The picking pass in object mode, drawn whole into a texture of its own
+    /// and read back: the same test against the same depth the picture had.
+    pub fn read_object_ids(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        draws: &[Draw],
+    ) -> Result<Vec<u32>, String> {
+        self.prepare_ids(device, queue, camera, draws, PickDomain::Object);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object ids"),
+            size: wgpu::Extent3d { width: self.size.0, height: self.size.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::picking::ID_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("object ids") });
+        self.render_ids(&mut encoder, &view, draws, PickDomain::Object, false);
+        queue.submit([encoder.finish()]);
+        let bytes = read_texture(device, queue, &texture, wgpu::TextureAspect::All, 8, self.render_size)?;
+        Ok(bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
+            .collect())
+    }
+}

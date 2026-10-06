@@ -3991,6 +3991,7 @@ impl App {
             saved,
             started: Instant::now(),
             drawn: 0,
+            ids: None,
             written: Vec::new(),
         });
         self.aim_render_camera();
@@ -4080,6 +4081,7 @@ impl App {
                 if let Some(job) = self.render_job.as_mut() {
                     job.frames = Some((f + 1, end));
                     job.drawn = 0;
+                    job.ids = None;
                 }
                 return;
             }
@@ -4111,7 +4113,19 @@ impl App {
                 let passes = gfx
                     .viewport
                     .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
-                exr_of(&passes)
+                let crypto = self.render_job.as_ref().and_then(|j| j.ids.as_ref()).map(|ids| {
+                    let names: Vec<Option<String>> = ids
+                        .iter()
+                        .map(|&key| {
+                            key.checked_sub(1)
+                                .and_then(|k| kreate::shell::object_from_key(&self.doc, k))
+                                .and_then(|id| self.doc.object(id))
+                                .map(|o| o.name.clone())
+                        })
+                        .collect();
+                    names
+                });
+                exr_of(&passes, crypto.as_deref())
             }
         };
         std::fs::write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -8033,6 +8047,17 @@ impl App {
         if let Some(frame) = frame {
             frame.present();
         }
+        // An EXR render's object ids, once its camera has settled: the
+        // picking pass over this frame's depth, read back. Once a picture,
+        // because what is where does not change while the samples add up.
+        if let Some(job) = self.render_job.as_mut() {
+            if job.settings.format == kreate_scene::render::OutputFormat::Exr && job.drawn >= 3 && job.ids.is_none() {
+                match gfx.viewport.read_object_ids(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &draws) {
+                    Ok(ids) => job.ids = Some(ids),
+                    Err(e) => tracing::warn!(error = %e, "no object ids for the render"),
+                }
+            }
+        }
         // Only after submit: mapping a buffer whose copy has not been submitted
         // waits for a command that will never arrive.
         gfx.pick_target.after_submit();
@@ -9449,7 +9474,7 @@ impl ApplicationHandler for App {
 
 /// A render's EXR: the picture as R, G, B and A, its depth as Z and its
 /// normals as N.X, N.Y and N.Z — the names compositors look for first.
-fn exr_of(p: &kreate_render::viewport::RenderPasses) -> Vec<u8> {
+fn exr_of(p: &kreate_render::viewport::RenderPasses, objects: Option<&[Option<String>]>) -> Vec<u8> {
     use kreate_io::exr::Channel;
     let pick = |f: &dyn Fn(usize) -> f32| -> Vec<f32> { (0..p.combined.len()).map(f).collect() };
     let r = pick(&|i| p.combined[i][0]);
@@ -9462,10 +9487,38 @@ fn exr_of(p: &kreate_render::viewport::RenderPasses) -> Vec<u8> {
     fn channel<'a>(name: &'a str, values: &'a [f32], full_float: bool) -> Channel<'a> {
         Channel { name, values, full_float }
     }
-    kreate_io::exr::write(
-        p.width,
-        p.height,
-        &[
+    // Cryptomatte, rank zero only: each pixel's object and full coverage.
+    // The picking pass gives one object a pixel, so an edge is the object at
+    // the pixel's centre; the next rank is left empty, which every reader
+    // takes as nothing behind.
+    let ids: Vec<f32> = objects
+        .map(|o| o.iter().map(|n| n.as_deref().map_or(0.0, kreate_io::exr::cryptomatte_id)).collect())
+        .unwrap_or_default();
+    let coverage: Vec<f32> = objects
+        .map(|o| o.iter().map(|n| if n.is_some() { 1.0 } else { 0.0 }).collect())
+        .unwrap_or_default();
+    let nothing = vec![0.0f32; ids.len()];
+    let mut names: Vec<&str> = objects
+        .map(|o| o.iter().filter_map(|n| n.as_deref()).collect())
+        .unwrap_or_default();
+    names.sort_unstable();
+    names.dedup();
+    let attributes = if objects.is_some() {
+        kreate_io::exr::cryptomatte_attributes("CryptoObject", &names)
+    } else {
+        Vec::new()
+    };
+    let strings: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut extra = Vec::new();
+    if objects.is_some() && ids.len() == p.combined.len() {
+        extra.extend([
+            channel("CryptoObject00.R", &ids, true),
+            channel("CryptoObject00.G", &coverage, true),
+            channel("CryptoObject00.B", &nothing, true),
+            channel("CryptoObject00.A", &nothing, true),
+        ]);
+    }
+    let mut channels = vec![
             channel("R", &r, false),
             channel("G", &g, false),
             channel("B", &b, false),
@@ -9475,9 +9528,9 @@ fn exr_of(p: &kreate_render::viewport::RenderPasses) -> Vec<u8> {
             channel("N.X", &nx, false),
             channel("N.Y", &ny, false),
             channel("N.Z", &nz, false),
-        ],
-        &[],
-    )
+    ];
+    channels.extend(extra);
+    kreate_io::exr::write(p.width, p.height, &channels, &strings)
 }
 
 /// A render under way: F12's still, or Ctrl+F12's frames.
@@ -9497,6 +9550,9 @@ struct RenderJob {
     /// Frames drawn since this picture started: its first frames still show
     /// the last one's samples.
     drawn: u32,
+    /// Which object each pixel shows, read once the camera has settled, for
+    /// an EXR's Cryptomatte. See `Viewport::read_object_ids`.
+    ids: Option<Vec<u32>>,
     written: Vec<std::path::PathBuf>,
 }
 
