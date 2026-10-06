@@ -216,6 +216,7 @@ pub fn write_gltf_scene(
     write_lights(&scene.lights, &mut root);
     write_cameras(scene, &mut root, &mut notes);
     write_nodes(scene, &mesh_indices, &mut root, &mut notes);
+    write_skins(scene, to_gltf, &mut root, &mut bin, &mut notes);
     write_animations(scene, &mut root, &mut bin, &mut notes);
 
     if used_ngons {
@@ -464,6 +465,9 @@ fn write_nodes(
             }
             ImportNodeData::Empty => {}
         }
+        if let Some(skin) = node.skin.filter(|s| *s < scene.skins.len()) {
+            json_node.skin = Some(json::Index::new(skin as u32));
+        }
         root.nodes.push(json_node);
     }
 
@@ -478,6 +482,120 @@ fn write_nodes(
         .map(|(index, _)| json::Index::new(index as u32))
         .collect();
     root_scene(root).nodes.extend(roots);
+}
+
+/// Writes the skins: joints and inverse bind matrices, in glTF's axes.
+///
+/// The matrix is the IR's with the axis change on both sides — a matrix maps
+/// a Kreate point to a Kreate point, and glTF's has to map a glTF point to a
+/// glTF point. glTF has no unit here: every exported unit is a metre.
+fn write_skins(
+    scene: &ExportScene<'_>,
+    to_gltf: glam::Mat3,
+    root: &mut json::Root,
+    bin: &mut Vec<u8>,
+    notes: &mut Vec<LossyNote>,
+) {
+    let back = to_gltf.transpose();
+    for skin in &scene.skins {
+        if skin.joints.is_empty() || skin.joints.iter().any(|j| *j >= scene.nodes.len()) {
+            notes.push(LossyNote::Unsupported {
+                what: format!("{}: a skin whose joints are not in the scene", skin.name),
+            });
+            root.skins.push(json::Skin {
+                extensions: None,
+                extras: Default::default(),
+                inverse_bind_matrices: None,
+                joints: Vec::new(),
+                name: Some(skin.name.clone()),
+                skeleton: None,
+            });
+            continue;
+        }
+        let matrices: Vec<f32> = skin
+            .inverse_bind
+            .iter()
+            .flat_map(|m| {
+                let linear = to_gltf * m.matrix3.as_mat3() * back;
+                let t = to_gltf * m.translation.as_vec3();
+                glam::Mat4::from_cols(
+                    linear.x_axis.extend(0.0),
+                    linear.y_axis.extend(0.0),
+                    linear.z_axis.extend(0.0),
+                    t.extend(1.0),
+                )
+                .to_cols_array()
+            })
+            .collect();
+        let view = push_view(root, bin, bytemuck::cast_slice(&matrices), None);
+        let accessor = push_accessor(
+            root,
+            view,
+            skin.inverse_bind.len(),
+            json::accessor::ComponentType::F32,
+            json::accessor::Type::Mat4,
+            None,
+            None,
+        );
+        root.skins.push(json::Skin {
+            extensions: None,
+            extras: Default::default(),
+            inverse_bind_matrices: Some(accessor),
+            joints: skin.joints.iter().map(|j| json::Index::new(*j as u32)).collect(),
+            name: Some(skin.name.clone()),
+            skeleton: None,
+        });
+    }
+}
+
+/// The joints and weights each vertex of `mesh` carries, for the skin the
+/// scene binds it with: its four heaviest bones, normalised, as glTF allows
+/// no more. `None` when no node skins this mesh.
+fn vertex_skin(
+    mesh: &MeshData,
+    scene: &ExportScene<'_>,
+    index: usize,
+) -> Option<(crate::ir::VertexSkin, bool)> {
+    let skin = scene
+        .nodes
+        .iter()
+        .find(|n| n.data == ImportNodeData::Mesh(index) && n.skin.is_some())
+        .and_then(|n| scene.skins.get(n.skin?))?;
+    let n = mesh.num_verts() as usize;
+    let layers: Vec<(u16, &[f32])> = skin
+        .joint_names
+        .iter()
+        .enumerate()
+        .filter_map(|(j, name)| {
+            let w = mesh.attributes().get_f32(&format!("weight:{name}"))?;
+            (w.len() == n).then_some((j as u16, w))
+        })
+        .collect();
+    let mut joints = vec![[0u16; 4]; n];
+    let mut weights = vec![[0.0f32; 4]; n];
+    let mut more_than_four = false;
+    for v in 0..n {
+        let mut all: Vec<(u16, f32)> = layers
+            .iter()
+            .map(|(j, w)| (*j, w[v]))
+            .filter(|(_, w)| *w > 0.0)
+            .collect();
+        all.sort_by(|a, b| b.1.total_cmp(&a.1));
+        more_than_four |= all.len() > 4;
+        all.truncate(4);
+        let total: f32 = all.iter().map(|(_, w)| w).sum();
+        if total <= 0.0 {
+            // No bone weighs on it: glTF has no "stays put", so it follows
+            // the first joint fully — at rest, where it is.
+            weights[v][0] = 1.0;
+            continue;
+        }
+        for (k, (j, w)) in all.into_iter().enumerate() {
+            joints[v][k] = j;
+            weights[v][k] = w / total;
+        }
+    }
+    Some((crate::ir::VertexSkin { joints, weights }, more_than_four))
 }
 
 /// The default scene, made on first use.
@@ -689,6 +807,12 @@ fn write_mesh(
         .get(index)
         .is_some_and(|slots| !slots.is_empty());
     let tri = mesh.triangulate();
+    let skinning = vertex_skin(mesh, scene, index);
+    if skinning.as_ref().is_some_and(|(_, more)| *more) {
+        notes.push(LossyNote::Unsupported {
+            what: format!("{name}: vertices weighed on by more than four bones kept their four heaviest"),
+        });
+    }
 
     // Which faces go in which primitive. Sorted by material index so the output
     // is the same whichever order the faces happen to be in.
@@ -721,6 +845,8 @@ fn write_mesh(
         let mut out_positions: Vec<Vec3> = Vec::new();
         let mut out_uvs: Vec<Vec2> = Vec::new();
         let mut out_normals: Vec<Vec3> = Vec::new();
+        let mut out_joints: Vec<[u16; 4]> = Vec::new();
+        let mut out_weights: Vec<[f32; 4]> = Vec::new();
         let mut corner_vertex: HashMap<u32, u32> = HashMap::new();
 
         let mut face_sizes: Vec<u32> = Vec::new();
@@ -744,6 +870,10 @@ fn write_mesh(
                     out_positions.push(to_gltf * positions[vertex as usize]);
                     out_uvs.push(uv);
                     out_normals.push(normal);
+                    if let Some((skin, _)) = &skinning {
+                        out_joints.push(skin.joints[vertex as usize]);
+                        out_weights.push(skin.weights[vertex as usize]);
+                    }
                     (out_positions.len() - 1) as u32
                 });
                 corner_vertex.insert(c as u32, index);
@@ -829,6 +959,35 @@ fn write_mesh(
                     out_uvs.len(),
                     json::accessor::ComponentType::F32,
                     json::accessor::Type::Vec2,
+                    None,
+                    None,
+                ),
+            );
+        }
+
+        if skinning.is_some() {
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_joints), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::Joints(0)),
+                push_accessor(
+                    root,
+                    view,
+                    out_joints.len(),
+                    json::accessor::ComponentType::U16,
+                    json::accessor::Type::Vec4,
+                    None,
+                    None,
+                ),
+            );
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_weights), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::Weights(0)),
+                push_accessor(
+                    root,
+                    view,
+                    out_weights.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec4,
                     None,
                     None,
                 ),

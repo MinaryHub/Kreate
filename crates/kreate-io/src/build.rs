@@ -38,6 +38,10 @@ pub enum BuildNote {
     /// object plays one action, so the later clip's movement of it was left
     /// out.
     LaterClip { animation: String, node: String },
+    /// Something hung from a joint, which is a bone here and not an object:
+    /// it was parented to the armature instead, and no longer follows the
+    /// bone.
+    HungFromJoint { node: String },
 }
 
 /// Adds everything in `scene` to `doc`, placed as the file placed it.
@@ -179,10 +183,18 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         return (made, notes);
     }
 
-    let made: Vec<ObjectId> = scene
+    // Joints become bones, not objects: each skin is an armature.
+    let rigs = build_armatures(scene, doc);
+    let rig_of_joint = |node: usize| rigs.iter().find(|r| r.joints.contains(&node));
+
+    let made: Vec<Option<ObjectId>> = scene
         .nodes
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(index, node)| {
+            if rig_of_joint(index).is_some() {
+                return None;
+            }
             let data = match node.data {
                 ImportNodeData::Mesh(i) => match meshes.get(i) {
                     Some(id) => ObjectData::Mesh(*id),
@@ -222,13 +234,31 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
             // Parenting everything while it is still at the origin makes that
             // memory an identity, and then the transforms mean what the file
             // meant.
-            doc.add_object(Object::new(node.name.clone(), data))
+            Some(doc.add_object(Object::new(node.name.clone(), data)))
         })
         .collect();
 
     for (index, node) in scene.nodes.iter().enumerate() {
+        let Some(Some(child_id)) = made.get(index) else { continue };
+        // A skinned mesh hangs from its armature, placed where its node is
+        // in the world — the space its armature's bones were built in.
+        if let Some(rig) = node.skin.and_then(|s| rigs.iter().find(|r| r.skin == s)) {
+            let _ = doc.set_parent(*child_id, Some(rig.object));
+            continue;
+        }
         let Some(parent) = node.parent else { continue };
-        let (Some(child_id), Some(parent_id)) = (made.get(index), made.get(parent)) else {
+        let parent_id = match made.get(parent) {
+            Some(Some(p)) => Some(*p),
+            Some(None) => {
+                let rig = rig_of_joint(parent).map(|r| r.object);
+                notes.push(BuildNote::HungFromJoint {
+                    node: node.name.clone(),
+                });
+                rig
+            }
+            None => None,
+        };
+        let Some(parent_id) = parent_id else {
             notes.push(BuildNote::BrokenParent {
                 node: node.name.clone(),
             });
@@ -237,7 +267,7 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         // `set_parent` refuses a cycle, which a file can express and this
         // cannot fix. Refused means the node stays at the root with its own
         // transform, which is the honest partial answer.
-        if doc.set_parent(*child_id, Some(*parent_id)).is_err() {
+        if doc.set_parent(*child_id, Some(parent_id)).is_err() {
             notes.push(BuildNote::BrokenParent {
                 node: node.name.clone(),
             });
@@ -246,15 +276,369 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 
     // And now the placements, with every parent link already in place.
     for (index, node) in scene.nodes.iter().enumerate() {
-        let Some(id) = made.get(index) else { continue };
+        let Some(Some(id)) = made.get(index) else { continue };
+        if node.skin.is_some_and(|s| rigs.iter().any(|r| r.skin == s)) {
+            if let (Some(world), Some(object)) = (scene.world_transform(index), doc.object_mut(*id)) {
+                object.transform = to_transform(world);
+            }
+            continue;
+        }
         if let Some(object) = doc.object_mut(*id) {
             object.transform = to_transform(node.transform.to_kreate(&scene.source));
         }
     }
 
-    build_animations(scene, &made, doc, &mut notes);
+    // Bound: the weights as the bones' vertex groups, and the mesh following
+    // its armature.
+    for (index, node) in scene.nodes.iter().enumerate() {
+        let (Some(Some(id)), ImportNodeData::Mesh(m)) = (made.get(index), node.data) else {
+            continue;
+        };
+        let Some(rig) = node.skin.and_then(|s| rigs.iter().find(|r| r.skin == s)) else {
+            continue;
+        };
+        let (Some(Some(skin)), Some(mesh)) = (scene.vertex_skins.get(m), meshes.get(m)) else {
+            continue;
+        };
+        let rig_uid = doc.object(rig.object).map(|o| o.uid);
+        if let Some(data) = doc.mesh_mut(*mesh) {
+            let n = data.num_verts() as usize;
+            for (k, bone) in rig.bone_names.iter().enumerate() {
+                let layer = kreate_scene::skin::weight_layer(bone);
+                if data.attributes().get_f32(&layer).is_some() {
+                    continue;
+                }
+                let mut w = vec![0.0f32; n];
+                for (v, slot) in w.iter_mut().enumerate() {
+                    if let (Some(j), Some(wt)) = (skin.joints.get(v), skin.weights.get(v)) {
+                        for i in 0..4 {
+                            if j[i] as usize == k {
+                                *slot += wt[i];
+                            }
+                        }
+                    }
+                }
+                data.attributes_mut().insert(
+                    &layer,
+                    kreate_mesh::attribute::Domain::Point,
+                    kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(w)),
+                );
+            }
+        }
+        if let Some(object) = doc.object_mut(*id) {
+            object.skin = rig_uid;
+        }
+    }
 
-    (made, notes)
+    build_animations(scene, &made, doc, &mut notes);
+    for rig in &rigs {
+        build_bone_animation(scene, rig, doc);
+    }
+
+    let mut out: Vec<ObjectId> = made.into_iter().flatten().collect();
+    out.extend(rigs.iter().map(|r| r.object));
+    (out, notes)
+}
+
+/// One skin, built as an armature.
+struct Rig {
+    skin: usize,
+    object: ObjectId,
+    /// Node indices, in the skin's joint order — a vertex's joint number.
+    joints: Vec<usize>,
+    /// The bone each joint became, in the same order.
+    bone_names: Vec<String>,
+    /// The bone each joint became, by index into the armature's bones.
+    bone_of_joint: Vec<usize>,
+}
+
+/// Every skin as an armature object at the world origin: a bone per joint,
+/// its frame the joint's frame at the bind, so a joint's turn is the bone's.
+fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
+    use kreate_math::{DAffine3, DQuat, DVec3};
+    use kreate_scene::armature::{Armature, Bone};
+    let mut rigs = Vec::new();
+    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (s, skin) in scene.skins.iter().enumerate() {
+        // A joint in two skins is a bone in the first.
+        let joints: Vec<usize> = skin
+            .joints
+            .iter()
+            .copied()
+            .filter(|j| *j < scene.nodes.len())
+            .collect();
+        if joints.is_empty() || joints.iter().any(|j| claimed.contains(j)) {
+            continue;
+        }
+        claimed.extend(joints.iter().copied());
+        // Where each joint stood at the bind, in Kreate's space. An inverse
+        // bind matrix takes the mesh's own coordinates into the joint's, so
+        // its inverse is the joint in the mesh's space — and the mesh is
+        // where its node puts it. glTF ignores that placement when it draws a
+        // skin; it is still the space the matrices were written against, by
+        // every exporter that writes one, ours included. When the file has no
+        // matrices the joints' nodes are the bind.
+        let mesh_world = scene
+            .nodes
+            .iter()
+            .position(|n| n.skin == Some(s))
+            .and_then(|n| scene.world_transform(n))
+            .unwrap_or(DAffine3::IDENTITY);
+        let bind: Vec<DAffine3> = joints
+            .iter()
+            .enumerate()
+            .map(|(k, node)| {
+                match skin.inverse_bind.as_ref().and_then(|m| m.get(k)) {
+                    Some(m) => mesh_world * scene.matrix_to_kreate(m.inverse()),
+                    None => scene.world_transform(*node).unwrap_or(DAffine3::IDENTITY),
+                }
+            })
+            .collect();
+        // A bone's frame has no scale.
+        let frames: Vec<(DQuat, DVec3)> = bind
+            .iter()
+            .map(|m| {
+                let (_, r, t) = m.to_scale_rotation_translation();
+                (r.normalize(), t)
+            })
+            .collect();
+        // The nearest ancestor that is a joint of this skin.
+        let parent_joint = |k: usize| -> Option<usize> {
+            let mut at = scene.nodes[joints[k]].parent;
+            for _ in 0..=scene.nodes.len() {
+                let p = at?;
+                if let Some(pk) = joints.iter().position(|j| *j == p) {
+                    return Some(pk);
+                }
+                at = scene.nodes.get(p)?.parent;
+            }
+            None
+        };
+        let parents: Vec<Option<usize>> = (0..joints.len()).map(parent_joint).collect();
+        // Parents first: by depth among the joints.
+        let depth = |mut k: usize| {
+            let mut d = 0;
+            while let Some(p) = parents[k] {
+                d += 1;
+                k = p;
+                if d > joints.len() {
+                    break;
+                }
+            }
+            d
+        };
+        let mut order: Vec<usize> = (0..joints.len()).collect();
+        order.sort_by_key(|k| depth(*k));
+        let mut armature = Armature::new(skin.name.clone());
+        armature.bones.clear();
+        let mut bone_of_joint = vec![0usize; joints.len()];
+        let mut lengths = vec![0.0f64; joints.len()];
+        for &k in &order {
+            let (rotation, head) = frames[k];
+            let along = rotation * DVec3::Y;
+            // As long as the farthest child joint lies along it; otherwise
+            // its parent's length, or a tenth of a unit.
+            let reach = (0..joints.len())
+                .filter(|c| parents[*c] == Some(k))
+                .map(|c| (frames[c].1 - head).dot(along))
+                .fold(0.0f64, f64::max);
+            let length = if reach > 1e-4 {
+                reach
+            } else {
+                parents[k].map(|p| lengths[p]).filter(|l| *l > 0.0).unwrap_or(0.1)
+            };
+            lengths[k] = length;
+            // The roll that turns the shortest-arc frame onto the joint's.
+            let align = if along.dot(DVec3::Y) < -1.0 + 1e-12 {
+                DQuat::from_rotation_z(std::f64::consts::PI)
+            } else {
+                DQuat::from_rotation_arc(DVec3::Y, along)
+            };
+            let twist = align.inverse() * rotation;
+            let roll = 2.0 * twist.y.atan2(twist.w);
+            let name = armature.unique_name(&scene.nodes[joints[k]].name);
+            bone_of_joint[k] = armature.add_bone(Bone {
+                name,
+                parent: parents[k].map(|p| bone_of_joint[p]),
+                head,
+                tail: head + along * length,
+                roll,
+                ..Default::default()
+            });
+        }
+        let bone_names: Vec<String> = bone_of_joint
+            .iter()
+            .map(|b| armature.bones[*b].name.clone())
+            .collect();
+        let name = if skin.name.is_empty() {
+            "Armature".to_string()
+        } else {
+            skin.name.clone()
+        };
+        let id = doc.add_armature(armature);
+        let object = doc.add_object(Object::new(name, ObjectData::Armature(id)));
+        let rig = Rig {
+            skin: s,
+            object,
+            joints,
+            bone_names,
+            bone_of_joint,
+        };
+        // Standing as the file's nodes stand, which need not be the bind.
+        let pose = rig_pose(scene, &rig, doc, None);
+        if let Some(o) = doc.object_mut(object) {
+            for (name, t) in pose {
+                if !t.to_affine().abs_diff_eq(DAffine3::IDENTITY, 1e-6) {
+                    o.pose.entry(&name).transform = t;
+                }
+            }
+        }
+        rigs.push(rig);
+    }
+    rigs
+}
+
+/// Each bone's pose that puts it where its joint is at time `t` (seconds),
+/// or as the nodes stand when `None`.
+fn rig_pose(
+    scene: &ImportScene,
+    rig: &Rig,
+    doc: &Document,
+    t: Option<f32>,
+) -> Vec<(String, kreate_math::DTransform)> {
+    use kreate_math::DAffine3;
+    let Some((_, armature)) = doc.armature_of(rig.object) else {
+        return Vec::new();
+    };
+    // A node's placement under its parent at `t`.
+    let local = |node: usize| -> DAffine3 {
+        let n = &scene.nodes[node];
+        let mut placed = n.transform;
+        if let Some(t) = t {
+            for animation in &scene.animations {
+                for c in animation.channels.iter().filter(|c| c.node == node && c.key_count() > 0) {
+                    match c.values {
+                        crate::ir::ChannelValues::Translation(_) => {
+                            placed.translation = c.vec3_at(t).unwrap_or(placed.translation)
+                        }
+                        crate::ir::ChannelValues::Rotation(_) => {
+                            placed.rotation = c.quat_at(t).unwrap_or(placed.rotation)
+                        }
+                        crate::ir::ChannelValues::Scale(_) => {
+                            placed.scale = c.vec3_at(t).unwrap_or(placed.scale)
+                        }
+                    }
+                }
+            }
+        }
+        placed.to_kreate(&scene.source)
+    };
+    let world = |node: usize| -> DAffine3 {
+        let mut out = DAffine3::IDENTITY;
+        let mut at = Some(node);
+        for _ in 0..=scene.nodes.len() {
+            let Some(n) = at else { break };
+            out = local(n) * out;
+            at = scene.nodes[n].parent;
+        }
+        out
+    };
+    // Bones are parents first, so each parent's posed frame is ready.
+    let mut posed: Vec<DAffine3> = vec![DAffine3::IDENTITY; armature.bones.len()];
+    let mut joint_of_bone = vec![usize::MAX; armature.bones.len()];
+    for (k, b) in rig.bone_of_joint.iter().enumerate() {
+        joint_of_bone[*b] = k;
+    }
+    let mut out = Vec::new();
+    for (i, bone) in armature.bones.iter().enumerate() {
+        let Some(&k) = joint_of_bone.get(i).filter(|k| **k != usize::MAX) else {
+            continue;
+        };
+        let at = world(rig.joints[k]);
+        let base = match bone.parent {
+            Some(p) => posed[p] * armature.bones[p].rest().inverse() * bone.rest(),
+            None => bone.rest(),
+        };
+        let pose = kreate_math::DTransform::from_affine(base.inverse() * at);
+        posed[i] = base * pose.to_affine();
+        out.push((bone.name.clone(), pose));
+    }
+    out
+}
+
+/// The clip's movement of a skin's joints, as its armature's action: every
+/// frame of the moving range, each bone's pose keyed.
+fn build_bone_animation(scene: &ImportScene, rig: &Rig, doc: &mut Document) {
+    use kreate_scene::animation::{bone_path, Action, Interpolation};
+    let times: Vec<f32> = scene
+        .animations
+        .iter()
+        .flat_map(|a| a.channels.iter())
+        .filter(|c| rig.joints.contains(&c.node))
+        .flat_map(|c| c.times[..c.key_count()].iter().copied())
+        .collect();
+    let (Some(first), Some(last)) = (
+        times.iter().copied().reduce(f32::min),
+        times.iter().copied().reduce(f32::max),
+    ) else {
+        return;
+    };
+    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let start = doc.playback.start as f64;
+    let frame_of = |t: f32| start + t as f64 * fps;
+    let (a, b) = (frame_of(first), frame_of(last));
+    let mut frames = vec![a];
+    let mut f = a.floor() + 1.0;
+    while f < b {
+        frames.push(f);
+        f += 1.0;
+    }
+    if b > a {
+        frames.push(b);
+    }
+    let name = doc.object(rig.object).map(|o| o.name.clone()).unwrap_or_default();
+    let mut action = Action::new(format!("{name}Action"));
+    let mut previous: std::collections::HashMap<String, kreate_math::DQuat> =
+        std::collections::HashMap::new();
+    for frame in &frames {
+        let t = ((frame - start) / fps) as f32;
+        for (bone, pose) in rig_pose(scene, rig, doc, Some(t)) {
+            for i in 0..3u8 {
+                action.curve_mut(&bone_path(&bone, "location"), i).insert(
+                    *frame,
+                    pose.translation[i as usize],
+                    Interpolation::Linear,
+                );
+                action.curve_mut(&bone_path(&bone, "scale"), i).insert(
+                    *frame,
+                    pose.scale[i as usize],
+                    Interpolation::Linear,
+                );
+            }
+            // On the previous key's side: q and -q are one turn, and the
+            // curves draw straight lines between numbers.
+            let mut q = pose.rotation;
+            if previous.get(&bone).is_some_and(|p| p.dot(q) < 0.0) {
+                q = -q;
+            }
+            previous.insert(bone.clone(), q);
+            for (i, v) in [q.w, q.x, q.y, q.z].into_iter().enumerate() {
+                action
+                    .curve_mut(&bone_path(&bone, "rotation_quaternion"), i as u8)
+                    .insert(*frame, v, Interpolation::Linear);
+            }
+        }
+    }
+    action.select_all_with(|_| false);
+    let id = doc.add_action(action);
+    if let Some(o) = doc.object_mut(rig.object) {
+        o.action = Some(id);
+    }
+    if b.ceil() as i32 > doc.playback.end {
+        doc.playback.end = b.ceil() as i32;
+    }
+    let frame = doc.playback.frame;
+    doc.animate(frame);
 }
 
 /// The file's clips as actions: one per animated node, keyed on the frames
@@ -272,7 +656,7 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 /// the file's own keys.
 fn build_animations(
     scene: &ImportScene,
-    made: &[ObjectId],
+    made: &[Option<ObjectId>],
     doc: &mut Document,
     notes: &mut Vec<BuildNote>,
 ) {
@@ -291,7 +675,7 @@ fn build_animations(
         nodes.sort_unstable();
         nodes.dedup();
         for node in nodes {
-            let (Some(object), Some(rest)) = (made.get(node), scene.nodes.get(node)) else {
+            let (Some(Some(object)), Some(rest)) = (made.get(node), scene.nodes.get(node)) else {
                 continue;
             };
             if !animated.insert(node) {
@@ -711,18 +1095,9 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 ImportNodeData::Camera(index)
             }
             ObjectData::Empty => ImportNodeData::Empty,
-            ObjectData::Armature(_) => {
-                // A skin is a joint per bone and weights per vertex, and the
-                // document has no weights yet. The placement goes, so a rig's
-                // children are still where they were; the bones do not.
-                notes.push(LossyNote::Unsupported {
-                    what: format!(
-                        "{}: an armature was written as an empty; skins are not written yet",
-                        object.name
-                    ),
-                });
-                ImportNodeData::Empty
-            }
+            // The armature's own node; its bones follow every object's, as
+            // nodes of their own under it. See below.
+            ObjectData::Armature(_) => ImportNodeData::Empty,
         };
         nodes.push(ExportNode {
             name: object.name.clone(),
@@ -744,6 +1119,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 object.transform
             },
             data,
+            skin: None,
         });
         if !object.visible {
             // Written anyway. Visibility is a viewport state and not a property
@@ -758,8 +1134,6 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         }
     }
 
-    let animations = export_animations(doc, &mut notes);
-
     for (index, (_, object)) in doc.objects().enumerate() {
         let Some(parent) = object.parent else {
             continue;
@@ -772,6 +1146,63 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         }
     }
 
+    // Bones, after every object so that object `i` is still node `i`: a node
+    // each, under its parent bone or the armature, placed as posed now. A
+    // joint in glTF is a node like any other, and that is what a reader that
+    // knows nothing of skins sees too: the skeleton, standing as it stands.
+    let mut bone_nodes: std::collections::HashMap<ObjectId, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (id, object) in doc.objects() {
+        let Some((_, armature)) = doc.armature_of(id) else {
+            continue;
+        };
+        let posed = kreate_scene::armature::posed(armature, &object.pose);
+        let mut made = Vec::with_capacity(armature.bones.len());
+        for (i, bone) in armature.bones.iter().enumerate() {
+            let (parent, relative) = match bone.parent {
+                Some(p) => (made.get(p).copied(), posed[p].inverse() * posed[i]),
+                None => (node_of.get(&id).copied(), posed[i]),
+            };
+            made.push(nodes.len());
+            nodes.push(ExportNode {
+                name: bone.name.clone(),
+                parent,
+                transform: kreate_math::DTransform::from_affine(relative),
+                data: ImportNodeData::Empty,
+                skin: None,
+            });
+        }
+        bone_nodes.insert(id, made);
+    }
+
+    // Skins: each bound mesh names its armature's bones as joints.
+    let mut skins = Vec::new();
+    for (id, object) in doc.objects() {
+        let Some(rig) = object.skin.and_then(|uid| doc.object_by_uid(uid)) else {
+            continue;
+        };
+        let (Some((_, armature)), Some(joints), Some(node)) =
+            (doc.armature_of(rig), bone_nodes.get(&rig), node_of.get(&id))
+        else {
+            continue;
+        };
+        let rig_world = doc.world_transform(rig);
+        let mesh_world = doc.world_transform(id);
+        nodes[*node].skin = Some(skins.len());
+        skins.push(crate::ir::ExportSkin {
+            name: doc.object(rig).map(|o| o.name.clone()).unwrap_or_default(),
+            joints: joints.clone(),
+            joint_names: armature.bones.iter().map(|b| b.name.clone()).collect(),
+            inverse_bind: armature
+                .bones
+                .iter()
+                .map(|b| (rig_world * b.rest()).inverse() * mesh_world)
+                .collect(),
+        });
+    }
+
+    let animations = export_animations(doc, &bone_nodes, &mut notes);
+
     (
         ExportScene {
             meshes,
@@ -782,6 +1213,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             cameras,
             nodes,
             animations,
+            skins,
         },
         notes,
     )
@@ -802,6 +1234,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
 /// same range and rate lands on the frames it left from.
 fn export_animations(
     doc: &Document,
+    bone_nodes: &std::collections::HashMap<ObjectId, Vec<usize>>,
     notes: &mut Vec<LossyNote>,
 ) -> Vec<crate::ir::ExportAnimation> {
     use kreate_scene::animation::Interpolation;
@@ -816,11 +1249,11 @@ fn export_animations(
     let mut origin = doc.playback.start as f64;
     for (_, object) in doc.objects() {
         if let Some(action) = object.action.and_then(|a| doc.action(a)) {
-            for curve in action
-                .curves
-                .iter()
-                .filter(|c| MOVES.contains(&c.path.property.as_ref()))
-            {
+            // Bones' keys too: their tracks share the clip's clock.
+            for curve in action.curves.iter().filter(|c| {
+                MOVES.contains(&c.path.property.as_ref())
+                    || kreate_scene::animation::parse_bone_path(&c.path.property).is_some()
+            }) {
                 if let Some(first) = curve.keys.first() {
                     origin = origin.min(first.frame);
                 }
@@ -898,6 +1331,67 @@ fn export_animations(
             rotation: moves("rotation_euler"),
             scale: moves("scale"),
         });
+    }
+    // Bones: every frame of the keyed range, each bone's placement under its
+    // parent as the document poses it — IK and constraints included, which a
+    // file has no place for and a viewer then plays as they looked.
+    for (id, object) in doc.objects() {
+        let (Some(action), Some((_, armature)), Some(joints)) = (
+            object.action.and_then(|a| doc.action(a)),
+            doc.armature_of(id),
+            bone_nodes.get(&id),
+        ) else {
+            continue;
+        };
+        let keyed: Vec<f64> = action
+            .curves
+            .iter()
+            .filter(|c| kreate_scene::animation::parse_bone_path(&c.path.property).is_some())
+            .flat_map(|c| c.keys.iter().map(|k| k.frame))
+            .collect();
+        let (Some(first), Some(last)) = (
+            keyed.iter().copied().reduce(f64::min),
+            keyed.iter().copied().reduce(f64::max),
+        ) else {
+            continue;
+        };
+        let mut frames = vec![first];
+        let mut f = first.floor() + 1.0;
+        while f < last {
+            frames.push(f);
+            f += 1.0;
+        }
+        if last > first {
+            frames.push(last);
+        }
+        let poses: Vec<Vec<kreate_math::DAffine3>> = frames
+            .iter()
+            .map(|frame| {
+                let mut pose = object.pose.clone();
+                kreate_scene::animation::apply_to_pose(action, *frame, &mut pose);
+                kreate_scene::armature::posed(armature, &pose)
+            })
+            .collect();
+        for (i, bone) in armature.bones.iter().enumerate() {
+            let Some(node) = joints.get(i) else { continue };
+            tracks.push(crate::ir::ExportTrack {
+                node: *node,
+                times: frames.iter().map(|f| ((f - origin) / fps) as f32).collect(),
+                transforms: poses
+                    .iter()
+                    .map(|p| {
+                        kreate_math::DTransform::from_affine(match bone.parent {
+                            Some(parent) => p[parent].inverse() * p[i],
+                            None => p[i],
+                        })
+                    })
+                    .collect(),
+                step: false,
+                translation: true,
+                rotation: true,
+                scale: true,
+            });
+        }
     }
     for (_, o) in doc.objects() {
         if !o.drivers.is_empty() {

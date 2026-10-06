@@ -124,6 +124,7 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
 
     let mut scene = ImportScene::new(source);
     read_nodes(&document, &mut scene);
+    read_skins(&document, &buffers, &mut scene);
     read_animations(&document, &buffers, &mut scene);
 
     // Every image, in the file's order, so a texture's `source` index is an
@@ -224,6 +225,8 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
         let mut face_materials: Vec<i32> = Vec::new();
         let mut any_uvs = false;
         let mut any_normals = false;
+        let mut vertex_skin = crate::ir::VertexSkin::default();
+        let mut any_skin = false;
 
         for primitive in mesh.primitives() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -246,6 +249,21 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             let vertices: Vec<Vec3> = vertices.map(Vec3::from_array).collect();
             let count = vertices.len();
             positions.extend(vertices);
+            // Joints and weights per vertex, kept in step with the positions
+            // across primitives whether or not this one has them.
+            let joints: Vec<[u16; 4]> = reader
+                .read_joints(0)
+                .map(|j| j.into_u16().collect())
+                .unwrap_or_default();
+            let weights: Vec<[f32; 4]> = reader
+                .read_weights(0)
+                .map(|w| w.into_f32().collect())
+                .unwrap_or_default();
+            any_skin |= !joints.is_empty() && !weights.is_empty();
+            for v in 0..count {
+                vertex_skin.joints.push(joints.get(v).copied().unwrap_or([0; 4]));
+                vertex_skin.weights.push(weights.get(v).copied().unwrap_or([0.0; 4]));
+            }
 
             let primitive_uvs: Option<Vec<Vec2>> = reader
                 .read_tex_coords(0)
@@ -341,8 +359,27 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             // are what the corner domain represents, so welding by position
             // recovers the surface the author modelled while the UVs and normals
             // keep the distinctions the split was made for.
-            import.weld(options.weld_epsilon, &mut scene.source.notes);
+            if let Some(map) = import.weld_mapped(options.weld_epsilon, &mut scene.source.notes) {
+                // A merged vertex keeps the first copy's joints: the copies of
+                // one skinned vertex carry the same ones.
+                let n = import.positions.len();
+                let mut out = crate::ir::VertexSkin {
+                    joints: vec![[0; 4]; n],
+                    weights: vec![[0.0; 4]; n],
+                };
+                let mut done = vec![false; n];
+                for (old, new) in map.iter().enumerate() {
+                    let new = *new as usize;
+                    if new < n && !done[new] && old < vertex_skin.joints.len() {
+                        out.joints[new] = vertex_skin.joints[old];
+                        out.weights[new] = vertex_skin.weights[old];
+                        done[new] = true;
+                    }
+                }
+                vertex_skin = out;
+            }
         }
+        scene.vertex_skins.push(any_skin.then_some(vertex_skin));
         scene.meshes.push(import);
     }
 
@@ -509,6 +546,7 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
                 rotation: glam::Quat::from_array(rotation),
                 scale: Vec3::from_array(scale),
             };
+            out.skin = node.skin().map(|s| s.index());
             out.data = if let Some(mesh) = node.mesh() {
                 ImportNodeData::Mesh(mesh.index())
             } else if let Some(light) = node.light() {
@@ -531,6 +569,24 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
                 scene.nodes[child.index()].parent = Some(node.index());
             }
         }
+    }
+}
+
+/// The skins: joints by node index and the inverse bind matrices, in the
+/// file's space. The meshes' joints and weights are read with the meshes.
+fn read_skins(document: &gltf::Document, buffers: &[gltf::buffer::Data], scene: &mut ImportScene) {
+    for skin in document.skins() {
+        let reader = skin.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+        scene.skins.push(crate::ir::ImportSkin {
+            name: skin
+                .name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("skin{}", skin.index())),
+            joints: skin.joints().map(|n| n.index()).collect(),
+            inverse_bind: reader
+                .read_inverse_bind_matrices()
+                .map(|m| m.map(|c| glam::Mat4::from_cols_array_2d(&c)).collect()),
+        });
     }
 }
 

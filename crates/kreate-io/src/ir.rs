@@ -217,8 +217,15 @@ impl ImportMesh {
     /// one. That is a definite rule that produces the same mesh every time, and
     /// the file's own vertex order is the tie-breaker.
     pub fn weld(&mut self, epsilon: f32, notes: &mut Vec<LossyNote>) {
+        self.weld_mapped(epsilon, notes);
+    }
+
+    /// [`ImportMesh::weld`], saying where each vertex went: `Some(map)` with
+    /// `map[old] == new` when anything merged. For data kept per vertex
+    /// outside the mesh — a skin's weights — which has to follow.
+    pub fn weld_mapped(&mut self, epsilon: f32, notes: &mut Vec<LossyNote>) -> Option<Vec<u32>> {
         if self.positions.is_empty() || epsilon <= 0.0 {
-            return;
+            return None;
         }
         let before = self.positions.len();
 
@@ -283,7 +290,7 @@ impl ImportMesh {
         }
 
         if welded.len() == before {
-            return;
+            return None;
         }
         notes.push(LossyNote::Welded {
             mesh: self.name.clone(),
@@ -325,6 +332,7 @@ impl ImportMesh {
         // which also keeps the corner arrays in step — one place that decides
         // what an unrepresentable face is.
         self.sanitize(notes);
+        Some(representative)
     }
 
     /// Drops faces that cannot be represented, recording why.
@@ -532,6 +540,8 @@ pub struct ImportNode {
     pub parent: Option<usize>,
     pub transform: ImportTransform,
     pub data: ImportNodeData,
+    /// Index into [`ImportScene::skins`], for a mesh the joints deform.
+    pub skin: Option<usize>,
 }
 
 impl ImportNode {
@@ -541,8 +551,31 @@ impl ImportNode {
             parent: None,
             transform: ImportTransform::default(),
             data: ImportNodeData::Empty,
+            skin: None,
         }
     }
+}
+
+/// A skin as the file wrote it: which nodes are its joints and where each
+/// stood when the mesh was bound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportSkin {
+    pub name: String,
+    /// Indices into [`ImportScene::nodes`], in the order a vertex's joint
+    /// numbers count them.
+    pub joints: Vec<usize>,
+    /// Per joint, in the file's space: from the mesh to the joint's own space
+    /// at the bind. `None` when the file left them out, which glTF reads as
+    /// the identity — the joints' placements in the file are then the bind.
+    pub inverse_bind: Option<Vec<glam::Mat4>>,
+}
+
+/// One mesh's joints and weights per vertex, as glTF carries them: four of
+/// each. Parallel to the mesh's positions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VertexSkin {
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
 }
 
 /// What kind of light, in the units the format writes.
@@ -610,6 +643,8 @@ pub struct ExportNode {
     /// Relative to the parent, in Kreate space.
     pub transform: kreate_math::DTransform,
     pub data: ImportNodeData,
+    /// Index into [`ExportScene::skins`], for a mesh node the bones deform.
+    pub skin: Option<usize>,
 }
 
 impl ExportNode {
@@ -619,8 +654,27 @@ impl ExportNode {
             parent: None,
             transform: kreate_math::DTransform::IDENTITY,
             data: ImportNodeData::Empty,
+            skin: None,
         }
     }
+}
+
+/// A skin on the way out: the nodes that are its joints, in the order a
+/// vertex's joint numbers count them, and where each stood when the mesh was
+/// bound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportSkin {
+    pub name: String,
+    /// Indices into [`ExportScene::nodes`].
+    pub joints: Vec<usize>,
+    /// The bone each joint is, by name: a mesh's weight layer
+    /// `weight:<name>` is that joint's weights.
+    pub joint_names: Vec<String>,
+    /// Per joint, in Kreate space: the joint's world frame at rest, inverted,
+    /// times the mesh's world transform. What takes a vertex of the mesh into
+    /// the joint's own space, which is glTF's inverse bind matrix with the
+    /// mesh's placement folded in — glTF ignores a skinned mesh node's own.
+    pub inverse_bind: Vec<kreate_math::DAffine3>,
 }
 
 /// How a channel travels between its keys, as glTF says it.
@@ -844,6 +898,8 @@ pub struct ExportScene<'a> {
     pub nodes: Vec<ExportNode>,
     /// What moves. Empty for a still scene and for every format without time.
     pub animations: Vec<ExportAnimation>,
+    /// The skins the mesh nodes' `skin` indices name.
+    pub skins: Vec<ExportSkin>,
 }
 
 impl<'a> ExportScene<'a> {
@@ -857,6 +913,7 @@ impl<'a> ExportScene<'a> {
             cameras: Vec::new(),
             nodes: Vec::new(),
             animations: Vec::new(),
+            skins: Vec::new(),
         }
     }
 
@@ -896,6 +953,10 @@ pub struct ImportScene {
     pub nodes: Vec<ImportNode>,
     /// What moves, clip by clip. Empty for a format without time.
     pub animations: Vec<ImportAnimation>,
+    pub skins: Vec<ImportSkin>,
+    /// Per mesh, parallel to `meshes` (and possibly shorter): the joints and
+    /// weights of its vertices, for a mesh a skin deforms.
+    pub vertex_skins: Vec<Option<VertexSkin>>,
     pub source: SourceMetadata,
 }
 
@@ -909,8 +970,21 @@ impl ImportScene {
             cameras: Vec::new(),
             nodes: Vec::new(),
             animations: Vec::new(),
+            skins: Vec::new(),
+            vertex_skins: Vec::new(),
             source,
         }
+    }
+
+    /// A matrix in the file's space, in Kreate's: the axis change on both
+    /// sides of the linear part, the unit on the translation — what
+    /// [`ImportTransform::to_kreate`] does to a placement, for a matrix that
+    /// need not be one.
+    pub fn matrix_to_kreate(&self, m: glam::Mat4) -> kreate_math::DAffine3 {
+        let axis = self.source.axis.to_kreate();
+        let linear = axis * Mat3::from_mat4(m) * axis.transpose();
+        let translation = axis * (m.w_axis.truncate() * self.source.unit_scale);
+        kreate_math::DAffine3::from_mat3_translation(linear.as_dmat3(), translation.as_dvec3())
     }
 
     /// Where a node ends up, with its parents applied.
