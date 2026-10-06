@@ -2577,3 +2577,56 @@ fn shot_keyed_material() {
     };
     shot.dump("material-keyed");
 }
+
+/// Blender's sidebar: Item, Tool and View tabs, each its own page, and the
+/// navigation gizmo moved to the left of it rather than hidden under it.
+#[test]
+fn the_sidebar_has_blenders_three_tabs_and_keeps_the_gizmo_in_view() {
+    let mut doc = Document::new();
+    let object = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+    doc.selection.add(object);
+    let shot = |tab: kreate::shell::SidebarTab| {
+        composite_with(&doc, "en-US", false, move |state| {
+            state.toggle_sidebar();
+            state.sidebar_tab = tab;
+        })
+    };
+    use kreate::shell::SidebarTab;
+    let item = gpu_or_skip!(shot(SidebarTab::Item));
+    let tool = gpu_or_skip!(shot(SidebarTab::Tool));
+    let view = gpu_or_skip!(shot(SidebarTab::View));
+    for (name, c) in [("sidebar-item", &item), ("sidebar-tool", &tool), ("sidebar-view", &view)] {
+        c.dump(name);
+    }
+
+    let vr = item.viewport_rect;
+    let bar = *item
+        .state
+        .viewport_blockers
+        .iter()
+        .find(|r| (r.max.x - vr.max.x).abs() < 1.0)
+        .expect("the sidebar against the right edge");
+    // Each tab draws its own page: below the tab row, the strip differs.
+    let page = |a: &Composited, b: &Composited| -> usize {
+        let mut n = 0;
+        for y in (bar.min.y as u32 + 40)..(bar.max.y as u32 - 8) {
+            for x in (bar.min.x as u32 + 2)..(bar.max.x as u32 - 2) {
+                if a.at(x, y) != b.at(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    assert!(page(&item, &tool) > 500, "Item and Tool draw the same page");
+    assert!(page(&item, &view) > 500, "Item and View draw the same page");
+    assert!(page(&tool, &view) > 500, "Tool and View draw the same page");
+
+    // The gizmo, wholly left of the sidebar.
+    let (centre, radius) = item.state.gizmo_circle.expect("the gizmo was drawn");
+    assert!(
+        centre.x + radius <= bar.min.x,
+        "the gizmo at {centre:?} (radius {radius}) is under the sidebar from {}",
+        bar.min.x
+    );
+}

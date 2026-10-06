@@ -7045,6 +7045,9 @@ impl App {
         // will be drawn into until the layout changes — and the shell replaces
         // the rectangle with this frame's as it draws.
         self.ui.camera_rotation = self.camera.rotation;
+        // The lens as a 35 mm camera would have it: the vertical field of
+        // view across a 24 mm-high frame.
+        self.ui.view_lens_mm = 12.0 / (self.camera.fov_y * 0.5).tan();
         self.ui.projector = self.viewport_px.map(|(x, y, w, h)| {
             let ppp = self.egui_ctx.pixels_per_point();
             let aspect = if h > 0.0 { (w / h) as f64 } else { 1.0 };
@@ -8375,6 +8378,15 @@ impl App {
             "file.run_script" => self.run_script_file(),
             "view.frame_all" => self.frame_all(),
             "view.toggle_edit_mode" => self.toggle_edit_mode(),
+            // The sidebar's View tab: the viewport's focal length, in mm.
+            "view.set_lens" => {
+                if let Some(PropertyValue::Float(mm)) = action.params.get("lens") {
+                    let mm = mm.clamp(1.0, 1000.0);
+                    self.camera.fov_y = 2.0 * (12.0 / mm).atan();
+                    self.motion.interrupt(&self.camera);
+                    self.redraw.set(RedrawReason::CAMERA_MOVED);
+                }
+            }
             "view.toggle_sidebar" => {
                 self.ui.toggle_sidebar();
                 self.redraw.set(RedrawReason::UI);

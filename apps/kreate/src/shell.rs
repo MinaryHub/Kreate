@@ -124,6 +124,12 @@ pub struct ShellState {
     /// The camera's rotation, for drawing the navigation gizmo. Interface state
     /// reads the camera; it never writes to it.
     pub camera_rotation: kreate_math::DQuat,
+    /// The viewport camera's focal length in millimetres, for the sidebar's
+    /// View tab. Published by the application; the tab asks for a new one
+    /// through `view.set_lens`.
+    pub view_lens_mm: f64,
+    /// Which of the sidebar's tabs is showing.
+    pub sidebar_tab: SidebarTab,
     /// Enough of the camera to put a world point on the screen, for the glyphs
     /// drawn over the picture for objects that have no surface — lights and
     /// cameras. `None` until the first frame has said how big the viewport is.
@@ -565,6 +571,8 @@ impl Default for ShellState {
             ime_active: false,
             select_mode: 2,
             camera_rotation: kreate_math::DQuat::IDENTITY,
+            view_lens_mm: 50.0,
+            sidebar_tab: SidebarTab::Item,
             projector: None,
             gizmo_circle: None,
             viewport_blockers: Vec::new(),
@@ -1375,6 +1383,11 @@ struct Labels {
     area_menu: String,
     editor_unavailable: String,
     sidebar_item: String,
+    sidebar_tool: String,
+    sidebar_view: String,
+    sidebar_dimensions: String,
+    sidebar_lens: String,
+    sidebar_cursor: String,
     sidebar_nothing: String,
     area_split_v: String,
     area_split_h: String,
@@ -1666,6 +1679,11 @@ impl Labels {
             area_menu: t("area-menu"),
             editor_unavailable: t("editor-unavailable"),
             sidebar_item: t("sidebar-item"),
+            sidebar_tool: t("sidebar-tool"),
+            sidebar_view: t("sidebar-view"),
+            sidebar_dimensions: t("sidebar-dimensions"),
+            sidebar_lens: t("sidebar-lens"),
+            sidebar_cursor: t("sidebar-cursor"),
             sidebar_nothing: t("sidebar-nothing"),
             area_split_v: t("area-split-vertical"),
             area_split_h: t("area-split-horizontal"),
@@ -2317,7 +2335,8 @@ fn draw_area(
             ui.set_clip_rect(inner);
             match area.editor.as_str() {
                 "viewport" => {
-                    draw_viewport(ui, state, doc, mode, l, inner, image);
+                    let sidebar = state.sidebar_open(area.id);
+                    draw_viewport(ui, state, doc, mode, l, inner, image, sidebar);
                     // The brush's reach, as a ring under the pointer.
                     let brush = match mode.acts_on() {
                         kreate_ops::mode::ActsOn::Weights => Some(state.paint.radius),
@@ -3807,6 +3826,7 @@ fn draw_viewport(
     l: &Labels,
     rect: egui::Rect,
     image: Option<ViewportImage>,
+    sidebar: bool,
 ) {
     if let Some(image) = image {
         // Only the part of the target that was drawn into. Sampling the whole
@@ -3824,7 +3844,13 @@ fn draw_viewport(
     draw_view_info(ui, state, doc, mode, l, rect, toolbar);
     draw_select_band(ui, state, rect);
     draw_modal_header(ui, state, rect);
-    draw_nav_gizmo(ui, state, rect);
+    // Left of the sidebar when it is open, as Blender moves it: under the
+    // sidebar it was hidden exactly while the sidebar was in use.
+    let mut gizmo_room = rect;
+    if sidebar {
+        gizmo_room.max.x -= sidebar_width(rect);
+    }
+    draw_nav_gizmo(ui, state, gizmo_room);
     draw_context_menu(ui, state, rect);
     draw_rename(ui, state, rect);
 }
@@ -5480,7 +5506,7 @@ fn draw_item_sidebar(
     l: &Labels,
     mode: kreate_ops::operator::Mode,
 ) {
-    let width = SIDEBAR_WIDTH.min(viewport.width() * 0.5);
+    let width = sidebar_width(viewport);
     if width <= 0.0 {
         return;
     }
@@ -5509,8 +5535,33 @@ fn draw_item_sidebar(
             .id_salt(("sidebar", area.0)),
         |ui| {
             ui.set_clip_rect(inner);
-            ui.heading(&l.sidebar_item);
+            // Blender's tabs, across the top rather than down the side: the
+            // sidebar is narrow, and three words fit on one line.
+            ui.horizontal(|ui| {
+                for (tab, label) in [
+                    (SidebarTab::Item, &l.sidebar_item),
+                    (SidebarTab::Tool, &l.sidebar_tool),
+                    (SidebarTab::View, &l.sidebar_view),
+                ] {
+                    if ui.selectable_label(state.sidebar_tab == tab, label.as_str()).clicked() {
+                        state.sidebar_tab = tab;
+                    }
+                }
+            });
             ui.separator();
+            match state.sidebar_tab {
+                SidebarTab::Item => {}
+                SidebarTab::Tool => {
+                    // The header's own controls, one under another. Their
+                    // own id space: the header draws the same ones.
+                    ui.vertical(|ui| draw_tool_settings(ui, state, area.0 | 0x8000_0000, mode));
+                    return;
+                }
+                SidebarTab::View => {
+                    draw_view_sidebar(ui, state, doc, registry, l);
+                    return;
+                }
+            }
 
             let Some(active) = doc.selection.active.and_then(|id| doc.object(id)) else {
                 // Said out loud rather than drawn as three empty boxes: a
@@ -5576,8 +5627,92 @@ fn draw_item_sidebar(
                 .active
                 .expect("an active object was just read");
             draw_object_transform(ui, state, doc, info, object, params, l);
+            draw_dimensions(ui, state, doc, registry, object, l);
         },
     );
+}
+
+/// Which tab of the viewport sidebar is showing: Blender's three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarTab {
+    /// The active object: where it is, how it is turned, how big it is.
+    Item,
+    /// The transform settings the header also shows.
+    Tool,
+    /// The view itself: its lens and the 3D cursor.
+    View,
+}
+
+/// How wide the sidebar is in a viewport of this size.
+fn sidebar_width(viewport: egui::Rect) -> f32 {
+    SIDEBAR_WIDTH.min(viewport.width() * 0.5)
+}
+
+/// The active object's size in metres along its own axes — the mesh's extent
+/// times the scale, Blender's Dimensions — or `None` for an object without
+/// a mesh.
+fn object_dimensions(doc: &Document, object: ObjectId) -> Option<[f64; 3]> {
+    let o = doc.object(object)?;
+    let kreate_scene::document::ObjectData::Mesh(mesh) = o.data else {
+        return None;
+    };
+    let bounds = doc.mesh(mesh)?.bounds();
+    if bounds.min.x > bounds.max.x {
+        return None;
+    }
+    Some(((bounds.max - bounds.min).as_dvec3() * o.transform.scale).abs().to_array())
+}
+
+/// Dimensions, under the transform: typing a size sets the scale that gives it.
+fn draw_dimensions(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    object: ObjectId,
+    l: &Labels,
+) {
+    let (Some(size), Some(info)) = (object_dimensions(doc, object), registry.get("object.set_dimensions")) else {
+        return;
+    };
+    ui.separator();
+    ui.strong(&l.sidebar_dimensions);
+    let mut params = PropertyMap::new();
+    params.set("dimensions", kreate_reflect::PropertyValue::Vec3(size));
+    if kreate_ui::property_editor(ui, &state.catalog, "sidebar.dimensions", info.schema, &mut params) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "object.set_dimensions", params, dragging);
+    }
+}
+
+/// The View tab: the viewport's lens and the 3D cursor.
+fn draw_view_sidebar(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+) {
+    ui.strong(&l.sidebar_lens);
+    let mut lens = state.view_lens_mm;
+    if ui
+        .add(egui::DragValue::new(&mut lens).range(1.0..=1000.0).speed(0.5).max_decimals(1))
+        .changed()
+    {
+        state.view_lens_mm = lens;
+        let mut params = PropertyMap::new();
+        params.set("lens", kreate_reflect::PropertyValue::Float(lens));
+        state.queue.dispatch("view.set_lens", params);
+    }
+    ui.separator();
+    ui.strong(&l.sidebar_cursor);
+    let Some(info) = registry.get("scene.cursor_set") else { return };
+    let mut params = PropertyMap::new();
+    params.set("location", kreate_reflect::PropertyValue::Vec3(doc.cursor.to_array()));
+    if kreate_ui::property_editor(ui, &state.catalog, "sidebar.cursor", info.schema, &mut params) {
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "scene.cursor_set", params, dragging);
+    }
 }
 
 /// The workspace tabs.
@@ -8269,6 +8404,11 @@ keymap-context-modal = Modal Tools
 uv-none = This mesh has no UVs yet. Project some with U, or from the right-click menu.
 area-menu = Area
 sidebar-item = Item
+sidebar-tool = Tool
+sidebar-view = View
+sidebar-dimensions = Dimensions
+sidebar-lens = Focal Length (mm)
+sidebar-cursor = 3D Cursor
 mode-weight-paint = Weight Paint
 keymap-context-weight-paint = Weight Paint
 keymap-context-sculpt = Sculpt
@@ -9084,6 +9224,11 @@ keymap-context-modal = 모달 툴
 uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른클릭 메뉴에서 펼치세요.
 area-menu = 영역
 sidebar-item = 항목
+sidebar-tool = 도구
+sidebar-view = 보기
+sidebar-dimensions = 치수
+sidebar-lens = 초점 거리 (mm)
+sidebar-cursor = 3D 커서
 mode-weight-paint = 웨이트 페인트
 keymap-context-weight-paint = 웨이트 페인트
 keymap-context-sculpt = 스컬프트
