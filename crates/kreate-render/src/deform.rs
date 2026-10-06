@@ -207,11 +207,15 @@ fn workgroups(items: u32) -> u32 {
 
 /// The pipelines, built once for the device.
 pub struct Deformer {
-    live: wgpu::BindGroupLayout,
-    topology: wgpu::BindGroupLayout,
+    pub(crate) live: wgpu::BindGroupLayout,
+    pub(crate) topology: wgpu::BindGroupLayout,
     positions: wgpu::ComputePipeline,
-    face_normals: wgpu::ComputePipeline,
-    vertex_normals: wgpu::ComputePipeline,
+    pub(crate) face_normals: wgpu::ComputePipeline,
+    pub(crate) vertex_normals: wgpu::ComputePipeline,
+    /// Skinning's position pass. The normals after it are the two above:
+    /// see [`crate::skin`].
+    pub(crate) skin: wgpu::ComputePipeline,
+    pub(crate) skin_layout: wgpu::BindGroupLayout,
 }
 
 impl Deformer {
@@ -276,7 +280,38 @@ impl Deformer {
                 cache: None,
             })
         };
+        let skin_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skin"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/skin.wgsl").into()),
+        });
+        let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skin"),
+            entries: &[
+                storage(0, true),  // rest positions
+                storage(1, false), // live positions
+                storage(2, true),  // render vertex to mesh vertex
+                storage(3, true),  // influence offsets
+                storage(4, true),  // influence bones
+                storage(5, true),  // influence weights
+                storage(6, true),  // bone matrices
+            ],
+        });
+        let skin_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skin"),
+            bind_group_layouts: &[Some(&skin_layout)],
+            immediate_size: 0,
+        });
+        let skin = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("skin_positions"),
+            layout: Some(&skin_pipeline_layout),
+            module: &skin_module,
+            entry_point: Some("skin_positions"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         Self {
+            skin,
+            skin_layout,
             positions: stage("deform_positions"),
             face_normals: stage("compute_face_normals"),
             vertex_normals: stage("compute_vertex_normals"),
@@ -339,14 +374,7 @@ impl Deform {
         encoder.copy_buffer_to_buffer(mesh.positions(), 0, &rest_positions, 0, positions_bytes);
         encoder.copy_buffer_to_buffer(mesh.normals(), 0, &rest_normals, 0, normals_bytes);
 
-        let init = |label: &str, contents: &[u8]| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-        };
-        // COPY_DST, unlike the tables below it: the proportional radius is a
+        // COPY_DST, unlike the topology tables: the proportional radius is a
         // live control during a drag, so this is the one buffer here that gets
         // rewritten. See `set_weights`.
         let weights_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -354,67 +382,25 @@ impl Deform {
             contents: bytemuck::cast_slice(weights),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let face_offsets = init(
-            "deform face offsets",
-            bytemuck::cast_slice(&cpu.face_offsets),
-        );
-        let corner_render = init(
-            "deform corner render",
-            bytemuck::cast_slice(&cpu.corner_render),
-        );
-        let group_offsets = init(
-            "deform group offsets",
-            bytemuck::cast_slice(&cpu.group_offsets),
-        );
-        // A mesh of one face has no group entries at all, and a zero-sized
-        // storage buffer is not a thing wgpu will bind.
-        let group_faces = init(
-            "deform group faces",
-            bytemuck::cast_slice(pad_if_empty(&cpu.group_faces)),
-        );
-        let faces = cpu.counts.faces.max(1);
-        let face_normals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("deform face normals"),
-            size: (faces as u64) * 12,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("deform gesture"),
             contents: bytemuck::bytes_of(&Gesture::IDENTITY),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-            wgpu::BindGroupEntry {
-                binding,
-                resource: buffer.as_entire_binding(),
-            }
-        }
         let live = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("deform live"),
             layout: &deformer.live,
             entries: &[
-                entry(0, &rest_positions),
-                entry(1, &rest_normals),
-                entry(2, mesh.positions()),
-                entry(3, mesh.normals()),
-                entry(4, &weights_buffer),
-                entry(5, &uniform),
+                bind_entry(0, &rest_positions),
+                bind_entry(1, &rest_normals),
+                bind_entry(2, mesh.positions()),
+                bind_entry(3, mesh.normals()),
+                bind_entry(4, &weights_buffer),
+                bind_entry(5, &uniform),
             ],
         });
-        let topology = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("deform topology"),
-            layout: &deformer.topology,
-            entries: &[
-                entry(0, &face_offsets),
-                entry(1, &corner_render),
-                entry(2, &face_normals),
-                entry(3, &group_offsets),
-                entry(4, &group_faces),
-            ],
-        });
+        let topology = topology_group(device, deformer, cpu);
 
         Some(Self {
             live,
@@ -488,15 +474,71 @@ impl Deform {
     }
 }
 
+/// The tables the normal passes walk, bound: which render vertices make up
+/// each face and which faces each render vertex averages. A function of the
+/// topology alone, so a drag and a skin build the same thing.
+pub(crate) fn topology_group(
+    device: &wgpu::Device,
+    deformer: &Deformer,
+    cpu: &RenderMeshCpu,
+) -> wgpu::BindGroup {
+    let init = |label: &str, contents: &[u8]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage: wgpu::BufferUsages::STORAGE,
+        })
+    };
+    let face_offsets = init("deform face offsets", bytemuck::cast_slice(&cpu.face_offsets));
+    let corner_render = init("deform corner render", bytemuck::cast_slice(&cpu.corner_render));
+    let group_offsets = init("deform group offsets", bytemuck::cast_slice(&cpu.group_offsets));
+    // A mesh of one face has no group entries at all, and a zero-sized
+    // storage buffer is not a thing wgpu will bind.
+    let group_faces = init(
+        "deform group faces",
+        bytemuck::cast_slice(pad_if_empty(&cpu.group_faces)),
+    );
+    let faces = cpu.counts.faces.max(1);
+    let face_normals = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("deform face normals"),
+        size: (faces as u64) * 12,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("deform topology"),
+        layout: &deformer.topology,
+        entries: &[
+            bind_entry(0, &face_offsets),
+            bind_entry(1, &corner_render),
+            bind_entry(2, &face_normals),
+            bind_entry(3, &group_offsets),
+            bind_entry(4, &group_faces),
+        ],
+    })
+}
+
+/// The workgroups that cover `items`, for the passes in [`crate::skin`].
+pub(crate) fn workgroups_for(items: u32) -> u32 {
+    workgroups(items)
+}
+
 /// A one-element slice when the input is empty.
 ///
 /// wgpu will not bind a zero-sized storage buffer, and a mesh can legitimately
 /// have nothing in one of these tables.
-fn pad_if_empty(values: &[u32]) -> &[u32] {
+pub(crate) fn pad_if_empty(values: &[u32]) -> &[u32] {
     if values.is_empty() {
         &[0]
     } else {
         values
+    }
+}
+
+pub(crate) fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 

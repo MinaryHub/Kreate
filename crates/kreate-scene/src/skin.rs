@@ -102,6 +102,43 @@ pub fn skin(mesh: &MeshData, armature: &Armature, matrices: &[DAffine3]) -> Opti
     Some(out)
 }
 
+/// The influences [`skin`] reads, as tables: for each vertex, the bones with a
+/// positive weight on it and those weights, CSR over the vertices. What a GPU
+/// skinning pass uploads once, so it can do per pose exactly what [`skin`]
+/// does. `None` when no bone weighs on the mesh, as for [`skin`].
+pub fn influences(mesh: &MeshData, armature: &Armature) -> Option<(Vec<u32>, Vec<u32>, Vec<f32>)> {
+    let n = mesh.num_verts() as usize;
+    let layers: Vec<(u32, &[f32])> = armature
+        .bones
+        .iter()
+        .enumerate()
+        .filter_map(|(i, bone)| {
+            let layer = mesh.attributes().get(&weight_layer(&bone.name))?;
+            match (&layer.domain, &layer.data) {
+                (Domain::Point, AttrData::F32(w)) if w.len() == n => Some((i as u32, w.as_slice())),
+                _ => None,
+            }
+        })
+        .collect();
+    if layers.is_empty() {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(n + 1);
+    let mut bones = Vec::new();
+    let mut weights = Vec::new();
+    offsets.push(0);
+    for v in 0..n {
+        for (bone, w) in &layers {
+            if w[v] > 0.0 {
+                bones.push(*bone);
+                weights.push(w[v]);
+            }
+        }
+        offsets.push(bones.len() as u32);
+    }
+    Some((offsets, bones, weights))
+}
+
 /// Weights from distance: each vertex follows the bones nearest it.
 ///
 /// Blender's "With Automatic Weights" solves heat diffusion over the surface;

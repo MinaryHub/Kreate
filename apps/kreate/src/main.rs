@@ -501,6 +501,9 @@ struct Gfx {
     /// copies when the handle is shared. It also makes the renderer's view of the
     /// document genuinely immutable rather than merely intended to be.
     meshes: Vec<(Arc<MeshData>, GpuMesh)>,
+    /// Objects skinned on the GPU: each keeps a mesh uploaded once from its
+    /// rest shape, and a pose is the bones' matrices. See `kreate_render::skin`.
+    skinned: Vec<SkinnedGpu>,
     /// The id buffer and the ring of readback buffers behind it.
     pick_target: kreate_render::PickTarget,
     /// The compute reduction behind box, circle and lasso selection.
@@ -546,6 +549,18 @@ impl Gfx {
         self.gpu.queue.submit([encoder.finish()]);
         true
     }
+}
+
+/// One object skinned on the GPU. See `Gfx::skinned`.
+struct SkinnedGpu {
+    object: ObjectId,
+    /// The mesh as it was before the bones: what `mesh` was uploaded from.
+    rest: Arc<MeshData>,
+    /// The CPU's skinned mesh this frame's pose matches — the handle the
+    /// draw loop finds this by, and the test for whether the pose moved.
+    shown: Arc<MeshData>,
+    mesh: GpuMesh,
+    skin: kreate_render::Skin,
 }
 
 struct App {
@@ -5876,8 +5891,79 @@ impl App {
     /// a stutter on a scene big enough that it is already too late.
     fn sync_gpu(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
+        // Skinned objects first. Each is drawn from a GPU mesh of its rest
+        // shape, skinned in place, so a new pose costs a matrix upload and a
+        // dispatch rather than the extract and upload a changed mesh costs —
+        // the difference between playing an animated character and not. The
+        // CPU's skinned mesh is still what `evaluated` holds: picking,
+        // snapping and the path tracer read it.
+        let mut skinned = Vec::new();
+        let mut encoder: Option<wgpu::CommandEncoder> = None;
+        for (id, shown) in &self.evaluated {
+            let Some((rest, matrices)) = self.modifiers.skin_source(shown) else {
+                continue;
+            };
+            let reused = gfx
+                .skinned
+                .iter()
+                .position(|e| e.object == *id && Arc::ptr_eq(&e.rest, rest))
+                .map(|i| gfx.skinned.swap_remove(i));
+            let fresh = reused.is_none();
+            let entry = reused.or_else(|| {
+                let armature = self.doc.skin_matrices(*id).and_then(|(a, _)| self.doc.armature(a))?;
+                let (offsets, bones, weights) = kreate_scene::skin::influences(rest, armature)?;
+                let cpu = RenderMeshCpu::extract(rest);
+                let mesh = GpuMesh::upload(
+                    &gfx.gpu.device,
+                    &gfx.viewport.layouts,
+                    &cpu,
+                    Vec4::new(0.72, 0.73, 0.76, 1.0),
+                );
+                let skin = kreate_render::Skin::new(
+                    &gfx.gpu.device,
+                    &gfx.deformer,
+                    &mesh,
+                    &cpu,
+                    &kreate_render::Influences { offsets, bones, weights },
+                    matrices.len() as u32,
+                )?;
+                Some(SkinnedGpu { object: *id, rest: rest.clone(), shown: shown.clone(), mesh, skin })
+            });
+            let Some(mut entry) = entry else { continue };
+            if fresh || !Arc::ptr_eq(&entry.shown, shown) {
+                let rows: Vec<kreate_render::BoneRows> = matrices
+                    .iter()
+                    .map(|m| kreate_render::bone_rows(glam::Affine3A::from_mat4(glam::DMat4::from(*m).as_mat4())))
+                    .collect();
+                if !entry.skin.set_bones(&gfx.gpu.queue, &rows) {
+                    // The armature gained or lost a bone: made again next
+                    // frame, and drawn the ordinary way until then.
+                    continue;
+                }
+                let encoder = encoder.get_or_insert_with(|| {
+                    gfx.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("skin"),
+                    })
+                });
+                entry.skin.dispatch(encoder, &gfx.deformer);
+                entry.shown = shown.clone();
+            }
+            skinned.push(entry);
+        }
+        if let Some(encoder) = encoder {
+            gfx.gpu.queue.submit([encoder.finish()]);
+        }
+        gfx.skinned = skinned;
+        let ordinary: Vec<(ObjectId, Arc<MeshData>)> = self
+            .evaluated
+            .iter()
+            .filter(|(id, mesh)| {
+                !gfx.skinned.iter().any(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
+            })
+            .cloned()
+            .collect();
         let held: Vec<Arc<MeshData>> = gfx.meshes.iter().map(|(arc, _)| arc.clone()).collect();
-        let plan = gpu_sync::plan_sync(&held, &self.evaluated);
+        let plan = gpu_sync::plan_sync(&held, &ordinary);
         if !plan.needs_work(held.len()) {
             return;
         }
@@ -7651,7 +7737,18 @@ impl App {
         let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
         let mut draws: Vec<Draw> = Vec::new();
         for (at, (id, mesh)) in self.evaluated.iter().enumerate() {
-            if let Some((_, gpu_mesh)) = gfx.meshes.iter().find(|(m, _)| Arc::ptr_eq(m, mesh)) {
+            let resident = gfx
+                .meshes
+                .iter()
+                .find(|(m, _)| Arc::ptr_eq(m, mesh))
+                .map(|(_, g)| g)
+                .or_else(|| {
+                    gfx.skinned
+                        .iter()
+                        .find(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
+                        .map(|e| &e.mesh)
+                });
+            if let Some(gpu_mesh) = resident {
                 // In edit mode the object-level highlight stands down: the
                 // whole wireframe going orange would drown out the element
                 // selection, which is the only thing the user is looking at.
@@ -9190,6 +9287,7 @@ impl ApplicationHandler for App {
             gpu,
             viewport,
             meshes: Vec::new(),
+            skinned: Vec::new(),
             pick_target,
             region,
             deformer,

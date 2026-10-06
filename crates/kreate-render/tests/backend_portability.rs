@@ -74,6 +74,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
             include_str!("../src/shaders/hiz_build.wgsl").into(),
         ),
         ("deform", include_str!("../src/shaders/deform.wgsl").into()),
+        ("skin", include_str!("../src/shaders/skin.wgsl").into()),
         ("agx", include_str!("../src/shaders/agx.wgsl").into()),
         ("fxaa", kreate_render::fxaa::source().into()),
         ("ao", kreate_render::ao::source().into()),

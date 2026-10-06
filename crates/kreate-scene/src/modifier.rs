@@ -537,6 +537,20 @@ impl ModifierCache {
         output
     }
 
+    /// What `mesh` was skinned from and by, when it is exactly a skinned
+    /// result — no modifier ran after the bones. For a renderer that skins on
+    /// the GPU: it keeps the rest shape uploaded once and needs only the
+    /// matrices to draw this.
+    pub fn skin_source(
+        &self,
+        mesh: &Arc<MeshData>,
+    ) -> Option<(&Arc<MeshData>, &[kreate_math::DAffine3])> {
+        self.skins
+            .iter()
+            .find(|e| Arc::ptr_eq(&e.output, mesh) && !Arc::ptr_eq(&e.input, &e.output))
+            .map(|e| (&e.input, e.matrices.as_slice()))
+    }
+
     /// The evaluated result of applying `stack` to `input` at `ctx`'s time.
     pub fn evaluate(
         &mut self,
