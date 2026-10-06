@@ -59,8 +59,17 @@ pub struct Group {
 /// The shortcut goes on the right of the row in a dimmer colour, which is where
 /// every application in this category puts it and therefore where the eye
 /// already looks.
-pub fn command_button(ui: &mut egui::Ui, info: &CommandInfo, wide: bool) -> egui::Response {
-    let response = ui
+///
+/// Returns the row's response and whether it was chosen. Both, because the
+/// button inside the row takes a click on its label for itself: the row's own
+/// response never sees it, and a menu that asked only the row ran nothing
+/// when its name was clicked — which is where everyone clicks.
+pub fn command_button(
+    ui: &mut egui::Ui,
+    info: &CommandInfo,
+    wide: bool,
+) -> (egui::Response, bool) {
+    let shown = ui
         .scope(|ui| {
             if wide {
                 // A menu row fills the popup so the shortcut can sit at its far
@@ -79,8 +88,9 @@ pub fn command_button(ui: &mut egui::Ui, info: &CommandInfo, wide: bool) -> egui
                 clicked
             })
             .inner
-        })
-        .response;
+        });
+    let button_clicked = shown.inner;
+    let response = shown.response;
 
     // The whole row is the hover target, not just the button: a user pointing at
     // the shortcut is pointing at the command.
@@ -88,7 +98,8 @@ pub fn command_button(ui: &mut egui::Ui, info: &CommandInfo, wide: bool) -> egui
     if info.has_tooltip() {
         response.clone().on_hover_text(info.tooltip());
     }
-    response
+    let chosen = button_clicked || response.clicked();
+    (response, chosen)
 }
 
 /// Queues what choosing `entry` does.
@@ -122,8 +133,8 @@ pub fn menu_body(ui: &mut egui::Ui, groups: &[Group], queue: &mut CommandQueue) 
             ui.weak(&group.title);
         }
         for entry in &group.entries {
-            let response = command_button(ui, &entry.info, true);
-            if response.clicked() {
+            let (_, clicked) = command_button(ui, &entry.info, true);
+            if clicked {
                 choose(entry, queue);
                 chosen = true;
             }
@@ -182,5 +193,52 @@ mod tests {
     fn an_entry_with_no_parameters_starts_empty() {
         let entry = Entry::new("mesh.extrude_region", info("Extrude", "E"));
         assert!(entry.params.is_empty());
+    }
+
+    /// A click on a row, through egui's own input: the menu has to queue the
+    /// row's command. Two frames, press then release, as a real click is.
+    #[test]
+    fn clicking_a_row_queues_its_command() {
+        let ctx = egui::Context::default();
+        let groups = vec![Group {
+            title: "Mesh".into(),
+            entries: vec![
+                Entry::new("object.add_primitive", info("Plane", "")),
+                Entry::new("object.add_primitive", info("Cube", "")),
+            ],
+        }];
+        let mut queue = CommandQueue::default();
+        let mut rects = Vec::new();
+        let frame = |events: Vec<egui::Event>, queue: &mut CommandQueue, rects: &mut Vec<egui::Rect>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut chosen = false;
+            let _ = ctx.run_ui(raw, |ui| {
+                egui::Area::new(egui::Id::new("menu")).fixed_pos(egui::pos2(10.0, 10.0)).show(ui.ctx(), |ui| {
+                    ui.set_min_width(180.0);
+                    ui.set_max_width(180.0);
+                    chosen = menu_body(ui, &groups, queue);
+                    rects.clear();
+                });
+            });
+            chosen
+        };
+        frame(vec![], &mut queue, &mut rects);
+        // The second row, a little in from its left edge: title, then two rows.
+        let at = egui::pos2(30.0, 10.0 + 20.0 + 24.0 + 10.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut queue, &mut rects);
+        frame(vec![button(true)], &mut queue, &mut rects);
+        let chosen = frame(vec![button(false)], &mut queue, &mut rects);
+        assert!(chosen, "the click chose nothing");
+        assert_eq!(queue.drain().len(), 1);
     }
 }
