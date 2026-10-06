@@ -239,7 +239,7 @@ impl Chat {
         let provider = self.provider;
         let tool = find_cli(provider).ok_or_else(|| provider.not_installed())?;
         let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
-        let mut command = Command::new(tool);
+        let mut command = quiet_command(tool);
         match provider {
             Provider::Claude => {
                 command.args(["auth", "login"]);
@@ -316,7 +316,7 @@ impl Chat {
         )?;
         let folder = provider.folder();
         let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
-        let mut command = Command::new(tool);
+        let mut command = quiet_command(tool);
         let parse: fn(&str) -> Vec<Event> = match provider {
             Provider::Claude => {
                 let config = serde_json::json!({
@@ -496,7 +496,7 @@ fn ask_account(provider: Provider) -> Account {
         Provider::Claude => {
             // Not logged in exits with 1 and still prints the answer, so the
             // output is read whatever the status.
-            match Command::new(tool)
+            match quiet_command(tool)
                 .args(["auth", "status", "--json"])
                 .stdin(Stdio::null())
                 .output()
@@ -512,7 +512,7 @@ fn ask_account(provider: Provider) -> Account {
             }
         }
         Provider::Gemini => gemini_account(),
-        Provider::ChatGpt => match Command::new(tool)
+        Provider::ChatGpt => match quiet_command(tool)
             .args(["login", "status"])
             .stdin(Stdio::null())
             .output()
@@ -1000,6 +1000,24 @@ fn result_text(content: Option<&Value>) -> String {
 /// A provider's tool: its `KREATE_*` variable, then the search path, then
 /// where its installers put it — a window opened from the Finder or a desktop
 /// menu does not get the shell's path.
+/// A command for a console program, with no console window.
+///
+/// Kreate is a windowed program, and on Windows a console program it starts
+/// gets a console window of its own unless told otherwise — so every check of
+/// an assistant's sign-in flashed a black window over Kreate as it opened.
+/// Their input and output are pipes; nothing is lost by hiding it.
+pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Whether this Gemini CLI takes `--skip-trust`.
 ///
 /// Newer versions ask before trusting a folder and take the flag to skip the
@@ -1014,15 +1032,8 @@ fn gemini_knows_skip_trust(tool: &Path) -> bool {
     if let Some(answer) = known.lock().ok().and_then(|k| k.get(tool).copied()) {
         return answer;
     }
-    let mut command = Command::new(tool);
+    let mut command = quiet_command(tool);
     command.arg("--help").stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // No console window flashing up behind the application.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     let answer = command
         .output()
         .map(|out| help_lists_skip_trust(&String::from_utf8_lossy(&out.stdout)))

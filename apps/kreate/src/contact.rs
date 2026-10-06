@@ -15,7 +15,7 @@
 //! their company's certificates are already set up for.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
@@ -110,7 +110,7 @@ impl Outbox {
 
 fn post(body: &str) -> Result<(), String> {
     let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let mut child = Command::new(curl)
+    let mut child = crate::claude::quiet_command(curl)
         .args([
             "--silent",
             "--show-error",

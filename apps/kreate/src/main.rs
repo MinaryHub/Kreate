@@ -8669,7 +8669,11 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title("Kreate")
             .with_window_icon(icon)
-            .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0))
+            // Hidden until the loading screen is in it: shown at once, the
+            // window is a blank white rectangle for as long as the graphics
+            // take to come up.
+            .with_visible(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let opts = GpuOptions::default();
@@ -8705,6 +8709,18 @@ impl ApplicationHandler for App {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
+
+        // The loading screen, as soon as there is something to draw it with.
+        // What follows — every pipeline compiled, the shaders warmed — is the
+        // bulk of the start-up, and without this the window sits blank for it.
+        let mut splash = Splash::new(&self.egui_ctx, &self.ui.catalog);
+        let show = |message: &str, splash: &mut Splash, egui_state: &mut egui_winit::State, renderer: &mut egui_wgpu::Renderer| {
+            splash.draw(&self.egui_ctx, egui_state, &window, &gpu, &surface, &config, renderer, message);
+        };
+        let egui_state = self.egui_state.as_mut().expect("made just above");
+        show(&self.ui.catalog.get("splash-shaders"), &mut splash, egui_state, &mut egui_renderer);
+        window.set_visible(true);
+
         let target = ViewportTarget::new(&gpu.device, &mut egui_renderer, size.width, size.height);
         let mut viewport = Viewport::new(
             &gpu.device,
@@ -8719,7 +8735,10 @@ impl ApplicationHandler for App {
         // overlay and picking pipelines are not touched by an ordinary first
         // frame. Measured cold, that first touch costs around ten milliseconds —
         // a dropped frame, landing exactly when the user starts interacting.
+        show(&self.ui.catalog.get("splash-warming"), &mut splash, egui_state, &mut egui_renderer);
         viewport.warm_up(&gpu.device, &gpu.queue);
+        show(&self.ui.catalog.get("splash-opening"), &mut splash, egui_state, &mut egui_renderer);
+        drop(splash);
 
         let pick_target = kreate_render::PickTarget::new(&gpu.device, target.size.0, target.size.1);
         let region = kreate_render::RegionSelect::new(&gpu.device);
@@ -9103,6 +9122,121 @@ impl ApplicationHandler for App {
             event_loop.set_control_flow(ControlFlow::WaitUntil(at));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+}
+
+/// The loading screen: the logo, the name, what is being done and the version,
+/// drawn while the window is being made ready.
+///
+/// Drawn whole on each call rather than animated. Start-up holds the main
+/// thread — compiling pipelines is synchronous — so there is no frame loop to
+/// animate in; each step says what it is about to do instead, which is the
+/// honest progress there is.
+struct Splash {
+    logo: Option<egui::TextureHandle>,
+    title: String,
+    version: String,
+}
+
+impl Splash {
+    fn new(ctx: &egui::Context, catalog: &kreate_i18n::Catalog) -> Self {
+        let logo = image::load_from_memory(include_bytes!("../assets/kreate.png"))
+            .ok()
+            .map(|img| {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                ctx.load_texture(
+                    "splash-logo",
+                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        Self {
+            logo,
+            title: catalog.get("splash-title"),
+            version: catalog.format(
+                "splash-version",
+                kreate_i18n::TextKind::Ui,
+                &[("version", &kreate::version::describe())],
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &mut self,
+        ctx: &egui::Context,
+        state: &mut egui_winit::State,
+        window: &Window,
+        gpu: &kreate_render::Gpu,
+        surface: &wgpu::Surface<'_>,
+        config: &wgpu::SurfaceConfiguration,
+        renderer: &mut egui_wgpu::Renderer,
+        message: &str,
+    ) {
+        let input = state.take_egui_input(window);
+        let output = ctx.run_ui(input, |ui| {
+            let background = ui.visuals().panel_fill;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(background))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space((ui.available_height() * 0.5 - 130.0).max(0.0));
+                        if let Some(logo) = &self.logo {
+                            ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(128.0, 128.0)));
+                        }
+                        ui.add_space(12.0);
+                        ui.heading(&self.title);
+                        ui.add_space(6.0);
+                        ui.label(message);
+                        ui.add_space(18.0);
+                        ui.weak(&self.version);
+                    });
+                });
+        });
+        for (id, delta) in &output.textures_delta.set {
+            renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
+        }
+        let frame = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            // No frame to draw into yet; the next step will try again.
+            _ => return,
+        };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [config.width, config.height],
+            pixels_per_point: output.pixels_per_point,
+        };
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("splash") });
+        let extra = renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("splash"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        gpu.queue.submit(extra.into_iter().chain(Some(encoder.finish())));
+        window.pre_present_notify();
+        frame.present();
+        for id in &output.textures_delta.free {
+            renderer.free_texture(id);
         }
     }
 }
