@@ -238,6 +238,7 @@ impl Chat {
         }
         let provider = self.provider;
         let tool = find_cli(provider).ok_or_else(|| provider.not_installed())?;
+        let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
         let mut command = Command::new(tool);
         match provider {
             Provider::Claude => {
@@ -250,8 +251,11 @@ impl Chat {
                 // The Gemini CLI signs in on first use; a message that needs
                 // no tools is the shortest first use.
                 command
-                    .args(["-p", "Reply with the single word OK.", "--skip-trust"])
+                    .args(["-p", "Reply with the single word OK."])
                     .env("GOOGLE_GENAI_USE_GCA", "true");
+                if skip_trust {
+                    command.arg("--skip-trust");
+                }
             }
         }
         if let Some(dir) = provider.folder() {
@@ -311,6 +315,7 @@ impl Chat {
             "kreate-mcp was not found next to Kreate. Build it with `cargo build -p kreate-mcp`.",
         )?;
         let folder = provider.folder();
+        let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
         let mut command = Command::new(tool);
         let parse: fn(&str) -> Vec<Event> = match provider {
             Provider::Claude => {
@@ -343,8 +348,11 @@ impl Chat {
                 command
                     .arg("-p")
                     .arg(text)
-                    .args(["--output-format", "stream-json", "--skip-trust"])
+                    .args(["--output-format", "stream-json"])
                     .args(["--allowed-mcp-server-names", "kreate"]);
+                if skip_trust {
+                    command.arg("--skip-trust");
+                }
                 // Kreate's folder holds only Kreate's conversation, so the
                 // latest session in it is this one.
                 if self.session.is_some() {
@@ -992,6 +1000,43 @@ fn result_text(content: Option<&Value>) -> String {
 /// A provider's tool: its `KREATE_*` variable, then the search path, then
 /// where its installers put it — a window opened from the Finder or a desktop
 /// menu does not get the shell's path.
+/// Whether this Gemini CLI takes `--skip-trust`.
+///
+/// Newer versions ask before trusting a folder and take the flag to skip the
+/// question; older ones have no question and refuse a flag they do not know
+/// ("Unknown arguments: skip-trust") — so the flag goes only to a CLI whose
+/// help lists it. Asked once per program and remembered.
+fn gemini_knows_skip_trust(tool: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(answer) = known.lock().ok().and_then(|k| k.get(tool).copied()) {
+        return answer;
+    }
+    let mut command = Command::new(tool);
+    command.arg("--help").stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window flashing up behind the application.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let answer = command
+        .output()
+        .map(|out| help_lists_skip_trust(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or(false);
+    if let Ok(mut k) = known.lock() {
+        k.insert(tool.to_path_buf(), answer);
+    }
+    answer
+}
+
+fn help_lists_skip_trust(help: &str) -> bool {
+    help.contains("--skip-trust")
+}
+
 fn find_cli(provider: Provider) -> Option<PathBuf> {
     let (command, var) = provider.command();
     if let Some(path) = std::env::var_os(var) {
@@ -1042,6 +1087,17 @@ fn find_connector() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_trust_goes_only_to_a_gemini_whose_help_lists_it() {
+        // 0.23 has no folder trust and refuses the flag; later versions list it.
+        let old = "  -y, --yolo  Automatically accept all actions
+  -o, --output-format  The format";
+        let new = "  --skip-trust  Trust the current folder for this session
+";
+        assert!(!help_lists_skip_trust(old));
+        assert!(help_lists_skip_trust(new));
+    }
 
     #[test]
     fn init_line_gives_the_session() {
