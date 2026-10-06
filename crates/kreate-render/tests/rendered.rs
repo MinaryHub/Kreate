@@ -18,9 +18,18 @@ use kreate_render::{brdf::Surface, Camera, GpuOptions, RenderMeshCpu};
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// This test's turn on the device, held for as long as the test runs.
+    ///
+    /// One test at a time: many threads driving one device at once — path
+    /// tracing, readbacks, maps and waits — ended this binary now and then in
+    /// a heap corruption inside the driver (0xc0000374), with every test
+    /// passing on its own. The CI runner's Windows build already runs the
+    /// application's GPU tests singly for the same family of crash.
+    _turn: std::sync::MutexGuard<'static, ()>,
 }
 
 fn gpu() -> Option<Gpu> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
         std::sync::OnceLock::new();
     let (device, queue) = SHARED
@@ -31,7 +40,8 @@ fn gpu() -> Option<Gpu> {
             Some((gpu.device.clone(), gpu.queue.clone()))
         })
         .clone()?;
-    Some(Gpu { device, queue })
+    let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Some(Gpu { device, queue, _turn: turn })
 }
 
 macro_rules! gpu_or_skip {
@@ -2773,4 +2783,144 @@ fn a_renders_passes_read_back_with_depth_and_normals() {
     let n = glam::Vec3::from(passes.normal[centre]);
     assert!(n.length() > 0.9 && n.dot(-forward) > 0.3, "the normal {n} does not face the camera");
     assert!(passes.combined[centre][0] > 0.01, "the picture is black where the lit cube is");
+}
+
+/// A small glowing panel is the only light. The path tracer aims at it as well
+/// as finding it by bouncing, and weighs the two: the floor beside it comes out
+/// as bright as the panel's radiance, size and angle say — not twice, which
+/// counting both ways would give — and smooth after a few samples, where
+/// finding it only by bouncing is speckle.
+#[test]
+fn a_glowing_panel_lights_the_floor_as_much_as_it_should_and_quietly() {
+    let gpu = gpu_or_skip!(gpu());
+    let camera = Camera {
+        pivot: glam::DVec3::new(0.3, 0.0, 0.0),
+        distance: 3.0,
+        rotation: glam::DQuat::from_rotation_z(0.4) * glam::DQuat::from_rotation_x(0.5),
+        ..Camera::default()
+    };
+    let patch = glowing_panel_patch(&gpu, 16, 0.2, camera, glam::DVec3::new(0.3, 0.0, 0.0));
+    let mean = patch.iter().sum::<f32>() / patch.len() as f32;
+    // The floor point is 0.3 m along and 1 m below the panel: irradiance is
+    // L·A·cosθ²/d², and a matte floor of albedo 0.8 sends back 0.8/π of it.
+    let (l, a, d2) = (20_000.0f32, 0.04f32, 0.3f32 * 0.3 + 1.0);
+    let expected = 0.8 / std::f32::consts::PI * l * a / (d2 * d2) * FRAMED.exposure.exp2();
+    assert!(
+        (mean - expected).abs() < expected * 0.15,
+        "the floor beside the panel is {mean}, the panel's light says {expected}"
+    );
+    let spread = (patch.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / patch.len() as f32).sqrt();
+    assert!(spread < mean * 0.25, "sixteen samples are still speckle: spread {spread} about {mean}");
+}
+
+/// The floor under a glowing panel (only light, 20 000 nits, `size` metres
+/// square, 1 m up), path traced for `frames` samples, read back linear: the
+/// green of a 5x5 patch around where `point` lands.
+fn glowing_panel_patch(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point: glam::DVec3) -> Vec<f32> {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Rendered;
+        viewport.path_trace = true;
+        viewport.path_trace_denoise = false;
+        viewport.show_bloom = false;
+        viewport.show_reflections = false;
+        viewport.ambient_occlusion = false;
+        viewport.contact_shadows = false;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.set_display(&gpu.queue, FRAMED);
+        viewport.set_world([0.0; 3]);
+        let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+        let panel_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(size, 1, 1));
+        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+        let panel = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &panel_cpu, glam::Vec4::ONE);
+        one_material(gpu, &mut viewport, grey());
+        let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 1.0));
+        let parts = [(&floor_cpu, glam::DAffine3::IDENTITY, 0u32), (&panel_cpu, lift, 1u32)];
+        let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
+            .iter()
+            .map(|(m, _, _)| {
+                (
+                    m.positions.iter().map(|p| p.0).collect(),
+                    m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
+                )
+            })
+            .collect();
+        let meshes: Vec<_> = parts
+            .iter()
+            .zip(&data)
+            .map(|((m, t, surface), (p, n))| kreate_render::pathtrace::PtMesh {
+                positions: p,
+                uvs: &m.uvs,
+                normals: n,
+                indices: &m.indices,
+                transform: *t,
+                surface: *surface,
+            })
+            .collect();
+        let floor_surface = kreate_render::pathtrace::PtSurface {
+            base_color: [0.8, 0.8, 0.8],
+            roughness: 0.9,
+            ..Default::default()
+        };
+        let glow = kreate_render::pathtrace::PtSurface {
+            base_color: [0.0; 3],
+            emission: [20_000.0; 3],
+            ..Default::default()
+        };
+        viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[floor_surface, glow], &[]);
+        let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY), Draw::new(&panel, lift)];
+        for _ in 0..frames {
+            viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+            let _ = read_frame(gpu, &mut viewport, &draws);
+        }
+        let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
+        let passes = viewport
+            .read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward)
+            .expect("passes");
+        // The pixel where the floor point lands.
+        let vp = camera.view_projection(1.0);
+        let at = (point - camera.eye()).as_vec3();
+        let clip = vp * at.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        let x = ((ndc.x * 0.5 + 0.5) * passes.width as f32) as i32;
+        let y = ((0.5 - ndc.y * 0.5) * passes.height as f32) as i32;
+        // A 5x5 patch around it.
+        let mut values = Vec::new();
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let i = ((y + dy) as u32 * passes.width + (x + dx) as u32) as usize;
+                values.push(passes.combined[i][1]);
+            }
+        }
+        values
+}
+
+/// Under a big panel — 2 m square, 1 m up — paths bounce into the glow as
+/// often as they aim at it, so counting both whole would show: the floor
+/// below its middle is exactly what the rectangle's form factor says.
+#[test]
+fn a_big_glowing_panel_is_counted_once() {
+    let gpu = gpu_or_skip!(gpu());
+    // Low, looking in under the panel's edge at the floor below its middle.
+    let camera = Camera {
+        pivot: glam::DVec3::ZERO,
+        distance: 4.0,
+        rotation: glam::DQuat::from_rotation_x(1.35),
+        ..Camera::default()
+    };
+    let patch = glowing_panel_patch(&gpu, 64, 2.0, camera, glam::DVec3::ZERO);
+    let mean = patch.iter().sum::<f32>() / patch.len() as f32;
+    // A point below the corner of a w×l rectangle at height h, both sides
+    // parallel, sees it with form factor
+    // (1/2π)[X/√(1+X²)·atan(Y/√(1+X²)) + Y/√(1+Y²)·atan(X/√(1+Y²))], X=w/h,
+    // Y=l/h. Four 1 m quarters at 1 m: X = Y = 1.
+    let corner = (2.0f32 * (1.0 / 2f32.sqrt()) * (1.0 / 2f32.sqrt()).atan()) / (2.0 * std::f32::consts::PI);
+    let form = 4.0 * corner;
+    // Radiance L·F irradiates πL·F; a matte floor of 0.8 returns 0.8/π of it.
+    let expected = 0.8 * 20_000.0 * form * FRAMED.exposure.exp2();
+    assert!(
+        (mean - expected).abs() < expected * 0.1,
+        "the floor under the panel is {mean}, the form factor says {expected}"
+    );
 }

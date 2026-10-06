@@ -119,7 +119,11 @@ struct Params {
     sample: u32,
     light_count: u32,
     max_bounces: u32,
-    _pad: [u32; 3],
+    /// Glowing triangles the path tracer can aim at, and their summed
+    /// weight (area times luminance). See `emitters_of`.
+    emitter_count: u32,
+    emitter_total: f32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -141,6 +145,45 @@ struct Scene {
     nodes: wgpu::Buffer,
     order: wgpu::Buffer,
     surfaces: wgpu::Buffer,
+    /// The glowing triangles: each one's index and its place in the
+    /// cumulative distribution.
+    emitters: wgpu::Buffer,
+    emitter_count: u32,
+    emitter_total: f32,
+}
+
+/// The glowing triangles, for the path tracer to aim at: each one's index
+/// (its bits, in the first float) and the cumulative distribution of area
+/// times luminance (the second), and that weight's total.
+///
+/// Picked in proportion to how much light each gives — a big bright panel
+/// more often than a small dim one — and a point on the one picked uniformly,
+/// so the probability of a point is luminance over the total, whatever the
+/// triangle's size. The shader relies on that.
+fn emitters_of(positions: &[Vec3], triangles: &[[u32; 4]], surfaces: &[PtSurface]) -> (Vec<[f32; 2]>, f32) {
+    let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let mut out = Vec::new();
+    let mut total = 0.0f32;
+    for (i, t) in triangles.iter().enumerate() {
+        let Some(surface) = surfaces.get(t[3] as usize) else { continue };
+        let lum = luminance(surface.emission);
+        if lum <= 0.0 {
+            continue;
+        }
+        let (a, b, c) = (positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]);
+        let area = 0.5 * (b - a).cross(c - a).length();
+        if area <= 0.0 {
+            continue;
+        }
+        total += area * lum;
+        out.push([f32::from_bits(i as u32), total]);
+    }
+    if total > 0.0 {
+        for e in &mut out {
+            e[1] /= total;
+        }
+    }
+    (out, total)
 }
 
 pub struct PathTracer {
@@ -225,6 +268,7 @@ impl PathTracer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                storage(12, true, c),
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -486,8 +530,11 @@ impl PathTracer {
             &data_layers,
         );
         if surface_data.is_empty() {
-            surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, -1.0, -1.0, 0.0]]);
+            // Three slots a surface, as the shader reads them.
+            surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, -1.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.5]]);
         }
+        let (emitter_data, emitter_total) = emitters_of(&positions, &triangles, surfaces);
+        let emitter_count = emitter_data.len() as u32;
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let upload = |label, bytes: &[u8]| {
             let bytes = if bytes.is_empty() {
@@ -514,6 +561,9 @@ impl PathTracer {
             nodes: upload("path trace nodes", bytemuck::cast_slice(&nodes)),
             order: upload("path trace order", bytemuck::cast_slice(&order)),
             surfaces: upload("path trace surfaces", bytemuck::cast_slice(&surface_data)),
+            emitters: upload("path trace emitters", bytemuck::cast_slice(&emitter_data)),
+            emitter_count,
+            emitter_total,
         });
         self.scene_bind = None;
         self.sample = 0;
@@ -586,6 +636,10 @@ impl PathTracer {
                 binding: 11,
                 resource: wgpu::BindingResource::Sampler(&self.image_sampler),
             });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 12,
+                resource: scene.emitters.as_entire_binding(),
+            });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,
@@ -623,7 +677,9 @@ impl PathTracer {
             sample: self.sample,
             light_count,
             max_bounces: 4,
-            _pad: [0; 3],
+            emitter_count: self.scene.as_ref().map_or(0, |s| s.emitter_count),
+            emitter_total: self.scene.as_ref().map_or(0.0, |s| s.emitter_total),
+            _pad: 0,
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         queue.write_buffer(

@@ -30,9 +30,10 @@ struct PtParams {
     sample: u32,
     light_count: u32,
     max_bounces: u32,
+    // The glowing triangles, and their summed area times luminance.
+    emitter_count: u32,
+    emitter_total: f32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
 };
 
 struct PtNode {
@@ -62,6 +63,9 @@ struct PtNode {
 @group(0) @binding(9) var pt_colour_images: texture_2d_array<f32>;
 @group(0) @binding(10) var pt_data_images: texture_2d_array<f32>;
 @group(0) @binding(11) var pt_image_sampler: sampler;
+// The glowing triangles: x the triangle's index (its bits), y where it ends
+// in the cumulative distribution of area times luminance.
+@group(0) @binding(12) var<storage, read> pt_emitters: array<vec2<f32>>;
 
 // --- random numbers -----------------------------------------------------------
 
@@ -196,6 +200,80 @@ fn pt_luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// --- glowing surfaces as lights ------------------------------------------------
+//
+// A small bright panel found only by paths that happen to bounce into it is a
+// picture of speckles for thousands of samples. So at each surface the tracer
+// also aims at one: picked in proportion to its light, a point on it chosen
+// uniformly, a shadow ray to it. Both ways can find the same light, so each is
+// weighted by multiple importance sampling — the power heuristic, Veach's —
+// and the two shares add up to one: nothing is counted twice and each way
+// carries the cases it is good at (aiming for small lights and rough
+// surfaces, bouncing for big lights and mirrors).
+
+// How often a surface aims at a glowing triangle rather than at a lamp.
+fn pt_emitter_share() -> f32 {
+    if (pt.emitter_count == 0u) {
+        return 0.0;
+    }
+    if (pt.light_count == 0u) {
+        return 1.0;
+    }
+    return 0.5;
+}
+
+// The triangle whose stretch of the distribution `u` falls in.
+fn pt_pick_emitter(u: f32) -> u32 {
+    var lo = 0u;
+    var hi = pt.emitter_count - 1u;
+    loop {
+        if (lo >= hi) {
+            break;
+        }
+        let mid = (lo + hi) / 2u;
+        if (pt_emitters[mid].y < u) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// The probability, per unit solid angle seen from the shading point, that
+// aiming at the glowing triangles lands on a point of glow `le` at distance²
+// `dist2` whose surface is at `cos_l` to the ray. A point's probability is
+// luminance over the total — area cancels — times the share of aiming.
+fn pt_emitter_pdf(le: vec3<f32>, dist2: f32, cos_l: f32) -> f32 {
+    if (pt.emitter_total <= 0.0 || cos_l <= 1e-6) {
+        return 0.0;
+    }
+    return pt_emitter_share() * pt_luminance(le) / pt.emitter_total * dist2 / cos_l;
+}
+
+// The probability per solid angle that the bounce sampling below picks `l`:
+// the specular lobe's GGX half-vector density and the cosine lobe's, mixed as
+// the sampler mixes them.
+fn pt_bsdf_pdf(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
+    let nol = dot(n, l);
+    if (nol <= 0.0) {
+        return 0.0;
+    }
+    let p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+    let h = normalize(v + l);
+    let noh = max(dot(n, h), 1e-4);
+    let voh = max(dot(v, h), 1e-4);
+    let alpha = s.roughness * s.roughness;
+    let spec = distribution(noh, alpha) * noh / (4.0 * voh);
+    return p_spec * spec + (1.0 - p_spec) * nol / PI;
+}
+
+fn pt_power(a: f32, b: f32) -> f32 {
+    let a2 = a * a;
+    let b2 = b * b;
+    return select(1.0, a2 / (a2 + b2), a2 + b2 > 0.0);
+}
+
 @compute @workgroup_size(8, 8)
 fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= pt.size.x || id.y >= pt.size.y) {
@@ -236,6 +314,10 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     var bounce = 0u;
     var crossings = 0u;
     var skip = PT_NONE;
+    // The probability per solid angle the last bounce had of going where it
+    // went, for weighting a glow it finds; negative when the light-aiming
+    // could not have found it (the camera's ray, glass), and it counts whole.
+    var last_pdf = -1.0;
     loop {
         if (bounce > pt.max_bounces || crossings > 16u) {
             break;
@@ -265,10 +347,18 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             n = -n;
         }
         let m = tri.w * 3u;
-        // A glowing surface adds its light wherever a path meets it. Only
-        // here: the light sampling picks among the lamps, never among the
-        // glowing faces, so nothing is counted twice.
-        radiance += throughput * pt_surfaces[m + 2u].rgb;
+        // A glowing surface adds its light wherever a path meets it — whole
+        // when nothing could have aimed at it, weighted against the aiming
+        // otherwise. See `pt_emitter_pdf`.
+        let glow = pt_surfaces[m + 2u].rgb;
+        if (pt_luminance(glow) > 0.0) {
+            var weight = 1.0;
+            if (last_pdf >= 0.0) {
+                let cos_l = abs(dot(geometric, dir));
+                weight = pt_power(last_pdf, pt_emitter_pdf(glow, hit.t * hit.t, cos_l));
+            }
+            radiance += throughput * glow * weight;
+        }
         let extra = pt_surfaces[m + 1u];
         var s: Surface;
         s.base_color = pt_surfaces[m].rgb;
@@ -337,17 +427,50 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             dir = normalize(next);
             crossings += 1u;
+            last_pdf = -1.0;
             continue;
         }
         bounce += 1u;
 
-        // One light, chosen at random, its share scaled by how many there are.
-        if (pt.light_count > 0u) {
+        // Aim at a glowing triangle, or at a lamp: one of the two, its share
+        // made up by dividing by how often it is chosen.
+        let share = pt_emitter_share();
+        let aim_at_glow = pt_random() < share;
+        if (aim_at_glow) {
+            let picked = bitcast<u32>(pt_emitters[pt_pick_emitter(pt_random())].x);
+            let et = pt_triangles[picked];
+            let ea = pt_positions[et.x].xyz;
+            let eb = pt_positions[et.y].xyz;
+            let ec = pt_positions[et.z].xyz;
+            let r1 = sqrt(pt_random());
+            let r2 = pt_random();
+            let q = ea * (1.0 - r1) + eb * (r1 * (1.0 - r2)) + ec * (r1 * r2);
+            let face = cross(eb - ea, ec - ea);
+            let to = q - p;
+            let dist2 = dot(to, to);
+            let l = to * inverseSqrt(max(dist2, 1e-12));
+            let cos_l = abs(dot(normalize(face), l));
+            let le = pt_surfaces[et.w * 3u + 2u].rgb;
+            if (picked != hit.triangle && dot(l, geometric) > 0.0 && cos_l > 1e-6) {
+                let visible = pt_trace(start, l, sqrt(dist2) * 0.999, true, picked).t < 0.0;
+                if (visible) {
+                    let pdf = pt_emitter_pdf(le, dist2, cos_l);
+                    // The light arriving, as the lux a lamp would deliver
+                    // perpendicular to the ray: what `brdf_shade` takes.
+                    let e = le / pdf;
+                    let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
+                    radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
+                }
+            }
+        }
+
+        // One lamp, chosen at random, its share scaled by how many there are.
+        if (!aim_at_glow && pt.light_count > 0u) {
             let k = min(u32(pt_random() * f32(pt.light_count)), pt.light_count - 1u);
             let light = lights[k];
             let at = p - pt.eye.xyz;
             let to_light = direction_to(light, at);
-            let e = illuminance_at(light, at) * f32(pt.light_count);
+            let e = illuminance_at(light, at) * f32(pt.light_count) / (1.0 - share);
             if (dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
                 // The shadow ray goes to a random point of the source — a
                 // sphere's disc facing the surface, or the sun's disc in the
@@ -421,6 +544,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             throughput *= surface_diffuse_albedo(s) / (1.0 - p_spec);
         }
+        last_pdf = pt_bsdf_pdf(s, n, v, normalize(next));
         // Paths that carry little are ended, the survivors made heavier so the
         // sum stays right.
         if (bounce >= 3u) {
