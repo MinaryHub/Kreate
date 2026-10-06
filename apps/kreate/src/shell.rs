@@ -5016,6 +5016,8 @@ fn draw_graph_editor(
         handles: l.graph_handles.clone(),
         auto: l.handle_auto.clone(),
         flat: l.handle_flat.clone(),
+        extrapolation: state.catalog.get("graph-extrapolation"),
+        cyclic: state.catalog.get("extrapolation-cyclic"),
     };
     let mut panel = state.graph_views.remove(&area).unwrap_or_default();
     let edits = kreate_ui::graph_editor::graph_editor(ui, &view, &mut panel, &text);
@@ -5055,6 +5057,12 @@ fn draw_graph_editor(
                 p.set("kind", V::Enum(kind));
                 state.queue.run("anim.keys_handle_type", p);
             }
+            E::Extrapolation(mode) => {
+                p.set("extrapolation", V::Enum(mode));
+                state.queue.run("anim.keys_extrapolation", p);
+            }
+            E::Smooth => state.queue.run("anim.keys_smooth", p),
+            E::Bake => state.queue.run("anim.keys_bake", p),
             E::SetSlope {
                 target,
                 frame,
@@ -6940,6 +6948,17 @@ fn draw_object_tab(
                         }
                     });
                     ui.end_row();
+                    let was = active.preserve_volume;
+                    let mut on = was;
+                    ui.label("");
+                    ui.checkbox(&mut on, state.catalog.get("preserve-volume"))
+                        .on_hover_text(state.catalog.get("op-object-set-preserve-volume-desc"));
+                    if on != was {
+                        let mut p = PropertyMap::new();
+                        p.set("preserve_volume", kreate_reflect::PropertyValue::Bool(on));
+                        state.queue.run("object.set_preserve_volume", p);
+                    }
+                    ui.end_row();
                 }
             });
         });
@@ -8280,6 +8299,14 @@ driver-error-property = “{ $name }” reads no such property
 driver-error-bad-name = “{ $name }” is not a valid name
 driver-error-cycle = Drivers read each other in a loop
 graph-handles = Handles
+graph-extrapolation = Extrapolation
+extrapolation-cyclic = Cyclic
+op-anim-keys-extrapolation = Set Extrapolation
+op-anim-keys-extrapolation-desc = How the curves with a selected key carry on past their ends: hold, carry on straight, or repeat.
+op-anim-keys-smooth = Smooth Keys
+op-anim-keys-smooth-desc = Moves each selected key halfway towards the mean of its neighbours.
+op-anim-keys-bake = Bake Keys
+op-anim-keys-bake-desc = Puts a key on every frame of the selected stretch, in straight lines, keeping the curve's shape.
 handle-auto = Auto Clamped
 handle-flat = Flat
 sheet-empty = Select an animated object to see its keys.
@@ -8699,6 +8726,9 @@ op-object-rename-desc = Renames the active object.
 bind-automatic = With Automatic Weights
 bind-empty = With Empty Groups
 unbind-armature = Remove Armature Deform
+preserve-volume = Preserve Volume
+op-object-set-preserve-volume = Preserve Volume
+op-object-set-preserve-volume-desc = Skins by dual quaternions, which keeps a twisted joint round instead of pinching it.
 panel-relations = Relations
 relations-parent = Parent
 relations-armature = Armature
@@ -9116,6 +9146,14 @@ driver-error-property = “{ $name }”이(가) 읽는 속성이 없습니다
 driver-error-bad-name = “{ $name }”은(는) 쓸 수 없는 이름입니다
 driver-error-cycle = 드라이버들이 서로를 읽는 고리가 있습니다
 graph-handles = 핸들
+graph-extrapolation = 외삽
+extrapolation-cyclic = 반복
+op-anim-keys-extrapolation = 외삽 설정
+op-anim-keys-extrapolation-desc = 선택한 키가 있는 커브가 양 끝 너머에서 어떻게 이어질지: 유지, 직선으로 계속, 반복.
+op-anim-keys-smooth = 키 부드럽게
+op-anim-keys-smooth-desc = 선택한 키를 이웃 키 평균 쪽으로 절반만큼 옮깁니다.
+op-anim-keys-bake = 키 굽기
+op-anim-keys-bake-desc = 선택한 구간의 모든 프레임에 키를 넣습니다(직선 보간, 커브 모양 유지).
 handle-auto = 자동 (클램프)
 handle-flat = 평평하게
 sheet-empty = 애니메이션이 있는 오브젝트를 선택하면 키가 보입니다.
@@ -9550,6 +9588,9 @@ op-object-rename-desc = 활성 오브젝트의 이름을 바꿉니다.
 bind-automatic = 자동 웨이트로
 bind-empty = 빈 그룹으로
 unbind-armature = 아마튜어 변형 제거
+preserve-volume = 부피 유지
+op-object-set-preserve-volume = 부피 유지
+op-object-set-preserve-volume-desc = 듀얼 쿼터니언으로 스키닝해, 비틀린 관절이 가늘어지지 않고 둥글게 남습니다.
 panel-relations = 관계
 relations-parent = 부모
 relations-armature = 아마튜어

@@ -25,7 +25,7 @@
 //! reference that pass has to match — the weights and the matrices here are
 //! exactly what it will upload.
 
-use kreate_math::{DAffine3, DVec3};
+use kreate_math::{DAffine3, DMat3, DQuat, DVec3};
 use kreate_mesh::attribute::{AttrData, Domain};
 use kreate_mesh::MeshData;
 
@@ -62,6 +62,70 @@ pub fn skin_matrices(
 /// of `armature` weighs on any vertex — then the mesh is its own answer and
 /// nothing needs copying.
 pub fn skin(mesh: &MeshData, armature: &Armature, matrices: &[DAffine3]) -> Option<MeshData> {
+    skin_with(mesh, armature, matrices, false)
+}
+
+/// A bone matrix taken apart for dual-quaternion skinning: the rotation and
+/// translation as a unit dual quaternion, and what is left — scale and any
+/// shear — as a matrix applied first. `M = T · R · S` exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DualBone {
+    pub real: DQuat,
+    pub dual: DQuat,
+    pub rest: DMat3,
+}
+
+impl DualBone {
+    pub fn of(m: &DAffine3) -> Self {
+        let (_, r, t) = m.to_scale_rotation_translation();
+        let r = r.normalize();
+        let dual = DQuat::from_xyzw(t.x, t.y, t.z, 0.0) * r * 0.5;
+        Self {
+            real: r,
+            dual,
+            rest: DMat3::from_quat(r.inverse()) * m.matrix3,
+        }
+    }
+}
+
+/// Where the blend of `bones` (weight, bone) puts `p`: Kavan's dual
+/// quaternion skinning with the scales blended linearly first. A joint bent
+/// far keeps its volume where the linear blend pinches it to a candy wrapper.
+pub fn dual_blend(p: DVec3, bones: &[(f64, DualBone)]) -> DVec3 {
+    let Some((_, first)) = bones.first() else {
+        return p;
+    };
+    let mut real = DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    let mut dual = DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    let mut rest = DMat3::ZERO;
+    let mut total = 0.0;
+    for (w, b) in bones {
+        // The shorter way round: q and -q are one turn, and adding them cancels.
+        let s = if b.real.dot(first.real) < 0.0 { -w } else { *w };
+        real += b.real * s;
+        dual += b.dual * s;
+        rest += b.rest * *w;
+        total += w;
+    }
+    let length = real.length();
+    if length < 1e-12 || total <= 0.0 {
+        return p;
+    }
+    let (real, dual) = (real * (1.0 / length), dual * (1.0 / length));
+    let q = real.xyz();
+    let d = dual.xyz();
+    let t = 2.0 * (real.w * d - dual.w * q + q.cross(d));
+    real * ((rest * (1.0 / total)) * p) + t
+}
+
+/// [`skin`], by dual quaternions when `preserve_volume` is set — Blender's
+/// Preserve Volume on the Armature modifier.
+pub fn skin_with(
+    mesh: &MeshData,
+    armature: &Armature,
+    matrices: &[DAffine3],
+    preserve_volume: bool,
+) -> Option<MeshData> {
     let n = mesh.num_verts() as usize;
     // Each bone's weights, if the mesh has a layer for it of the right length.
     let layers: Vec<(usize, &[f32])> = armature
@@ -81,6 +145,26 @@ pub fn skin(mesh: &MeshData, armature: &Armature, matrices: &[DAffine3]) -> Opti
     }
     let mut out = mesh.clone();
     let positions = out.positions_mut();
+    if preserve_volume {
+        let duals: Vec<DualBone> = matrices.iter().map(DualBone::of).collect();
+        let mut on = Vec::new();
+        for (v, p) in positions.iter_mut().enumerate() {
+            on.clear();
+            for (bone, weights) in &layers {
+                let w = weights[v] as f64;
+                if w > 0.0 {
+                    if let Some(d) = duals.get(*bone) {
+                        on.push((w, *d));
+                    }
+                }
+            }
+            if !on.is_empty() {
+                let at = dual_blend(p.as_dvec3(), &on);
+                *p = glam::Vec3::new(at.x as f32, at.y as f32, at.z as f32);
+            }
+        }
+        return Some(out);
+    }
     for (v, p) in positions.iter_mut().enumerate() {
         let rest = DVec3::new(p.x as f64, p.y as f64, p.z as f64);
         let mut sum = DVec3::ZERO;
@@ -223,6 +307,51 @@ mod tests {
             p.z = (p.z + 0.1) * 10.0;
         }
         m
+    }
+
+    #[test]
+    fn dual_quaternions_agree_with_the_linear_blend_for_one_bone_and_keep_volume_for_two() {
+        // A column with rings all the way up, so the joint has vertices.
+        let mut m = kreate_mesh::primitives::uv_sphere(0.5, 16, 24);
+        for p in m.positions_mut() {
+            p.x *= 0.4;
+            p.y *= 0.4;
+            p.z = (p.z + 0.5) * 2.0;
+        }
+        let a = arm();
+        let mut weighted = m.clone();
+        for (name, w) in automatic_weights(&m, &a, DAffine3::IDENTITY) {
+            weighted
+                .attributes_mut()
+                .insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+        }
+        // A twist and a scale on the lower bone: one bone alone is the same
+        // matrix either way.
+        let mut pose = Pose::default();
+        pose.entry("Lower").transform.rotation = DQuat::from_rotation_y(2.4);
+        pose.entry("Lower").transform.scale = DVec3::new(1.3, 0.8, 1.1);
+        let matrices = skin_matrices(&a, &pose, DAffine3::IDENTITY);
+        let p = DVec3::new(0.3, -0.2, 1.7);
+        let by_dq = dual_blend(p, &[(1.0, DualBone::of(&matrices[1]))]);
+        assert!(by_dq.distance(matrices[1].transform_point3(p)) < 1e-9);
+        let linear = skin(&weighted, &a, &matrices).unwrap();
+        let dual = skin_with(&weighted, &a, &matrices, true).unwrap();
+        // At the joint the twist pinches the linear blend towards the bone;
+        // the dual blend keeps it out. Measured as the mean distance from the
+        // column's axis of the vertices around the joint.
+        let spread = |mesh: &MeshData| {
+            let near: Vec<f32> = m
+                .positions()
+                .iter()
+                .zip(mesh.positions())
+                .filter(|(rest, _)| (rest.z - 1.0).abs() < 0.3)
+                .map(|(_, now)| (now.x * now.x + now.y * now.y).sqrt())
+                .collect();
+            near.iter().sum::<f32>() / near.len() as f32
+        };
+        let rest = spread(&weighted);
+        assert!(spread(&linear) < rest * 0.8, "the linear blend should pinch: {} of {rest}", spread(&linear));
+        assert!(spread(&dual) > spread(&linear) * 1.15, "{} vs {}", spread(&dual), spread(&linear));
     }
 
     #[test]

@@ -100,6 +100,36 @@ pub struct FCurve {
     /// Sorted by frame, never two at one frame. Kept so by [`FCurve::insert`];
     /// a file that says otherwise is sorted on the way in.
     pub keys: Vec<Keyframe>,
+    /// What the curve does before its first key and after its last.
+    pub extrapolation: Extrapolation,
+}
+
+/// What a curve does outside its keys: Blender's Shift+E.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Extrapolation {
+    /// Holds the end keys' values.
+    #[default]
+    Constant,
+    /// Carries on along the end segments' slopes.
+    Linear,
+    /// Repeats the keys, end to end: a walk cycle keyed once plays forever.
+    Cyclic,
+}
+
+impl Extrapolation {
+    pub const ALL: [Self; 3] = [Self::Constant, Self::Linear, Self::Cyclic];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Constant => "constant",
+            Self::Linear => "linear",
+            Self::Cyclic => "cyclic",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.tag() == tag)
+    }
 }
 
 impl FCurve {
@@ -107,6 +137,7 @@ impl FCurve {
         Self {
             path,
             keys: Vec::new(),
+            extrapolation: Extrapolation::Constant,
         }
     }
 
@@ -174,6 +205,52 @@ impl FCurve {
     /// constant extrapolation, and the only one that does not send an object
     /// flying off after its last key.
     pub fn evaluate(&self, frame: f64) -> Option<f64> {
+        let first = self.keys.first()?;
+        let last = self.keys.last()?;
+        let n = self.keys.len();
+        match self.extrapolation {
+            Extrapolation::Cyclic if n >= 2 => {
+                let period = last.frame - first.frame;
+                if period > 0.0 && (frame < first.frame || frame > last.frame) {
+                    return self.within(first.frame + (frame - first.frame).rem_euclid(period));
+                }
+            }
+            Extrapolation::Linear if n >= 2 => {
+                if frame < first.frame {
+                    return Some(first.value - (first.frame - frame) * self.end_slope(true));
+                }
+                if frame > last.frame {
+                    return Some(last.value + (frame - last.frame) * self.end_slope(false));
+                }
+            }
+            _ => {}
+        }
+        self.within(frame)
+    }
+
+    /// The slope the curve leaves its first key with (`start`) or arrives at
+    /// its last with: what linear extrapolation carries on along. Flat for a
+    /// held segment, the straight line's for a linear one, the key's own for
+    /// a Bézier — which auto-clamping makes flat at an end, as Blender's is.
+    fn end_slope(&self, start: bool) -> f64 {
+        let n = self.keys.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let (a, b, at) = if start {
+            (self.keys[0], self.keys[1], 0)
+        } else {
+            (self.keys[n - 2], self.keys[n - 1], n - 1)
+        };
+        match a.interpolation {
+            Interpolation::Constant => 0.0,
+            Interpolation::Linear => (b.value - a.value) / (b.frame - a.frame),
+            Interpolation::Bezier => self.slope(at),
+        }
+    }
+
+    /// The value at `frame`, holding the end keys outside them.
+    fn within(&self, frame: f64) -> Option<f64> {
         let first = self.keys.first()?;
         let last = self.keys.last()?;
         if frame <= first.frame {
@@ -429,6 +506,70 @@ impl Action {
     }
 
     /// Sets how the selected keys travel to the next.
+    /// Sets how the curves with a selected key carry on past their ends.
+    pub fn set_selected_extrapolation(&mut self, extrapolation: Extrapolation) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            if curve.keys.iter().any(|k| k.selected) && curve.extrapolation != extrapolation {
+                curve.extrapolation = extrapolation;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Smooths the selected keys: each between two others moves a half of
+    /// the way towards their mean — Blender's Smooth Keys, one pass. The
+    /// ends stay put, so a held pose at either end stays held.
+    pub fn smooth_selected(&mut self) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            let before: Vec<f64> = curve.keys.iter().map(|k| k.value).collect();
+            for i in 1..curve.keys.len().saturating_sub(1) {
+                if !curve.keys[i].selected {
+                    continue;
+                }
+                let v = 0.25 * before[i - 1] + 0.5 * before[i] + 0.25 * before[i + 1];
+                if v != before[i] {
+                    curve.keys[i].value = v;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Bakes the selected stretch of each curve: a key on every whole frame
+    /// from its first selected key to its last, each holding the value the
+    /// curve had there, in straight lines — Blender's Sample Keyframes. What
+    /// a game engine or a format with no Bézier wants.
+    pub fn bake_selected(&mut self) -> bool {
+        let mut changed = false;
+        for curve in &mut self.curves {
+            let selected: Vec<f64> = curve.keys.iter().filter(|k| k.selected).map(|k| k.frame).collect();
+            let (Some(first), Some(last)) = (selected.first().copied(), selected.last().copied()) else {
+                continue;
+            };
+            if last - first < 1.0 {
+                continue;
+            }
+            let mut frames = vec![first];
+            let mut f = first.floor() + 1.0;
+            while f < last {
+                frames.push(f);
+                f += 1.0;
+            }
+            frames.push(last);
+            let values: Vec<f64> = frames.iter().map(|f| curve.evaluate(*f).unwrap_or(0.0)).collect();
+            curve.keys.retain(|k| k.frame < first - SAME_FRAME || k.frame > last + SAME_FRAME);
+            for (f, v) in frames.iter().zip(values) {
+                curve.insert(*f, v, Interpolation::Linear);
+            }
+            changed = true;
+        }
+        changed
+    }
+
     pub fn set_selected_interpolation(&mut self, interpolation: Interpolation) -> bool {
         let mut changed = false;
         for curve in &mut self.curves {
@@ -1180,5 +1321,55 @@ mod tests {
         let mut t = DTransform::IDENTITY;
         apply_to_object(&a, 11.0, &mut t);
         assert_eq!(t, DTransform::IDENTITY);
+    }
+
+    #[test]
+    fn extrapolation_holds_carries_on_or_repeats() {
+        let mut c = FCurve::owned("location", 0);
+        c.insert(10.0, 1.0, Interpolation::Linear);
+        c.insert(20.0, 3.0, Interpolation::Linear);
+        c.insert(30.0, 2.0, Interpolation::Linear);
+        assert_eq!(c.evaluate(0.0), Some(1.0));
+        assert_eq!(c.evaluate(40.0), Some(2.0));
+        c.extrapolation = Extrapolation::Linear;
+        // Along the first segment's slope (0.2 a frame) and the last's (-0.1).
+        assert!((c.evaluate(0.0).unwrap() - (1.0 - 2.0)).abs() < 1e-12);
+        assert!((c.evaluate(40.0).unwrap() - (2.0 - 1.0)).abs() < 1e-12);
+        c.extrapolation = Extrapolation::Cyclic;
+        // A period of twenty frames, both ways.
+        for f in [12.5, 20.0, 27.0] {
+            assert!((c.evaluate(f + 20.0).unwrap() - c.evaluate(f).unwrap()).abs() < 1e-12);
+            assert!((c.evaluate(f - 40.0).unwrap() - c.evaluate(f).unwrap()).abs() < 1e-12);
+        }
+        // Inside the keys nothing changes.
+        assert!((c.evaluate(15.0).unwrap() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn smoothing_pulls_a_spike_down_and_leaves_the_ends() {
+        let mut a = Action::new("A");
+        let c = a.curve_mut("location", 0);
+        for (f, v) in [(1.0, 0.0), (2.0, 4.0), (3.0, 0.0)] {
+            c.insert(f, v, Interpolation::Linear);
+        }
+        assert!(a.smooth_selected());
+        let v: Vec<f64> = a.curves[0].keys.iter().map(|k| k.value).collect();
+        assert_eq!(v, vec![0.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn baking_keys_every_frame_and_keeps_the_shape() {
+        let mut a = Action::new("A");
+        let c = a.curve_mut("location", 0);
+        c.insert(1.0, 0.0, Interpolation::Bezier);
+        c.insert(9.0, 5.0, Interpolation::Bezier);
+        let before: Vec<f64> = (1..=9).map(|f| a.curves[0].evaluate(f as f64).unwrap()).collect();
+        assert!(a.bake_selected());
+        let c = &a.curves[0];
+        assert_eq!(c.keys.len(), 9);
+        assert!(c.keys.iter().all(|k| k.interpolation == Interpolation::Linear));
+        for (f, v) in (1..=9).zip(before) {
+            assert!((c.evaluate(f as f64).unwrap() - v).abs() < 1e-12);
+        }
     }
 }

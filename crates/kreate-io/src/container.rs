@@ -203,6 +203,9 @@ pub struct ObjectRecord {
     /// The armature object this mesh follows, by identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skin: Option<u64>,
+    /// Skinned by dual quaternions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preserve_volume: bool,
     /// The vertex group being painted, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_group: Option<String>,
@@ -332,6 +335,9 @@ pub struct CurveRecord {
     pub property: String,
     pub index: u8,
     pub keys: Vec<KeyRecord>,
+    /// Written only when it is not the default hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extrapolation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1343,6 +1349,9 @@ pub fn write(
                     .iter()
                     .filter_map(|c| {
                         Some(CurveRecord {
+                            extrapolation: (c.extrapolation
+                                != kreate_scene::animation::Extrapolation::Constant)
+                                .then(|| c.extrapolation.tag().to_string()),
                             property: c.path.property.to_string(),
                             index: c.path.index?,
                             keys: c
@@ -1593,6 +1602,7 @@ pub fn write(
                     })
                     .collect(),
                 skin: object.skin.map(|u| u.raw()),
+                preserve_volume: object.preserve_volume,
                 active_group: object.active_group.clone(),
                 shape_keys: object
                     .shape_keys
@@ -1878,6 +1888,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                         slope: k.slope.filter(|s| s.is_finite()),
                     })
                     .collect();
+                made.extrapolation = curve
+                    .extrapolation
+                    .as_deref()
+                    .and_then(kreate_scene::animation::Extrapolation::from_tag)
+                    .unwrap_or_default();
                 made.normalise();
                 action.curves.push(made);
             }
@@ -2119,6 +2134,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         // By identity, which the file restores for every object, so the
         // armature is found whatever order the two come back in.
         object.skin = record.skin.map(kreate_scene::Uid::from_raw);
+        object.preserve_volume = record.preserve_volume;
         object.active_group = record.active_group.clone();
         // Variables name their objects by identity, and every object's
         // identity is restored from the file, so these resolve whatever order

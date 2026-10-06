@@ -195,3 +195,15 @@ fn bone_constraints_are_saved_with_the_pose() {
     let (_, o) = back.objects().find(|(_, o)| o.name == "Rig").unwrap();
     assert_eq!(o.pose.constraints, constraints);
 }
+
+#[test]
+fn preserve_volume_is_saved_with_the_object() {
+    use kreate_scene::document::{Object, ObjectData};
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let id = doc.add_object(Object::new("Body", ObjectData::Mesh(mesh)));
+    doc.object_mut(id).unwrap().preserve_volume = true;
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
+    assert!(o.preserve_volume);
+}

@@ -113,6 +113,16 @@ fn bent() -> Pose {
 /// Skins on the GPU, once per pose in turn, and reads back the positions and
 /// normals after the last one.
 fn on_gpu(gpu: &Gpu, mesh: &MeshData, a: &Armature, poses: &[Vec<DAffine3>]) -> (Vec<glam::Vec3>, Vec<u32>) {
+    on_gpu_with(gpu, mesh, a, poses, false)
+}
+
+fn on_gpu_with(
+    gpu: &Gpu,
+    mesh: &MeshData,
+    a: &Armature,
+    poses: &[Vec<DAffine3>],
+    preserve_volume: bool,
+) -> (Vec<glam::Vec3>, Vec<u32>) {
     let cpu = RenderMeshCpu::extract(mesh);
     let viewport = kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
     let gpu_mesh = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
@@ -121,6 +131,7 @@ fn on_gpu(gpu: &Gpu, mesh: &MeshData, a: &Armature, poses: &[Vec<DAffine3>]) -> 
     let table = Influences { offsets, bones, weights };
     let skinner = Skin::new(&gpu.device, &deformer, &gpu_mesh, &cpu, &table, a.bones.len() as u32)
         .expect("a weighted mesh");
+    skinner.set_preserve_volume(&gpu.queue, preserve_volume);
     for matrices in poses {
         let rows: Vec<_> = matrices
             .iter()
@@ -233,6 +244,39 @@ fn the_normals_are_the_skinned_surface_s() {
     // And they really did turn: the rest normals would not pass this.
     assert!(stale < 0.5, "the pose has to turn some normals: {stale}");
     assert!(worst < 1.0, "a skinned normal is {worst} degrees off");
+}
+
+#[test]
+fn dual_quaternions_on_the_gpu_are_the_cpu_s() {
+    let gpu = gpu_or_skip!(gpu());
+    let mesh_to_armature = DAffine3::from_scale_rotation_translation(
+        DVec3::ONE,
+        DQuat::from_rotation_z(0.6),
+        DVec3::new(0.2, -0.1, 0.0),
+    );
+    let a = arm();
+    let m = column(&a, mesh_to_armature);
+    // Bent past half a turn from the root to the hand, so some vertex's
+    // bones sit in opposite hemispheres and the sign has to be chosen.
+    let mut pose = bent();
+    pose.entry("Lower").transform.rotation = DQuat::from_rotation_x(2.0);
+    pose.entry("Hand").transform.rotation = DQuat::from_rotation_x(1.8);
+    let matrices = skin_matrices(&a, &pose, mesh_to_armature);
+    let want = kreate_scene::skin::skin_with(&m, &a, &matrices, true).expect("weighted");
+    let linear = skin(&m, &a, &matrices).expect("weighted");
+    let (got, _) = on_gpu_with(&gpu, &m, &a, &[matrices], true);
+    let cpu = RenderMeshCpu::extract(&m);
+    let mut worst = 0.0f32;
+    let mut differs = 0.0f32;
+    for (r, p) in got.iter().enumerate() {
+        let v = cpu.render_to_vert[r] as usize;
+        worst = worst.max((*p - want.positions()[v]).length());
+        differs = differs.max((want.positions()[v] - linear.positions()[v]).length());
+    }
+    // The two blends really differ here, so agreeing with one is not
+    // agreeing with the other.
+    assert!(differs > 0.01, "{differs}");
+    assert!(worst < 1e-4, "GPU and CPU disagree by {worst}");
 }
 
 #[test]

@@ -33,15 +33,26 @@ pub struct Influences {
     pub weights: Vec<f32>,
 }
 
-/// An affine matrix as the shader reads it: three rows, the translation last
-/// in each.
-pub type BoneRows = [f32; 12];
+/// A bone as the shader reads it: the matrix's three rows (the translation
+/// last in each), then its rotation and translation as a unit dual
+/// quaternion (real, dual), then the rows of what is left — scale and shear —
+/// for dual-quaternion skinning. `kreate_scene::skin::DualBone`, in `f32`.
+pub type BoneRows = [f32; 32];
 
-/// The rows of `m`.
+/// `m` as the shader reads it.
 pub fn bone_rows(m: glam::Affine3A) -> BoneRows {
     let r = glam::Mat4::from(m).transpose();
     let (a, b, c) = (r.x_axis, r.y_axis, r.z_axis);
-    [a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x, c.y, c.z, c.w]
+    let (_, q, t) = m.to_scale_rotation_translation();
+    let q = q.normalize();
+    let dual = glam::Quat::from_xyzw(t.x, t.y, t.z, 0.0) * q * 0.5;
+    let left = (glam::Mat3::from_quat(q.inverse()) * glam::Mat3::from(m.matrix3)).transpose();
+    let (s0, s1, s2) = (left.x_axis, left.y_axis, left.z_axis);
+    [
+        a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x, c.y, c.z, c.w, //
+        q.x, q.y, q.z, q.w, dual.x, dual.y, dual.z, dual.w, //
+        s0.x, s0.y, s0.z, 0.0, s1.x, s1.y, s1.z, 0.0, s2.x, s2.y, s2.z, 0.0,
+    ]
 }
 
 /// One skinned mesh's GPU state: the rest copy, the tables, the bones.
@@ -50,6 +61,7 @@ pub struct Skin {
     live: wgpu::BindGroup,
     topology: wgpu::BindGroup,
     bones: wgpu::Buffer,
+    mode: wgpu::Buffer,
     bone_count: u32,
     render_verts: u32,
     faces: u32,
@@ -103,6 +115,11 @@ impl Skin {
             bytemuck::cast_slice(&identity),
             storage | wgpu::BufferUsages::COPY_DST,
         );
+        let mode = init(
+            "skin mode",
+            bytemuck::cast_slice(&[0u32; 4]),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         // The normal passes' own inputs: every vertex fully "weighted", which
         // is what their bounds check reads the vertex count from, and a
         // gesture they never look at.
@@ -123,6 +140,7 @@ impl Skin {
                 bind_entry(4, &bones_of),
                 bind_entry(5, &weights_of),
                 bind_entry(6, &bones),
+                bind_entry(7, &mode),
             ],
         });
         let live = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -142,6 +160,7 @@ impl Skin {
             live,
             topology: topology_group(device, deformer, cpu),
             bones,
+            mode,
             bone_count,
             render_verts,
             faces: cpu.counts.faces,
@@ -163,6 +182,12 @@ impl Skin {
         }
         queue.write_buffer(&self.bones, 0, bytemuck::cast_slice(bones));
         true
+    }
+
+    /// Dual quaternions (Blender's Preserve Volume) or the matrices' linear
+    /// blend, from the next dispatch on.
+    pub fn set_preserve_volume(&self, queue: &wgpu::Queue, on: bool) {
+        queue.write_buffer(&self.mode, 0, bytemuck::cast_slice(&[on as u32, 0, 0, 0]));
     }
 
     /// Writes the skinned positions and their normals into the mesh's buffers.

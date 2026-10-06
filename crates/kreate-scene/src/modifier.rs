@@ -401,6 +401,7 @@ struct ShapeEntry {
 struct SkinEntry {
     input: Arc<MeshData>,
     matrices: Vec<kreate_math::DAffine3>,
+    preserve_volume: bool,
     output: Arc<MeshData>,
     used: u64,
 }
@@ -473,7 +474,9 @@ impl ModifierCache {
         // modifier usually sits at the top of the stack, and the stack runs on
         // what the bones made of it.
         let skinned = match doc.skin_matrices(id) {
-            Some((armature, matrices)) => self.skinned(doc, input, armature, matrices),
+            Some((armature, matrices)) => {
+                self.skinned(doc, input, armature, matrices, object.preserve_volume)
+            }
             None => input.clone(),
         };
         let operands = operands_of(doc, id, &object.modifiers);
@@ -513,24 +516,26 @@ impl ModifierCache {
         input: &Arc<MeshData>,
         armature: crate::document::ArmatureId,
         matrices: Vec<kreate_math::DAffine3>,
+        preserve_volume: bool,
     ) -> Arc<MeshData> {
-        if let Some(entry) = self
-            .skins
-            .iter_mut()
-            .find(|e| Arc::ptr_eq(&e.input, input) && e.matrices == matrices)
-        {
+        if let Some(entry) = self.skins.iter_mut().find(|e| {
+            Arc::ptr_eq(&e.input, input)
+                && e.matrices == matrices
+                && e.preserve_volume == preserve_volume
+        }) {
             entry.used = self.generation;
             return entry.output.clone();
         }
         let output = doc
             .armature(armature)
-            .and_then(|a| crate::skin::skin(input, a, &matrices))
+            .and_then(|a| crate::skin::skin_with(input, a, &matrices, preserve_volume))
             .map(Arc::new)
             .unwrap_or_else(|| input.clone());
         self.skins.retain(|e| !Arc::ptr_eq(&e.input, input));
         self.skins.push(SkinEntry {
             input: input.clone(),
             matrices,
+            preserve_volume,
             output: output.clone(),
             used: self.generation,
         });
@@ -544,11 +549,11 @@ impl ModifierCache {
     pub fn skin_source(
         &self,
         mesh: &Arc<MeshData>,
-    ) -> Option<(&Arc<MeshData>, &[kreate_math::DAffine3])> {
+    ) -> Option<(&Arc<MeshData>, &[kreate_math::DAffine3], bool)> {
         self.skins
             .iter()
             .find(|e| Arc::ptr_eq(&e.output, mesh) && !Arc::ptr_eq(&e.input, &e.output))
-            .map(|e| (&e.input, e.matrices.as_slice()))
+            .map(|e| (&e.input, e.matrices.as_slice(), e.preserve_volume))
     }
 
     /// The evaluated result of applying `stack` to `input` at `ctx`'s time.

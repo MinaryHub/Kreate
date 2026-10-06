@@ -68,6 +68,10 @@ pub enum GraphEdit {
     Delete,
     Interpolation(u32),
     HandleType(u32),
+    /// `anim.keys_extrapolation`'s order: constant, linear, cyclic.
+    Extrapolation(u32),
+    Smooth,
+    Bake,
     SetSlope {
         target: String,
         frame: f64,
@@ -86,6 +90,8 @@ pub struct GraphText {
     pub handles: String,
     pub auto: String,
     pub flat: String,
+    pub extrapolation: String,
+    pub cyclic: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -115,6 +121,7 @@ enum Drag {
 enum Menu {
     Interpolation(Pos2),
     Handles(Pos2),
+    Extrapolation(Pos2),
 }
 
 /// What the panel remembers, per area.
@@ -674,7 +681,8 @@ fn graph_plot(
 
     // --- keys ------------------------------------------------------------------------
     if hovered && !ui.ctx().egui_wants_keyboard_input() && state.drag == Drag::None {
-        let (alt, ctrl) = ui.input(|i| (i.modifiers.alt, i.modifiers.command));
+        let (alt, ctrl, shift) =
+            ui.input(|i| (i.modifiers.alt, i.modifiers.command, i.modifiers.shift));
         let pressed = |k: Key| ui.input(|i| i.key_pressed(k));
         if pressed(Key::A) {
             out.push(GraphEdit::SelectAll(if alt { 1 } else { 0 }));
@@ -698,6 +706,12 @@ fn graph_plot(
         if pressed(Key::V) {
             state.menu = pointer.map(Menu::Handles);
         }
+        if shift && pressed(Key::E) {
+            state.menu = pointer.map(Menu::Extrapolation);
+        }
+        if alt && pressed(Key::O) {
+            out.push(if shift { GraphEdit::Bake } else { GraphEdit::Smooth });
+        }
     }
 
     // --- menus -------------------------------------------------------------------------
@@ -709,6 +723,11 @@ fn graph_plot(
                 vec![&text.constant, &text.linear, &text.bezier],
             ),
             Menu::Handles(at) => (at, &text.handles, vec![&text.auto, &text.flat]),
+            Menu::Extrapolation(at) => (
+                at,
+                &text.extrapolation,
+                vec![&text.constant, &text.linear, &text.cyclic],
+            ),
         };
         let mut close = false;
         let area = egui::Area::new(ui.id().with("graph-menu"))
@@ -723,6 +742,7 @@ fn graph_plot(
                             out.push(match menu {
                                 Menu::Interpolation(_) => GraphEdit::Interpolation(i as u32),
                                 Menu::Handles(_) => GraphEdit::HandleType(i as u32),
+                                Menu::Extrapolation(_) => GraphEdit::Extrapolation(i as u32),
                             });
                             close = true;
                         }
@@ -881,6 +901,8 @@ mod tests {
                 handles: String::new(),
                 auto: "A".into(),
                 flat: "F".into(),
+                extrapolation: String::new(),
+                cyclic: "Y".into(),
             };
             let mut out = Vec::new();
             let (state, view) = (&mut self.state, &self.view);

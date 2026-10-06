@@ -20,8 +20,21 @@
 @group(0) @binding(3) var<storage, read> offsets: array<u32>;
 @group(0) @binding(4) var<storage, read> influence_bones: array<u32>;
 @group(0) @binding(5) var<storage, read> influence_weights: array<f32>;
-// Three rows of an affine matrix per bone, the fourth column the translation.
+// Eight vec4 per bone: three rows of the affine matrix (the fourth column the
+// translation); the rotation and translation as a unit dual quaternion (real,
+// dual); and the rows of what is left of the matrix once those are taken out
+// — scale and shear — for dual-quaternion skinning.
 @group(0) @binding(6) var<storage, read> bones: array<vec4<f32>>;
+// x: 1 to skin by dual quaternions (Blender's Preserve Volume), 0 to blend
+// the matrices.
+@group(0) @binding(7) var<uniform> mode: vec4<u32>;
+
+const STRIDE: u32 = 8u;
+
+fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
 
 @compute @workgroup_size(64)
 fn skin_positions(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -34,21 +47,49 @@ fn skin_positions(@builtin(global_invocation_id) id: vec3<u32>) {
     let v = render_to_vert[r];
     var sum = vec3<f32>(0.0, 0.0, 0.0);
     var total = 0.0;
+    // The dual-quaternion blend's accumulators: `kreate_scene::skin::dual_blend`.
+    var real = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var dual = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var s0 = vec3<f32>(0.0, 0.0, 0.0);
+    var s1 = vec3<f32>(0.0, 0.0, 0.0);
+    var s2 = vec3<f32>(0.0, 0.0, 0.0);
+    var first = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var seen = false;
     if (v + 1u < arrayLength(&offsets)) {
         for (var k = offsets[v]; k < offsets[v + 1u]; k = k + 1u) {
             let w = influence_weights[k];
-            let b = influence_bones[k] * 3u;
+            let b = influence_bones[k] * STRIDE;
             // A bone the matrices do not cover is skipped, as the CPU skips a
             // weight layer whose bone has no matrix.
-            if (w > 0.0 && b + 2u < arrayLength(&bones)) {
+            if (w > 0.0 && b + STRIDE - 1u < arrayLength(&bones)) {
                 sum += vec3<f32>(dot(bones[b], rest), dot(bones[b + 1u], rest), dot(bones[b + 2u], rest)) * w;
                 total += w;
+                let q = bones[b + 3u];
+                if (!seen) {
+                    first = q;
+                    seen = true;
+                }
+                // The shorter way round: q and -q are one turn.
+                let s = select(w, -w, dot(q, first) < 0.0);
+                real += q * s;
+                dual += bones[b + 4u] * s;
+                s0 += bones[b + 5u].xyz * w;
+                s1 += bones[b + 6u].xyz * w;
+                s2 += bones[b + 7u].xyz * w;
             }
         }
     }
     var out = rest.xyz;
     if (total > 0.0) {
         out = sum / total;
+        let length = sqrt(dot(real, real));
+        if (mode.x == 1u && length > 1e-12) {
+            let r = real / length;
+            let d = dual / length;
+            let scaled = vec3<f32>(dot(s0, rest.xyz), dot(s1, rest.xyz), dot(s2, rest.xyz)) / total;
+            let t = 2.0 * (r.w * d.xyz - d.w * r.xyz + cross(r.xyz, d.xyz));
+            out = quat_rotate(r, scaled) + t;
+        }
     }
     live_positions[i] = out.x;
     live_positions[i + 1u] = out.y;

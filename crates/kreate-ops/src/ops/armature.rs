@@ -35,6 +35,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetBone>();
     registry.register::<Bind>();
     registry.register::<Unbind>();
+    registry.register::<SetPreserveVolume>();
 }
 
 /// The armature object being edited.
@@ -804,6 +805,59 @@ fn meshes_to_bind(doc: &Document) -> Vec<ObjectId> {
             Some(*id) != doc.selection.active && doc.object(*id).is_some_and(|o| o.mesh().is_some())
         })
         .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PreserveVolumeParams {
+    pub preserve_volume: bool,
+}
+
+/// Blender's Preserve Volume, on the selected bound meshes: dual-quaternion
+/// skinning, which keeps a twisted joint round.
+pub struct SetPreserveVolume;
+
+impl Operator for SetPreserveVolume {
+    type Params = PreserveVolumeParams;
+    fn id() -> &'static str {
+        "object.set_preserve_volume"
+    }
+    fn label() -> &'static str {
+        "Preserve Volume"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .objects
+            .iter()
+            .any(|id| doc.object(*id).is_some_and(|o| o.skin.is_some()))
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let changing: Vec<ObjectId> = doc
+            .document()
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| {
+                doc.document().object(*id).is_some_and(|o| {
+                    o.skin.is_some() && o.preserve_volume != params.preserve_volume
+                })
+            })
+            .collect();
+        if changing.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in changing {
+            if let Some(o) = d.object_mut(id) {
+                o.preserve_volume = params.preserve_volume;
+            }
+        }
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]

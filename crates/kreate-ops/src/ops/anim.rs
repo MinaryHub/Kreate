@@ -21,6 +21,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MoveKeys>();
     registry.register::<DeleteKeys>();
     registry.register::<SetKeyInterpolation>();
+    registry.register::<SetExtrapolation>();
+    registry.register::<SmoothKeys>();
+    registry.register::<BakeKeys>();
     registry.register::<KeyProperty>();
     registry.register::<UnkeyProperty>();
     registry.register::<SelectKeysRegion>();
@@ -696,6 +699,125 @@ impl Operator for SetKeyInterpolation {
             }
         }
         Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetExtrapolationParams {
+    #[param(variants("constant", "linear", "cyclic"))]
+    pub extrapolation: u32,
+}
+
+/// Sets how the curves with a selected key carry on past their ends:
+/// Blender's Shift+E.
+pub struct SetExtrapolation;
+
+impl Operator for SetExtrapolation {
+    type Params = SetExtrapolationParams;
+    fn id() -> &'static str {
+        "anim.keys_extrapolation"
+    }
+    fn label() -> &'static str {
+        "Set Extrapolation"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mode) = kreate_scene::animation::Extrapolation::ALL
+            .get(params.extrapolation as usize)
+            .copied()
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let shown = shown_actions(doc.document());
+        let any = shown.iter().any(|a| {
+            doc.document().action(*a).is_some_and(|a| {
+                a.curves
+                    .iter()
+                    .any(|c| c.extrapolation != mode && c.keys.iter().any(|k| k.selected))
+            })
+        });
+        if !any {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                a.set_selected_extrapolation(mode);
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct CurveToolParams {}
+
+/// Smooths the selected keys: Blender's Smooth Keys (Alt+O).
+pub struct SmoothKeys;
+
+impl Operator for SmoothKeys {
+    type Params = CurveToolParams;
+    fn id() -> &'static str {
+        "anim.keys_smooth"
+    }
+    fn label() -> &'static str {
+        "Smooth Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        let d = doc.document_mut();
+        let mut changed = false;
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                changed |= a.smooth_selected();
+            }
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+/// A key on every frame of the selected stretch of each curve: Blender's
+/// Sample Keyframes (Shift+Alt+O).
+pub struct BakeKeys;
+
+impl Operator for BakeKeys {
+    type Params = CurveToolParams;
+    fn id() -> &'static str {
+        "anim.keys_bake"
+    }
+    fn label() -> &'static str {
+        "Bake Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let shown = shown_actions(doc.document());
+        let d = doc.document_mut();
+        let mut changed = false;
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                changed |= a.bake_selected();
+            }
+        }
+        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
     }
 }
 

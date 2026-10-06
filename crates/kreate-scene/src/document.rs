@@ -186,6 +186,9 @@ pub struct Object {
     /// The armature object this mesh follows, by identity — what Blender's
     /// Armature modifier names. See [`crate::skin`].
     pub skin: Option<Uid>,
+    /// Skin by dual quaternions rather than by the linear blend: Blender's
+    /// Preserve Volume. Keeps a twisted joint round.
+    pub preserve_volume: bool,
     /// The vertex group being painted and shown, by name — Blender's active
     /// group, on the object as Blender keeps it.
     pub active_group: Option<String>,
@@ -217,6 +220,7 @@ impl Object {
             drivers: Vec::new(),
             pose: crate::armature::Pose::default(),
             skin: None,
+            preserve_volume: false,
             active_group: None,
             shape_keys: Vec::new(),
             active_shape: None,

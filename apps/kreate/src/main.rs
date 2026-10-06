@@ -5900,7 +5900,7 @@ impl App {
         let mut skinned = Vec::new();
         let mut encoder: Option<wgpu::CommandEncoder> = None;
         for (id, shown) in &self.evaluated {
-            let Some((rest, matrices)) = self.modifiers.skin_source(shown) else {
+            let Some((rest, matrices, preserve_volume)) = self.modifiers.skin_source(shown) else {
                 continue;
             };
             let reused = gfx
@@ -5945,6 +5945,7 @@ impl App {
                         label: Some("skin"),
                     })
                 });
+                entry.skin.set_preserve_volume(&gfx.gpu.queue, preserve_volume);
                 entry.skin.dispatch(encoder, &gfx.deformer);
                 entry.shown = shown.clone();
             }
