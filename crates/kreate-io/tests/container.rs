@@ -1189,3 +1189,22 @@ fn a_bound_mesh_still_follows_its_armature_after_a_save() {
     );
     assert!(after.skin_matrices(body_after).is_some());
 }
+
+#[test]
+fn the_render_settings_survive_a_save() {
+    let mut doc = Document::new();
+    doc.render = kreate_scene::render::RenderSettings {
+        width: 1280,
+        height: 720,
+        samples: 256,
+        format: kreate_scene::render::OutputFormat::Exr,
+        output: "C:/renders/shot".into(),
+        denoise: false,
+        motion_blur: true,
+    };
+    let after = round_trip(&doc).document;
+    assert_eq!(after.render, doc.render);
+    // And the defaults are not written at all.
+    let plain = round_trip(&Document::new()).document;
+    assert_eq!(plain.render, kreate_scene::render::RenderSettings::default());
+}

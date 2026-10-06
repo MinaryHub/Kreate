@@ -8,6 +8,7 @@
 
 pub mod build;
 pub mod clipboard;
+pub mod exr;
 pub mod container;
 pub mod gltf_export;
 pub mod gltf_import;

@@ -523,6 +523,21 @@ pub struct CollectionRecord {
     pub objects: Vec<usize>,
 }
 
+/// The scene's render settings. See `kreate_scene::render`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenderRecord {
+    pub width: u32,
+    pub height: u32,
+    pub samples: u32,
+    /// `png` or `exr`; anything else reads as PNG.
+    pub format: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    pub denoise: bool,
+    #[serde(default)]
+    pub motion_blur: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlaybackRecord {
     pub frame: f64,
@@ -949,6 +964,9 @@ pub struct SceneFile {
     /// never touched the timeline reads as it did before there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback: Option<PlaybackRecord>,
+    /// The render settings, when they are not the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<RenderRecord>,
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
@@ -1333,6 +1351,18 @@ pub fn write(
                     .collect(),
             })
             .collect();
+        scene.render = (document.render != kreate_scene::render::RenderSettings::default()).then(|| {
+            let r = &document.render;
+            RenderRecord {
+                width: r.width,
+                height: r.height,
+                samples: r.samples,
+                format: r.format.extension().to_string(),
+                output: r.output.clone(),
+                denoise: r.denoise,
+                motion_blur: r.motion_blur,
+            }
+        });
         scene.playback =
             (document.playback != kreate_scene::animation::Playback::default()).then(|| {
                 let p = document.playback;
@@ -1914,6 +1944,20 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         .filter(|c| c.is_finite())
     {
         document.cursor = c;
+    }
+    if let Some(r) = &scene.render {
+        use kreate_scene::render::{OutputFormat, RenderSettings};
+        // Sizes a file can make absurd are brought back into range rather
+        // than trusted: a render of zero pixels, or of a billion, is not one.
+        document.render = RenderSettings {
+            width: r.width.clamp(16, 16384),
+            height: r.height.clamp(16, 16384),
+            samples: r.samples.clamp(1, 65536),
+            format: if r.format == "exr" { OutputFormat::Exr } else { OutputFormat::Png },
+            output: r.output.clone(),
+            denoise: r.denoise,
+            motion_blur: r.motion_blur,
+        };
     }
     if let Some(p) = scene.playback {
         // Refused rather than trusted: an fps of zero divides every playback
