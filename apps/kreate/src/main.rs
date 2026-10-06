@@ -3992,8 +3992,30 @@ impl App {
             started: Instant::now(),
             drawn: 0,
             ids: None,
+            blur: None,
             written: Vec::new(),
         });
+        // Motion blur: the shutter, as a fraction of a frame, from the
+        // camera; a closed one has nothing to smear.
+        let shutter = self
+            .doc
+            .object(camera)
+            .and_then(|o| match o.data {
+                kreate_scene::document::ObjectData::Camera(c) => self.doc.camera(c),
+                _ => None,
+            })
+            .map_or(0.0, |c| c.shutter);
+        if self.doc.render.motion_blur && shutter > 0.0 {
+            let base = frames.map_or(self.doc.playback.frame, |(first, _)| first as f64);
+            let samples = self.doc.render.samples;
+            if let Some(gfx) = self.gfx.as_mut() {
+                gfx.viewport.sample_cap = Some((samples / Blur::STEPS).max(1));
+            }
+            if let Some(job) = self.render_job.as_mut() {
+                job.blur = Some(Blur { step: 0, shutter, base, sum: Vec::new() });
+            }
+            self.set_frame(Blur::time(base, shutter, 0));
+        }
         self.aim_render_camera();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
@@ -4053,6 +4075,38 @@ impl App {
             self.status(&format!("{progress}, {:.0} s (Esc stops)", started.elapsed().as_secs_f32()));
             return;
         }
+        // Motion blur: this was one moment of the shutter. Added to the
+        // mean, and the next moment drawn, until the shutter has closed.
+        if self.render_job.as_ref().is_some_and(|j| j.blur.is_some()) {
+            let forward = (self.camera.pivot - self.camera.eye()).normalize_or_zero().as_vec3();
+            let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
+            let passes = self
+                .gfx
+                .as_ref()
+                .ok_or("the window closed".to_string())
+                .and_then(|g| g.viewport.read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward));
+            let Ok(passes) = passes else {
+                self.finish_render_job("motion blur: the picture could not be read back");
+                return;
+            };
+            let job = self.render_job.as_mut().expect("checked");
+            let blur = job.blur.as_mut().expect("checked");
+            if blur.sum.len() != passes.combined.len() {
+                blur.sum = vec![[0.0; 4]; passes.combined.len()];
+            }
+            for (s, c) in blur.sum.iter_mut().zip(&passes.combined) {
+                for i in 0..4 {
+                    s[i] += c[i];
+                }
+            }
+            blur.step += 1;
+            if blur.step < Blur::STEPS {
+                let t = Blur::time(blur.base, blur.shutter, blur.step);
+                job.drawn = 0;
+                self.set_frame(t);
+                return;
+            }
+        }
         let job = self.render_job.as_ref().expect("checked");
         let path = match frames {
             Some((f, _)) => job.settings.frame_path(&job.folder, f),
@@ -4082,6 +4136,14 @@ impl App {
                     job.frames = Some((f + 1, end));
                     job.drawn = 0;
                     job.ids = None;
+                    if let Some(blur) = job.blur.as_mut() {
+                        blur.step = 0;
+                        blur.base = (f + 1) as f64;
+                        blur.sum.clear();
+                        let t = Blur::time(blur.base, blur.shutter, 0);
+                        self.set_frame(t);
+                        return;
+                    }
                 }
                 return;
             }
@@ -4100,7 +4162,32 @@ impl App {
     /// Writes the picture on screen to `path`: the display's PNG, or an EXR
     /// of the scene-linear picture with its depth and normal passes.
     fn write_render(&mut self, path: &std::path::Path, format: kreate_scene::render::OutputFormat) -> Result<(), String> {
-        let (w, h, png) = self.read_target_png()?;
+        // A motion-blurred picture is the mean of the shutter's moments,
+        // shown through the same view transform on the CPU; any other is the
+        // one on screen.
+        let blurred: Option<Vec<[f32; 4]>> = self.render_job.as_ref().and_then(|j| j.blur.as_ref()).map(|b| {
+            let n = Blur::STEPS as f32;
+            b.sum.iter().map(|c| [c[0] / n, c[1] / n, c[2] / n, 1.0]).collect()
+        });
+        let (w, h, png) = match &blurred {
+            Some(mean) => {
+                let (w, h) = self.gfx.as_ref().map(|g| g.viewport.render_size()).ok_or("the window closed")?;
+                let view = kreate_math::DisplayTransform::agx(0.0);
+                let mut rgba = Vec::with_capacity(mean.len() * 4);
+                for c in mean {
+                    let s = view.apply(kreate_math::SceneRgb::new(c[0], c[1], c[2])).encode();
+                    rgba.extend([s.r, s.g, s.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                    rgba.push(255);
+                }
+                let image = image::RgbaImage::from_raw(w, h, rgba).ok_or("the blurred picture has the wrong size")?;
+                let mut png = Vec::new();
+                image
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                (w, h, png)
+            }
+            None => self.read_target_png()?,
+        };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -4110,9 +4197,12 @@ impl App {
                 let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
                 let forward = (self.camera.pivot - self.camera.eye()).normalize_or_zero().as_vec3();
                 let gfx = self.gfx.as_ref().ok_or("the window closed")?;
-                let passes = gfx
+                let mut passes = gfx
                     .viewport
                     .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
+                if let Some(mean) = blurred {
+                    passes.combined = mean;
+                }
                 let crypto = self.render_job.as_ref().and_then(|j| j.ids.as_ref()).map(|ids| {
                     let names: Vec<Option<String>> = ids
                         .iter()
@@ -4163,7 +4253,8 @@ impl App {
         self.camera_view = saved.camera_view;
         self.camera_view_object = saved.camera_view_object;
         self.wanted_viewport = saved.wanted_viewport;
-        if job.frames.is_some() {
+        // An animation or a blurred still moved the clock; it goes back.
+        if job.frames.is_some() || job.blur.is_some() {
             self.set_frame(saved.frame);
         }
         if let Some((_, _, _, path)) = &mut self.last_render {
@@ -9553,7 +9644,33 @@ struct RenderJob {
     /// Which object each pixel shows, read once the camera has settled, for
     /// an EXR's Cryptomatte. See `Viewport::read_object_ids`.
     ids: Option<Vec<u32>>,
+    /// Motion blur, when the settings ask for it and the camera's shutter is
+    /// open: the picture as the mean of pictures across the shutter.
+    blur: Option<Blur>,
     written: Vec<std::path::PathBuf>,
+}
+
+/// Motion blur in progress: which moment of the shutter is being drawn, and
+/// the sum of those drawn so far.
+struct Blur {
+    step: u32,
+    /// How long the shutter is open, as a fraction of a frame.
+    shutter: f64,
+    /// The frame the shutter is centred on.
+    base: f64,
+    sum: Vec<[f32; 4]>,
+}
+
+impl Blur {
+    /// Moments across the shutter. Each gets an equal share of the samples,
+    /// so the render costs what it did without blur.
+    const STEPS: u32 = 16;
+
+    /// The time of moment `step`: the middles of equal slices of the shutter,
+    /// centred on `base`.
+    fn time(base: f64, shutter: f64, step: u32) -> f64 {
+        base + shutter * ((step as f64 + 0.5) / Self::STEPS as f64 - 0.5)
+    }
 }
 
 /// The view a render borrows, to give back.
