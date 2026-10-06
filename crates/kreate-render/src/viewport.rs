@@ -3370,6 +3370,9 @@ impl Viewport {
         self.environment =
             crate::environment::Environment::new(device, queue, width, height, pixels);
         self.has_environment = true;
+        // Where its light comes from, for the path tracer to aim at.
+        let map = crate::environment::ImportanceMap::of(width, height, pixels);
+        self.pathtracer.set_environment(device, Some(&map));
         self.rebuild_shading_bind(device);
         queue.write_buffer(
             &self.shading_globals_buf,
@@ -3385,6 +3388,7 @@ impl Viewport {
         }
         self.environment = crate::environment::Environment::placeholder(device);
         self.has_environment = false;
+        self.pathtracer.set_environment(device, None);
         self.rebuild_shading_bind(device);
         queue.write_buffer(
             &self.shading_globals_buf,

@@ -124,6 +124,9 @@ struct Params {
     emitter_count: u32,
     emitter_total: f32,
     _pad: u32,
+    /// The environment's importance map: columns, rows, whether there is
+    /// one, and nothing.
+    env: [u32; 4],
 }
 
 #[repr(C)]
@@ -187,6 +190,10 @@ fn emitters_of(positions: &[Vec3], triangles: &[[u32; 4]], surfaces: &[PtSurface
 }
 
 pub struct PathTracer {
+    /// The environment's importance map (see `environment::ImportanceMap`),
+    /// or one zero when there is none; and its columns and rows.
+    env_map: wgpu::Buffer,
+    env_size: Option<(u32, u32)>,
     trace: wgpu::ComputePipeline,
     resolve: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
@@ -269,6 +276,7 @@ impl PathTracer {
                     count: None,
                 },
                 storage(12, true, c),
+                storage(13, true, c),
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -356,7 +364,17 @@ impl PathTracer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let env_map = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("path trace environment map"),
+                contents: &[0u8; 16],
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
         Self {
+            env_map,
+            env_size: None,
             image_sampler,
             trace,
             resolve,
@@ -569,6 +587,22 @@ impl PathTracer {
         self.sample = 0;
     }
 
+    /// The environment's importance map, or none for a flat world.
+    pub fn set_environment(&mut self, device: &wgpu::Device, map: Option<&crate::environment::ImportanceMap>) {
+        let data: &[f32] = map.map_or(&[0.0; 4][..], |m| &m.cdf);
+        self.env_map = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("path trace environment map"),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        );
+        self.env_size = map.map(|m| (m.columns, m.rows));
+        self.scene_bind = None;
+        self.sample = 0;
+    }
+
     /// Samples in the sum so far.
     pub fn samples(&self) -> u32 {
         self.sample
@@ -640,6 +674,10 @@ impl PathTracer {
                 binding: 12,
                 resource: scene.emitters.as_entire_binding(),
             });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 13,
+                resource: self.env_map.as_entire_binding(),
+            });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,
@@ -680,6 +718,10 @@ impl PathTracer {
             emitter_count: self.scene.as_ref().map_or(0, |s| s.emitter_count),
             emitter_total: self.scene.as_ref().map_or(0.0, |s| s.emitter_total),
             _pad: 0,
+            env: match self.env_size {
+                Some((c, r)) => [c, r, 1, 0],
+                None => [0, 0, 0, 0],
+            },
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         queue.write_buffer(

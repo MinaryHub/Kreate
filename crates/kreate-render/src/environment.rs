@@ -108,6 +108,79 @@ pub fn equirect_uv(dir: Vec3) -> Vec2 {
     Vec2::new(u, v)
 }
 
+/// Where the environment's light comes from, for the path tracer to aim at:
+/// a grid over the equirectangular image, each cell weighted by its mean
+/// luminance times the solid angle it covers, as cumulative distributions —
+/// the rows first (`rows` values), then each row's columns (`rows * columns`).
+///
+/// Every pixel is counted into its cell, not a sample of them: a sun smaller
+/// than a cell is the whole reason for the map, and a point sample of the cell
+/// would miss it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportanceMap {
+    pub columns: u32,
+    pub rows: u32,
+    pub cdf: Vec<f32>,
+}
+
+impl ImportanceMap {
+    pub const COLUMNS: u32 = 256;
+    pub const ROWS: u32 = 128;
+
+    /// The map of an `Rgba16Float` equirectangular image.
+    pub fn of(width: u32, height: u32, pixels: &[u8]) -> Self {
+        let (columns, rows) = (Self::COLUMNS, Self::ROWS);
+        let mut sum = vec![0.0f64; (columns * rows) as usize];
+        let mut count = vec![0u32; (columns * rows) as usize];
+        if width > 0 && height > 0 {
+            for y in 0..height {
+                let row = (y as u64 * rows as u64 / height as u64) as u32;
+                for x in 0..width {
+                    let column = (x as u64 * columns as u64 / width as u64) as u32;
+                    let c = texel(pixels, width, x, y);
+                    let lum = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+                    let i = (row * columns + column) as usize;
+                    sum[i] += lum.max(0.0) as f64;
+                    count[i] += 1;
+                }
+            }
+        }
+        let mut cdf = vec![0.0f32; (rows + rows * columns) as usize];
+        let mut row_weights = vec![0.0f64; rows as usize];
+        for row in 0..rows {
+            let theta = (row as f64 + 0.5) / rows as f64 * std::f64::consts::PI;
+            let mut running = 0.0f64;
+            for column in 0..columns {
+                let i = (row * columns + column) as usize;
+                let mean = if count[i] > 0 { sum[i] / count[i] as f64 } else { 0.0 };
+                running += mean * theta.sin();
+                cdf[(rows + row * columns + column) as usize] = running as f32;
+            }
+            row_weights[row as usize] = running;
+            // Normalised along the row; an empty row picks its columns evenly.
+            for column in 0..columns {
+                let at = (rows + row * columns + column) as usize;
+                cdf[at] = if running > 0.0 {
+                    (cdf[at] as f64 / running) as f32
+                } else {
+                    (column + 1) as f32 / columns as f32
+                };
+            }
+        }
+        let total: f64 = row_weights.iter().sum();
+        let mut running = 0.0f64;
+        for row in 0..rows {
+            running += row_weights[row as usize];
+            cdf[row as usize] = if total > 0.0 {
+                (running / total) as f32
+            } else {
+                (row + 1) as f32 / rows as f32
+            };
+        }
+        Self { columns, rows, cdf }
+    }
+}
+
 /// The nine spherical-harmonic basis values for a direction.
 ///
 /// Second order, which is nine terms. Written out rather than looped because
@@ -1048,5 +1121,41 @@ mod tests {
         for level in 1..MIPS {
             assert!(roughness_of(level) > roughness_of(level - 1));
         }
+    }
+}
+
+#[cfg(test)]
+mod importance_tests {
+    use super::*;
+
+    fn image(width: u32, height: u32, bright: impl Fn(u32, u32) -> bool) -> Vec<u8> {
+        let mut out = Vec::with_capacity((width * height * 8) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let v = if bright(x, y) { 1000.0 } else { 1e-4 };
+                for c in [v, v, v, 1.0] {
+                    out.extend_from_slice(&half::f16::from_f32(c).to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_one_pixel_sun_takes_nearly_all_of_the_distribution() {
+        // A 512x256 sky, dark but for one pixel: smaller than a cell, and the
+        // cell it lands in must still carry it.
+        let (w, h) = (512, 256);
+        let pixels = image(w, h, |x, y| x == 300 && y == 60);
+        let map = ImportanceMap::of(w, h, &pixels);
+        let (cols, rows) = (map.columns as usize, map.rows as usize);
+        let row = 60 * rows / h as usize;
+        let col = 300 * cols / w as usize;
+        let row_share = map.cdf[row] - if row > 0 { map.cdf[row - 1] } else { 0.0 };
+        assert!(row_share > 0.9, "the sun's row has {row_share} of the distribution");
+        let at = rows + row * cols + col;
+        let cell_share = map.cdf[at] - map.cdf[at - 1];
+        assert!(cell_share > 0.9, "the sun's cell has {cell_share} of its row");
+        assert!((map.cdf[rows - 1] - 1.0).abs() < 1e-5, "the rows sum to one");
     }
 }

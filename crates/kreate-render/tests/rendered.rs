@@ -2924,3 +2924,97 @@ fn a_big_glowing_panel_is_counted_once() {
         "the floor under the panel is {mean}, the form factor says {expected}"
     );
 }
+
+/// An equirectangular sky, `Rgba16Float`: `radiance` in the top `rows` of
+/// `height`, black below.
+fn cap_sky(width: u32, height: u32, rows: u32, radiance: f32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((width * height * 8) as usize);
+    for y in 0..height {
+        let v = if y < rows { radiance } else { 0.0 };
+        for _ in 0..width {
+            for c in [v, v, v, 1.0] {
+                out.extend_from_slice(&half::f16::from_f32(c).to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// A matte floor under `sky`, path traced for `frames` samples with no lamps
+/// and nothing glowing: the green of a 5x5 patch at the origin, linear.
+fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.path_trace = true;
+    viewport.path_trace_denoise = false;
+    viewport.show_bloom = false;
+    viewport.show_reflections = false;
+    viewport.ambient_occlusion = false;
+    viewport.contact_shadows = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    viewport.set_environment(&gpu.device, &gpu.queue, w, h, sky);
+    viewport.set_world_shape(&gpu.queue, 0.0, 1.0);
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(40.0, 2, 2));
+    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    one_material(gpu, &mut viewport, grey());
+    let positions: Vec<[f32; 3]> = floor_cpu.positions.iter().map(|p| p.0).collect();
+    let normals: Vec<glam::Vec3> = floor_cpu.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect();
+    let meshes = [kreate_render::pathtrace::PtMesh {
+        positions: &positions,
+        uvs: &floor_cpu.uvs,
+        normals: &normals,
+        indices: &floor_cpu.indices,
+        transform: glam::DAffine3::IDENTITY,
+        surface: 0,
+    }];
+    let matte = kreate_render::pathtrace::PtSurface { base_color: [0.8; 3], roughness: 0.9, ..Default::default() };
+    viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[matte], &[]);
+    let camera = Camera {
+        pivot: glam::DVec3::ZERO,
+        distance: 3.0,
+        rotation: glam::DQuat::from_rotation_x(0.6),
+        ..Camera::default()
+    };
+    let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    for _ in 0..frames {
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        let _ = read_frame(gpu, &mut viewport, &draws);
+    }
+    let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
+    let passes = viewport.read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward).expect("passes");
+    let (x, y) = (passes.width as i32 / 2, passes.height as i32 / 2);
+    let mut values = Vec::new();
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            values.push(passes.combined[((y + dy) as u32 * passes.width + (x + dx) as u32) as usize][1]);
+        }
+    }
+    values
+}
+
+/// The path tracer aims at the environment where its light is, and weighs
+/// that against bouncing into it: a floor under a bright cap of sky is as
+/// bright as the cap's radiance and size say, and under a small sun it is
+/// smooth after a few samples.
+#[test]
+fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
+    let gpu = gpu_or_skip!(gpu());
+    let (w, h) = (256, 128);
+    let mean = |p: &[f32]| p.iter().sum::<f32>() / p.len() as f32;
+    // A cap of radiance L to θ₀ from straight up irradiates a level floor
+    // with πL·sin²θ₀; a matte floor of 0.8 returns 0.8·L·sin²θ₀ of it.
+    let rows = 16;
+    let theta = rows as f32 / h as f32 * std::f32::consts::PI;
+    let cap = mean(&sky_patch(&gpu, 32, &cap_sky(w, h, rows, 1000.0), (w, h)));
+    let expected = 0.8 * 1000.0 * theta.sin().powi(2) * FRAMED.exposure.exp2();
+    assert!((cap - expected).abs() < expected * 0.12, "under the cap the floor is {cap}, its size says {expected}");
+    // A sun: two rows, far brighter — near the most a half float holds.
+    // Smooth at sixteen samples.
+    let sun = sky_patch(&gpu, 16, &cap_sky(w, h, 2, 60_000.0), (w, h));
+    let m = mean(&sun);
+    let spread = (sun.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / sun.len() as f32).sqrt();
+    assert!(m > 0.0 && spread < m * 0.25, "under a small sun sixteen samples are speckle: {spread} about {m}");
+}

@@ -34,6 +34,9 @@ struct PtParams {
     emitter_count: u32,
     emitter_total: f32,
     _pad0: u32,
+    // The environment's importance map: columns, rows, nonzero when there is
+    // one.
+    env: vec4<u32>,
 };
 
 struct PtNode {
@@ -66,6 +69,9 @@ struct PtNode {
 // The glowing triangles: x the triangle's index (its bits), y where it ends
 // in the cumulative distribution of area times luminance.
 @group(0) @binding(12) var<storage, read> pt_emitters: array<vec2<f32>>;
+// The environment's cumulative distributions: the rows, then each row's
+// columns. See `environment::ImportanceMap`.
+@group(0) @binding(13) var<storage, read> pt_env_cdf: array<f32>;
 
 // --- random numbers -----------------------------------------------------------
 
@@ -211,15 +217,115 @@ fn pt_luminance(c: vec3<f32>) -> f32 {
 // carries the cases it is good at (aiming for small lights and rough
 // surfaces, bouncing for big lights and mirrors).
 
-// How often a surface aims at a glowing triangle rather than at a lamp.
+// How many of the three ways to aim there are: at a lamp, at a glowing
+// triangle, at the environment's bright part. Each that exists is chosen
+// equally often.
+fn pt_aim_ways() -> f32 {
+    return f32(u32(pt.light_count > 0u) + u32(pt.emitter_count > 0u) + u32(pt.env.z != 0u));
+}
+
+// How often a surface aims at a glowing triangle.
 fn pt_emitter_share() -> f32 {
     if (pt.emitter_count == 0u) {
         return 0.0;
     }
-    if (pt.light_count == 0u) {
-        return 1.0;
+    return 1.0 / pt_aim_ways();
+}
+
+fn pt_env_share() -> f32 {
+    if (pt.env.z == 0u) {
+        return 0.0;
     }
-    return 0.5;
+    return 1.0 / pt_aim_ways();
+}
+
+fn pt_lamp_share() -> f32 {
+    if (pt.light_count == 0u) {
+        return 0.0;
+    }
+    return 1.0 / pt_aim_ways();
+}
+
+// --- the environment as a light -------------------------------------------------
+//
+// An image sky lit only through bounces is grain around every bright patch,
+// and a sun in it is grain for good. So the tracer aims at it too, in
+// proportion to where its light is, and weighs that against bouncing into it
+// as it does for glowing surfaces.
+
+// The environment's own frame from the world's: its turn about up undone.
+fn pt_env_local(dir: vec3<f32>) -> vec3<f32> {
+    return unrotate(dir);
+}
+
+// The world's frame from the environment's: the turn done.
+fn pt_env_world(d: vec3<f32>) -> vec3<f32> {
+    let c = shading.environment.x;
+    let s = shading.environment.y;
+    return vec3<f32>(d.x * c - d.y * s, d.x * s + d.y * c, d.z);
+}
+
+// The probability per solid angle of aiming at direction `dir` (world).
+fn pt_env_pdf(dir: vec3<f32>) -> f32 {
+    let columns = pt.env.x;
+    let rows = pt.env.y;
+    let d = pt_env_local(dir);
+    let u = 0.5 + atan2(d.x, -d.y) / 6.2831853;
+    let v = acos(clamp(d.z, -1.0, 1.0)) / 3.14159265;
+    let row = min(u32(v * f32(rows)), rows - 1u);
+    let column = min(u32(fract(u) * f32(columns)), columns - 1u);
+    let row_p = pt_env_cdf[row] - select(0.0, pt_env_cdf[max(row, 1u) - 1u], row > 0u);
+    let at = rows + row * columns + column;
+    let col_p = pt_env_cdf[at] - select(0.0, pt_env_cdf[max(at, 1u) - 1u], column > 0u);
+    let sin_t = sqrt(max(1.0 - d.z * d.z, 0.0));
+    if (sin_t < 1e-4) {
+        return 0.0;
+    }
+    // A cell's probability spread over its area of the unit square, then over
+    // the sphere: the equirectangular map stretches by 2π² sinθ.
+    return row_p * col_p * f32(rows * columns) / (2.0 * 3.14159265 * 3.14159265 * sin_t);
+}
+
+// A direction (world) picked in proportion to the environment's light.
+fn pt_env_sample() -> vec3<f32> {
+    let columns = pt.env.x;
+    let rows = pt.env.y;
+    let ur = pt_random();
+    var lo = 0u;
+    var hi = rows - 1u;
+    loop {
+        if (lo >= hi) {
+            break;
+        }
+        let mid = (lo + hi) / 2u;
+        if (pt_env_cdf[mid] < ur) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    let row = lo;
+    let uc = pt_random();
+    lo = 0u;
+    hi = columns - 1u;
+    loop {
+        if (lo >= hi) {
+            break;
+        }
+        let mid = (lo + hi) / 2u;
+        if (pt_env_cdf[rows + row * columns + mid] < uc) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    let column = lo;
+    let u = (f32(column) + pt_random()) / f32(columns);
+    let v = (f32(row) + pt_random()) / f32(rows);
+    let theta = v * 3.14159265;
+    let phi = (u - 0.5) * 6.2831853;
+    let local = vec3<f32>(sin(theta) * sin(phi), -sin(theta) * cos(phi), cos(theta));
+    return pt_env_world(local);
 }
 
 // The triangle whose stretch of the distribution `u` falls in.
@@ -325,7 +431,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let hit = pt_trace(origin, dir, 1e30, false, skip);
         skip = PT_NONE;
         if (hit.t < 0.0) {
-            radiance += throughput * pt_environment(dir);
+            var weight = 1.0;
+            if (last_pdf >= 0.0 && pt.env.z != 0u) {
+                weight = pt_power(last_pdf, pt_env_share() * pt_env_pdf(dir));
+            }
+            radiance += throughput * pt_environment(dir) * weight;
             break;
         }
         let tri = pt_triangles[hit.triangle];
@@ -435,7 +545,21 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Aim at a glowing triangle, or at a lamp: one of the two, its share
         // made up by dividing by how often it is chosen.
         let share = pt_emitter_share();
-        let aim_at_glow = pt_random() < share;
+        let env_share = pt_env_share();
+        let pick = pt_random();
+        let aim_at_glow = pick < share;
+        let aim_at_sky = !aim_at_glow && pick < share + env_share;
+        if (aim_at_sky) {
+            let l = pt_env_sample();
+            if (dot(l, geometric) > 0.0) {
+                let pdf = env_share * pt_env_pdf(l);
+                if (pdf > 0.0 && pt_trace(start, l, 1e30, true, PT_NONE).t < 0.0) {
+                    let e = pt_environment(l) / pdf;
+                    let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
+                    radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
+                }
+            }
+        }
         if (aim_at_glow) {
             let picked = bitcast<u32>(pt_emitters[pt_pick_emitter(pt_random())].x);
             let et = pt_triangles[picked];
@@ -465,12 +589,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
 
         // One lamp, chosen at random, its share scaled by how many there are.
-        if (!aim_at_glow && pt.light_count > 0u) {
+        if (!aim_at_glow && !aim_at_sky && pt.light_count > 0u) {
             let k = min(u32(pt_random() * f32(pt.light_count)), pt.light_count - 1u);
             let light = lights[k];
             let at = p - pt.eye.xyz;
             let to_light = direction_to(light, at);
-            let e = illuminance_at(light, at) * f32(pt.light_count) / (1.0 - share);
+            let e = illuminance_at(light, at) * f32(pt.light_count) / pt_lamp_share();
             if (dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
                 // The shadow ray goes to a random point of the source — a
                 // sphere's disc facing the surface, or the sun's disc in the
