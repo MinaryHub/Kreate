@@ -286,7 +286,19 @@ pub fn property_editor_full(
                         out.action = Some((desc.name, a));
                     }
                 }
-                out.changed |= property_widget(ui, desc, values);
+                // A vector is three rows, its name beside the first: in one row
+                // with the name centred against all three, the next vector's
+                // name sat nearer the last one's Z than its own X, and which
+                // X belonged to which was a guess.
+                let vector = matches!(
+                    (&desc.kind, values.get(desc.name)),
+                    (PropertyKind::Vec3, Some(PropertyValue::Vec3(_)))
+                );
+                if vector {
+                    out.changed |= vector_component(ui, desc, values, 0);
+                } else {
+                    out.changed |= property_widget(ui, desc, values);
+                }
                 if decorated {
                     match mark(desc.name) {
                         Some(m) => {
@@ -311,9 +323,47 @@ pub fn property_editor_full(
                     }
                 }
                 ui.end_row();
+                if vector {
+                    for i in 1..3 {
+                        ui.label("");
+                        out.changed |= vector_component(ui, desc, values, i);
+                        if decorated {
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
+                    // And a gap before the next, so each group reads as one.
+                    ui.add_space(4.0);
+                    ui.end_row();
+                }
             }
         });
     out
+}
+
+/// One component of a vector parameter, with its axis letter and colour.
+fn vector_component(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMap, i: usize) -> bool {
+    let Some(PropertyValue::Vec3(mut v)) = values.get(desc.name).cloned() else {
+        return false;
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        // i18n-exempt: axis letters are conventionally untranslated
+        ui.label(["X", "Y", "Z"][i]);
+        // Adding zero turns a negative zero positive, which would otherwise
+        // show as "-0°" — a sign on nothing.
+        let mut component = v[i] + 0.0;
+        let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
+        axis_marker(ui, field.response.rect, i);
+        if field.inner {
+            v[i] = component;
+            changed = true;
+        }
+    });
+    if changed {
+        values.set(desc.name, desc.clamp(PropertyValue::Vec3(v)));
+    }
+    changed
 }
 
 /// The right-click menu of one field.
@@ -447,7 +497,7 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
                     ui.horizontal(|ui| {
                         // i18n-exempt: axis letters are conventionally untranslated
                         ui.label(*axis);
-                        let mut component = out[i];
+                        let mut component = out[i] + 0.0;
                         let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
                         axis_marker(ui, field.response.rect, i);
                         if field.inner {
