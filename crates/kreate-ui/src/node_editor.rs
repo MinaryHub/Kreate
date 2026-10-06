@@ -38,6 +38,8 @@ pub enum SocketType {
     Color,
     Scalar,
     Vector,
+    /// A mesh, in a geometry node graph.
+    Geometry,
 }
 
 impl SocketType {
@@ -49,6 +51,7 @@ impl SocketType {
             SocketType::Color => Color32::from_rgb(0xc7, 0xc7, 0x29),
             SocketType::Scalar => Color32::from_rgb(0xa1, 0xa1, 0xa1),
             SocketType::Vector => Color32::from_rgb(0x63, 0x63, 0xc7),
+            SocketType::Geometry => Color32::from_rgb(0x00, 0xd6, 0xa3),
         }
     }
 }
@@ -111,6 +114,7 @@ pub enum Family {
     Converter,
     Vector,
     Shader,
+    Geometry,
 }
 
 impl Family {
@@ -121,6 +125,7 @@ impl Family {
             Family::Converter => Color32::from_rgb(0x24, 0x62, 0x83),
             Family::Vector => Color32::from_rgb(0x3c, 0x3c, 0x83),
             Family::Shader => Color32::from_rgb(0x2b, 0x65, 0x2b),
+            Family::Geometry => Color32::from_rgb(0x1e, 0x6e, 0x5a),
         }
     }
 }

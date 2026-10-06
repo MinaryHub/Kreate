@@ -97,6 +97,8 @@ impl EditorId {
     pub const CLAUDE: Self = Self::known("claude");
     /// A material's node graph.
     pub const SHADER: Self = Self::known("shader");
+    /// The active object's geometry node graph.
+    pub const GEOMETRY: Self = Self::known("geometry_nodes");
     /// The scene's clock and a ruler to move it along.
     pub const TIMELINE: Self = Self::known("timeline");
     /// Every key of the selected objects, to select and retime.
@@ -170,6 +172,7 @@ impl EditorRegistry {
             (EditorId::CONSOLE, "editor-console", false),
             (EditorId::CLAUDE, "editor-claude", false),
             (EditorId::SHADER, "editor-shader", true),
+            (EditorId::GEOMETRY, "editor-geometry-nodes", true),
             (EditorId::TIMELINE, "editor-timeline", true),
             (EditorId::DOPE_SHEET, "editor-dope-sheet", true),
             (EditorId::GRAPH, "editor-graph", true),

@@ -238,6 +238,10 @@ pub struct ObjectRecord {
     /// The modifier stack, bottom first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifiers: Vec<ModifierRecord>,
+    /// Its geometry node graph: nodes by tag, and wires as
+    /// `[from_node, to_node, to_socket]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_nodes: Option<GeoGraphRecord>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -842,6 +846,50 @@ pub struct NodeRecord {
     pub values: Vec<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_uid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GeoGraphRecord {
+    pub nodes: Vec<NodeRecord>,
+    pub links: Vec<[usize; 3]>,
+}
+
+fn geo_record(graph: &kreate_scene::geonodes::GeoGraph) -> GeoGraphRecord {
+    GeoGraphRecord {
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|n| NodeRecord {
+                name: n.name.clone(),
+                kind: n.kind.tag().to_string(),
+                position: n.position,
+                values: n.kind.values(),
+                image_uid: None,
+            })
+            .collect(),
+        links: graph
+            .links
+            .iter()
+            .map(|l| [l.from_node, l.to_node, l.to_socket])
+            .collect(),
+    }
+}
+
+/// A record as a geometry graph; all or nothing, as a material's is.
+fn geo_from_record(record: &GeoGraphRecord) -> Option<kreate_scene::geonodes::GeoGraph> {
+    use kreate_scene::geonodes::{GeoGraph, GeoNode, GeoNodeKind};
+    let mut graph = GeoGraph::default();
+    for n in &record.nodes {
+        graph.nodes.push(GeoNode {
+            name: n.name.clone(),
+            kind: GeoNodeKind::from_parts(&n.kind, &n.values)?,
+            position: n.position,
+        });
+    }
+    for [from, to, socket] in &record.links {
+        let _ = graph.link(*from, *to, *socket);
+    }
+    Some(graph)
 }
 
 /// A graph as its record.
@@ -1683,6 +1731,7 @@ pub fn write(
                     .iter()
                     .filter_map(modifier_record)
                     .collect(),
+                geometry_nodes: object.geometry_nodes.as_ref().map(geo_record),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -2228,6 +2277,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .map(|s| s.and_then(|i| material_ids.get(i).copied()))
             .collect();
         object.modifiers = record.modifiers.iter().filter_map(modifier_from).collect();
+        object.geometry_nodes = record.geometry_nodes.as_ref().and_then(geo_from_record);
         object.shape_keys = record
             .shape_keys
             .iter()

@@ -9,6 +9,7 @@ pub mod anim;
 pub mod armature;
 pub mod collection;
 pub mod driver;
+pub mod geo;
 pub mod mesh;
 pub mod modifier;
 pub mod node;
@@ -28,6 +29,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     armature::register(registry);
     collection::register(registry);
     driver::register(registry);
+    geo::register(registry);
     mesh::register(registry);
     modifier::register(registry);
     node::register(registry);

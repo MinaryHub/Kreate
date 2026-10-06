@@ -396,6 +396,15 @@ struct ShapeEntry {
     used: u64,
 }
 
+/// A geometry graph's result, and the input and graph it was made from.
+#[derive(Clone, Debug)]
+struct GeoEntry {
+    input: Arc<MeshData>,
+    graph: crate::geonodes::GeoGraph,
+    output: Arc<MeshData>,
+    used: u64,
+}
+
 /// A skinned mesh, and the input and bone matrices it was made from.
 #[derive(Clone, Debug)]
 struct SkinEntry {
@@ -436,6 +445,8 @@ pub struct ModifierCache {
     skins: Vec<SkinEntry>,
     /// Shape-key mixes, one per input and set of values.
     shapes: Vec<ShapeEntry>,
+    /// Geometry node results, one per input.
+    geo: Vec<GeoEntry>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -480,7 +491,36 @@ impl ModifierCache {
             None => input.clone(),
         };
         let operands = operands_of(doc, id, &object.modifiers);
-        Some(self.evaluate_with(&skinned, &object.modifiers, ctx, &operands))
+        let stacked = self.evaluate_with(&skinned, &object.modifiers, ctx, &operands);
+        // Geometry nodes, after the stack, as Blender's modifier sits last.
+        Some(match &object.geometry_nodes {
+            Some(graph) => self.noded(&stacked, graph),
+            None => stacked,
+        })
+    }
+
+    /// The graph's result for `input`, from the cache while both are the same.
+    fn noded(&mut self, input: &Arc<MeshData>, graph: &crate::geonodes::GeoGraph) -> Arc<MeshData> {
+        if let Some(entry) = self
+            .geo
+            .iter_mut()
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.graph == *graph)
+        {
+            entry.used = self.generation;
+            return entry.output.clone();
+        }
+        let output = graph
+            .evaluate(input)
+            .map(Arc::new)
+            .unwrap_or_else(|| Arc::new(MeshData::empty()));
+        self.geo.retain(|e| !Arc::ptr_eq(&e.input, input));
+        self.geo.push(GeoEntry {
+            input: input.clone(),
+            graph: graph.clone(),
+            output: output.clone(),
+            used: self.generation,
+        });
+        output
     }
 
     /// The mesh with its keys mixed in, from the cache while the input and the
@@ -674,6 +714,7 @@ impl ModifierCache {
         self.entries.retain(|e| e.used == generation);
         self.skins.retain(|e| e.used == generation);
         self.shapes.retain(|e| e.used == generation);
+        self.geo.retain(|e| e.used == generation);
         self.generation += 1;
     }
 

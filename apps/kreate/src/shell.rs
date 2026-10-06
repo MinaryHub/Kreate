@@ -486,7 +486,7 @@ impl ShellState {
     pub fn node_editor_at(&self, at: egui::Pos2) -> bool {
         let over = |rect: Option<egui::Rect>| rect.is_some_and(|r| r.contains(at));
         self.screen().areas().into_iter().any(|(id, kind)| {
-            if kind == kreate_ui::EditorId::SHADER {
+            if kind == kreate_ui::EditorId::SHADER || kind == kreate_ui::EditorId::GEOMETRY {
                 over(self.node_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::DOPE_SHEET {
                 over(self.sheet_views.get(&id).and_then(|s| s.rect))
@@ -2564,6 +2564,9 @@ fn draw_area(
                 }
                 "shader" => {
                     draw_shader_editor(ui, state, doc, area.id, l);
+                }
+                "geometry_nodes" => {
+                    draw_geometry_editor(ui, state, doc, area.id, l);
                 }
                 "timeline" => {
                     draw_timeline(ui, state, area.id, l);
@@ -5344,6 +5347,165 @@ fn draw_dope_sheet(
                 p.set("frame", V::Float(frame));
                 state.queue.dispatch("time.set_frame", p);
             }
+        }
+    }
+}
+
+/// The geometry node editor, for the active object's graph.
+fn draw_geometry_editor(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_scene::geonodes::GeoNodeKind;
+    use kreate_ui::node_editor::{Family, FieldView, LinkView, NodeView, SocketType, SocketView};
+    let object = doc
+        .selection
+        .active
+        .and_then(|id| doc.object(id))
+        .filter(|o| o.mesh().is_some());
+    let t = |key: &str| state.catalog.get(key);
+    let view = object.and_then(|o| o.geometry_nodes.as_ref()).map(|graph| {
+        let nodes = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(n, node)| {
+                let geometry = |label: String, connected: bool| SocketView {
+                    label,
+                    ty: SocketType::Geometry,
+                    connected,
+                    default: None,
+                };
+                NodeView {
+                    // i18n-exempt: a node's name is the document's own text
+                    title: node.name.clone(),
+                    position: node.position,
+                    outputs: if node.kind.has_output() {
+                        vec![geometry(t("geo-socket-geometry"), false)]
+                    } else {
+                        Vec::new()
+                    },
+                    inputs: (0..node.kind.inputs())
+                        .map(|i| geometry(t("geo-socket-geometry"), graph.incoming(n, i).is_some()))
+                        .collect(),
+                    fields: node
+                        .kind
+                        .fields()
+                        .into_iter()
+                        .map(|f| match f.choice {
+                            Some(options) => FieldView::Choice {
+                                field: f.index,
+                                value: f.value.round().max(0.0) as u32,
+                                options: options
+                                    .iter()
+                                    .map(|o| t(&format!("geo-option-{}", o.replace('_', "-"))))
+                                    .collect(),
+                            },
+                            None => FieldView::Value {
+                                field: f.index,
+                                value: f.value,
+                                min: f.min,
+                                max: f.max,
+                                label: t(&format!("geo-field-{}", f.name)),
+                            },
+                        })
+                        .collect(),
+                    family: match node.kind {
+                        GeoNodeKind::Input | GeoNodeKind::Output => Family::Input,
+                        GeoNodeKind::Primitive { .. } => Family::Texture,
+                        _ => Family::Geometry,
+                    },
+                }
+            })
+            .collect();
+        kreate_ui::GraphView {
+            nodes,
+            links: graph
+                .links
+                .iter()
+                .map(|l| LinkView {
+                    from: (l.from_node, 0),
+                    to: (l.to_node, l.to_socket),
+                })
+                .collect(),
+            images: Vec::new(),
+            addable: GeoNodeKind::ADDABLE
+                .iter()
+                .map(|tag| t(&format!("geo-kind-{}", tag.replace('_', "-"))))
+                .collect(),
+        }
+    });
+    let text = kreate_ui::NodeText {
+        no_graph: if object.is_some() {
+            t("geo-no-graph")
+        } else {
+            t("geo-no-object")
+        },
+        use_nodes: t("geo-enable"),
+        add: l.node_add.clone(),
+        no_image: String::new(),
+        open_image: String::new(),
+    };
+    let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    let mut asked = false;
+    let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
+    state.node_views.insert(area, editor);
+    if asked && object.is_some() {
+        state.queue.run("geo.enable", PropertyMap::new());
+    }
+    use kreate_ui::NodeEdit as E;
+    for edit in edits {
+        let mut p = PropertyMap::new();
+        match edit {
+            E::Translate { nodes, x, y } => {
+                p.set("nodes", V::Ints(nodes));
+                p.set("x", V::Float(x as f64));
+                p.set("y", V::Float(y as f64));
+                state.queue.run("geo.translate", p);
+            }
+            E::Link {
+                from_node,
+                to_node,
+                to_socket,
+                ..
+            } => {
+                p.set("from_node", V::Int(from_node as i64));
+                p.set("to_node", V::Int(to_node as i64));
+                p.set("to_socket", V::Int(to_socket as i64));
+                state.queue.run("geo.link", p);
+            }
+            E::Unlink { to_node, to_socket } => {
+                p.set("to_node", V::Int(to_node as i64));
+                p.set("to_socket", V::Int(to_socket as i64));
+                state.queue.run("geo.unlink", p);
+            }
+            E::Add { kind, x, y } => {
+                p.set("kind", V::Enum(kind));
+                p.set("x", V::Float(x as f64));
+                p.set("y", V::Float(y as f64));
+                state.queue.run("geo.add", p);
+            }
+            E::Remove { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                state.queue.run("geo.remove", p);
+            }
+            E::SetValue {
+                node,
+                field,
+                value,
+                continuing,
+            } => {
+                p.set("node", V::Int(node as i64));
+                p.set("field", V::Int(field as i64));
+                p.set("value", V::Float(value as f64));
+                send_edit(state, "geo.set_value", p, continuing);
+            }
+            // Colours, images and copying are the material graph's.
+            _ => {}
         }
     }
 }
@@ -8993,6 +9155,57 @@ editor-preferences = Preferences
 editor-console = Console
 editor-claude = AI Chat
 editor-shader = Shader Editor
+editor-geometry-nodes = Geometry Nodes
+geo-no-graph = This object has no geometry nodes.
+geo-no-object = Select a mesh object to give it geometry nodes.
+geo-enable = Add Geometry Nodes
+geo-socket-geometry = Geometry
+geo-kind-transform = Transform Geometry
+geo-kind-array = Array
+geo-kind-subdivide = Subdivide
+geo-kind-mirror = Mirror
+geo-kind-join = Join Geometry
+geo-kind-primitive = Mesh Primitive
+geo-field-translate-x = Translation X
+geo-field-translate-y = Translation Y
+geo-field-translate-z = Translation Z
+geo-field-rotate-x = Rotation X
+geo-field-rotate-y = Rotation Y
+geo-field-rotate-z = Rotation Z
+geo-field-scale-x = Scale X
+geo-field-scale-y = Scale Y
+geo-field-scale-z = Scale Z
+geo-field-count = Count
+geo-field-offset-x = Offset X
+geo-field-offset-y = Offset Y
+geo-field-offset-z = Offset Z
+geo-field-levels = Levels
+geo-field-size = Size
+geo-option-off = Flat
+geo-option-on = Smooth
+geo-option-x = X
+geo-option-y = Y
+geo-option-z = Z
+geo-option-cube = Cube
+geo-option-uv-sphere = UV Sphere
+geo-option-cylinder = Cylinder
+geo-option-cone = Cone
+geo-option-torus = Torus
+geo-option-ico-sphere = Icosphere
+op-geo-enable = Geometry Nodes
+op-geo-enable-desc = Gives the active mesh object a geometry node graph that passes its mesh straight through, or takes the graph away.
+op-geo-add = Add Geometry Node
+op-geo-add-desc = Adds a node to the active object's geometry graph.
+op-geo-remove = Delete Geometry Nodes
+op-geo-remove-desc = Removes nodes and their wires; never the group's input or output.
+op-geo-link = Link Geometry Nodes
+op-geo-link-desc = Wires one node's geometry into another's input.
+op-geo-unlink = Unlink Geometry Node
+op-geo-unlink-desc = Takes the wire off an input.
+op-geo-translate = Move Geometry Nodes
+op-geo-translate-desc = Moves nodes in the editor.
+op-geo-set-value = Set Geometry Node Value
+op-geo-set-value-desc = Sets one of a node's numbers.
 material-uses-nodes = This material uses nodes. Edit it in the Shader Editor.
 node-use-nodes = Use Nodes
 node-use-nodes-hint = Give this material a node graph, built from what it already is
@@ -9888,6 +10101,57 @@ editor-preferences = 환경 설정
 editor-console = 콘솔
 editor-claude = AI 채팅
 editor-shader = 셰이더 에디터
+editor-geometry-nodes = 지오메트리 노드
+geo-no-graph = 이 오브젝트에는 지오메트리 노드가 없습니다.
+geo-no-object = 메시 오브젝트를 선택하면 지오메트리 노드를 줄 수 있습니다.
+geo-enable = 지오메트리 노드 추가
+geo-socket-geometry = 지오메트리
+geo-kind-transform = 지오메트리 변형
+geo-kind-array = 배열
+geo-kind-subdivide = 세분
+geo-kind-mirror = 미러
+geo-kind-join = 지오메트리 합치기
+geo-kind-primitive = 메시 기본 도형
+geo-field-translate-x = 이동 X
+geo-field-translate-y = 이동 Y
+geo-field-translate-z = 이동 Z
+geo-field-rotate-x = 회전 X
+geo-field-rotate-y = 회전 Y
+geo-field-rotate-z = 회전 Z
+geo-field-scale-x = 크기 X
+geo-field-scale-y = 크기 Y
+geo-field-scale-z = 크기 Z
+geo-field-count = 개수
+geo-field-offset-x = 간격 X
+geo-field-offset-y = 간격 Y
+geo-field-offset-z = 간격 Z
+geo-field-levels = 단계
+geo-field-size = 크기
+geo-option-off = 각지게
+geo-option-on = 부드럽게
+geo-option-x = X
+geo-option-y = Y
+geo-option-z = Z
+geo-option-cube = 큐브
+geo-option-uv-sphere = UV 구
+geo-option-cylinder = 원기둥
+geo-option-cone = 원뿔
+geo-option-torus = 토러스
+geo-option-ico-sphere = 아이코스피어
+op-geo-enable = 지오메트리 노드
+op-geo-enable-desc = 활성 메시 오브젝트에 메시를 그대로 통과시키는 지오메트리 노드 그래프를 주거나 없앱니다.
+op-geo-add = 지오메트리 노드 추가
+op-geo-add-desc = 활성 오브젝트의 지오메트리 그래프에 노드를 더합니다.
+op-geo-remove = 지오메트리 노드 삭제
+op-geo-remove-desc = 노드와 그 연결을 없앱니다. 그룹 입력·출력은 남깁니다.
+op-geo-link = 지오메트리 노드 연결
+op-geo-link-desc = 한 노드의 지오메트리를 다른 노드의 입력에 잇습니다.
+op-geo-unlink = 지오메트리 노드 연결 끊기
+op-geo-unlink-desc = 입력의 연결을 끊습니다.
+op-geo-translate = 지오메트리 노드 이동
+op-geo-translate-desc = 에디터에서 노드를 옮깁니다.
+op-geo-set-value = 지오메트리 노드 값 설정
+op-geo-set-value-desc = 노드의 숫자 하나를 바꿉니다.
 material-uses-nodes = 이 재질은 노드를 사용합니다. 셰이더 에디터에서 편집하세요.
 node-use-nodes = 노드 사용
 node-use-nodes-hint = 이 재질의 현재 모습 그대로 노드 그래프를 만듭니다

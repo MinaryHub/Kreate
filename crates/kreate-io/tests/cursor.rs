@@ -242,3 +242,28 @@ fn nla_strips_are_saved_with_their_object() {
         strip
     );
 }
+
+#[test]
+fn geometry_nodes_are_saved_with_their_object() {
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::geonodes::{GeoGraph, GeoNode, GeoNodeKind};
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let id = doc.add_object(Object::new("Body", ObjectData::Mesh(mesh)));
+    let mut graph = GeoGraph::passthrough();
+    graph.nodes.push(GeoNode {
+        name: "Spin".into(),
+        kind: GeoNodeKind::Transform {
+            translate: [1.0, 2.0, 3.0],
+            rotate: [10.0, 20.0, 30.0],
+            scale: [1.5, 1.0, 0.5],
+        },
+        position: [12.0, -40.0],
+    });
+    graph.link(0, 2, 0).unwrap();
+    graph.link(2, 1, 0).unwrap();
+    doc.object_mut(id).unwrap().geometry_nodes = Some(graph.clone());
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
+    assert_eq!(o.geometry_nodes.as_ref(), Some(&graph));
+}

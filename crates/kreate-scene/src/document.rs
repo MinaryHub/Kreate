@@ -175,6 +175,8 @@ pub struct Object {
     /// result of running this stack over it. See [`crate::modifier`] for why the
     /// evaluated result is cached outside the document rather than here.
     pub modifiers: Vec<crate::modifier::ModifierInstance>,
+    /// A geometry node graph run after the stack: see [`crate::geonodes`].
+    pub geometry_nodes: Option<crate::geonodes::GeoGraph>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
     /// Actions laid on the timeline under the active one: see [`crate::nla`].
@@ -218,6 +220,7 @@ impl Object {
             material_overrides: MaterialOverrides::new(),
             uid: Uid::NONE,
             modifiers: Vec::new(),
+            geometry_nodes: None,
             action: None,
             nla: Vec::new(),
             drivers: Vec::new(),

@@ -11,6 +11,7 @@ pub mod document;
 pub mod driver;
 pub mod edit_session;
 pub mod expression;
+pub mod geonodes;
 pub mod image;
 pub mod light;
 pub mod modifier;
