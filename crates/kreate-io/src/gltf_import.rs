@@ -227,6 +227,22 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
         let mut any_normals = false;
         let mut vertex_skin = crate::ir::VertexSkin::default();
         let mut any_skin = false;
+        // Morph targets: names from `extras.targetNames`, where Blender
+        // writes them, and a displacement per vertex for each.
+        let target_names: Vec<String> = mesh
+            .extras()
+            .as_ref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+            .and_then(|v| {
+                v.get("targetNames")?.as_array().map(|a| {
+                    a.iter()
+                        .map(|n| n.as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        let target_count = mesh.primitives().map(|p| p.morph_targets().len()).max().unwrap_or(0);
+        let mut morphs: Vec<Vec<Vec3>> = vec![Vec::new(); target_count];
 
         for primitive in mesh.primitives() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -260,6 +276,20 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
                 .map(|w| w.into_f32().collect())
                 .unwrap_or_default();
             any_skin |= !joints.is_empty() && !weights.is_empty();
+            let mut read: Vec<Vec<Vec3>> = reader
+                .read_morph_targets()
+                .map(|(positions, _, _)| {
+                    positions
+                        .map(|p| p.map(Vec3::from_array).collect())
+                        .unwrap_or_default()
+                })
+                .collect();
+            read.resize(target_count, Vec::new());
+            for (target, out) in read.iter().zip(morphs.iter_mut()) {
+                for v in 0..count {
+                    out.push(target.get(v).copied().unwrap_or(Vec3::ZERO));
+                }
+            }
             for v in 0..count {
                 vertex_skin.joints.push(joints.get(v).copied().unwrap_or([0; 4]));
                 vertex_skin.weights.push(weights.get(v).copied().unwrap_or([0.0; 4]));
@@ -360,6 +390,20 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             // recovers the surface the author modelled while the UVs and normals
             // keep the distinctions the split was made for.
             if let Some(map) = import.weld_mapped(options.weld_epsilon, &mut scene.source.notes) {
+                // Morph targets follow the same way, first copy wins.
+                let n = import.positions.len();
+                for target in morphs.iter_mut() {
+                    let mut out = vec![Vec3::ZERO; n];
+                    let mut done = vec![false; n];
+                    for (old, new) in map.iter().enumerate() {
+                        let new = *new as usize;
+                        if new < n && !done[new] && old < target.len() {
+                            out[new] = target[old];
+                            done[new] = true;
+                        }
+                    }
+                    *target = out;
+                }
                 // A merged vertex keeps the first copy's joints: the copies of
                 // one skinned vertex carry the same ones.
                 let n = import.positions.len();
@@ -380,6 +424,20 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             }
         }
         scene.vertex_skins.push(any_skin.then_some(vertex_skin));
+        scene.vertex_morphs.push(
+            morphs
+                .into_iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    let name = target_names
+                        .get(i)
+                        .filter(|n| !n.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("Key {}", i + 1));
+                    (name, d)
+                })
+                .collect(),
+        );
         scene.meshes.push(import);
     }
 
@@ -440,10 +498,22 @@ fn read_animations(
                 Some(ReadOutputs::Scales(v)) => {
                     Some(ChannelValues::Scale(v.map(Vec3::from).collect()))
                 }
-                Some(ReadOutputs::MorphTargetWeights(_)) => {
-                    scene.source.notes.push(LossyNote::Unsupported {
-                        what: format!("{name}: morph target weights are not animated yet"),
-                    });
+                Some(ReadOutputs::MorphTargetWeights(w)) => {
+                    if let Some(times) = reader.read_inputs().map(|i| i.collect()) {
+                        scene.morph_channels.push(crate::ir::ImportMorphChannel {
+                            animation: name.clone(),
+                            node,
+                            interpolation: match channel.sampler().interpolation() {
+                                gltf::animation::Interpolation::Step => ChannelInterpolation::Step,
+                                gltf::animation::Interpolation::Linear => ChannelInterpolation::Linear,
+                                gltf::animation::Interpolation::CubicSpline => {
+                                    ChannelInterpolation::CubicSpline
+                                }
+                            },
+                            times,
+                            values: w.into_f32().collect(),
+                        });
+                    }
                     continue;
                 }
                 None => None,
@@ -547,6 +617,15 @@ fn read_nodes(document: &gltf::Document, scene: &mut ImportScene) {
                 scale: Vec3::from_array(scale),
             };
             out.skin = node.skin().map(|s| s.index());
+            let weights = node
+                .weights()
+                .or_else(|| node.mesh().and_then(|m| m.weights()))
+                .map(<[f32]>::to_vec)
+                .unwrap_or_default();
+            if scene.node_weights.len() <= node.index() {
+                scene.node_weights.resize(node.index() + 1, Vec::new());
+            }
+            scene.node_weights[node.index()] = weights;
             out.data = if let Some(mesh) = node.mesh() {
                 ImportNodeData::Mesh(mesh.index())
             } else if let Some(light) = node.light() {
@@ -699,14 +778,6 @@ fn note_unread_features(document: &gltf::Document, notes: &mut Vec<LossyNote>) {
             "{} cameras were not read",
             document.cameras().len()
         ));
-    }
-    let morph_targets: usize = document
-        .meshes()
-        .flat_map(|m| m.primitives())
-        .map(|p| p.morph_targets().len())
-        .sum();
-    if morph_targets > 0 {
-        mention(format!("{morph_targets} morph targets were not read"));
     }
     if document.textures().len() > 0 {
         mention(format!(

@@ -645,6 +645,9 @@ pub struct ExportNode {
     pub data: ImportNodeData,
     /// Index into [`ExportScene::skins`], for a mesh node the bones deform.
     pub skin: Option<usize>,
+    /// How far each of its mesh's morph targets is turned up, in the order
+    /// [`ExportScene::morph_targets`] lists them.
+    pub morph_weights: Vec<f32>,
 }
 
 impl ExportNode {
@@ -655,8 +658,20 @@ impl ExportNode {
             transform: kreate_math::DTransform::IDENTITY,
             data: ImportNodeData::Empty,
             skin: None,
+            morph_weights: Vec::new(),
         }
     }
+}
+
+/// One node's morph target weights over time: a list of weights per time,
+/// one weight per target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportWeights {
+    /// Index into [`ExportScene::nodes`].
+    pub node: usize,
+    /// Seconds, increasing.
+    pub times: Vec<f32>,
+    pub values: Vec<Vec<f32>>,
 }
 
 /// A skin on the way out: the nodes that are its joints, in the order a
@@ -863,6 +878,8 @@ pub struct ExportTrack {
 pub struct ExportAnimation {
     pub name: String,
     pub tracks: Vec<ExportTrack>,
+    /// Shape keys moving, as morph target weights.
+    pub weights: Vec<ExportWeights>,
 }
 
 /// A scene on its way into a file.
@@ -900,6 +917,9 @@ pub struct ExportScene<'a> {
     pub animations: Vec<ExportAnimation>,
     /// The skins the mesh nodes' `skin` indices name.
     pub skins: Vec<ExportSkin>,
+    /// Per mesh, parallel to `meshes` (and possibly shorter): the shape keys
+    /// it carries as morph targets, by name — each a `shape:<name>` layer.
+    pub morph_targets: Vec<Vec<String>>,
 }
 
 impl<'a> ExportScene<'a> {
@@ -914,6 +934,7 @@ impl<'a> ExportScene<'a> {
             nodes: Vec::new(),
             animations: Vec::new(),
             skins: Vec::new(),
+            morph_targets: Vec::new(),
         }
     }
 
@@ -957,7 +978,29 @@ pub struct ImportScene {
     /// Per mesh, parallel to `meshes` (and possibly shorter): the joints and
     /// weights of its vertices, for a mesh a skin deforms.
     pub vertex_skins: Vec<Option<VertexSkin>>,
+    /// Per mesh, parallel to `meshes` (and possibly shorter): its morph
+    /// targets, each a name and a displacement per vertex in the file's space.
+    pub vertex_morphs: Vec<Vec<(String, Vec<Vec3>)>>,
+    /// Per node, parallel to `nodes` (and possibly shorter): its morph target
+    /// weights as the file stands.
+    pub node_weights: Vec<Vec<f32>>,
+    /// Morph target weights moving: per channel, the node and its keys.
+    pub morph_channels: Vec<ImportMorphChannel>,
     pub source: SourceMetadata,
+}
+
+/// One node's morph target weights over time, as the file keyed them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportMorphChannel {
+    pub animation: String,
+    /// Index into [`ImportScene::nodes`].
+    pub node: usize,
+    pub interpolation: ChannelInterpolation,
+    /// Seconds, increasing.
+    pub times: Vec<f32>,
+    /// Flat: the targets' weights for the first time, then the next — and,
+    /// for a cubic spline, each key's in-tangents, values and out-tangents.
+    pub values: Vec<f32>,
 }
 
 impl ImportScene {
@@ -972,6 +1015,9 @@ impl ImportScene {
             animations: Vec::new(),
             skins: Vec::new(),
             vertex_skins: Vec::new(),
+            vertex_morphs: Vec::new(),
+            node_weights: Vec::new(),
+            morph_channels: Vec::new(),
             source,
         }
     }

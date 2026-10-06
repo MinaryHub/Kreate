@@ -203,12 +203,17 @@ pub fn write_gltf_scene(
             });
             continue;
         }
+        // Shape keys: the targets' names where Blender and three.js look for
+        // them, and every target off — a node says how far its are turned.
+        let targets = scene.morph_targets.get(index).filter(|t| !t.is_empty());
         root.meshes.push(json::Mesh {
             name: Some(name.clone()),
             primitives,
             extensions: None,
-            extras: Default::default(),
-            weights: None,
+            extras: targets.and_then(|t| {
+                serde_json::value::to_raw_value(&serde_json::json!({ "targetNames": t })).ok()
+            }),
+            weights: targets.map(|t| vec![0.0; t.len()]),
         });
         mesh_indices.insert(index, mesh_index);
     }
@@ -467,6 +472,9 @@ fn write_nodes(
         }
         if let Some(skin) = node.skin.filter(|s| *s < scene.skins.len()) {
             json_node.skin = Some(json::Index::new(skin as u32));
+        }
+        if !node.morph_weights.is_empty() {
+            json_node.weights = Some(node.morph_weights.clone());
         }
         root.nodes.push(json_node);
     }
@@ -751,6 +759,55 @@ fn write_animations(
                 );
             }
         }
+        // Shape keys, as morph target weights: every target's weight at
+        // every time, one after another.
+        for track in &animation.weights {
+            let count = track.times.len().min(track.values.len());
+            if track.node >= scene.nodes.len() || count == 0 {
+                continue;
+            }
+            let times = &track.times[..count];
+            let input_view = push_view(root, bin, bytemuck::cast_slice(times), None);
+            let input = push_accessor(
+                root,
+                input_view,
+                count,
+                json::accessor::ComponentType::F32,
+                json::accessor::Type::Scalar,
+                Some(serde_json::json!([times[0]])),
+                Some(serde_json::json!([times[count - 1]])),
+            );
+            let flat: Vec<f32> = track.values[..count].iter().flatten().copied().collect();
+            let view = push_view(root, bin, bytemuck::cast_slice(&flat), None);
+            let output = push_accessor(
+                root,
+                view,
+                flat.len(),
+                json::accessor::ComponentType::F32,
+                json::accessor::Type::Scalar,
+                None,
+                None,
+            );
+            let sampler = out.samplers.len() as u32;
+            out.samplers.push(Sampler {
+                extensions: None,
+                extras: Default::default(),
+                input,
+                interpolation: Checked::Valid(Interpolation::Linear),
+                output,
+            });
+            out.channels.push(Channel {
+                sampler: json::Index::new(sampler),
+                target: Target {
+                    extensions: None,
+                    extras: Default::default(),
+                    node: json::Index::new(track.node as u32),
+                    path: Checked::Valid(Property::MorphTargetWeights),
+                },
+                extensions: None,
+                extras: Default::default(),
+            });
+        }
         if !out.channels.is_empty() {
             root.animations.push(out);
         }
@@ -845,6 +902,7 @@ fn write_mesh(
         let mut out_positions: Vec<Vec3> = Vec::new();
         let mut out_uvs: Vec<Vec2> = Vec::new();
         let mut out_normals: Vec<Vec3> = Vec::new();
+        let mut out_vertex: Vec<u32> = Vec::new();
         let mut out_joints: Vec<[u16; 4]> = Vec::new();
         let mut out_weights: Vec<[f32; 4]> = Vec::new();
         let mut corner_vertex: HashMap<u32, u32> = HashMap::new();
@@ -870,6 +928,7 @@ fn write_mesh(
                     out_positions.push(to_gltf * positions[vertex as usize]);
                     out_uvs.push(uv);
                     out_normals.push(normal);
+                    out_vertex.push(vertex);
                     if let Some((skin, _)) = &skinning {
                         out_joints.push(skin.joints[vertex as usize]);
                         out_weights.push(skin.weights[vertex as usize]);
@@ -1024,6 +1083,43 @@ fn write_mesh(
             });
         }
 
+        // Morph targets: each shape key's offsets, per split vertex.
+        let targets: Vec<json::mesh::MorphTarget> = scene
+            .morph_targets
+            .get(index)
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|n| {
+                        let offsets = mesh.attributes().get_f32x3(&kreate_scene::shape::layer(n));
+                        let moved: Vec<Vec3> = out_vertex
+                            .iter()
+                            .map(|v| {
+                                offsets
+                                    .and_then(|o| o.get(*v as usize))
+                                    .map_or(Vec3::ZERO, |d| to_gltf * *d)
+                            })
+                            .collect();
+                        let view = push_view(root, bin, bytemuck::cast_slice(&moved), ARRAY_BUFFER);
+                        let (min, max) = bounds(&moved);
+                        json::mesh::MorphTarget {
+                            positions: Some(push_accessor(
+                                root,
+                                view,
+                                moved.len(),
+                                json::accessor::ComponentType::F32,
+                                json::accessor::Type::Vec3,
+                                Some(serde_json::json!([min.x, min.y, min.z])),
+                                Some(serde_json::json!([max.x, max.y, max.z])),
+                            )),
+                            normals: None,
+                            tangents: None,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         primitives.push(json::mesh::Primitive {
             attributes,
             extensions,
@@ -1042,7 +1138,7 @@ fn write_mesh(
                 ))
             }),
             mode: Checked::Valid(json::mesh::Mode::Triangles),
-            targets: None,
+            targets: (!targets.is_empty()).then_some(targets),
         });
     }
     primitives

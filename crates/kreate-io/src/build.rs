@@ -96,6 +96,27 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         out
     };
 
+    // Shape keys: each morph target a `shape:<name>` layer, its offsets put
+    // through the axis change and the unit the positions went through.
+    for (m, targets) in scene.vertex_morphs.iter().enumerate() {
+        let Some(data) = meshes.get(m).and_then(|id| doc.mesh_mut(*id)) else {
+            continue;
+        };
+        let n = data.num_verts() as usize;
+        let to_kreate = scene.source.to_kreate_matrix();
+        for (name, offsets) in targets {
+            if offsets.len() != n {
+                continue;
+            }
+            let moved: Vec<glam::Vec3> = offsets.iter().map(|d| to_kreate * *d).collect();
+            data.attributes_mut().insert(
+                &kreate_scene::shape::layer(name),
+                kreate_mesh::attribute::Domain::Point,
+                kreate_mesh::attribute::AttrData::F32x3(std::sync::Arc::new(moved)),
+            );
+        }
+    }
+
     let lights: Vec<_> = scene
         .lights
         .iter()
@@ -330,7 +351,30 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         }
     }
 
+    // The objects' shape keys: their mesh's targets, turned up as the node
+    // says.
+    for (index, node) in scene.nodes.iter().enumerate() {
+        let (Some(Some(id)), ImportNodeData::Mesh(m)) = (made.get(index), node.data) else {
+            continue;
+        };
+        let Some(targets) = scene.vertex_morphs.get(m).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let weights = scene.node_weights.get(index);
+        if let Some(object) = doc.object_mut(*id) {
+            object.shape_keys = targets
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _))| kreate_scene::shape::ShapeKey {
+                    name: name.clone(),
+                    value: weights.and_then(|w| w.get(i)).copied().unwrap_or(0.0),
+                })
+                .collect();
+        }
+    }
+
     build_animations(scene, &made, doc, &mut notes);
+    build_shape_animations(scene, &made, doc);
     for rig in &rigs {
         build_bone_animation(scene, rig, doc);
     }
@@ -338,6 +382,63 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
     let mut out: Vec<ObjectId> = made.into_iter().flatten().collect();
     out.extend(rigs.iter().map(|r| r.object));
     (out, notes)
+}
+
+/// Morph target weights moving, as shape-key curves on the object's action
+/// — the one its movement went on, if it has one.
+fn build_shape_animations(scene: &ImportScene, made: &[Option<ObjectId>], doc: &mut Document) {
+    use crate::ir::ChannelInterpolation as I;
+    use kreate_scene::animation::{shape_path, Action, Interpolation};
+    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let start = doc.playback.start as f64;
+    let mut last = f64::NEG_INFINITY;
+    for channel in &scene.morph_channels {
+        let (Some(Some(id)), Some(node)) = (made.get(channel.node), scene.nodes.get(channel.node)) else {
+            continue;
+        };
+        let ImportNodeData::Mesh(m) = node.data else { continue };
+        let Some(targets) = scene.vertex_morphs.get(m).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let per = targets.len();
+        let stride = if channel.interpolation == I::CubicSpline { 3 * per } else { per };
+        let offset = if channel.interpolation == I::CubicSpline { per } else { 0 };
+        let interpolation = if channel.interpolation == I::Step {
+            Interpolation::Constant
+        } else {
+            Interpolation::Linear
+        };
+        let action_id = match doc.object(*id).and_then(|o| o.action) {
+            Some(a) => a,
+            None => {
+                let mut action = Action::new(format!("{}Action", node.name));
+                action.select_all_with(|_| false);
+                let a = doc.add_action(action);
+                if let Some(o) = doc.object_mut(*id) {
+                    o.action = Some(a);
+                }
+                a
+            }
+        };
+        let Some(action) = doc.action_mut(action_id) else { continue };
+        for (k, t) in channel.times.iter().enumerate() {
+            let frame = start + *t as f64 * fps;
+            last = last.max(frame);
+            for (i, (name, _)) in targets.iter().enumerate() {
+                if let Some(v) = channel.values.get(k * stride + offset + i) {
+                    action.curve_mut(&shape_path(name), 0).insert(frame, *v as f64, interpolation);
+                }
+            }
+        }
+        action.select_all_with(|_| false);
+    }
+    if last.is_finite() {
+        if last.ceil() as i32 > doc.playback.end {
+            doc.playback.end = last.ceil() as i32;
+        }
+        let frame = doc.playback.frame;
+        doc.animate(frame);
+    }
 }
 
 /// One skin, built as an armature.
@@ -1019,6 +1120,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
     let mut camera_index = std::collections::HashMap::new();
     let mut nodes: Vec<ExportNode> = Vec::new();
     let mut node_of = std::collections::HashMap::new();
+    let mut morph_targets: Vec<Vec<String>> = Vec::new();
 
     for (id, object) in doc.objects() {
         node_of.insert(id, nodes.len());
@@ -1040,6 +1142,20 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 // survives the file rather than becoming two copies.
                 Some(data) => {
                     let index = *mesh_index.entry(mesh).or_insert_with(|| {
+                        // The shape keys the first object using it names, in
+                        // its order, that the mesh has offsets for.
+                        morph_targets.push(
+                            object
+                                .shape_keys
+                                .iter()
+                                .filter(|k| {
+                                    data.attributes()
+                                        .get_f32x3(&kreate_scene::shape::layer(&k.name))
+                                        .is_some()
+                                })
+                                .map(|k| k.name.clone())
+                                .collect(),
+                        );
                         let slots = doc
                             .mesh_slots(mesh)
                             .iter()
@@ -1120,6 +1236,24 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             },
             data,
             skin: None,
+            morph_weights: match data {
+                ImportNodeData::Mesh(m) => morph_targets
+                    .get(m)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .map(|n| {
+                                object
+                                    .shape_keys
+                                    .iter()
+                                    .find(|k| k.name == *n)
+                                    .map_or(0.0, |k| k.value)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
         });
         if !object.visible {
             // Written anyway. Visibility is a viewport state and not a property
@@ -1170,6 +1304,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 transform: kreate_math::DTransform::from_affine(relative),
                 data: ImportNodeData::Empty,
                 skin: None,
+                morph_weights: Vec::new(),
             });
         }
         bone_nodes.insert(id, made);
@@ -1201,7 +1336,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         });
     }
 
-    let animations = export_animations(doc, &bone_nodes, &mut notes);
+    let animations = export_animations(doc, &bone_nodes, &nodes, &morph_targets, &mut notes);
 
     (
         ExportScene {
@@ -1214,6 +1349,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             nodes,
             animations,
             skins,
+            morph_targets,
         },
         notes,
     )
@@ -1235,6 +1371,8 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
 fn export_animations(
     doc: &Document,
     bone_nodes: &std::collections::HashMap<ObjectId, Vec<usize>>,
+    nodes: &[ExportNode],
+    morph_targets: &[Vec<String>],
     notes: &mut Vec<LossyNote>,
 ) -> Vec<crate::ir::ExportAnimation> {
     use kreate_scene::animation::Interpolation;
@@ -1249,10 +1387,12 @@ fn export_animations(
     let mut origin = doc.playback.start as f64;
     for (_, object) in doc.objects() {
         if let Some(action) = object.action.and_then(|a| doc.action(a)) {
-            // Bones' keys too: their tracks share the clip's clock.
+            // Bones' and shape keys' keys too: their tracks share the clip's
+            // clock.
             for curve in action.curves.iter().filter(|c| {
                 MOVES.contains(&c.path.property.as_ref())
                     || kreate_scene::animation::parse_bone_path(&c.path.property).is_some()
+                    || kreate_scene::animation::parse_shape_path(&c.path.property).is_some()
             }) {
                 if let Some(first) = curve.keys.first() {
                     origin = origin.min(first.frame);
@@ -1393,6 +1533,60 @@ fn export_animations(
             });
         }
     }
+    // Shape keys: every frame of the keyed range, as the weights of the
+    // node's morph targets.
+    let mut weights = Vec::new();
+    for (index, (_, object)) in doc.objects().enumerate() {
+        let (Some(action), Some(ImportNodeData::Mesh(m))) = (
+            object.action.and_then(|a| doc.action(a)),
+            nodes.get(index).map(|n| n.data),
+        ) else {
+            continue;
+        };
+        let Some(names) = morph_targets.get(m).filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let keyed: Vec<f64> = action
+            .curves
+            .iter()
+            .filter(|c| {
+                kreate_scene::animation::parse_shape_path(&c.path.property)
+                    .is_some_and(|n| names.iter().any(|k| k == n))
+            })
+            .flat_map(|c| c.keys.iter().map(|k| k.frame))
+            .collect();
+        let (Some(first), Some(last)) = (
+            keyed.iter().copied().reduce(f64::min),
+            keyed.iter().copied().reduce(f64::max),
+        ) else {
+            continue;
+        };
+        let mut frames = vec![first];
+        let mut f = first.floor() + 1.0;
+        while f < last {
+            frames.push(f);
+            f += 1.0;
+        }
+        if last > first {
+            frames.push(last);
+        }
+        let values = frames
+            .iter()
+            .map(|frame| {
+                let mut keys = object.shape_keys.clone();
+                kreate_scene::animation::apply_to_shapes(action, *frame, &mut keys);
+                names
+                    .iter()
+                    .map(|n| keys.iter().find(|k| k.name == *n).map_or(0.0, |k| k.value))
+                    .collect()
+            })
+            .collect();
+        weights.push(crate::ir::ExportWeights {
+            node: index,
+            times: frames.iter().map(|f| ((f - origin) / fps) as f32).collect(),
+            values,
+        });
+    }
     for (_, o) in doc.objects() {
         if !o.drivers.is_empty() {
             notes.push(LossyNote::Unsupported {
@@ -1423,12 +1617,13 @@ fn export_animations(
             });
         }
     }
-    if tracks.is_empty() {
+    if tracks.is_empty() && weights.is_empty() {
         return Vec::new();
     }
     vec![crate::ir::ExportAnimation {
         name: "Animation".into(),
         tracks,
+        weights,
     }]
 }
 
