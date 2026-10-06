@@ -43,6 +43,8 @@ pub struct UvView<'a> {
     pub offsets: &'a [u32],
     /// Corner slots, grouped into faces by [`Self::offsets`].
     pub corners: &'a [u32],
+    /// Which corners are pinned, by corner slot. May be shorter than `uvs`.
+    pub pinned: &'a [bool],
 }
 
 impl UvView<'_> {
@@ -66,6 +68,10 @@ impl UvView<'_> {
         self.selected.get(slot as usize).copied().unwrap_or(false)
     }
 
+    fn is_pinned(&self, slot: u32) -> bool {
+        self.pinned.get(slot as usize).copied().unwrap_or(false)
+    }
+
     /// Whether there is anything to draw at all.
     pub fn is_empty(&self) -> bool {
         self.uvs.is_empty() || self.face_count() == 0
@@ -85,6 +91,7 @@ pub struct UvData {
     pub selected: Vec<bool>,
     pub offsets: Vec<u32>,
     pub corners: Vec<u32>,
+    pub pinned: Vec<bool>,
 }
 
 impl UvData {
@@ -94,6 +101,7 @@ impl UvData {
             selected: &self.selected,
             offsets: &self.offsets,
             corners: &self.corners,
+            pinned: &self.pinned,
         }
     }
 }
@@ -354,9 +362,42 @@ pub fn uv_editor(
                     };
                     let colour = if pass { theme.accent } else { theme.text_dim };
                     let size = if pass { 3.5 } else { 2.5 };
-                    painter.circle_filled(to_screen(state, rect, uv), size, colour);
+                    let at = to_screen(state, rect, uv);
+                    painter.circle_filled(at, size, colour);
+                    // A pin is a red square around the dot, as Blender draws it.
+                    if view.is_pinned(*slot) {
+                        painter.rect_stroke(
+                            Rect::from_center_size(at, egui::vec2(9.0, 9.0)),
+                            0.0,
+                            Stroke::new(1.5, egui::Color32::from_rgb(0xe0, 0x40, 0x40)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                 }
             }
+        }
+    }
+
+    // --- pins -------------------------------------------------------------------
+    if response.hovered() && !ui.ctx().egui_wants_keyboard_input() {
+        let pin = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key: egui::Key::P,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(modifiers.alt),
+                _ => None,
+            })
+        });
+        if let Some(clear) = pin {
+            let mut params = PropertyMap::new();
+            params.set("clear", PropertyValue::Bool(clear));
+            out.push(Command::RunOperator {
+                op_id: "uv.pin".to_string(),
+                params,
+            });
         }
     }
 
@@ -526,6 +567,7 @@ mod tests {
             selected,
             offsets,
             corners,
+            pinned: &[],
         }
     }
 

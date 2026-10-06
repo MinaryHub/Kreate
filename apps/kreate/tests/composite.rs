@@ -1237,6 +1237,7 @@ fn the_uv_editor_draws_its_map_and_says_so_when_there_is_none() {
                 egui::vec2(0.6, 0.9),
             ],
             selected: vec![true, true, true, true, false, false, false, false],
+            pinned: Vec::new(),
             offsets: vec![0, 4, 8],
             corners: vec![0, 1, 2, 3, 4, 5, 6, 7],
         });

@@ -351,6 +351,9 @@ pub mod names {
     pub const SHARP_EDGE: &str = "sharp_edge";
     /// Edge / `Bool`. UV seam.
     pub const SEAM: &str = "seam";
+    /// Corner / `Bool`. A UV pinned where it is: an unwrap keeps it there and
+    /// lays the rest of its island around it — Blender's Pin.
+    pub const UV_PIN: &str = "uv_pin";
     /// Corner / `F32x2`. The first UV set, and the one every format calls its
     /// default: glTF's `TEXCOORD_0`, OBJ's `vt`, USD's `st`.
     ///

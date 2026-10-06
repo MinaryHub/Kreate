@@ -45,6 +45,12 @@ pub fn from_bmesh(bm: &BMesh) -> Option<UvData> {
             .collect(),
         offsets: Vec::with_capacity(bm.num_faces() + 1),
         corners: Vec::new(),
+        pinned: {
+            let pins = bm.attributes().get_bool(names::UV_PIN);
+            (0..slots)
+                .map(|i| pins.and_then(|f| f.get(i)).copied().unwrap_or(false))
+                .collect()
+        },
     };
 
     data.offsets.push(0);

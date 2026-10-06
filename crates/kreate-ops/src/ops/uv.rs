@@ -636,6 +636,78 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Transform>();
     registry.register::<SmartProject>();
     registry.register::<Pack>();
+    registry.register::<Pin>();
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PinParams {
+    /// Unpin instead: Alt+P.
+    pub clear: bool,
+}
+
+/// Pins the selected UVs where they are, or unpins them: Blender's P and
+/// Alt+P. An unwrap lays a pinned UV's island around it.
+pub struct Pin;
+
+impl Operator for Pin {
+    type Params = PinParams;
+
+    fn id() -> &'static str {
+        "uv.pin"
+    }
+    fn label() -> &'static str {
+        "Pin"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let on = !params.clear;
+        let changed = with_bmesh(doc, |bm| {
+            let selected: Vec<usize> = bm
+                .attributes()
+                .get_bool(kreate_mesh::attribute::names::SELECT_UV)
+                .map(|s| {
+                    s.iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v)
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if selected.is_empty() {
+                return Ok(false);
+            }
+            let n = bm.slot_count(kreate_mesh::attribute::Domain::Corner);
+            bm.attributes_mut().ensure(
+                kreate_mesh::attribute::names::UV_PIN,
+                kreate_mesh::attribute::Domain::Corner,
+                kreate_mesh::attribute::AttrType::Bool,
+                n,
+            );
+            let Some(flags) = bm.attributes_mut().make_mut_bool(kreate_mesh::attribute::names::UV_PIN) else {
+                return Ok(false);
+            };
+            let mut changed = false;
+            for i in selected {
+                if let Some(f) = flags.get_mut(i) {
+                    changed |= *f != on;
+                    *f = on;
+                }
+            }
+            Ok(changed)
+        })?;
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
 }
 
 #[cfg(test)]
