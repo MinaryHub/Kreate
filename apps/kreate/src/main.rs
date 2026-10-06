@@ -1783,7 +1783,7 @@ impl App {
                 ],
             }],
             "extrude" => vec![Group {
-                title: t("menu-extrude"),
+                title: t("menu-extrude-kind"),
                 entries: vec![
                     row(self, t("extrude-region"), "app.extrude", &[]),
                     row(
