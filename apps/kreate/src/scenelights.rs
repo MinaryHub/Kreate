@@ -254,7 +254,68 @@ fn place(light: &kreate_scene::Light, world: &kreate_math::DAffine3) -> PlacedLi
         // culls against it; when the datablock grows an artist-set distance, as
         // Blender's has, it arrives here instead.
         range: None,
+        // The path tracer draws a panel for it instead. See `area_panels`.
+        traced_as_geometry: matches!(light.kind, LightKind::Area { .. }),
     }
+}
+
+/// An area light's panel, for the path tracer: its outline in the light's own
+/// XY plane, facing -Z the way the light shines, placed by `transform`, and
+/// glowing with `radiance` — nits, the unit an area light's intensity is in.
+pub struct AreaPanel {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<kreate_math::Vec3>,
+    pub indices: Vec<u32>,
+    pub transform: kreate_math::DAffine3,
+    pub radiance: [f32; 3],
+}
+
+/// Every visible area light's panel.
+///
+/// What the path tracer lights an area light with: the surface it is, glowing
+/// from its front, aimed at as any glowing surface is — rather than the sphere
+/// the rasterised view stands in for it, which shines every way at once.
+pub fn area_panels(doc: &Document) -> Vec<AreaPanel> {
+    use kreate_scene::AreaShape;
+    doc.lit_by()
+        .filter_map(|(_, light, world)| {
+            let LightKind::Area { shape, .. } = light.kind else {
+                return None;
+            };
+            let (positions, indices) = match shape {
+                AreaShape::Rect { width, height } => {
+                    let (x, y) = ((width * 0.5) as f32, (height * 0.5) as f32);
+                    (
+                        vec![[-x, -y, 0.0], [x, -y, 0.0], [x, y, 0.0], [-x, y, 0.0]],
+                        vec![0, 2, 1, 0, 3, 2],
+                    )
+                }
+                AreaShape::Disc { radius } => ellipse(radius as f32, radius as f32),
+                AreaShape::Ellipse { width, height } => ellipse((width * 0.5) as f32, (height * 0.5) as f32),
+            };
+            let normals = vec![kreate_math::Vec3::NEG_Z; positions.len()];
+            Some(AreaPanel {
+                positions,
+                normals,
+                indices,
+                transform: world,
+                radiance: light.tinted_intensity().to_array(),
+            })
+        })
+        .collect()
+}
+
+/// An ellipse of half-widths `a` and `b` as a fan of 32 triangles.
+fn ellipse(a: f32, b: f32) -> (Vec<[f32; 3]>, Vec<u32>) {
+    const SIDES: u32 = 32;
+    let mut positions = vec![[0.0; 3]];
+    let mut indices = Vec::new();
+    for i in 0..SIDES {
+        let t = i as f32 / SIDES as f32 * std::f32::consts::TAU;
+        positions.push([a * t.cos(), b * t.sin(), 0.0]);
+        indices.extend([0, 1 + i, 1 + (i + 1) % SIDES]);
+    }
+    (positions, indices)
 }
 
 /// How big the source is, in metres, for a soft shadow and a highlight.
@@ -277,6 +338,28 @@ fn source_radius(kind: LightKind) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_area_light_is_a_panel_to_the_path_tracer_and_not_a_lamp() {
+        use kreate_scene::AreaShape;
+        let (doc, placed) = one(LightKind::Area {
+            shape: AreaShape::Rect { width: 2.0, height: 1.0 },
+            spread: std::f64::consts::PI,
+        });
+        assert!(placed.traced_as_geometry, "the lamp sampling would count it twice");
+        let panels = area_panels(&doc);
+        assert_eq!(panels.len(), 1);
+        let p = &panels[0];
+        // Two by one, in its own plane, facing down its -Z.
+        let (xs, ys): (Vec<f32>, Vec<f32>) = p.positions.iter().map(|v| (v[0], v[1])).unzip();
+        assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 0.5);
+        assert!(p.normals.iter().all(|n| *n == kreate_math::Vec3::NEG_Z));
+        assert!(p.radiance[0] > 0.0);
+        // A point light is still a lamp.
+        let (_, point) = one(LightKind::Point { radius: 0.1 });
+        assert!(!point.traced_as_geometry);
+    }
     use kreate_scene::document::{Object, ObjectData};
     use kreate_scene::{AreaShape, Light};
 

@@ -70,6 +70,9 @@ pub struct PtSurface {
     pub metallic_roughness_image: Option<usize>,
     /// Light the surface emits by itself, in nits.
     pub emission: [f32; 3],
+    /// Glows from the side its normals face only, as an area light's panel
+    /// does; both sides otherwise.
+    pub one_sided: bool,
     /// How much passes through, zero to one, and how it bends.
     pub transmission: f32,
     pub ior: f32,
@@ -488,6 +491,7 @@ impl PathTracer {
                         s.transmission,
                     ],
                     [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
+                    [if s.one_sided { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 ]
             })
             .collect();
@@ -549,7 +553,12 @@ impl PathTracer {
         );
         if surface_data.is_empty() {
             // Three slots a surface, as the shader reads them.
-            surface_data.extend([[0.8, 0.8, 0.8, 0.0], [0.5, -1.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.5]]);
+            surface_data.extend([
+                [0.8, 0.8, 0.8, 0.0],
+                [0.5, -1.0, -1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.5],
+                [0.0; 4],
+            ]);
         }
         let (emitter_data, emitter_total) = emitters_of(&positions, &triangles, surfaces);
         let emitter_count = emitter_data.len() as u32;

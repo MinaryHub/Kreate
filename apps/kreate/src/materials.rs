@@ -118,6 +118,9 @@ impl Materials {
                     emission: graph_emission(m),
                     transmission: graph_glass(m).0,
                     ior: graph_glass(m).1,
+                    // A material glows both ways, as the rasterised view
+                    // draws it; only a light's panel is one-sided.
+                    one_sided: false,
                 };
             }
         }

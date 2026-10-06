@@ -56,8 +56,10 @@ struct PtNode {
 @group(0) @binding(3) var<storage, read> pt_triangles: array<vec4<u32>>;
 @group(0) @binding(4) var<storage, read> pt_nodes: array<PtNode>;
 @group(0) @binding(5) var<storage, read> pt_order: array<u32>;
-// Two per material: base colour and metallic; then roughness, the base
-// colour image's layer and the metallic-roughness image's, -1 for none.
+// Four per material: base colour and metallic; roughness, the base colour
+// image's layer, the metallic-roughness image's (-1 for none) and the
+// transmission; emission and index of refraction; one-sidedness.
+const PT_SURFACE: u32 = 4u;
 @group(0) @binding(6) var<storage, read> pt_surfaces: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> pt_sum: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read> pt_uvs: array<vec2<f32>>;
@@ -165,7 +167,7 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: u32)
                 // four fifths dark. Untinted — the caustic a real block would
                 // focus is a path no shadow ray can find, and a black shadow
                 // under a window is the worse of the two errors.
-                if (any && pt_random() < pt_surfaces[tri.w * 3u + 1u].w) {
+                if (any && pt_random() < pt_surfaces[tri.w * PT_SURFACE + 1u].w) {
                     continue;
                 }
                 let near = select(1e-4, -1e-5, skip != PT_NONE);
@@ -456,11 +458,14 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (dot(n, geometric) < 0.0) {
             n = -n;
         }
-        let m = tri.w * 3u;
+        let m = tri.w * PT_SURFACE;
         // A glowing surface adds its light wherever a path meets it — whole
         // when nothing could have aimed at it, weighted against the aiming
         // otherwise. See `pt_emitter_pdf`.
-        let glow = pt_surfaces[m + 2u].rgb;
+        // A one-sided glow — an area light's panel — lights only the side its
+        // normals face, so a path arriving from behind finds nothing.
+        let lit_side = entering || pt_surfaces[m + 3u].x == 0.0;
+        let glow = select(vec3<f32>(0.0), pt_surfaces[m + 2u].rgb, lit_side);
         if (pt_luminance(glow) > 0.0) {
             var weight = 1.0;
             if (last_pdf >= 0.0) {
@@ -574,8 +579,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let dist2 = dot(to, to);
             let l = to * inverseSqrt(max(dist2, 1e-12));
             let cos_l = abs(dot(normalize(face), l));
-            let le = pt_surfaces[et.w * 3u + 2u].rgb;
-            if (picked != hit.triangle && dot(l, geometric) > 0.0 && cos_l > 1e-6) {
+            var le = pt_surfaces[et.w * PT_SURFACE + 2u].rgb;
+            // A one-sided panel lights only what its normals face.
+            if (pt_surfaces[et.w * PT_SURFACE + 3u].x != 0.0) {
+                let front = pt_normals[et.x].xyz + pt_normals[et.y].xyz + pt_normals[et.z].xyz;
+                if (dot(front, -l) <= 0.0) {
+                    le = vec3<f32>(0.0);
+                }
+            }
+            if (picked != hit.triangle && dot(l, geometric) > 0.0 && cos_l > 1e-6 && pt_luminance(le) > 0.0) {
                 let visible = pt_trace(start, l, sqrt(dist2) * 0.999, true, picked).t < 0.0;
                 if (visible) {
                     let pdf = pt_emitter_pdf(le, dist2, cos_l);
@@ -592,10 +604,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (!aim_at_glow && !aim_at_sky && pt.light_count > 0u) {
             let k = min(u32(pt_random() * f32(pt.light_count)), pt.light_count - 1u);
             let light = lights[k];
+            // Drawn as glowing geometry instead, and aimed at as that.
+            let as_geometry = (light.flags & FLAG_GEOMETRY) != 0u;
             let at = p - pt.eye.xyz;
             let to_light = direction_to(light, at);
             let e = illuminance_at(light, at) * f32(pt.light_count) / pt_lamp_share();
-            if (dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
+            if (!as_geometry && dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
                 // The shadow ray goes to a random point of the source — a
                 // sphere's disc facing the surface, or the sun's disc in the
                 // sky — so a big source casts a soft shadow, as it does in the

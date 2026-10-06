@@ -2817,6 +2817,12 @@ fn a_glowing_panel_lights_the_floor_as_much_as_it_should_and_quietly() {
 /// square, 1 m up), path traced for `frames` samples, read back linear: the
 /// green of a 5x5 patch around where `point` lands.
 fn glowing_panel_patch(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point: glam::DVec3) -> Vec<f32> {
+    glowing_panel_patch_sided(gpu, frames, size, camera, point, false)
+}
+
+/// The same, the panel glowing only the way its normals face (up) when
+/// `one_sided`.
+fn glowing_panel_patch_sided(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point: glam::DVec3, one_sided: bool) -> Vec<f32> {
         let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
         viewport.shading = ShadingMode::Rendered;
         viewport.path_trace = true;
@@ -2865,6 +2871,7 @@ fn glowing_panel_patch(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point:
         let glow = kreate_render::pathtrace::PtSurface {
             base_color: [0.0; 3],
             emission: [20_000.0; 3],
+            one_sided,
             ..Default::default()
         };
         viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[floor_surface, glow], &[]);
@@ -3017,4 +3024,24 @@ fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
     let m = mean(&sun);
     let spread = (sun.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / sun.len() as f32).sqrt();
     assert!(m > 0.0 && spread < m * 0.25, "under a small sun sixteen samples are speckle: {spread} about {m}");
+}
+
+/// An area light's panel glows from its front only: the grid's normals face
+/// up, so a one-sided panel above the floor lights nothing under it, by aiming
+/// or by bouncing, where the same panel glowing both ways does.
+#[test]
+fn a_one_sided_panel_lights_only_what_it_faces() {
+    let gpu = gpu_or_skip!(gpu());
+    let camera = Camera {
+        pivot: glam::DVec3::new(0.3, 0.0, 0.0),
+        distance: 3.0,
+        rotation: glam::DQuat::from_rotation_z(0.4) * glam::DQuat::from_rotation_x(0.5),
+        ..Camera::default()
+    };
+    let at = glam::DVec3::new(0.3, 0.0, 0.0);
+    let mean = |p: Vec<f32>| p.iter().sum::<f32>() / p.len() as f32;
+    let both = mean(glowing_panel_patch_sided(&gpu, 16, 0.2, camera, at, false));
+    let facing_away = mean(glowing_panel_patch_sided(&gpu, 16, 0.2, camera, at, true));
+    assert!(both > 0.01, "the two-sided panel lit nothing: {both}");
+    assert!(facing_away < both * 0.02, "a panel facing away lit the floor: {facing_away} against {both}");
 }

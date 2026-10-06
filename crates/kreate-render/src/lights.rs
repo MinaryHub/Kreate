@@ -130,6 +130,10 @@ pub struct PlacedLight {
     /// the caller that knows the display — and because when the datablock grows
     /// an artist-set distance, as Blender's has, it lands here.
     pub range: Option<f32>,
+    /// The path tracer has this light as glowing geometry of its own — an
+    /// area light's panel — and its lamp sampling passes it over, or it would
+    /// be counted twice. The rasterised view reads it as a lamp regardless.
+    pub traced_as_geometry: bool,
 }
 
 /// How far a light of `candela` reaches before it stops being visible.
@@ -190,6 +194,7 @@ impl Default for PlacedLight {
             // wants culling says so, and every test written before there was
             // such a thing goes on measuring the light it was measuring.
             range: None,
+            traced_as_geometry: false,
         }
     }
 }
@@ -200,6 +205,9 @@ pub const FLAG_SHADOW: u32 = 1;
 pub const FLAG_DIFFUSE: u32 = 2;
 /// A light lights the specular response.
 pub const FLAG_SPECULAR: u32 = 4;
+/// The path tracer has the light as geometry. See
+/// [`PlacedLight::traced_as_geometry`].
+pub const FLAG_GEOMETRY: u32 = 8;
 
 /// One light, as the shader reads it.
 ///
@@ -270,6 +278,9 @@ impl GpuLight {
         }
         if light.affect_specular {
             flags |= FLAG_SPECULAR;
+        }
+        if light.traced_as_geometry {
+            flags |= FLAG_GEOMETRY;
         }
 
         Self {

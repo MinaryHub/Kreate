@@ -29,6 +29,7 @@ const FALLOFF_PARALLEL: u32 = 1u;
 const FLAG_SHADOW: u32 = 1u;
 const FLAG_DIFFUSE: u32 = 2u;
 const FLAG_SPECULAR: u32 = 4u;
+const FLAG_GEOMETRY: u32 = 8u;
 
 struct Light {
     /// xyz: eye-relative position in metres. w: source radius in metres.
