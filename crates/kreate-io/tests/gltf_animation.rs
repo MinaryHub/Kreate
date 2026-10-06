@@ -402,7 +402,7 @@ fn a_cubic_spline_is_followed_between_its_keys() {
 }
 
 #[test]
-fn a_second_clip_on_the_same_node_is_said_and_left() {
+fn a_second_clip_on_the_same_node_is_said_and_kept_as_a_muted_strip() {
     let clip = |name: &str, x: f32| ImportAnimation {
         name: name.into(),
         channels: vec![ImportChannel {
@@ -431,4 +431,14 @@ fn a_second_clip_on_the_same_node_is_said_and_left() {
         .translation
         .x;
     assert!((x - 1.0).abs() < 1e-5, "the second clip won: {x}");
+    // It came in as a muted strip, and plays when switched on.
+    let o = doc.object(made[0]).unwrap();
+    assert_eq!(o.nla.len(), 1);
+    assert!(o.nla[0].mute);
+    let object = made[0];
+    doc.object_mut(object).unwrap().nla[0].mute = false;
+    doc.object_mut(object).unwrap().action = None;
+    doc.animate(25.0);
+    let x = doc.object(object).unwrap().transform.translation.x;
+    assert!((x - 5.0).abs() < 1e-5, "the second clip should play now: {x}");
 }

@@ -24,6 +24,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetExtrapolation>();
     registry.register::<SmoothKeys>();
     registry.register::<BakeKeys>();
+    registry.register::<NlaPushDown>();
+    registry.register::<NlaStripSet>();
+    registry.register::<NlaStripRemove>();
     registry.register::<KeyProperty>();
     registry.register::<UnkeyProperty>();
     registry.register::<SelectKeysRegion>();
@@ -818,6 +821,191 @@ impl Operator for BakeKeys {
             }
         }
         Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+    }
+}
+
+// --- the NLA ----------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct NlaPushParams {}
+
+/// Blender's Push Down: the active object's action becomes a strip at the
+/// bottom of nothing — on top of its others — where its keys are, and the
+/// object has no active action, ready for the next take.
+pub struct NlaPushDown;
+
+impl Operator for NlaPushDown {
+    type Params = NlaPushParams;
+    fn id() -> &'static str {
+        "anim.nla_push_down"
+    }
+    fn label() -> &'static str {
+        "Push Down"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| o.action.is_some())
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document_mut();
+        let Some(id) = d.selection.active else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(action_id) = d.object(id).and_then(|o| o.action) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(action) = d.action(action_id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let frames = action.key_frames();
+        let range = match (frames.first(), frames.last()) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => (d.playback.start as f64, d.playback.end as f64),
+        };
+        let name = action.name.clone();
+        let Some(o) = d.object_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut strip = kreate_scene::nla::NlaStrip::new(name, action_id, range.0, range);
+        if o.nla.is_empty() {
+            strip.extend = kreate_scene::nla::NlaExtend::Hold;
+        }
+        o.nla.push(strip);
+        o.action = None;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct NlaStripParams {
+    /// Which strip, bottom first.
+    #[param(hidden, min = 0, max = 4096, unit = "count")]
+    pub index: u32,
+    /// The scene frame it starts at.
+    pub start: f64,
+    /// Scene frames per action frame; above one is slower.
+    #[param(min = 0.001, max = 1000.0)]
+    pub scale: f64,
+    /// How many times it plays.
+    #[param(min = 0.001, max = 1000.0)]
+    pub repeat: f64,
+    #[param(min = 0.0, max = 1.0)]
+    pub influence: f64,
+    #[param(variants("nothing", "hold_forward", "hold"))]
+    pub extend: u32,
+    pub mute: bool,
+}
+
+impl Default for NlaStripParams {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            start: 1.0,
+            scale: 1.0,
+            repeat: 1.0,
+            influence: 1.0,
+            extend: 1,
+            mute: false,
+        }
+    }
+}
+
+/// What the NLA panel shows for one strip, as the operator's parameters.
+pub fn nla_strip_params(index: usize, s: &kreate_scene::nla::NlaStrip) -> NlaStripParams {
+    NlaStripParams {
+        index: index as u32,
+        start: s.start,
+        scale: s.scale,
+        repeat: s.repeat,
+        influence: s.influence,
+        extend: s.extend.index(),
+        mute: s.mute,
+    }
+}
+
+/// Changes one of the active object's strips.
+pub struct NlaStripSet;
+
+impl Operator for NlaStripSet {
+    type Params = NlaStripParams;
+    fn id() -> &'static str {
+        "anim.nla_strip_set"
+    }
+    fn label() -> &'static str {
+        "Set NLA Strip"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| !o.nla.is_empty())
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document_mut();
+        let Some(o) = d.selection.active.and_then(|id| d.object_mut(id)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(s) = o.nla.get_mut(params.index as usize) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let wanted = kreate_scene::nla::NlaStrip {
+            start: params.start,
+            scale: params.scale.max(0.001),
+            repeat: params.repeat.max(0.001),
+            influence: params.influence.clamp(0.0, 1.0),
+            extend: kreate_scene::nla::NlaExtend::ALL
+                .get(params.extend as usize)
+                .copied()
+                .unwrap_or_default(),
+            mute: params.mute,
+            ..s.clone()
+        };
+        if *s == wanted {
+            return Ok(OpResult::Cancelled);
+        }
+        *s = wanted;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Takes one strip off the active object. The action stays in the file.
+pub struct NlaStripRemove;
+
+impl Operator for NlaStripRemove {
+    type Params = NlaStripParams;
+    fn id() -> &'static str {
+        "anim.nla_strip_remove"
+    }
+    fn label() -> &'static str {
+        "Remove NLA Strip"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        NlaStripSet::poll(_ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document_mut();
+        let Some(o) = d.selection.active.and_then(|id| d.object_mut(id)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if (params.index as usize) >= o.nla.len() {
+            return Ok(OpResult::Cancelled);
+        }
+        o.nla.remove(params.index as usize);
+        Ok(OpResult::Finished)
     }
 }
 

@@ -1333,8 +1333,45 @@ fn emit_material(
         emissive_factor: json::material::EmissiveFactor(
             described.map(|m| m.emissive.to_array()).unwrap_or_default(),
         ),
+        extensions: described.and_then(|m| {
+            let glows = m.emissive != Vec3::ZERO && m.emissive_strength != 1.0;
+            let clear = m.transmission > 0.0;
+            let bends = m.ior != 1.5;
+            (glows || clear || bends).then(|| json::extensions::material::Material {
+                emissive_strength: glows.then_some(json::extensions::material::EmissiveStrength {
+                    emissive_strength: json::extensions::material::EmissiveStrengthFactor(
+                        m.emissive_strength,
+                    ),
+                }),
+                transmission: clear.then(|| json::extensions::material::Transmission {
+                    transmission_factor: json::extensions::material::TransmissionFactor(
+                        m.transmission,
+                    ),
+                    transmission_texture: None,
+                    extras: Default::default(),
+                }),
+                ior: bends.then_some(json::extensions::material::Ior {
+                    ior: json::extensions::material::IndexOfRefraction(m.ior),
+                    extras: Default::default(),
+                }),
+                ..Default::default()
+            })
+        }),
         ..Default::default()
     });
+    // Each extension a material uses, listed once.
+    if let Some(ext) = root.materials.last().and_then(|m| m.extensions.as_ref()) {
+        let used = [
+            (ext.emissive_strength.is_some(), "KHR_materials_emissive_strength"),
+            (ext.transmission.is_some(), "KHR_materials_transmission"),
+            (ext.ior.is_some(), "KHR_materials_ior"),
+        ];
+        for (on, name) in used {
+            if on && !root.extensions_used.iter().any(|e| e == name) {
+                root.extensions_used.push(name.to_string());
+            }
+        }
+    }
     map.insert(source, index);
     index
 }

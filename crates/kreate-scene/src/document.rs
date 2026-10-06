@@ -177,6 +177,8 @@ pub struct Object {
     pub modifiers: Vec<crate::modifier::ModifierInstance>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
+    /// Actions laid on the timeline under the active one: see [`crate::nla`].
+    pub nla: Vec<crate::nla::NlaStrip>,
     /// Properties of this object that are expressions of others'. See
     /// [`crate::driver`].
     pub drivers: Vec<crate::driver::Driver>,
@@ -217,6 +219,7 @@ impl Object {
             uid: Uid::NONE,
             modifiers: Vec::new(),
             action: None,
+            nla: Vec::new(),
             drivers: Vec::new(),
             pose: crate::armature::Pose::default(),
             skin: None,
@@ -1529,10 +1532,11 @@ impl Document {
     /// frame change animated nothing.
     pub fn animate(&mut self, frame: f64) -> usize {
         self.playback.frame = frame;
-        let animated: Vec<(ObjectId, ActionId)> = self
+        let animated: Vec<(ObjectId, Option<ActionId>)> = self
             .objects
             .iter()
-            .filter_map(|(id, o)| o.action.map(|a| (id, a)))
+            .filter(|(_, o)| o.action.is_some() || !o.nla.is_empty())
+            .map(|(id, o)| (id, o.action))
             .collect();
         let mut moved = 0;
         // Materials and lights, which play their own actions: the colour of a
@@ -1574,21 +1578,56 @@ impl Document {
             }
         }
         for (object, action) in animated {
-            let Some(action) = self.actions.get(action).cloned() else {
-                continue;
-            };
+            let action = action.and_then(|a| self.actions.get(a).cloned());
+            // The strips, bottom to top, each with the action it plays.
+            let strips: Vec<(crate::nla::NlaStrip, _)> = self
+                .objects
+                .get(object)
+                .map(|o| {
+                    o.nla
+                        .iter()
+                        .filter_map(|s| Some((s.clone(), self.actions.get(s.action)?.clone())))
+                        .collect()
+                })
+                .unwrap_or_default();
             let Some(o) = self.objects.get_mut(object) else {
                 continue;
             };
             let before = o.transform;
-            crate::animation::apply_to_object(&action, frame, &mut o.transform);
-            // And the bones, from the same action: Blender's model, where one
-            // action is a character's placement and its pose together.
             let pose_before = o.pose.clone();
-            crate::animation::apply_to_pose(&action, frame, &mut o.pose);
-            // And the shape keys' values.
             let shapes_before = o.shape_keys.clone();
-            crate::animation::apply_to_shapes(&action, frame, &mut o.shape_keys);
+            for (strip, played) in &strips {
+                let Some(local) = strip.action_frame(frame) else {
+                    continue;
+                };
+                let t = strip.influence.clamp(0.0, 1.0);
+                if t <= 0.0 {
+                    continue;
+                }
+                let mut transform = o.transform;
+                crate::animation::apply_to_object(played, local, &mut transform);
+                o.transform = crate::nla::mix_transform(o.transform, transform, t);
+                let mut pose = o.pose.clone();
+                crate::animation::apply_to_pose(played, local, &mut pose);
+                for bone in &pose.bones {
+                    let under = o.pose.transform(&bone.name);
+                    o.pose.entry(&bone.name).transform =
+                        crate::nla::mix_transform(under, bone.transform, t);
+                }
+                let mut keys = o.shape_keys.clone();
+                crate::animation::apply_to_shapes(played, local, &mut keys);
+                for (k, new) in o.shape_keys.iter_mut().zip(keys) {
+                    k.value += (new.value - k.value) * t as f32;
+                }
+            }
+            if let Some(action) = &action {
+                crate::animation::apply_to_object(action, frame, &mut o.transform);
+                // And the bones, from the same action: Blender's model, where
+                // one action is a character's placement and its pose together.
+                crate::animation::apply_to_pose(action, frame, &mut o.pose);
+                // And the shape keys' values.
+                crate::animation::apply_to_shapes(action, frame, &mut o.shape_keys);
+            }
             if o.transform != before || o.pose != pose_before || o.shape_keys != shapes_before {
                 moved += 1;
             }

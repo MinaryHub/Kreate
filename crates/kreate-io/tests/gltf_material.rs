@@ -287,3 +287,45 @@ fn a_float_image_goes_out_as_eight_bits_and_says_so() {
     // the light is 188.
     assert_eq!(&scene.images[0].pixels[..4], &[255, 188, 0, 255]);
 }
+
+#[test]
+fn glow_glass_and_ior_travel_as_their_extensions() {
+    let mut doc = Document::new();
+    let lamp = doc.add_material(Material {
+        name: "Lamp".into(),
+        emission: kreate_math::SceneRgb::new(1.0, 0.5, 0.25),
+        emission_strength: 40.0,
+        ..Default::default()
+    });
+    let glass = doc.add_material(Material {
+        name: "Glass".into(),
+        transmission: 0.9,
+        ior: 1.33,
+        ..Default::default()
+    });
+    cube_with(&mut doc, "A", lamp);
+    cube_with(&mut doc, "B", glass);
+    let bytes = write(&doc, true);
+    let json = glb_json(&bytes);
+    let used: Vec<&str> = json["extensionsUsed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for name in [
+        "KHR_materials_emissive_strength",
+        "KHR_materials_transmission",
+        "KHR_materials_ior",
+    ] {
+        assert!(used.contains(&name), "{name} not in {used:?}");
+    }
+    let (back, _) = read(&bytes);
+    let by_name = |n: &str| back.materials().find(|(_, m)| m.name == n).unwrap().1.clone();
+    let lamp = by_name("Lamp");
+    assert_eq!(lamp.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
+    assert_eq!(lamp.emission_strength, 40.0);
+    let glass = by_name("Glass");
+    assert_eq!((glass.transmission, glass.ior), (0.9, 1.33));
+    assert_eq!(glass.emission_strength, 0.0, "no glow where none was");
+}

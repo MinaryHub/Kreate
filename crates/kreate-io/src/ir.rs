@@ -126,6 +126,12 @@ pub struct ImportMaterial {
     pub normal_texture: Option<usize>,
     /// glTF's `normalTexture.scale`.
     pub normal_scale: f32,
+    /// What `emissive` is multiplied by: `KHR_materials_emissive_strength`.
+    pub emissive_strength: f32,
+    /// `KHR_materials_transmission`: zero is solid, one is glass.
+    pub transmission: f32,
+    /// `KHR_materials_ior`.
+    pub ior: f32,
 }
 
 /// An image as a file carries it: eight bits a channel, four channels.
@@ -155,6 +161,9 @@ impl Default for ImportMaterial {
             metallic_roughness_texture: None,
             normal_texture: None,
             normal_scale: 1.0,
+            emissive_strength: 1.0,
+            transmission: 0.0,
+            ior: 1.5,
         }
     }
 }

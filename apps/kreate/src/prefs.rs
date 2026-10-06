@@ -77,6 +77,34 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
     result
 }
 
+/// The viewport preferences' file: `resolution_scale = 0.5`.
+pub fn viewport_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("viewport.txt"))
+}
+
+/// The smallest resolution scale the preference allows: a quarter of the
+/// pixels on each side, which is already a sixteenth of the work.
+pub const MIN_RESOLUTION_SCALE: f32 = 0.25;
+
+/// The viewport's resolution scale, from its file; one when the file is
+/// missing or does not say.
+pub fn load_resolution_scale(path: &Path) -> f32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "resolution_scale").then(|| value.trim().parse::<f32>().ok())?
+            })
+        })
+        .filter(|s| s.is_finite())
+        .map_or(1.0, |s| s.clamp(MIN_RESOLUTION_SCALE, 1.0))
+}
+
+pub fn save_resolution_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
+    write_atomic(path, &format!("resolution_scale = {scale}\n"))
+}
+
 /// The workspace file's path.
 /// File ▸ Open Recent's list, one path per line, newest first.
 pub fn recent_path() -> Option<PathBuf> {
@@ -455,6 +483,20 @@ mod recent_tests {
         ];
         save_recent(&path, &list).unwrap();
         assert_eq!(load_recent(&path), list);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_resolution_scale_round_trips_and_is_kept_in_range() {
+        let dir = std::env::temp_dir().join("kreate-prefs-resolution-scale");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("viewport.txt");
+        assert_eq!(load_resolution_scale(&path), 1.0);
+        save_resolution_scale(&path, 0.5).unwrap();
+        assert_eq!(load_resolution_scale(&path), 0.5);
+        save_resolution_scale(&path, 0.01).unwrap();
+        assert_eq!(load_resolution_scale(&path), MIN_RESOLUTION_SCALE);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

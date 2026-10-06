@@ -35,8 +35,8 @@ pub enum BuildNote {
     /// not be read. The slot is left empty.
     MissingImage { material: String },
     /// A second clip moved a node the first had already given an action. An
-    /// object plays one action, so the later clip's movement of it was left
-    /// out.
+    /// object plays one action, so the later clip came in as a muted NLA
+    /// strip, there to be switched on.
     LaterClip { animation: String, node: String },
     /// Something hung from a joint, which is a bone here and not an object:
     /// it was parented to the armature instead, and no longer follows the
@@ -779,12 +779,15 @@ fn build_animations(
             let (Some(Some(object)), Some(rest)) = (made.get(node), scene.nodes.get(node)) else {
                 continue;
             };
-            if !animated.insert(node) {
+            // A later clip on a node that already has one becomes a muted
+            // NLA strip: an object plays one action, and the others are
+            // still the file's takes, there to be switched on.
+            let later = !animated.insert(node);
+            if later {
                 notes.push(BuildNote::LaterClip {
                     animation: animation.name.clone(),
                     node: rest.name.clone(),
                 });
-                continue;
             }
             let channels: Vec<_> = animation
                 .channels
@@ -883,9 +886,17 @@ fn build_animations(
                 last_frame = last_frame.max(*frame);
             }
             action.select_all_with(|_| false);
+            let name = action.name.clone();
             let id = doc.add_action(action);
             if let Some(o) = doc.object_mut(*object) {
-                o.action = Some(id);
+                if later {
+                    let range = (frames[0], frames[frames.len() - 1]);
+                    let mut strip = kreate_scene::nla::NlaStrip::new(name, id, range.0, range);
+                    strip.mute = true;
+                    o.nla.push(strip);
+                } else {
+                    o.action = Some(id);
+                }
             }
         }
     }
@@ -1003,6 +1014,17 @@ fn build_materials(
                 metallic_roughness_image,
                 normal_image,
                 normal_strength: m.normal_scale,
+                // The glow's colour and how bright, kept apart as the
+                // datablock keeps them; a file with a colour and no strength
+                // means it as written.
+                emission: kreate_math::SceneRgb::new(m.emissive.x, m.emissive.y, m.emissive.z),
+                emission_strength: if m.emissive == glam::Vec3::ZERO {
+                    0.0
+                } else {
+                    m.emissive_strength
+                },
+                transmission: m.transmission,
+                ior: m.ior,
                 ..Default::default()
             })
         })
@@ -1092,10 +1114,14 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             ],
             metallic: material.metallic,
             roughness: material.roughness,
-            // Not a field on the datablock yet: §2.3's node graph is where
-            // emission will live, and inventing a value here would make the
-            // file claim one.
-            emissive: glam::Vec3::ZERO,
+            // The glow: its colour, and how bright as the extension's
+            // multiplier — the datablock's strength, unchanged, so it comes
+            // back the same number.
+            emissive: if material.emission_strength > 0.0 {
+                glam::Vec3::new(material.emission.r, material.emission.g, material.emission.b)
+            } else {
+                glam::Vec3::ZERO
+            },
             base_color_texture: texture(
                 MaterialMap::BaseColor,
                 material.base_color_image,
@@ -1108,6 +1134,13 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             ),
             normal_texture: texture(MaterialMap::Normal, material.normal_image, &mut notes),
             normal_scale: material.normal_strength,
+            emissive_strength: if material.emission_strength > 0.0 {
+                material.emission_strength
+            } else {
+                1.0
+            },
+            transmission: material.transmission,
+            ior: material.ior,
         });
     }
 

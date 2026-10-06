@@ -98,6 +98,14 @@ impl Document {
             copy.action = object
                 .action
                 .and_then(|a| self.copy_action(a, &mut out, &mut actions));
+            copy.nla = object
+                .nla
+                .iter()
+                .filter_map(|s| {
+                    let action = self.copy_action(s.action, &mut out, &mut actions)?;
+                    Some(crate::nla::NlaStrip { action, ..s.clone() })
+                })
+                .collect();
             // Parents are settled below, once every copy exists. Until then
             // the copy stands alone at its world placement.
             copy.parent = None;
@@ -206,6 +214,14 @@ impl Document {
             copy.action = object
                 .action
                 .and_then(|a| other.copy_action(a, self, &mut actions));
+            copy.nla = object
+                .nla
+                .iter()
+                .filter_map(|s| {
+                    let action = other.copy_action(s.action, self, &mut actions)?;
+                    Some(crate::nla::NlaStrip { action, ..s.clone() })
+                })
+                .collect();
             copy.parent = None;
             let new_id = self.add_object(copy);
             new_ids.insert(*id, new_id);

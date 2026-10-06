@@ -207,3 +207,38 @@ fn preserve_volume_is_saved_with_the_object() {
     let (_, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
     assert!(o.preserve_volume);
 }
+
+#[test]
+fn nla_strips_are_saved_with_their_object() {
+    use kreate_scene::animation::{Action, Interpolation};
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::nla::{NlaExtend, NlaStrip};
+    let mut doc = Document::new();
+    let mut walk = Action::new("Walk");
+    walk.curve_mut("location", 0).insert(1.0, 2.0, Interpolation::Linear);
+    let walk = doc.add_action(walk);
+    let id = doc.add_object(Object::new("Mover", ObjectData::Empty));
+    // Nothing at its default.
+    let strip = NlaStrip {
+        name: "Walk".into(),
+        action: walk,
+        start: 12.0,
+        action_start: 3.0,
+        action_end: 27.0,
+        scale: 1.5,
+        repeat: 2.25,
+        influence: 0.75,
+        extend: NlaExtend::Nothing,
+        mute: true,
+    };
+    doc.object_mut(id).unwrap().nla.push(strip.clone());
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Mover").unwrap();
+    assert_eq!(o.nla.len(), 1);
+    let got = &o.nla[0];
+    assert_eq!(back.action(got.action).unwrap().name, "Walk");
+    assert_eq!(
+        NlaStrip { action: walk, ..got.clone() },
+        strip
+    );
+}

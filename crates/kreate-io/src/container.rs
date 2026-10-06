@@ -228,6 +228,9 @@ pub struct ObjectRecord {
     /// Index into [`SceneFile::actions`]: the action this object plays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<usize>,
+    /// Its NLA strips, bottom to top.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nla: Vec<NlaStripRecord>,
     /// Its drivers. Written only when there are some, so a file without them
     /// is byte for byte what it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -521,6 +524,26 @@ pub struct IkRecord {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pole: String,
+}
+
+/// One NLA strip; its action as an index into [`SceneFile::actions`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NlaStripRecord {
+    pub name: String,
+    pub action: usize,
+    pub start: f64,
+    pub action_start: f64,
+    pub action_end: f64,
+    #[serde(default = "full_influence")]
+    pub scale: f64,
+    #[serde(default = "full_influence")]
+    pub repeat: f64,
+    #[serde(default = "full_influence")]
+    pub influence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mute: bool,
 }
 
 /// One bone constraint: its kind by name, so a reader that does not know a
@@ -1617,6 +1640,25 @@ pub fn write(
                     .map(|s| s.and_then(|m| material_index.get(&m).copied()))
                     .collect(),
                 action: object.action.and_then(|a| action_index.get(&a).copied()),
+                nla: object
+                    .nla
+                    .iter()
+                    .filter_map(|s| {
+                        Some(NlaStripRecord {
+                            name: s.name.clone(),
+                            action: *action_index.get(&s.action)?,
+                            start: s.start,
+                            action_start: s.action_start,
+                            action_end: s.action_end,
+                            scale: s.scale,
+                            repeat: s.repeat,
+                            influence: s.influence,
+                            extend: (s.extend != kreate_scene::nla::NlaExtend::HoldForward)
+                                .then(|| s.extend.tag().to_string()),
+                            mute: s.mute,
+                        })
+                    })
+                    .collect(),
                 drivers: object
                     .drivers
                     .iter()
@@ -2075,6 +2117,28 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         object.visible = record.visible;
         object.selectable = record.selectable;
         object.action = record.action.and_then(|i| action_ids.get(i).copied());
+        object.nla = record
+            .nla
+            .iter()
+            .filter_map(|r| {
+                Some(kreate_scene::nla::NlaStrip {
+                    name: r.name.clone(),
+                    action: *action_ids.get(r.action)?,
+                    start: r.start,
+                    action_start: r.action_start,
+                    action_end: r.action_end,
+                    scale: r.scale,
+                    repeat: r.repeat,
+                    influence: r.influence,
+                    extend: r
+                        .extend
+                        .as_deref()
+                        .and_then(kreate_scene::nla::NlaExtend::from_tag)
+                        .unwrap_or_default(),
+                    mute: r.mute,
+                })
+            })
+            .collect();
         object.pose = kreate_scene::armature::Pose {
             constraints: record
                 .constraints

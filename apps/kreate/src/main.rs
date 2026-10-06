@@ -826,6 +826,8 @@ impl App {
         kreate_ops::register_builtin(&mut registry);
         let mut app = Self::empty(doc, locale, registry);
         // File ▸ Open Recent, as the last session left it.
+        app.ui.resolution_scale = kreate::prefs::viewport_path()
+            .map_or(1.0, |p| kreate::prefs::load_resolution_scale(&p));
         app.ui.recent_files = kreate::prefs::recent_path()
             .map(|p| kreate::prefs::load_recent(&p))
             .unwrap_or_default();
@@ -7609,9 +7611,13 @@ impl App {
         let pixels_per_point = self.egui_ctx.pixels_per_point();
 
         // What the panels left this frame, applied at the start of the next one.
+        // At the preference's fraction of the panel's pixels, stretched to
+        // fit: the cursor is mapped through the drawn size, so picking keeps
+        // working at any scale.
+        let scale = self.ui.resolution_scale.clamp(kreate::prefs::MIN_RESOLUTION_SCALE, 1.0);
         let wanted = (
-            (viewport_rect.width().max(0.0) * pixels_per_point) as u32,
-            (viewport_rect.height().max(0.0) * pixels_per_point) as u32,
+            (viewport_rect.width().max(0.0) * pixels_per_point * scale) as u32,
+            (viewport_rect.height().max(0.0) * pixels_per_point * scale) as u32,
         );
         // Not while a render runs: the picture is the render's size, not the
         // panel's, and following the panel restarted its samples every frame.

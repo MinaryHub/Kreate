@@ -222,6 +222,9 @@ pub struct ShellState {
     pub recoverable: Vec<RecoveryOffer>,
     /// File ▸ Open Recent, newest first.
     pub recent_files: Vec<std::path::PathBuf>,
+    /// The viewport drawn at this fraction of its pixels on each side, and
+    /// stretched to fit: Blender's Resolution Scale, for a slow machine.
+    pub resolution_scale: f32,
     /// Whether the remapping panel is open.
 
     /// The binding waiting for a keystroke, if any.
@@ -591,6 +594,7 @@ impl Default for ShellState {
             status: None,
             recoverable: Vec::new(),
             recent_files: Vec::new(),
+            resolution_scale: 1.0,
             capturing: None,
             palette: Default::default(),
             pie: Default::default(),
@@ -2541,6 +2545,24 @@ fn draw_area(
                     draw_drivers(ui, state, doc, area.id);
                 }
                 "preferences" => {
+                    ui.horizontal(|ui| {
+                        ui.label(state.catalog.get("prefs-resolution-scale"));
+                        let mut scale = state.resolution_scale;
+                        if ui
+                            .add(egui::Slider::new(
+                                &mut scale,
+                                crate::prefs::MIN_RESOLUTION_SCALE..=1.0,
+                            ))
+                            .on_hover_text(state.catalog.get("prefs-resolution-scale-desc"))
+                            .changed()
+                        {
+                            state.resolution_scale = scale;
+                            if let Some(path) = crate::prefs::viewport_path() {
+                                let _ = crate::prefs::save_resolution_scale(&path, scale);
+                            }
+                        }
+                    });
+                    ui.separator();
                     let conflicts = keymap.conflicts();
                     let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
                     let mut edits = std::mem::take(&mut state.keymap_edits);
@@ -6911,6 +6933,7 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    draw_nla_panel(ui, state, doc, registry, object);
     // What the object hangs from and what bends it: Blender's Relations
     // panel, and the Armature modifier's one field.
     let parent = active
@@ -6963,6 +6986,57 @@ fn draw_object_tab(
             });
         });
     }
+}
+
+/// The object's NLA: Push Down for its action, and each strip's place,
+/// speed, repeats, influence and ends — Blender's strip sidebar, in a panel.
+fn draw_nla_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    object: ObjectId,
+) {
+    use kreate_reflect::PropertyValue as V;
+    let Some(o) = doc.object(object) else { return };
+    if o.action.is_none() && o.nla.is_empty() {
+        return;
+    }
+    let title = state.catalog.get("panel-nla");
+    kreate_ui::panel::section(ui, &title, false, |ui| {
+        if o.action.is_some()
+            && ui
+                .button(state.catalog.get("op-anim-nla-push-down"))
+                .on_hover_text(state.catalog.get("op-anim-nla-push-down-desc"))
+                .clicked()
+        {
+            state.queue.run("anim.nla_push_down", PropertyMap::new());
+        }
+        let Some(info) = registry.get("anim.nla_strip_set") else {
+            return;
+        };
+        for (index, strip) in o.nla.iter().enumerate().rev() {
+            ui.separator();
+            ui.horizontal(|ui| {
+                // i18n-exempt: a strip's name is its action's, the user's own text
+                ui.strong(&strip.name);
+                if ui
+                    .small_button(REMOVE_GLYPH)
+                    .on_hover_text(state.catalog.get("op-anim-nla-strip-remove"))
+                    .clicked()
+                {
+                    let mut p = PropertyMap::new();
+                    p.set("index", V::Int(index as i64));
+                    state.queue.run("anim.nla_strip_remove", p);
+                }
+            });
+            let mut map =
+                kreate_reflect::OpParams::to_map(&kreate_ops::ops::anim::nla_strip_params(index, strip));
+            if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut map) {
+                state.queue.run("anim.nla_strip_set", map);
+            }
+        }
+    });
 }
 
 /// The transform of the active object, with Blender's diamonds and the
@@ -8625,6 +8699,8 @@ select-mode-vert = Vertex
 select-mode-edge = Edge
 select-mode-face = Face
 keymap-preset = Preset
+prefs-resolution-scale = Resolution Scale
+prefs-resolution-scale-desc = Draws the viewport at a fraction of its pixels and stretches it to fit: faster on a slow machine, softer to look at.
 keymap-changed = { $count } changed
 keymap-reset-all = Reset all
 keymap-shadowed = { $count } shadowed
@@ -8726,6 +8802,13 @@ op-object-rename-desc = Renames the active object.
 bind-automatic = With Automatic Weights
 bind-empty = With Empty Groups
 unbind-armature = Remove Armature Deform
+panel-nla = Nonlinear Animation
+op-anim-nla-push-down = Push Down
+op-anim-nla-push-down-desc = Turns the action into a strip on the timeline, and leaves the object with no active action for the next take.
+op-anim-nla-strip-set = Set NLA Strip
+op-anim-nla-strip-set-desc = Changes where a strip starts, how fast and how often it plays, how much of it shows and what it does past its ends.
+op-anim-nla-strip-remove = Remove NLA Strip
+op-anim-nla-strip-remove-desc = Takes a strip off. Its action stays in the file.
 preserve-volume = Preserve Volume
 op-object-set-preserve-volume = Preserve Volume
 op-object-set-preserve-volume-desc = Skins by dual quaternions, which keeps a twisted joint round instead of pinching it.
@@ -9488,6 +9571,8 @@ select-mode-vert = 정점
 select-mode-edge = 모서리
 select-mode-face = 면
 keymap-preset = 프리셋
+prefs-resolution-scale = 해상도 배율
+prefs-resolution-scale-desc = 뷰포트를 픽셀 수의 일부로 그린 뒤 늘려 보여줍니다. 느린 컴퓨터에서 빨라지고 화면은 조금 흐려집니다.
 keymap-changed = { $count }개 변경됨
 keymap-reset-all = 전부 초기화
 keymap-shadowed = { $count }개가 가려짐
@@ -9588,6 +9673,13 @@ op-object-rename-desc = 활성 오브젝트의 이름을 바꿉니다.
 bind-automatic = 자동 웨이트로
 bind-empty = 빈 그룹으로
 unbind-armature = 아마튜어 변형 제거
+panel-nla = 비선형 애니메이션(NLA)
+op-anim-nla-push-down = 아래로 밀기
+op-anim-nla-push-down-desc = 액션을 타임라인의 스트립으로 만들고, 다음 테이크를 위해 오브젝트의 활성 액션을 비웁니다.
+op-anim-nla-strip-set = NLA 스트립 설정
+op-anim-nla-strip-set-desc = 스트립의 시작, 속도, 반복, 영향도, 끝 너머 동작을 바꿉니다.
+op-anim-nla-strip-remove = NLA 스트립 제거
+op-anim-nla-strip-remove-desc = 스트립을 없앱니다. 액션은 파일에 남습니다.
 preserve-volume = 부피 유지
 op-object-set-preserve-volume = 부피 유지
 op-object-set-preserve-volume-desc = 듀얼 쿼터니언으로 스키닝해, 비틀린 관절이 가늘어지지 않고 둥글게 남습니다.

@@ -815,3 +815,45 @@ fn a_bone_constraint_is_added_set_and_removed_by_operators() {
         .unwrap();
     assert!(doc.object(rig).unwrap().pose.constraints.is_empty());
 }
+
+#[test]
+fn push_down_turns_the_action_into_a_strip_where_its_keys_are() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+    use kreate_scene::animation::{Action, Interpolation};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut doc = kreate_scene::Document::new();
+    let mut a = Action::new("Hop");
+    let c = a.curve_mut("location", 2);
+    c.insert(5.0, 0.0, Interpolation::Linear);
+    c.insert(15.0, 1.0, Interpolation::Linear);
+    let a = doc.add_action(a);
+    let mut o = Object::new("Ball", ObjectData::Empty);
+    o.action = Some(a);
+    let id = doc.add_object(o);
+    doc.selection.add(id);
+    let mut history = History::new();
+    let ctx = kreate_ops::operator::Context::default();
+    history
+        .dispatch(&registry, &mut doc, &ctx, "anim.nla_push_down", &PropertyMap::new())
+        .unwrap();
+    let o = doc.object(id).unwrap();
+    assert!(o.action.is_none());
+    assert_eq!(o.nla.len(), 1);
+    assert_eq!((o.nla[0].start, o.nla[0].action_start, o.nla[0].action_end), (5.0, 5.0, 15.0));
+    // It still plays.
+    doc.animate(10.0);
+    assert!((doc.object(id).unwrap().transform.translation.z - 0.5).abs() < 1e-9);
+    // Twice as slow, through the operator the panel sends.
+    let mut p = kreate_reflect::OpParams::to_map(&kreate_ops::ops::anim::nla_strip_params(
+        0,
+        &doc.object(id).unwrap().nla[0],
+    ));
+    p.set("scale", PropertyValue::Float(2.0));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "anim.nla_strip_set", &p)
+        .unwrap();
+    doc.animate(15.0);
+    assert!((doc.object(id).unwrap().transform.translation.z - 0.5).abs() < 1e-9);
+}

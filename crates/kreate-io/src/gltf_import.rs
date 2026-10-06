@@ -204,6 +204,9 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             metallic_roughness_texture,
             normal_texture,
             normal_scale,
+            emissive_strength: material.emissive_strength().unwrap_or(1.0),
+            transmission: material.transmission().map_or(0.0, |t| t.transmission_factor()),
+            ior: material.ior().unwrap_or(1.5),
         });
     }
 

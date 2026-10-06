@@ -14,6 +14,7 @@ pub mod expression;
 pub mod image;
 pub mod light;
 pub mod modifier;
+pub mod nla;
 pub mod render;
 pub mod shader;
 pub mod shape;
