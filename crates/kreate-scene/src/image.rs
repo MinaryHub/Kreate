@@ -187,7 +187,7 @@ impl Tile {
 }
 
 /// An image datablock.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Image {
     pub name: String,
     pub linkage: crate::document::Linkage,
@@ -209,6 +209,24 @@ pub struct Image {
     /// on sparse residency — and a read of one yields the blank, so a
     /// half-loaded image draws as empty rather than as whatever was in memory.
     tiles: Vec<Option<Arc<Tile>>>,
+    /// Counts writes to the pixels, so whoever has uploaded them can tell
+    /// they changed without comparing them. Not part of what an image *is*:
+    /// two images with the same pixels are equal however they got there.
+    revision: u64,
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.linkage == other.linkage
+            && self.uid == other.uid
+            && self.width == other.width
+            && self.height == other.height
+            && self.format == other.format
+            && self.color_space == other.color_space
+            && self.source == other.source
+            && self.tiles == other.tiles
+    }
 }
 
 impl Image {
@@ -288,7 +306,13 @@ impl Image {
             color_space: ColorSpace::default(),
             source: Source::Generated,
             tiles,
+            revision: 0,
         })
+    }
+
+    /// How many times the pixels have been written to. See the field.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn width(&self) -> u32 {
@@ -337,6 +361,7 @@ impl Image {
     pub fn tile_mut(&mut self, tile_x: u32, tile_y: u32) -> Option<&mut Tile> {
         let index = self.index_of(tile_x, tile_y)?;
         let format = self.format;
+        self.revision += 1;
         let slot = self.tiles.get_mut(index)?;
         Some(Arc::make_mut(
             slot.get_or_insert_with(|| Arc::new(Tile::blank(format))),
@@ -360,6 +385,7 @@ impl Image {
         match self.index_of(tile_x, tile_y) {
             Some(index) => {
                 self.tiles[index] = tile;
+                self.revision += 1;
                 true
             }
             None => false,

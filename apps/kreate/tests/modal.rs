@@ -882,7 +882,9 @@ fn the_operator_a_gesture_runs_depends_on_the_mode() {
         .filter(|mode| {
             !matches!(
                 mode.acts_on(),
-                kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt
+                kreate_ops::mode::ActsOn::Weights
+                    | kreate_ops::mode::ActsOn::Sculpt
+                    | kreate_ops::mode::ActsOn::Texture
             )
         })
         .flat_map(|mode| {

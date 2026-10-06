@@ -193,3 +193,68 @@ fn a_soft_brush_paints_its_rim_less_than_its_middle() {
     let w = weights(&doc, mesh, "Arm");
     assert_eq!((w[0], w[1]), (1.0, 0.5));
 }
+
+#[test]
+fn a_texture_stroke_paints_under_the_brush_and_undo_takes_only_its_tiles_back() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue};
+    use kreate_scene::document::{Object, ObjectData};
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut doc = kreate_scene::Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let cube = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+    doc.selection.add(cube);
+    let ctx = kreate_ops::operator::Context::default();
+    let mut history = History::new();
+    let mut p = PropertyMap::new();
+    p.set("width", PropertyValue::Int(256));
+    p.set("height", PropertyValue::Int(256));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "paint.new_texture", &p)
+        .unwrap();
+    // The cube's first material now shows a new white image.
+    let material = doc.mesh_slots(mesh)[0].expect("a material");
+    let image = doc.material(material).unwrap().base_color_image.expect("an image");
+    let pixel = |doc: &kreate_scene::Document, x: u32, y: u32| {
+        let img = doc.image(image).unwrap();
+        let t = kreate_scene::image::TILE;
+        let at = (((y % t) * t + (x % t)) * 4) as usize;
+        img.tile(x / t, y / t).map(|tile| tile.bytes()[at..at + 4].to_vec())
+    };
+    assert_eq!(pixel(&doc, 128, 128).unwrap(), vec![255, 255, 255, 255]);
+    let before = doc.image(image).unwrap().revision();
+    let handles_before: Vec<_> = (0..2)
+        .flat_map(|ty| (0..2).map(move |tx| (tx, ty)))
+        .map(|(tx, ty)| doc.image(image).unwrap().tile_handle(tx, ty))
+        .collect();
+    // A red dab in the middle of the top-left tile: a tenth of the image wide.
+    let uid = doc.image_uid(image).unwrap().raw().to_string();
+    let mut p = PropertyMap::new();
+    p.set("image", PropertyValue::Text(uid));
+    p.set("dabs", PropertyValue::Floats(vec![0.25, 0.25, 0.05, 1.0]));
+    p.set("color", PropertyValue::Vec3([1.0, 0.0, 0.0]));
+    history
+        .dispatch(&registry, &mut doc, &ctx, "paint.texture_stroke", &p)
+        .unwrap();
+    // Red at the middle — the pixel's centre is half a pixel off the dab's,
+    // where the falloff is a hair under full.
+    let middle = pixel(&doc, 64, 64).unwrap();
+    assert!(middle[0] == 255 && middle[1] <= 3 && middle[2] <= 3, "{middle:?}");
+    assert_eq!(pixel(&doc, 64 + 20, 64).unwrap(), vec![255, 255, 255, 255], "outside, untouched");
+    let edge = pixel(&doc, 64 + 10, 64).unwrap();
+    assert!(edge[1] > 0 && edge[1] < 255, "the falloff is soft: {edge:?}");
+    assert!(doc.image(image).unwrap().revision() > before);
+    // Only the tile it touched was replaced.
+    let after: Vec<_> = (0..2)
+        .flat_map(|ty| (0..2).map(move |tx| (tx, ty)))
+        .map(|(tx, ty)| doc.image(image).unwrap().tile_handle(tx, ty))
+        .collect();
+    let replaced = handles_before
+        .iter()
+        .zip(&after)
+        .filter(|(a, b)| !std::sync::Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap()))
+        .count();
+    assert_eq!(replaced, 1);
+    assert!(history.undo(&mut doc));
+    assert_eq!(pixel(&doc, 64, 64).unwrap(), vec![255, 255, 255, 255]);
+}

@@ -143,6 +143,7 @@ pub enum Context {
     EditArmature,
     /// Weight paint mode: the pointer paints.
     WeightPaint,
+    TexturePaint,
     /// Sculpt mode: the pointer sculpts, and letters pick brushes.
     Sculpt,
     /// The pointer is over the UV editor.
@@ -174,6 +175,7 @@ impl Context {
             Context::Pose => &[Context::Pose, Context::Viewport, Context::Global],
             Context::EditArmature => &[Context::EditArmature, Context::Viewport, Context::Global],
             Context::WeightPaint => &[Context::WeightPaint, Context::Viewport, Context::Global],
+            Context::TexturePaint => &[Context::TexturePaint, Context::Viewport, Context::Global],
             Context::Sculpt => &[Context::Sculpt, Context::Viewport, Context::Global],
             Context::UvEditor => &[Context::UvEditor, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
@@ -193,6 +195,7 @@ impl Context {
             Context::Pose => "pose",
             Context::EditArmature => "edit_armature",
             Context::WeightPaint => "weight_paint",
+            Context::TexturePaint => "texture_paint",
             Context::Sculpt => "sculpt",
             Context::UvEditor => "uv_editor",
             Context::Modal => "modal",
@@ -212,6 +215,7 @@ impl Context {
         Context::Pose,
         Context::EditArmature,
         Context::WeightPaint,
+        Context::TexturePaint,
         Context::Sculpt,
         Context::UvEditor,
         Context::Modal,
@@ -863,6 +867,12 @@ mod tests {
             Binding::new(
                 "sculpt.nothing",
                 Context::Sculpt,
+                Input::key("G"),
+                Action::new("object.translate"),
+            ),
+            Binding::new(
+                "texture.nothing",
+                Context::TexturePaint,
                 Input::key("G"),
                 Action::new("object.translate"),
             ),

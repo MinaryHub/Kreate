@@ -271,6 +271,7 @@ pub struct ShellState {
     pub paint: PaintSettings,
     /// The sculpt brush.
     pub sculpt: SculptSettings,
+    pub texture_paint: TexturePaintSettings,
     /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
     /// polyline per loop. Empty otherwise.
     pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
@@ -611,6 +612,7 @@ impl Default for ShellState {
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
             sculpt: SculptSettings::default(),
+            texture_paint: TexturePaintSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
             circle_select: None,
@@ -1105,6 +1107,26 @@ impl Default for PaintSettings {
     }
 }
 
+/// The texture paint brush's settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TexturePaintSettings {
+    /// The colour, in the image's own sRGB encoding — what the swatch shows.
+    pub color: [f32; 3],
+    /// Its radius on screen, in points.
+    pub radius: f32,
+    pub strength: f32,
+}
+
+impl Default for TexturePaintSettings {
+    fn default() -> Self {
+        Self {
+            color: [0.8, 0.1, 0.1],
+            radius: 30.0,
+            strength: 1.0,
+        }
+    }
+}
+
 /// The sculpt brush's settings, the application's as the paint brush's are.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SculptSettings {
@@ -1258,6 +1280,8 @@ struct Labels {
     add_armature: String,
     menu_pose: String,
     menu_sculpt: String,
+    menu_texture: String,
+    new_texture: String,
     sculpt_draw: String,
     sculpt_smooth: String,
     sculpt_grab: String,
@@ -1553,6 +1577,8 @@ impl Labels {
             add_armature: t("menu-add-armature"),
             menu_pose: t("menu-pose"),
             menu_sculpt: t("menu-sculpt"),
+            menu_texture: t("menu-texture"),
+            new_texture: t("op-paint-new-texture"),
             sculpt_draw: t("sculpt-draw"),
             sculpt_smooth: t("sculpt-smooth"),
             sculpt_grab: t("sculpt-grab"),
@@ -1869,7 +1895,9 @@ pub fn draw(
                     "armature.delete",
                 ],
                 // The brush is the mouse; there are no keys to learn yet.
-                kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => &[],
+                kreate_ops::mode::ActsOn::Weights
+                | kreate_ops::mode::ActsOn::Sculpt
+                | kreate_ops::mode::ActsOn::Texture => &[],
             };
             for id in hints {
                 if let Some(info) = state
@@ -2370,6 +2398,7 @@ fn draw_area(
                     let brush = match mode.acts_on() {
                         kreate_ops::mode::ActsOn::Weights => Some(state.paint.radius),
                         kreate_ops::mode::ActsOn::Sculpt => Some(state.sculpt.radius),
+                        kreate_ops::mode::ActsOn::Texture => Some(state.texture_paint.radius),
                         _ => None,
                     };
                     if let Some(radius) = brush {
@@ -2782,6 +2811,34 @@ fn draw_brush_settings(
     area: u32,
     mode: kreate_ops::operator::Mode,
 ) {
+    // The texture brush, in its header: its colour, size and strength, and
+    // something to paint on.
+    if mode.acts_on() == kreate_ops::mode::ActsOn::Texture {
+        let t = &mut state.texture_paint;
+        ui.color_edit_button_rgb(&mut t.color);
+        ui.label(state.catalog.get("paint-radius"));
+        ui.add(
+            egui::DragValue::new(&mut state.texture_paint.radius)
+                .range(2.0..=400.0)
+                .speed(1.0)
+                .suffix(" px"),
+        );
+        ui.label(state.catalog.get("paint-strength"));
+        ui.add(
+            egui::DragValue::new(&mut state.texture_paint.strength)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .max_decimals(2),
+        );
+        if ui
+            .button(state.catalog.get("op-paint-new-texture"))
+            .on_hover_text(state.catalog.get("op-paint-new-texture-desc"))
+            .clicked()
+        {
+            state.queue.run("paint.new_texture", PropertyMap::new());
+        }
+        ui.separator();
+    }
     // The sculpt brush, in its header.
     if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
         let names = [
@@ -3238,7 +3295,8 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
         // A pose and a brush add nothing, as in Blender.
         kreate_ops::mode::ActsOn::Bones
         | kreate_ops::mode::ActsOn::Weights
-        | kreate_ops::mode::ActsOn::Sculpt => {}
+        | kreate_ops::mode::ActsOn::Sculpt
+        | kreate_ops::mode::ActsOn::Texture => {}
         kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
             label: l.add_menu.clone(),
             nodes: vec![entry(
@@ -3291,6 +3349,14 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                     )
                 })
                 .collect(),
+            }),
+            kreate_ops::mode::Menu::Texture => out.push(TopMenu {
+                label: l.menu_texture.clone(),
+                nodes: vec![entry(
+                    "paint.new_texture",
+                    &l.new_texture,
+                    op("paint.new_texture", &[]),
+                )],
             }),
             kreate_ops::mode::Menu::Weights => out.push(TopMenu {
                 label: l.menu_weights.clone(),
@@ -8805,6 +8871,14 @@ mode-weight-paint = Weight Paint
 keymap-context-weight-paint = Weight Paint
 keymap-context-sculpt = Sculpt
 mode-sculpt = Sculpt Mode
+keymap-context-texture-paint = Texture Paint
+mode-texture-paint = Texture Paint
+menu-texture = Texture
+texture-paint-no-image = Nothing to paint on: Texture > New Texture gives the object one.
+op-paint-new-texture = New Texture
+op-paint-new-texture-desc = Makes a white image to paint on and puts it in the active object's first material as its base colour.
+op-paint-texture-stroke = Texture Paint Stroke
+op-paint-texture-stroke-desc = Paints on an image through the mesh's UVs, with a soft round brush.
 op-mode-sculpt-desc = Pushes and pulls the surface with brushes.
 menu-sculpt = Sculpt
 sculpt-brush = Brush
@@ -9693,6 +9767,14 @@ mode-weight-paint = 웨이트 페인트
 keymap-context-weight-paint = 웨이트 페인트
 keymap-context-sculpt = 스컬프트
 mode-sculpt = 스컬프트 모드
+keymap-context-texture-paint = 텍스처 페인트
+mode-texture-paint = 텍스처 페인트
+menu-texture = 텍스처
+texture-paint-no-image = 칠할 이미지가 없습니다. 텍스처 > 새 텍스처로 만드세요.
+op-paint-new-texture = 새 텍스처
+op-paint-new-texture-desc = 칠할 흰 이미지를 만들어 활성 오브젝트의 첫 재질 베이스 컬러에 넣습니다.
+op-paint-texture-stroke = 텍스처 페인트 획
+op-paint-texture-stroke-desc = 메시의 UV를 따라 부드러운 둥근 붓으로 이미지에 칠합니다.
 op-mode-sculpt-desc = 붓으로 표면을 밀고 당깁니다.
 menu-sculpt = 스컬프트
 sculpt-brush = 붓
@@ -11481,7 +11563,8 @@ mod tests {
                 "mode-object",
                 "mode-edit",
                 "mode-weight-paint",
-                "mode-sculpt"
+                "mode-sculpt",
+                "mode-texture-paint"
             ]
         );
         assert!(entries[0].1, "the mode you are in is not lit");

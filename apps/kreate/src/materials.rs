@@ -31,6 +31,10 @@ pub struct Materials {
     pub compiled: Vec<kreate_shader::Compiled>,
     /// Where each of the document's materials landed in `compiled`.
     index: std::collections::HashMap<MaterialId, u32>,
+    /// Every image the materials read, with how many times its pixels have
+    /// been written: a stroke changes the second, and the atlas goes up
+    /// again. See `Image::revision`.
+    revisions: Vec<(kreate_scene::document::ImageId, u64)>,
 }
 
 impl Materials {
@@ -57,7 +61,16 @@ impl Materials {
             // material from having to be added twice.
             compiled.push(compile_one(doc, &material.shading_graph()));
         }
-        Self { compiled, index }
+        let revisions = compiled
+            .iter()
+            .flat_map(|c| c.images.iter())
+            .map(|id| (*id, doc.image(*id).map_or(0, |i| i.revision())))
+            .collect();
+        Self {
+            compiled,
+            index,
+            revisions,
+        }
     }
 
     /// Which material an object is drawn with.
@@ -161,7 +174,8 @@ impl Materials {
     /// index after it — and an index that moved without the viewport being told
     /// is an object wearing somebody else's material.
     pub fn same_code_as(&self, other: &Materials) -> bool {
-        self.compiled.len() == other.compiled.len()
+        self.revisions == other.revisions
+            && self.compiled.len() == other.compiled.len()
             && self
                 .compiled
                 .iter()

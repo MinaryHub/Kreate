@@ -58,6 +58,7 @@ fn the_header_offers_what_the_mode_acts_on() {
             ActsOn::BoneJoints => Menu::Armature,
             ActsOn::Weights => Menu::Weights,
             ActsOn::Sculpt => Menu::Sculpt,
+            ActsOn::Texture => Menu::Texture,
         };
         assert!(
             info.menus.contains(&want),

@@ -381,6 +381,19 @@ struct SculptStroke {
     session: Option<kreate_ops::ModalSession>,
 }
 
+/// A texture paint stroke in progress: the dabs laid so far in the image's
+/// UV square, and — once anything has changed — its modal session.
+struct TextureStroke {
+    object: kreate_scene::document::ObjectId,
+    /// The image painted, by identity, as the operator names it.
+    image: String,
+    dabs: Vec<f64>,
+    /// Where the last dab went, in the world, to space the next one.
+    last: DVec3,
+    radius_world: f64,
+    session: Option<kreate_ops::ModalSession>,
+}
+
 /// Blender's circle select: a brush that selects what it passes over.
 struct CircleSelect {
     /// Its radius in the viewport's own pixels.
@@ -549,6 +562,59 @@ impl Gfx {
         self.gpu.queue.submit([encoder.finish()]);
         true
     }
+}
+
+/// The UV at `p` on `face` of `mesh` (both in the mesh's own space), and how
+/// many UV units one unit of the mesh's length is there — what turns a
+/// brush's size on the surface into its size on the texture.
+///
+/// The face's fan of triangles, and the one `p` falls in — or, for a point
+/// just off every one of them, the nearest. `None` for a mesh with no UVs.
+fn uv_on_face(
+    mesh: &kreate_mesh::MeshData,
+    face: u32,
+    p: glam::Vec3,
+) -> Option<(glam::Vec2, f64)> {
+    let uvs = mesh.attributes().get_f32x2(kreate_mesh::attribute::names::UV)?;
+    if face >= mesh.num_faces() {
+        return None;
+    }
+    let corners: Vec<usize> = mesh.face_corner_range(face).collect();
+    let positions = mesh.positions();
+    let verts = mesh.corner_verts();
+    let mut best: Option<(f32, glam::Vec2, f64)> = None;
+    for i in 1..corners.len().saturating_sub(1) {
+        let (c0, c1, c2) = (corners[0], corners[i], corners[i + 1]);
+        let (a, b, c) = (
+            positions[verts[c0] as usize],
+            positions[verts[c1] as usize],
+            positions[verts[c2] as usize],
+        );
+        let (v0, v1, v2) = (b - a, c - a, p - a);
+        let (d00, d01, d11) = (v0.dot(v0), v0.dot(v1), v1.dot(v1));
+        let (d20, d21) = (v2.dot(v0), v2.dot(v1));
+        let denom = d00 * d11 - d01 * d01;
+        if denom.abs() < 1e-20 {
+            continue;
+        }
+        let wb = (d11 * d20 - d01 * d21) / denom;
+        let wc = (d00 * d21 - d01 * d20) / denom;
+        let wa = 1.0 - wb - wc;
+        let off = (-wa).max(-wb).max(-wc).max(0.0);
+        let (ua, ub, uc) = (uvs[c0], uvs[c1], uvs[c2]);
+        let uv = ua * wa + ub * wb + uc * wc;
+        let world_area = v0.cross(v1).length() as f64 * 0.5;
+        let uv_area = ((ub - ua).perp_dot(uc - ua) * 0.5).abs() as f64;
+        let scale = if world_area > 1e-20 {
+            (uv_area / world_area).sqrt()
+        } else {
+            0.0
+        };
+        if best.as_ref().is_none_or(|(o, _, _)| off < *o) {
+            best = Some((off, uv, scale));
+        }
+    }
+    best.map(|(_, uv, scale)| (uv, scale))
 }
 
 /// Where each edited object's elements start in a region select's bitset,
@@ -755,6 +821,8 @@ struct App {
     paint_stroke: Option<PaintStroke>,
     /// A sculpt stroke in progress.
     sculpt_stroke: Option<SculptStroke>,
+    /// A texture paint stroke in progress.
+    texture_stroke: Option<TextureStroke>,
     /// The painted mesh as the screen shows it in weight paint mode, with the
     /// active group's weights where the renderer's ramp reads them — kept, so
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
@@ -905,6 +973,7 @@ impl App {
             driven_at: u64::MAX,
             paint_stroke: None,
             sculpt_stroke: None,
+            texture_stroke: None,
             weight_display: None,
             unhidden: Vec::new(),
             loop_cut_hover: None,
@@ -1172,6 +1241,17 @@ impl App {
         // A brush moves vertices, so a mesh with few of them barely changes
         // under one — the default cube has eight. Said once, on the way in,
         // rather than left to look like a brush that does nothing.
+        // A texture shows only in the rendered view, so painting one starts
+        // there — as Blender's texture paint shows the texture.
+        if change.to.acts_on() == kreate_ops::mode::ActsOn::Texture {
+            if let Some(gfx) = self.gfx.as_mut() {
+                gfx.viewport.shading = kreate_render::ShadingMode::Rendered;
+            }
+            if self.paint_target().is_none() {
+                let message = self.ui.catalog.get("texture-paint-no-image");
+                self.status(&message);
+            }
+        }
         if change.to.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
             let verts = self
                 .doc
@@ -6418,6 +6498,10 @@ impl App {
                 self.begin_sculpt_stroke();
                 return;
             }
+            if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Texture {
+                self.begin_texture_stroke();
+                return;
+            }
             // The header's Circle tool: a press paints, as C's brush does.
             if self.ui.tools.select_tool == 2 {
                 if self.circle.is_none() {
@@ -6630,6 +6714,148 @@ impl App {
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
+    /// The image texture paint paints on: the active object's first
+    /// material's base colour, by identity.
+    fn paint_target(&self) -> Option<String> {
+        let object = self.doc.selection.active?;
+        let mesh = self.doc.object(object)?.mesh()?;
+        let material = self.doc.mesh_slots(mesh).first().copied().flatten()?;
+        let image = self.doc.material(material)?.base_color_image?;
+        Some(self.doc.image_uid(image)?.raw().to_string())
+    }
+
+    /// Where the pointer meets the active mesh, as a UV and how many UV units
+    /// a unit of the mesh's own length is there.
+    fn texture_hit(&mut self) -> Option<(DVec3, glam::Vec2, f64)> {
+        let object = self.doc.selection.active?;
+        let ndc = self.cursor_ndc()?;
+        let aspect = self.viewport_aspect();
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        if hit.object != object {
+            return None;
+        }
+        let mesh = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == object)
+            .map(|(_, m)| m.clone())?;
+        let local = self
+            .doc
+            .world_transform(object)
+            .inverse()
+            .transform_point3(hit.point)
+            .as_vec3();
+        let (uv, scale) = uv_on_face(&mesh, hit.face, local)?;
+        Some((hit.point, uv, scale))
+    }
+
+    /// A press in texture paint mode: a stroke starts where the pointer
+    /// meets the mesh, on its texture.
+    fn begin_texture_stroke(&mut self) {
+        let Some(object) = self.doc.selection.active else {
+            return;
+        };
+        let Some(image) = self.paint_target() else {
+            let message = self.ui.catalog.get("texture-paint-no-image");
+            self.status(&message);
+            return;
+        };
+        let Some((at, _, _)) = self.texture_hit() else {
+            return;
+        };
+        let height = self
+            .viewport_px
+            .map(|(_, _, _, h)| h as f64)
+            .unwrap_or(1.0)
+            .max(1.0);
+        let ppp = self.egui_ctx.pixels_per_point() as f64;
+        let distance = (at - self.camera.eye()).length();
+        let per_pixel = 2.0 * (self.camera.fov_y * 0.5).tan() * distance / height;
+        let radius_world = self.ui.texture_paint.radius as f64 * ppp * per_pixel;
+        self.texture_stroke = Some(TextureStroke {
+            object,
+            image,
+            dabs: Vec::new(),
+            last: at,
+            radius_world,
+            session: None,
+        });
+        self.add_texture_dab();
+        self.drive_texture_stroke();
+    }
+
+    fn add_texture_dab(&mut self) {
+        let Some((at, uv, scale)) = self.texture_hit() else {
+            return;
+        };
+        let strength = self.ui.texture_paint.strength as f64;
+        let Some(stroke) = self.texture_stroke.as_mut() else {
+            return;
+        };
+        let to_local = self.doc.world_transform(stroke.object).inverse();
+        let radius_local = to_local
+            .transform_vector3(DVec3::X * stroke.radius_world)
+            .length();
+        stroke.dabs.extend([
+            uv.x as f64,
+            uv.y as f64,
+            radius_local * scale,
+            strength,
+        ]);
+        stroke.last = at;
+    }
+
+    /// The pointer moved during a stroke: a new dab once it has gone a
+    /// quarter of the brush, then the stroke re-run from where it began.
+    fn drive_texture_stroke(&mut self) {
+        let Some(stroke) = self.texture_stroke.as_ref() else {
+            return;
+        };
+        let (last, radius) = (stroke.last, stroke.radius_world);
+        if let Some((at, _, _)) = self.texture_hit() {
+            if at.distance(last) >= radius * 0.25 {
+                self.add_texture_dab();
+            }
+        }
+        let color = self.ui.texture_paint.color;
+        let Some(stroke) = self.texture_stroke.as_mut() else {
+            return;
+        };
+        let mut params = PropertyMap::new();
+        params.set("image", PropertyValue::Text(stroke.image.clone()));
+        params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
+        params.set("color", PropertyValue::Vec3(color.map(|c| c as f64)));
+        match stroke.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = self.history.update_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    session,
+                    &params,
+                ) {
+                    tracing::warn!(error = %e, "texture paint failed");
+                }
+            }
+            None => {
+                if let Ok(Some(session)) = self.history.begin_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    "paint.texture_stroke",
+                    &params,
+                ) {
+                    stroke.session = Some(session);
+                }
+            }
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
     /// The painted mesh's vertex normals, in the world, as it is drawn.
     fn paint_normals(&self, object: kreate_scene::document::ObjectId) -> Vec<DVec3> {
         let Some(mesh) = self
@@ -6785,6 +7011,14 @@ impl App {
                 session: Some(session),
                 ..
             }) = self.sculpt_stroke.take()
+            {
+                self.history.commit_modal(session);
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            if let Some(TextureStroke {
+                session: Some(session),
+                ..
+            }) = self.texture_stroke.take()
             {
                 self.history.commit_modal(session);
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -7014,7 +7248,9 @@ impl App {
             }
             // A click in weight paint or sculpt mode is a stroke, handled on
             // the press.
-            kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt => {}
+            kreate_ops::mode::ActsOn::Weights
+            | kreate_ops::mode::ActsOn::Sculpt
+            | kreate_ops::mode::ActsOn::Texture => {}
             kreate_ops::mode::ActsOn::BoneJoints => {
                 let Some(object) = kreate_ops::ops::armature::edited_object(&self.doc) else {
                     return true;
@@ -9596,6 +9832,9 @@ impl ApplicationHandler for App {
                 if self.sculpt_stroke.is_some() {
                     self.drive_sculpt_stroke();
                 }
+                if self.texture_stroke.is_some() {
+                    self.drive_texture_stroke();
+                }
                 if self.loop_cut_hover.is_some() {
                     self.update_loop_cut_hover();
                 }
@@ -9608,7 +9847,9 @@ impl ApplicationHandler for App {
                 // The brush circle follows the pointer.
                 if matches!(
                     self.op_ctx.mode.acts_on(),
-                    kreate_ops::mode::ActsOn::Weights | kreate_ops::mode::ActsOn::Sculpt
+                    kreate_ops::mode::ActsOn::Weights
+                        | kreate_ops::mode::ActsOn::Sculpt
+                        | kreate_ops::mode::ActsOn::Texture
                 ) {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
                 }

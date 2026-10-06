@@ -316,6 +316,37 @@ impl<'a> DocMut<'a> {
         Ok(())
     }
 
+    /// Writes an image's pixels in a declared set of tiles, recording only
+    /// those tiles for undo — a brush stroke's cost, not the image's.
+    ///
+    /// The tiles' handles are taken first, which is what makes the writes
+    /// that follow copy them rather than write through: the record and the
+    /// image share nothing a stroke changes. `f` must stay inside `tiles`; a
+    /// tile it writes outside them is not restored by an undo.
+    pub fn edit_image(
+        &mut self,
+        image: ImageId,
+        tiles: &[(u32, u32)],
+        f: impl FnOnce(&mut crate::image::Image),
+    ) -> bool {
+        let Some(img) = self.doc.image(image) else {
+            return false;
+        };
+        let was = tiles.iter().map(|(x, y)| img.tile_handle(*x, *y)).collect();
+        self.deltas.push(UndoPayload::ImageTileDelta {
+            image,
+            tiles: tiles.to_vec(),
+            was,
+        });
+        match self.doc.image_mut(image) {
+            Some(img) => {
+                f(img);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Every vertex index of a mesh, for operators that genuinely touch all of
     /// them. Present so "affect everything" still goes through the declared path
     /// rather than tempting a caller into the coarse one.
