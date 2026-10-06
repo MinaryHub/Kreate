@@ -2773,6 +2773,12 @@ pub struct SelectSetParams {
     /// What Ctrl+drag does: a box that deselects. Only meaningful with `extend`,
     /// because without it the selection is being replaced anyway.
     pub deselect: bool,
+    /// Which objects' meshes the elements belong to, as arena slots plus one
+    /// (as `mesh.select_pick` names one), with `counts` saying how many of
+    /// `elements` are each one's, in order. Empty: every element is the
+    /// target mesh's — what a box in single-object edit mode means.
+    pub objects: Vec<u32>,
+    pub counts: Vec<u32>,
 }
 
 /// Selects a resolved set of elements — what a box, lasso or circle drag commits.
@@ -2823,6 +2829,9 @@ impl Operator for SelectSet {
         if params.elements.is_empty() && params.extend {
             return Ok(OpResult::Cancelled);
         }
+        if !params.objects.is_empty() {
+            return select_set_many(params, mode, doc);
+        }
 
         let domain = mode.domain();
         let adjacency = edit_adjacency(doc);
@@ -2856,6 +2865,64 @@ impl Operator for SelectSet {
             OpResult::Cancelled
         })
     }
+}
+
+/// [`SelectSet`] across several meshes in edit mode: each named object's
+/// share of the elements into its own mesh, and — replacing — every edited
+/// mesh cleared first, so a box over one object deselects the others.
+fn select_set_many(
+    params: &SelectSetParams,
+    mode: SelectMode,
+    doc: &mut DocMut<'_>,
+) -> Result<OpResult, OpError> {
+    let domain = mode.domain();
+    let targets = edit_targets(doc.document());
+    let target = target_mesh(doc.document());
+    let mut groups = Vec::new();
+    let mut at = 0usize;
+    for (slot, count) in params.objects.iter().zip(&params.counts) {
+        let count = *count as usize;
+        let elements = params.elements.get(at..at + count).unwrap_or(&[]).to_vec();
+        at += count;
+        let mesh = slot.checked_sub(1).and_then(|s| {
+            doc.document()
+                .object_at_slot(s)
+                .and_then(|id| targets.iter().find(|t| t.object == id))
+                .map(|t| t.mesh)
+        });
+        if let Some(mesh) = mesh {
+            groups.push((mesh, elements));
+        }
+    }
+    let mut changed = false;
+    if !params.extend {
+        changed |= for_each_edit_mesh(doc, |_, mesh| {
+            let had = selection::any_selected(mesh);
+            selection::select_none(mesh);
+            had
+        })?;
+    }
+    let on = !params.deselect;
+    for (mesh_id, elements) in groups {
+        let adjacency = edit_adjacency(doc).filter(|_| Some(mesh_id) == target);
+        changed |= with_named_mesh(doc, mesh_id, |mesh| {
+            let count = mesh.domain_len(domain);
+            let mut touched = false;
+            for index in &elements {
+                if (*index as usize) < count {
+                    selection::set_selected(mesh, domain, *index, on);
+                    touched = true;
+                }
+            }
+            flush(mesh, mode, &adjacency);
+            touched
+        })?;
+    }
+    Ok(if changed {
+        OpResult::Finished
+    } else {
+        OpResult::Cancelled
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]

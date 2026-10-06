@@ -551,6 +551,10 @@ impl Gfx {
     }
 }
 
+/// Where each edited object's elements start in a region select's bitset,
+/// by object key, and each one's (key, base, count). See `App::edit_bases`.
+type EditBases = (Vec<u32>, Vec<(u32, u32, u32)>);
+
 /// One object skinned on the GPU. See `Gfx::skinned`.
 struct SkinnedGpu {
     object: ObjectId,
@@ -5252,6 +5256,7 @@ impl App {
             .add_filter("glTF", &["gltf"])
             .add_filter("Wavefront OBJ", &["obj"])
             .add_filter("STL", &["stl"])
+            .add_filter("USD (text)", &["usda"])
             .set_title("Export")
             .set_file_name("untitled.glb")
             .save_file()
@@ -5270,6 +5275,11 @@ impl App {
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_else(|| "glb".to_string());
         let written = match lower.as_str() {
+            "usda" => {
+                let (text, more) = kreate_io::usd::write_usda(&scene);
+                notes.extend(more);
+                Ok(text.into_bytes())
+            }
             "obj" | "stl" => {
                 // Neither format has a node, a light or a camera, so what
                 // travels is the geometry at the origin. Said out loud: a user
@@ -6164,6 +6174,12 @@ impl App {
             return Some((shape, kreate_render::Collect::Objects { count }));
         }
 
+        // Several meshes in edit mode: their elements one after another, so a
+        // box over two objects selects in both.
+        if let Some((_, groups)) = self.edit_bases() {
+            let count = groups.iter().map(|g| g.2).sum();
+            return Some((shape, kreate_render::Collect::Many { count }));
+        }
         // The object being edited, and how many elements its *cage* has in the
         // domain being selected. The cage rather than the evaluated mesh,
         // because that is what edit mode draws and therefore what the ids index.
@@ -6181,6 +6197,39 @@ impl App {
                 count,
             },
         ))
+    }
+
+    /// With more than one mesh in edit mode, where each object's elements
+    /// start in a region select's bitset — indexed by object key, `u32::MAX`
+    /// for one not being edited — and each one's (key, base, count), in
+    /// order. `None` with one mesh or none.
+    fn edit_bases(&self) -> Option<EditBases> {
+        if !self.op_ctx.mode.edits_elements() {
+            return None;
+        }
+        let targets = kreate_ops::ops::mesh::edit_targets(&self.doc);
+        if targets.len() < 2 {
+            return None;
+        }
+        let domain = self.pick_domain();
+        let mut groups = Vec::new();
+        let mut base = 0u32;
+        for t in &targets {
+            let Some(mesh) = self.doc.mesh(t.mesh) else { continue };
+            let count = match domain {
+                kreate_render::PickDomain::Vert => mesh.num_verts(),
+                kreate_render::PickDomain::Edge => mesh.num_edges(),
+                _ => mesh.num_faces(),
+            };
+            groups.push((shell::object_key(t.object), base, count));
+            base += count;
+        }
+        let len = groups.iter().map(|g| g.0 as usize + 1).max().unwrap_or(0);
+        let mut bases = vec![u32::MAX; len];
+        for (key, base, _) in &groups {
+            bases[*key as usize] = *base;
+        }
+        Some((bases, groups))
     }
 
     /// Whether the cursor is inside the viewport rectangle.
@@ -6886,7 +6935,24 @@ impl App {
             return;
         }
 
-        let elements = resolved;
+        let mut elements = resolved;
+        // Several meshes: each bit back to its object and its own index.
+        let mut objects = Vec::new();
+        let mut counts = Vec::new();
+        if let Some((_, groups)) = self.edit_bases() {
+            let mut split = Vec::with_capacity(elements.len());
+            for (key, base, count) in groups {
+                let mine: Vec<u32> = elements
+                    .iter()
+                    .filter(|e| **e >= base && **e < base + count)
+                    .map(|e| e - base)
+                    .collect();
+                objects.push(key + 1);
+                counts.push(mine.len() as u32);
+                split.extend(mine);
+            }
+            elements = split;
+        }
         let mode = match self.pick_domain() {
             kreate_render::PickDomain::Vert => 0u32,
             kreate_render::PickDomain::Edge => 1,
@@ -6897,6 +6963,10 @@ impl App {
         params.set("mode", PropertyValue::Enum(mode));
         params.set("extend", PropertyValue::Bool(drag.extend || drag.deselect));
         params.set("deselect", PropertyValue::Bool(drag.deselect));
+        if !objects.is_empty() {
+            params.set("objects", PropertyValue::Ints(objects));
+            params.set("counts", PropertyValue::Ints(counts));
+        }
         self.run_op("mesh.select_set", params);
     }
 
@@ -7651,6 +7721,7 @@ impl App {
         // object drag fills is indexed by object, and the overlays highlight
         // elements. An object drag shows its rubber band and the objects it
         // covers highlight on release.
+        let bases = self.edit_bases().map(|(b, _)| b);
         let preview_state = region_request.as_ref().and_then(|(_, collect)| {
             let kreate_render::Collect::Elements { count, .. } = collect else {
                 return None;
@@ -8188,6 +8259,9 @@ impl App {
             // GPU, and brings back one bit per element rather than sixteen
             // megabytes of ids.
             if let Some((shape, collect)) = region_request {
+                if let Some(bases) = &bases {
+                    gfx.region.set_bases(&gfx.gpu.device, &gfx.gpu.queue, bases);
+                }
                 gfx.region.dispatch(
                     &gfx.gpu.device,
                     &gfx.gpu.queue,

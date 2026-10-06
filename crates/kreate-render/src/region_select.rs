@@ -50,12 +50,21 @@ pub enum Collect {
         /// One past the largest object id in the scene.
         count: u32,
     },
+    /// Elements of several objects at once — multi-object edit mode — each
+    /// object's laid after the one before. Where each starts is
+    /// [`RegionSelect::set_bases`]'s table, indexed by object id.
+    Many {
+        /// Every object's elements together, bounding the bitset.
+        count: u32,
+    },
 }
 
 impl Collect {
     fn count(self) -> u32 {
         match self {
-            Collect::Elements { count, .. } | Collect::Objects { count } => count,
+            Collect::Elements { count, .. }
+            | Collect::Objects { count }
+            | Collect::Many { count } => count,
         }
     }
 
@@ -64,6 +73,7 @@ impl Collect {
         match self {
             Collect::Elements { object, .. } => object + 1,
             Collect::Objects { .. } => 0,
+            Collect::Many { .. } => u32::MAX,
         }
     }
 }
@@ -186,6 +196,10 @@ pub struct RegionSelect {
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
     lasso: wgpu::Buffer,
+    /// Per object id, where its elements start in a [`Collect::Many`]
+    /// bitset; `u32::MAX` for an object not being collected.
+    bases: wgpu::Buffer,
+    bases_len: usize,
     /// One bit per element, rounded up to whole words.
     bits: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -254,6 +268,16 @@ impl RegionSelect {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -288,11 +312,19 @@ impl RegionSelect {
         });
 
         let (bits, readback) = allocate_bits(device, 1);
+        let bases = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("region select bases"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline,
             layout,
             params,
             lasso,
+            bases,
+            bases_len: 1,
             bits,
             readback,
             capacity: 32,
@@ -303,6 +335,25 @@ impl RegionSelect {
     }
 
     /// How many times the bitset has been reallocated.
+    /// Where each object's elements start in a [`Collect::Many`] bitset,
+    /// indexed by object id; `u32::MAX` for one not collected. Set before the
+    /// dispatch that collects them.
+    pub fn set_bases(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bases: &[u32]) {
+        let bases: &[u32] = if bases.is_empty() { &[u32::MAX] } else { bases };
+        if bases.len() > self.bases_len {
+            self.bases_len = bases.len().next_power_of_two();
+            self.bases = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("region select bases"),
+                size: (self.bases_len * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let mut padded = bases.to_vec();
+        padded.resize(self.bases_len, u32::MAX);
+        queue.write_buffer(&self.bases, 0, bytemuck::cast_slice(&padded));
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -404,6 +455,10 @@ impl RegionSelect {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: self.bits.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.bases.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,

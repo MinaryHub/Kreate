@@ -48,6 +48,11 @@ const MAX_LASSO: u32 = 256u;
 @group(0) @binding(1) var ids: texture_2d<u32>;
 @group(0) @binding(2) var<storage, read_write> bits: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> lasso: array<vec2<f32>>;
+// Multi-object edit mode: where each object's elements start, by object id;
+// all ones for an object not being collected.
+@group(0) @binding(4) var<storage, read> bases: array<u32>;
+
+const MANY: u32 = 0xffffffffu;
 
 /// Crossing-number point-in-polygon.
 ///
@@ -128,6 +133,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var entry: u32;
     if (p.mode.w == 0u) {
         entry = id.x - 1u;
+    } else if (p.mode.w == MANY) {
+        // Several objects, each element at its object's base.
+        let object = id.x - 1u;
+        if (object >= arrayLength(&bases)) {
+            return;
+        }
+        let base = bases[object];
+        if (base == MANY) {
+            return;
+        }
+        entry = base + id.y;
     } else {
         if (id.x != p.mode.w) {
             return;

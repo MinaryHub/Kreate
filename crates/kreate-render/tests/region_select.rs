@@ -37,6 +37,19 @@ fn select(
     collect: Collect,
     configure_camera: impl FnOnce(&mut Camera),
 ) -> Option<Vec<u32>> {
+    select_with(objects, domain, xray, shape, collect, &[], configure_camera)
+}
+
+/// [`select`], with the per-object bases a [`Collect::Many`] reads.
+fn select_with(
+    objects: &[Object],
+    domain: PickDomain,
+    xray: bool,
+    shape: &SelectShape,
+    collect: Collect,
+    bases: &[u32],
+    configure_camera: impl FnOnce(&mut Camera),
+) -> Option<Vec<u32>> {
     let opts = GpuOptions::default();
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
@@ -96,6 +109,7 @@ fn select(
         });
     viewport.render(&mut encoder, &colour_view, &draws);
     viewport.render_ids(&mut encoder, ids.view(), &draws, domain, xray);
+    region.set_bases(&gpu.device, &gpu.queue, bases);
     region.dispatch(
         &gpu.device,
         &gpu.queue,
@@ -623,4 +637,58 @@ fn a_second_drag_does_not_inherit_the_first() {
         empty.is_empty(),
         "the second drag inherited the first: {empty:?}"
     );
+}
+
+#[test]
+fn many_objects_collect_each_one_s_elements_at_its_base() {
+    // Two cubes side by side and a box over both: each lid, the second's
+    // counted from the second's base — and the same as asking each alone.
+    let cubes = [cube_at(-2.0, 0), cube_at(2.0, 1)];
+    let wide = |camera: &mut Camera| {
+        from_above(camera);
+        camera.distance = 14.0;
+    };
+    let Some(both) = select_with(
+        &cubes,
+        PickDomain::Face,
+        false,
+        &everything(),
+        Collect::Many { count: 12 },
+        &[0, 6],
+        wide,
+    ) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let alone = |object: u32| {
+        select(
+            &cubes,
+            PickDomain::Face,
+            false,
+            &everything(),
+            Collect::Elements { object, count: 6 },
+            wide,
+        )
+        .unwrap()
+    };
+    let mut want: Vec<u32> = alone(0);
+    want.extend(alone(1).into_iter().map(|f| f + 6));
+    want.sort_unstable();
+    let mut got = both;
+    got.sort_unstable();
+    assert_eq!(got, want);
+    assert!(got.iter().any(|f| *f < 6) && got.iter().any(|f| *f >= 6), "{got:?}");
+    // An object left out of the table is not collected.
+    let Some(first) = select_with(
+        &cubes,
+        PickDomain::Face,
+        false,
+        &everything(),
+        Collect::Many { count: 6 },
+        &[0, u32::MAX],
+        wide,
+    ) else {
+        return;
+    };
+    assert!(first.iter().all(|f| *f < 6), "{first:?}");
 }

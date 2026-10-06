@@ -1143,3 +1143,48 @@ fn a_topology_edit_uses_the_session_of_the_mesh_it_is_editing() {
     assert_eq!(scene.faces(0), before[0], "another mesh was written");
     assert_eq!(scene.faces(2), before[2], "and so was the third");
 }
+
+#[test]
+fn a_box_selects_in_every_mesh_it_covers_and_clears_the_rest() {
+    // What a box over two objects in edit mode commits: each object's share
+    // of the elements, named by object.
+    let mut scene = Scene::new(3);
+    scene.select_objects(&[0, 1, 2]);
+    scene.doc.selection.active = Some(scene.objects[0]);
+    scene.select_faces(2, &[0]);
+    let (a, b) = (scene.key(0), scene.key(1));
+    let ints = |v: &[i64]| PropertyValue::Ints(v.iter().map(|x| *x as u32).collect());
+    assert_eq!(
+        scene.run(
+            "mesh.select_set",
+            &[
+                ("elements", ints(&[0, 0])),
+                ("mode", PropertyValue::Enum(2)),
+                ("extend", PropertyValue::Bool(false)),
+                ("objects", ints(&[a, b])),
+                ("counts", ints(&[1, 1])),
+            ],
+        ),
+        kreate_ops::OpResult::Finished
+    );
+    assert_eq!(scene.selected(0, names::SELECT_FACE), vec![0]);
+    assert_eq!(scene.selected(1, names::SELECT_FACE), vec![0]);
+    assert!(
+        scene.selected(2, names::SELECT_FACE).is_empty(),
+        "a replacing box leaves nothing selected outside it"
+    );
+    // Extending into the third keeps the first two.
+    let c = scene.key(2);
+    scene.run(
+        "mesh.select_set",
+        &[
+            ("elements", ints(&[0])),
+            ("mode", PropertyValue::Enum(2)),
+            ("extend", PropertyValue::Bool(true)),
+            ("objects", ints(&[c])),
+            ("counts", ints(&[1])),
+        ],
+    );
+    assert_eq!(scene.selected(0, names::SELECT_FACE), vec![0]);
+    assert_eq!(scene.selected(2, names::SELECT_FACE), vec![0]);
+}
