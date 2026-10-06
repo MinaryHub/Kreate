@@ -1047,6 +1047,9 @@ pub struct ExtrudeParams {
     /// axis key pressed during the extrude picks — the world's or the
     /// object's own.
     pub direction: [f64; 3],
+    /// Each face out along its own normal, the region holding together —
+    /// Blender's Extrude Faces Along Normals. `direction` is then unused.
+    pub along_normals: bool,
 }
 
 impl Default for ExtrudeParams {
@@ -1054,6 +1057,7 @@ impl Default for ExtrudeParams {
         Self {
             offset: 1.0,
             direction: [0.0; 3],
+            along_normals: false,
         }
     }
 }
@@ -1083,7 +1087,7 @@ impl Operator for ExtrudeRegion {
         // early and is left alone, which is what makes this safe to run over
         // the whole set.
         let direction = glam::DVec3::from_array(params.direction);
-        let along_axis = direction.length_squared() > 1e-12;
+        let along_axis = !params.along_normals && direction.length_squared() > 1e-12;
         let grew = each_bmesh(doc, |bm| {
             let faces = bm.selected_faces();
             if faces.is_empty() {
@@ -1092,8 +1096,12 @@ impl Operator for ExtrudeRegion {
             // Along an axis: made where they are, then moved in the world,
             // where the axis is.
             let distance = if along_axis { 0.0 } else { params.offset as f32 };
-            edit::extrude_selected_faces(bm, distance)
-                .map_err(|e| OpError::Failed(e.to_string()))?;
+            if params.along_normals {
+                edit::extrude_selected_faces_along_normals(bm, distance)
+            } else {
+                edit::extrude_selected_faces(bm, distance)
+            }
+            .map_err(|e| OpError::Failed(e.to_string()))?;
             Ok(true)
         })?
         .into_iter()
@@ -3282,6 +3290,18 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 /// mode — the direction `E` drags an extrusion along. Each face's Newell normal,
 /// area-weighted as Newell's is, through its object's normal matrix; `None`
 /// when no face is selected or they cancel out.
+/// Whether any mesh in edit mode has a face selected.
+pub fn any_face_selected(doc: &Document) -> bool {
+    edit_targets(doc).iter().any(|target| {
+        doc.mesh(target.mesh)
+            .and_then(|m| {
+                m.attributes()
+                    .get_bool(kreate_mesh::attribute::names::SELECT_FACE)
+            })
+            .is_some_and(|s| s.iter().any(|on| *on))
+    })
+}
+
 pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
     let mut sum = glam::DVec3::ZERO;
     for target in edit_targets(doc) {

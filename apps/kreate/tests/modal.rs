@@ -1743,3 +1743,48 @@ fn an_extrude_goes_along_the_normal_then_a_world_axis_then_the_objects_own() {
     assert_eq!(direction(&p), None, "back on the normal");
     assert!(g.status().contains("normal"));
 }
+
+#[test]
+fn an_extrude_along_normals_ignores_axis_keys_and_says_so() {
+    let mut g = Gesture::begin(
+        Kind::Extrude,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.extrude_along_normals(true);
+    g.type_character('2');
+    g.cycle_axis(Axis::X);
+    let p = at(&mut g, (400.0, 300.0));
+    assert_eq!(p.get("along_normals"), Some(&PropertyValue::Bool(true)));
+    assert_eq!(p.get("direction"), None);
+    assert_eq!(p.get("offset"), Some(&PropertyValue::Float(2.0)));
+    assert!(g.status().contains("along normals"));
+}
+
+#[test]
+fn an_extrude_along_normals_on_a_closed_solid_grows_as_the_pointer_leaves_the_middle() {
+    // No region normal to measure along: the pointer's distance from the
+    // middle is the amount, as a bevel's width.
+    let mut g = Gesture::begin(
+        Kind::Extrude,
+        (450.0, 300.0),
+        DVec3::ZERO,
+        &camera(),
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.extrude_along_normals(false);
+    let amount = |p: kreate_ops::PropertyMap| match p.get("offset") {
+        Some(PropertyValue::Float(f)) => *f,
+        other => panic!("{other:?}"),
+    };
+    assert!(amount(at(&mut g, (550.0, 300.0))) > 0.1);
+    assert!(amount(at(&mut g, (420.0, 300.0))) < -0.01);
+}

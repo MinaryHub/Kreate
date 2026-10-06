@@ -783,6 +783,8 @@ struct App {
     capturing: bool,
     /// Which primitive Shift+A adds next.
     next_shape: u32,
+    /// Set for the one `begin_gesture` that Alt+E ▸ Along Normals starts.
+    extrude_along_normals: bool,
     /// Where the document lives, and everything about saving it.
     file: DocumentFile,
     /// Autosaves from sessions that did not exit cleanly, offered once.
@@ -957,6 +959,7 @@ impl App {
             last_render: None,
             capturing: false,
             next_shape: 1,
+            extrude_along_normals: false,
             snap: kreate::modal::Snap::default(),
             proportional: None,
             proportional_falloff: 0,
@@ -1779,6 +1782,18 @@ impl App {
                     row(self, t("unbind-armature"), "object.unbind_armature", &[]),
                 ],
             }],
+            "extrude" => vec![Group {
+                title: t("menu-extrude"),
+                entries: vec![
+                    row(self, t("extrude-region"), "app.extrude", &[]),
+                    row(
+                        self,
+                        t("extrude-along-normals"),
+                        "app.extrude",
+                        &[("along_normals", PropertyValue::Bool(true))],
+                    ),
+                ],
+            }],
             "apply" => {
                 let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
                     row(
@@ -2212,9 +2227,15 @@ impl App {
         let mode = self.op_ctx.mode;
         // An extrude's frame: the selected faces' normal as its local Z, which
         // the gesture is then held to.
+        let along_normals = std::mem::take(&mut self.extrude_along_normals);
         let extrude_normal = if kind == kreate::modal::Kind::Extrude {
             match kreate_ops::ops::mesh::selected_faces_normal(&self.doc) {
                 Some(n) => Some(n),
+                // A closed solid's normals cancel; along its own normals each
+                // face still has somewhere to go.
+                None if along_normals && kreate_ops::ops::mesh::any_face_selected(&self.doc) => {
+                    Some(glam::DVec3::Z)
+                }
                 None => {
                     self.status("select faces to extrude");
                     return;
@@ -2251,7 +2272,12 @@ impl App {
         }
         if extrude_normal.is_some() {
             gesture.set_object_basis(self.selection_basis());
-            gesture.extrude_along_normal();
+            if along_normals {
+                let has_normal = kreate_ops::ops::mesh::selected_faces_normal(&self.doc).is_some();
+                gesture.extrude_along_normals(has_normal);
+            } else {
+                gesture.extrude_along_normal();
+            }
         }
         // A loop cut slides along the edge it cuts across from.
         if kind == kreate::modal::Kind::LoopCut {
@@ -9010,6 +9036,25 @@ impl App {
             // normal with the pointer, rather than by a fixed amount.
             // Faces go out along their normal; edges and vertices, with no
             // face to give a direction, move freely.
+            // Alt+E's rows: the same gesture, along the region's normal or
+            // each face's own.
+            "app.extrude" if self.op_ctx.mode.edits_elements() => {
+                let along = matches!(
+                    action.params.get("along_normals"),
+                    Some(PropertyValue::Bool(true))
+                );
+                if along {
+                    if kreate_ops::ops::mesh::any_face_selected(&self.doc) {
+                        self.extrude_along_normals = true;
+                        self.begin_gesture(kreate::modal::Kind::Extrude);
+                        self.extrude_along_normals = false;
+                    } else {
+                        self.status("select faces to extrude");
+                    }
+                } else {
+                    self.dispatch(&Action::new("mesh.extrude_region"));
+                }
+            }
             "mesh.extrude_region" if self.op_ctx.mode.edits_elements() => {
                 if kreate_ops::ops::mesh::selected_faces_normal(&self.doc).is_some() {
                     self.begin_gesture(kreate::modal::Kind::Extrude)
@@ -10730,6 +10775,28 @@ mod tests {
         );
         app.open_popup_menu("parent_clear");
         assert_eq!(ops(&app), ["object.parent", "object.unbind_armature"]);
+    }
+
+    /// Blender's Alt+E: the region, or each face along its own normal.
+    #[test]
+    fn the_extrude_menu_offers_region_and_along_normals() {
+        let mut app = app();
+        app.open_popup_menu("extrude");
+        let rows: Vec<_> = app
+            .ui
+            .context_menu
+            .groups
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .map(|e| (e.op_id.clone(), e.params.get("along_normals").cloned()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("app.extrude".to_string(), None),
+                ("app.extrude".to_string(), Some(PropertyValue::Bool(true))),
+            ]
+        );
     }
 
     #[test]

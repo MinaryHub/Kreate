@@ -284,6 +284,13 @@ pub struct Gesture {
     /// An extrude travelling along its faces' normal — what `E` starts as —
     /// rather than along an axis the user picked.
     along_normal: bool,
+    /// Each face along its own normal (Alt+E ▸ Along Normals). Axis keys do
+    /// nothing then: there is no one direction to replace.
+    along_normals: bool,
+    /// The selection has a region normal to measure the pointer along. A
+    /// closed solid has none, and the pointer's distance from the middle is
+    /// read instead.
+    has_normal: bool,
     /// Snapping, as configured. `snap_inverted` flips it for this drag.
     pub snap: Snap,
     pub snap_inverted: bool,
@@ -392,6 +399,8 @@ impl Gesture {
             basis,
             object_basis: basis,
             along_normal: false,
+            along_normals: false,
+            has_normal: true,
             snap,
             snap_inverted: false,
             world,
@@ -464,6 +473,9 @@ impl Gesture {
         // An extrude starts along its faces' normal. X, Y or Z sends it along
         // that axis instead — the header's orientation first, the other one
         // on a second press — and a third press brings it back to the normal.
+        if self.kind == Kind::Extrude && self.along_normals {
+            return;
+        }
         if self.kind == Kind::Extrude {
             let first = self.first_orientation;
             let second = match first {
@@ -522,6 +534,14 @@ impl Gesture {
         self.along_normal = true;
         self.axis = Some(Axis::Z);
         self.orientation = Orientation::Local;
+    }
+
+    /// Makes an extrude move each face along its own normal. `has_normal` says
+    /// whether the region has one direction the pointer can be measured along.
+    pub fn extrude_along_normals(&mut self, has_normal: bool) {
+        self.extrude_along_normal();
+        self.along_normals = true;
+        self.has_normal = has_normal;
     }
 
     /// Sets what the first press of an axis key constrains to.
@@ -806,7 +826,9 @@ impl Gesture {
                     "offset",
                     PropertyValue::Float(self.extrude_distance(dx, dy)),
                 );
-                if !self.along_normal {
+                if self.along_normals {
+                    params.set("along_normals", PropertyValue::Bool(true));
+                } else if !self.along_normal {
                     let d = self.extrude_direction().as_dvec3();
                     params.set("direction", PropertyValue::Vec3([d.x, d.y, d.z]));
                 }
@@ -967,6 +989,10 @@ impl Gesture {
         if let Some(value) = self.typed() {
             return value;
         }
+        if !self.has_normal {
+            // Out from the middle grows it, as a bevel's width does.
+            return self.length_value(-self.pull());
+        }
         self.offset(dx, dy).dot(self.extrude_direction().as_dvec3())
     }
 
@@ -1097,6 +1123,7 @@ impl Gesture {
 
     pub fn status(&self) -> String {
         let axis = match (self.axis, self.orientation) {
+            _ if self.kind == Kind::Extrude && self.along_normals => " along normals".to_string(),
             _ if self.kind == Kind::Extrude && self.along_normal => " normal".to_string(),
             (Some(axis), Orientation::Global) => format!(" {}", axis.label()),
             // Doubled, the way it was typed, so the header says which of the two

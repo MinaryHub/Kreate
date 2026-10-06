@@ -186,6 +186,66 @@ pub struct WireExtrusion {
     pub new_faces: Vec<FaceId>,
 }
 
+/// Extrudes the selected faces, then moves each new vertex out along the
+/// normals of the faces around it — Blender's Extrude Faces Along Normals.
+///
+/// Every face moves `distance` along its *own* normal, not the region's: the
+/// offset at a vertex is scaled so each face's plane lands exactly that far
+/// out (even thickness), so a cube grows into a bigger cube rather than
+/// rounding off at its corners. A closed solid, which has no region normal to
+/// travel along, inflates.
+pub fn extrude_selected_faces_along_normals(
+    mesh: &mut BMesh,
+    distance: f32,
+) -> Result<Extrusion, BmError> {
+    let faces = mesh.selected_faces();
+    let out = extrude_faces(mesh, &faces, Vec3::ZERO)?;
+    offset_along_normals(mesh, &out.new_faces, distance);
+    Ok(out)
+}
+
+/// Moves the vertices of `faces` out along their faces' normals, each face's
+/// plane by `distance`.
+pub fn offset_along_normals(mesh: &mut BMesh, faces: &[FaceId], distance: f32) {
+    // Read every normal before moving anything: a moved vertex changes the
+    // normals of the faces around it.
+    let normals: Vec<(FaceId, Vec3)> = faces
+        .iter()
+        .map(|f| (*f, mesh.face_normal(*f).normalize_or_zero()))
+        .filter(|(_, n)| *n != Vec3::ZERO)
+        .collect();
+    let mut around: Vec<Vec<Vec3>> = vec![Vec::new(); mesh.slot_count(crate::Domain::Point)];
+    let mut verts: Vec<VertId> = Vec::new();
+    for (f, n) in &normals {
+        for v in mesh.face_verts(*f) {
+            let slot = &mut around[v.index() as usize];
+            if slot.is_empty() {
+                verts.push(v);
+            }
+            slot.push(*n);
+        }
+    }
+    let moves: Vec<(VertId, Vec3)> = verts
+        .into_iter()
+        .filter_map(|v| {
+            let ns = &around[v.index() as usize];
+            let dir = ns.iter().copied().sum::<Vec3>().normalize_or_zero();
+            if dir == Vec3::ZERO {
+                return None;
+            }
+            // Even thickness: the faces meet `dir` at an angle, and moving a
+            // unit along it lifts each face's plane by only the cosine. Clamped
+            // so a near-fold does not throw the vertex off to infinity.
+            let cosine = ns.iter().map(|n| n.dot(dir)).sum::<f32>() / ns.len() as f32;
+            let p = mesh.position(v)?;
+            Some((v, p + dir * (distance / cosine.max(0.25))))
+        })
+        .collect();
+    for (v, p) in moves {
+        mesh.set_position(v, p);
+    }
+}
+
 /// Blender's `E` on edges and vertices: each selected edge pulls out a quad
 /// behind it, each selected vertex on no selected edge an edge, and the new
 /// copies become the selection — to be moved where the pointer takes them.
@@ -261,6 +321,50 @@ mod tests {
 
     fn cube() -> BMesh {
         BMesh::from_mesh_data(&primitives::cube(2.0))
+    }
+
+    #[test]
+    fn along_normals_each_face_moves_its_own_way_by_the_same_distance() {
+        // The top and the +X side of a cube, both selected: the top rises by
+        // 0.5 and the side moves out by 0.5, so the shared edge goes up *and*
+        // out — not along the region's averaged diagonal.
+        let mut m = cube();
+        for dir in [Vec3::Z, Vec3::X] {
+            let f = face_facing(&m, dir);
+            m.set_face_selected(f, true);
+        }
+        m.flush_selection(SelectMode::Face);
+        let out = extrude_selected_faces_along_normals(&mut m, 0.5).unwrap();
+        assert_eq!(out.new_faces.len(), 2);
+        let max = out
+            .new_verts
+            .iter()
+            .filter_map(|v| m.position(*v))
+            .fold(Vec3::splat(f32::MIN), Vec3::max);
+        assert!((max.z - 1.5).abs() < 1e-5, "{max:?}");
+        assert!((max.x - 1.5).abs() < 1e-5, "{max:?}");
+        for f in &out.new_faces {
+            let n = m.face_normal(*f).normalize_or_zero();
+            assert!(n.dot(Vec3::Z) > 0.999 || n.dot(Vec3::X) > 0.999, "{n:?}");
+        }
+    }
+
+    #[test]
+    fn along_normals_a_closed_cube_grows_into_a_bigger_cube() {
+        // No region normal, but each face has its own: every face out by 1.
+        let mut m = cube();
+        let all: Vec<FaceId> = m.face_ids().collect();
+        for f in all {
+            m.set_face_selected(f, true);
+        }
+        m.flush_selection(SelectMode::Face);
+        let out = extrude_selected_faces_along_normals(&mut m, 1.0).unwrap();
+        for v in &out.new_verts {
+            let p = m.position(*v).unwrap();
+            for c in p.to_array() {
+                assert!((c.abs() - 2.0).abs() < 1e-5, "{p:?}");
+            }
+        }
     }
 
     /// The face whose normal points most nearly along `dir`.

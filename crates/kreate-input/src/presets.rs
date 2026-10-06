@@ -933,6 +933,15 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             Action::new("mesh.extrude_region").with("offset", PropertyValue::Float(1.0)),
         ),
+        // Blender's Alt+E: which extrude — the region along its normal, or
+        // each face along its own.
+        key(
+            "mesh.extrude_menu",
+            "E",
+            Context::EditMesh,
+            Action::new("app.menu").with("menu", PropertyValue::Text("extrude".into())),
+        )
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.inset",
             "I",
