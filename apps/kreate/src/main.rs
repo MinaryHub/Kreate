@@ -996,7 +996,22 @@ impl App {
         self.autokey.then(|| self.doc.playback.frame.round())
     }
 
-    fn run_op(&mut self, op_id: &str, params: PropertyMap) {
+    fn run_op(&mut self, op_id: &str, mut params: PropertyMap) {
+        // A new shape on the cursor lands inside whatever is already there —
+        // on a new scene, inside the cube — and nothing seems to happen. Set
+        // beside it instead, and said, when the spot is taken.
+        if matches!(
+            op_id,
+            "object.add_primitive" | "object.add_empty" | "object.add_armature"
+        ) && params.get("location").is_none()
+        {
+            let spot = self.free_spot(self.doc.cursor);
+            if spot != self.doc.cursor {
+                params.set("location", PropertyValue::Vec3(spot.to_array()));
+                let message = self.ui.catalog.get("add-beside");
+                self.status(&message);
+            }
+        }
         let params = self.app_params().apply(op_id, &params);
         // Recorded before it runs, not after. The operator that panics is the one
         // most worth having in the report, and an entry written on success would
@@ -2670,6 +2685,35 @@ impl App {
     /// rather than additive, so one notch feels the same whether the radius is a
     /// centimetre or ten metres.
     /// The application's additions to an operator's parameters, as of now.
+    /// `at`, or the first place along +X from it that is not inside a
+    /// visible object — where a new object can be seen.
+    fn free_spot(&self, at: DVec3) -> DVec3 {
+        let boxes: Vec<(DVec3, DVec3)> = self
+            .evaluated
+            .iter()
+            .filter_map(|(id, mesh)| {
+                let p = mesh.positions();
+                let first = *p.first()?;
+                let (lo, hi) = p.iter().fold((first, first), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+                let to = self.doc.world_transform(*id);
+                let mut wlo = DVec3::splat(f64::MAX);
+                let mut whi = DVec3::splat(f64::MIN);
+                for i in 0..8 {
+                    let c = glam::Vec3::new(
+                        if i & 1 == 0 { lo.x } else { hi.x },
+                        if i & 2 == 0 { lo.y } else { hi.y },
+                        if i & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    let w = to.transform_point3(c.as_dvec3());
+                    wlo = wlo.min(w);
+                    whi = whi.max(w);
+                }
+                Some((wlo, whi))
+            })
+            .collect();
+        spot_beside(at, &boxes)
+    }
+
     fn app_params(&self) -> AppParams {
         AppParams {
             key: self.autokey_frame(),
@@ -10441,6 +10485,23 @@ fn install_panic_hook() {
 ///
 /// Not when the caller already named them: a script line or a replayed step
 /// that says `autokey=False` means it, whatever the record button says now.
+/// `at`, or the first point along +X from it clear of every box (world
+/// bounds, low and high corner). A new shape is two units across, so it is
+/// clear of a box by its half and a little room.
+fn spot_beside(at: DVec3, boxes: &[(DVec3, DVec3)]) -> DVec3 {
+    let mut spot = at;
+    for _ in 0..64 {
+        let Some((_, hi)) = boxes
+            .iter()
+            .find(|(lo, hi)| spot.cmpge(*lo - 1.0).all() && spot.cmple(*hi + 1.0).all())
+        else {
+            break;
+        };
+        spot.x = hi.x + 1.5;
+    }
+    spot
+}
+
 /// What the application adds to an operator's parameters from its own state:
 /// the auto-key frame, the pivot point, and the 3D cursor for a new object.
 /// Taken as a copy, so it can be read before a gesture's session is borrowed.
@@ -10537,6 +10598,19 @@ fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_object_is_set_beside_what_the_cursor_is_inside() {
+        use super::*;
+        let cube = (DVec3::splat(-1.0), DVec3::splat(1.0));
+        let next = (DVec3::new(1.5, -1.0, -1.0), DVec3::new(3.5, 1.0, 1.0));
+        // Free: where the cursor is.
+        assert_eq!(spot_beside(DVec3::new(10.0, 0.0, 0.0), &[cube]), DVec3::new(10.0, 0.0, 0.0));
+        // Inside the cube: past it.
+        assert_eq!(spot_beside(DVec3::ZERO, &[cube]), DVec3::new(2.5, 0.0, 0.0));
+        // And past the one beside it too.
+        assert_eq!(spot_beside(DVec3::ZERO, &[cube, next]), DVec3::new(5.0, 0.0, 0.0));
+    }
+
     #[test]
     fn the_pivot_point_and_the_cursor_reach_the_operators() {
         use super::*;
