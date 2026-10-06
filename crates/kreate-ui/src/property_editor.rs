@@ -332,9 +332,6 @@ pub fn property_editor_full(
                         }
                         ui.end_row();
                     }
-                    // And a gap before the next, so each group reads as one.
-                    ui.add_space(4.0);
-                    ui.end_row();
                 }
             }
         });
