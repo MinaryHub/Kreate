@@ -11151,7 +11151,7 @@ mod tests {
     fn the_measure_tool_leaves_distances_and_angles() {
         let mut app = app();
         app.begin_measure();
-        let mut click = |app: &mut App, at: DVec3, ctrl: bool| {
+        let click = |app: &mut App, at: DVec3, ctrl: bool| {
             app.input.ctrl_down = ctrl;
             app.measure.as_mut().expect("the tool is out").hover = Some(at);
             app.measure_click();

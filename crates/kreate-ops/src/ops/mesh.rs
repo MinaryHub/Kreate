@@ -890,6 +890,64 @@ impl Operator for TranslateSelection {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MedianSetParams {
+    /// Where the selection's middle goes, in the world.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+}
+
+/// Puts the selection's middle at a typed place: Blender's Median field in
+/// the sidebar, or Vertex for one. The selection moves as one, by the
+/// difference — what a coordinate on a drawing means.
+pub struct MedianSet;
+
+impl Operator for MedianSet {
+    type Params = MedianSetParams;
+
+    fn id() -> &'static str {
+        "mesh.median_set"
+    }
+    fn label() -> &'static str {
+        "Set Selection Position"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let to = glam::DVec3::from_array(params.location);
+        let Some(weighing) = weigh_edit_selection_with(doc.document(), 0.0, 0) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let offset = to - weighing.pivot;
+        if !offset.is_finite() || offset.length() < 1e-12 {
+            return Ok(OpResult::Cancelled);
+        }
+        run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+            p + offset * weight as f64
+        })
+    }
+}
+
+/// The selection's middle in the world, and how many vertices it is — what
+/// the sidebar shows as Median, or Vertex for one.
+pub fn selection_median(doc: &Document) -> Option<(glam::DVec3, usize)> {
+    let count: usize = edit_targets(doc)
+        .iter()
+        .filter_map(|t| doc.mesh(t.mesh))
+        .map(|m| selection_vertices(m).len())
+        .sum();
+    if count == 0 {
+        return None;
+    }
+    weigh_edit_selection_with(doc, 0.0, 0).map(|w| (w.pivot, count))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct MeshRotateParams {
     #[param(unit = "angle")]
     pub angle: f64,
@@ -3260,6 +3318,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<BevelEdges>();
     registry.register::<BridgeEdgeLoops>();
     registry.register::<ExtrudeRegion>();
+    registry.register::<MedianSet>();
     registry.register::<FillHole>();
     registry.register::<InsetFaces>();
     registry.register::<LoopCut>();
@@ -3564,6 +3623,46 @@ mod tests {
         assert!((b.min.y + 3.0).abs() < 1e-5, "{b:?}");
         assert!((b.max.z - 1.0).abs() < 1e-5, "{b:?}");
         assert_eq!(after.validate(), Vec::new());
+    }
+
+    #[test]
+    fn the_selections_middle_goes_where_it_is_typed() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = cube_doc();
+        // Moved, so the typed place is the world's and not the mesh's.
+        let obj = doc.selection.objects[0];
+        doc.object_mut(obj).unwrap().transform.translation = glam::DVec3::new(10.0, 0.0, 0.0);
+        {
+            let m = doc.mesh_mut(mesh).unwrap();
+            let mut bm = m.to_bmesh();
+            let top = bm
+                .face_ids()
+                .max_by(|a, b| {
+                    let za = bm.face_normal(*a).normalize_or_zero().z;
+                    let zb = bm.face_normal(*b).normalize_or_zero().z;
+                    za.partial_cmp(&zb).unwrap()
+                })
+                .unwrap();
+            bm.set_face_selected(top, true);
+            bm.flush_selection(SelectMode::Face);
+            *m = bm.to_mesh_data();
+        }
+        let (median, count) = selection_median(&doc).unwrap();
+        assert_eq!(count, 4);
+        assert!((median - glam::DVec3::new(10.0, 0.0, 1.0)).length() < 1e-9);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.median_set",
+            &params(&[("location", PropertyValue::Vec3([10.0, 0.0, 5.0]))]),
+        )
+        .unwrap();
+        let (median, _) = selection_median(&doc).unwrap();
+        assert!((median - glam::DVec3::new(10.0, 0.0, 5.0)).length() < 1e-6);
+        assert!((doc.mesh(mesh).unwrap().bounds().max.z - 5.0).abs() < 1e-5);
+        assert!((doc.mesh(mesh).unwrap().bounds().min.z + 1.0).abs() < 1e-5, "the rest stays");
     }
 
     #[test]

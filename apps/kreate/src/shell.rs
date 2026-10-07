@@ -1412,6 +1412,8 @@ struct Labels {
     stats_faces: String,
     stats_triangles: String,
     stats_length: String,
+    sidebar_median: String,
+    sidebar_vertex: String,
     stats_area: String,
     pivot_median: String,
     pivot_individual: String,
@@ -1726,6 +1728,8 @@ impl Labels {
             stats_faces: t("stats-faces"),
             stats_triangles: t("stats-triangles"),
             stats_length: t("stats-length"),
+            sidebar_median: t("sidebar-median"),
+            sidebar_vertex: t("sidebar-vertex"),
             stats_area: t("stats-area"),
             pivot_median: t("pivot-median"),
             pivot_individual: t("pivot-individual"),
@@ -6167,6 +6171,32 @@ fn draw_item_sidebar(
             // i18n-exempt: an object's name is the user's own text
             ui.label(&active.name);
 
+            // Editing a mesh, the item is the selection: where its middle is,
+            // in the world, to be typed — or the vertex, when it is one.
+            if mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
+                match (
+                    kreate_ops::ops::mesh::selection_median(doc),
+                    registry.get("mesh.median_set"),
+                ) {
+                    (Some((median, count)), Some(info)) => {
+                        ui.strong(if count == 1 { &l.sidebar_vertex } else { &l.sidebar_median });
+                        let mut params = kreate_reflect::PropertyMap::new();
+                        params.set(
+                            "location",
+                            kreate_reflect::PropertyValue::Vec3(median.to_array()),
+                        );
+                        if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                            send_edit(state, "mesh.median_set", params, dragging);
+                        }
+                    }
+                    _ => {
+                        ui.weak(&l.sidebar_nothing);
+                    }
+                }
+                return;
+            }
+
             // In pose mode and the skeleton's edit mode the item is the active
             // bone, as in Blender: its pose, or its head, tail and roll.
             let bone_op = match mode.acts_on() {
@@ -9150,6 +9180,8 @@ stats-edges = Edges
 stats-faces = Faces
 stats-triangles = Triangles
 stats-length = Edge Length
+sidebar-median = Median (Global)
+sidebar-vertex = Vertex (Global)
 stats-area = Face Area
 op-view-circle-select = Circle Select
 op-view-circle-select-desc = A brush that selects what it passes over. Shift to deselect, wheel for size, Esc or right-click to stop.
@@ -10110,6 +10142,8 @@ stats-edges = 엣지
 stats-faces = 면
 stats-triangles = 삼각형
 stats-length = 엣지 길이
+sidebar-median = 중앙점 (전역)
+sidebar-vertex = 정점 (전역)
 stats-area = 면 넓이
 op-view-circle-select = 원형 선택
 op-view-circle-select-desc = 지나가는 것을 선택하는 브러시입니다. Shift는 해제, 휠은 크기, Esc나 우클릭으로 끝냅니다.
