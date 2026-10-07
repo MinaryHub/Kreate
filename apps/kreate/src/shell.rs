@@ -1427,6 +1427,7 @@ struct Labels {
     render_view: String,
     render_result_title: String,
     render_hint: String,
+    design_units: String,
     world_image: String,
     duplicate: String,
     object_copy: String,
@@ -1735,6 +1736,7 @@ impl Labels {
             render_view: t("render-view"),
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
+            design_units: t("design-units"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
             object_copy: t("object-copy"),
@@ -4701,6 +4703,17 @@ fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
 
 /// The Render tab: the scene's render settings, and the buttons that use them.
 fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry, l: &Labels) {
+    // The scene's units, first: they are the scene's as much as how it
+    // renders, and a design is set up in them before anything is drawn.
+    ui.heading(&l.design_units);
+    if let Some(info) = registry.get("scene.units_set") {
+        let mut params =
+            kreate_reflect::OpParams::to_map(&kreate_ops::ops::design::units_params(doc));
+        if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+            send_edit(state, "scene.units_set", params, false);
+        }
+    }
+    ui.separator();
     ui.heading(&l.tab_render);
     ui.horizontal(|ui| {
         if ui.button(&l.render_image).clicked() {
@@ -9046,6 +9059,7 @@ render-animation = Render Animation
 render-view = View Render
 render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
+design-units = Units
 render-saved = Saved { $path }
 render-failed = Not saved: { $why }
 sidebar-tool = Tool
@@ -10000,6 +10014,7 @@ render-animation = 애니메이션 렌더
 render-view = 렌더 결과 보기
 render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
+design-units = 단위
 render-saved = 저장됨: { $path }
 render-failed = 저장 안 됨: { $why }
 sidebar-tool = 도구

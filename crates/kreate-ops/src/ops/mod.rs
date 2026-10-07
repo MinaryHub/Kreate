@@ -15,6 +15,7 @@ pub mod modifier;
 pub mod node;
 pub mod object;
 pub mod origin;
+pub mod design;
 pub mod paint;
 pub mod pose;
 pub mod render;
@@ -35,6 +36,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     node::register(registry);
     object::register(registry);
     origin::register(registry);
+    design::register(registry);
     render::register(registry);
     paint::register(registry);
     pose::register(registry);

@@ -7949,6 +7949,9 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Every length the panels show and every number typed into one is in
+        // the open document's unit.
+        kreate_reflect::set_display_length_unit(self.doc.design.length_unit);
         // Before anything reads the camera: the eased position is what this
         // frame is drawn from, and it has to be settled before the viewport
         // projection, the ray queries and the interface all ask for it.

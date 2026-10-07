@@ -51,7 +51,21 @@ pub enum ExprError {
 ///
 /// `Err(Incomplete)` for anything still being typed, which the caller treats as
 /// "the pointer is still in charge" rather than as a failure.
+///
+/// A bare number in a length field is in the scene's unit — `5` with the
+/// scene in millimetres is five millimetres — as on a drawing, where the
+/// unit is written once in the corner rather than after every dimension.
 pub fn eval(text: &str, unit: Unit) -> Result<f64, ExprError> {
+    eval_in(text, unit, kreate_reflect::display_length_unit())
+}
+
+/// [`eval`], with the unit a bare length is in given rather than the
+/// scene's.
+pub fn eval_in(
+    text: &str,
+    unit: Unit,
+    bare_length: kreate_reflect::LengthUnit,
+) -> Result<f64, ExprError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(ExprError::Incomplete);
@@ -60,11 +74,14 @@ pub fn eval(text: &str, unit: Unit) -> Result<f64, ExprError> {
     let (body, suffix) = split_suffix(text);
     let scale = match (suffix, unit) {
         (None, Unit::Angle) => std::f64::consts::PI / 180.0,
+        (None, Unit::Length) => bare_length.metres(),
         (None, _) => 1.0,
         (Some("m"), Unit::Length) => 1.0,
         (Some("cm"), Unit::Length) => 0.01,
         (Some("mm"), Unit::Length) => 0.001,
         (Some("km"), Unit::Length) => 1000.0,
+        (Some("in"), Unit::Length) => 0.0254,
+        (Some("ft"), Unit::Length) => 0.3048,
         (Some("deg" | "d" | "°"), Unit::Angle) => std::f64::consts::PI / 180.0,
         (Some("rad" | "r"), Unit::Angle) => 1.0,
         // A suffix the field cannot use. Refused rather than ignored: `30deg`
@@ -222,7 +239,7 @@ mod tests {
     use super::*;
 
     fn length(text: &str) -> Result<f64, ExprError> {
-        eval(text, Unit::Length)
+        eval_in(text, Unit::Length, kreate_reflect::LengthUnit::Metres)
     }
 
     #[test]
@@ -262,6 +279,18 @@ mod tests {
         assert_eq!(length("50cm"), Ok(0.5));
         assert_eq!(length("2.5km"), Ok(2500.0));
         assert!((length("7mm").unwrap() - 0.007).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_bare_length_is_in_the_scenes_unit_and_a_suffix_overrides_it() {
+        use kreate_reflect::LengthUnit;
+        let mm = |t: &str| eval_in(t, Unit::Length, LengthUnit::Millimetres).unwrap();
+        assert!((mm("5") - 0.005).abs() < 1e-12);
+        assert!((mm("2m") - 2.0).abs() < 1e-12);
+        assert!((mm("1in") - 0.0254).abs() < 1e-12);
+        // Angles are not lengths: a bare one stays degrees.
+        let deg = eval_in("90", Unit::Angle, LengthUnit::Millimetres).unwrap();
+        assert!((deg - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     }
 
     #[test]

@@ -37,12 +37,23 @@ impl UnitDisplay {
                 default_step: 0.01,
                 decimals: 3,
             },
-            Unit::Length => Self {
-                to_display: 1.0,
-                suffix: " m",
-                default_step: 0.01,
-                decimals: 4,
-            },
+            // In the scene's unit: a part drawn in millimetres reads
+            // `12.5 mm`, not `0.0125 m`.
+            Unit::Length => {
+                let unit = kreate_reflect::display_length_unit();
+                Self {
+                    to_display: 1.0 / unit.metres(),
+                    suffix: match unit {
+                        kreate_reflect::LengthUnit::Metres => " m",
+                        kreate_reflect::LengthUnit::Centimetres => " cm",
+                        kreate_reflect::LengthUnit::Millimetres => " mm",
+                        kreate_reflect::LengthUnit::Inches => " in",
+                        kreate_reflect::LengthUnit::Feet => " ft",
+                    },
+                    default_step: 0.01,
+                    decimals: unit.decimals(),
+                }
+            }
             // Stored in radians, edited in degrees.
             Unit::Angle => Self {
                 to_display: 180.0 / std::f64::consts::PI,

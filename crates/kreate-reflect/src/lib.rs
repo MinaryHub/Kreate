@@ -171,7 +171,7 @@ pub enum Unit {
     /// A bare number.
     #[default]
     None,
-    /// Metres.
+    /// Metres, stored; shown in [`display_length_unit`].
     Length,
     /// Radians internally, shown in degrees.
     Angle,
@@ -179,6 +179,124 @@ pub enum Unit {
     Factor,
     /// A count.
     Count,
+}
+
+/// The unit lengths are shown and typed in — the scene's, as Blender keeps it.
+///
+/// Lengths are always *stored* in metres; this is only how a person reads and
+/// writes them. A part drawn in millimetres is still metres underneath, so
+/// nothing that computes with lengths has to know which unit is showing, and
+/// changing it is a change of display, never of the model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LengthUnit {
+    #[default]
+    Metres,
+    Centimetres,
+    Millimetres,
+    Inches,
+    Feet,
+}
+
+impl LengthUnit {
+    pub const ALL: [LengthUnit; 5] = [
+        LengthUnit::Metres,
+        LengthUnit::Centimetres,
+        LengthUnit::Millimetres,
+        LengthUnit::Inches,
+        LengthUnit::Feet,
+    ];
+
+    /// Metres in one of this unit.
+    pub fn metres(self) -> f64 {
+        match self {
+            LengthUnit::Metres => 1.0,
+            LengthUnit::Centimetres => 0.01,
+            LengthUnit::Millimetres => 0.001,
+            LengthUnit::Inches => 0.0254,
+            LengthUnit::Feet => 0.3048,
+        }
+    }
+
+    /// The symbol written after a number, and typed after one.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            LengthUnit::Metres => "m",
+            LengthUnit::Centimetres => "cm",
+            LengthUnit::Millimetres => "mm",
+            LengthUnit::Inches => "in",
+            LengthUnit::Feet => "ft",
+        }
+    }
+
+    /// The stable name, for the file and scripts.
+    pub fn tag(self) -> &'static str {
+        match self {
+            LengthUnit::Metres => "metres",
+            LengthUnit::Centimetres => "centimetres",
+            LengthUnit::Millimetres => "millimetres",
+            LengthUnit::Inches => "inches",
+            LengthUnit::Feet => "feet",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|u| u.tag() == tag)
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|u| *u == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(index: u32) -> Self {
+        Self::ALL.get(index as usize).copied().unwrap_or_default()
+    }
+
+    /// Decimals worth showing: a millimetre part wants hundredths of a
+    /// millimetre, a building in metres wants millimetres.
+    pub fn decimals(self) -> usize {
+        match self {
+            LengthUnit::Metres => 4,
+            LengthUnit::Centimetres => 3,
+            LengthUnit::Millimetres | LengthUnit::Inches => 3,
+            LengthUnit::Feet => 4,
+        }
+    }
+}
+
+/// The unit lengths are shown in, for every panel at once.
+///
+/// Process-wide, like a theme: the application sets it from the open
+/// document every frame, and every place that shows or reads a length asks
+/// it, rather than each being handed the document to find out.
+static DISPLAY_LENGTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The unit lengths are shown and typed in.
+pub fn display_length_unit() -> LengthUnit {
+    LengthUnit::from_index(DISPLAY_LENGTH.load(std::sync::atomic::Ordering::Relaxed) as u32)
+}
+
+/// Sets it: the application does, from the document.
+pub fn set_display_length_unit(unit: LengthUnit) {
+    DISPLAY_LENGTH.store(unit.index() as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A length, stored in metres, as the display unit writes it: `12.5 mm`.
+pub fn format_length(metres: f64) -> String {
+    format_length_in(metres, display_length_unit())
+}
+
+/// A length, stored in metres, written in `unit`.
+pub fn format_length_in(metres: f64, unit: LengthUnit) -> String {
+    let shown = metres / unit.metres();
+    let text = format!("{shown:.*}", unit.decimals());
+    // Trailing zeros carry nothing a person reads: `12.500 mm` is `12.5 mm`.
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    };
+    let text = if text == "-0" { "0".to_string() } else { text };
+    format!("{text} {}", unit.symbol())
 }
 
 /// Everything the UI, the scripting layer and the i18n system need to know about
@@ -460,6 +578,18 @@ pub trait OpParams: Sized + Clone + Default {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_length_is_written_in_the_unit_without_trailing_zeros() {
+        assert_eq!(format_length_in(0.0125, LengthUnit::Millimetres), "12.5 mm");
+        assert_eq!(format_length_in(2.0, LengthUnit::Metres), "2 m");
+        assert_eq!(format_length_in(0.0254, LengthUnit::Inches), "1 in");
+        assert_eq!(format_length_in(-0.0000001, LengthUnit::Millimetres), "0 mm");
+        for u in LengthUnit::ALL {
+            assert_eq!(LengthUnit::from_tag(u.tag()), Some(u));
+            assert_eq!(LengthUnit::from_index(u.index()), u);
+        }
+    }
 
     const SCHEMA: &[PropertyDesc] = &[
         PropertyDesc {

@@ -559,6 +559,9 @@ pub struct Document {
     /// can turn about, and where Set Origin can put an origin. The scene's, as
     /// Blender keeps it, so it is saved with the file.
     pub cursor: kreate_math::DVec3,
+    /// The unit it is drawn in, and what else a design keeps. See
+    /// [`crate::design`].
+    pub design: crate::design::DesignSettings,
     /// How a finished picture is made. See [`crate::render`].
     pub render: crate::render::RenderSettings,
     /// Which world is lighting the scene.

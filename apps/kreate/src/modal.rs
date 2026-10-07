@@ -1122,6 +1122,7 @@ impl Gesture {
     }
 
     pub fn status(&self) -> String {
+        let len = kreate_reflect::format_length;
         let axis = match (self.axis, self.orientation) {
             _ if self.kind == Kind::Extrude && self.along_normals => " along normals".to_string(),
             _ if self.kind == Kind::Extrude && self.along_normal => " normal".to_string(),
@@ -1145,7 +1146,7 @@ impl Gesture {
         let value = match self.kind {
             Kind::Extrude => {
                 let (dx, dy) = self.effective_delta(self.cursor);
-                format!("{:.3}", self.extrude_distance(dx, dy))
+                len(self.extrude_distance(dx, dy))
             }
             Kind::Inset => {
                 let thickness = self
@@ -1153,11 +1154,12 @@ impl Gesture {
                     .map(|(held, _)| held)
                     .unwrap_or_else(|| self.inset_thickness());
                 format!(
-                    "thickness {thickness:.3}  depth {:.3}  (Ctrl: depth)",
-                    self.inset_depth()
+                    "thickness {}  depth {}  (Ctrl: depth)",
+                    len(thickness),
+                    len(self.inset_depth())
                 )
             }
-            Kind::Bevel => format!("width {:.3}", self.bevel_width()),
+            Kind::Bevel => format!("width {}", len(self.bevel_width())),
             Kind::LoopCut => {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 format!(
@@ -1168,8 +1170,16 @@ impl Gesture {
             }
             Kind::Move | Kind::ExtrudeFree => {
                 let (dx, dy) = self.effective_delta(self.cursor);
+                // Each axis and how far in all, in the scene's unit: what a
+                // part is being moved by is a dimension.
                 let v = self.offset(dx, dy);
-                format!("{:.3} {:.3} {:.3}", v.x, v.y, v.z)
+                format!(
+                    "Dx {}  Dy {}  Dz {}  ({})",
+                    len(v.x),
+                    len(v.y),
+                    len(v.z),
+                    len(v.length())
+                )
             }
             Kind::Rotate => {
                 let radians = self.typed().unwrap_or(self.swept);

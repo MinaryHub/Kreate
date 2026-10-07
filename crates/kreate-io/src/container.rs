@@ -582,6 +582,16 @@ pub struct CollectionRecord {
     pub objects: Vec<usize>,
 }
 
+/// The scene's design settings, when any is not the default. See
+/// `kreate_scene::design`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DesignRecord {
+    /// The length unit's tag; absent is metres. An unknown one — from a
+    /// later version — reads as metres rather than failing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_unit: Option<String>,
+}
+
 /// The scene's render settings. See `kreate_scene::render`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderRecord {
@@ -1073,6 +1083,9 @@ pub struct SceneFile {
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
+    /// The design settings, when they are not the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design: Option<DesignRecord>,
     /// Collections, when there are any: names, whether hidden, and which
     /// objects by their place in `objects`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1445,6 +1458,10 @@ pub fn write(
             .collect();
         scene.cursor =
             (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
+        scene.design = (!document.design.is_default()).then(|| DesignRecord {
+            length_unit: (document.design.length_unit != Default::default())
+                .then(|| document.design.length_unit.tag().to_string()),
+        });
         scene.collections = document
             .collections()
             .map(|(_, c)| CollectionRecord {
@@ -2099,6 +2116,15 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         .filter(|c| c.is_finite())
     {
         document.cursor = c;
+    }
+    if let Some(d) = &scene.design {
+        if let Some(unit) = d
+            .length_unit
+            .as_deref()
+            .and_then(kreate_scene::design::LengthUnit::from_tag)
+        {
+            document.design.length_unit = unit;
+        }
     }
     if let Some(r) = &scene.render {
         use kreate_scene::render::{OutputFormat, RenderSettings};
