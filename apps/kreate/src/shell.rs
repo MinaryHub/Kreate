@@ -286,6 +286,9 @@ pub struct ShellState {
     pub knife_preview: Vec<kreate_math::DVec3>,
     /// The Measure tool's points so far and where the next would go.
     pub measure_preview: Vec<kreate_math::DVec3>,
+    /// The active object's volume, surface and middle, in the world, as it
+    /// is evaluated. See `kreate_mesh::measure`.
+    pub mass: Option<kreate_mesh::measure::MassProperties>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
     /// What a snapping drag has caught, for a marker on it.
@@ -626,6 +629,7 @@ impl Default for ShellState {
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
             measure_preview: Vec::new(),
+            mass: None,
             circle_select: None,
             snap_target: None,
             rename: None,
@@ -4566,6 +4570,65 @@ fn draw_view_info(
     }
 }
 
+/// What the active object weighs: its volume, surface and middle as it is
+/// evaluated, in the world and the scene's unit, and its mass at the scene's
+/// density, which is edited here.
+fn draw_physical_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+) {
+    let Some(mass) = state.mass else { return };
+    let title = state.catalog.get("panel-physical");
+    let open = !mass.closed;
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        if let Some(info) = registry.get("scene.density_set") {
+            let mut params = PropertyMap::new();
+            params.set("density", kreate_reflect::PropertyValue::Float(doc.design.density));
+            if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                send_edit(state, "scene.density_set", params, dragging);
+            }
+        }
+        egui::Grid::new("physical").num_columns(2).show(ui, |ui| {
+            let c = mass.centroid;
+            let rows = [
+                ("physical-volume", kreate_reflect::format_volume(mass.volume.abs())),
+                ("physical-area", kreate_reflect::format_area(mass.area)),
+                (
+                    "physical-mass",
+                    kreate_reflect::format_mass(mass.volume.abs() * doc.design.density),
+                ),
+                (
+                    "physical-centroid",
+                    format!(
+                        "{}, {}, {}",
+                        kreate_reflect::format_length(c.x),
+                        kreate_reflect::format_length(c.y),
+                        kreate_reflect::format_length(c.z)
+                    ),
+                ),
+            ];
+            for (key, value) in rows {
+                ui.label(state.catalog.get(key));
+                // i18n-exempt: measured values
+                ui.label(value);
+                ui.end_row();
+            }
+        });
+        if open {
+            let theme = kreate_ui::theme::from_ui(ui);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(state.catalog.get("physical-open")).color(theme.accent),
+                )
+                .wrap(),
+            );
+        }
+    });
+}
+
 /// The work plane: a grid around the 3D cursor in the plane it is turned to,
 /// its X and Y drawn in the axis colours. The spacing is a power of ten that
 /// suits how far away it is, so it reads at any zoom.
@@ -7474,6 +7537,7 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    draw_physical_panel(ui, state, doc, registry);
     draw_nla_panel(ui, state, doc, registry, object);
     // What the object hangs from and what bends it: Blender's Relations
     // panel, and the Armature modifier's one field.
@@ -9274,6 +9338,12 @@ render-view = View Render
 render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
 design-units = Units
+panel-physical = Physical Properties
+physical-volume = Volume
+physical-area = Surface Area
+physical-mass = Mass
+physical-centroid = Center of Mass
+physical-open = The surface is open, so the volume and mass mean nothing. Close it first (Mesh Check shows where).
 render-saved = Saved { $path }
 render-failed = Not saved: { $why }
 sidebar-tool = Tool
@@ -10238,6 +10308,12 @@ render-view = 렌더 결과 보기
 render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
 design-units = 단위
+panel-physical = 물성
+physical-volume = 부피
+physical-area = 겉넓이
+physical-mass = 질량
+physical-centroid = 무게중심
+physical-open = 표면이 닫혀 있지 않아 부피와 질량이 의미가 없습니다. 먼저 닫아 주세요(메시 검사로 위치 확인).
 render-saved = 저장됨: { $path }
 render-failed = 저장 안 됨: { $why }
 sidebar-tool = 도구

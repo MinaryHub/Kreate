@@ -872,6 +872,10 @@ struct App {
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
     /// The Measure tool, while it is out. See `begin_measure`.
     measure: Option<MeasureTool>,
+    /// The active object's mass properties, and the evaluated mesh and
+    /// placement they were measured for: measured again only when either
+    /// changes.
+    mass_cache: Option<(usize, [f64; 12], kreate_mesh::measure::MassProperties)>,
     /// The brush size circle select last used, so the next one starts there.
     circle_radius: f32,
     /// Local view (`/`): the objects shown, and the view to go back to.
@@ -1015,6 +1019,7 @@ impl App {
             loop_cut_seed: None,
             knife: None,
             measure: None,
+            mass_cache: None,
             circle_radius: 40.0,
             local_view: None,
             camera_view: None,
@@ -3263,6 +3268,39 @@ impl App {
     }
 
     /// `K`: from here until Enter, each click adds a point to the cut.
+    /// The active mesh object's volume, surface and middle, for the Object
+    /// tab: as evaluated (modifiers included) and in the world, so it is what
+    /// is on screen. Not during a sculpt stroke, which changes the mesh every
+    /// frame; the stroke's end measures it again.
+    fn publish_mass(&mut self) {
+        if self.sculpt_stroke.is_some() {
+            return;
+        }
+        let found = self.doc.selection.active.and_then(|id| {
+            self.evaluated
+                .iter()
+                .find(|(o, _)| *o == id)
+                .map(|(_, m)| (id, m.clone()))
+        });
+        let Some((id, mesh)) = found else {
+            self.mass_cache = None;
+            self.ui.mass = None;
+            return;
+        };
+        let to_world = self.doc.world_transform(id);
+        let key = (Arc::as_ptr(&mesh) as usize, to_world.to_cols_array());
+        let props = match &self.mass_cache {
+            Some((ptr, cols, props)) if (*ptr, *cols) == key => *props,
+            _ => {
+                let props =
+                    kreate_mesh::measure::mass_properties(&mesh, |p| to_world.transform_point3(p));
+                self.mass_cache = Some((key.0, key.1, props));
+                props
+            }
+        };
+        self.ui.mass = (mesh.num_faces() > 0).then_some(props);
+    }
+
     /// View ▸ Measure: click two points for the distance between them, or
     /// hold Ctrl on the second for the corner of an angle and click a third.
     /// Points catch on vertices, edges and faces of anything shown; each
@@ -8106,6 +8144,7 @@ impl App {
         // Every length the panels show and every number typed into one is in
         // the open document's unit.
         kreate_reflect::set_display_length_unit(self.doc.design.length_unit);
+        self.publish_mass();
         // Before anything reads the camera: the eased position is what this
         // frame is drawn from, and it has to be settled before the viewport
         // projection, the ray queries and the interface all ask for it.
@@ -11207,6 +11246,21 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// The Object tab's physical properties are the active object's as
+    /// evaluated, in the world: a 2 m cube scaled by half in Z is 4 m³.
+    #[test]
+    fn the_active_object_is_measured_as_it_stands() {
+        let mut app = app();
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let id = app.doc.selection.active.unwrap();
+        app.doc.object_mut(id).unwrap().transform.scale = DVec3::new(1.0, 1.0, 0.5);
+        app.evaluate_scene();
+        app.publish_mass();
+        let mass = app.ui.mass.expect("a mesh is active");
+        assert!((mass.volume - 4.0).abs() < 1e-9, "{}", mass.volume);
+        assert!(mass.closed);
     }
 
     /// A work plane on a face: the cursor turns to it, a new shape is set

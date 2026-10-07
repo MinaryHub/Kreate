@@ -299,6 +299,36 @@ pub fn format_area(square_metres: f64) -> String {
     format!("{text} {}²", unit.symbol())
 }
 
+/// A volume, stored in cubic metres, as the display unit writes it.
+pub fn format_volume(cubic_metres: f64) -> String {
+    let unit = display_length_unit();
+    let shown = cubic_metres / unit.metres().powi(3);
+    format!("{} {}³", trimmed(shown, unit.decimals()), unit.symbol())
+}
+
+/// A mass, stored in kilograms: grams below one.
+pub fn format_mass(kilograms: f64) -> String {
+    if kilograms.abs() < 1.0 {
+        format!("{} g", trimmed(kilograms * 1000.0, 2))
+    } else {
+        format!("{} kg", trimmed(kilograms, 3))
+    }
+}
+
+fn trimmed(value: f64, decimals: usize) -> String {
+    let text = format!("{value:.decimals$}");
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    };
+    if text == "-0" {
+        "0".to_string()
+    } else {
+        text
+    }
+}
+
 /// A length, stored in metres, written in `unit`.
 pub fn format_length_in(metres: f64, unit: LengthUnit) -> String {
     let shown = metres / unit.metres();
@@ -592,6 +622,12 @@ pub trait OpParams: Sized + Clone + Default {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mass_is_grams_below_a_kilogram() {
+        assert_eq!(format_mass(0.0125), "12.5 g");
+        assert_eq!(format_mass(2.5), "2.5 kg");
+    }
 
     #[test]
     fn a_length_is_written_in_the_unit_without_trailing_zeros() {

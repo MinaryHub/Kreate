@@ -51,3 +51,10 @@ fn the_work_plane_is_saved_with_the_cursor() {
     let bytes = container::write(&Document::new(), &Manifest::default(), &[]).expect("writes");
     assert!(!String::from_utf8_lossy(&bytes).contains("cursor_rotation"));
 }
+
+#[test]
+fn the_density_is_saved() {
+    let mut doc = Document::new();
+    doc.design.density = 1240.0;
+    assert_eq!(round_trip(&doc).design.density, 1240.0);
+}

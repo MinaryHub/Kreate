@@ -10,8 +10,46 @@ use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<UnitsSet>();
+    registry.register::<DensitySet>();
     registry.register::<MeasureAdd>();
     registry.register::<MeasureRemove>();
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DensitySetParams {
+    /// Kilograms per cubic metre: PLA about 1240, aluminium 2700, steel 7850.
+    #[param(min = 0.0, soft_max = 20000.0)]
+    pub density: f64,
+}
+
+/// What the parts are made of, for their mass.
+pub struct DensitySet;
+
+impl Operator for DensitySet {
+    type Params = DensitySetParams;
+    fn id() -> &'static str {
+        "scene.density_set"
+    }
+    fn label() -> &'static str {
+        "Set Density"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        if !params.density.is_finite()
+            || params.density < 0.0
+            || doc.document().design.density == params.density
+        {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut().design.density = params.density;
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]

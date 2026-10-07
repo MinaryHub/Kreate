@@ -593,6 +593,9 @@ pub struct DesignRecord {
     /// The dimensions left on the scene, each its two or three points.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub measurements: Vec<Vec<[f64; 3]>>,
+    /// Kilograms per cubic metre, when not water's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<f64>,
 }
 
 /// The scene's render settings. See `kreate_scene::render`.
@@ -1475,6 +1478,8 @@ pub fn write(
                 .iter()
                 .map(|m| m.points.iter().map(|p| p.to_array()).collect())
                 .collect(),
+            density: (document.design.density != kreate_scene::design::DEFAULT_DENSITY)
+                .then_some(document.design.density),
         });
         scene.collections = document
             .collections()
@@ -2154,6 +2159,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             })
             .filter(|m| m.is_valid())
             .collect();
+        if let Some(density) = d.density.filter(|x| x.is_finite() && *x >= 0.0) {
+            document.design.density = density;
+        }
     }
     if let Some(r) = &scene.render {
         use kreate_scene::render::{OutputFormat, RenderSettings};

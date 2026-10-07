@@ -44,14 +44,31 @@ impl Measurement {
     }
 }
 
+/// Water's density, kilograms per cubic metre: what a new scene assumes a
+/// part is made of until it is told.
+pub const DEFAULT_DENSITY: f64 = 1000.0;
+
 /// The scene's design settings.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DesignSettings {
     /// The unit lengths are shown and typed in. Lengths are stored in metres
     /// whatever this says; see [`LengthUnit`].
     pub length_unit: LengthUnit,
     /// The dimensions left on the scene, in the order they were taken.
     pub measurements: Vec<Measurement>,
+    /// What the parts are made of, in kilograms per cubic metre, for their
+    /// mass: PLA is about 1240, aluminium 2700, steel 7850.
+    pub density: f64,
+}
+
+impl Default for DesignSettings {
+    fn default() -> Self {
+        Self {
+            length_unit: LengthUnit::default(),
+            measurements: Vec::new(),
+            density: DEFAULT_DENSITY,
+        }
+    }
 }
 
 impl DesignSettings {
