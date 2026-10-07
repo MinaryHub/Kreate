@@ -889,6 +889,101 @@ impl Operator for TranslateSelection {
     }
 }
 
+/// What `mesh.check_select` can find, in its numbering.
+pub const CHECK_ISSUES: [&str; 7] = [
+    "open",
+    "non_manifold",
+    "flipped",
+    "degenerate",
+    "loose",
+    "intersecting",
+    "thin",
+];
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct CheckSelectParams {
+    /// Which fault to select. See [`CHECK_ISSUES`].
+    #[param(variants(
+        "open",
+        "non_manifold",
+        "flipped",
+        "degenerate",
+        "loose",
+        "intersecting",
+        "thin"
+    ))]
+    pub issue: u32,
+    /// The thinnest wall allowed, in the world, for `thin`.
+    #[param(min = 0.0, unit = "length")]
+    pub thickness: f64,
+}
+
+impl Default for CheckSelectParams {
+    fn default() -> Self {
+        Self {
+            issue: 0,
+            thickness: 0.001,
+        }
+    }
+}
+
+/// Selects what a mesh check found, in every mesh being edited: the rims of
+/// holes, faces passing through each other, walls too thin to print. The
+/// rest is deselected, so what is left selected is exactly the fault.
+pub struct CheckSelect;
+
+impl Operator for CheckSelect {
+    type Params = CheckSelectParams;
+
+    fn id() -> &'static str {
+        "mesh.check_select"
+    }
+    fn label() -> &'static str {
+        "Select Mesh Problems"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_mesh::attribute::Domain;
+        let issue = params.issue.min(CHECK_ISSUES.len() as u32 - 1);
+        let thickness = if issue == 6 { params.thickness.max(0.0) } else { 0.0 };
+        let found = for_each_edit_mesh(doc, |target, mesh| {
+            let report = kreate_mesh::check::check(
+                mesh,
+                |p| target.to_world.transform_point3(p),
+                thickness,
+                issue == 5,
+            );
+            let (domain, mode, list) = match issue {
+                0 => (Domain::Edge, SelectMode::Edge, report.open_edges),
+                1 => (Domain::Edge, SelectMode::Edge, report.non_manifold_edges),
+                2 => (Domain::Edge, SelectMode::Edge, report.flipped_edges),
+                3 => (Domain::Face, SelectMode::Face, report.degenerate_faces),
+                4 => (Domain::Point, SelectMode::Vert, report.loose_verts),
+                5 => (Domain::Face, SelectMode::Face, report.intersecting_faces),
+                _ => (Domain::Face, SelectMode::Face, report.thin_faces),
+            };
+            selection::select_none(mesh);
+            for i in &list {
+                selection::set_selected(mesh, domain, *i, true);
+            }
+            selection::flush(mesh, mode);
+            !list.is_empty()
+        })?;
+        Ok(if found {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct MedianSetParams {
     /// Where the selection's middle goes, in the world.
@@ -3319,6 +3414,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<BridgeEdgeLoops>();
     registry.register::<ExtrudeRegion>();
     registry.register::<MedianSet>();
+    registry.register::<CheckSelect>();
     registry.register::<FillHole>();
     registry.register::<InsetFaces>();
     registry.register::<LoopCut>();
@@ -3623,6 +3719,43 @@ mod tests {
         assert!((b.min.y + 3.0).abs() < 1e-5, "{b:?}");
         assert!((b.max.z - 1.0).abs() < 1e-5, "{b:?}");
         assert_eq!(after.validate(), Vec::new());
+    }
+
+    #[test]
+    fn a_mesh_check_selects_what_it_found_and_nothing_else() {
+        let r = registry();
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::plane(2.0));
+        let obj = doc.add_object(Object::new("Plane", ObjectData::Mesh(mesh)));
+        doc.selection.add(obj);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.check_select",
+            &params(&[("issue", PropertyValue::Enum(0))]),
+        )
+        .unwrap();
+        let m = doc.mesh(mesh).unwrap();
+        let picked = selection::selected(m, kreate_mesh::attribute::Domain::Edge);
+        assert_eq!(picked.len(), 4, "a plane's rim is all open");
+        // Nothing flipped on a plane: nothing to select, and no step left.
+        let before = h.entries().len();
+        let result = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.check_select",
+                &params(&[("issue", PropertyValue::Enum(2))]),
+            )
+            .unwrap();
+        assert_eq!(result, OpResult::Cancelled);
+        assert_eq!(h.entries().len(), before);
     }
 
     #[test]

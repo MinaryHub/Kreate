@@ -289,6 +289,11 @@ pub struct ShellState {
     /// The active object's volume, surface and middle, in the world, as it
     /// is evaluated. See `kreate_mesh::measure`.
     pub mass: Option<kreate_mesh::measure::MassProperties>,
+    /// The thinnest wall Mesh Check allows, in metres.
+    pub check_thickness: f64,
+    /// What the last Mesh Check found, and on which object: counts in the
+    /// order of `kreate_ops::ops::mesh::CHECK_ISSUES`.
+    pub mesh_check: Option<(ObjectId, [usize; 7])>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
     /// What a snapping drag has caught, for a marker on it.
@@ -630,6 +635,8 @@ impl Default for ShellState {
             knife_preview: Vec::new(),
             measure_preview: Vec::new(),
             mass: None,
+            check_thickness: 0.001,
+            mesh_check: None,
             circle_select: None,
             snap_target: None,
             rename: None,
@@ -4629,6 +4636,72 @@ fn draw_physical_panel(
     });
 }
 
+/// Mesh Check: is the active mesh fit to print. The thinnest wall allowed,
+/// a button that checks, and what it found with a button to select each.
+fn draw_mesh_check_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, object: ObjectId) {
+    if doc.object(object).and_then(|o| o.mesh()).is_none() {
+        return;
+    }
+    let title = state.catalog.get("panel-mesh-check");
+    kreate_ui::panel::section(ui, &title, false, |ui| {
+        let display = kreate_ui::property_editor::UnitDisplay::of(kreate_reflect::Unit::Length);
+        ui.horizontal(|ui| {
+            ui.label(state.catalog.get("check-thickness"));
+            let mut shown = state.check_thickness * display.to_display;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut shown)
+                        .speed(0.01 * display.to_display * 0.01)
+                        .suffix(display.suffix)
+                        .max_decimals(display.decimals)
+                        .range(0.0..=f64::MAX),
+                )
+                .changed()
+            {
+                state.check_thickness = display.from_display(shown);
+            }
+        });
+        let thickness = state.check_thickness;
+        if ui.button(state.catalog.get("check-run")).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("thickness", kreate_reflect::PropertyValue::Float(thickness));
+            state.queue.dispatch("app.mesh_check", p);
+        }
+        let Some((_, counts)) = state.mesh_check.filter(|(o, _)| *o == object) else {
+            return;
+        };
+        if counts.iter().all(|c| *c == 0) {
+            ui.label(state.catalog.get("check-clean"));
+            return;
+        }
+        egui::Grid::new("mesh-check").num_columns(3).show(ui, |ui| {
+            for (i, key) in [
+                "check-open",
+                "check-non-manifold",
+                "check-flipped",
+                "check-degenerate",
+                "check-loose",
+                "check-intersecting",
+                "check-thin",
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.label(state.catalog.get(key));
+                // i18n-exempt: a count
+                ui.label(counts[i].to_string());
+                if counts[i] > 0 && ui.small_button(state.catalog.get("check-select")).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("issue", kreate_reflect::PropertyValue::Enum(i as u32));
+                    p.set("thickness", kreate_reflect::PropertyValue::Float(thickness));
+                    state.queue.dispatch("app.mesh_check_select", p);
+                }
+                ui.end_row();
+            }
+        });
+    });
+}
+
 /// The work plane: a grid around the 3D cursor in the plane it is turned to,
 /// its X and Y drawn in the axis colours. The spacing is a power of ten that
 /// suits how far away it is, so it reads at any zoom.
@@ -7538,6 +7611,7 @@ fn draw_object_tab(
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
     draw_physical_panel(ui, state, doc, registry);
+    draw_mesh_check_panel(ui, state, doc, object);
     draw_nla_panel(ui, state, doc, registry, object);
     // What the object hangs from and what bends it: Blender's Relations
     // panel, and the Armature modifier's one field.
@@ -9339,6 +9413,18 @@ render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
 design-units = Units
 panel-physical = Physical Properties
+panel-mesh-check = Mesh Check
+check-thickness = Thinnest Wall
+check-run = Check
+check-select = Select
+check-clean = No problems found.
+check-open = Holes (open edges)
+check-non-manifold = Non-manifold edges
+check-flipped = Flipped faces (edges)
+check-degenerate = Zero-area faces
+check-loose = Loose vertices
+check-intersecting = Intersecting faces
+check-thin = Thin walls
 physical-volume = Volume
 physical-area = Surface Area
 physical-mass = Mass
@@ -10309,6 +10395,18 @@ render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
 design-units = 단위
 panel-physical = 물성
+panel-mesh-check = 메시 검사
+check-thickness = 최소 벽 두께
+check-run = 검사
+check-select = 선택
+check-clean = 문제가 없습니다.
+check-open = 구멍 (열린 엣지)
+check-non-manifold = 비다양체 엣지
+check-flipped = 뒤집힌 면 (엣지)
+check-degenerate = 넓이 없는 면
+check-loose = 떨어진 정점
+check-intersecting = 서로 뚫는 면
+check-thin = 얇은 벽
 physical-volume = 부피
 physical-area = 겉넓이
 physical-mass = 질량

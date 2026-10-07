@@ -9,6 +9,7 @@
 pub mod arena;
 pub mod attribute;
 pub mod bmesh;
+pub mod check;
 pub mod edit;
 pub mod intersect;
 pub mod mesh_data;

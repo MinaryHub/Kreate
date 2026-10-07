@@ -3268,6 +3268,36 @@ impl App {
     }
 
     /// `K`: from here until Enter, each click adds a point to the cut.
+    /// Runs every Mesh Check on the active mesh, as it is in the document
+    /// (what selecting will select), in the world, and keeps the counts for
+    /// the Object tab.
+    fn run_mesh_check(&mut self, thickness: f64) {
+        let Some(id) = self.doc.selection.active else { return };
+        let Some(mesh) = self.doc.object(id).and_then(|o| o.mesh()).and_then(|m| self.doc.mesh(m))
+        else {
+            return;
+        };
+        let to_world = self.doc.world_transform(id);
+        let r = kreate_mesh::check::check(mesh, |p| to_world.transform_point3(p), thickness, true);
+        let counts = [
+            r.open_edges.len(),
+            r.non_manifold_edges.len(),
+            r.flipped_edges.len(),
+            r.degenerate_faces.len(),
+            r.loose_verts.len(),
+            r.intersecting_faces.len(),
+            r.thin_faces.len(),
+        ];
+        self.ui.mesh_check = Some((id, counts));
+        let total: usize = counts.iter().sum();
+        self.status(&if total == 0 {
+            "mesh check: no problems".to_string()
+        } else {
+            format!("mesh check: {total} problem elements")
+        });
+        self.redraw.set(RedrawReason::UI);
+    }
+
     /// The active mesh object's volume, surface and middle, for the Object
     /// tab: as evaluated (modifiers included) and in the world, so it is what
     /// is on screen. Not during a sculpt stroke, which changes the mesh every
@@ -9484,6 +9514,31 @@ impl App {
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.measure" => self.begin_measure(),
+            // The Object tab's Mesh Check: what is wrong with the active
+            // mesh, in the world, and then where.
+            "app.mesh_check" => {
+                let thickness = action
+                    .params
+                    .get("thickness")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.001);
+                self.run_mesh_check(thickness);
+            }
+            "app.mesh_check_select" => {
+                if !self.op_ctx.mode.edits_elements() {
+                    self.set_mode(OpMode::EditMesh);
+                }
+                self.run_op("mesh.check_select", action.params.clone());
+                if self.history.last().is_some_and(|e| e.op_id == "mesh.check_select") {
+                    self.set_select_mode(if action.params.get("issue").and_then(|v| v.as_int()).is_some_and(|i| matches!(i, 3 | 5 | 6)) {
+                        2
+                    } else if action.params.get("issue").and_then(|v| v.as_int()) == Some(4) {
+                        0
+                    } else {
+                        1
+                    });
+                }
+            }
             "view.frame_selected" => self.frame_selected(),
             "view.toggle_statistics" => {
                 self.ui.show_stats = !self.ui.show_stats;
@@ -11246,6 +11301,30 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// Mesh Check finds a plane's open rim, and Select takes the user into
+    /// edit mode with exactly those edges selected.
+    #[test]
+    fn mesh_check_counts_and_then_selects_the_fault() {
+        let mut app = app();
+        let mut p = PropertyMap::new();
+        p.set("shape", PropertyValue::Enum(0));
+        app.run_op("object.add_primitive", p);
+        app.run_mesh_check(0.001);
+        let (_, counts) = app.ui.mesh_check.expect("checked");
+        assert_eq!(counts[0], 4, "{counts:?}");
+        let mut p = PropertyMap::new();
+        p.set("issue", PropertyValue::Enum(0));
+        app.dispatch(&Action {
+            op_id: "app.mesh_check_select".into(),
+            params: p,
+        });
+        assert!(app.op_ctx.mode.edits_elements());
+        let id = app.doc.selection.active.unwrap();
+        let mesh = app.doc.mesh(app.doc.object(id).unwrap().mesh().unwrap()).unwrap();
+        let edges = kreate_mesh::selection::selected(mesh, kreate_mesh::attribute::Domain::Edge);
+        assert_eq!(edges.len(), 4);
     }
 
     /// The Object tab's physical properties are the active object's as
