@@ -655,6 +655,9 @@ struct App {
     chat: Option<kreate::claude::Chat>,
     /// Whether the last chat entry is a reply still streaming in.
     chat_streaming: bool,
+    /// What goes with the next chat message: files picked or pasted. The
+    /// panel shows `ui.chat_attachments`, made from this.
+    chat_attachments: Vec<kreate::attach::Attachment>,
     /// Help ▸ Contact's messages on their way. See `kreate::contact`.
     outbox: Option<kreate::contact::Outbox>,
     window: Option<Arc<Window>>,
@@ -930,6 +933,7 @@ impl App {
             bridge: None,
             chat: None,
             chat_streaming: false,
+            chat_attachments: Vec::new(),
             outbox: None,
             window: None,
             gfx: None,
@@ -3700,17 +3704,107 @@ impl App {
     fn chat_send(&mut self, text: String) {
         use kreate_ui::chat::{ChatMessage, ChatRole};
         let Some(chat) = &mut self.chat else { return };
+        // The message as the log keeps it: the words, then what went with
+        // them, by name.
+        let mut shown = text.clone();
+        for a in &self.chat_attachments {
+            if !shown.is_empty() {
+                shown.push('\n');
+            }
+            // i18n-exempt: a file's own name
+            shown.push_str(&format!("[{}]", a.name));
+        }
         self.ui.chat_log.push(ChatMessage {
             role: ChatRole::User,
-            text: text.clone(),
+            text: shown,
         });
-        if let Err(e) = chat.send(&text) {
-            self.ui.chat_log.push(ChatMessage {
+        match chat.send(&text, &self.chat_attachments) {
+            Ok(()) => self.chat_attachments.clear(),
+            // Kept, so a message that could not go can be sent another way.
+            Err(e) => self.ui.chat_log.push(ChatMessage {
                 role: ChatRole::Error,
                 text: e,
-            });
+            }),
         }
         self.ui.chat_busy = chat.busy();
+        self.publish_chat_attachments();
+    }
+
+    /// The panel's view of what goes with the next message.
+    fn publish_chat_attachments(&mut self) {
+        self.ui.chat_attachments = self
+            .chat_attachments
+            .iter()
+            .map(|a| kreate_ui::chat::ChatAttachment {
+                name: a.name.clone(),
+                detail: a.describe(),
+            })
+            .collect();
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// Adds files to the next chat message. One that cannot go is said in
+    /// the conversation, and the rest still go.
+    fn attach_to_chat(&mut self, attachments: Vec<Result<kreate::attach::Attachment, String>>) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        for a in attachments {
+            match a {
+                Ok(a) => self.chat_attachments.push(a),
+                Err(e) => self.ui.chat_log.push(ChatMessage {
+                    role: ChatRole::Error,
+                    text: e,
+                }),
+            }
+        }
+        self.publish_chat_attachments();
+    }
+
+    /// The chat panel's Attach button.
+    fn pick_chat_attachments(&mut self) {
+        let Some(paths) = rfd::FileDialog::new()
+            .add_filter(
+                "Pictures, PDFs and text",
+                &["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "json", "csv", "obj", "gltf", "usda"],
+            )
+            .add_filter("All files", &["*"])
+            .set_title("Attach")
+            .pick_files()
+        else {
+            return;
+        };
+        let read = paths
+            .iter()
+            .map(|p| kreate::attach::Attachment::from_path(p))
+            .collect();
+        self.attach_to_chat(read);
+    }
+
+    /// Ctrl+V in the chat's box: files copied in the file manager, or a
+    /// picture — a screenshot, an image copied from a browser.
+    fn paste_into_chat(&mut self) {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return;
+        };
+        if let Ok(paths) = clipboard.get().file_list() {
+            if !paths.is_empty() {
+                let read = paths
+                    .iter()
+                    .map(|p| kreate::attach::Attachment::from_path(p))
+                    .collect();
+                self.attach_to_chat(read);
+                return;
+            }
+        }
+        if let Ok(image) = clipboard.get_image() {
+            let n = self.chat_attachments.iter().filter(|a| a.is_image()).count() + 1;
+            let pasted = kreate::attach::Attachment::from_rgba(
+                format!("pasted-{n}"),
+                image.width as u32,
+                image.height as u32,
+                image.bytes.into_owned(),
+            );
+            self.attach_to_chat(vec![pasted]);
+        }
     }
 
     /// Moves what Claude has said since the last wake into the panel.
@@ -4993,6 +5087,13 @@ impl App {
                 // edit-mode operator works on the open session.
                 Command::RunScript { source } => self.run_script(&source),
                 Command::ChatSend { text } => self.chat_send(text),
+                Command::ChatAttach => self.pick_chat_attachments(),
+                Command::ChatDetach { index } => {
+                    if index < self.chat_attachments.len() {
+                        self.chat_attachments.remove(index);
+                        self.publish_chat_attachments();
+                    }
+                }
                 Command::ChatStop => {
                     if let Some(chat) = &mut self.chat {
                         chat.stop();
@@ -10103,6 +10204,15 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Ctrl+V in the chat's box: a picture or files on the
+                // clipboard are attached. egui pastes only text, and does it
+                // itself.
+                if self.ui.chat_focused
+                    && self.input.ctrl_down
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyV)
+                {
+                    self.paste_into_chat();
+                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     self.input.note_event();
                     self.handle_key(code, event_loop);

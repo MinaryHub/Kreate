@@ -169,6 +169,13 @@ pub enum Command {
     ChatSend {
         text: String,
     },
+    /// From the chat panel: pick files to attach to the next message.
+    ChatAttach,
+    /// From the chat panel: take an attachment off the next message — an
+    /// index into the list the panel was given.
+    ChatDetach {
+        index: usize,
+    },
     /// From the Claude panel: stop the answer in progress.
     ChatStop,
     /// From the Claude panel: forget the conversation and start another.

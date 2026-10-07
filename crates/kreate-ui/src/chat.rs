@@ -8,7 +8,9 @@
 //! The crate cannot run a process, so the application owns the conversation
 //! and the child behind it. What the panel owns is the text being typed; what
 //! it hands back is a [`Command::ChatSend`], [`Command::ChatStop`] or
-//! [`Command::ChatNew`].
+//! [`Command::ChatNew`] — and [`Command::ChatAttach`] and
+//! [`Command::ChatDetach`] for what goes with the next message, which the
+//! application holds too: it reads the files, and the clipboard.
 
 use egui::Ui;
 
@@ -55,8 +57,21 @@ pub enum ChatAccount {
     Unavailable(String),
 }
 
+/// Something attached to the next message, as the panel shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatAttachment {
+    pub name: String,
+    /// After the name: "1200 × 800", "PDF, 1.2 MB".
+    pub detail: String,
+}
+
 /// The panel's translated strings.
 pub struct ChatText {
+    /// The button that picks files to attach, and what hovering it says.
+    pub attach: String,
+    pub attach_hint: String,
+    /// What hovering an attachment's remove button says.
+    pub remove: String,
     /// Shown in the empty input box.
     pub placeholder: String,
     /// Shown when nothing has been said yet.
@@ -85,6 +100,9 @@ pub struct ChatProviders<'a> {
     pub current: usize,
 }
 
+/// The panel itself. `attachments` go with the next message. Returns whether the input box has
+/// the keyboard, which is when the application takes Ctrl+V for a picture or
+/// files on the clipboard — egui pastes only text.
 #[allow(clippy::too_many_arguments)]
 pub fn chat(
     ui: &mut Ui,
@@ -92,14 +110,16 @@ pub fn chat(
     providers: &ChatProviders<'_>,
     account: &ChatAccount,
     messages: &[ChatMessage],
+    attachments: &[ChatAttachment],
     input: &mut String,
     code: &mut String,
     busy: bool,
     queue: &mut CommandQueue,
-) {
+) -> bool {
     let theme = crate::theme::from_ui(ui);
     let row = ui.spacing().interact_size.y;
-    let input_height = row * 3.0 + 20.0;
+    let attach_rows = if attachments.is_empty() { 1.0 } else { 2.0 };
+    let input_height = row * (3.0 + attach_rows) + 28.0;
 
     // Which assistant, first: changing it starts a new conversation, so not
     // while one is answering or signing in.
@@ -157,7 +177,39 @@ pub fn chat(
         });
 
     ui.separator();
+    // What goes with the next message, and the button that adds to it.
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button(&text.attach)
+            .on_hover_text(&text.attach_hint)
+            .clicked()
+        {
+            queue.push(Command::ChatAttach);
+        }
+        for (index, a) in attachments.iter().enumerate() {
+            egui::Frame::new()
+                .fill(theme.accent_wash)
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // i18n-exempt: a file's own name, and its size
+                        ui.label(egui::RichText::new(&a.name).color(theme.text));
+                        ui.label(egui::RichText::new(&a.detail).small().color(theme.text_faint));
+                        // i18n-exempt: a close mark
+                        if ui
+                            .small_button("x")
+                            .on_hover_text(&text.remove)
+                            .clicked()
+                        {
+                            queue.push(Command::ChatDetach { index });
+                        }
+                    });
+                });
+        }
+    });
     let id = ui.make_persistent_id("claude-chat-input");
+    let mut focused = false;
     ui.horizontal(|ui| {
         let button_width = 64.0;
         let response = ui.add_sized(
@@ -171,8 +223,11 @@ pub fn chat(
                 // Enter sends; Shift+Enter is the new line.
                 .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)),
         );
+        focused = response.has_focus();
         let entered = response.has_focus()
             && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+        // Something attached is worth sending without a word.
+        let something = !input.trim().is_empty() || !attachments.is_empty();
         let send = if busy {
             if ui
                 .add_sized([button_width, row], egui::Button::new(&text.stop))
@@ -183,20 +238,21 @@ pub fn chat(
             false
         } else {
             let clicked = ui
-                .add_enabled_ui(!input.trim().is_empty(), |ui| {
+                .add_enabled_ui(something, |ui| {
                     ui.add_sized([button_width, row], egui::Button::new(&text.send))
                 })
                 .inner
                 .clicked();
             clicked || entered
         };
-        if send && !input.trim().is_empty() {
+        if send && something {
             queue.push(Command::ChatSend {
                 text: std::mem::take(input).trim().to_string(),
             });
             response.request_focus();
         }
     });
+    focused
 }
 
 /// The account line, and signing in when there is no account.

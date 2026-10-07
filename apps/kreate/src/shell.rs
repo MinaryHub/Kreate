@@ -101,6 +101,12 @@ pub struct ShellState {
     /// Claude is answering. The process behind it is the application's.
     pub chat_input: String,
     pub chat_log: Vec<kreate_ui::chat::ChatMessage>,
+    /// What goes with the next message. The application holds the files;
+    /// this is what the panel shows of them.
+    pub chat_attachments: Vec<kreate_ui::chat::ChatAttachment>,
+    /// Whether the chat's input box has the keyboard: Ctrl+V there is the
+    /// application's to read, for a picture or files on the clipboard.
+    pub chat_focused: bool,
     pub chat_busy: bool,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
@@ -564,6 +570,8 @@ impl Default for ShellState {
             console_log: Vec::new(),
             chat_input: String::new(),
             chat_log: Vec::new(),
+            chat_attachments: Vec::new(),
+            chat_focused: false,
             chat_busy: false,
             chat_provider: 0,
             chat_account: kreate_ui::chat::ChatAccount::Checking,
@@ -1252,6 +1260,9 @@ struct Labels {
     console_placeholder: String,
     console_empty: String,
     chat_placeholder: String,
+    chat_attach: String,
+    chat_attach_hint: String,
+    chat_remove: String,
     chat_empty: String,
     chat_send: String,
     chat_stop: String,
@@ -1549,6 +1560,9 @@ impl Labels {
             console_placeholder: t("console-placeholder"),
             console_empty: t("console-empty"),
             chat_placeholder: t("chat-placeholder"),
+            chat_attach: t("chat-attach"),
+            chat_attach_hint: t("chat-attach-hint"),
+            chat_remove: t("chat-remove"),
             chat_empty: t("chat-empty"),
             chat_send: t("chat-send"),
             chat_stop: t("chat-stop"),
@@ -4709,6 +4723,9 @@ fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry
 /// The Claude panel: the conversation, and a box to say the next thing.
 fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     let text = kreate_ui::chat::ChatText {
+        attach: l.chat_attach.clone(),
+        attach_hint: l.chat_attach_hint.clone(),
+        remove: l.chat_remove.clone(),
         placeholder: l.chat_placeholder.clone(),
         empty: l.chat_empty.clone(),
         send: l.chat_send.clone(),
@@ -4734,12 +4751,13 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         names: &names,
         current: state.chat_provider,
     };
-    kreate_ui::chat::chat(
+    state.chat_focused = kreate_ui::chat::chat(
         ui,
         &text,
         &providers,
         &state.chat_account,
         &state.chat_log,
+        &state.chat_attachments,
         &mut input,
         &mut code,
         state.chat_busy,
@@ -9257,6 +9275,9 @@ node-socket-strength = Strength
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = Every edit you make appears here as a line of script. Type one to run it.
 chat-placeholder = Ask for something to be built or changed…
+chat-attach = Attach…
+chat-attach-hint = Attach pictures, PDFs or text files. Ctrl+V in the box pastes a picture or copied files.
+chat-remove = Remove
 chat-empty = Ask about the scene, or to change it — with Claude, Gemini or ChatGPT, chosen above. Every edit it makes is one undo step.
 chat-send = Send
 chat-stop = Stop
@@ -10207,6 +10228,9 @@ node-socket-strength = 세기
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
 chat-placeholder = 만들거나 바꿀 것을 말해 보세요…
+chat-attach = 첨부…
+chat-attach-hint = 사진, PDF, 텍스트 파일을 첨부합니다. 입력 칸에서 Ctrl+V로 사진이나 복사한 파일을 붙여 넣을 수 있습니다.
+chat-remove = 빼기
 chat-empty = 장면에 대해 묻거나 바꿔 달라고 해 보세요. 위에서 Claude, Gemini, ChatGPT 중에 고를 수 있고, AI가 하는 편집은 하나하나 실행 취소할 수 있습니다.
 chat-send = 보내기
 chat-stop = 중지

@@ -43,6 +43,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::attach::{claude_user_message, prompt_with_text, Attachment, Kind as AttachKind};
+
 /// What the assistant is told about where it is, on top of the connector's
 /// own instructions.
 const SYSTEM_PROMPT: &str = "You are talking with the user in the chat panel inside Kreate, \
@@ -304,12 +306,37 @@ impl Chat {
         self.turn.is_some()
     }
 
-    /// Says `text` to the assistant. An error if its tool cannot be started.
-    pub fn send(&mut self, text: &str) -> Result<(), String> {
+    /// Says `text` to the assistant, with `attachments`. An error if its
+    /// tool cannot be started, or cannot take what is attached.
+    ///
+    /// How each tool takes them: Claude Code reads the whole turn as JSON on
+    /// its input, pictures and PDFs as content blocks; Codex is handed the
+    /// pictures as files (`--image`) and cannot take a PDF; Gemini here takes
+    /// neither, its file reading being among the tools it runs without. Text
+    /// files are read into the words for every one of them.
+    pub fn send(&mut self, text: &str, attachments: &[Attachment]) -> Result<(), String> {
         if self.turn.is_some() {
             return Err(format!("{} is still answering", self.provider.name()));
         }
         let provider = self.provider;
+        let has_pictures = attachments.iter().any(Attachment::is_image);
+        let has_pdfs = attachments.iter().any(|a| a.kind == AttachKind::Pdf);
+        match provider {
+            Provider::Gemini if has_pictures || has_pdfs => {
+                return Err(
+                    "Gemini here takes text files only. Pictures and PDFs: Claude, or ChatGPT for pictures."
+                        .into(),
+                )
+            }
+            Provider::ChatGpt if has_pdfs => {
+                return Err("ChatGPT here cannot take PDFs. Claude can.".into())
+            }
+            _ => {}
+        }
+        let words = prompt_with_text(text, attachments);
+        // Claude Code's turn, as JSON on its input, when it carries more than
+        // words.
+        let mut stdin_turn: Option<String> = None;
         let tool = find_cli(provider).ok_or_else(|| provider.not_installed())?;
         let connector = find_connector().ok_or(
             "kreate-mcp was not found next to Kreate. Build it with `cargo build -p kreate-mcp`.",
@@ -322,9 +349,14 @@ impl Chat {
                 let config = serde_json::json!({
                     "mcpServers": { "kreate": { "command": connector, "args": [] } }
                 });
+                command.arg("-p");
+                if has_pictures || has_pdfs {
+                    command.args(["--input-format", "stream-json"]);
+                    stdin_turn = Some(claude_user_message(text, attachments).to_string());
+                } else {
+                    command.arg(&words);
+                }
                 command
-                    .arg("-p")
-                    .arg(text)
                     .args(["--output-format", "stream-json", "--verbose"])
                     .arg("--mcp-config")
                     .arg(config.to_string())
@@ -347,7 +379,7 @@ impl Chat {
                     .map_err(|e| format!("cannot set up Gemini's folder: {e}"))?;
                 command
                     .arg("-p")
-                    .arg(text)
+                    .arg(&words)
                     .args(["--output-format", "stream-json"])
                     .args(["--allowed-mcp-server-names", "kreate"]);
                 if skip_trust {
@@ -381,10 +413,24 @@ impl Chat {
                         toml_string(&connector.to_string_lossy())
                     ))
                     .args(["-c", "approval_policy=\"never\""]);
+                // Pictures as files in Kreate's own folder for the tool, the
+                // only place it is let read.
+                if has_pictures {
+                    let pictures = dir.join("attachments");
+                    let _ = std::fs::remove_dir_all(&pictures);
+                    std::fs::create_dir_all(&pictures)
+                        .map_err(|e| format!("cannot keep the pictures for Codex: {e}"))?;
+                    for (i, a) in attachments.iter().filter(|a| a.is_image()).enumerate() {
+                        let path = pictures.join(format!("{i}-{}", a.name));
+                        std::fs::write(&path, &a.data)
+                            .map_err(|e| format!("cannot keep {} for Codex: {e}", a.name))?;
+                        command.arg("--image").arg(path);
+                    }
+                }
                 if let Some(thread) = &self.session {
                     command.args(["resume", thread]);
                 }
-                command.arg(text);
+                command.arg(&words);
                 parse_codex_line
             }
         };
@@ -392,11 +438,25 @@ impl Chat {
             command.current_dir(dir);
         }
         let mut child = command
-            .stdin(Stdio::null())
+            .stdin(if stdin_turn.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot start {}: {e}", provider.name()))?;
+        // Written on a thread of its own: a turn with pictures is megabytes,
+        // more than a pipe holds, and the tool reads it while it also writes.
+        // Closed when written, which is what ends the turn's input.
+        if let (Some(turn), Some(mut input)) = (stdin_turn, child.stdin.take()) {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = input.write_all(turn.as_bytes());
+                let _ = input.write_all(b"\n");
+            });
+        }
 
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");

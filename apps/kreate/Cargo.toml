@@ -38,7 +38,11 @@ half = "2"
 serde_json.workspace = true
 # The bridge's token: the operating system's secure random source.
 getrandom = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The chat panel's attachments: a picture or files on the system clipboard,
+# and pictures and PDFs sent as base64. See `attach`.
+arboard = "3.6"
+base64 = "0.13"
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon in the executable. See `build.rs`.
