@@ -1,7 +1,8 @@
-//! The scene's design settings: the unit it is drawn in. See
-//! `kreate_scene::design`.
+//! The scene's design settings: the unit it is drawn in, and the dimensions
+//! left on it. See `kreate_scene::design`.
 
-use kreate_scene::design::LengthUnit;
+use kreate_math::DVec3;
+use kreate_scene::design::{LengthUnit, Measurement};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
@@ -9,6 +10,89 @@ use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<UnitsSet>();
+    registry.register::<MeasureAdd>();
+    registry.register::<MeasureRemove>();
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MeasureAddParams {
+    /// Two points for a distance, three for the angle at the middle one:
+    /// x, y, z each, in the world.
+    pub points: Vec<f64>,
+}
+
+/// Leaves a dimension on the scene — what the Measure tool's clicks make.
+pub struct MeasureAdd;
+
+impl Operator for MeasureAdd {
+    type Params = MeasureAddParams;
+    fn id() -> &'static str {
+        "measure.add"
+    }
+    fn label() -> &'static str {
+        "Add Measurement"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let (chunks, rest) = params.points.as_chunks::<3>();
+        let m = Measurement {
+            points: chunks.iter().map(|c| DVec3::from_array(*c)).collect(),
+        };
+        if !rest.is_empty() || !m.is_valid() {
+            return Err(OpError::Failed(
+                "a measurement is two points, or three for an angle".into(),
+            ));
+        }
+        doc.document_mut().design.measurements.push(m);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MeasureRemoveParams {
+    /// Which one, in the order they were taken.
+    pub index: u32,
+    /// Every one of them instead.
+    pub all: bool,
+}
+
+/// Takes a dimension off the scene, or all of them.
+pub struct MeasureRemove;
+
+impl Operator for MeasureRemove {
+    type Params = MeasureRemoveParams;
+    fn id() -> &'static str {
+        "measure.remove"
+    }
+    fn label() -> &'static str {
+        "Remove Measurement"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !doc.design.measurements.is_empty()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let list = &doc.document().design.measurements;
+        if list.is_empty() || (!params.all && params.index as usize >= list.len()) {
+            return Ok(OpResult::Cancelled);
+        }
+        let list = &mut doc.document_mut().design.measurements;
+        if params.all {
+            list.clear();
+        } else {
+            list.remove(params.index as usize);
+        }
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -59,6 +143,34 @@ mod tests {
     use super::*;
     use crate::history::History;
     use crate::{OperatorRegistry, PropertyMap, PropertyValue};
+
+    #[test]
+    fn measurements_are_added_and_removed() {
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut doc = Document::new();
+        let mut history = History::new();
+        let ctx = Context::default();
+        let mut run = |doc: &mut Document, id: &str, pairs: &[(&'static str, PropertyValue)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            history.dispatch(&registry, doc, &ctx, id, &p)
+        };
+        let two = PropertyValue::Floats(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.02]);
+        run(&mut doc, "measure.add", &[("points", two)]).unwrap();
+        assert_eq!(doc.design.measurements[0].length(), Some(0.02));
+        let bad = PropertyValue::Floats(vec![1.0, 2.0]);
+        assert!(run(&mut doc, "measure.add", &[("points", bad)]).is_err());
+        let three = PropertyValue::Floats(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        run(&mut doc, "measure.add", &[("points", three)]).unwrap();
+        assert_eq!(doc.design.measurements.len(), 2);
+        run(&mut doc, "measure.remove", &[("index", PropertyValue::Int(0))]).unwrap();
+        assert!(doc.design.measurements[0].angle().is_some());
+        run(&mut doc, "measure.remove", &[("all", PropertyValue::Bool(true))]).unwrap();
+        assert!(doc.design.measurements.is_empty());
+    }
 
     #[test]
     fn the_unit_is_set_and_undone() {

@@ -25,3 +25,19 @@ fn default_design_settings_write_nothing() {
     let bytes = container::write(&Document::new(), &Manifest::default(), &[]).expect("writes");
     assert!(!String::from_utf8_lossy(&bytes).contains("\"design\""));
 }
+
+#[test]
+fn measurements_are_saved_where_they_were_taken() {
+    use kreate_math::DVec3;
+    use kreate_scene::design::Measurement;
+    let mut doc = Document::new();
+    doc.design.measurements = vec![
+        Measurement {
+            points: vec![DVec3::new(0.5, 1.0, -2.0), DVec3::new(0.0, 0.25, 3.0)],
+        },
+        Measurement {
+            points: vec![DVec3::X, DVec3::ZERO, DVec3::new(0.0, 1.5, 0.0)],
+        },
+    ];
+    assert_eq!(round_trip(&doc).design.measurements, doc.design.measurements);
+}

@@ -285,6 +285,20 @@ pub fn format_length(metres: f64) -> String {
     format_length_in(metres, display_length_unit())
 }
 
+/// An area, stored in square metres, as the display unit writes it:
+/// `120 mm²`.
+pub fn format_area(square_metres: f64) -> String {
+    let unit = display_length_unit();
+    let shown = square_metres / (unit.metres() * unit.metres());
+    let text = format!("{shown:.*}", unit.decimals());
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    };
+    format!("{text} {}²", unit.symbol())
+}
+
 /// A length, stored in metres, written in `unit`.
 pub fn format_length_in(metres: f64, unit: LengthUnit) -> String {
     let shown = metres / unit.metres();

@@ -590,6 +590,9 @@ pub struct DesignRecord {
     /// later version — reads as metres rather than failing the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length_unit: Option<String>,
+    /// The dimensions left on the scene, each its two or three points.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measurements: Vec<Vec<[f64; 3]>>,
 }
 
 /// The scene's render settings. See `kreate_scene::render`.
@@ -1461,6 +1464,12 @@ pub fn write(
         scene.design = (!document.design.is_default()).then(|| DesignRecord {
             length_unit: (document.design.length_unit != Default::default())
                 .then(|| document.design.length_unit.tag().to_string()),
+            measurements: document
+                .design
+                .measurements
+                .iter()
+                .map(|m| m.points.iter().map(|p| p.to_array()).collect())
+                .collect(),
         });
         scene.collections = document
             .collections()
@@ -2125,6 +2134,14 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         {
             document.design.length_unit = unit;
         }
+        document.design.measurements = d
+            .measurements
+            .iter()
+            .map(|points| kreate_scene::design::Measurement {
+                points: points.iter().map(|p| kreate_math::DVec3::from_array(*p)).collect(),
+            })
+            .filter(|m| m.is_valid())
+            .collect();
     }
     if let Some(r) = &scene.render {
         use kreate_scene::render::{OutputFormat, RenderSettings};

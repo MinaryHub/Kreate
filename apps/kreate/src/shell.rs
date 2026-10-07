@@ -284,6 +284,8 @@ pub struct ShellState {
     /// The knife's path while `K` is drawing it: the points clicked, then
     /// where the next one would go. Empty otherwise.
     pub knife_preview: Vec<kreate_math::DVec3>,
+    /// The Measure tool's points so far and where the next would go.
+    pub measure_preview: Vec<kreate_math::DVec3>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
     /// What a snapping drag has caught, for a marker on it.
@@ -623,6 +625,7 @@ impl Default for ShellState {
             texture_paint: TexturePaintSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
+            measure_preview: Vec::new(),
             circle_select: None,
             snap_target: None,
             rename: None,
@@ -1359,6 +1362,9 @@ struct Labels {
     view_frame_all: String,
     view_frame_selected: String,
     view_camera: String,
+    view_measure: String,
+    design_dimensions: String,
+    design_clear: String,
     view_perspective: String,
     view_sidebar: String,
     overlays: String,
@@ -1405,6 +1411,8 @@ struct Labels {
     stats_edges: String,
     stats_faces: String,
     stats_triangles: String,
+    stats_length: String,
+    stats_area: String,
     pivot_median: String,
     pivot_individual: String,
     pivot_active: String,
@@ -1668,6 +1676,9 @@ impl Labels {
             view_frame_all: t("view-frame-all"),
             view_frame_selected: t("view-frame-selected"),
             view_camera: t("view-camera"),
+            view_measure: t("view-measure"),
+            design_dimensions: t("design-dimensions"),
+            design_clear: t("design-clear"),
             view_perspective: t("view-perspective"),
             view_sidebar: t("view-sidebar"),
             overlays: t("overlays"),
@@ -1714,6 +1725,8 @@ impl Labels {
             stats_edges: t("stats-edges"),
             stats_faces: t("stats-faces"),
             stats_triangles: t("stats-triangles"),
+            stats_length: t("stats-length"),
+            stats_area: t("stats-area"),
             pivot_median: t("pivot-median"),
             pivot_individual: t("pivot-individual"),
             pivot_active: t("pivot-active"),
@@ -2500,6 +2513,14 @@ fn draw_area(
                             }
                         }
                     }
+                    // The dimensions on the scene, and the one being taken.
+                    if let Some(projector) = state.projector {
+                        let painter = ui.painter().with_clip_rect(inner);
+                        for m in &doc.design.measurements {
+                            draw_measurement(&painter, &projector, &m.points, false);
+                        }
+                        draw_measurement(&painter, &projector, &state.measure_preview, true);
+                    }
                     // The knife's path: the cut so far and the next stretch.
                     if let Some(projector) =
                         state.projector.filter(|_| !state.knife_preview.is_empty())
@@ -3285,6 +3306,8 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         // Numpad 0 is the key, and a keyboard without a numpad has no other
         // way through the camera.
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
+        MenuNode::Separator,
+        entry("view.measure", &l.view_measure, dispatch("view.measure")),
         MenuNode::Separator,
         entry(
             "view.toggle_projection",
@@ -4534,6 +4557,59 @@ fn draw_view_info(
     }
 }
 
+/// A dimension over the picture: the line between two points and how long it
+/// is, or the two arms of an angle and how wide. `live` is the one the
+/// Measure tool is taking, drawn brighter.
+fn draw_measurement(
+    painter: &egui::Painter,
+    projector: &kreate_ui::object_glyph::Projector,
+    points: &[kreate_math::DVec3],
+    live: bool,
+) {
+    let colour = if live {
+        egui::Color32::from_rgb(255, 214, 90)
+    } else {
+        egui::Color32::from_rgb(235, 170, 50)
+    };
+    let screen: Vec<egui::Pos2> = points.iter().filter_map(|p| projector.project(*p)).collect();
+    if screen.len() != points.len() || screen.is_empty() {
+        return;
+    }
+    let stroke = egui::Stroke::new(1.5, colour);
+    for pair in screen.windows(2) {
+        painter.line_segment([pair[0], pair[1]], stroke);
+    }
+    for p in &screen {
+        painter.circle_filled(*p, 3.0, colour);
+    }
+    // i18n-exempt: a measured length or angle
+    let (text, at) = match points {
+        [a, b] => (
+            kreate_reflect::format_length(a.distance(*b)),
+            screen[0] + (screen[1] - screen[0]) * 0.5,
+        ),
+        [a, b, c] => {
+            let (u, v) = (*a - *b, *c - *b);
+            if u.length() == 0.0 || v.length() == 0.0 {
+                return;
+            }
+            (
+                format!("{:.2}°", u.angle_between(v).to_degrees()),
+                screen[1],
+            )
+        }
+        _ => return,
+    };
+    let font = egui::FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(text, font, egui::Color32::BLACK);
+    let rect = egui::Rect::from_center_size(
+        at + egui::vec2(0.0, -12.0),
+        galley.size() + egui::vec2(8.0, 4.0),
+    );
+    painter.rect_filled(rect, 3.0, colour);
+    painter.galley(rect.min + egui::vec2(4.0, 2.0), galley, egui::Color32::BLACK);
+}
+
 /// Blender's Statistics overlay: how many objects, and how many vertices,
 /// edges, faces and triangles — selected of the total in edit mode.
 fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> Vec<String> {
@@ -4553,10 +4629,34 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
     let row = |name: &str, value: String| format!("{name}  {value}");
     if mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements {
         let (mut v, mut e, mut f, mut t) = ([0usize; 2], [0usize; 2], [0usize; 2], 0usize);
+        // What a designer reads off a selection: how long its edges are, and
+        // how much surface its faces cover — in the world, in the scene's unit.
+        let (mut length, mut area) = (0.0f64, 0.0f64);
         for target in kreate_ops::ops::mesh::edit_targets(doc) {
             let Some(mesh) = doc.mesh(target.mesh) else {
                 continue;
             };
+            let at = |v: u32| target.to_world.transform_point3(mesh.positions()[v as usize].as_dvec3());
+            if let Some(sel) = mesh.attributes().get_bool(names::SELECT_EDGE) {
+                for (edge, on) in mesh.edges().iter().zip(sel) {
+                    if *on {
+                        length += at(edge[0]).distance(at(edge[1]));
+                    }
+                }
+            }
+            if let Some(sel) = mesh.attributes().get_bool(names::SELECT_FACE) {
+                for (face, on) in sel.iter().enumerate() {
+                    if !*on {
+                        continue;
+                    }
+                    let ring: Vec<_> = mesh.face_verts(face as u32).iter().map(|v| at(*v)).collect();
+                    let mut n = kreate_math::DVec3::ZERO;
+                    for i in 0..ring.len() {
+                        n += ring[i].cross(ring[(i + 1) % ring.len()]);
+                    }
+                    area += n.length() * 0.5;
+                }
+            }
             v[0] += count(mesh, names::SELECT_VERT);
             v[1] += mesh.num_verts() as usize;
             e[0] += count(mesh, names::SELECT_EDGE);
@@ -4565,12 +4665,19 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
             f[1] += mesh.num_faces() as usize;
             t += triangles(mesh);
         }
-        return vec![
+        let mut rows = vec![
             row(&l.stats_vertices, format!("{}/{}", v[0], v[1])),
             row(&l.stats_edges, format!("{}/{}", e[0], e[1])),
             row(&l.stats_faces, format!("{}/{}", f[0], f[1])),
             row(&l.stats_triangles, t.to_string()),
         ];
+        if e[0] > 0 {
+            rows.push(row(&l.stats_length, kreate_reflect::format_length(length)));
+        }
+        if f[0] > 0 {
+            rows.push(row(&l.stats_area, kreate_reflect::format_area(area)));
+        }
+        return rows;
     }
     let (mut v, mut e, mut f, mut t, mut objects) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for (id, object) in doc.objects() {
@@ -4711,6 +4818,40 @@ fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry
             kreate_reflect::OpParams::to_map(&kreate_ops::ops::design::units_params(doc));
         if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
             send_edit(state, "scene.units_set", params, false);
+        }
+    }
+    // The dimensions on the scene: what each reads, and a way to take it off.
+    if !doc.design.measurements.is_empty() {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong(&l.design_dimensions);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(&l.design_clear).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("all", kreate_reflect::PropertyValue::Bool(true));
+                    state.queue.run("measure.remove", p);
+                }
+            });
+        });
+        for (i, m) in doc.design.measurements.iter().enumerate() {
+            // i18n-exempt: a measured length or angle
+            let value = match (m.length(), m.angle()) {
+                (Some(d), _) => kreate_reflect::format_length(d),
+                (_, Some(a)) => format!("{:.2}°", a.to_degrees()),
+                _ => continue,
+            };
+            ui.horizontal(|ui| {
+                // i18n-exempt: a number and a measured value
+                ui.label(format!("{}.  {value}", i + 1));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // i18n-exempt: a close mark
+                    if ui.small_button("x").clicked() {
+                        let mut p = PropertyMap::new();
+                        p.set("index", kreate_reflect::PropertyValue::Int(i as i64));
+                        state.queue.run("measure.remove", p);
+                    }
+                });
+            });
         }
     }
     ui.separator();
@@ -9008,6 +9149,8 @@ stats-vertices = Vertices
 stats-edges = Edges
 stats-faces = Faces
 stats-triangles = Triangles
+stats-length = Edge Length
+stats-area = Face Area
 op-view-circle-select = Circle Select
 op-view-circle-select-desc = A brush that selects what it passes over. Shift to deselect, wheel for size, Esc or right-click to stop.
 op-mesh-knife-desc = Cuts new edges along a path clicked over the surface. Enter cuts, Esc gives up.
@@ -9370,6 +9513,10 @@ select-invert = Invert
 view-frame-all = Frame All
 view-frame-selected = Frame Selected
 view-camera = Camera
+view-measure = Measure
+op-view-measure-desc = Click two points to measure the distance between them; hold Ctrl on the second for an angle. Each measurement stays as a dimension.
+design-dimensions = Dimensions
+design-clear = Clear All
 view-perspective = Perspective/Orthographic
 view-sidebar = Sidebar
 overlays = Overlays
@@ -9962,6 +10109,8 @@ stats-vertices = 정점
 stats-edges = 엣지
 stats-faces = 면
 stats-triangles = 삼각형
+stats-length = 엣지 길이
+stats-area = 면 넓이
 op-view-circle-select = 원형 선택
 op-view-circle-select-desc = 지나가는 것을 선택하는 브러시입니다. Shift는 해제, 휠은 크기, Esc나 우클릭으로 끝냅니다.
 op-mesh-knife-desc = 표면 위에 클릭한 경로를 따라 새 엣지를 자릅니다. Enter로 자르고 Esc로 취소합니다.
@@ -10324,6 +10473,10 @@ select-invert = 반전
 view-frame-all = 전체 보기
 view-frame-selected = 선택 항목 보기
 view-camera = 카메라 시점
+view-measure = 측정
+op-view-measure-desc = 두 점을 클릭하면 거리를 잽니다. 두 번째 점에서 Ctrl을 누르면 각도를 잽니다. 잰 값은 치수로 남습니다.
+design-dimensions = 치수
+design-clear = 모두 지우기
 view-perspective = 원근/직교
 view-sidebar = 사이드바
 overlays = 오버레이

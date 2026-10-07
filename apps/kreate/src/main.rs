@@ -637,6 +637,17 @@ struct SculptView {
     reshape: kreate_render::Reshape,
 }
 
+/// The Measure tool: the points clicked so far, where the next would go,
+/// and everything it can catch on — all of the scene, gathered once.
+struct MeasureTool {
+    world: kreate::snap::SnapWorld,
+    points: Vec<DVec3>,
+    hover: Option<DVec3>,
+    /// Ctrl was held on the second click: the second point is the corner of
+    /// an angle, and a third is wanted.
+    angle: bool,
+}
+
 struct SkinnedGpu {
     object: ObjectId,
     /// The mesh as it was before the bones: what `mesh` was uploaded from.
@@ -859,6 +870,8 @@ struct App {
     /// `K` drawing a cut: the points clicked so far, in the world, and where
     /// the next click would put one.
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
+    /// The Measure tool, while it is out. See `begin_measure`.
+    measure: Option<MeasureTool>,
     /// The brush size circle select last used, so the next one starts there.
     circle_radius: f32,
     /// Local view (`/`): the objects shown, and the view to go back to.
@@ -1001,6 +1014,7 @@ impl App {
             loop_cut_hover: None,
             loop_cut_seed: None,
             knife: None,
+            measure: None,
             circle_radius: 40.0,
             local_view: None,
             camera_view: None,
@@ -3202,6 +3216,99 @@ impl App {
     }
 
     /// `K`: from here until Enter, each click adds a point to the cut.
+    /// View ▸ Measure: click two points for the distance between them, or
+    /// hold Ctrl on the second for the corner of an angle and click a third.
+    /// Points catch on vertices, edges and faces of anything shown; each
+    /// finished measurement stays on the scene as a dimension.
+    fn begin_measure(&mut self) {
+        if self.gesture.is_some() || self.measure.is_some() {
+            return;
+        }
+        self.end_loop_cut_hover();
+        let mut world = kreate::snap::SnapWorld::default();
+        for (id, mesh) in &self.evaluated {
+            if self.doc.is_shown(*id) {
+                world.add_mesh(mesh, &self.doc.world_transform(*id), &[]);
+            }
+        }
+        self.measure = Some(MeasureTool {
+            world,
+            points: Vec::new(),
+            hover: None,
+            angle: false,
+        });
+        self.status("Measure: click two points (Ctrl on the second for an angle), Esc to stop");
+        self.update_measure();
+    }
+
+    /// Where the next point would go: what the pointer is near, or failing
+    /// that the point under it on the plane facing the view through the last
+    /// point taken (the 3D cursor for the first).
+    fn update_measure(&mut self) {
+        let Some(mut tool) = self.measure.take() else {
+            return;
+        };
+        let size = self.gfx.as_ref().map(|g| g.viewport.render_size());
+        let caught = match (self.cursor_viewport_px(), size) {
+            (Some((x, y)), Some((w, h))) => kreate::snap::resolve(
+                &tool.world,
+                kreate::snap::Mode::Element,
+                (x as f32, y as f32),
+                &self.camera,
+                (w as f32, h as f32),
+            )
+            .map(|hit| hit.point),
+            _ => None,
+        };
+        tool.hover = caught.or_else(|| {
+            let ndc = self.cursor_ndc()?;
+            let eye = self.camera.eye();
+            let dir = self.camera.ray_direction(ndc, self.viewport_aspect()).as_dvec3();
+            let n = self.camera.forward();
+            let through = tool.points.last().copied().unwrap_or(self.doc.cursor);
+            let denom = dir.dot(n);
+            (denom.abs() > 1e-9).then(|| eye + dir * ((through - eye).dot(n) / denom))
+        });
+        let mut preview = tool.points.clone();
+        preview.extend(tool.hover);
+        self.ui.measure_preview = preview;
+        self.measure = Some(tool);
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// A click with the Measure tool: a point taken, and the measurement left
+    /// on the scene once it has its two points — or three, for an angle.
+    fn measure_click(&mut self) {
+        let ctrl = self.input.ctrl_down;
+        let Some(tool) = &mut self.measure else { return };
+        let Some(at) = tool.hover else { return };
+        tool.points.push(at);
+        if tool.points.len() == 2 && ctrl {
+            tool.angle = true;
+        }
+        let done = match tool.points.len() {
+            2 => !tool.angle,
+            3 => true,
+            _ => false,
+        };
+        if done {
+            let points: Vec<f64> = tool.points.iter().flat_map(|p| p.to_array()).collect();
+            tool.points.clear();
+            tool.angle = false;
+            self.run_op_with("measure.add", &[("points", PropertyValue::Floats(points))]);
+        }
+        self.update_measure();
+    }
+
+    fn end_measure(&mut self, status: &str) {
+        self.measure = None;
+        self.ui.measure_preview.clear();
+        if !status.is_empty() {
+            self.status(status);
+        }
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
     fn begin_knife(&mut self) {
         if self.gesture.is_some() || self.knife.is_some() {
             return;
@@ -9094,6 +9201,23 @@ impl App {
             self.end_circle_select();
             return;
         }
+        if self.measure.is_some() {
+            match code {
+                KeyCode::Escape => {
+                    self.end_measure("Measure cancelled");
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if let Some(tool) = &mut self.measure {
+                        tool.points.pop();
+                        tool.angle = tool.angle && tool.points.len() >= 2;
+                    }
+                    self.update_measure();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.knife.is_some() {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
@@ -9273,6 +9397,7 @@ impl App {
             }
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
+            "view.measure" => self.begin_measure(),
             "view.frame_selected" => self.frame_selected(),
             "view.toggle_statistics" => {
                 self.ui.show_stats = !self.ui.show_stats;
@@ -9988,6 +10113,20 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // The Measure tool: left takes a point, right puts it away.
+                if self.measure.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.measure_click();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.end_measure("Measure cancelled");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // K drawing a cut: left adds a point, right gives up.
                 if self.knife.is_some() && pressed {
                     match button {
@@ -10116,6 +10255,9 @@ impl ApplicationHandler for App {
                 }
                 if self.knife.is_some() {
                     self.update_knife();
+                }
+                if self.measure.is_some() {
+                    self.update_measure();
                 }
                 if self.circle.is_some() {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
@@ -11001,6 +11143,36 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// The Measure tool: two clicks leave a distance, Ctrl on the second
+    /// asks for a third and leaves an angle; Esc puts the tool away.
+    #[test]
+    fn the_measure_tool_leaves_distances_and_angles() {
+        let mut app = app();
+        app.begin_measure();
+        let mut click = |app: &mut App, at: DVec3, ctrl: bool| {
+            app.input.ctrl_down = ctrl;
+            app.measure.as_mut().expect("the tool is out").hover = Some(at);
+            app.measure_click();
+        };
+        click(&mut app, DVec3::ZERO, false);
+        click(&mut app, DVec3::new(0.0, 0.03, 0.04), false);
+        assert_eq!(app.doc.design.measurements.len(), 1);
+        assert!((app.doc.design.measurements[0].length().unwrap() - 0.05).abs() < 1e-12);
+
+        click(&mut app, DVec3::X, false);
+        click(&mut app, DVec3::ZERO, true);
+        assert_eq!(app.doc.design.measurements.len(), 1, "an angle wants a third point");
+        click(&mut app, DVec3::Y, false);
+        let angle = app.doc.design.measurements[1].angle().unwrap();
+        assert!((angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+
+        // Each is one undo step, and the tool stays out until put away.
+        assert!(app.measure.is_some());
+        app.end_measure("");
+        assert!(app.measure.is_none());
+        assert!(app.ui.measure_preview.is_empty());
     }
 
     /// Blender's Alt+E: the region, or each face along its own normal.
