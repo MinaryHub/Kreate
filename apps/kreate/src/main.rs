@@ -378,6 +378,9 @@ struct SculptStroke {
     radius_world: f64,
     /// For a grab: where it took hold, and the plane facing the view through it.
     hold: DVec3,
+    /// What the operator last ran with — the dab count and, for a grab, the
+    /// drag — so a frame with nothing new does not run it again.
+    sent: Option<(usize, DVec3)>,
     session: Option<kreate_ops::ModalSession>,
 }
 
@@ -526,6 +529,8 @@ struct Gfx {
     deformer: kreate_render::Deformer,
     /// The drag being previewed on the GPU, if there is one.
     preview: Option<LivePreview>,
+    /// The mesh a sculpt stroke is reshaping in place. See `SculptView`.
+    sculpt_view: Option<SculptView>,
 
     egui_renderer: egui_wgpu::Renderer,
     target: ViewportTarget,
@@ -622,6 +627,16 @@ fn uv_on_face(
 type EditBases = (Vec<u32>, Vec<(u32, u32, u32)>);
 
 /// One object skinned on the GPU. See `Gfx::skinned`.
+/// A mesh being sculpted, drawn by writing its new positions into the GPU
+/// mesh it was uploaded as and recomputing the normals there — not by
+/// extracting it again every frame of the stroke, which at a hundred thousand
+/// vertices is most of the frame. See `kreate_render::Reshape`.
+struct SculptView {
+    /// The mesh the GPU buffers now show.
+    held: Arc<MeshData>,
+    reshape: kreate_render::Reshape,
+}
+
 struct SkinnedGpu {
     object: ObjectId,
     /// The mesh as it was before the bones: what `mesh` was uploaded from.
@@ -6052,7 +6067,16 @@ impl App {
     /// upload more than it had to" is invisible at a glance and only shows up as
     /// a stutter on a scene big enough that it is already too late.
     fn sync_gpu(&mut self) {
+        let sculpting = self.sculpt_stroke.is_some();
         let Some(gfx) = self.gfx.as_mut() else { return };
+        // The stroke is over, however it ended: drop the reshaped mesh so it
+        // is uploaded afresh, with a vertex split that matches what was
+        // sculpted — a crease the stroke made shaded as one.
+        if !sculpting {
+            if let Some(view) = gfx.sculpt_view.take() {
+                gfx.meshes.retain(|(held, _)| !Arc::ptr_eq(held, &view.held));
+            }
+        }
         // Skinned objects first. Each is drawn from a GPU mesh of its rest
         // shape, skinned in place, so a new pose costs a matrix upload and a
         // dispatch rather than the extract and upload a changed mesh costs —
@@ -6191,17 +6215,55 @@ impl App {
         // that the topology is identical. It is asserted rather than
         // trusted, because a wrong answer here writes past the end of
         // somebody's buffer.
+        let mut reshaped: Option<wgpu::CommandEncoder> = None;
         for (slot, mesh) in &plan.repositions {
             let Some(Some((held, gpu_mesh))) = old.get_mut(*slot) else {
                 continue;
             };
+            // A sculpt stroke after its first frame: positions in, normals
+            // recomputed on the GPU, nothing extracted.
+            if sculpting {
+                if let Some(view) = gfx
+                    .sculpt_view
+                    .as_mut()
+                    .filter(|v| Arc::ptr_eq(&v.held, held))
+                {
+                    if view.reshape.write(&gfx.gpu.queue, gpu_mesh, mesh.positions()) {
+                        let encoder = reshaped.get_or_insert_with(|| {
+                            gfx.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("reshape"),
+                            })
+                        });
+                        view.reshape.dispatch(encoder, &gfx.deformer);
+                        view.held = mesh.clone();
+                        *held = mesh.clone();
+                        continue;
+                    }
+                }
+            }
             let cpu = RenderMeshCpu::extract(mesh);
             if cpu.positions.len() as u32 == gpu_mesh.render_verts {
                 gpu_mesh.update_positions(&gfx.gpu.queue, &cpu);
                 *held = mesh.clone();
+                // The stroke's first frame: what the rest of it reshapes.
+                if sculpting && gfx.sculpt_view.is_none() {
+                    gfx.sculpt_view = kreate_render::Reshape::new(
+                        &gfx.gpu.device,
+                        &gfx.deformer,
+                        gpu_mesh,
+                        &cpu,
+                    )
+                    .map(|reshape| SculptView {
+                        held: mesh.clone(),
+                        reshape,
+                    });
+                }
             } else {
                 old[*slot] = None;
             }
+        }
+        if let Some(encoder) = reshaped {
+            gfx.gpu.queue.submit([encoder.finish()]);
         }
 
         let mut next: Vec<(Arc<MeshData>, GpuMesh)> = Vec::with_capacity(plan.total());
@@ -6427,6 +6489,18 @@ impl App {
         // coordinate fields above all, where a drag would otherwise type a
         // number *and* orbit the camera.
         if self.ui.viewport_blockers.iter().any(|r| r.contains(at)) {
+            return false;
+        }
+        // And a menu or list open over it — the mode list, a header menu,
+        // Shift+A. Its click chose an entry; taken by the scene as well, it
+        // was an object-mode click on empty space that cleared the selection,
+        // and the mode just chosen then refused to start for want of a mesh.
+        // Tooltips are left out: one under the pointer is not a thing to click.
+        if self
+            .egui_ctx
+            .layer_id_at(at)
+            .is_some_and(|l| matches!(l.order, egui::Order::Middle | egui::Order::Foreground))
+        {
             return false;
         }
         let Some((centre, radius)) = self.ui.gizmo_circle else {
@@ -6691,6 +6765,7 @@ impl App {
             last: at,
             radius_world,
             hold: at,
+            sent: None,
             session: None,
         });
         self.add_sculpt_dab(at);
@@ -6748,6 +6823,13 @@ impl App {
         let Some(stroke) = self.sculpt_stroke.as_mut() else {
             return;
         };
+        // Called every frame of the stroke; most frames the pointer has not
+        // gone far enough for a new dab, and re-running would redo the same.
+        let now = (stroke.dabs.len(), grab);
+        if stroke.session.is_some() && stroke.sent == Some(now) {
+            return;
+        }
+        stroke.sent = Some(now);
         let mut params = PropertyMap::new();
         params.set("brush", PropertyValue::Enum(stroke.brush));
         params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
@@ -9698,6 +9780,7 @@ impl ApplicationHandler for App {
             region,
             deformer,
             preview: None,
+            sculpt_view: None,
             egui_renderer,
             target,
         });
@@ -10775,6 +10858,36 @@ mod tests {
         );
         app.open_popup_menu("parent_clear");
         assert_eq!(ops(&app), ["object.parent", "object.unbind_armature"]);
+    }
+
+    /// A press on a list or menu open over the scene is the list's: the
+    /// mode list's entries sit over the viewport, and their click must not
+    /// also reach the scene.
+    #[test]
+    fn a_press_on_a_menu_over_the_scene_is_the_menus() {
+        let mut app = app();
+        app.viewport_px = Some((0.0, 0.0, 800.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            ..Default::default()
+        };
+        let ctx = app.egui_ctx.clone();
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default().show(ui, |_| {});
+                egui::Area::new(egui::Id::new("a menu"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(egui::pos2(100.0, 100.0))
+                    .show(ui.ctx(), |ui| {
+                        ui.set_min_size(egui::vec2(120.0, 80.0));
+                    });
+            });
+        }
+        let ppp = ctx.pixels_per_point() as f64;
+        app.input.cursor = Some((150.0 * ppp, 130.0 * ppp));
+        assert!(!app.press_belongs_to_viewport(), "on the menu");
+        app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
+        assert!(app.press_belongs_to_viewport(), "on the scene beside it");
     }
 
     /// Blender's Alt+E: the region, or each face along its own normal.

@@ -5,11 +5,19 @@
 //! whole of it is one step to undo. See `kreate_mesh::sculpt`.
 
 use kreate_math::Vec3;
-use kreate_mesh::sculpt::{self, Brush, Dab, Stroke};
+use std::sync::Mutex;
+
+use kreate_mesh::sculpt::{Brush, Dab, Stroke, StrokeCache};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
 use crate::OpParams;
+
+/// The stroke being drawn. While the pointer moves the stroke is re-run on
+/// its starting mesh with one more dab each time; the cache lets that run do
+/// only the new dab. It checks it was given the mesh it began on, so a stale
+/// one is never used — at worst it is rebuilt.
+static STROKE: Mutex<Option<StrokeCache>> = Mutex::new(None);
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SculptStroke>();
@@ -105,7 +113,13 @@ impl Operator for SculptStroke {
         let Some(m) = doc.document_mut().mesh_mut(mesh) else {
             return Ok(OpResult::Cancelled);
         };
-        Ok(if sculpt::apply(m, &dabs, &stroke) {
+        let mut held = STROKE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = match held.take() {
+            Some(cache) if cache.fits(m, &stroke, &dabs) => cache,
+            _ => StrokeCache::new(m, &stroke, dabs[0].radius),
+        };
+        let cache = held.insert(cache);
+        Ok(if cache.run(m, &dabs, &stroke) {
             OpResult::Finished
         } else {
             OpResult::Cancelled

@@ -12,6 +12,7 @@ pub mod capability;
 pub mod cluster;
 pub mod cluster_cull;
 pub mod deform;
+pub mod reshape;
 pub mod skin;
 pub mod denoise;
 pub mod display;
@@ -42,6 +43,7 @@ pub use capability::{Capabilities, Tier};
 pub use cluster::{is_occluded, survives, Cluster, ClusterMesh, Frustum, PyramidData, WorldSphere};
 pub use cluster_cull::{ClusterCull, CullSlot, VERTICES_PER_CLUSTER};
 pub use deform::{Deform, Deformer, Gesture, Placement};
+pub use reshape::Reshape;
 pub use skin::{bone_rows, BoneRows, Influences, Skin};
 pub use gpu::{
     AdapterSummary, Gpu, GpuError, GpuOptions, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,

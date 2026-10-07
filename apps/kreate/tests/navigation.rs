@@ -276,12 +276,12 @@ fn the_pick_cache_survives_an_edit_between_queries() {
         );
     }
 
-    // The edited mesh is a different handle, so the tree for the old one is left
-    // behind rather than replaced. It has to actually go when swept, or the
-    // cache grows by one mesh for every edit the user makes.
-    assert_eq!(pick.len(), 2, "both the old tree and the new one");
+    // Only the vertices moved, so the old mesh's tree was refitted for the new
+    // one rather than a second built beside it: the cache does not grow by a
+    // mesh for every edit the user makes.
+    assert_eq!(pick.len(), 1, "refitted, not built again");
     pick.retain_live(&scene);
-    assert_eq!(pick.len(), 1, "the stale tree is collected");
+    assert_eq!(pick.len(), 1, "and kept, since its mesh is live");
 }
 
 // --- keymap integration -----------------------------------------------------

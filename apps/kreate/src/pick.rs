@@ -41,6 +41,16 @@ struct Entry {
     bvh: Bvh,
 }
 
+impl Entry {
+    /// Nobody but this cache holds the mesh any more, so its tree is free to
+    /// be refitted for another. Two live meshes sharing connectivity — two
+    /// objects with different shape-key values — each keep their own, rather
+    /// than one tree being refitted back and forth between them every query.
+    fn replaceable(&self) -> bool {
+        Arc::strong_count(&self.mesh) == 1
+    }
+}
+
 /// Lazily built BVHs, one per distinct evaluated mesh.
 #[derive(Default)]
 pub struct PickCache {
@@ -85,8 +95,13 @@ impl PickCache {
     /// abandoned tree costs memory, not correctness, and scanning for them on
     /// the hot path would cost both.
     pub fn retain_live(&mut self, scene: &[(ObjectId, Arc<MeshData>)]) {
-        self.entries
-            .retain(|e| scene.iter().any(|(_, m)| Arc::ptr_eq(m, &e.mesh)));
+        // A tree whose mesh has only moved its vertices is kept for the mesh
+        // that replaced it: `entry` refits it rather than building anew.
+        self.entries.retain(|e| {
+            scene.iter().any(|(_, m)| {
+                Arc::ptr_eq(m, &e.mesh) || (e.replaceable() && m.same_topology(&e.mesh))
+            })
+        });
     }
 
     /// The tree for a mesh, building it if it is not already held.
@@ -96,6 +111,21 @@ impl PickCache {
     /// [`PickCache::retain_live`] to collect.
     fn entry(&mut self, mesh: &Arc<MeshData>) -> &Entry {
         if let Some(i) = self.entries.iter().position(|e| Arc::ptr_eq(&e.mesh, mesh)) {
+            return &self.entries[i];
+        }
+        // The same connectivity with its vertices moved — a sculpt stroke, a
+        // drag — refits the tree in a linear pass instead of rebuilding it,
+        // which on a large mesh is the difference between a stroke that keeps
+        // up with the pointer and one that does not. The triangles are kept:
+        // the faces are the same faces.
+        if let Some(i) = self
+            .entries
+            .iter()
+            .position(|e| e.replaceable() && e.mesh.same_topology(mesh))
+        {
+            let e = &mut self.entries[i];
+            e.bvh.refit(mesh.positions(), &e.triangles);
+            e.mesh = mesh.clone();
             return &self.entries[i];
         }
 
@@ -244,6 +274,28 @@ mod tests {
         assert_eq!(hit.object, object);
         assert!((hit.distance - 9.0).abs() < 1e-4, "hit at {}", hit.distance);
         assert!((hit.point.z - 1.0).abs() < 1e-4, "the top, not the bottom");
+    }
+
+    /// A sculpt stroke moves vertices and nothing else: the tree is refitted
+    /// for the new mesh, not rebuilt beside the old one, and the ray meets
+    /// the surface where it now is.
+    #[test]
+    fn a_mesh_whose_vertices_moved_refits_its_tree() {
+        let (mut doc, _, mesh) = doc_with_cube();
+        let mut cache = PickCache::new();
+        let before = scene(&doc);
+        from_above(&mut cache, &doc, &before, 10.0).expect("the lid");
+        drop(before);
+        for p in doc.mesh_mut(mesh).unwrap().positions_mut().iter_mut() {
+            if p.z > 0.0 {
+                p.z += 2.0;
+            }
+        }
+        let after = scene(&doc);
+        cache.retain_live(&after);
+        let hit = from_above(&mut cache, &doc, &after, 10.0).expect("the raised lid");
+        assert!((hit.point.z - 3.0).abs() < 1e-4, "{}", hit.point.z);
+        assert_eq!(cache.entries.len(), 1, "refitted, not built anew");
     }
 
     #[test]
