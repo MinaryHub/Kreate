@@ -4504,12 +4504,15 @@ fn draw_view_info(
     for (text, colour) in lines.iter().map(|(t, c)| (t.as_str(), *c)) {
         let galley = painter.layout_no_wrap(text.to_string(), font.clone(), colour);
         // A soft shadow rather than a box: this text sits over the picture and
-        // a box would be a panel where the eye expects a scene.
-        painter.galley(
-            egui::pos2(left + 1.0, y + 1.0),
-            galley.clone(),
+        // a box would be a panel where the eye expects a scene. Laid out in
+        // its own colour: `galley`'s colour argument only fills text laid out
+        // without one, so passing it here drew the text twice, a pixel apart.
+        let shadow = painter.layout_no_wrap(
+            text.to_string(),
+            font.clone(),
             theme.sunken.gamma_multiply(0.8),
         );
+        painter.galley(egui::pos2(left + 1.0, y + 1.0), shadow, colour);
         painter.galley(egui::pos2(left, y), galley.clone(), colour);
         y += galley.size().y + 2.0;
     }

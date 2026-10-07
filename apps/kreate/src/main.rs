@@ -7836,10 +7836,10 @@ impl App {
             .last_frame
             .replace(now)
             .map(|t| now.duration_since(t).as_secs_f64())
-            // A long gap — the window was hidden, or a dialogue was open —
-            // must not teleport the camera through its whole easing in one
-            // step, so the step is capped at a slow frame rather than trusted.
-            .map_or(1.0 / 60.0, |dt| dt.clamp(1e-4, 0.1));
+            // The real time, so smoothing keeps up on a slow frame; a timed
+            // move caps its own step (`MAX_TRANSITION_STEP`), so a long gap
+            // does not teleport through it.
+            .map_or(1.0 / 60.0, |dt| dt.clamp(1e-4, 1.0));
         let moving = self.motion.advance(&mut self.camera, dt);
         if moving {
             self.redraw.set(RedrawReason::CAMERA_MOVED);
@@ -11050,7 +11050,7 @@ mod tests {
         let camera = app.doc.selection.active.expect("the camera is active");
         app.toggle_camera_view();
         // The move into the camera finishes, and the view is the camera's.
-        app.motion.advance(&mut app.camera, 10.0);
+        while app.motion.advance(&mut app.camera, 0.1) {}
         app.follow_camera_view();
         let start = app.camera.eye();
 
@@ -11065,7 +11065,7 @@ mod tests {
 
         // The user orbits: the view is theirs, and the camera view is left.
         app.motion.target.orbit(0.3, 0.0);
-        app.motion.advance(&mut app.camera, 10.0);
+        while app.motion.advance(&mut app.camera, 0.1) {}
         app.follow_camera_view();
         assert!(
             app.camera_view.is_none(),

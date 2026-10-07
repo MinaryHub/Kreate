@@ -53,6 +53,13 @@ pub const DEFAULT_SMOOTHING: f64 = 0.07;
 /// Long enough to follow, short enough not to wait for.
 pub const DEFAULT_TRANSITION: f64 = 0.25;
 
+/// The most of a timed move one frame may cover. A long gap — the window was
+/// hidden, a dialogue was open — must not jump the camera through the whole
+/// move in one step. Smoothing is not held to it: it follows the user's own
+/// hand, and on a slow frame holding it back is what made the view go on
+/// turning after the button was let go.
+pub const MAX_TRANSITION_STEP: f64 = 0.1;
+
 /// Below this, a camera has arrived. Chosen relative to the orbit distance so
 /// the same threshold works at a millimetre and at a kilometre.
 const SETTLED: f64 = 1e-4;
@@ -101,7 +108,7 @@ impl CameraMotion {
     /// assumed.
     pub fn advance(&mut self, current: &mut Camera, dt: f64) -> bool {
         if let Some(t) = &mut self.transition {
-            t.elapsed += dt;
+            t.elapsed += dt.min(MAX_TRANSITION_STEP);
             let progress = (t.elapsed / t.duration).clamp(0.0, 1.0);
             // Smoothstep: zero velocity at both ends, so the move neither jerks
             // into motion nor stops dead.
@@ -210,6 +217,29 @@ mod tests {
             !motion.advance(&mut current, 1.0 / 60.0),
             "and then it rests"
         );
+    }
+
+    #[test]
+    fn a_slow_frame_catches_smoothing_up_rather_than_dragging_it_out() {
+        // Three frames a second, as a heavy rendered view in a debug build
+        // can be. The camera follows the hand in real time: by the next frame
+        // it is all but there, not a third of the way.
+        let mut current = Camera::default();
+        let mut motion = CameraMotion::new(current);
+        motion.target = other();
+        motion.advance(&mut current, 1.0 / 3.0);
+        assert!(
+            (current.pivot - motion.target.pivot).length() < 0.1,
+            "{:?} against {:?}",
+            current.pivot,
+            motion.target.pivot
+        );
+        // A timed move is still held to its step, so a long gap does not
+        // teleport through it.
+        let mut current = Camera::default();
+        let mut motion = CameraMotion::new(current);
+        motion.animate_to(current, other(), DEFAULT_TRANSITION);
+        assert!(motion.advance(&mut current, 5.0), "still moving");
     }
 
     #[test]
