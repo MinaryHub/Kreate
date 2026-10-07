@@ -41,3 +41,13 @@ fn measurements_are_saved_where_they_were_taken() {
     ];
     assert_eq!(round_trip(&doc).design.measurements, doc.design.measurements);
 }
+
+#[test]
+fn the_work_plane_is_saved_with_the_cursor() {
+    let mut doc = Document::new();
+    doc.cursor_rotation = kreate_math::DQuat::from_rotation_y(0.7);
+    let back = round_trip(&doc);
+    assert!(back.cursor_rotation.abs_diff_eq(doc.cursor_rotation, 1e-12));
+    let bytes = container::write(&Document::new(), &Manifest::default(), &[]).expect("writes");
+    assert!(!String::from_utf8_lossy(&bytes).contains("cursor_rotation"));
+}

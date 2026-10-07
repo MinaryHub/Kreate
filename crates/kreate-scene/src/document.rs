@@ -559,6 +559,10 @@ pub struct Document {
     /// can turn about, and where Set Origin can put an origin. The scene's, as
     /// Blender keeps it, so it is saved with the file.
     pub cursor: kreate_math::DVec3,
+    /// How the 3D cursor is turned: the work plane. Its Z is the plane's
+    /// normal; the Cursor orientation constrains to its axes, and new objects
+    /// are set square to it. Identity is the ground.
+    pub cursor_rotation: kreate_math::DQuat,
     /// The unit it is drawn in, and what else a design keeps. See
     /// [`crate::design`].
     pub design: crate::design::DesignSettings,

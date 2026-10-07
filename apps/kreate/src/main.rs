@@ -2283,6 +2283,7 @@ impl App {
                 let t = n.any_orthonormal_vector();
                 [t, n.cross(t), n]
             }
+            None if self.ui.tools.orientation == 2 => self.cursor_basis(),
             None => self.selection_basis(),
         };
         let mut gesture = kreate::modal::Gesture::begin(
@@ -2304,7 +2305,11 @@ impl App {
             gesture.set_sources(self.snap_sources());
         }
         if extrude_normal.is_some() {
-            gesture.set_object_basis(self.selection_basis());
+            gesture.set_object_basis(if self.ui.tools.orientation == 2 {
+                self.cursor_basis()
+            } else {
+                self.selection_basis()
+            });
             if along_normals {
                 let has_normal = kreate_ops::ops::mesh::selected_faces_normal(&self.doc).is_some();
                 gesture.extrude_along_normals(has_normal);
@@ -2334,7 +2339,7 @@ impl App {
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
         gesture.set_snap_inverted(self.input.ctrl_down);
-        gesture.set_first_orientation(if self.ui.tools.orientation == 1 {
+        gesture.set_first_orientation(if matches!(self.ui.tools.orientation, 1 | 2) {
             kreate::modal::Orientation::Local
         } else {
             kreate::modal::Orientation::Global
@@ -2778,6 +2783,7 @@ impl App {
             key: self.autokey_frame(),
             pivot: self.ui.pivot,
             cursor: self.doc.cursor,
+            plane: (self.ui.tools.orientation == 2).then_some(self.doc.cursor_rotation),
         }
     }
 
@@ -2830,6 +2836,47 @@ impl App {
         let mut params = PropertyMap::new();
         params.set("location", PropertyValue::Vec3(at.to_array()));
         self.run_op("scene.cursor_set", params);
+    }
+
+    /// The work plane's axes: the 3D cursor's X, Y and its normal Z.
+    fn cursor_basis(&self) -> [Vec3; 3] {
+        let q = self.doc.cursor_rotation.as_quat();
+        [q * Vec3::X, q * Vec3::Y, q * Vec3::Z]
+    }
+
+    /// Puts the cursor somewhere and turns it: the work plane.
+    fn place_cursor_turned(&mut self, at: DVec3, turn: kreate_math::DQuat) {
+        let mut params = PropertyMap::new();
+        params.set("location", PropertyValue::Vec3(at.to_array()));
+        params.set("orient", PropertyValue::Bool(true));
+        params.set(
+            "rotation",
+            PropertyValue::Vec3(kreate_scene::animation::to_euler(turn).to_array()),
+        );
+        self.run_op("scene.cursor_set", params);
+    }
+
+    /// Shift+S > Cursor to Selected. With faces selected in edit mode the
+    /// cursor also turns to lie on them (Z their normal, X level where it
+    /// can be), which is how a work plane is put on a face.
+    fn cursor_to_selected(&mut self) {
+        let Some(at) = self.selection_pivot() else {
+            self.status("nothing selected");
+            return;
+        };
+        let normal = self
+            .op_ctx
+            .mode
+            .edits_elements()
+            .then(|| kreate_ops::ops::mesh::selected_faces_normal(&self.doc))
+            .flatten();
+        match normal {
+            Some(n) => {
+                self.place_cursor_turned(at, work_plane_turn(n));
+                self.status("cursor on the faces: the Cursor orientation works in their plane");
+            }
+            None => self.set_cursor(at),
+        }
     }
 
     /// Shift+S ▸ Selection to Cursor: the selection moved so its middle is on
@@ -9472,11 +9519,10 @@ impl App {
             }
             // The 3D cursor.
             "view.cursor_place" => self.place_cursor(),
-            "view.cursor_to_origin" => self.set_cursor(DVec3::ZERO),
-            "view.cursor_to_selected" => match self.selection_pivot() {
-                Some(at) => self.set_cursor(at),
-                None => self.status("nothing selected"),
-            },
+            "view.cursor_to_origin" => {
+                self.place_cursor_turned(DVec3::ZERO, kreate_math::DQuat::IDENTITY)
+            }
+            "view.cursor_to_selected" => self.cursor_to_selected(),
             "view.selection_to_cursor" => self.selection_to_cursor(),
             "armature.translate" => self.begin_gesture(kreate::modal::Kind::Move),
             "armature.rotate" => self.begin_gesture(kreate::modal::Kind::Rotate),
@@ -10893,6 +10939,19 @@ struct AppParams {
     key: Option<f64>,
     pivot: u32,
     cursor: DVec3,
+    /// The work plane's turn, when the Cursor orientation is chosen: new
+    /// shapes are set square to it.
+    plane: Option<kreate_math::DQuat>,
+}
+
+/// A turn whose Z is `normal` and whose X is level (along the ground) where
+/// the normal allows, so a work plane on a wall reads with X across it.
+fn work_plane_turn(normal: DVec3) -> kreate_math::DQuat {
+    let z = normal.normalize_or(DVec3::Z);
+    let x = DVec3::Z.cross(z);
+    let x = if x.length() < 1e-6 { DVec3::X } else { x.normalize() };
+    let y = z.cross(x);
+    kreate_math::DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z)).normalize()
 }
 
 impl AppParams {
@@ -10922,6 +10981,10 @@ impl AppParams {
         if let (Some(offset), None) = (offset, out.get("location")) {
             let at = self.cursor + offset;
             out.set("location", PropertyValue::Vec3(at.to_array()));
+        }
+        if let (Some(q), "object.add_primitive", None) = (self.plane, op_id, out.get("rotation")) {
+            let euler = kreate_scene::animation::to_euler(q);
+            out.set("rotation", PropertyValue::Vec3(euler.to_array()));
         }
         out
     }
@@ -11001,6 +11064,7 @@ mod tests {
             key: None,
             pivot: 3,
             cursor: DVec3::new(1.0, 2.0, 3.0),
+            plane: None,
         };
         let none = PropertyMap::new();
         assert_eq!(
@@ -11143,6 +11207,32 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// A work plane on a face: the cursor turns to it, a new shape is set
+    /// square to it while the Cursor orientation is chosen, and not otherwise.
+    #[test]
+    fn a_work_plane_turns_the_cursor_and_squares_new_shapes() {
+        let wall = DVec3::new(1.0, 0.0, 0.0);
+        let q = work_plane_turn(wall);
+        assert!((q * DVec3::Z - wall).length() < 1e-12, "Z is the normal");
+        assert!((q * DVec3::X).z.abs() < 1e-12, "X is level");
+        let up = work_plane_turn(DVec3::Z);
+        assert!(up.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12), "the ground is no turn");
+
+        let mut app = app();
+        app.place_cursor_turned(DVec3::new(0.0, 0.0, 1.0), q);
+        assert!(app.doc.cursor_rotation.abs_diff_eq(q, 1e-9));
+        app.ui.tools.orientation = 2;
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let added = app.doc.selection.active.unwrap();
+        let turn = app.doc.object(added).unwrap().transform.rotation;
+        assert!((turn * DVec3::Z - wall).length() < 1e-9, "square to the plane");
+        app.ui.tools.orientation = 0;
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let added = app.doc.selection.active.unwrap();
+        let turn = app.doc.object(added).unwrap().transform.rotation;
+        assert!(turn.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12));
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second

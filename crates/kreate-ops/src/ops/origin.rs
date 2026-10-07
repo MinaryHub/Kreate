@@ -37,6 +37,11 @@ pub struct CursorSetParams {
     /// Where the cursor goes, in the world.
     #[param(unit = "length")]
     pub location: [f64; 3],
+    /// Turn it too: the work plane. Off, its turn is left as it is.
+    pub orient: bool,
+    /// How it is turned, as Euler XYZ, when `orient` is on.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
 }
 
 /// Puts the 3D cursor somewhere — `Shift+Right-click`, and the snap menu's
@@ -57,10 +62,20 @@ impl Operator for CursorSet {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let at = DVec3::from_array(params.location);
-        if !at.is_finite() || at == doc.document().cursor {
+        let turn = params
+            .orient
+            .then(|| kreate_scene::animation::from_euler(DVec3::from_array(params.rotation)));
+        let d = doc.document();
+        let same_turn = turn.is_none_or(|q| q.abs_diff_eq(d.cursor_rotation, 1e-12));
+        if !at.is_finite() || turn.is_some_and(|q| !q.is_finite()) || (at == d.cursor && same_turn)
+        {
             return Ok(OpResult::Cancelled);
         }
-        doc.document_mut().cursor = at;
+        let d = doc.document_mut();
+        d.cursor = at;
+        if let Some(q) = turn {
+            d.cursor_rotation = q.normalize();
+        }
         Ok(OpResult::Finished)
     }
 }

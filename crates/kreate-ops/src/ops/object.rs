@@ -54,6 +54,10 @@ pub struct AddPrimitiveParams {
     pub rings: u32,
     /// Where to place the new object.
     pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ: square to the work plane when the
+    /// Cursor orientation is chosen.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
 }
 
 impl Default for AddPrimitiveParams {
@@ -64,6 +68,7 @@ impl Default for AddPrimitiveParams {
             segments: 32,
             rings: 16,
             location: [0.0; 3],
+            rotation: [0.0; 3],
         }
     }
 }
@@ -118,8 +123,12 @@ impl Operator for AddPrimitive {
 
         let d = doc.document_mut();
         let id = d.add_mesh_object(capitalise(name), mesh);
-        d.object_mut(id).expect("just added").transform.translation =
-            DVec3::from_array(params.location);
+        let o = d.object_mut(id).expect("just added");
+        o.transform.translation = DVec3::from_array(params.location);
+        let angles = DVec3::from_array(params.rotation);
+        if angles.is_finite() {
+            o.transform.rotation = kreate_scene::animation::from_euler(angles);
+        }
         // A newly added object becomes the selection, which is what every
         // subsequent operator acts on.
         d.selection.clear();

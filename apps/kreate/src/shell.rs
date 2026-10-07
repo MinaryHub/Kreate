@@ -2524,6 +2524,11 @@ fn draw_area(
                             draw_measurement(&painter, &projector, &m.points, false);
                         }
                         draw_measurement(&painter, &projector, &state.measure_preview, true);
+                        // The work plane, while the Cursor orientation is
+                        // chosen: a grid on the cursor, square to it.
+                        if state.tools.orientation == 2 {
+                            draw_work_plane(&painter, &projector, doc.cursor, doc.cursor_rotation);
+                        }
                     }
                     // The knife's path: the cut so far and the next stretch.
                     if let Some(projector) =
@@ -4559,6 +4564,38 @@ fn draw_view_info(
         painter.galley(egui::pos2(left, y), galley.clone(), colour);
         y += galley.size().y + 2.0;
     }
+}
+
+/// The work plane: a grid around the 3D cursor in the plane it is turned to,
+/// its X and Y drawn in the axis colours. The spacing is a power of ten that
+/// suits how far away it is, so it reads at any zoom.
+fn draw_work_plane(
+    painter: &egui::Painter,
+    projector: &kreate_ui::object_glyph::Projector,
+    at: kreate_math::DVec3,
+    turn: kreate_math::DQuat,
+) {
+    const HALF: i32 = 10;
+    let distance = (at - projector.eye).length().max(1e-6);
+    let step = 10f64.powf((distance / 4.0).log10().floor());
+    let (x, y) = (turn * kreate_math::DVec3::X, turn * kreate_math::DVec3::Y);
+    let reach = step * HALF as f64;
+    let theme_line = egui::Color32::from_rgba_unmultiplied(200, 200, 210, 60);
+    let line = |a: kreate_math::DVec3, b: kreate_math::DVec3, colour: egui::Color32, width: f32| {
+        if let (Some(a), Some(b)) = (projector.project(a), projector.project(b)) {
+            painter.line_segment([a, b], egui::Stroke::new(width, colour));
+        }
+    };
+    for i in -HALF..=HALF {
+        let offset = step * i as f64;
+        if i == 0 {
+            continue;
+        }
+        line(at + x * offset - y * reach, at + x * offset + y * reach, theme_line, 1.0);
+        line(at + y * offset - x * reach, at + y * offset + x * reach, theme_line, 1.0);
+    }
+    line(at - x * reach, at + x * reach, egui::Color32::from_rgb(220, 80, 80), 1.5);
+    line(at - y * reach, at + y * reach, egui::Color32::from_rgb(110, 200, 90), 1.5);
 }
 
 /// A dimension over the picture: the line between two points and how long it
@@ -6728,10 +6765,11 @@ fn draw_tool_settings(
     let orientations = [
         get(state, "orientation-global"),
         get(state, "orientation-local"),
+        get(state, "orientation-cursor"),
     ];
     egui::ComboBox::from_id_salt(("orientation", area))
         .width(58.0)
-        .selected_text(orientations[tools.orientation.min(1) as usize].as_str())
+        .selected_text(orientations[tools.orientation.min(2) as usize].as_str())
         .show_ui(ui, |ui| {
             for (i, name) in orientations.iter().enumerate() {
                 ui.selectable_value(&mut tools.orientation, i as u32, name.as_str());
@@ -9058,7 +9096,8 @@ pivot-point = Pivot Point
 pivot-median = Median Point
 orientation-global = Global
 orientation-local = Local
-orientation-hint = Transform orientation: what the first X, Y or Z press constrains to
+orientation-cursor = Cursor
+orientation-hint = Transform orientation: what the first X, Y or Z press constrains to. Cursor is the work plane: put it on faces with Shift+S, Cursor to Selected
 snap-toggle = Snap
 snap-on = Snapping
 snap-hint = Snap while moving (Shift+Tab); Ctrl turns it the other way for one drag, B mid-drag too
@@ -10005,7 +10044,8 @@ pivot-point = 기준점
 pivot-median = 중앙점
 orientation-global = 월드
 orientation-local = 로컬
-orientation-hint = 방향 기준: X·Y·Z를 처음 누를 때 따르는 축
+orientation-cursor = 커서
+orientation-hint = 방향 기준: X·Y·Z를 처음 누를 때 따르는 축. 커서는 작업 평면입니다(Shift+S의 커서를 선택으로 면 위에 놓기)
 snap-toggle = 스냅
 snap-on = 스냅 켜기
 snap-hint = 이동할 때 달라붙기 (Shift+Tab). Ctrl은 한 번만 반대로, 이동 중 B도 됩니다

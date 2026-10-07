@@ -1086,6 +1086,9 @@ pub struct SceneFile {
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
+    /// How the 3D cursor is turned (x, y, z, w), when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_rotation: Option<[f64; 4]>,
     /// The design settings, when they are not the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design: Option<DesignRecord>,
@@ -1461,6 +1464,8 @@ pub fn write(
             .collect();
         scene.cursor =
             (document.cursor != kreate_math::DVec3::ZERO).then(|| document.cursor.to_array());
+        scene.cursor_rotation = (document.cursor_rotation != kreate_math::DQuat::IDENTITY)
+            .then(|| document.cursor_rotation.to_array());
         scene.design = (!document.design.is_default()).then(|| DesignRecord {
             length_unit: (document.design.length_unit != Default::default())
                 .then(|| document.design.length_unit.tag().to_string()),
@@ -2125,6 +2130,13 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         .filter(|c| c.is_finite())
     {
         document.cursor = c;
+    }
+    if let Some(q) = scene
+        .cursor_rotation
+        .map(kreate_math::DQuat::from_array)
+        .filter(|q| q.is_finite() && q.length() > 0.5)
+    {
+        document.cursor_rotation = q.normalize();
     }
     if let Some(d) = &scene.design {
         if let Some(unit) = d
