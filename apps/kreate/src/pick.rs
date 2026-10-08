@@ -32,6 +32,7 @@ use kreate_scene::document::ObjectId;
 use kreate_scene::Document;
 
 /// One mesh's tree, plus what it was built from.
+#[derive(Clone)]
 struct Entry {
     mesh: Arc<MeshData>,
     triangles: Vec<[u32; 3]>,
@@ -127,6 +128,18 @@ impl PickCache {
             e.bvh.refit(mesh.positions(), &e.triangles);
             e.mesh = mesh.clone();
             return &self.entries[i];
+        }
+        // The same, but the mesh it was built for is still held — the undo
+        // snapshot of a stroke's first frame holds the mesh as it was — so
+        // the tree is copied and the copy refitted: a copy is a few
+        // milliseconds, a build on a dense mesh a pause the hand feels at the
+        // start of every stroke.
+        if let Some(i) = self.entries.iter().position(|e| e.mesh.same_topology(mesh)) {
+            let mut e = self.entries[i].clone();
+            e.bvh.refit(mesh.positions(), &e.triangles);
+            e.mesh = mesh.clone();
+            self.entries.push(e);
+            return self.entries.last().expect("just pushed");
         }
 
         let tri = mesh.triangulate();
@@ -296,6 +309,28 @@ mod tests {
         let hit = from_above(&mut cache, &doc, &after, 10.0).expect("the raised lid");
         assert!((hit.point.z - 3.0).abs() < 1e-4, "{}", hit.point.z);
         assert_eq!(cache.entries.len(), 1, "refitted, not built anew");
+    }
+
+    /// A stroke's first frame: the mesh as it was is still held (by the undo
+    /// snapshot), so its tree stays, and the moved mesh gets a refitted copy
+    /// of it — right for both, and no build.
+    #[test]
+    fn a_moved_mesh_whose_old_self_is_held_gets_a_copy() {
+        let (mut doc, _, mesh) = doc_with_cube();
+        let mut cache = PickCache::new();
+        let before = scene(&doc);
+        from_above(&mut cache, &doc, &before, 10.0).expect("the lid");
+        for p in doc.mesh_mut(mesh).unwrap().positions_mut().iter_mut() {
+            if p.z > 0.0 {
+                p.z += 2.0;
+            }
+        }
+        let after = scene(&doc);
+        let hit = from_above(&mut cache, &doc, &after, 10.0).expect("the raised lid");
+        assert!((hit.point.z - 3.0).abs() < 1e-4, "{}", hit.point.z);
+        let hit = from_above(&mut cache, &doc, &before, 10.0).expect("the old lid");
+        assert!((hit.point.z - 1.0).abs() < 1e-4, "{}", hit.point.z);
+        assert_eq!(cache.entries.len(), 2, "one tree for each mesh");
     }
 
     #[test]

@@ -137,29 +137,51 @@ impl Bvh {
         if self.nodes.is_empty() {
             return;
         }
+        let order = &self.order;
+        let leaf = |node: &mut Node| {
+            if !node.is_leaf() {
+                return;
+            }
+            let mut bb = Aabb::EMPTY;
+            for slot in node.first..node.first + node.count {
+                let Some(&prim) = order.get(slot as usize) else {
+                    continue;
+                };
+                let Some(tri) = indices.get(prim as usize) else {
+                    continue;
+                };
+                if let Some([a, b, c]) = fetch(positions, *tri) {
+                    bb = bb.extend(a).extend(b).extend(c);
+                }
+            }
+            node.bounds = bb;
+        };
+        // The leaves are nearly all the work — a gather of every triangle's
+        // corners — and each depends on nothing but the positions, so a large
+        // tree has them shared out across the cores. A sculpt stroke refits
+        // every frame, and on one core a quarter-million triangles is most of
+        // the frame.
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(8);
+        if threads > 1 && self.nodes.len() >= 8192 {
+            let chunk = self.nodes.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                for part in self.nodes.chunks_mut(chunk) {
+                    scope.spawn(move || part.iter_mut().for_each(leaf));
+                }
+            });
+        } else {
+            self.nodes.iter_mut().for_each(leaf);
+        }
+        // Children always come after their parent, so a reverse pass sees
+        // them already updated.
         for i in (0..self.nodes.len()).rev() {
             let node = self.nodes[i];
-            let bounds = if node.is_leaf() {
-                let mut bb = Aabb::EMPTY;
-                for slot in node.first..node.first + node.count {
-                    let Some(&prim) = self.order.get(slot as usize) else {
-                        continue;
-                    };
-                    let Some(tri) = indices.get(prim as usize) else {
-                        continue;
-                    };
-                    if let Some([a, b, c]) = fetch(positions, *tri) {
-                        bb = bb.extend(a).extend(b).extend(c);
-                    }
-                }
-                bb
-            } else {
-                // Children always come after their parent, so a reverse pass
-                // sees them already updated.
+            if !node.is_leaf() {
                 let left = node.first as usize;
-                self.nodes[left].bounds.union(self.nodes[left + 1].bounds)
-            };
-            self.nodes[i].bounds = bounds;
+                self.nodes[i].bounds = self.nodes[left].bounds.union(self.nodes[left + 1].bounds);
+            }
         }
     }
 
@@ -607,6 +629,61 @@ mod tests {
                     (None, None) => {}
                     (Some(a), Some(b)) => assert!((a.t - b.t).abs() < 1e-4),
                     _ => panic!("a refit and a rebuild disagree at ({x}, {y})"),
+                }
+            }
+        }
+    }
+
+    /// A tree big enough that its leaves are refitted on several threads:
+    /// every box still holds what is under it, and rays agree with a rebuild.
+    #[test]
+    fn a_large_refit_shared_across_threads_is_whole() {
+        let (mut positions, indices) = grid(120);
+        let mut refitted = Bvh::build(&positions, &indices);
+        assert!(
+            refitted.nodes.len() >= 8192,
+            "{} nodes: not the threaded path",
+            refitted.nodes.len()
+        );
+        for (i, p) in positions.iter_mut().enumerate() {
+            p.z += (i as f32 * 0.37).sin() * 0.5;
+        }
+        refitted.refit(&positions, &indices);
+        for node in &refitted.nodes {
+            if node.is_leaf() {
+                for slot in node.first..node.first + node.count {
+                    let tri = indices[refitted.order[slot as usize] as usize];
+                    for v in tri {
+                        let p = positions[v as usize];
+                        assert!(p.cmpge(node.bounds.min).all() && p.cmple(node.bounds.max).all());
+                    }
+                }
+            } else {
+                let left = node.first as usize;
+                for child in [left, left + 1] {
+                    let c = refitted.nodes[child].bounds;
+                    assert!(
+                        c.min.cmpge(node.bounds.min).all() && c.max.cmple(node.bounds.max).all()
+                    );
+                }
+            }
+        }
+        let rebuilt = Bvh::build(&positions, &indices);
+        for x in 0..40 {
+            for y in 0..40 {
+                let ray = Ray::new(
+                    Vec3::new(x as f32 * 1.5 + 0.3, y as f32 * 1.5 + 0.3, 5.0),
+                    -Vec3::Z,
+                );
+                let a = refitted
+                    .raycast(&positions, &indices, &ray, 100.0)
+                    .map(|h| h.t);
+                let b = rebuilt
+                    .raycast(&positions, &indices, &ray, 100.0)
+                    .map(|h| h.t);
+                assert_eq!(a.is_some(), b.is_some(), "({x}, {y})");
+                if let (Some(a), Some(b)) = (a, b) {
+                    assert!((a - b).abs() < 1e-4);
                 }
             }
         }

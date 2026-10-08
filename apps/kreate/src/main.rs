@@ -854,6 +854,11 @@ struct App {
     sculpt_stroke: Option<SculptStroke>,
     /// A texture paint stroke in progress.
     texture_stroke: Option<TextureStroke>,
+    /// The pointer moved during a brush stroke since the stroke was last
+    /// driven. A mouse reports hundreds of moves a second and each drive is
+    /// a raycast and a re-run of the stroke, so they are driven once a frame,
+    /// not once a move.
+    stroke_moved: bool,
     /// The painted mesh as the screen shows it in weight paint mode, with the
     /// active group's weights where the renderer's ramp reads them — kept, so
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
@@ -1018,6 +1023,7 @@ impl App {
             driven_at: u64::MAX,
             paint_stroke: None,
             sculpt_stroke: None,
+            stroke_moved: false,
             texture_stroke: None,
             weight_display: None,
             unhidden: Vec::new(),
@@ -7356,6 +7362,20 @@ impl App {
         }
     }
 
+    /// The brush strokes in progress, once for every move of the pointer
+    /// since the last frame.
+    fn drive_strokes(&mut self) {
+        if self.paint_stroke.is_some() {
+            self.drive_paint_stroke();
+        }
+        if self.sculpt_stroke.is_some() {
+            self.drive_sculpt_stroke();
+        }
+        if self.texture_stroke.is_some() {
+            self.drive_texture_stroke();
+        }
+    }
+
     /// Where the pointer meets the active mesh, in the world, if it does.
     fn sculpt_hit(&mut self) -> Option<DVec3> {
         let object = self.doc.selection.active?;
@@ -7453,7 +7473,16 @@ impl App {
                 }
             }
         } else if let Some(at) = self.sculpt_hit() {
-            if at.distance(last) >= radius * 0.25 {
+            let step = radius * 0.25;
+            let gap = at.distance(last);
+            if gap >= step {
+                // Driven once a frame, a fast pointer has gone several
+                // spacings: the dabs between, on the straight line, so the
+                // stroke stays a line rather than a row of beads.
+                let n = ((gap / step).floor() as usize).clamp(1, 64);
+                for k in 1..n {
+                    self.add_sculpt_dab(last.lerp(at, k as f64 / n as f64));
+                }
                 self.add_sculpt_dab(at);
             }
         }
@@ -10809,14 +10838,12 @@ impl ApplicationHandler for App {
                 if self.uv_gesture.is_some() {
                     self.drive_uv_gesture();
                 }
-                if self.paint_stroke.is_some() {
-                    self.drive_paint_stroke();
-                }
-                if self.sculpt_stroke.is_some() {
-                    self.drive_sculpt_stroke();
-                }
-                if self.texture_stroke.is_some() {
-                    self.drive_texture_stroke();
+                if self.paint_stroke.is_some()
+                    || self.sculpt_stroke.is_some()
+                    || self.texture_stroke.is_some()
+                {
+                    self.stroke_moved = true;
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
                 if self.loop_cut_hover.is_some() {
                     self.update_loop_cut_hover();
@@ -10933,6 +10960,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                if std::mem::take(&mut self.stroke_moved) {
+                    self.drive_strokes();
+                }
                 self.advance_playback();
                 self.sync_timeline();
                 self.apply_input();
@@ -11913,6 +11943,87 @@ kreate.ops.object.add_primitive()",
         let added = app.doc.selection.active.unwrap();
         let turn = app.doc.object(added).unwrap().transform.rotation;
         assert!(turn.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12));
+    }
+
+    #[test]
+    #[ignore]
+    fn sculpt_frame_cost() {
+        use std::time::Instant;
+        let mut app = app();
+        let mesh = app
+            .doc
+            .add_mesh(kreate_mesh::primitives::uv_sphere(1.0, 512, 256));
+        let id = app.doc.add_object(kreate_scene::document::Object::new(
+            "Ball",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        app.doc.selection.add(id);
+        app.set_mode(OpMode::from_tag("sculpt").unwrap());
+        app.evaluate_scene();
+        // The tree is built once, when the stroke starts; what is measured is
+        // the frames after.
+        let _ = app.pick.raycast(
+            &app.doc,
+            &app.evaluated,
+            DVec3::new(0.0, -5.0, 0.0),
+            DVec3::Y,
+            f64::INFINITY,
+        );
+        let mut dabs: Vec<f64> = Vec::new();
+        let mut session: Option<kreate_ops::ModalSession> = None;
+        let (mut op, mut eval, mut pick) = (0.0, 0.0, 0.0);
+        let frames = 60;
+        for i in 0..frames {
+            let a = i as f64 * 0.02;
+            dabs.extend([a.cos(), a.sin(), 0.0, 0.1]);
+            let mut params = PropertyMap::new();
+            params.set("brush", PropertyValue::Enum(0));
+            params.set("dabs", PropertyValue::Floats(dabs.clone()));
+            let t = Instant::now();
+            match session.as_mut() {
+                Some(s) => {
+                    app.history
+                        .update_modal(&app.registry, &mut app.doc, None, &app.op_ctx, s, &params)
+                        .unwrap();
+                }
+                None => {
+                    session = app
+                        .history
+                        .begin_modal(
+                            &app.registry,
+                            &mut app.doc,
+                            None,
+                            &app.op_ctx,
+                            "sculpt.stroke",
+                            &params,
+                        )
+                        .unwrap();
+                }
+            }
+            op += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            app.evaluate_scene();
+            eval += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let _ = app.pick.raycast(
+                &app.doc,
+                &app.evaluated,
+                DVec3::new(0.0, -5.0, 0.0),
+                DVec3::Y,
+                f64::INFINITY,
+            );
+            pick += t.elapsed().as_secs_f64();
+        }
+        let ms = |s: f64| s * 1000.0 / frames as f64;
+        eprintln!(
+            "per frame: operator {:.2} ms, evaluate {:.2} ms, pick {:.2} ms",
+            ms(op),
+            ms(eval),
+            ms(pick)
+        );
+        let t = Instant::now();
+        app.history.commit_modal(session.unwrap());
+        eprintln!("commit {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second
