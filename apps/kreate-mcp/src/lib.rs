@@ -34,6 +34,9 @@ through a camera to a file.\n\
 Workflow: object.* operators work in object mode on the selection and the active object. \
 mesh.* and uv.* operators work in edit mode on the selected elements: enter it with \
 kreate.ops.object.mode_set(mode=\"edit\") and leave it with mode=\"object\". \
+run_script stops at the first line that fails and says why and how to fix it; read that \
+error, fix the cause (often: select the object, or enter edit mode) and send the rest again \
+rather than repeating the same lines. \
 run_script returns, for each line, the objects it created (name and uid), so name and \
 reuse them rather than guessing. Object names are unique: a second \"Cube\" becomes \"Cube.001\". \
 get_scene gives each mesh's dimensions and world bounds, for sizing and placing, and \

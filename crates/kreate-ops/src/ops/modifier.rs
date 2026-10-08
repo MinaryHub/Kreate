@@ -1215,7 +1215,7 @@ mod tests {
         d.add_object(Object::new("Empty", ObjectData::Empty));
         assert!(matches!(
             try_add(&r, &mut h, &mut d, &c),
-            Err(OpError::PollFailed(_))
+            Err(OpError::PollFailed(..))
         ));
         assert!(!h.can_undo(), "a refused operator must not leave a step");
     }
@@ -1229,7 +1229,7 @@ mod tests {
         };
         assert!(matches!(
             try_add(&r, &mut h, &mut d, &c),
-            Err(OpError::PollFailed(_))
+            Err(OpError::PollFailed(..))
         ));
         assert!(d.object(id).unwrap().modifiers.is_empty());
     }

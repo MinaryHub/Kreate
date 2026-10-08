@@ -3879,7 +3879,7 @@ mod tests {
             .dispatch(&r, &mut doc, &ctx, "object.set_transform", &p)
             .expect_err("the dispatcher must refuse it");
         assert!(
-            matches!(error, crate::operator::OpError::PollFailed(_)),
+            matches!(error, crate::operator::OpError::PollFailed(..)),
             "{error:?}"
         );
         assert!(!h.can_undo(), "a refused operator reached the history");

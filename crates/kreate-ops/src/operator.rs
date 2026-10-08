@@ -45,13 +45,74 @@ pub enum OpResult {
 pub enum OpError {
     #[error("no operator registered with id `{0}`")]
     UnknownOperator(String),
-    #[error("`{0}` cannot run in the current context")]
-    PollFailed(String),
+    /// The operator, and why not and what would let it — said for a person
+    /// and for a script's author alike, who otherwise retry blind.
+    #[error("`{0}` cannot run now: {1}")]
+    PollFailed(String, String),
     #[error("{0}")]
     Failed(String),
 }
 
 pub use crate::mode::Mode;
+
+/// Why an operator would not run, and what would let it: what its family
+/// needs, the mode and the active object as they are, and the lines that
+/// would put things right.
+pub fn poll_reason(id: &str, ctx: &Context, doc: &Document) -> String {
+    use kreate_scene::document::ObjectData;
+    let active = doc.selection.active.and_then(|a| doc.object(a));
+    let what = match active {
+        None => "nothing is active".to_string(),
+        Some(o) => {
+            let kind = match o.data {
+                ObjectData::Mesh(_) => "a mesh",
+                ObjectData::Camera(_) => "a camera",
+                ObjectData::Light(_) => "a light",
+                ObjectData::Armature(_) => "an armature",
+                ObjectData::Empty => "an empty",
+            };
+            format!("the active object is \"{}\", {kind}", o.name)
+        }
+    };
+    let mode = ctx.mode.tag();
+    let family = id.split('.').next().unwrap_or("");
+    let active_mesh = active.is_some_and(|o| o.mesh().is_some());
+    let select = "kreate.ops.object.select(name=\"...\")";
+    let edit = "kreate.ops.object.mode_set(mode=\"edit\")";
+    let (needs, fix) = match family {
+        "mesh" | "uv" => (
+            "it works on a mesh in edit mode".to_string(),
+            if !active_mesh {
+                format!("select a mesh with {select}, then {edit}")
+            } else if !ctx.mode.edits_elements() {
+                format!("enter edit mode with {edit}")
+            } else {
+                "select the elements it acts on first".to_string()
+            },
+        ),
+        "pose" => (
+            "it works on an armature in pose mode".to_string(),
+            format!("select the armature with {select}, then kreate.ops.object.mode_set(mode=\"pose\")"),
+        ),
+        "armature" => (
+            "it works on an armature in its edit mode".to_string(),
+            format!("select the armature with {select}, then {edit}"),
+        ),
+        "sculpt" => (
+            "it works on a mesh in sculpt mode".to_string(),
+            format!("select a mesh with {select}, then kreate.ops.object.mode_set(mode=\"sculpt\")"),
+        ),
+        "object" if ctx.mode != Mode::RESTING => (
+            "it works in object mode".to_string(),
+            "leave with kreate.ops.object.mode_set(mode=\"object\")".to_string(),
+        ),
+        _ => (
+            "what it acts on is not there".to_string(),
+            format!("check the selection with get_scene, or select with {select}"),
+        ),
+    };
+    format!("{needs}; the mode is {mode} and {what}. To fix: {fix}")
+}
 
 /// What an operator is allowed to know about the world beyond the document.
 ///
@@ -250,7 +311,10 @@ impl OperatorRegistry {
             .get(id)
             .ok_or_else(|| OpError::UnknownOperator(id.to_string()))?;
         if !info.poll(ctx, doc.document()) {
-            return Err(OpError::PollFailed(id.to_string()));
+            return Err(OpError::PollFailed(
+                id.to_string(),
+                poll_reason(id, ctx, doc.document()),
+            ));
         }
         (info.exec)(params, doc, ctx)
     }
@@ -421,7 +485,10 @@ mod tests {
         let mut edit = DocMut::new(&mut doc);
         assert_eq!(
             r.execute_default("mesh.noop", &mut edit, &Context { mode: Mode::Object }),
-            Err(OpError::PollFailed("mesh.noop".into()))
+            Err(OpError::PollFailed(
+                "mesh.noop".into(),
+                poll_reason("mesh.noop", &Context { mode: Mode::Object }, &Document::new())
+            ))
         );
         assert_eq!(
             r.execute_default(
@@ -442,7 +509,7 @@ mod tests {
         let mut edit = DocMut::new(&mut doc);
         assert!(matches!(
             r.execute_default("object.rename", &mut edit, &Context::default()),
-            Err(OpError::PollFailed(_))
+            Err(OpError::PollFailed(..))
         ));
     }
 
@@ -498,7 +565,7 @@ mod tests {
         let mut edit = DocMut::new(&mut doc);
         assert!(matches!(
             registry().execute_default("object.rename", &mut edit, &Context::default()),
-            Err(OpError::PollFailed(_))
+            Err(OpError::PollFailed(..))
         ));
     }
 

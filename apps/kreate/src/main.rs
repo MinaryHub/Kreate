@@ -8135,9 +8135,25 @@ impl App {
         use kreate_ui::console::{ConsoleLine, LineKind};
         let mut report = Vec::new();
         let mut errors = 0;
+        let mut skipped = 0;
         for text in source.lines() {
             let trimmed = text.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // After a failure the rest is not run: every line after it was
+            // written for a document the failed line would have made, and
+            // running them anyway only buries the one error that matters
+            // under a column of ones it caused.
+            if errors > 0 {
+                skipped += 1;
+                report.push(ScriptLine {
+                    text: trimmed.to_string(),
+                    result: Err("skipped: an earlier line failed".to_string()),
+                    created: Vec::new(),
+                    materials: Vec::new(),
+                    images: Vec::new(),
+                });
                 continue;
             }
             let before: std::collections::HashSet<_> = self
@@ -8231,8 +8247,15 @@ impl App {
         // The echo above is what was typed; the history line the console
         // draws beneath it is what it became. A line that ran is not shown
         // twice as the same thing.
+        if skipped > 0 {
+            self.ui.console_log.push(ConsoleLine {
+                // i18n-exempt: script output is API text
+                text: format!("{skipped} line(s) after it not run"),
+                kind: LineKind::Note,
+            });
+        }
         if errors > 0 {
-            self.status(&format!("script: {errors} line(s) failed"));
+            self.status(&format!("script: a line failed; {skipped} after it not run"));
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
         report
@@ -8246,7 +8269,29 @@ impl App {
                 let mode = match name.as_str() {
                     // Whatever Tab would enter from object mode: the edit
                     // mode of the kind of thing that is active.
-                    "edit" => OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc)),
+                    "edit" => {
+                        // An active object that cannot be edited, with a mesh
+                        // among the selected: that mesh is what was meant.
+                        let has = kreate_ops::mode::Has::of(&self.doc);
+                        if !has.mesh && !has.armature {
+                            let meant = self
+                                .doc
+                                .selection
+                                .objects
+                                .iter()
+                                .copied()
+                                .find(|id| self.doc.object(*id).and_then(|o| o.mesh()).is_some())
+                                .and_then(|id| self.doc.object(id))
+                                .map(|o| o.name.clone());
+                            if let Some(name) = meant {
+                                let mut p = PropertyMap::new();
+                                p.set("name", PropertyValue::Text(name));
+                                p.set("extend", PropertyValue::Bool(true));
+                                self.run_op("object.select", p);
+                            }
+                        }
+                        OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc))
+                    }
                     other => OpMode::from_tag(other).ok_or_else(|| {
                         format!(
                             "no mode called {other:?}: object, edit, sculpt, weight_paint or pose"
@@ -8258,8 +8303,16 @@ impl App {
                 }
                 self.set_mode(mode);
                 if self.op_ctx.mode != mode {
+                    let active = self
+                        .doc
+                        .selection
+                        .active
+                        .and_then(|id| self.doc.object(id))
+                        .map(|o| format!("the active object is \"{}\"", o.name))
+                        .unwrap_or_else(|| "nothing is selected".to_string());
                     return Err(format!(
-                        "cannot enter {} mode: the active object is not one it can edit",
+                        "cannot enter {} mode: {active}, and it is not one that mode edits. \
+                         Select one with kreate.ops.object.select(name=\"...\") first",
                         mode.tag()
                     ));
                 }
@@ -11614,6 +11667,40 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// A script stops at its first failing line, says why and what would
+    /// fix it, and runs nothing after it.
+    #[test]
+    fn a_script_stops_at_its_first_failure_and_says_why() {
+        let mut app = app();
+        let report = app.run_script_reporting(
+            "kreate.ops.mesh.select_nothing()
+kreate.ops.object.add_primitive()",
+        );
+        assert_eq!(report.len(), 2);
+        let why = report[0].result.as_ref().unwrap_err();
+        assert!(why.contains("edit mode"), "{why}");
+        assert!(why.contains("mode_set"), "the fix is named: {why}");
+        assert!(report[1].result.as_ref().unwrap_err().contains("skipped"));
+        assert_eq!(app.doc.objects().count(), 0, "the second line did not run");
+    }
+
+    /// Entering edit mode with a light active and a mesh selected edits the
+    /// mesh: that is what was meant.
+    #[test]
+    fn edit_mode_finds_the_selected_mesh_when_the_active_object_is_not_one() {
+        let mut app = app();
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let cube = app.doc.selection.active.unwrap();
+        app.run_op("object.add_light", PropertyMap::new());
+        let light = app.doc.selection.active.unwrap();
+        app.doc.selection.add(cube);
+        app.doc.selection.active = Some(light);
+        let report = app.run_script_reporting("kreate.ops.object.mode_set(mode=\"edit\")");
+        assert!(report[0].result.is_ok(), "{:?}", report[0].result);
+        assert!(app.op_ctx.mode.edits_elements());
+        assert_eq!(app.doc.selection.active, Some(cube));
     }
 
     /// STEP, the parts list and a drawing, all in the scene's unit; two
