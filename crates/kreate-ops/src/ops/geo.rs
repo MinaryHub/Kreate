@@ -92,7 +92,16 @@ impl Operator for Enable {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct AddParams {
     /// Which kind, in the order of `GeoNodeKind::ADDABLE`.
-    #[param(variants("transform", "array", "subdivide", "mirror", "join", "primitive"))]
+    #[param(variants(
+        "transform",
+        "array",
+        "subdivide",
+        "mirror",
+        "join",
+        "primitive",
+        "extrude_profile",
+        "revolve_profile"
+    ))]
     pub kind: u32,
     pub x: f64,
     pub y: f64,
@@ -146,6 +155,8 @@ pub fn default_name(kind: &GeoNodeKind) -> &'static str {
         GeoNodeKind::Mirror { .. } => "Mirror",
         GeoNodeKind::Join => "Join Geometry",
         GeoNodeKind::Primitive { .. } => "Mesh Primitive",
+        GeoNodeKind::ExtrudeProfile { .. } => "Extrude Profile",
+        GeoNodeKind::RevolveProfile { .. } => "Revolve Profile",
     }
 }
 

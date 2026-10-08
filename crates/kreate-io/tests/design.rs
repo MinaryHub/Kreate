@@ -72,3 +72,23 @@ fn the_section_view_is_saved() {
     doc.design.section = Some(section);
     assert_eq!(round_trip(&doc).design.section, Some(section));
 }
+
+#[test]
+fn sketch_constraints_are_saved_with_their_object() {
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::sketch::Constraint;
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::plane(2.0));
+    let id = doc.add_object(Object::new("Sketch", ObjectData::Mesh(mesh)));
+    let constraints = vec![
+        Constraint::Distance { a: 0, b: 1, value: 0.04 },
+        Constraint::Horizontal { a: 1, b: 2 },
+        Constraint::Fixed { a: 3, at: [0.5, -0.25] },
+        Constraint::Angle { a: 0, b: 1, c: 2, d: 3, value: 0.7 },
+        Constraint::Equal { a: 0, b: 1, c: 2, d: 3 },
+    ];
+    doc.object_mut(id).unwrap().sketch = constraints.clone();
+    let back = round_trip(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Sketch").unwrap();
+    assert_eq!(o.sketch, constraints);
+}

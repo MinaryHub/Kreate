@@ -16,6 +16,7 @@ pub mod mesh_data;
 pub mod measure;
 pub mod modifiers;
 pub mod primitives;
+pub mod profile;
 pub mod sculpt;
 pub mod section;
 pub mod selection;

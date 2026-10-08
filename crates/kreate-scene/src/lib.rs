@@ -20,6 +20,7 @@ pub mod nla;
 pub mod render;
 pub mod shader;
 pub mod shape;
+pub mod sketch;
 pub mod skin;
 pub mod undo;
 

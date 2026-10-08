@@ -177,6 +177,9 @@ pub struct Object {
     pub modifiers: Vec<crate::modifier::ModifierInstance>,
     /// A geometry node graph run after the stack: see [`crate::geonodes`].
     pub geometry_nodes: Option<crate::geonodes::GeoGraph>,
+    /// Its sketch's constraints, on its mesh's vertices: see
+    /// [`crate::sketch`]. Empty for an object that is not a sketch.
+    pub sketch: Vec<crate::sketch::Constraint>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
     /// Actions laid on the timeline under the active one: see [`crate::nla`].
@@ -221,6 +224,7 @@ impl Object {
             uid: Uid::NONE,
             modifiers: Vec::new(),
             geometry_nodes: None,
+            sketch: Vec::new(),
             action: None,
             nla: Vec::new(),
             drivers: Vec::new(),

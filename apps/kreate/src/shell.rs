@@ -2538,6 +2538,8 @@ fn draw_area(
                         for m in &doc.design.measurements {
                             draw_measurement(&painter, &projector, &m.points, false);
                         }
+                        // A sketch's dimensions, where its points are now.
+                        draw_sketch_dimensions(&painter, &projector, doc);
                         draw_measurement(&painter, &projector, &state.measure_preview, true);
                         // The work plane, while the Cursor orientation is
                         // chosen: a grid on the cursor, square to it.
@@ -4736,6 +4738,50 @@ fn draw_work_plane(
     }
     line(at - x * reach, at + x * reach, egui::Color32::from_rgb(220, 80, 80), 1.5);
     line(at - y * reach, at + y * reach, egui::Color32::from_rgb(110, 200, 90), 1.5);
+}
+
+/// Each sketch's distance and angle constraints, drawn as dimensions on its
+/// points in the world.
+fn draw_sketch_dimensions(
+    painter: &egui::Painter,
+    projector: &kreate_ui::object_glyph::Projector,
+    doc: &Document,
+) {
+    for (id, object) in doc.objects() {
+        if object.sketch.is_empty() || !doc.is_shown(id) {
+            continue;
+        }
+        let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
+            continue;
+        };
+        let world = doc.world_transform(id);
+        let at = |v: u32| {
+            mesh.positions()
+                .get(v as usize)
+                .map(|p| world.transform_point3(p.as_dvec3()))
+        };
+        for c in &object.sketch {
+            let points: Option<Vec<kreate_math::DVec3>> = match c {
+                kreate_scene::sketch::Constraint::Distance { a, b, .. } => {
+                    [*a, *b].iter().map(|v| at(*v)).collect()
+                }
+                kreate_scene::sketch::Constraint::Angle { a, b, c, d, .. } => {
+                    // Drawn at the second line's start: its arms the two lines.
+                    let (pa, pb, pc, pd) = (at(*a), at(*b), at(*c), at(*d));
+                    match (pa, pb, pc, pd) {
+                        (Some(pa), Some(pb), Some(pc), Some(pd)) => {
+                            Some(vec![pc + (pb - pa), pc, pd])
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(points) = points {
+                draw_measurement(painter, projector, &points, false);
+            }
+        }
+    }
 }
 
 /// A dimension over the picture: the line between two points and how long it
@@ -8314,11 +8360,97 @@ fn draw_data_tab(
             draw_armature_data(ui, state, doc, registry, id)
         }
         kreate_scene::document::ObjectData::Mesh(id) => {
+            draw_sketch_panel(ui, state, active);
             draw_vertex_groups(ui, state, doc, id, active);
             draw_shape_keys(ui, state, active);
         }
         _ => {}
     }
+}
+
+/// The sketch: its constraints with their dimensions, buttons that add one
+/// on what is selected in edit mode, and the solid it becomes.
+fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::document::Object) {
+    use kreate_reflect::PropertyValue as V;
+    let title = state.catalog.get("panel-sketch");
+    let open = !object.sketch.is_empty();
+    kreate_ui::panel::section(ui, &title, open, |ui| {
+        ui.weak(state.catalog.get("sketch-hint"));
+        ui.horizontal_wrapped(|ui| {
+            for (kind, tag) in kreate_scene::sketch::KINDS.iter().enumerate() {
+                let label = state.catalog.get(&format!("sketch-kind-{tag}"));
+                if ui.small_button(label).clicked() {
+                    let mut p = PropertyMap::new();
+                    p.set("kind", V::Enum(kind as u32));
+                    state.queue.run("sketch.constraint_add", p);
+                }
+            }
+        });
+        let length = kreate_ui::property_editor::UnitDisplay::of(kreate_reflect::Unit::Length);
+        for (i, c) in object.sketch.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let name = state.catalog.get(&format!("sketch-kind-{}", c.tag()));
+                // i18n-exempt: a number and a translated kind
+                ui.label(format!("{}. {name}", i + 1));
+                match c {
+                    kreate_scene::sketch::Constraint::Distance { value, .. } => {
+                        let mut shown = value * length.to_display;
+                        let response = ui.add(
+                            egui::DragValue::new(&mut shown)
+                                .speed(0.01 * length.to_display * 0.01)
+                                .suffix(length.suffix)
+                                .max_decimals(length.decimals),
+                        );
+                        if response.changed() {
+                            let mut p = PropertyMap::new();
+                            p.set("index", V::Int(i as i64));
+                            p.set("value", V::Float(length.from_display(shown)));
+                            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                            send_edit(state, "sketch.constraint_set", p, dragging);
+                        }
+                    }
+                    kreate_scene::sketch::Constraint::Angle { value, .. } => {
+                        let mut degrees = value.to_degrees();
+                        let response = ui.add(
+                            egui::DragValue::new(&mut degrees).speed(0.5).suffix("°"),
+                        );
+                        if response.changed() {
+                            let mut p = PropertyMap::new();
+                            p.set("index", V::Int(i as i64));
+                            p.set("value", V::Float(degrees.to_radians()));
+                            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                            send_edit(state, "sketch.constraint_set", p, dragging);
+                        }
+                    }
+                    _ => {}
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(REMOVE_GLYPH).clicked() {
+                        let mut p = PropertyMap::new();
+                        p.set("index", V::Int(i as i64));
+                        state.queue.run("sketch.constraint_remove", p);
+                    }
+                });
+            });
+        }
+        ui.horizontal(|ui| {
+            if !object.sketch.is_empty() && ui.button(state.catalog.get("sketch-solve")).clicked() {
+                state.queue.run("sketch.solve", PropertyMap::new());
+            }
+            if ui.button(state.catalog.get("sketch-extrude")).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("kind", V::Enum(0));
+                // Ten of the scene's units: a part's thickness to start from.
+                p.set("height", V::Float(10.0 / length.to_display));
+                state.queue.run("sketch.make_solid", p);
+            }
+            if ui.button(state.catalog.get("sketch-revolve")).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("kind", V::Enum(1));
+                state.queue.run("sketch.make_solid", p);
+            }
+        });
+    });
 }
 
 /// The mesh's vertex groups: Blender's list in the Mesh Data tab. Click one to
@@ -9436,6 +9568,19 @@ render-hint = Renders through the scene camera with the path tracer. Esc stops a
 design-units = Units
 design-section = Section View
 panel-physical = Physical Properties
+panel-sketch = Sketch
+sketch-hint = A sketch is flat faces in the object's XY plane. In edit mode, select two points or an edge (two edges for an angle) and add a constraint; the sketch solves at once.
+sketch-kind-distance = Distance
+sketch-kind-horizontal = Horizontal
+sketch-kind-vertical = Vertical
+sketch-kind-fixed = Fixed
+sketch-kind-angle = Angle
+sketch-kind-parallel = Parallel
+sketch-kind-perpendicular = Perpendicular
+sketch-kind-equal = Equal
+sketch-solve = Solve
+sketch-extrude = Extrude
+sketch-revolve = Revolve
 panel-mesh-check = Mesh Check
 check-thickness = Thinnest Wall
 check-run = Check
@@ -9598,6 +9743,10 @@ geo-kind-subdivide = Subdivide
 geo-kind-mirror = Mirror
 geo-kind-join = Join Geometry
 geo-kind-primitive = Mesh Primitive
+geo-kind-extrude-profile = Extrude Profile
+geo-kind-revolve-profile = Revolve Profile
+geo-field-height = Height
+geo-field-segments = Segments
 geo-field-translate-x = Translation X
 geo-field-translate-y = Translation Y
 geo-field-translate-z = Translation Z
@@ -10421,6 +10570,19 @@ render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 �
 design-units = 단위
 design-section = 단면 보기
 panel-physical = 물성
+panel-sketch = 스케치
+sketch-hint = 스케치는 오브젝트의 XY 평면에 놓인 평평한 면입니다. 편집 모드에서 두 점이나 엣지 하나(각도는 엣지 둘)를 선택하고 구속을 추가하면 바로 풀립니다.
+sketch-kind-distance = 거리
+sketch-kind-horizontal = 수평
+sketch-kind-vertical = 수직
+sketch-kind-fixed = 고정
+sketch-kind-angle = 각도
+sketch-kind-parallel = 평행
+sketch-kind-perpendicular = 직각
+sketch-kind-equal = 같은 길이
+sketch-solve = 풀기
+sketch-extrude = 돌출
+sketch-revolve = 회전
 panel-mesh-check = 메시 검사
 check-thickness = 최소 벽 두께
 check-run = 검사
@@ -10582,6 +10744,10 @@ geo-kind-subdivide = 세분
 geo-kind-mirror = 미러
 geo-kind-join = 지오메트리 합치기
 geo-kind-primitive = 메시 기본 도형
+geo-kind-extrude-profile = 프로파일 돌출
+geo-kind-revolve-profile = 프로파일 회전
+geo-field-height = 높이
+geo-field-segments = 분할 수
 geo-field-translate-x = 이동 X
 geo-field-translate-y = 이동 Y
 geo-field-translate-z = 이동 Z

@@ -38,6 +38,11 @@ pub enum GeoNodeKind {
     /// A shape from nothing: 0 cube, 1 UV sphere, 2 cylinder, 3 cone,
     /// 4 torus, 5 icosphere.
     Primitive { shape: u32, size: f32 },
+    /// A sketch's outline pushed out along its Z: a solid, holes and all. See
+    /// `kreate_mesh::profile`.
+    ExtrudeProfile { height: f32 },
+    /// A sketch's outline turned a full turn about its Y axis.
+    RevolveProfile { segments: u32 },
 }
 
 /// The primitive shapes, in [`GeoNodeKind::Primitive`]'s order.
@@ -69,13 +74,23 @@ impl GeoNodeKind {
             GeoNodeKind::Mirror { .. } => "mirror",
             GeoNodeKind::Join => "join",
             GeoNodeKind::Primitive { .. } => "primitive",
+            GeoNodeKind::ExtrudeProfile { .. } => "extrude_profile",
+            GeoNodeKind::RevolveProfile { .. } => "revolve_profile",
         }
     }
 
     /// The kinds the Add menu offers, in its order. Not the group's input or
     /// output: a graph has one of each.
-    pub const ADDABLE: [&'static str; 6] =
-        ["transform", "array", "subdivide", "mirror", "join", "primitive"];
+    pub const ADDABLE: [&'static str; 8] = [
+        "transform",
+        "array",
+        "subdivide",
+        "mirror",
+        "join",
+        "primitive",
+        "extrude_profile",
+        "revolve_profile",
+    ];
 
     /// The node's numbers, flat — for a file, and for its fields by index.
     pub fn values(&self) -> Vec<f32> {
@@ -94,6 +109,8 @@ impl GeoNodeKind {
             }
             GeoNodeKind::Mirror { axis } => vec![*axis as f32],
             GeoNodeKind::Primitive { shape, size } => vec![*shape as f32, *size],
+            GeoNodeKind::ExtrudeProfile { height } => vec![*height],
+            GeoNodeKind::RevolveProfile { segments } => vec![*segments as f32],
         }
     }
 
@@ -124,6 +141,12 @@ impl GeoNodeKind {
             "primitive" => GeoNodeKind::Primitive {
                 shape: at(0, 0.0).clamp(0.0, (PRIMITIVES.len() - 1) as f32) as u32,
                 size: at(1, 1.0).max(0.001),
+            },
+            "extrude_profile" => GeoNodeKind::ExtrudeProfile {
+                height: at(0, 1.0),
+            },
+            "revolve_profile" => GeoNodeKind::RevolveProfile {
+                segments: at(0, 32.0).clamp(3.0, 512.0) as u32,
             },
             _ => return None,
         })
@@ -178,6 +201,8 @@ impl GeoNodeKind {
                 },
                 number("size", 1, 0.001, 1000.0),
             ],
+            GeoNodeKind::ExtrudeProfile { .. } => vec![number("height", 0, -1000.0, 1000.0)],
+            GeoNodeKind::RevolveProfile { .. } => vec![number("segments", 0, 3.0, 512.0)],
         }
     }
 
@@ -401,6 +426,14 @@ impl GeoGraph {
                     *p = to.transform_point3(p.as_dvec3()).as_vec3();
                 }
                 m
+            }
+            GeoNodeKind::ExtrudeProfile { height } => {
+                let m = self.socket(n, 0, input, memo, depth);
+                kreate_mesh::profile::extrude_profile(&m, *height)
+            }
+            GeoNodeKind::RevolveProfile { segments } => {
+                let m = self.socket(n, 0, input, memo, depth);
+                kreate_mesh::profile::revolve_profile(&m, *segments)
             }
             GeoNodeKind::Array { count, offset } => {
                 let m = self.socket(n, 0, input, memo, depth);

@@ -242,6 +242,9 @@ pub struct ObjectRecord {
     /// `[from_node, to_node, to_socket]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_nodes: Option<GeoGraphRecord>,
+    /// Its sketch constraints: kind, vertex indices, number, held place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sketch: Vec<(String, Vec<u32>, f64, [f64; 2])>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -1775,6 +1778,18 @@ pub fn write(
                     .filter_map(modifier_record)
                     .collect(),
                 geometry_nodes: object.geometry_nodes.as_ref().map(geo_record),
+                sketch: object
+                    .sketch
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.tag().to_string(),
+                            c.points(),
+                            c.value().unwrap_or(0.0),
+                            c.at(),
+                        )
+                    })
+                    .collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -2357,6 +2372,15 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .collect();
         object.modifiers = record.modifiers.iter().filter_map(modifier_from).collect();
         object.geometry_nodes = record.geometry_nodes.as_ref().and_then(geo_from_record);
+        // A constraint of a kind this build does not know is dropped, not
+        // guessed at: the rest of the sketch still holds.
+        object.sketch = record
+            .sketch
+            .iter()
+            .filter_map(|(tag, points, value, at)| {
+                kreate_scene::sketch::Constraint::from_parts(tag, points, *value, *at)
+            })
+            .collect();
         object.shape_keys = record
             .shape_keys
             .iter()
