@@ -405,6 +405,24 @@ struct GeoEntry {
     used: u64,
 }
 
+/// A mesh with its simulation laid on: what it was made from and of.
+#[derive(Clone, Debug)]
+struct SimEntry {
+    object: kreate_reflect::Uid,
+    input: Arc<MeshData>,
+    /// The bake it read, by address.
+    cache: usize,
+    /// The frame it is of, when the bake has anything for it; `None` for
+    /// hair at rest, which is the same at every frame.
+    frame: Option<i64>,
+    physics: crate::physics::ObjectPhysics,
+    /// The instance objects' meshes, by address: a changed one is new
+    /// particles.
+    instances: Vec<usize>,
+    output: Arc<MeshData>,
+    used: u64,
+}
+
 /// A skinned mesh, and the input and bone matrices it was made from.
 #[derive(Clone, Debug)]
 struct SkinEntry {
@@ -447,6 +465,8 @@ pub struct ModifierCache {
     shapes: Vec<ShapeEntry>,
     /// Geometry node results, one per input.
     geo: Vec<GeoEntry>,
+    /// Simulation results laid on, one per object.
+    sims: Vec<SimEntry>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -465,6 +485,18 @@ impl ModifierCache {
     /// `None` when the object has no mesh, or references one that is not in the
     /// document.
     pub fn evaluated(
+        &mut self,
+        doc: &Document,
+        id: ObjectId,
+        ctx: &EvalCtx,
+    ) -> Option<Arc<MeshData>> {
+        let base = self.evaluated_base(doc, id, ctx)?;
+        Some(self.simulated(doc, id, base))
+    }
+
+    /// The evaluated mesh before any simulation is laid on: what a bake
+    /// starts from.
+    pub fn evaluated_base(
         &mut self,
         doc: &Document,
         id: ObjectId,
@@ -497,6 +529,100 @@ impl ModifierCache {
             Some(graph) => self.noded(&stacked, graph),
             None => stacked,
         })
+    }
+
+    /// `input` with the object's baked cloth vertices, particles and hair laid
+    /// on, at the document's frame. See [`crate::physics`].
+    fn simulated(&mut self, doc: &Document, id: ObjectId, input: Arc<MeshData>) -> Arc<MeshData> {
+        let Some(object) = doc.object(id) else {
+            return input;
+        };
+        let physics = &object.physics;
+        if physics.soft.is_none() && physics.particles.is_empty() {
+            return input;
+        }
+        let cache = &doc.physics_cache;
+        let uid = object.uid;
+        let baked = cache.soft_of(uid).is_some()
+            || cache.particles.iter().any(|t| t.object == uid);
+        let frame = baked.then(|| doc.playback.frame.round() as i64);
+        let instance_of = |s: &crate::physics::ParticleSettings| {
+            let o = doc.object(doc.object_by_uid(s.instance?)?)?;
+            Some((doc.mesh_arc(o.mesh()?)?.clone(), o.transform))
+        };
+        let instances: Vec<Option<(Arc<MeshData>, kreate_math::DTransform)>> =
+            physics.particles.iter().map(instance_of).collect();
+        let instance_keys: Vec<usize> = instances
+            .iter()
+            .map(|i| i.as_ref().map_or(0, |(m, _)| Arc::as_ptr(m) as usize))
+            .collect();
+        let cache_key = Arc::as_ptr(cache) as usize;
+        if let Some(entry) = self.sims.iter_mut().find(|e| {
+            e.object == uid
+                && Arc::ptr_eq(&e.input, &input)
+                && e.cache == cache_key
+                && e.frame == frame
+                && e.physics == *physics
+                && e.instances == instance_keys
+        }) {
+            entry.used = self.generation;
+            return entry.output.clone();
+        }
+        let at = doc.playback.frame;
+        let mut mesh = (*input).clone();
+        if let Some(v) = cache.soft_at(uid, at) {
+            if v.len() == mesh.num_verts() as usize {
+                mesh.positions_mut().copy_from_slice(v);
+            }
+        }
+        let mut parts: Vec<MeshData> = Vec::new();
+        for (i, (s, inst)) in physics.particles.iter().zip(&instances).enumerate() {
+            // The instance as it stands — turned and sized — but not moved:
+            // every particle is its own place.
+            let shaped = inst.as_ref().map(|(m, t)| {
+                let mut m = (**m).clone();
+                for p in m.positions_mut() {
+                    *p = (t.rotation * (p.as_dvec3() * t.scale)).as_vec3();
+                }
+                m
+            });
+            let particles = cache.particles_at(uid, i, at).map(|p| &p[..]);
+            if let Some(m) = crate::physics::particles::system_mesh(&input, s, particles, shaped.as_ref()) {
+                parts.push(m);
+            }
+        }
+        let show_emitter = physics.particles.iter().all(|s| s.show_emitter);
+        let output = if parts.is_empty() {
+            mesh
+        } else {
+            let mut list: Vec<kreate_mesh::edit::join::Part<'_>> = Vec::new();
+            if show_emitter {
+                list.push(kreate_mesh::edit::join::Part {
+                    mesh: &mesh,
+                    transform: kreate_math::DAffine3::IDENTITY,
+                });
+            }
+            for m in &parts {
+                list.push(kreate_mesh::edit::join::Part {
+                    mesh: m,
+                    transform: kreate_math::DAffine3::IDENTITY,
+                });
+            }
+            kreate_mesh::edit::join::join(&list).0
+        };
+        let output = Arc::new(output);
+        self.sims.retain(|e| e.object != uid);
+        self.sims.push(SimEntry {
+            object: uid,
+            input,
+            cache: cache_key,
+            frame,
+            physics: physics.clone(),
+            instances: instance_keys,
+            output: output.clone(),
+            used: self.generation,
+        });
+        output
     }
 
     /// The graph's result for `input`, from the cache while both are the same.
@@ -715,6 +841,7 @@ impl ModifierCache {
         self.skins.retain(|e| e.used == generation);
         self.shapes.retain(|e| e.used == generation);
         self.geo.retain(|e| e.used == generation);
+        self.sims.retain(|e| e.used == generation);
         self.generation += 1;
     }
 

@@ -18,6 +18,7 @@ pub mod origin;
 pub mod design;
 pub mod sketch;
 pub mod paint;
+pub mod physics;
 pub mod pose;
 pub mod render;
 pub mod sculpt;
@@ -41,6 +42,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     sketch::register(registry);
     render::register(registry);
     paint::register(registry);
+    physics::register(registry);
     pose::register(registry);
     sculpt::register(registry);
     shape::register(registry);

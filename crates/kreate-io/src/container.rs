@@ -217,6 +217,9 @@ pub struct ObjectRecord {
     /// The key edit mode had traded into the mesh when this was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editing_shape: Option<String>,
+    /// Its physics settings, when it has any. See `physics_record`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<crate::physics_record::PhysicsRecord>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1092,6 +1095,9 @@ pub struct SceneFile {
     /// The render settings, when they are not the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<RenderRecord>,
+    /// The physics world, when it is not the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<crate::physics_record::WorldRecord>,
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
@@ -1503,6 +1509,7 @@ pub fn write(
                     .collect(),
             })
             .collect();
+        scene.physics = crate::physics_record::write_world(&document.physics);
         scene.render = (document.render != kreate_scene::render::RenderSettings::default()).then(|| {
             let r = &document.render;
             RenderRecord {
@@ -1728,6 +1735,7 @@ pub fn write(
                     .collect(),
                 active_shape: object.active_shape.clone(),
                 editing_shape: object.editing_shape.clone(),
+                physics: crate::physics_record::write(&object.physics),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -2194,6 +2202,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 cap,
             });
     }
+    if let Some(w) = &scene.physics {
+        document.physics = crate::physics_record::read_world(w);
+    }
     if let Some(r) = &scene.render {
         use kreate_scene::render::{OutputFormat, RenderSettings};
         // Sizes a file can make absurd are brought back into range rather
@@ -2391,6 +2402,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .collect();
         object.active_shape = record.active_shape.clone();
         object.editing_shape = record.editing_shape.clone();
+        if let Some(p) = &record.physics {
+            object.physics = crate::physics_record::read(p);
+        }
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {

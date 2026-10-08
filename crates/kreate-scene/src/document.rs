@@ -206,6 +206,9 @@ pub struct Object {
     /// The key traded into the mesh's positions while edit mode edits it —
     /// see `shape`. `None` the rest of the time.
     pub editing_shape: Option<String>,
+    /// What it is to the simulation: a rigid body, a collider, cloth,
+    /// particle systems. See [`crate::physics`].
+    pub physics: crate::physics::ObjectPhysics,
 }
 
 impl Object {
@@ -235,6 +238,7 @@ impl Object {
             shape_keys: Vec::new(),
             active_shape: None,
             editing_shape: None,
+            physics: crate::physics::ObjectPhysics::default(),
         }
     }
 
@@ -572,6 +576,11 @@ pub struct Document {
     pub design: crate::design::DesignSettings,
     /// How a finished picture is made. See [`crate::render`].
     pub render: crate::render::RenderSettings,
+    /// Gravity, steps, and the frames a bake covers. See [`crate::physics`].
+    pub physics: crate::physics::PhysicsWorld,
+    /// The last bake: what plays. Behind an `Arc` so a snapshot keeps it for
+    /// the price of a pointer. Not saved with the file.
+    pub physics_cache: Arc<crate::physics::PhysicsCache>,
     /// Which world is lighting the scene.
     ///
     /// A pointer and not the world itself, so that swapping a lighting setup is
@@ -1644,6 +1653,23 @@ impl Document {
             }
             if o.transform != before || o.pose != pose_before || o.shape_keys != shapes_before {
                 moved += 1;
+            }
+        }
+        // The baked rigid bodies, over whatever their keys said: a body the
+        // simulation moves is where the simulation put it.
+        let cache = self.physics_cache.clone();
+        for track in &cache.rigid {
+            let Some(id) = self.object_by_uid(track.object) else {
+                continue;
+            };
+            let Some(at) = cache.index(frame, track.frames.len()) else {
+                continue;
+            };
+            if let Some(o) = self.objects.get_mut(id) {
+                if o.transform != track.frames[at] {
+                    o.transform = track.frames[at];
+                    moved += 1;
+                }
             }
         }
         if moved > 0 {

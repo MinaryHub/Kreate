@@ -1787,6 +1787,36 @@ fn shot_every_tab() {
     }
 }
 
+/// The Physics tab, with a rigid body and a hair system on the cube.
+#[test]
+fn shot_physics_tab() {
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    let cube = doc
+        .objects()
+        .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
+        .map(|(id, _)| id)
+        .unwrap();
+    let o = doc.object_mut(cube).unwrap();
+    o.physics.rigid = Some(kreate_scene::physics::RigidBody::default());
+    o.physics.particles = vec![kreate_scene::physics::ParticleSettings::new(
+        "Fur",
+        kreate_scene::physics::ParticleKind::Hair,
+    )];
+    doc.selection.clear();
+    doc.selection.add(cube);
+    let Some(shot) = composite_with(&doc, "en", false, |state| {
+        let areas: Vec<_> = state.screen().areas().iter().map(|(a, _)| *a).collect();
+        for area in areas {
+            state.set_properties_tab(area, kreate::shell::PropertiesTab::Physics);
+        }
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("tab-physics");
+}
+
 /// A cube with a point light in frame beside it, shown or hidden.
 fn doc_with_lamp(visible: bool) -> (Document, glam::DVec3) {
     let mut doc = doc_with_cube();

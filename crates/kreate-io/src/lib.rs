@@ -20,6 +20,7 @@ pub mod ktile;
 pub mod library;
 pub mod migrate;
 pub mod obj;
+pub mod physics_record;
 pub mod step;
 pub mod stl;
 pub mod threemf;

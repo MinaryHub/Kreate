@@ -1079,6 +1079,8 @@ pub enum PropertiesTab {
     World,
     /// The modifier stack.
     Modifiers,
+    /// Rigid body, collision, cloth, particles; the scene's physics and bake.
+    Physics,
     /// How the scene renders: size, samples, where the file goes.
     Render,
 }
@@ -1098,6 +1100,7 @@ impl PropertiesTab {
             Self::World => Icon::World,
             Self::Modifiers => Icon::Modifiers,
             Self::Render => Icon::Render,
+            Self::Physics => Icon::Physics,
         }
     }
 
@@ -1111,6 +1114,7 @@ impl PropertiesTab {
             Self::World => "tab-world",
             Self::Modifiers => "tab-modifiers",
             Self::Render => "tab-render",
+            Self::Physics => "tab-physics",
         }
     }
 }
@@ -1446,6 +1450,15 @@ struct Labels {
     origin_to_cursor: String,
     geometry_to_origin: String,
     menu_snap: String,
+    menu_physics: String,
+    physics_active: String,
+    physics_passive: String,
+    physics_cloth: String,
+    physics_soft: String,
+    physics_collision: String,
+    physics_particles: String,
+    physics_bake_menu: String,
+    physics_free_menu: String,
     pivot_label: String,
     undo_history: String,
     undo_original: String,
@@ -1770,6 +1783,15 @@ impl Labels {
             origin_to_cursor: t("origin-to-cursor"),
             geometry_to_origin: t("geometry-to-origin"),
             menu_snap: t("menu-snap"),
+            menu_physics: t("menu-physics"),
+            physics_active: t("menu-physics-active"),
+            physics_passive: t("menu-physics-passive"),
+            physics_cloth: t("menu-physics-cloth"),
+            physics_soft: t("menu-physics-soft"),
+            physics_collision: t("menu-physics-collision"),
+            physics_particles: t("physics-add-emitter"),
+            physics_bake_menu: t("menu-physics-bake"),
+            physics_free_menu: t("physics-free-bake"),
             pivot_label: t("pivot-point"),
             undo_history: t("menu-undo-history"),
             undo_original: t("undo-original"),
@@ -2301,6 +2323,53 @@ fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
             ],
         ),
     ]
+}
+
+/// The Object menu's Physics: Blender's quick ways to make something fall,
+/// drape or be in the way, and the bake. The rest is in the Physics tab.
+fn physics_node(l: &Labels) -> MenuNode {
+    use kreate_reflect::PropertyValue as V;
+    let rigid = |label: &str, kind: u32| {
+        MenuNode::Entry(
+            MenuEntry::new(
+                "physics.rigid_body_set",
+                label,
+                op(
+                    "physics.rigid_body_set",
+                    &[("enabled", V::Bool(true)), ("kind", V::Enum(kind))],
+                ),
+            )
+            .variant("kind", V::Enum(kind)),
+        )
+    };
+    let soft = |label: &str, kind: u32| {
+        MenuNode::Entry(
+            MenuEntry::new("physics.soft_set", label, op("physics.soft_set", &[("kind", V::Enum(kind))]))
+                .variant("kind", V::Enum(kind)),
+        )
+    };
+    MenuNode::Sub(
+        l.menu_physics.clone(),
+        vec![
+            rigid(&l.physics_active, 0),
+            rigid(&l.physics_passive, 1),
+            soft(&l.physics_cloth, 1),
+            soft(&l.physics_soft, 2),
+            MenuNode::Entry(MenuEntry::new(
+                "physics.collision_set",
+                &l.physics_collision,
+                op("physics.collision_set", &[("enabled", V::Bool(true))]),
+            )),
+            MenuNode::Entry(MenuEntry::new(
+                "physics.particles_add",
+                &l.physics_particles,
+                op("physics.particles_add", &[]),
+            )),
+            MenuNode::Separator,
+            MenuNode::Entry(MenuEntry::new("physics.bake", &l.physics_bake_menu, op("physics.bake", &[]))),
+            MenuNode::Entry(MenuEntry::new("physics.free_bake", &l.physics_free_menu, op("physics.free_bake", &[]))),
+        ],
+    )
 }
 
 /// Draws the open pie, and runs what it chooses.
@@ -3558,6 +3627,7 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                     let mut nodes = object_nodes(l);
                     nodes.push(MenuNode::Separator);
                     nodes.extend(transform_nodes(l));
+                    nodes.push(physics_node(l));
                     nodes
                 },
             }),
@@ -5212,6 +5282,143 @@ fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
 }
 
 /// The Render tab: the scene's render settings, and the buttons that use them.
+/// One physics panel: an operator's parameters as they stand, edited in
+/// place, each change sent through the operator.
+fn physics_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    registry: &OperatorRegistry,
+    title: &str,
+    op: &str,
+    mut params: PropertyMap,
+    keep: impl Fn(&str) -> bool,
+) {
+    let Some(info) = registry.get(op) else { return };
+    // Its own id scope: several panels have a "Kind", and egui names a
+    // drop-down by its label.
+    ui.push_id(op, |ui| {
+        kreate_ui::panel::section(ui, title, true, |ui| {
+            if kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut params, keep) {
+                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                send_edit(state, op, params, dragging);
+            }
+        });
+    });
+}
+
+/// Blender's Physics tab: what the active object is to the simulation —
+/// rigid body, collider, cloth or soft body, particle systems — and the
+/// scene's gravity, range and bake.
+fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry) {
+    use kreate_ops::ops::physics as ph;
+    use kreate_reflect::OpParams as _;
+    use kreate_reflect::PropertyValue as V;
+    ui.heading(state.catalog.get("tab-physics"));
+    let active = doc
+        .selection
+        .active
+        .and_then(|id| doc.object(id))
+        .filter(|o| o.mesh().is_some());
+    match active {
+        None => {
+            ui.weak(state.catalog.get("physics-no-mesh"));
+        }
+        Some(o) => {
+            let p = &o.physics;
+            let on = p.rigid.is_some();
+            let title = state.catalog.get("physics-rigid");
+            physics_panel(ui, state, registry, &title, "physics.rigid_body_set",
+                ph::rigid_params(p.rigid.as_ref()).to_map(), |n| on || n == "enabled");
+            let on = p.collision.is_some();
+            let title = state.catalog.get("physics-collision");
+            physics_panel(ui, state, registry, &title, "physics.collision_set",
+                ph::collision_params(p.collision.as_ref()).to_map(), |n| on || n == "enabled");
+            let soft = ph::soft_params(p.soft.as_ref());
+            let kind = soft.kind;
+            let title = state.catalog.get("physics-soft");
+            physics_panel(ui, state, registry, &title, "physics.soft_set", soft.to_map(),
+                |n| ph::soft_param_applies(kind, n));
+            let title = state.catalog.get("physics-particles");
+            kreate_ui::panel::section(ui, &title, true, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(state.catalog.get("physics-add-emitter")).clicked() {
+                        state.queue.run("physics.particles_add", PropertyMap::new());
+                    }
+                    if ui.button(state.catalog.get("physics-add-hair")).clicked() {
+                        let mut m = PropertyMap::new();
+                        m.set("kind", V::Enum(1));
+                        state.queue.run("physics.particles_add", m);
+                    }
+                });
+                for (i, s) in p.particles.iter().enumerate() {
+                    ui.push_id(("particles", i), |ui| {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            // i18n-exempt: the system's name is the user's own text
+                            ui.strong(&s.name);
+                            if ui
+                                .small_button(REMOVE_GLYPH)
+                                .on_hover_text(state.catalog.get("physics-remove-system"))
+                                .clicked()
+                            {
+                                let mut m = PropertyMap::new();
+                                m.set("index", V::Int(i as i64));
+                                state.queue.run("physics.particles_remove", m);
+                            }
+                        });
+                        let params = ph::particle_params(doc, i as u32, s);
+                        let kind = params.kind;
+                        if let Some(info) = registry.get("physics.particles_set") {
+                            let mut map = params.to_map();
+                            if kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut map,
+                                |n| ph::particle_param_applies(kind, n))
+                            {
+                                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                                send_edit(state, "physics.particles_set", map, dragging);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    }
+    ui.separator();
+    let title = state.catalog.get("physics-world");
+    physics_panel(ui, state, registry, &title, "physics.world_set",
+        ph::world_params(&doc.physics).to_map(), |_| true);
+    let cache = &doc.physics_cache;
+    ui.horizontal(|ui| {
+        if ui.button(state.catalog.get("physics-bake")).clicked() {
+            state.queue.run("physics.bake", PropertyMap::new());
+        }
+        if ui
+            .add_enabled(!cache.is_empty(), egui::Button::new(state.catalog.get("physics-free-bake")))
+            .clicked()
+        {
+            state.queue.run("physics.free_bake", PropertyMap::new());
+        }
+        if ui
+            .add_enabled(!cache.rigid.is_empty(), egui::Button::new(state.catalog.get("physics-bake-to-keys")))
+            .clicked()
+        {
+            state.queue.run("physics.bake_to_keys", PropertyMap::new());
+        }
+    });
+    if cache.is_empty() {
+        ui.weak(state.catalog.get("physics-not-baked"));
+    } else {
+        let frames = cache
+            .rigid
+            .first()
+            .map(|t| t.frames.len())
+            .or(cache.soft.first().map(|t| t.frames.len()))
+            .or(cache.particles.first().map(|t| t.frames.len()))
+            .unwrap_or(1);
+        let (start, end) = (cache.start.to_string(), (cache.start + frames as i32 - 1).to_string());
+        ui.weak(state.catalog.get_args("physics-baked", &[("start", start.as_str()), ("end", end.as_str())]));
+    }
+}
+
 fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry, l: &Labels) {
     // The scene's units, first: they are the scene's as much as how it
     // renders, and a design is set up in them before anything is drawn.
@@ -7723,6 +7930,7 @@ fn draw_properties(
                         draw_modifier_stack(ui, state, modifier_rows);
                     }
                     PropertiesTab::Render => draw_render_tab(ui, state, doc, registry, l),
+                    PropertiesTab::Physics => draw_physics_tab(ui, state, doc, registry),
                 });
         });
     });
@@ -7757,6 +7965,7 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         PropertiesTab::Material,
         PropertiesTab::World,
         PropertiesTab::Modifiers,
+        PropertiesTab::Physics,
         PropertiesTab::Render,
     ]
     .into_iter()
@@ -7782,6 +7991,9 @@ pub fn available_tabs(doc: &Document) -> Vec<PropertiesTab> {
         // The stack is per object, but an empty one is worth showing: it is
         // where a modifier gets added from.
         PropertiesTab::Modifiers => active.is_some(),
+        // The object's physics and the scene's: any object, since the scene's
+        // world and bake are there too.
+        PropertiesTab::Physics => active.is_some(),
         PropertiesTab::Tool => true,
         // The scene's, whatever is selected.
         PropertiesTab::Render => true,
@@ -9547,6 +9759,13 @@ menu-weld = Weld
 menu-select-loop = Loop
 pie-snap = Snap
 menu-snap = Snap
+menu-physics = Physics
+menu-physics-active = Add Active Rigid Body
+menu-physics-passive = Add Passive Rigid Body
+menu-physics-cloth = Add Cloth
+menu-physics-soft = Add Soft Body
+menu-physics-collision = Add Collision
+menu-physics-bake = Bake Physics
 menu-apply = Apply
 apply-location = Location
 apply-rotation = Rotation
@@ -9702,6 +9921,13 @@ op-object-origin-set = Set Origin
 op-object-origin-set-desc = Moves the origin of the selected meshes without moving what is drawn.
 op-object-transform-apply = Apply Transform
 op-object-transform-apply-desc = Bakes the transform into the mesh and resets it, leaving everything in place.
+op-physics-rigid-body-set-desc = Makes the selected objects rigid bodies: active ones fall and tumble, passive ones stay put and are in the way.
+op-physics-soft-set-desc = Makes the selected objects cloth, which hangs and drapes, or soft bodies, which wobble back to their shape.
+op-physics-collision-set-desc = Makes the selected objects something cloth, soft bodies and particles collide with.
+op-physics-particles-add-desc = Adds a particle system to the active object: particles thrown from its surface, or hair grown on it.
+op-physics-bake-desc = Runs every simulation from the first frame of the physics range to the last. Play the timeline to see it.
+op-physics-free-bake-desc = Throws the bake away. Rigid bodies go back to where they started.
+op-physics-bake-to-keys-desc = Turns the baked rigid bodies into keyframes, a key every frame, and stops them being rigid bodies.
 menu-select-more = More
 menu-select-less = Less
 menu-select-linked = Linked
@@ -9737,6 +9963,21 @@ uv-none = This mesh has no UVs yet. Project some with U, or from the right-click
 area-menu = Area
 sidebar-item = Item
 tab-render = Render
+tab-physics = Physics
+physics-rigid = Rigid Body
+physics-collision = Collision
+physics-soft = Cloth / Soft Body
+physics-particles = Particles
+physics-add-emitter = Add Particles
+physics-add-hair = Add Hair
+physics-remove-system = Remove this particle system
+physics-world = Scene Physics
+physics-bake = Bake
+physics-free-bake = Free Bake
+physics-bake-to-keys = Bake to Keyframes
+physics-baked = Baked: frames { $start } to { $end }. Play the timeline to see it.
+physics-not-baked = Not baked. Bake runs every simulation from the first frame to the last.
+physics-no-mesh = Rigid bodies, cloth and particles go on mesh objects.
 menu-render = Render
 render-image = Render Image
 render-animation = Render Animation
@@ -10547,6 +10788,13 @@ menu-weld = 용접
 menu-select-loop = 루프
 pie-snap = 스냅
 menu-snap = 스냅
+menu-physics = 물리
+menu-physics-active = 액티브 강체 추가
+menu-physics-passive = 패시브 강체 추가
+menu-physics-cloth = 천 추가
+menu-physics-soft = 소프트바디 추가
+menu-physics-collision = 충돌 추가
+menu-physics-bake = 물리 베이크
 menu-apply = 적용
 apply-location = 위치
 apply-rotation = 회전
@@ -10717,6 +10965,13 @@ op-object-origin-set = 원점 설정
 op-object-origin-set-desc = 그려진 모양은 그대로 두고 선택한 메시의 원점을 옮깁니다.
 op-object-transform-apply = 트랜스폼 적용
 op-object-transform-apply-desc = 트랜스폼을 메시에 굳히고 초기화합니다. 화면의 모습은 그대로입니다.
+op-physics-rigid-body-set-desc = 선택한 오브젝트를 강체로 만듭니다. 액티브는 떨어지고 구르며, 패시브는 제자리에서 다른 것을 막습니다.
+op-physics-soft-set-desc = 선택한 오브젝트를 늘어지고 덮이는 천이나, 출렁이다 제 모양으로 돌아오는 소프트바디로 만듭니다.
+op-physics-collision-set-desc = 선택한 오브젝트에 천, 소프트바디, 파티클이 부딪히게 합니다.
+op-physics-particles-add-desc = 활성 오브젝트에 파티클 시스템을 추가합니다. 표면에서 뿜어지는 파티클이나 표면에 자라는 헤어입니다.
+op-physics-bake-desc = 모든 시뮬레이션을 물리 범위의 첫 프레임부터 끝 프레임까지 계산합니다. 타임라인을 재생해 보세요.
+op-physics-free-bake-desc = 베이크를 지웁니다. 강체는 처음 자리로 돌아갑니다.
+op-physics-bake-to-keys-desc = 베이크된 강체를 매 프레임 키프레임으로 바꾸고, 강체 설정을 뺍니다.
 menu-select-more = 넓히기
 menu-select-less = 좁히기
 menu-select-linked = 연결된 것
@@ -10753,6 +11008,21 @@ uv-none = 이 메시에는 아직 UV가 없습니다. U를 누르거나 오른�
 area-menu = 영역
 sidebar-item = 항목
 tab-render = 렌더
+tab-physics = 물리
+physics-rigid = 강체
+physics-collision = 충돌
+physics-soft = 천 / 소프트바디
+physics-particles = 파티클
+physics-add-emitter = 파티클 추가
+physics-add-hair = 헤어 추가
+physics-remove-system = 이 파티클 시스템 제거
+physics-world = 장면 물리
+physics-bake = 베이크
+physics-free-bake = 베이크 지우기
+physics-bake-to-keys = 키프레임으로 굽기
+physics-baked = 베이크됨: { $start }~{ $end } 프레임. 타임라인을 재생해 보세요.
+physics-not-baked = 베이크 안 됨. 베이크는 모든 시뮬레이션을 첫 프레임부터 끝 프레임까지 계산합니다.
+physics-no-mesh = 강체, 천, 파티클은 메시 오브젝트에 붙습니다.
 menu-render = 렌더
 render-image = 이미지 렌더
 render-animation = 애니메이션 렌더
@@ -12265,7 +12535,7 @@ mod tests {
     // --- what the chrome can actually draw -------------------------------
 
     /// Every tab, so that a new one cannot be added without a glyph.
-    const ALL_TABS: [PropertiesTab; 7] = [
+    const ALL_TABS: [PropertiesTab; 8] = [
         PropertiesTab::Tool,
         PropertiesTab::Object,
         PropertiesTab::Data,
@@ -12273,6 +12543,7 @@ mod tests {
         PropertiesTab::Material,
         PropertiesTab::World,
         PropertiesTab::Modifiers,
+        PropertiesTab::Physics,
     ];
 
     #[test]

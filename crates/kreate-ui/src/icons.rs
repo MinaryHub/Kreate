@@ -30,6 +30,8 @@ pub enum Icon {
     Modifiers,
     /// A camera's body and lens: how the picture is made.
     Render,
+    /// A ball falling, with the lines of its fall: physics.
+    Physics,
 }
 
 /// Paints `icon` into `rect` in `ink`.
@@ -93,6 +95,17 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, ink: Color32) {
                 })
                 .collect();
             p.add(egui::Shape::line(meridian, line));
+        }
+        Icon::Physics => {
+            let ball = c + Vec2::new(s * 0.3, s * 0.3);
+            p.circle_filled(ball, s * 0.45, ink);
+            for dx in [-0.35f32, 0.05, 0.45] {
+                let x = c.x + dx * s;
+                p.line_segment(
+                    [Pos2::new(x - s * 0.15, c.y - s * 0.95), Pos2::new(x - s * 0.15, c.y - s * 0.35)],
+                    line,
+                );
+            }
         }
         Icon::Modifiers => {
             // A wrench: a handle and an open jaw.
