@@ -8919,6 +8919,7 @@ impl App {
             wireframe: gfx.viewport.show_wireframe,
             face_orientation: gfx.viewport.face_orientation,
             statistics: self.ui.show_stats,
+            dimensions: self.ui.show_dimensions,
             ambient_occlusion: gfx.viewport.ambient_occlusion,
             xray: gfx.viewport.xray,
             outline: gfx.viewport.show_outline,
@@ -9835,6 +9836,10 @@ impl App {
             "view.frame_selected" => self.frame_selected(),
             "view.toggle_statistics" => {
                 self.ui.show_stats = !self.ui.show_stats;
+                self.redraw.set(RedrawReason::UI);
+            }
+            "view.toggle_dimensions" => {
+                self.ui.show_dimensions = !self.ui.show_dimensions;
                 self.redraw.set(RedrawReason::UI);
             }
             "app.rename" => {

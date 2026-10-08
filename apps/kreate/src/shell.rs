@@ -300,6 +300,9 @@ pub struct ShellState {
     pub snap_target: Option<(kreate_math::DVec3, crate::snap::Element)>,
     /// Blender's Statistics overlay: counts in the viewport's corner.
     pub show_stats: bool,
+    /// Whether the dimensions — measurements and sketch dimensions — are
+    /// drawn over the picture. They stay in the document either way.
+    pub show_dimensions: bool,
     /// The history's step names and how many are applied, for the Undo
     /// History menu.
     pub history_steps: Vec<String>,
@@ -641,6 +644,7 @@ impl Default for ShellState {
             snap_target: None,
             rename: None,
             show_stats: false,
+            show_dimensions: true,
             history_steps: Vec::new(),
             history_at: 0,
             pivot: 0,
@@ -1016,6 +1020,7 @@ pub struct Overlays {
     pub wireframe: bool,
     pub face_orientation: bool,
     pub statistics: bool,
+    pub dimensions: bool,
     pub ambient_occlusion: bool,
     pub xray: bool,
     pub outline: bool,
@@ -1383,6 +1388,7 @@ struct Labels {
     overlay_wireframe: String,
     overlay_face_orientation: String,
     overlay_statistics: String,
+    overlay_dimensions: String,
     overlay_ao: String,
     overlay_xray: String,
     overlay_outline: String,
@@ -1706,6 +1712,7 @@ impl Labels {
             overlay_wireframe: t("overlay-wireframe"),
             overlay_face_orientation: t("overlay-face-orientation"),
             overlay_statistics: t("overlay-statistics"),
+            overlay_dimensions: t("overlay-dimensions"),
             overlay_ao: t("overlay-ao"),
             overlay_xray: t("overlay-xray"),
             overlay_outline: t("overlay-outline"),
@@ -2545,11 +2552,13 @@ fn draw_area(
                     // The dimensions on the scene, and the one being taken.
                     if let Some(projector) = state.projector {
                         let painter = ui.painter().with_clip_rect(inner);
-                        for m in &doc.design.measurements {
-                            draw_measurement(&painter, &projector, &m.points, false);
+                        if state.show_dimensions {
+                            for m in &doc.design.measurements {
+                                draw_measurement(&painter, &projector, &m.points, false);
+                            }
+                            // A sketch's dimensions, where its points are now.
+                            draw_sketch_dimensions(&painter, &projector, doc);
                         }
-                        // A sketch's dimensions, where its points are now.
-                        draw_sketch_dimensions(&painter, &projector, doc);
                         draw_measurement(&painter, &projector, &state.measure_preview, true);
                         // The work plane, while the Cursor orientation is
                         // chosen: a grid on the cursor, square to it.
@@ -4000,6 +4009,11 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 "view.toggle_statistics",
                 &l.overlay_statistics,
                 on.statistics,
+            ),
+            (
+                "view.toggle_dimensions",
+                &l.overlay_dimensions,
+                on.dimensions,
             ),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
@@ -9503,6 +9517,7 @@ overlay-face-orientation = Face Orientation
 menu-undo-history = Undo History
 undo-original = Original
 overlay-statistics = Statistics
+overlay-dimensions = Dimensions
 overlay-ao = Ambient Occlusion
 overlay-xray = X-Ray
 overlay-outline = Outline Selected
@@ -9534,6 +9549,7 @@ op-view-toggle-face-orientation = Face Orientation
 op-view-toggle-face-orientation-desc = Colours faces blue from the front and red from the back.
 op-view-toggle-statistics = Statistics
 op-view-toggle-statistics-desc = Shows how many objects, vertices, edges and faces there are.
+op-view-toggle-dimensions-desc = Shows or hides the measurements and sketch dimensions over the picture. They are kept either way.
 stats-objects = Objects
 stats-vertices = Vertices
 stats-edges = Edges
@@ -10497,6 +10513,7 @@ overlay-face-orientation = 면 방향
 menu-undo-history = 되돌리기 기록
 undo-original = 처음 상태
 overlay-statistics = 통계
+overlay-dimensions = 치수
 overlay-ao = 앰비언트 오클루전
 overlay-xray = 투시
 overlay-outline = 선택 외곽선
@@ -10543,6 +10560,7 @@ op-view-toggle-face-orientation = 면 방향
 op-view-toggle-face-orientation-desc = 면의 앞쪽은 파랑, 뒤쪽은 빨강으로 칠합니다.
 op-view-toggle-statistics = 통계
 op-view-toggle-statistics-desc = 오브젝트·정점·엣지·면 수를 보여 줍니다.
+op-view-toggle-dimensions-desc = 화면 위의 측정값과 스케치 치수를 보이거나 숨깁니다. 숨겨도 지워지지 않습니다.
 stats-objects = 오브젝트
 stats-vertices = 정점
 stats-edges = 엣지
