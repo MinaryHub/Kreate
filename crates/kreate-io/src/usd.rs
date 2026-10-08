@@ -51,7 +51,16 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
         // A bare mesh list: each at the origin, as the file puts them.
         let names = unique(scene.meshes.iter().map(|(n, _)| n.as_str()));
         for (index, name) in names.iter().enumerate() {
-            write_mesh(&mut out, scene, index, name, None, &material_names, 1, &mut notes);
+            write_mesh(
+                &mut out,
+                scene,
+                index,
+                name,
+                None,
+                &material_names,
+                1,
+                &mut notes,
+            );
         }
     } else {
         // Each node under its parent, by nesting.
@@ -82,7 +91,15 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
                 let _ = writeln!(out, "{pad}}}");
                 continue;
             }
-            write_node(&mut out, scene, i, &names[i], &material_names, depth, &mut notes);
+            write_node(
+                &mut out,
+                scene,
+                i,
+                &names[i],
+                &material_names,
+                depth,
+                &mut notes,
+            );
             stack.push((i, depth, true));
             for c in children[i].iter().rev() {
                 stack.push((*c, depth + 1, false));
@@ -108,7 +125,13 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
 pub fn prim_name(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) {
         s.insert(0, '_');
@@ -140,8 +163,18 @@ fn matrix(m: &kreate_math::DAffine3) -> String {
     let t = m.translation;
     format!(
         "( ({}, {}, {}, 0), ({}, {}, {}, 0), ({}, {}, {}, 0), ({}, {}, {}, 1) )",
-        c.x_axis.x, c.x_axis.y, c.x_axis.z, c.y_axis.x, c.y_axis.y, c.y_axis.z, c.z_axis.x,
-        c.z_axis.y, c.z_axis.z, t.x, t.y, t.z
+        c.x_axis.x,
+        c.x_axis.y,
+        c.x_axis.z,
+        c.y_axis.x,
+        c.y_axis.y,
+        c.y_axis.z,
+        c.z_axis.x,
+        c.z_axis.y,
+        c.z_axis.z,
+        t.x,
+        t.y,
+        t.z
     )
 }
 
@@ -151,7 +184,10 @@ fn write_transform(out: &mut String, node: &crate::ir::ExportNode, pad: &str) {
         "{pad}matrix4d xformOp:transform = {}",
         matrix(&node.transform.to_affine())
     );
-    let _ = writeln!(out, "{pad}uniform token[] xformOpOrder = [\"xformOp:transform\"]");
+    let _ = writeln!(
+        out,
+        "{pad}uniform token[] xformOpOrder = [\"xformOp:transform\"]"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -174,7 +210,16 @@ fn write_node(
             let _ = writeln!(out, "{pad}def Xform \"{name}\"");
             let _ = writeln!(out, "{pad}{{");
             write_transform(out, node, &inner);
-            write_mesh(out, scene, m, &format!("{name}_mesh"), None, materials, depth + 1, notes);
+            write_mesh(
+                out,
+                scene,
+                m,
+                &format!("{name}_mesh"),
+                None,
+                materials,
+                depth + 1,
+                notes,
+            );
         }
         ImportNodeData::Light(l) => {
             let Some(light) = scene.lights.get(l) else {
@@ -187,14 +232,21 @@ fn write_node(
                 // Candela from a small sphere: its surface's luminance.
                 ImportLightKind::Point => {
                     let r = 0.05f32;
-                    ("SphereLight", light.intensity / (std::f32::consts::PI * r * r), format!("{inner}float inputs:radius = {r}\n"))
+                    (
+                        "SphereLight",
+                        light.intensity / (std::f32::consts::PI * r * r),
+                        format!("{inner}float inputs:radius = {r}\n"),
+                    )
                 }
                 ImportLightKind::Directional => (
                     "DistantLight",
                     light.intensity,
                     format!("{inner}float inputs:angle = 0.53\n"),
                 ),
-                ImportLightKind::Spot { inner: cone_in, outer } => {
+                ImportLightKind::Spot {
+                    inner: cone_in,
+                    outer,
+                } => {
                     let r = 0.05f32;
                     (
                         "SphereLight",
@@ -214,7 +266,11 @@ fn write_node(
                 ),
             });
             let api = if matches!(light.kind, ImportLightKind::Spot { .. }) {
-                " (\n".to_string() + &pad + "    prepend apiSchemas = [\"ShapingAPI\"]\n" + &pad + ")"
+                " (\n".to_string()
+                    + &pad
+                    + "    prepend apiSchemas = [\"ShapingAPI\"]\n"
+                    + &pad
+                    + ")"
             } else {
                 String::new()
             };
@@ -246,7 +302,11 @@ fn write_node(
                         // orthographic camera.
                         let _ = writeln!(out, "{inner}token projection = \"orthographic\"");
                         let _ = writeln!(out, "{inner}float horizontalAperture = {}", width * 10.0);
-                        let _ = writeln!(out, "{inner}float verticalAperture = {}", width * 10.0 * 2.0 / 3.0);
+                        let _ = writeln!(
+                            out,
+                            "{inner}float verticalAperture = {}",
+                            width * 10.0 * 2.0 / 3.0
+                        );
                     }
                     (None, None) => {}
                 }
@@ -289,17 +349,28 @@ fn write_mesh(
     let _ = writeln!(
         out,
         "{inner}point3f[] points = [{}]",
-        list(&mut positions.iter().map(|p| format!("({}, {}, {})", p.x, p.y, p.z)))
+        list(
+            &mut positions
+                .iter()
+                .map(|p| format!("({}, {}, {})", p.x, p.y, p.z))
+        )
     );
-    let counts: Vec<String> = (0..mesh.num_faces()).map(|f| mesh.face_len(f).to_string()).collect();
-    let _ = writeln!(out, "{inner}int[] faceVertexCounts = [{}]", counts.join(", "));
+    let counts: Vec<String> = (0..mesh.num_faces())
+        .map(|f| mesh.face_len(f).to_string())
+        .collect();
+    let _ = writeln!(
+        out,
+        "{inner}int[] faceVertexCounts = [{}]",
+        counts.join(", ")
+    );
     let _ = writeln!(
         out,
         "{inner}int[] faceVertexIndices = [{}]",
         list(&mut mesh.corner_verts().iter().map(|v| v.to_string()))
     );
     let normals: Vec<Vec3> = mesh.compute_corner_normals(30f32.to_radians());
-    let _ = writeln!(
+    let _ =
+        writeln!(
         out,
         "{inner}normal3f[] normals = [{}] (\n{inner}    interpolation = \"faceVarying\"\n{inner})",
         list(&mut normals.iter().map(|n| format!("({}, {}, {})", n.x, n.y, n.z)))
@@ -352,7 +423,11 @@ fn write_material(out: &mut String, m: &crate::ir::ImportMaterial, name: &str, d
     let _ = writeln!(out, "{deep}float inputs:metallic = {}", m.metallic);
     let _ = writeln!(out, "{deep}float inputs:roughness = {}", m.roughness);
     let e = m.emissive * m.emissive_strength;
-    let _ = writeln!(out, "{deep}color3f inputs:emissiveColor = ({}, {}, {})", e.x, e.y, e.z);
+    let _ = writeln!(
+        out,
+        "{deep}color3f inputs:emissiveColor = ({}, {}, {})",
+        e.x, e.y, e.z
+    );
     let _ = writeln!(out, "{deep}float inputs:ior = {}", m.ior);
     let _ = writeln!(out, "{deep}token outputs:surface");
     let _ = writeln!(out, "{inner}}}");
@@ -368,6 +443,9 @@ mod tests {
         assert_eq!(prim_name("Cube.001"), "Cube_001");
         assert_eq!(prim_name("3 Lamps"), "_3_Lamps");
         assert_eq!(prim_name(""), "_");
-        assert_eq!(unique(["A", "A", "a b"].into_iter()), vec!["A", "A_1", "a_b"]);
+        assert_eq!(
+            unique(["A", "A", "a b"].into_iter()),
+            vec!["A", "A_1", "a_b"]
+        );
     }
 }

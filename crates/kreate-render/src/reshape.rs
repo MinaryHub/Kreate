@@ -57,7 +57,11 @@ impl Reshape {
         let unused = init("reshape unused", &[0u8; 16], storage);
         // Read where a vertex's neighbourhood has collapsed to nothing: the
         // normal it was uploaded with.
-        let rest_normals = init("reshape rest normals", bytemuck::cast_slice(&cpu.normals), storage);
+        let rest_normals = init(
+            "reshape rest normals",
+            bytemuck::cast_slice(&cpu.normals),
+            storage,
+        );
         // Every vertex fully weighted: the bounds check reads the count from it.
         let ones = init(
             "reshape weights",
@@ -84,7 +88,12 @@ impl Reshape {
         Some(Self {
             live,
             topology: topology_group(device, deformer, cpu),
-            mesh_verts: cpu.render_to_vert.iter().copied().max().map_or(0, |v| v as usize + 1),
+            mesh_verts: cpu
+                .render_to_vert
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |v| v as usize + 1),
             render_to_vert: cpu.render_to_vert.clone(),
             faces: cpu.counts.faces,
             scratch: Vec::with_capacity(render_verts),

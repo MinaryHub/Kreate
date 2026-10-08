@@ -91,7 +91,10 @@ pub struct ParticleSim {
 impl ParticleSim {
     pub fn new(mesh: &MeshData, settings: &ParticleSettings) -> Self {
         let count = settings.count as usize;
-        let (start, end) = (settings.frame_start as f64, settings.frame_end.max(settings.frame_start) as f64);
+        let (start, end) = (
+            settings.frame_start as f64,
+            settings.frame_end.max(settings.frame_start) as f64,
+        );
         let births = (0..count)
             .map(|i| start + (end - start) * i as f64 / count.max(1) as f64)
             .collect();
@@ -121,7 +124,8 @@ impl ParticleSim {
             while self.next < self.births.len() && self.births[self.next] <= frame {
                 let (p, n) = self.surface.sample(&mut self.rng);
                 let n = (turn * n).normalize_or(DVec3::Z);
-                let v = n * self.settings.normal_speed + self.rng.direction() * self.settings.random_speed;
+                let v = n * self.settings.normal_speed
+                    + self.rng.direction() * self.settings.random_speed;
                 self.live.push(Live {
                     birth: self.births[self.next],
                     x: world.transform_point3(p),
@@ -148,7 +152,8 @@ impl ParticleSim {
                         let vn = p.v.dot(normal);
                         if vn < 0.0 {
                             let along = p.v - normal * vn;
-                            p.v = along * (1.0 - c.friction as f64) - normal * (vn * c.bounciness as f64);
+                            p.v = along * (1.0 - c.friction as f64)
+                                - normal * (vn * c.bounciness as f64);
                         }
                     }
                 }
@@ -208,7 +213,8 @@ pub fn hair_rest(mesh: &MeshData, settings: &ParticleSettings) -> Vec<Particle> 
         }
         for k in 0..=segments {
             out.push(Particle {
-                position: (root + n * (settings.hair_length * k as f64 / segments as f64)).as_vec3(),
+                position: (root + n * (settings.hair_length * k as f64 / segments as f64))
+                    .as_vec3(),
                 heading: n.as_vec3(),
             });
         }
@@ -234,7 +240,10 @@ pub struct HairSim {
 
 impl HairSim {
     pub fn new(mesh: &MeshData, settings: &ParticleSettings, world: DAffine3) -> Self {
-        let rest: Vec<DVec3> = hair_rest(mesh, settings).iter().map(|p| p.position.as_dvec3()).collect();
+        let rest: Vec<DVec3> = hair_rest(mesh, settings)
+            .iter()
+            .map(|p| p.position.as_dvec3())
+            .collect();
         let x: Vec<DVec3> = rest.iter().map(|p| world.transform_point3(*p)).collect();
         let segments = settings.hair_segments.clamp(1, 64) as usize;
         Self {
@@ -250,7 +259,14 @@ impl HairSim {
         }
     }
 
-    pub fn advance(&mut self, dt: f64, substeps: u32, gravity: DVec3, world: DAffine3, colliders: &[&Collider]) {
+    pub fn advance(
+        &mut self,
+        dt: f64,
+        substeps: u32,
+        gravity: DVec3,
+        world: DAffine3,
+        colliders: &[&Collider],
+    ) {
         let n = substeps.max(1);
         let h = dt / n as f64;
         let per = self.segments + 1;
@@ -303,7 +319,11 @@ impl HairSim {
         (0..self.x.len())
             .map(|i| {
                 let here = self.x[i];
-                let next = if i % per < self.segments { self.x[i + 1] } else { here + (here - self.x[i - 1]) };
+                let next = if i % per < self.segments {
+                    self.x[i + 1]
+                } else {
+                    here + (here - self.x[i - 1])
+                };
                 Particle {
                     position: back.transform_point3(here).as_vec3(),
                     heading: (back.matrix3 * (next - here)).normalize_or_zero().as_vec3(),
@@ -341,7 +361,9 @@ pub fn particle_mesh(particles: &[Particle], size: f64, instance: Option<&MeshDa
     let (shape, faces): (Vec<Vec3>, Vec<Vec<u32>>) = match instance {
         Some(m) => (
             m.positions().iter().map(|p| *p * size as f32).collect(),
-            (0..m.num_faces()).map(|f| m.face_verts(f).to_vec()).collect(),
+            (0..m.num_faces())
+                .map(|f| m.face_verts(f).to_vec())
+                .collect(),
         ),
         None => diamond(size as f32),
     };
@@ -350,7 +372,11 @@ pub fn particle_mesh(particles: &[Particle], size: f64, instance: Option<&MeshDa
     for p in particles {
         let base = positions.len() as u32;
         positions.extend(shape.iter().map(|s| p.position + *s));
-        all.extend(faces.iter().map(|f| f.iter().map(|i| i + base).collect::<Vec<u32>>()));
+        all.extend(
+            faces
+                .iter()
+                .map(|f| f.iter().map(|i| i + base).collect::<Vec<u32>>()),
+        );
     }
     MeshData::from_faces(positions, &all)
 }
@@ -364,7 +390,11 @@ pub fn hair_mesh(points: &[Particle], segments: u32, width: f64) -> MeshData {
         let base = positions.len() as u32;
         let root_heading = strand[0].heading;
         // Square to the strand and to something it is not along.
-        let other = if root_heading.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+        let other = if root_heading.z.abs() < 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::X
+        };
         let side = root_heading.cross(other).normalize_or(Vec3::X);
         for (k, p) in strand.iter().enumerate() {
             let w = width as f32 * 0.5 * (1.0 - 0.8 * k as f32 / (per - 1) as f32);
@@ -416,12 +446,20 @@ mod tests {
         (s.count, s.frame_start, s.frame_end, s.lifetime) = (100, 1, 10, 5.0);
         let mut sim = ParticleSim::new(&plane, &s);
         sim.advance(1.0, 1.0 / 24.0, 4, G, DAffine3::IDENTITY, &[]);
-        assert!(!sim.live.is_empty() && sim.live.len() <= 11, "a tenth at the first frame: {}", sim.live.len());
+        assert!(
+            !sim.live.is_empty() && sim.live.len() <= 11,
+            "a tenth at the first frame: {}",
+            sim.live.len()
+        );
         for f in 2..=10 {
             sim.advance(f as f64, 1.0 / 24.0, 4, G, DAffine3::IDENTITY, &[]);
         }
         // Born up to frame 10, each living 5 frames: those of frames 5–10.
-        assert!(sim.live.len() < 70 && sim.live.len() > 40, "{}", sim.live.len());
+        assert!(
+            sim.live.len() < 70 && sim.live.len() > 40,
+            "{}",
+            sim.live.len()
+        );
         assert_eq!(sim.next, 100, "all born");
         for f in 11..=20 {
             sim.advance(f as f64, 1.0 / 24.0, 4, G, DAffine3::IDENTITY, &[]);
@@ -436,7 +474,13 @@ mod tests {
         (s.count, s.frame_start, s.frame_end, s.lifetime) = (20, 1, 1, 500.0);
         (s.normal_speed, s.random_speed) = (3.0, 0.0);
         let lift = DAffine3::from_translation(DVec3::new(0.0, 0.0, 1.0));
-        let floor = Collider::new(&kreate_mesh::primitives::plane(20.0), DAffine3::IDENTITY, 0.01, 0.0, 0.5);
+        let floor = Collider::new(
+            &kreate_mesh::primitives::plane(20.0),
+            DAffine3::IDENTITY,
+            0.01,
+            0.0,
+            0.5,
+        );
         let mut sim = ParticleSim::new(&emitter, &s);
         let mut highest: f64 = 0.0;
         for f in 1..=96 {
@@ -458,7 +502,11 @@ mod tests {
         assert_eq!(a.len(), (s.count * (s.hair_segments + 1)) as usize);
         assert_eq!(a, hair_rest(&plane, &s));
         let tip = a[s.hair_segments as usize];
-        assert!((tip.position.z - s.hair_length as f32).abs() < 1e-5, "{:?}", tip.position);
+        assert!(
+            (tip.position.z - s.hair_length as f32).abs() < 1e-5,
+            "{:?}",
+            tip.position
+        );
         let mesh = hair_mesh(&a, s.hair_segments, s.size);
         assert_eq!(mesh.num_faces(), s.count * s.hair_segments);
     }
@@ -476,24 +524,39 @@ mod tests {
         }
         let per = (s.hair_segments + 1) as usize;
         for strand in sim.x.chunks(per) {
-            assert!(strand[per - 1].z < strand[0].z - 0.3, "the tip hangs below the root");
+            assert!(
+                strand[per - 1].z < strand[0].z - 0.3,
+                "the tip hangs below the root"
+            );
         }
         let at = sim.snapshot(turn);
         let rest = hair_rest(&plane, &s);
-        assert!(at[0].position.distance(rest[0].position) < 1e-5, "roots stay");
+        assert!(
+            at[0].position.distance(rest[0].position) < 1e-5,
+            "roots stay"
+        );
     }
 
     #[test]
     fn a_particle_is_drawn_as_its_instance() {
         let cube = kreate_mesh::primitives::cube(2.0);
         let ps = [
-            Particle { position: Vec3::ZERO, heading: Vec3::Z },
-            Particle { position: Vec3::X * 5.0, heading: Vec3::Z },
+            Particle {
+                position: Vec3::ZERO,
+                heading: Vec3::Z,
+            },
+            Particle {
+                position: Vec3::X * 5.0,
+                heading: Vec3::Z,
+            },
         ];
         let m = particle_mesh(&ps, 0.5, Some(&cube));
         assert_eq!(m.num_verts(), 16);
         assert_eq!(m.num_faces(), 12);
-        let far = m.positions()[8..].iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        let far = m.positions()[8..]
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::MIN, f32::max);
         assert!((far - 5.5).abs() < 1e-5, "half-size cube at x = 5: {far}");
         assert_eq!(particle_mesh(&ps, 0.1, None).num_faces(), 16, "diamonds");
     }

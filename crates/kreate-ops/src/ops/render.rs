@@ -26,7 +26,11 @@ pub struct SetFrameRangeParams {
 impl Default for SetFrameRangeParams {
     fn default() -> Self {
         let p = kreate_scene::animation::Playback::default();
-        Self { start: p.start as i64, end: p.end as i64, fps: p.fps }
+        Self {
+            start: p.start as i64,
+            end: p.end as i64,
+            fps: p.fps,
+        }
     }
 }
 
@@ -44,10 +48,18 @@ impl Operator for SetFrameRange {
         "Frame Range"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let start = params.start.clamp(i32::MIN as i64 / 2, i32::MAX as i64 / 2) as i32;
         let end = (params.end.clamp(i32::MIN as i64 / 2, i32::MAX as i64 / 2) as i32).max(start);
-        let fps = if params.fps.is_finite() { params.fps.clamp(1.0, 1000.0) } else { 24.0 };
+        let fps = if params.fps.is_finite() {
+            params.fps.clamp(1.0, 1000.0)
+        } else {
+            24.0
+        };
         let p = doc.document().playback;
         if (p.start, p.end, p.fps) == (start, end, fps) {
             return Ok(OpResult::Cancelled);
@@ -98,7 +110,10 @@ pub fn render_params(doc: &Document) -> SetRenderSettingsParams {
         width: r.width as i64,
         height: r.height as i64,
         samples: r.samples as i64,
-        format: OutputFormat::ALL.iter().position(|f| *f == r.format).unwrap_or(0) as u32,
+        format: OutputFormat::ALL
+            .iter()
+            .position(|f| *f == r.format)
+            .unwrap_or(0) as u32,
         output: r.output.clone(),
         denoise: r.denoise,
         motion_blur: r.motion_blur,
@@ -118,7 +133,11 @@ impl Operator for SetRenderSettings {
         "Render Settings"
     }
 
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let next = kreate_scene::render::RenderSettings {
             width: params.width.clamp(16, 16384) as u32,
             height: params.height.clamp(16, 16384) as u32,
@@ -157,9 +176,18 @@ mod range_tests {
         params.set("end", PropertyValue::Int(5));
         params.set("fps", PropertyValue::Float(30.0));
         history
-            .dispatch(&registry, &mut doc, &Context::default(), "scene.set_frame_range", &params)
+            .dispatch(
+                &registry,
+                &mut doc,
+                &Context::default(),
+                "scene.set_frame_range",
+                &params,
+            )
             .expect("runs");
-        assert_eq!((doc.playback.start, doc.playback.end, doc.playback.fps), (10, 10, 30.0));
+        assert_eq!(
+            (doc.playback.start, doc.playback.end, doc.playback.fps),
+            (10, 10, 30.0)
+        );
         assert_eq!(doc.playback.frame, 10.0);
     }
 }
@@ -181,10 +209,19 @@ mod tests {
         params.set("format", PropertyValue::Enum(1));
         params.set("output", PropertyValue::Text("  C:/renders/shot  ".into()));
         history
-            .dispatch(&registry, &mut doc, &Context::default(), "render.set_settings", &params)
+            .dispatch(
+                &registry,
+                &mut doc,
+                &Context::default(),
+                "render.set_settings",
+                &params,
+            )
             .expect("runs");
         assert_eq!(doc.render.width, 800);
-        assert_eq!(doc.render.height, 1080, "a parameter left out keeps its value");
+        assert_eq!(
+            doc.render.height, 1080,
+            "a parameter left out keeps its value"
+        );
         assert_eq!(doc.render.format, OutputFormat::Exr);
         assert_eq!(doc.render.output, "C:/renders/shot");
         assert!(history.undo(&mut doc));

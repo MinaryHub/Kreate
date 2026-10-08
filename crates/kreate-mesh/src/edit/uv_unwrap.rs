@@ -373,7 +373,10 @@ fn flatten(
         if !uv.iter().all(|p| p.is_finite()) {
             return None;
         }
-        return Some((corner_of.into_iter().map(|(l, k)| (l, uv[k])).collect(), true));
+        return Some((
+            corner_of.into_iter().map(|(l, k)| (l, uv[k])).collect(),
+            true,
+        ));
     }
 
     // A map can come out mirrored; a mirrored island samples a texture
@@ -616,6 +619,9 @@ mod tests {
         unwrap(&mut m, &faces, LAYER, 0.0);
         assert!(uv_at_vertex(&m, 5).distance(held) < 1e-5);
         let after = stretch(&m);
-        assert!((after[0] / before[0] - 1.0).abs() < 1e-3 || after.iter().all(|x| (x / after[0] - 1.0).abs() < 1e-3));
+        assert!(
+            (after[0] / before[0] - 1.0).abs() < 1e-3
+                || after.iter().all(|x| (x / after[0] - 1.0).abs() < 1e-3)
+        );
     }
 }

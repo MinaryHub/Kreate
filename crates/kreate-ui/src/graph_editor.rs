@@ -710,7 +710,11 @@ fn graph_plot(
             state.menu = pointer.map(Menu::Extrapolation);
         }
         if alt && pressed(Key::O) {
-            out.push(if shift { GraphEdit::Bake } else { GraphEdit::Smooth });
+            out.push(if shift {
+                GraphEdit::Bake
+            } else {
+                GraphEdit::Smooth
+            });
         }
     }
 

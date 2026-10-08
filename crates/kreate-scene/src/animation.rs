@@ -546,8 +546,14 @@ impl Action {
     pub fn bake_selected(&mut self) -> bool {
         let mut changed = false;
         for curve in &mut self.curves {
-            let selected: Vec<f64> = curve.keys.iter().filter(|k| k.selected).map(|k| k.frame).collect();
-            let (Some(first), Some(last)) = (selected.first().copied(), selected.last().copied()) else {
+            let selected: Vec<f64> = curve
+                .keys
+                .iter()
+                .filter(|k| k.selected)
+                .map(|k| k.frame)
+                .collect();
+            let (Some(first), Some(last)) = (selected.first().copied(), selected.last().copied())
+            else {
                 continue;
             };
             if last - first < 1.0 {
@@ -560,8 +566,13 @@ impl Action {
                 f += 1.0;
             }
             frames.push(last);
-            let values: Vec<f64> = frames.iter().map(|f| curve.evaluate(*f).unwrap_or(0.0)).collect();
-            curve.keys.retain(|k| k.frame < first - SAME_FRAME || k.frame > last + SAME_FRAME);
+            let values: Vec<f64> = frames
+                .iter()
+                .map(|f| curve.evaluate(*f).unwrap_or(0.0))
+                .collect();
+            curve
+                .keys
+                .retain(|k| k.frame < first - SAME_FRAME || k.frame > last + SAME_FRAME);
             for (f, v) in frames.iter().zip(values) {
                 curve.insert(*f, v, Interpolation::Linear);
             }
@@ -1363,11 +1374,16 @@ mod tests {
         let c = a.curve_mut("location", 0);
         c.insert(1.0, 0.0, Interpolation::Bezier);
         c.insert(9.0, 5.0, Interpolation::Bezier);
-        let before: Vec<f64> = (1..=9).map(|f| a.curves[0].evaluate(f as f64).unwrap()).collect();
+        let before: Vec<f64> = (1..=9)
+            .map(|f| a.curves[0].evaluate(f as f64).unwrap())
+            .collect();
         assert!(a.bake_selected());
         let c = &a.curves[0];
         assert_eq!(c.keys.len(), 9);
-        assert!(c.keys.iter().all(|k| k.interpolation == Interpolation::Linear));
+        assert!(c
+            .keys
+            .iter()
+            .all(|k| k.interpolation == Interpolation::Linear));
         for (f, v) in (1..=9).zip(before) {
             assert!((c.evaluate(f as f64).unwrap() - v).abs() < 1e-12);
         }

@@ -17,15 +17,24 @@ use kreate_mesh::MeshData;
 /// The SI prefix STEP names a unit by, or `None` for a unit that is not
 /// metric (inches and feet are written as millimetres).
 fn si_prefix(metres_per_unit: f64) -> Option<&'static str> {
-    [(1.0, "$"), (1e-2, ".CENTI."), (1e-3, ".MILLI."), (1e-6, ".MICRO.")]
-        .iter()
-        .find(|(m, _)| (m - metres_per_unit).abs() < 1e-12)
-        .map(|(_, p)| *p)
+    [
+        (1.0, "$"),
+        (1e-2, ".CENTI."),
+        (1e-3, ".MILLI."),
+        (1e-6, ".MICRO."),
+    ]
+    .iter()
+    .find(|(m, _)| (m - metres_per_unit).abs() < 1e-12)
+    .map(|(_, p)| *p)
 }
 
 /// Writes `parts` as one STEP file in the unit that is `metres_per_unit`
 /// metres (a non-metric one becomes millimetres). `name` is the file's.
-pub fn write_step(name: &str, parts: &[(String, &MeshData, DAffine3)], metres_per_unit: f64) -> String {
+pub fn write_step(
+    name: &str,
+    parts: &[(String, &MeshData, DAffine3)],
+    metres_per_unit: f64,
+) -> String {
     let (prefix, scale) = match si_prefix(metres_per_unit) {
         Some(p) => (p, metres_per_unit),
         None => (".MILLI.", 1e-3),
@@ -72,14 +81,22 @@ pub fn write_step(name: &str, parts: &[(String, &MeshData, DAffine3)], metres_pe
             .iter()
             .map(|p| {
                 let q = world.transform_point3(p.as_dvec3()) / scale;
-                w.add(&format!("CARTESIAN_POINT('',({},{},{}))", real(q.x), real(q.y), real(q.z)))
+                w.add(&format!(
+                    "CARTESIAN_POINT('',({},{},{}))",
+                    real(q.x),
+                    real(q.y),
+                    real(q.z)
+                ))
             })
             .collect();
         let flip = world.matrix3.determinant() < 0.0;
         let positions: Vec<DVec3> = mesh.positions().iter().map(|p| p.as_dvec3()).collect();
         let mut faces = Vec::new();
         let mut add_face = |w: &mut Writer, ring: &[u32]| {
-            let mut ids: Vec<String> = ring.iter().map(|v| format!("#{}", points[*v as usize])).collect();
+            let mut ids: Vec<String> = ring
+                .iter()
+                .map(|v| format!("#{}", points[*v as usize]))
+                .collect();
             if flip {
                 ids.reverse();
             }
@@ -97,7 +114,10 @@ pub fn write_step(name: &str, parts: &[(String, &MeshData, DAffine3)], metres_pe
             if ring.len() == 3 || is_planar(&positions, ring) {
                 add_face(&mut w, ring);
             } else {
-                let points: Vec<_> = ring.iter().map(|v| positions[*v as usize].as_vec3()).collect();
+                let points: Vec<_> = ring
+                    .iter()
+                    .map(|v| positions[*v as usize].as_vec3())
+                    .collect();
                 let mut tris = Vec::new();
                 kreate_mesh::tessellate::triangulate_polygon(&points, &mut tris);
                 for t in tris {
@@ -105,7 +125,11 @@ pub fn write_step(name: &str, parts: &[(String, &MeshData, DAffine3)], metres_pe
                 }
             }
         }
-        let list = faces.iter().map(|f| format!("#{f}")).collect::<Vec<_>>().join(",");
+        let list = faces
+            .iter()
+            .map(|f| format!("#{f}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let representation = if kreate_mesh::measure::is_closed(mesh) {
             let shell = w.add(&format!("CLOSED_SHELL('',({list}))"));
             let brep = w.add(&format!("FACETED_BREP('{part}',#{shell})"));
@@ -119,7 +143,9 @@ pub fn write_step(name: &str, parts: &[(String, &MeshData, DAffine3)], metres_pe
                 "MANIFOLD_SURFACE_SHAPE_REPRESENTATION('{part}',(#{model},#{placement}),#{context})"
             ))
         };
-        w.add(&format!("SHAPE_DEFINITION_REPRESENTATION(#{shape},#{representation})"));
+        w.add(&format!(
+            "SHAPE_DEFINITION_REPRESENTATION(#{shape},#{representation})"
+        ));
     }
 
     let mut out = String::new();
@@ -181,7 +207,11 @@ fn is_planar(points: &[DVec3], ring: &[u32]) -> bool {
     if n == DVec3::ZERO {
         return false;
     }
-    let size = p.iter().map(|q| (*q - p[0]).length()).fold(0.0, f64::max).max(1e-12);
+    let size = p
+        .iter()
+        .map(|q| (*q - p[0]).length())
+        .fold(0.0, f64::max)
+        .max(1e-12);
     p.iter().all(|q| (*q - p[0]).dot(n).abs() <= size * 1e-6)
 }
 
@@ -204,7 +234,12 @@ mod tests {
         // Every reference points at an entity that exists.
         let defined = text.matches("\n#").count();
         for r in text.split('#').skip(1) {
-            let n: usize = r.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap();
+            let n: usize = r
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap();
             assert!(n >= 1 && n <= defined, "#{n} of {defined}");
         }
     }

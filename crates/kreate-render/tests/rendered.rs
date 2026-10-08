@@ -41,7 +41,11 @@ fn gpu() -> Option<Gpu> {
         })
         .clone()?;
     let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    Some(Gpu { device, queue, _turn: turn })
+    Some(Gpu {
+        device,
+        queue,
+        _turn: turn,
+    })
 }
 
 macro_rules! gpu_or_skip {
@@ -2764,11 +2768,20 @@ fn a_renders_passes_read_back_with_depth_and_normals() {
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
-    let cube = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
     one_material(&gpu, &mut viewport, grey());
     let mut draws = vec![Draw::new(&cube, glam::DAffine3::IDENTITY)];
-    let camera = Camera { distance: 6.0, ..Camera::default() };
-    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key_light(20_000.0)]);
+    let camera = Camera {
+        distance: 6.0,
+        ..Camera::default()
+    };
+    viewport.set_lights(
+        &gpu.device,
+        &gpu.queue,
+        camera.eye(),
+        &[key_light(20_000.0)],
+    );
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     let _ = read_frame(&gpu, &mut viewport, &draws);
     let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
@@ -2778,11 +2791,20 @@ fn a_renders_passes_read_back_with_depth_and_normals() {
     assert_eq!((passes.width, passes.height), (rw, rh));
     let centre = (rh / 2 * rw + rw / 2) as usize;
     let d = passes.depth[centre];
-    assert!(d > 3.5 && d < 5.5, "the cube's front is {d} m away along the view");
+    assert!(
+        d > 3.5 && d < 5.5,
+        "the cube's front is {d} m away along the view"
+    );
     assert_eq!(passes.depth[0], 1e10, "the empty corner has no depth");
     let n = glam::Vec3::from(passes.normal[centre]);
-    assert!(n.length() > 0.9 && n.dot(-forward) > 0.3, "the normal {n} does not face the camera");
-    assert!(passes.combined[centre][0] > 0.01, "the picture is black where the lit cube is");
+    assert!(
+        n.length() > 0.9 && n.dot(-forward) > 0.3,
+        "the normal {n} does not face the camera"
+    );
+    assert!(
+        passes.combined[centre][0] > 0.01,
+        "the picture is black where the lit cube is"
+    );
 }
 
 /// A small glowing panel is the only light. The path tracer aims at it as well
@@ -2809,98 +2831,134 @@ fn a_glowing_panel_lights_the_floor_as_much_as_it_should_and_quietly() {
         (mean - expected).abs() < expected * 0.15,
         "the floor beside the panel is {mean}, the panel's light says {expected}"
     );
-    let spread = (patch.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / patch.len() as f32).sqrt();
-    assert!(spread < mean * 0.25, "sixteen samples are still speckle: spread {spread} about {mean}");
+    let spread =
+        (patch.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / patch.len() as f32).sqrt();
+    assert!(
+        spread < mean * 0.25,
+        "sixteen samples are still speckle: spread {spread} about {mean}"
+    );
 }
 
 /// The floor under a glowing panel (only light, 20 000 nits, `size` metres
 /// square, 1 m up), path traced for `frames` samples, read back linear: the
 /// green of a 5x5 patch around where `point` lands.
-fn glowing_panel_patch(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point: glam::DVec3) -> Vec<f32> {
+fn glowing_panel_patch(
+    gpu: &Gpu,
+    frames: u32,
+    size: f32,
+    camera: Camera,
+    point: glam::DVec3,
+) -> Vec<f32> {
     glowing_panel_patch_sided(gpu, frames, size, camera, point, false)
 }
 
 /// The same, the panel glowing only the way its normals face (up) when
 /// `one_sided`.
-fn glowing_panel_patch_sided(gpu: &Gpu, frames: u32, size: f32, camera: Camera, point: glam::DVec3, one_sided: bool) -> Vec<f32> {
-        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-        viewport.shading = ShadingMode::Rendered;
-        viewport.path_trace = true;
-        viewport.path_trace_denoise = false;
-        viewport.show_bloom = false;
-        viewport.show_reflections = false;
-        viewport.ambient_occlusion = false;
-        viewport.contact_shadows = false;
-        viewport.show_grid = false;
-        viewport.show_wireframe = false;
-        viewport.set_display(&gpu.queue, FRAMED);
-        viewport.set_world([0.0; 3]);
-        let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
-        let panel_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(size, 1, 1));
-        let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
-        let panel = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &panel_cpu, glam::Vec4::ONE);
-        one_material(gpu, &mut viewport, grey());
-        let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 1.0));
-        let parts = [(&floor_cpu, glam::DAffine3::IDENTITY, 0u32), (&panel_cpu, lift, 1u32)];
-        let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
-            .iter()
-            .map(|(m, _, _)| {
-                (
-                    m.positions.iter().map(|p| p.0).collect(),
-                    m.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect(),
-                )
-            })
-            .collect();
-        let meshes: Vec<_> = parts
-            .iter()
-            .zip(&data)
-            .map(|((m, t, surface), (p, n))| kreate_render::pathtrace::PtMesh {
+fn glowing_panel_patch_sided(
+    gpu: &Gpu,
+    frames: u32,
+    size: f32,
+    camera: Camera,
+    point: glam::DVec3,
+    one_sided: bool,
+) -> Vec<f32> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.path_trace = true;
+    viewport.path_trace_denoise = false;
+    viewport.show_bloom = false;
+    viewport.show_reflections = false;
+    viewport.ambient_occlusion = false;
+    viewport.contact_shadows = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    viewport.set_world([0.0; 3]);
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+    let panel_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(size, 1, 1));
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    let panel =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &panel_cpu, glam::Vec4::ONE);
+    one_material(gpu, &mut viewport, grey());
+    let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 1.0));
+    let parts = [
+        (&floor_cpu, glam::DAffine3::IDENTITY, 0u32),
+        (&panel_cpu, lift, 1u32),
+    ];
+    let data: Vec<(Vec<[f32; 3]>, Vec<glam::Vec3>)> = parts
+        .iter()
+        .map(|(m, _, _)| {
+            (
+                m.positions.iter().map(|p| p.0).collect(),
+                m.normals
+                    .iter()
+                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                    .collect(),
+            )
+        })
+        .collect();
+    let meshes: Vec<_> = parts
+        .iter()
+        .zip(&data)
+        .map(
+            |((m, t, surface), (p, n))| kreate_render::pathtrace::PtMesh {
                 positions: p,
                 uvs: &m.uvs,
                 normals: n,
                 indices: &m.indices,
                 transform: *t,
                 surface: *surface,
-            })
-            .collect();
-        let floor_surface = kreate_render::pathtrace::PtSurface {
-            base_color: [0.8, 0.8, 0.8],
-            roughness: 0.9,
-            ..Default::default()
-        };
-        let glow = kreate_render::pathtrace::PtSurface {
-            base_color: [0.0; 3],
-            emission: [20_000.0; 3],
-            one_sided,
-            ..Default::default()
-        };
-        viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[floor_surface, glow], &[]);
-        let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY), Draw::new(&panel, lift)];
-        for _ in 0..frames {
-            viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
-            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
-            let _ = read_frame(gpu, &mut viewport, &draws);
+            },
+        )
+        .collect();
+    let floor_surface = kreate_render::pathtrace::PtSurface {
+        base_color: [0.8, 0.8, 0.8],
+        roughness: 0.9,
+        ..Default::default()
+    };
+    let glow = kreate_render::pathtrace::PtSurface {
+        base_color: [0.0; 3],
+        emission: [20_000.0; 3],
+        one_sided,
+        ..Default::default()
+    };
+    viewport.set_path_trace_scene(
+        &gpu.device,
+        &gpu.queue,
+        &meshes,
+        &[floor_surface, glow],
+        &[],
+    );
+    let mut draws = vec![
+        Draw::new(&floor, glam::DAffine3::IDENTITY),
+        Draw::new(&panel, lift),
+    ];
+    for _ in 0..frames {
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        let _ = read_frame(gpu, &mut viewport, &draws);
+    }
+    let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
+    let passes = viewport
+        .read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward)
+        .expect("passes");
+    // The pixel where the floor point lands.
+    let vp = camera.view_projection(1.0);
+    let at = (point - camera.eye()).as_vec3();
+    let clip = vp * at.extend(1.0);
+    let ndc = clip.truncate() / clip.w;
+    let x = ((ndc.x * 0.5 + 0.5) * passes.width as f32) as i32;
+    let y = ((0.5 - ndc.y * 0.5) * passes.height as f32) as i32;
+    // A 5x5 patch around it.
+    let mut values = Vec::new();
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let i = ((y + dy) as u32 * passes.width + (x + dx) as u32) as usize;
+            values.push(passes.combined[i][1]);
         }
-        let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
-        let passes = viewport
-            .read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward)
-            .expect("passes");
-        // The pixel where the floor point lands.
-        let vp = camera.view_projection(1.0);
-        let at = (point - camera.eye()).as_vec3();
-        let clip = vp * at.extend(1.0);
-        let ndc = clip.truncate() / clip.w;
-        let x = ((ndc.x * 0.5 + 0.5) * passes.width as f32) as i32;
-        let y = ((0.5 - ndc.y * 0.5) * passes.height as f32) as i32;
-        // A 5x5 patch around it.
-        let mut values = Vec::new();
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                let i = ((y + dy) as u32 * passes.width + (x + dx) as u32) as usize;
-                values.push(passes.combined[i][1]);
-            }
-        }
-        values
+    }
+    values
 }
 
 /// Under a big panel — 2 m square, 1 m up — paths bounce into the glow as
@@ -2922,7 +2980,8 @@ fn a_big_glowing_panel_is_counted_once() {
     // parallel, sees it with form factor
     // (1/2π)[X/√(1+X²)·atan(Y/√(1+X²)) + Y/√(1+Y²)·atan(X/√(1+Y²))], X=w/h,
     // Y=l/h. Four 1 m quarters at 1 m: X = Y = 1.
-    let corner = (2.0f32 * (1.0 / 2f32.sqrt()) * (1.0 / 2f32.sqrt()).atan()) / (2.0 * std::f32::consts::PI);
+    let corner =
+        (2.0f32 * (1.0 / 2f32.sqrt()) * (1.0 / 2f32.sqrt()).atan()) / (2.0 * std::f32::consts::PI);
     let form = 4.0 * corner;
     // Radiance L·F irradiates πL·F; a matte floor of 0.8 returns 0.8/π of it.
     let expected = 0.8 * 20_000.0 * form * FRAMED.exposure.exp2();
@@ -2964,10 +3023,15 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
     viewport.set_environment(&gpu.device, &gpu.queue, w, h, sky);
     viewport.set_world_shape(&gpu.queue, 0.0, 1.0);
     let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(40.0, 2, 2));
-    let floor = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
     one_material(gpu, &mut viewport, grey());
     let positions: Vec<[f32; 3]> = floor_cpu.positions.iter().map(|p| p.0).collect();
-    let normals: Vec<glam::Vec3> = floor_cpu.normals.iter().map(|n| kreate_render::mesh_gpu::oct_decode(*n)).collect();
+    let normals: Vec<glam::Vec3> = floor_cpu
+        .normals
+        .iter()
+        .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+        .collect();
     let meshes = [kreate_render::pathtrace::PtMesh {
         positions: &positions,
         uvs: &floor_cpu.uvs,
@@ -2976,7 +3040,11 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
         transform: glam::DAffine3::IDENTITY,
         surface: 0,
     }];
-    let matte = kreate_render::pathtrace::PtSurface { base_color: [0.8; 3], roughness: 0.9, ..Default::default() };
+    let matte = kreate_render::pathtrace::PtSurface {
+        base_color: [0.8; 3],
+        roughness: 0.9,
+        ..Default::default()
+    };
     viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[matte], &[]);
     let camera = Camera {
         pivot: glam::DVec3::ZERO,
@@ -2991,12 +3059,16 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
         let _ = read_frame(gpu, &mut viewport, &draws);
     }
     let forward = (camera.pivot - camera.eye()).normalize().as_vec3();
-    let passes = viewport.read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward).expect("passes");
+    let passes = viewport
+        .read_passes(&gpu.device, &gpu.queue, FRAMED.exposure, forward)
+        .expect("passes");
     let (x, y) = (passes.width as i32 / 2, passes.height as i32 / 2);
     let mut values = Vec::new();
     for dy in -2..=2 {
         for dx in -2..=2 {
-            values.push(passes.combined[((y + dy) as u32 * passes.width + (x + dx) as u32) as usize][1]);
+            values.push(
+                passes.combined[((y + dy) as u32 * passes.width + (x + dx) as u32) as usize][1],
+            );
         }
     }
     values
@@ -3017,13 +3089,19 @@ fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
     let theta = rows as f32 / h as f32 * std::f32::consts::PI;
     let cap = mean(&sky_patch(&gpu, 32, &cap_sky(w, h, rows, 1000.0), (w, h)));
     let expected = 0.8 * 1000.0 * theta.sin().powi(2) * FRAMED.exposure.exp2();
-    assert!((cap - expected).abs() < expected * 0.12, "under the cap the floor is {cap}, its size says {expected}");
+    assert!(
+        (cap - expected).abs() < expected * 0.12,
+        "under the cap the floor is {cap}, its size says {expected}"
+    );
     // A sun: two rows, far brighter — near the most a half float holds.
     // Smooth at sixteen samples.
     let sun = sky_patch(&gpu, 16, &cap_sky(w, h, 2, 60_000.0), (w, h));
     let m = mean(&sun);
     let spread = (sun.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / sun.len() as f32).sqrt();
-    assert!(m > 0.0 && spread < m * 0.25, "under a small sun sixteen samples are speckle: {spread} about {m}");
+    assert!(
+        m > 0.0 && spread < m * 0.25,
+        "under a small sun sixteen samples are speckle: {spread} about {m}"
+    );
 }
 
 /// An area light's panel glows from its front only: the grid's normals face
@@ -3043,5 +3121,8 @@ fn a_one_sided_panel_lights_only_what_it_faces() {
     let both = mean(glowing_panel_patch_sided(&gpu, 16, 0.2, camera, at, false));
     let facing_away = mean(glowing_panel_patch_sided(&gpu, 16, 0.2, camera, at, true));
     assert!(both > 0.01, "the two-sided panel lit nothing: {both}");
-    assert!(facing_away < both * 0.02, "a panel facing away lit the floor: {facing_away} against {both}");
+    assert!(
+        facing_away < both * 0.02,
+        "a panel facing away lit the floor: {facing_away} against {both}"
+    );
 }

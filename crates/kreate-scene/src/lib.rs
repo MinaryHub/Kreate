@@ -4,10 +4,10 @@
 //! [`document`] for why both of those are load-bearing rather than stylistic.
 
 pub mod animation;
-pub mod design;
 pub mod armature;
 pub mod camera;
 pub mod clipboard;
+pub mod design;
 pub mod document;
 pub mod driver;
 pub mod edit_session;

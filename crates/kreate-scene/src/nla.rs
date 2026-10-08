@@ -134,7 +134,11 @@ pub fn mix_transform(a: DTransform, b: DTransform, t: f64) -> DTransform {
     if t >= 1.0 {
         return b;
     }
-    let to = if a.rotation.dot(b.rotation) < 0.0 { -b.rotation } else { b.rotation };
+    let to = if a.rotation.dot(b.rotation) < 0.0 {
+        -b.rotation
+    } else {
+        b.rotation
+    };
     DTransform {
         translation: a.translation.lerp(b.translation, t),
         rotation: DQuat::slerp(a.rotation, to, t).normalize(),
@@ -189,7 +193,12 @@ mod tests {
 
     /// An object whose X runs 0 to 10 over frames 1 to 11 in one action and
     /// sits at 100 in another.
-    fn scene() -> (crate::Document, crate::document::ObjectId, ActionId, ActionId) {
+    fn scene() -> (
+        crate::Document,
+        crate::document::ObjectId,
+        ActionId,
+        ActionId,
+    ) {
         use crate::animation::{Action, Interpolation};
         use crate::document::{Object, ObjectData};
         let mut doc = crate::Document::new();
@@ -199,7 +208,9 @@ mod tests {
         c.insert(11.0, 10.0, Interpolation::Linear);
         let run = doc.add_action(run);
         let mut stand = Action::new("Stand");
-        stand.curve_mut("location", 0).insert(1.0, 100.0, Interpolation::Linear);
+        stand
+            .curve_mut("location", 0)
+            .insert(1.0, 100.0, Interpolation::Linear);
         let stand = doc.add_action(stand);
         let id = doc.add_object(Object::new("Mover", ObjectData::Empty));
         (doc, id, run, stand)
@@ -226,7 +237,10 @@ mod tests {
         over.influence = 0.5;
         doc.object_mut(id).unwrap().nla.push(over);
         assert!((x(&mut doc, id, 36.0) - (5.0 + (100.0 - 5.0) * 0.5)).abs() < 1e-9);
-        assert!((x(&mut doc, id, 26.0) - 5.0).abs() < 1e-9, "not before it starts");
+        assert!(
+            (x(&mut doc, id, 26.0) - 5.0).abs() < 1e-9,
+            "not before it starts"
+        );
         // Muted, it is gone.
         doc.object_mut(id).unwrap().nla[1].mute = true;
         assert!((x(&mut doc, id, 36.0) - 5.0).abs() < 1e-9);

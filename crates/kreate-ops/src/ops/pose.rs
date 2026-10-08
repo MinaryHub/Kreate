@@ -750,7 +750,13 @@ pub struct ConstraintParams {
     pub index: u32,
     /// The bone it is on; empty for the active bone. Adding only.
     pub bone: String,
-    #[param(variants("copy_location", "copy_rotation", "copy_scale", "damped_track", "limit_rotation"))]
+    #[param(variants(
+        "copy_location",
+        "copy_rotation",
+        "copy_scale",
+        "damped_track",
+        "limit_rotation"
+    ))]
     pub kind: u32,
     /// The bone it reads; empty when adding takes the other selected bone.
     pub target: String,

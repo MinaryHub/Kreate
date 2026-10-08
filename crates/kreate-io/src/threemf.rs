@@ -68,8 +68,14 @@ pub fn write_3mf(parts: &[(String, &MeshData, DAffine3)], metres_per_unit: f64) 
         // turned back so they still face outward.
         let flip = world.matrix3.determinant() < 0.0;
         for t in tris.indices.as_chunks::<3>().0 {
-            let (a, b, c) = if flip { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
-            model.push_str(&format!("     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"/>\n"));
+            let (a, b, c) = if flip {
+                (t[0], t[2], t[1])
+            } else {
+                (t[0], t[1], t[2])
+            };
+            model.push_str(&format!(
+                "     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"/>\n"
+            ));
         }
         model.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }
@@ -153,7 +159,10 @@ mod tests {
         assert!(model.contains("unit=\"millimeter\""));
         assert!(model.contains("name=\"Part &lt;1&gt;\""));
         // 100 mm along X, give or take the half width.
-        assert!(model.contains("x=\"110\"") && model.contains("x=\"90\""), "{model}");
+        assert!(
+            model.contains("x=\"110\"") && model.contains("x=\"90\""),
+            "{model}"
+        );
         assert_eq!(model.matches("<triangle ").count(), 12);
         assert_eq!(model.matches("<vertex ").count(), 8);
         assert!(model.contains("<item objectid=\"1\"/>"));
@@ -171,8 +180,20 @@ mod tests {
             )],
             1.0,
         ));
-        let first = |m: &str| m.split("<triangle ").nth(1).unwrap().split("/>").next().unwrap().to_string();
-        assert_ne!(first(&plain), first(&mirrored), "the winding turned with the mirror");
+        let first = |m: &str| {
+            m.split("<triangle ")
+                .nth(1)
+                .unwrap()
+                .split("/>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(
+            first(&plain),
+            first(&mirrored),
+            "the winding turned with the mirror"
+        );
     }
 
     #[test]

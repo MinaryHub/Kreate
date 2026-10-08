@@ -690,7 +690,10 @@ impl Operator for Pin {
                 kreate_mesh::attribute::AttrType::Bool,
                 n,
             );
-            let Some(flags) = bm.attributes_mut().make_mut_bool(kreate_mesh::attribute::names::UV_PIN) else {
+            let Some(flags) = bm
+                .attributes_mut()
+                .make_mut_bool(kreate_mesh::attribute::names::UV_PIN)
+            else {
                 return Ok(false);
             };
             let mut changed = false;

@@ -1510,18 +1510,19 @@ pub fn write(
             })
             .collect();
         scene.physics = crate::physics_record::write_world(&document.physics);
-        scene.render = (document.render != kreate_scene::render::RenderSettings::default()).then(|| {
-            let r = &document.render;
-            RenderRecord {
-                width: r.width,
-                height: r.height,
-                samples: r.samples,
-                format: r.format.extension().to_string(),
-                output: r.output.clone(),
-                denoise: r.denoise,
-                motion_blur: r.motion_blur,
-            }
-        });
+        scene.render =
+            (document.render != kreate_scene::render::RenderSettings::default()).then(|| {
+                let r = &document.render;
+                RenderRecord {
+                    width: r.width,
+                    height: r.height,
+                    samples: r.samples,
+                    format: r.format.extension().to_string(),
+                    output: r.output.clone(),
+                    denoise: r.denoise,
+                    motion_blur: r.motion_blur,
+                }
+            });
         scene.playback =
             (document.playback != kreate_scene::animation::Playback::default()).then(|| {
                 let p = document.playback;
@@ -1703,7 +1704,8 @@ pub fn write(
                         };
                         ConstraintRecord {
                             bone: c.bone.clone(),
-                            kind: kreate_scene::armature::ConstraintKind::NAMES[c.kind.index() as usize]
+                            kind: kreate_scene::armature::ConstraintKind::NAMES
+                                [c.kind.index() as usize]
                                 .to_string(),
                             target: c.target.clone(),
                             influence: c.influence,
@@ -2185,22 +2187,25 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .measurements
             .iter()
             .map(|points| kreate_scene::design::Measurement {
-                points: points.iter().map(|p| kreate_math::DVec3::from_array(*p)).collect(),
+                points: points
+                    .iter()
+                    .map(|p| kreate_math::DVec3::from_array(*p))
+                    .collect(),
             })
             .filter(|m| m.is_valid())
             .collect();
         if let Some(density) = d.density.filter(|x| x.is_finite() && *x >= 0.0) {
             document.design.density = density;
         }
-        document.design.section = d
-            .section
-            .filter(|s| s.0 <= 3 && s.1.is_finite())
-            .map(|(axis, offset, flip, cap)| kreate_scene::design::Section {
-                axis,
-                offset,
-                flip,
-                cap,
-            });
+        document.design.section =
+            d.section
+                .filter(|s| s.0 <= 3 && s.1.is_finite())
+                .map(|(axis, offset, flip, cap)| kreate_scene::design::Section {
+                    axis,
+                    offset,
+                    flip,
+                    cap,
+                });
     }
     if let Some(w) = &scene.physics {
         document.physics = crate::physics_record::read_world(w);
@@ -2213,7 +2218,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             width: r.width.clamp(16, 16384),
             height: r.height.clamp(16, 16384),
             samples: r.samples.clamp(1, 65536),
-            format: if r.format == "exr" { OutputFormat::Exr } else { OutputFormat::Png },
+            format: if r.format == "exr" {
+                OutputFormat::Exr
+            } else {
+                OutputFormat::Png
+            },
             output: r.output.clone(),
             denoise: r.denoise,
             motion_blur: r.motion_blur,

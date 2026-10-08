@@ -24,7 +24,11 @@ fn shaped() -> (Document, ObjectId) {
         .iter()
         .map(|p| glam::Vec3::new(0.0, 0.3 * p.y, (p.z.max(0.0)) * 0.8))
         .collect();
-    let wide: Vec<glam::Vec3> = mesh.positions().iter().map(|p| glam::Vec3::new(p.x * 0.5, 0.0, 0.0)).collect();
+    let wide: Vec<glam::Vec3> = mesh
+        .positions()
+        .iter()
+        .map(|p| glam::Vec3::new(p.x * 0.5, 0.0, 0.0))
+        .collect();
     for (name, offsets) in [("Tall", tall), ("Wide", wide)] {
         assert_eq!(offsets.len(), n);
         mesh.attributes_mut().insert(
@@ -41,8 +45,14 @@ fn shaped() -> (Document, ObjectId) {
         scale: DVec3::new(1.0, 2.0, 1.0),
     };
     object.shape_keys = vec![
-        ShapeKey { name: "Tall".into(), value: 0.25 },
-        ShapeKey { name: "Wide".into(), value: 0.0 },
+        ShapeKey {
+            name: "Tall".into(),
+            value: 0.25,
+        },
+        ShapeKey {
+            name: "Wide".into(),
+            value: 0.0,
+        },
     ];
     let mut action = Action::new("Breathe");
     for (frame, v) in [(1.0, 0.0), (10.0, 1.0)] {
@@ -118,8 +128,14 @@ fn the_file_names_its_targets_and_animates_their_weights() {
     let (doc, _) = shaped();
     let json: serde_json::Value = serde_json::from_slice(&written(&doc, false)).unwrap();
     let mesh = &json["meshes"][0];
-    assert_eq!(mesh["extras"]["targetNames"], serde_json::json!(["Tall", "Wide"]));
-    assert_eq!(mesh["primitives"][0]["targets"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        mesh["extras"]["targetNames"],
+        serde_json::json!(["Tall", "Wide"])
+    );
+    assert_eq!(
+        mesh["primitives"][0]["targets"].as_array().unwrap().len(),
+        2
+    );
     let node = json["nodes"]
         .as_array()
         .unwrap()

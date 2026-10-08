@@ -455,7 +455,10 @@ fn flat_and_studio_show_the_materials_colour() {
         COLORS.with(|c| *c.borrow_mut() = vec![[0.0; 4]]);
         let (img, _) = gpu_or_skip!(render_scene_full(&plane, shading, false, false, face_on));
         let p = img.at(SIZE / 2, SIZE / 2);
-        assert!((p[0] as i32 - p[2] as i32).abs() < 40, "{shading:?} no material is grey: {p:?}");
+        assert!(
+            (p[0] as i32 - p[2] as i32).abs() < 40,
+            "{shading:?} no material is grey: {p:?}"
+        );
     }
     COLORS.with(|c| c.borrow_mut().clear());
 }

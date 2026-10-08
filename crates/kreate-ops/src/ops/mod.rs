@@ -8,6 +8,7 @@
 pub mod anim;
 pub mod armature;
 pub mod collection;
+pub mod design;
 pub mod driver;
 pub mod geo;
 pub mod mesh;
@@ -15,14 +16,13 @@ pub mod modifier;
 pub mod node;
 pub mod object;
 pub mod origin;
-pub mod design;
-pub mod sketch;
 pub mod paint;
 pub mod physics;
 pub mod pose;
 pub mod render;
 pub mod sculpt;
 pub mod shape;
+pub mod sketch;
 pub mod texture;
 pub mod uv;
 

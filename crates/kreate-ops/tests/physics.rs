@@ -48,17 +48,33 @@ fn run(
 }
 
 /// A floor and a cube above it, both rigid bodies.
-fn falling_cube(registry: &OperatorRegistry, history: &mut History, doc: &mut Document) -> ObjectId {
+fn falling_cube(
+    registry: &OperatorRegistry,
+    history: &mut History,
+    doc: &mut Document,
+) -> ObjectId {
     let floor = add(doc, "Floor", kreate_mesh::primitives::plane(10.0), 0.0);
     let cube = add(doc, "Cube", kreate_mesh::primitives::cube(1.0), 3.0);
     select(doc, floor);
-    assert!(run(registry, history, doc, "physics.rigid_body_set", &[
-        ("enabled", PropertyValue::Bool(true)),
-        ("kind", PropertyValue::Enum(1)),
-        ("shape", PropertyValue::Enum(3)),
-    ]));
+    assert!(run(
+        registry,
+        history,
+        doc,
+        "physics.rigid_body_set",
+        &[
+            ("enabled", PropertyValue::Bool(true)),
+            ("kind", PropertyValue::Enum(1)),
+            ("shape", PropertyValue::Enum(3)),
+        ]
+    ));
     select(doc, cube);
-    assert!(run(registry, history, doc, "physics.rigid_body_set", &[("enabled", PropertyValue::Bool(true))]));
+    assert!(run(
+        registry,
+        history,
+        doc,
+        "physics.rigid_body_set",
+        &[("enabled", PropertyValue::Bool(true))]
+    ));
     cube
 }
 
@@ -68,11 +84,31 @@ fn settings_land_on_the_selection_and_switching_off_removes_them() {
     let cube = falling_cube(&registry, &mut history, &mut doc);
     let floor = doc.objects().find(|(_, o)| o.name == "Floor").unwrap().0;
     let body = doc.object(floor).unwrap().physics.rigid.unwrap();
-    assert_eq!((body.kind, body.shape), (BodyKind::Passive, CollisionShape::Mesh));
-    assert_eq!(doc.object(cube).unwrap().physics.rigid.unwrap().kind, BodyKind::Active);
-    assert!(!run(&registry, &mut history, &mut doc, "physics.rigid_body_set", &[("enabled", PropertyValue::Bool(true))]),
-        "the same again is no step");
-    assert!(run(&registry, &mut history, &mut doc, "physics.rigid_body_set", &[("enabled", PropertyValue::Bool(false))]));
+    assert_eq!(
+        (body.kind, body.shape),
+        (BodyKind::Passive, CollisionShape::Mesh)
+    );
+    assert_eq!(
+        doc.object(cube).unwrap().physics.rigid.unwrap().kind,
+        BodyKind::Active
+    );
+    assert!(
+        !run(
+            &registry,
+            &mut history,
+            &mut doc,
+            "physics.rigid_body_set",
+            &[("enabled", PropertyValue::Bool(true))]
+        ),
+        "the same again is no step"
+    );
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.rigid_body_set",
+        &[("enabled", PropertyValue::Bool(false))]
+    ));
     assert!(doc.object(cube).unwrap().physics.rigid.is_none());
 }
 
@@ -93,9 +129,19 @@ fn a_bake_plays_back_is_one_undo_step_and_free_puts_things_back() {
     run(&registry, &mut history, &mut doc, "physics.bake", &[]);
     assert!(!doc.physics_cache.is_empty());
     doc.animate(30.0);
-    assert!(run(&registry, &mut history, &mut doc, "physics.free_bake", &[]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.free_bake",
+        &[]
+    ));
     assert!(doc.physics_cache.is_empty());
-    assert_eq!(doc.object(cube).unwrap().transform.translation.z, 3.0, "back where it began");
+    assert_eq!(
+        doc.object(cube).unwrap().transform.translation.z,
+        3.0,
+        "back where it began"
+    );
 }
 
 #[test]
@@ -103,7 +149,13 @@ fn bake_to_keyframes_leaves_an_action_and_no_rigid_body() {
     let (registry, mut history, mut doc) = wired();
     let cube = falling_cube(&registry, &mut history, &mut doc);
     assert!(run(&registry, &mut history, &mut doc, "physics.bake", &[]));
-    assert!(run(&registry, &mut history, &mut doc, "physics.bake_to_keys", &[]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.bake_to_keys",
+        &[]
+    ));
     let o = doc.object(cube).unwrap();
     assert!(o.physics.rigid.is_none());
     assert!(doc.physics_cache.rigid.is_empty());
@@ -117,49 +169,142 @@ fn bake_to_keyframes_leaves_an_action_and_no_rigid_body() {
 #[test]
 fn cloth_kind_switches_take_that_kinds_settings() {
     let (registry, mut history, mut doc) = wired();
-    let sheet = add(&mut doc, "Sheet", kreate_mesh::primitives::grid(2.0, 4, 4), 1.0);
+    let sheet = add(
+        &mut doc,
+        "Sheet",
+        kreate_mesh::primitives::grid(2.0, 4, 4),
+        1.0,
+    );
     select(&mut doc, sheet);
-    assert!(run(&registry, &mut history, &mut doc, "physics.soft_set", &[("kind", PropertyValue::Enum(2))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.soft_set",
+        &[("kind", PropertyValue::Enum(2))]
+    ));
     let s = doc.object(sheet).unwrap().physics.soft.clone().unwrap();
     assert_eq!(s.kind, SoftKind::Soft);
     assert!(s.shape_stiffness > 0.0, "a soft body's own defaults");
-    assert!(run(&registry, &mut history, &mut doc, "physics.soft_set", &[
-        ("kind", PropertyValue::Enum(2)),
-        ("pin_group", PropertyValue::Text("Top".into())),
-    ]));
-    assert_eq!(doc.object(sheet).unwrap().physics.soft.clone().unwrap().pin_group.as_deref(), Some("Top"));
-    assert!(run(&registry, &mut history, &mut doc, "physics.soft_set", &[("kind", PropertyValue::Enum(0))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.soft_set",
+        &[
+            ("kind", PropertyValue::Enum(2)),
+            ("pin_group", PropertyValue::Text("Top".into())),
+        ]
+    ));
+    assert_eq!(
+        doc.object(sheet)
+            .unwrap()
+            .physics
+            .soft
+            .clone()
+            .unwrap()
+            .pin_group
+            .as_deref(),
+        Some("Top")
+    );
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.soft_set",
+        &[("kind", PropertyValue::Enum(0))]
+    ));
     assert!(doc.object(sheet).unwrap().physics.soft.is_none());
 }
 
 #[test]
 fn particle_systems_are_added_named_set_and_removed() {
     let (registry, mut history, mut doc) = wired();
-    let e = add(&mut doc, "Emitter", kreate_mesh::primitives::plane(1.0), 0.0);
-    let _bead = add(&mut doc, "Bead", kreate_mesh::primitives::ico_sphere(1.0, 1), 5.0);
+    let e = add(
+        &mut doc,
+        "Emitter",
+        kreate_mesh::primitives::plane(1.0),
+        0.0,
+    );
+    let _bead = add(
+        &mut doc,
+        "Bead",
+        kreate_mesh::primitives::ico_sphere(1.0, 1),
+        5.0,
+    );
     select(&mut doc, e);
-    assert!(run(&registry, &mut history, &mut doc, "physics.particles_add", &[]));
-    assert!(run(&registry, &mut history, &mut doc, "physics.particles_add", &[("kind", PropertyValue::Enum(1))]));
-    assert!(run(&registry, &mut history, &mut doc, "physics.particles_add", &[]));
-    let names: Vec<String> = doc.object(e).unwrap().physics.particles.iter().map(|s| s.name.clone()).collect();
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_add",
+        &[]
+    ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_add",
+        &[("kind", PropertyValue::Enum(1))]
+    ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_add",
+        &[]
+    ));
+    let names: Vec<String> = doc
+        .object(e)
+        .unwrap()
+        .physics
+        .particles
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     assert_eq!(names, ["Particles", "Hair", "Particles.001"]);
-    assert_eq!(doc.object(e).unwrap().physics.particles[1].kind, ParticleKind::Hair);
+    assert_eq!(
+        doc.object(e).unwrap().physics.particles[1].kind,
+        ParticleKind::Hair
+    );
 
-    assert!(run(&registry, &mut history, &mut doc, "physics.particles_set", &[
-        ("index", PropertyValue::Int(0)),
-        ("count", PropertyValue::Int(25)),
-        ("instance", PropertyValue::Text("Bead".into())),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_set",
+        &[
+            ("index", PropertyValue::Int(0)),
+            ("count", PropertyValue::Int(25)),
+            ("instance", PropertyValue::Text("Bead".into())),
+        ]
+    ));
     let s = &doc.object(e).unwrap().physics.particles[0];
     assert_eq!(s.count, 25);
     assert!(s.instance.is_some());
     let mut p = PropertyMap::new();
     p.set("index", PropertyValue::Int(0));
     p.set("instance", PropertyValue::Text("Nobody".into()));
-    assert!(history.dispatch(&registry, &mut doc, &Context::default(), "physics.particles_set", &p).is_err(),
-        "an instance that is not there is said");
+    assert!(
+        history
+            .dispatch(
+                &registry,
+                &mut doc,
+                &Context::default(),
+                "physics.particles_set",
+                &p
+            )
+            .is_err(),
+        "an instance that is not there is said"
+    );
 
-    assert!(run(&registry, &mut history, &mut doc, "physics.particles_remove", &[("index", PropertyValue::Int(1))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_remove",
+        &[("index", PropertyValue::Int(1))]
+    ));
     assert_eq!(doc.object(e).unwrap().physics.particles.len(), 2);
 }
 
@@ -168,7 +313,13 @@ fn a_bake_with_nothing_moving_says_so() {
     let (registry, mut history, mut doc) = wired();
     let floor = add(&mut doc, "Floor", kreate_mesh::primitives::plane(4.0), 0.0);
     select(&mut doc, floor);
-    assert!(run(&registry, &mut history, &mut doc, "physics.collision_set", &[("enabled", PropertyValue::Bool(true))]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.collision_set",
+        &[("enabled", PropertyValue::Bool(true))]
+    ));
     let p = PropertyMap::new();
     let err = history
         .dispatch(&registry, &mut doc, &Context::default(), "physics.bake", &p)
@@ -179,10 +330,16 @@ fn a_bake_with_nothing_moving_says_so() {
 #[test]
 fn the_world_takes_its_settings() {
     let (registry, mut history, mut doc) = wired();
-    assert!(run(&registry, &mut history, &mut doc, "physics.world_set", &[
-        ("gravity", PropertyValue::Vec3([0.0, 0.0, -1.62])),
-        ("frame_end", PropertyValue::Int(100)),
-    ]));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.world_set",
+        &[
+            ("gravity", PropertyValue::Vec3([0.0, 0.0, -1.62])),
+            ("frame_end", PropertyValue::Int(100)),
+        ]
+    ));
     assert_eq!(doc.physics.gravity.z, -1.62);
     assert_eq!(doc.physics.frame_end, 100);
 }

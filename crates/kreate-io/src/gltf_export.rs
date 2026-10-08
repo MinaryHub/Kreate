@@ -549,7 +549,11 @@ fn write_skins(
             extensions: None,
             extras: Default::default(),
             inverse_bind_matrices: Some(accessor),
-            joints: skin.joints.iter().map(|j| json::Index::new(*j as u32)).collect(),
+            joints: skin
+                .joints
+                .iter()
+                .map(|j| json::Index::new(*j as u32))
+                .collect(),
             name: Some(skin.name.clone()),
             skeleton: None,
         });
@@ -867,7 +871,9 @@ fn write_mesh(
     let skinning = vertex_skin(mesh, scene, index);
     if skinning.as_ref().is_some_and(|(_, more)| *more) {
         notes.push(LossyNote::Unsupported {
-            what: format!("{name}: vertices weighed on by more than four bones kept their four heaviest"),
+            what: format!(
+                "{name}: vertices weighed on by more than four bones kept their four heaviest"
+            ),
         });
     }
 
@@ -1362,7 +1368,10 @@ fn emit_material(
     // Each extension a material uses, listed once.
     if let Some(ext) = root.materials.last().and_then(|m| m.extensions.as_ref()) {
         let used = [
-            (ext.emissive_strength.is_some(), "KHR_materials_emissive_strength"),
+            (
+                ext.emissive_strength.is_some(),
+                "KHR_materials_emissive_strength",
+            ),
             (ext.transmission.is_some(), "KHR_materials_transmission"),
             (ext.ior.is_some(), "KHR_materials_ior"),
         ];

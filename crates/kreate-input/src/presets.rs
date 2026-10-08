@@ -172,7 +172,12 @@ fn common() -> Vec<Binding> {
         key("file.new", "N", Context::Global, Action::new("file.new"))
             .with_modifiers(Modifiers::ctrl()),
         // Blender's render keys: the still, and the frames.
-        key("render.image", "F12", Context::Global, Action::new("render.image")),
+        key(
+            "render.image",
+            "F12",
+            Context::Global,
+            Action::new("render.image"),
+        ),
         key(
             "render.animation",
             "F12",
@@ -620,15 +625,45 @@ fn common() -> Vec<Binding> {
         .with_modifiers(Modifiers::alt()),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
-        key("sculpt.brush_radius", "F", Context::Sculpt, Action::new("brush.radius_adjust")),
-        key("sculpt.brush_strength", "F", Context::Sculpt, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
-        key("weight_paint.brush_radius", "F", Context::WeightPaint, Action::new("brush.radius_adjust")),
-        key("weight_paint.brush_strength", "F", Context::WeightPaint, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
-        key("texture_paint.brush_radius", "F", Context::TexturePaint, Action::new("brush.radius_adjust")),
-        key("texture_paint.brush_strength", "F", Context::TexturePaint, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
+        key(
+            "sculpt.brush_radius",
+            "F",
+            Context::Sculpt,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "sculpt.brush_strength",
+            "F",
+            Context::Sculpt,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "weight_paint.brush_radius",
+            "F",
+            Context::WeightPaint,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "weight_paint.brush_strength",
+            "F",
+            Context::WeightPaint,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "texture_paint.brush_radius",
+            "F",
+            Context::TexturePaint,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "texture_paint.brush_strength",
+            "F",
+            Context::TexturePaint,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
         // Blender's sculpt brushes on their letters.
         key(
             "sculpt.draw",

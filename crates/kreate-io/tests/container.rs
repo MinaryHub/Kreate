@@ -1206,5 +1206,8 @@ fn the_render_settings_survive_a_save() {
     assert_eq!(after.render, doc.render);
     // And the defaults are not written at all.
     let plain = round_trip(&Document::new()).document;
-    assert_eq!(plain.render, kreate_scene::render::RenderSettings::default());
+    assert_eq!(
+        plain.render,
+        kreate_scene::render::RenderSettings::default()
+    );
 }

@@ -5350,14 +5350,29 @@ fn read_texture(
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pass readback") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("pass readback"),
+    });
     encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect },
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect,
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(full_h) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(full_h),
+            },
         },
-        wgpu::Extent3d { width: full_w, height: full_h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: full_w,
+            height: full_h,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([encoder.finish()]);
     buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -5397,9 +5412,23 @@ impl Viewport {
                 .collect()
         };
         let scale = exposure.exp2();
-        let hdr = halves(&read_texture(device, queue, self.hdr.texture(), wgpu::TextureAspect::All, 8, size)?);
+        let hdr = halves(&read_texture(
+            device,
+            queue,
+            self.hdr.texture(),
+            wgpu::TextureAspect::All,
+            8,
+            size,
+        )?);
         let combined = (0..n)
-            .map(|i| [hdr[i * 4] * scale, hdr[i * 4 + 1] * scale, hdr[i * 4 + 2] * scale, 1.0])
+            .map(|i| {
+                [
+                    hdr[i * 4] * scale,
+                    hdr[i * 4 + 1] * scale,
+                    hdr[i * 4 + 2] * scale,
+                    1.0,
+                ]
+            })
             .collect();
         let g = halves(&read_texture(
             device,
@@ -5409,9 +5438,21 @@ impl Viewport {
             8,
             size,
         )?);
-        let normal = (0..n).map(|i| [g[i * 4], g[i * 4 + 1], g[i * 4 + 2]]).collect();
-        let d = read_texture(device, queue, self.depth.texture(), wgpu::TextureAspect::DepthOnly, 4, size)?;
-        let unproject = self.depth_view_proj.unwrap_or(glam::Mat4::IDENTITY).inverse();
+        let normal = (0..n)
+            .map(|i| [g[i * 4], g[i * 4 + 1], g[i * 4 + 2]])
+            .collect();
+        let d = read_texture(
+            device,
+            queue,
+            self.depth.texture(),
+            wgpu::TextureAspect::DepthOnly,
+            4,
+            size,
+        )?;
+        let unproject = self
+            .depth_view_proj
+            .unwrap_or(glam::Mat4::IDENTITY)
+            .inverse();
         let forward = forward.normalize_or_zero();
         let depth = (0..n)
             .map(|i| {
@@ -5430,7 +5471,13 @@ impl Viewport {
                 (p.truncate() / p.w).dot(forward)
             })
             .collect();
-        Ok(RenderPasses { width: size.0, height: size.1, combined, normal, depth })
+        Ok(RenderPasses {
+            width: size.0,
+            height: size.1,
+            combined,
+            normal,
+            depth,
+        })
     }
 }
 
@@ -5451,7 +5498,11 @@ impl Viewport {
         self.prepare_ids(device, queue, camera, draws, PickDomain::Object);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("object ids"),
-            size: wgpu::Extent3d { width: self.size.0, height: self.size.1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: self.size.0,
+                height: self.size.1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -5460,10 +5511,19 @@ impl Viewport {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("object ids") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("object ids"),
+        });
         self.render_ids(&mut encoder, &view, draws, PickDomain::Object, false);
         queue.submit([encoder.finish()]);
-        let bytes = read_texture(device, queue, &texture, wgpu::TextureAspect::All, 8, self.render_size)?;
+        let bytes = read_texture(
+            device,
+            queue,
+            &texture,
+            wgpu::TextureAspect::All,
+            8,
+            self.render_size,
+        )?;
         Ok(bytes
             .as_chunks::<8>()
             .0

@@ -39,7 +39,10 @@ fn measurements_are_saved_where_they_were_taken() {
             points: vec![DVec3::X, DVec3::ZERO, DVec3::new(0.0, 1.5, 0.0)],
         },
     ];
-    assert_eq!(round_trip(&doc).design.measurements, doc.design.measurements);
+    assert_eq!(
+        round_trip(&doc).design.measurements,
+        doc.design.measurements
+    );
 }
 
 #[test]
@@ -81,11 +84,29 @@ fn sketch_constraints_are_saved_with_their_object() {
     let mesh = doc.add_mesh(kreate_mesh::primitives::plane(2.0));
     let id = doc.add_object(Object::new("Sketch", ObjectData::Mesh(mesh)));
     let constraints = vec![
-        Constraint::Distance { a: 0, b: 1, value: 0.04 },
+        Constraint::Distance {
+            a: 0,
+            b: 1,
+            value: 0.04,
+        },
         Constraint::Horizontal { a: 1, b: 2 },
-        Constraint::Fixed { a: 3, at: [0.5, -0.25] },
-        Constraint::Angle { a: 0, b: 1, c: 2, d: 3, value: 0.7 },
-        Constraint::Equal { a: 0, b: 1, c: 2, d: 3 },
+        Constraint::Fixed {
+            a: 3,
+            at: [0.5, -0.25],
+        },
+        Constraint::Angle {
+            a: 0,
+            b: 1,
+            c: 2,
+            d: 3,
+            value: 0.7,
+        },
+        Constraint::Equal {
+            a: 0,
+            b: 1,
+            c: 2,
+            d: 3,
+        },
     ];
     doc.object_mut(id).unwrap().sketch = constraints.clone();
     let back = round_trip(&doc);

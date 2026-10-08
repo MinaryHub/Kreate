@@ -341,7 +341,10 @@ impl ConstraintKind {
             1 => Self::CopyRotation,
             2 => Self::CopyScale,
             3 => Self::DampedTrack,
-            4 => Self::LimitRotation { min: -full, max: full },
+            4 => Self::LimitRotation {
+                min: -full,
+                max: full,
+            },
             _ => return None,
         })
     }
@@ -477,7 +480,9 @@ fn apply_constraint(armature: &Armature, frames: &mut [DAffine3], c: &BoneConstr
                 .parent
                 .and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?)))
             {
-                Some((parent_posed, parent)) => *parent_posed * parent.rest().inverse() * bone.rest(),
+                Some((parent_posed, parent)) => {
+                    *parent_posed * parent.rest().inverse() * bone.rest()
+                }
                 None => bone.rest(),
             };
             let local = base.inverse() * before;

@@ -92,7 +92,9 @@ pub fn poll_reason(id: &str, ctx: &Context, doc: &Document) -> String {
         ),
         "pose" => (
             "it works on an armature in pose mode".to_string(),
-            format!("select the armature with {select}, then kreate.ops.object.mode_set(mode=\"pose\")"),
+            format!(
+                "select the armature with {select}, then kreate.ops.object.mode_set(mode=\"pose\")"
+            ),
         ),
         "armature" => (
             "it works on an armature in its edit mode".to_string(),
@@ -100,7 +102,9 @@ pub fn poll_reason(id: &str, ctx: &Context, doc: &Document) -> String {
         ),
         "sculpt" => (
             "it works on a mesh in sculpt mode".to_string(),
-            format!("select a mesh with {select}, then kreate.ops.object.mode_set(mode=\"sculpt\")"),
+            format!(
+                "select a mesh with {select}, then kreate.ops.object.mode_set(mode=\"sculpt\")"
+            ),
         ),
         "object" if ctx.mode != Mode::RESTING => (
             "it works in object mode".to_string(),
@@ -487,7 +491,11 @@ mod tests {
             r.execute_default("mesh.noop", &mut edit, &Context { mode: Mode::Object }),
             Err(OpError::PollFailed(
                 "mesh.noop".into(),
-                poll_reason("mesh.noop", &Context { mode: Mode::Object }, &Document::new())
+                poll_reason(
+                    "mesh.noop",
+                    &Context { mode: Mode::Object },
+                    &Document::new()
+                )
             ))
         );
         assert_eq!(

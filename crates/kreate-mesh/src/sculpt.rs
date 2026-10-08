@@ -561,7 +561,11 @@ mod tests {
                     cache.run(&mut m, &dabs[..n], &s);
                     last = m;
                 }
-                assert_eq!(last.positions(), whole.positions(), "{brush:?} mirror {mirror_x}");
+                assert_eq!(
+                    last.positions(),
+                    whole.positions(),
+                    "{brush:?} mirror {mirror_x}"
+                );
             }
         }
     }
@@ -585,10 +589,7 @@ mod tests {
         cache.run(&mut m, &dabs, &s);
         assert!(!cache.fits(&m, &s, &dabs), "the mesh it already changed");
         assert!(!cache.fits(&base, &s, &dabs[..1]), "fewer dabs");
-        let harder = Stroke {
-            strength: 0.5,
-            ..s
-        };
+        let harder = Stroke { strength: 0.5, ..s };
         assert!(!cache.fits(&base, &harder, &dabs));
         assert!(cache.fits(&base, &s, &dabs));
     }

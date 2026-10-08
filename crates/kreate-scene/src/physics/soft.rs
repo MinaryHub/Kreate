@@ -78,7 +78,10 @@ impl SoftSim {
             .map(|i| weights.is_some_and(|w| w[i] > 0.5))
             .collect();
         let each = settings.mass.max(1e-6) / n.max(1) as f64;
-        let inv_mass = pinned.iter().map(|p| if *p { 0.0 } else { 1.0 / each }).collect();
+        let inv_mass = pinned
+            .iter()
+            .map(|p| if *p { 0.0 } else { 1.0 / each })
+            .collect();
         let edges = mesh
             .edges()
             .iter()
@@ -123,8 +126,16 @@ impl SoftSim {
             stretch: settings.stiffness.clamp(0.0, 1.0),
             bend: settings.bending.clamp(0.0, 1.0),
             damping: settings.damping.clamp(0.0, 1.0),
-            shape: if soft { settings.shape_stiffness.clamp(0.0, 1.0) } else { 0.0 },
-            pressure: if soft { settings.pressure.clamp(-1.0, 1.0) } else { 0.0 },
+            shape: if soft {
+                settings.shape_stiffness.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            pressure: if soft {
+                settings.pressure.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            },
         };
         if soft && closed {
             sim.volume = Some(sim.current_volume());
@@ -169,7 +180,14 @@ impl SoftSim {
         }
     }
 
-    fn step(&mut self, dt: f64, iterations: u32, gravity: DVec3, world: DAffine3, colliders: &[&Collider]) {
+    fn step(
+        &mut self,
+        dt: f64,
+        iterations: u32,
+        gravity: DVec3,
+        world: DAffine3,
+        colliders: &[&Collider],
+    ) {
         let keep = (1.0 - self.damping).powf(dt);
         for i in 0..self.x.len() {
             self.prev[i] = self.x[i];
@@ -241,7 +259,11 @@ impl SoftSim {
     /// Draws the vertices toward the rest shape, moved and turned to where
     /// the body is.
     fn match_shape(&mut self) {
-        let total: f64 = self.inv_mass.iter().map(|w| if *w > 0.0 { 1.0 / w } else { 0.0 }).sum();
+        let total: f64 = self
+            .inv_mass
+            .iter()
+            .map(|w| if *w > 0.0 { 1.0 / w } else { 0.0 })
+            .sum();
         if total <= 0.0 {
             return;
         }
@@ -291,7 +313,8 @@ fn rotation_of(a: DMat3, guess: DQuat) -> DQuat {
     for _ in 0..20 {
         let r = DMat3::from_quat(q);
         let omega = r.x_axis.cross(a.x_axis) + r.y_axis.cross(a.y_axis) + r.z_axis.cross(a.z_axis);
-        let denom = (r.x_axis.dot(a.x_axis) + r.y_axis.dot(a.y_axis) + r.z_axis.dot(a.z_axis)).abs() + 1e-9;
+        let denom =
+            (r.x_axis.dot(a.x_axis) + r.y_axis.dot(a.y_axis) + r.z_axis.dot(a.z_axis)).abs() + 1e-9;
         let omega = omega / denom;
         let angle = omega.length();
         if angle < 1e-9 {
@@ -322,7 +345,11 @@ mod tests {
     fn cloth_pinned_along_one_edge_hangs_from_it() {
         let mut mesh = cloth(10);
         // Pin the row along y = +1.
-        let w: Vec<f32> = mesh.positions().iter().map(|p| if p.y > 0.99 { 1.0 } else { 0.0 }).collect();
+        let w: Vec<f32> = mesh
+            .positions()
+            .iter()
+            .map(|p| if p.y > 0.99 { 1.0 } else { 0.0 })
+            .collect();
         mesh.attributes_mut().insert(
             &crate::skin::weight_layer("Pin"),
             Domain::Point,
@@ -373,12 +400,17 @@ mod tests {
         let mut settings = SoftBody::new(SoftKind::Soft);
         settings.shape_stiffness = 0.5;
         let mut sim = SoftSim::new(&cube, lift, &settings);
-        let floor = Collider::new(&kreate_mesh::primitives::plane(10.0), DAffine3::IDENTITY, 0.01, 0.5, 0.0);
+        let floor = Collider::new(
+            &kreate_mesh::primitives::plane(10.0),
+            DAffine3::IDENTITY,
+            0.01,
+            0.5,
+            0.0,
+        );
         run(&mut sim, 72, lift, &[&floor]);
-        let (lo, hi) = sim
-            .x
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.z), hi.max(p.z)));
+        let (lo, hi) = sim.x.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| {
+            (lo.min(p.z), hi.max(p.z))
+        });
         assert!(lo > -0.05, "on the floor: {lo}");
         assert!(hi - lo > 0.7, "still a cube, not a puddle: {}", hi - lo);
     }

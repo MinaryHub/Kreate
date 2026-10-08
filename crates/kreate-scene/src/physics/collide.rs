@@ -33,7 +33,13 @@ pub struct Contact {
 
 impl Collider {
     /// A collider from a mesh in its own space, placed by `world`.
-    pub fn new(mesh: &MeshData, world: DAffine3, thickness: f64, friction: f64, bounciness: f64) -> Self {
+    pub fn new(
+        mesh: &MeshData,
+        world: DAffine3,
+        thickness: f64,
+        friction: f64,
+        bounciness: f64,
+    ) -> Self {
         let tri = mesh.triangulate();
         let (tris, _) = tri.indices.as_chunks::<3>();
         let tris = tris.to_vec();
@@ -96,7 +102,9 @@ impl Collider {
         if len < 1e-9 {
             return None;
         }
-        let hit = self.bvh.raycast(&self.world, &self.tris, &Ray::new(from, d / len), len)?;
+        let hit = self
+            .bvh
+            .raycast(&self.world, &self.tris, &Ray::new(from, d / len), len)?;
         Some((hit.point, self.normals[hit.primitive as usize]))
     }
 
@@ -177,9 +185,16 @@ mod tests {
     #[test]
     fn the_nearest_point_of_a_triangle() {
         let (a, b, c) = (Vec3::ZERO, Vec3::X, Vec3::Y);
-        assert!(closest_on_triangle(Vec3::new(0.2, 0.2, 5.0), a, b, c).distance(Vec3::new(0.2, 0.2, 0.0)) < 1e-6);
+        assert!(
+            closest_on_triangle(Vec3::new(0.2, 0.2, 5.0), a, b, c)
+                .distance(Vec3::new(0.2, 0.2, 0.0))
+                < 1e-6
+        );
         assert_eq!(closest_on_triangle(Vec3::new(-1.0, -1.0, 0.0), a, b, c), a);
-        assert_eq!(closest_on_triangle(Vec3::new(0.5, -3.0, 0.0), a, b, c), Vec3::new(0.5, 0.0, 0.0));
+        assert_eq!(
+            closest_on_triangle(Vec3::new(0.5, -3.0, 0.0), a, b, c),
+            Vec3::new(0.5, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -199,15 +214,25 @@ mod tests {
             .resolve(Vec3::new(0.0, 0.0, -0.2), Vec3::new(0.0, 0.0, -0.01))
             .expect("inside the thickness");
         assert!((c.point.z + 0.05).abs() < 1e-4, "{:?}", c.point);
-        assert!(f.resolve(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.5)).is_none());
-        assert!(f.resolve(Vec3::new(9.0, 0.0, 1.0), Vec3::new(9.0, 0.0, -1.0)).is_none(), "beside the floor");
+        assert!(f
+            .resolve(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.5))
+            .is_none());
+        assert!(
+            f.resolve(Vec3::new(9.0, 0.0, 1.0), Vec3::new(9.0, 0.0, -1.0))
+                .is_none(),
+            "beside the floor"
+        );
     }
 
     #[test]
     fn a_moved_collider_is_where_it_was_moved() {
         let mut f = floor();
-        f.place(DAffine3::from_translation(kreate_math::DVec3::new(0.0, 0.0, 2.0)));
-        let c = f.resolve(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, 1.0)).expect("hit");
+        f.place(DAffine3::from_translation(kreate_math::DVec3::new(
+            0.0, 0.0, 2.0,
+        )));
+        let c = f
+            .resolve(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("hit");
         assert!((c.point.z - 2.05).abs() < 1e-4);
     }
 }

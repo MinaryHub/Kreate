@@ -33,7 +33,9 @@ use super::collide::Collider;
 /// A body's shape, in its own frame — its centre at the origin.
 #[derive(Clone, Debug)]
 pub enum Shape {
-    Sphere { radius: f64 },
+    Sphere {
+        radius: f64,
+    },
     Hull {
         /// Corners (and edge middles) tested against other bodies.
         points: Vec<DVec3>,
@@ -96,7 +98,20 @@ impl Body {
             }
         }
         // The edges' middles: a box landing on an edge.
-        for (a, b) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+        for (a, b) in [
+            (0, 1),
+            (2, 3),
+            (4, 5),
+            (6, 7),
+            (0, 2),
+            (1, 3),
+            (4, 6),
+            (5, 7),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ] {
             points.push((points[a] + points[b]) * 0.5);
         }
         let planes = vec![
@@ -107,12 +122,28 @@ impl Body {
             (DVec3::Z, h.z),
             (-DVec3::Z, h.z),
         ];
-        Self::with_shape(pos, rot, Shape::Hull { points, planes, half: h }, mass)
+        Self::with_shape(
+            pos,
+            rot,
+            Shape::Hull {
+                points,
+                planes,
+                half: h,
+            },
+            mass,
+        )
     }
 
     /// A ball.
     pub fn ball(pos: DVec3, radius: f64, mass: f64) -> Self {
-        Self::with_shape(pos, DQuat::IDENTITY, Shape::Sphere { radius: radius.max(1e-4) }, mass)
+        Self::with_shape(
+            pos,
+            DQuat::IDENTITY,
+            Shape::Sphere {
+                radius: radius.max(1e-4),
+            },
+            mass,
+        )
     }
 
     /// The convex shape round `points`, given in the world; the body is
@@ -143,7 +174,11 @@ impl Body {
         for i in 0..64 {
             let z = 1.0 - 2.0 * (i as f64 + 0.5) / 64.0;
             let r = (1.0 - z * z).sqrt();
-            sample.push(DVec3::new(r * (golden * i as f64).cos(), r * (golden * i as f64).sin(), z));
+            sample.push(DVec3::new(
+                r * (golden * i as f64).cos(),
+                r * (golden * i as f64).sin(),
+                z,
+            ));
         }
         for d in sample {
             let best = local
@@ -155,14 +190,28 @@ impl Body {
                 extremes.push(best);
             }
         }
-        Self::with_shape(rot * centre, rot, Shape::Hull { points: extremes, planes, half }, mass)
+        Self::with_shape(
+            rot * centre,
+            rot,
+            Shape::Hull {
+                points: extremes,
+                planes,
+                half,
+            },
+            mass,
+        )
     }
 
     /// A passive body of triangles.
     pub fn mesh(collider: Collider) -> Self {
         let b = collider.bounds();
         let centre = ((b.min + b.max) * 0.5).as_dvec3();
-        let mut body = Self::with_shape(centre, DQuat::IDENTITY, Shape::Mesh(Box::new(collider)), 0.0);
+        let mut body = Self::with_shape(
+            centre,
+            DQuat::IDENTITY,
+            Shape::Mesh(Box::new(collider)),
+            0.0,
+        );
         body.reach = ((b.max - b.min) * 0.5).as_dvec3().length();
         body
     }
@@ -174,7 +223,10 @@ impl Body {
                 let h2 = *half * *half;
                 (
                     DVec3::new(h2.y + h2.z, h2.x + h2.z, h2.x + h2.y) * (mass / 3.0),
-                    points.iter().map(|p| p.length()).fold(half.length(), f64::max),
+                    points
+                        .iter()
+                        .map(|p| p.length())
+                        .fold(half.length(), f64::max),
                 )
             }
             Shape::Mesh(_) => (DVec3::ZERO, 0.0),
@@ -279,7 +331,13 @@ fn against_mesh(collider: &Collider, centre: DVec3, p: DVec3, reach: f64) -> Opt
 fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>) {
     let (ba, bb) = (&bodies[a], &bodies[b]);
     let mut push = |point: DVec3, normal: DVec3, depth: f64| {
-        out.push(Contact { a, b, point, normal, depth })
+        out.push(Contact {
+            a,
+            b,
+            point,
+            normal,
+            depth,
+        })
     };
     match (&ba.shape, &bb.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {
@@ -302,7 +360,18 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                 push(bb.pos + n * *radius, -n, radius - s);
             }
         }
-        (Shape::Hull { points: pa, planes: qa, .. }, Shape::Hull { points: pb, planes: qb, .. }) => {
+        (
+            Shape::Hull {
+                points: pa,
+                planes: qa,
+                ..
+            },
+            Shape::Hull {
+                points: pb,
+                planes: qb,
+                ..
+            },
+        ) => {
             let wa: Vec<DVec3> = pa.iter().map(|p| ba.pos + ba.rot * *p).collect();
             let wb: Vec<DVec3> = pb.iter().map(|p| bb.pos + bb.rot * *p).collect();
             // One normal for the pair: the face direction, of either body,
@@ -312,12 +381,16 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
             // faces, where "the nearest face" is a coin toss and a sideways
             // push holds nothing up.
             let along = |points: &[DVec3], n: DVec3| {
-                points
-                    .iter()
-                    .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.dot(n)), hi.max(p.dot(n))))
+                points.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| {
+                    (lo.min(p.dot(n)), hi.max(p.dot(n)))
+                })
             };
             let mut best: Option<(DVec3, f64)> = None;
-            for n in qa.iter().map(|(n, _)| ba.rot * *n).chain(qb.iter().map(|(n, _)| bb.rot * *n)) {
+            for n in qa
+                .iter()
+                .map(|(n, _)| ba.rot * *n)
+                .chain(qb.iter().map(|(n, _)| bb.rot * *n))
+            {
                 let (alo, ahi) = along(&wa, n);
                 let (blo, bhi) = along(&wb, n);
                 let overlap = (ahi.min(bhi) - alo.max(blo)).max(0.0);
@@ -325,7 +398,11 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                     return;
                 }
                 // Turned to point from b to a.
-                let n = if (ba.pos - bb.pos).dot(n) >= 0.0 { n } else { -n };
+                let n = if (ba.pos - bb.pos).dot(n) >= 0.0 {
+                    n
+                } else {
+                    -n
+                };
                 if best.is_none_or(|(_, o)| overlap < o - 1e-9) {
                     best = Some((n, overlap));
                 }
@@ -365,7 +442,13 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                 let (q, n) = (q.as_dvec3(), n.as_dvec3());
                 let d = ba.pos - q;
                 let dist = d.length();
-                let n = if dist > 1e-9 { d / dist } else if n.dot(d) >= 0.0 { n } else { -n };
+                let n = if dist > 1e-9 {
+                    d / dist
+                } else if n.dot(d) >= 0.0 {
+                    n
+                } else {
+                    -n
+                };
                 push(ba.pos - n * *radius, n, radius - dist);
             }
         }
@@ -374,7 +457,13 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                 let (q, n) = (q.as_dvec3(), n.as_dvec3());
                 let d = bb.pos - q;
                 let dist = d.length();
-                let n = if dist > 1e-9 { d / dist } else if n.dot(d) >= 0.0 { n } else { -n };
+                let n = if dist > 1e-9 {
+                    d / dist
+                } else if n.dot(d) >= 0.0 {
+                    n
+                } else {
+                    -n
+                };
                 push(bb.pos - n * *radius, -n, radius - dist);
             }
         }
@@ -546,21 +635,43 @@ mod tests {
     #[test]
     fn a_box_falls_onto_a_box_and_stays_on_it() {
         let mut w = world();
-        w.bodies.push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(2.0, 2.0, 0.5), 0.0).fixed());
-        w.bodies.push(Body::cuboid(DVec3::new(0.0, 0.0, 3.0), DQuat::IDENTITY, DVec3::splat(0.5), 1.0));
+        w.bodies.push(
+            Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(2.0, 2.0, 0.5), 0.0).fixed(),
+        );
+        w.bodies.push(Body::cuboid(
+            DVec3::new(0.0, 0.0, 3.0),
+            DQuat::IDENTITY,
+            DVec3::splat(0.5),
+            1.0,
+        ));
         run(&mut w, 3.0);
         let b = &w.bodies[1];
-        assert!((b.pos.z - 1.0).abs() < 0.03, "rests on the top at 1.0: {}", b.pos.z);
+        assert!(
+            (b.pos.z - 1.0).abs() < 0.03,
+            "rests on the top at 1.0: {}",
+            b.pos.z
+        );
         assert!(b.vel.length() < 0.05, "at rest: {:?}", b.vel);
-        assert!(b.pos.truncate().length() < 0.05, "did not wander: {:?}", b.pos);
+        assert!(
+            b.pos.truncate().length() < 0.05,
+            "did not wander: {:?}",
+            b.pos
+        );
     }
 
     #[test]
     fn a_tilted_box_lands_flat() {
         let mut w = world();
-        w.bodies.push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(3.0, 3.0, 0.5), 0.0).fixed());
+        w.bodies.push(
+            Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(3.0, 3.0, 0.5), 0.0).fixed(),
+        );
         let tilt = DQuat::from_rotation_x(0.5) * DQuat::from_rotation_y(0.3);
-        w.bodies.push(Body::cuboid(DVec3::new(0.0, 0.0, 2.0), tilt, DVec3::splat(0.5), 1.0));
+        w.bodies.push(Body::cuboid(
+            DVec3::new(0.0, 0.0, 2.0),
+            tilt,
+            DVec3::splat(0.5),
+            1.0,
+        ));
         run(&mut w, 4.0);
         let b = &w.bodies[1];
         assert!((b.pos.z - 1.0).abs() < 0.05, "on a face: {}", b.pos.z);
@@ -573,7 +684,9 @@ mod tests {
     #[test]
     fn three_boxes_stand_in_a_stack() {
         let mut w = world();
-        w.bodies.push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(3.0, 3.0, 0.5), 0.0).fixed());
+        w.bodies.push(
+            Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(3.0, 3.0, 0.5), 0.0).fixed(),
+        );
         for i in 0..3 {
             w.bodies.push(Body::cuboid(
                 DVec3::new(0.0, 0.0, 1.0 + i as f64 * 1.01),
@@ -585,19 +698,34 @@ mod tests {
         run(&mut w, 3.0);
         for i in 0..3 {
             let b = &w.bodies[i + 1];
-            assert!((b.pos.z - (1.0 + i as f64)).abs() < 0.08, "box {i} at {}", b.pos.z);
+            assert!(
+                (b.pos.z - (1.0 + i as f64)).abs() < 0.08,
+                "box {i} at {}",
+                b.pos.z
+            );
             assert!(b.pos.truncate().length() < 0.1, "box {i} slid: {:?}", b.pos);
         }
     }
 
     #[test]
     fn a_ball_rests_on_a_mesh_floor_and_a_bouncy_one_bounces() {
-        let floor = Collider::new(&kreate_mesh::primitives::plane(10.0), DAffine3::IDENTITY, 0.0, 0.5, 0.0);
+        let floor = Collider::new(
+            &kreate_mesh::primitives::plane(10.0),
+            DAffine3::IDENTITY,
+            0.0,
+            0.5,
+            0.0,
+        );
         let mut w = world();
         w.bodies.push(Body::mesh(floor.clone()));
-        w.bodies.push(Body::ball(DVec3::new(0.0, 0.0, 2.0), 0.5, 1.0));
+        w.bodies
+            .push(Body::ball(DVec3::new(0.0, 0.0, 2.0), 0.5, 1.0));
         run(&mut w, 3.0);
-        assert!((w.bodies[1].pos.z - 0.5).abs() < 0.03, "{}", w.bodies[1].pos.z);
+        assert!(
+            (w.bodies[1].pos.z - 0.5).abs() < 0.03,
+            "{}",
+            w.bodies[1].pos.z
+        );
 
         let mut w = world();
         w.bodies.push(Body::mesh(floor));
@@ -628,10 +756,16 @@ mod tests {
             .map(|p| p.as_dvec3() + DVec3::new(0.0, 0.0, 3.0))
             .collect();
         let mut w = world();
-        w.bodies.push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(2.0, 2.0, 0.5), 0.0).fixed());
+        w.bodies.push(
+            Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::new(2.0, 2.0, 0.5), 0.0).fixed(),
+        );
         w.bodies.push(Body::hull(&points, DQuat::IDENTITY, 1.0));
         run(&mut w, 3.0);
-        assert!((w.bodies[1].pos.z - 1.0).abs() < 0.03, "{}", w.bodies[1].pos.z);
+        assert!(
+            (w.bodies[1].pos.z - 1.0).abs() < 0.03,
+            "{}",
+            w.bodies[1].pos.z
+        );
     }
 
     #[test]
@@ -639,10 +773,16 @@ mod tests {
         let slide = |friction: f64| {
             let mut w = world();
             let slope = DQuat::from_rotation_y(0.3);
-            let mut ground = Body::cuboid(DVec3::ZERO, slope, DVec3::new(5.0, 5.0, 0.5), 0.0).fixed();
+            let mut ground =
+                Body::cuboid(DVec3::ZERO, slope, DVec3::new(5.0, 5.0, 0.5), 0.0).fixed();
             ground.friction = friction;
             w.bodies.push(ground);
-            let mut b = Body::cuboid(slope * DVec3::new(0.0, 0.0, 1.0), slope, DVec3::splat(0.5), 1.0);
+            let mut b = Body::cuboid(
+                slope * DVec3::new(0.0, 0.0, 1.0),
+                slope,
+                DVec3::splat(0.5),
+                1.0,
+            );
             b.friction = friction;
             let start = b.pos;
             w.bodies.push(b);

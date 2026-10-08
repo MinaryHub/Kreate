@@ -64,31 +64,26 @@ pub struct Group {
 /// button inside the row takes a click on its label for itself: the row's own
 /// response never sees it, and a menu that asked only the row ran nothing
 /// when its name was clicked — which is where everyone clicks.
-pub fn command_button(
-    ui: &mut egui::Ui,
-    info: &CommandInfo,
-    wide: bool,
-) -> (egui::Response, bool) {
-    let shown = ui
-        .scope(|ui| {
-            if wide {
-                // A menu row fills the popup so the shortcut can sit at its far
-                // edge. The popup's own width is what bounds it — see
-                // `MENU_WIDTH` in the shell — because an unconstrained row
-                // stretches to the window and takes the shortcut with it.
-                ui.set_min_width(ui.available_width());
+pub fn command_button(ui: &mut egui::Ui, info: &CommandInfo, wide: bool) -> (egui::Response, bool) {
+    let shown = ui.scope(|ui| {
+        if wide {
+            // A menu row fills the popup so the shortcut can sit at its far
+            // edge. The popup's own width is what bounds it — see
+            // `MENU_WIDTH` in the shell — because an unconstrained row
+            // stretches to the window and takes the shortcut with it.
+            ui.set_min_width(ui.available_width());
+        }
+        ui.horizontal(|ui| {
+            let clicked = ui.button(&info.name).clicked();
+            if !info.shortcut.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(&info.shortcut);
+                });
             }
-            ui.horizontal(|ui| {
-                let clicked = ui.button(&info.name).clicked();
-                if !info.shortcut.is_empty() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(&info.shortcut);
-                    });
-                }
-                clicked
-            })
-            .inner
-        });
+            clicked
+        })
+        .inner
+    });
     let button_clicked = shown.inner;
     let response = shown.response;
 
@@ -209,23 +204,29 @@ mod tests {
         }];
         let mut queue = CommandQueue::default();
         let mut rects = Vec::new();
-        let frame = |events: Vec<egui::Event>, queue: &mut CommandQueue, rects: &mut Vec<egui::Rect>| {
-            let raw = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0))),
-                events,
-                ..Default::default()
-            };
-            let mut chosen = false;
-            let _ = ctx.run_ui(raw, |ui| {
-                egui::Area::new(egui::Id::new("menu")).fixed_pos(egui::pos2(10.0, 10.0)).show(ui.ctx(), |ui| {
-                    ui.set_min_width(180.0);
-                    ui.set_max_width(180.0);
-                    chosen = menu_body(ui, &groups, queue);
-                    rects.clear();
+        let frame =
+            |events: Vec<egui::Event>, queue: &mut CommandQueue, rects: &mut Vec<egui::Rect>| {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut chosen = false;
+                let _ = ctx.run_ui(raw, |ui| {
+                    egui::Area::new(egui::Id::new("menu"))
+                        .fixed_pos(egui::pos2(10.0, 10.0))
+                        .show(ui.ctx(), |ui| {
+                            ui.set_min_width(180.0);
+                            ui.set_max_width(180.0);
+                            chosen = menu_body(ui, &groups, queue);
+                            rects.clear();
+                        });
                 });
-            });
-            chosen
-        };
+                chosen
+            };
         frame(vec![], &mut queue, &mut rects);
         // The second row, a little in from its left edge: title, then two rows.
         let at = egui::pos2(30.0, 10.0 + 20.0 + 24.0 + 10.0);

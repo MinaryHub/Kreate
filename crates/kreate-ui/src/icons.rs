@@ -54,7 +54,8 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, ink: Color32) {
             p.rect_filled(r, 1.5, ink);
         }
         Icon::Render => {
-            let body = Rect::from_center_size(c + Vec2::new(-s * 0.25, 0.0), Vec2::new(s * 1.3, s * 1.0));
+            let body =
+                Rect::from_center_size(c + Vec2::new(-s * 0.25, 0.0), Vec2::new(s * 1.3, s * 1.0));
             p.rect_stroke(body, 1.5, line, egui::StrokeKind::Middle);
             let x = body.max.x;
             p.add(egui::Shape::convex_polygon(
@@ -102,7 +103,10 @@ pub fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, ink: Color32) {
             for dx in [-0.35f32, 0.05, 0.45] {
                 let x = c.x + dx * s;
                 p.line_segment(
-                    [Pos2::new(x - s * 0.15, c.y - s * 0.95), Pos2::new(x - s * 0.15, c.y - s * 0.35)],
+                    [
+                        Pos2::new(x - s * 0.15, c.y - s * 0.95),
+                        Pos2::new(x - s * 0.15, c.y - s * 0.35),
+                    ],
                     line,
                 );
             }

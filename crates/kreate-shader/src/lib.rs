@@ -412,7 +412,10 @@ impl Emitter<'_> {
                 let f = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
                 let a = self.input_expr(node, 1, "vec3<f32>(0.5)")?;
                 let b = self.input_expr(node, 2, "vec3<f32>(0.5)")?;
-                let _ = writeln!(self.body, "    let n{node} = mix({a}, {b}, clamp({f}, 0.0, 1.0));");
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node} = mix({a}, {b}, clamp({f}, 0.0, 1.0));"
+                );
             }
             NodeKind::Math { op, a, b } => {
                 self.constants.push([a, b, 0.0, 0.0]);
@@ -577,8 +580,15 @@ mod tests {
             let math = g
                 .add_node(Node::new("M", NodeKind::Math { op, a: 0.3, b: 2.0 }))
                 .unwrap();
-            let mix = g.add_node(Node::new("X", NodeKind::MixColor { factor: 0.5 })).unwrap();
-            let colour = g.add_node(Node::new("C", NodeKind::Color(SceneRgb::new(0.2, 0.4, 0.6)))).unwrap();
+            let mix = g
+                .add_node(Node::new("X", NodeKind::MixColor { factor: 0.5 }))
+                .unwrap();
+            let colour = g
+                .add_node(Node::new(
+                    "C",
+                    NodeKind::Color(SceneRgb::new(0.2, 0.4, 0.6)),
+                ))
+                .unwrap();
             let invert = g.add_node(Node::new("I", NodeKind::Invert)).unwrap();
             for (from, fs, to, ts) in [
                 (math, 0, mix, 0),
@@ -587,8 +597,13 @@ mod tests {
                 (colour, 0, invert, 0),
                 (invert, 0, 0, 4),
             ] {
-                g.link(Link { from_node: from, from_socket: fs, to_node: to, to_socket: ts })
-                    .unwrap_or_else(|e| panic!("{op:?}: {from}->{to}: {e:?}"));
+                g.link(Link {
+                    from_node: from,
+                    from_socket: fs,
+                    to_node: to,
+                    to_socket: ts,
+                })
+                .unwrap_or_else(|e| panic!("{op:?}: {from}->{to}: {e:?}"));
             }
             let compiled = compile(&g).expect("compiles");
             let source = format!(
@@ -598,9 +613,12 @@ mod tests {
             );
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                .validate(&module)
-                .unwrap_or_else(|e| panic!("{op:?}: {}", e.emit_to_string(&source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{op:?}: {}", e.emit_to_string(&source)));
             assert!(compiled.wgsl.contains("mix("), "{}", compiled.wgsl);
             assert!(compiled.wgsl.contains("].yzw * n"), "{}", compiled.wgsl);
         }
@@ -611,14 +629,26 @@ mod tests {
         // Wired into the roughness: a node nothing reads is not compiled.
         let with = |op, a, b| {
             let mut g = flat();
-            let m = g.add_node(Node::new("M", NodeKind::Math { op, a, b })).unwrap();
-            g.link(Link { from_node: m, from_socket: 0, to_node: 0, to_socket: 2 }).unwrap();
+            let m = g
+                .add_node(Node::new("M", NodeKind::Math { op, a, b }))
+                .unwrap();
+            g.link(Link {
+                from_node: m,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 2,
+            })
+            .unwrap();
             g
         };
         let a = with(MathOp::Add, 1.0, 2.0);
         let b = with(MathOp::Add, 7.0, 9.0);
         let c = with(MathOp::Power, 1.0, 2.0);
-        let (a, b, c) = (compile(&a).unwrap(), compile(&b).unwrap(), compile(&c).unwrap());
+        let (a, b, c) = (
+            compile(&a).unwrap(),
+            compile(&b).unwrap(),
+            compile(&c).unwrap(),
+        );
         // The numbers are constants, so they share a pipeline; the operation
         // is code, so it does not.
         assert_eq!(a.wgsl, b.wgsl);

@@ -100,7 +100,10 @@ pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
         let w = scene.world_transform(id);
         let p = o.physics.clone();
         if let Some(c) = p.collision {
-            colliders.push((id, Collider::new(&mesh, w, c.thickness, c.friction, c.bounciness)));
+            colliders.push((
+                id,
+                Collider::new(&mesh, w, c.thickness, c.friction, c.bounciness),
+            ));
         }
         if let Some(r) = p.rigid {
             let (_, turn, _) = w.to_scale_rotation_translation();
@@ -207,7 +210,14 @@ pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
         }
         for (id, _, _, sim, frames) in emitters.iter_mut() {
             let w = scene.world_transform(*id);
-            sim.advance(frame as f64, dt, substeps.min(10), settings.gravity, w, &near);
+            sim.advance(
+                frame as f64,
+                dt,
+                substeps.min(10),
+                settings.gravity,
+                w,
+                &near,
+            );
             frames.push(sim.snapshot(w).into());
         }
         for (id, _, _, sim, frames) in hairs.iter_mut() {
@@ -234,12 +244,19 @@ pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
             .collect(),
         soft: softs
             .into_iter()
-            .map(|(_, uid, _, frames)| SoftTrack { object: uid, frames })
+            .map(|(_, uid, _, frames)| SoftTrack {
+                object: uid,
+                frames,
+            })
             .collect(),
         particles: emitters
             .into_iter()
             .map(|(_, uid, system, _, frames)| (uid, system, frames))
-            .chain(hairs.into_iter().map(|(_, uid, system, _, frames)| (uid, system, frames)))
+            .chain(
+                hairs
+                    .into_iter()
+                    .map(|(_, uid, system, _, frames)| (uid, system, frames)),
+            )
             .map(|(object, system, frames)| ParticleTrack {
                 object,
                 system,
@@ -272,8 +289,18 @@ mod tests {
     fn a_baked_cube_falls_onto_the_floor_and_plays_back() {
         let mut doc = Document::new();
         short(&mut doc, 60);
-        let floor = add(&mut doc, "Floor", kreate_mesh::primitives::plane(10.0), DVec3::ZERO);
-        let cube = add(&mut doc, "Cube", kreate_mesh::primitives::cube(1.0), DVec3::new(0.0, 0.0, 3.0));
+        let floor = add(
+            &mut doc,
+            "Floor",
+            kreate_mesh::primitives::plane(10.0),
+            DVec3::ZERO,
+        );
+        let cube = add(
+            &mut doc,
+            "Cube",
+            kreate_mesh::primitives::cube(1.0),
+            DVec3::new(0.0, 0.0, 3.0),
+        );
         doc.object_mut(floor).unwrap().physics.rigid = Some(RigidBody {
             kind: BodyKind::Passive,
             shape: CollisionShape::Mesh,
@@ -283,7 +310,10 @@ mod tests {
         let (cache, summary) = bake(&doc);
         assert_eq!(summary.rigid, 1, "the floor does not move");
         assert_eq!(cache.rigid[0].frames.len(), 60);
-        assert_eq!(cache.rigid[0].frames[0].translation.z, 3.0, "starts where it was");
+        assert_eq!(
+            cache.rigid[0].frames[0].translation.z, 3.0,
+            "starts where it was"
+        );
         let last = cache.rigid[0].frames[59].translation.z;
         assert!((last - 0.5).abs() < 0.05, "rests on the floor: {last}");
 
@@ -291,21 +321,40 @@ mod tests {
         doc.animate(60.0);
         assert!((doc.object(cube).unwrap().transform.translation.z - 0.5).abs() < 0.05);
         doc.animate(1.0);
-        assert_eq!(doc.object(cube).unwrap().transform.translation.z, 3.0, "and back");
+        assert_eq!(
+            doc.object(cube).unwrap().transform.translation.z,
+            3.0,
+            "and back"
+        );
     }
 
     #[test]
     fn a_child_body_is_written_back_through_its_parent() {
         let mut doc = Document::new();
         short(&mut doc, 48);
-        let floor = add(&mut doc, "Floor", kreate_mesh::primitives::plane(10.0), DVec3::ZERO);
+        let floor = add(
+            &mut doc,
+            "Floor",
+            kreate_mesh::primitives::plane(10.0),
+            DVec3::ZERO,
+        );
         doc.object_mut(floor).unwrap().physics.rigid = Some(RigidBody {
             kind: BodyKind::Passive,
             shape: CollisionShape::Box,
             ..RigidBody::default()
         });
-        let holder = add(&mut doc, "Holder", kreate_mesh::primitives::cube(0.1), DVec3::new(5.0, 0.0, 0.0));
-        let cube = add(&mut doc, "Cube", kreate_mesh::primitives::cube(1.0), DVec3::new(5.0, 0.0, 2.0));
+        let holder = add(
+            &mut doc,
+            "Holder",
+            kreate_mesh::primitives::cube(0.1),
+            DVec3::new(5.0, 0.0, 0.0),
+        );
+        let cube = add(
+            &mut doc,
+            "Cube",
+            kreate_mesh::primitives::cube(1.0),
+            DVec3::new(5.0, 0.0, 2.0),
+        );
         doc.set_parent(cube, Some(holder)).unwrap();
         doc.object_mut(cube).unwrap().physics.rigid = Some(RigidBody {
             shape: CollisionShape::Box,
@@ -315,16 +364,29 @@ mod tests {
         doc.physics_cache = Arc::new(cache);
         doc.animate(48.0);
         let at = doc.world_transform(cube).translation;
-        assert!((at.z - 0.5).abs() < 0.05 && (at.x - 5.0).abs() < 0.05, "{at:?}");
+        assert!(
+            (at.z - 0.5).abs() < 0.05 && (at.x - 5.0).abs() < 0.05,
+            "{at:?}"
+        );
     }
 
     #[test]
     fn baked_cloth_drapes_and_is_laid_onto_the_evaluated_mesh() {
         let mut doc = Document::new();
         short(&mut doc, 36);
-        let block = add(&mut doc, "Block", kreate_mesh::primitives::cube(1.0), DVec3::ZERO);
+        let block = add(
+            &mut doc,
+            "Block",
+            kreate_mesh::primitives::cube(1.0),
+            DVec3::ZERO,
+        );
         doc.object_mut(block).unwrap().physics.collision = Some(Collision::default());
-        let cloth = add(&mut doc, "Cloth", kreate_mesh::primitives::grid(2.0, 12, 12), DVec3::new(0.0, 0.0, 1.2));
+        let cloth = add(
+            &mut doc,
+            "Cloth",
+            kreate_mesh::primitives::grid(2.0, 12, 12),
+            DVec3::new(0.0, 0.0, 1.2),
+        );
         doc.object_mut(cloth).unwrap().physics.soft = Some(SoftBody::new(SoftKind::Cloth));
         let (cache, summary) = bake(&doc);
         assert_eq!(summary.soft, 1);
@@ -334,7 +396,11 @@ mod tests {
         let mesh = eval.evaluated(&doc, cloth, &EvalCtx::still()).unwrap();
         // In the cloth's own space, lifted 1.2: the lowest corner hangs below
         // the lid at 0.5, so below -0.7 here.
-        let lowest = mesh.positions().iter().map(|p| p.z).fold(f32::MAX, f32::min);
+        let lowest = mesh
+            .positions()
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::MAX, f32::min);
         assert!(lowest < -0.8, "draped: {lowest}");
         let middle = mesh
             .positions()
@@ -352,7 +418,12 @@ mod tests {
     fn particles_and_hair_appear_on_their_emitter() {
         let mut doc = Document::new();
         short(&mut doc, 10);
-        let e = add(&mut doc, "Emitter", kreate_mesh::primitives::plane(1.0), DVec3::ZERO);
+        let e = add(
+            &mut doc,
+            "Emitter",
+            kreate_mesh::primitives::plane(1.0),
+            DVec3::ZERO,
+        );
         let mut spray = crate::physics::ParticleSettings::new("Spray", ParticleKind::Emitter);
         (spray.count, spray.frame_start, spray.frame_end) = (50, 1, 5);
         let hair = crate::physics::ParticleSettings::new("Fur", ParticleKind::Hair);
@@ -369,6 +440,10 @@ mod tests {
         doc.physics_cache = Arc::new(cache);
         doc.animate(10.0);
         let after = eval.evaluated(&doc, e, &EvalCtx::still()).unwrap();
-        assert_eq!(after.num_faces(), before.num_faces() + 50 * 8, "fifty diamonds");
+        assert_eq!(
+            after.num_faces(),
+            before.num_faces() + 50 * 8,
+            "fifty diamonds"
+        );
     }
 }
