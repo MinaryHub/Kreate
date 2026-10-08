@@ -2631,3 +2631,22 @@ fn the_sidebar_has_blenders_three_tabs_and_keeps_the_gizmo_in_view() {
         bar.min.x
     );
 }
+
+/// An outliner long enough to scroll: the eyes at the right edge have to
+/// stand clear of the scroll bar.
+#[test]
+fn shot_outliner_scrolling() {
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    for i in 0..60 {
+        doc.add_object(kreate_scene::document::Object::new(
+            &format!("Part {i}"),
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+    }
+    let Some(shot) = composite(&doc, "en") else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("outliner-scrolling");
+}

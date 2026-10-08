@@ -294,6 +294,9 @@ pub fn outliner(
     let rename_id = ui.id().with("renaming");
     let mut renaming: Option<Renaming> = ui.data(|d| d.get_temp(rename_id));
 
+    // A scroll bar with room of its own, not one floating over the rows: the
+    // eyes sit against the right edge, and a floating bar lay on top of them.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         // Only the visible rows are laid out — and, because `row` is a function
