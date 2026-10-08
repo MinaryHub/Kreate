@@ -50,6 +50,20 @@ The tag starts the **Build binaries** workflow, which checks that the tag and
 and Windows, and publishes a GitHub release with the binaries and that
 version's changelog section as its notes.
 
+## Updates
+
+Each platform's build is also published as `kreate-<platform>.zip` with
+`kreate` and `kreate-mcp` at its top level. An installed Kreate asks GitHub
+for the latest release when it starts, downloads that zip quietly when it is
+newer, and puts it in place the next time it starts (`apps/kreate/src/update.rs`).
+
+- The request is made without signing in, so **the repository has to be
+  public** for installed copies to see releases. `KREATE_UPDATE_REPO=owner/name`
+  points them at another repository, e.g. a public one that holds only releases.
+- Drafts and prereleases are never offered.
+- A build run from a `target` folder never updates itself (set `KREATE_UPDATE=1`
+  to try it); `KREATE_NO_UPDATE=1` turns updates off.
+
 ## When a release goes wrong
 
 A tag that has been pushed is never moved. Fix forward: the fix goes under

@@ -662,6 +662,9 @@ struct SkinnedGpu {
 struct App {
     /// The connector's socket. See `kreate::bridge`.
     bridge: Option<kreate::bridge::Bridge>,
+    /// The release the update check downloaded, once it has; said in the
+    /// status bar, then forgotten. See `kreate::update`.
+    update_ready: Option<Arc<std::sync::Mutex<Option<String>>>>,
     /// The Claude panel's conversation. See `kreate::claude`.
     chat: Option<kreate::claude::Chat>,
     /// Whether the last chat entry is a reply still streaming in.
@@ -959,6 +962,7 @@ impl App {
     fn empty(doc: Document, locale: &str, registry: OperatorRegistry) -> Self {
         Self {
             bridge: None,
+            update_ready: None,
             chat: None,
             chat_streaming: false,
             chat_attachments: Vec::new(),
@@ -11094,6 +11098,16 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let downloaded = self
+            .update_ready
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|mut v| v.take()));
+        if let Some(version) = downloaded {
+            self.status(&format!(
+                "Kreate {version} is downloaded and will be used the next time Kreate starts"
+            ));
+            self.redraw.set(RedrawReason::UI);
+        }
         // While the user is dragging, stay on Poll so motion is continuous;
         // otherwise Wait, so an idle window costs nothing — or until the
         // interface asked to be drawn again.
@@ -11480,6 +11494,12 @@ fn main() {
         kreate::crashreport::run_reporter(&socket);
     }
 
+    // An update downloaded last time goes in before anything opens; when it
+    // did, the new version is already starting and this one steps aside.
+    if kreate::update::apply_staged(&args) {
+        return;
+    }
+
     install_panic_hook();
     // Held for the life of `main`. Dropping it detaches the handler and lets the
     // reporter exit, which is what should happen on a clean shutdown.
@@ -11528,6 +11548,13 @@ fn main() {
             Err(e) => tracing::warn!(error = %e, "connector bridge not started"),
         }
     }
+    // Off the main thread: a slow network never holds up the window.
+    let update_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    app.update_ready = Some(kreate::update::check_in_background(move || {
+        if let Ok(proxy) = update_proxy.lock() {
+            let _ = proxy.send_event(());
+        }
+    }));
     event_loop.run_app(&mut app).expect("run");
 }
 

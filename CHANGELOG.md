@@ -12,6 +12,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Updates itself: at start Kreate looks for a newer release on GitHub,
+  downloads it in the background, and uses it the next time it starts.
+  `KREATE_NO_UPDATE=1` turns this off.
 - Help ▸ Contact: write to the developers from inside Kreate. The message goes
   through a relay, so neither the address it reaches nor any key is in the
   application.

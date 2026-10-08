@@ -43,11 +43,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # and pictures and PDFs sent as base64. See `attach`.
 arboard = "3.6"
 base64 = "0.13"
+# Unpacking an update's release zip. See `update`.
+zip.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon in the executable. See `build.rs`.
 winresource = "0.1"
 
 [dev-dependencies]
-# Reading back what an export wrote. See `a_3mf_export_is_in_the_scenes_unit`.
-zip.workspace = true
