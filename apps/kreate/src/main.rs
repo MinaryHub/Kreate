@@ -7362,6 +7362,85 @@ impl App {
         }
     }
 
+    /// The brush settings of the mode the viewport is in, if it paints or
+    /// sculpts: radius in points, strength.
+    fn brush_values(&mut self) -> Option<(&mut f32, &mut f32)> {
+        use kreate_ops::mode::ActsOn;
+        match self.op_ctx.mode.acts_on() {
+            ActsOn::Sculpt => Some((&mut self.ui.sculpt.radius, &mut self.ui.sculpt.strength)),
+            ActsOn::Weights => Some((&mut self.ui.paint.radius, &mut self.ui.paint.strength)),
+            ActsOn::Texture => Some((
+                &mut self.ui.texture_paint.radius,
+                &mut self.ui.texture_paint.strength,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The pointer, in points.
+    fn cursor_points(&self) -> Option<egui::Pos2> {
+        let ppp = self.egui_ctx.pixels_per_point().max(0.01) as f64;
+        self.input
+            .cursor
+            .map(|(x, y)| egui::pos2((x / ppp) as f32, (y / ppp) as f32))
+    }
+
+    /// `F` (radius) or `Shift+F` (strength): the ring holds still and the
+    /// pointer's distance from its middle is the new value — Blender's way.
+    fn begin_brush_adjust(&mut self, strength: bool) {
+        if self.paint_stroke.is_some() || self.sculpt_stroke.is_some() || self.texture_stroke.is_some() {
+            return;
+        }
+        let Some(pointer) = self.cursor_points() else { return };
+        let Some((radius, value)) = self.brush_values().map(|(r, s)| (*r, *s)) else {
+            return;
+        };
+        let reach = if strength { radius * value } else { radius };
+        self.ui.brush_adjust = Some(shell::BrushAdjust {
+            strength,
+            center: pointer - egui::vec2(reach, 0.0),
+            radius,
+            was: if strength { value } else { radius },
+        });
+        self.status(if strength {
+            "Brush strength: move the pointer, click or Enter to keep, Esc to cancel"
+        } else {
+            "Brush size: move the pointer, click or Enter to keep, Esc to cancel"
+        });
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    fn update_brush_adjust(&mut self) {
+        let (Some(adjust), Some(pointer)) = (self.ui.brush_adjust, self.cursor_points()) else {
+            return;
+        };
+        let distance = (pointer - adjust.center).length();
+        if let Some((radius, strength)) = self.brush_values() {
+            if adjust.strength {
+                *strength = (distance / adjust.radius.max(1.0)).clamp(0.0, 1.0);
+            } else {
+                *radius = distance.clamp(4.0, 400.0);
+            }
+        }
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
+    /// Ends `F`: kept, or put back as it was.
+    fn end_brush_adjust(&mut self, keep: bool) {
+        let Some(adjust) = self.ui.brush_adjust.take() else { return };
+        if !keep {
+            if let Some((radius, strength)) = self.brush_values() {
+                if adjust.strength {
+                    *strength = adjust.was;
+                } else {
+                    *radius = adjust.was;
+                }
+            }
+        }
+        self.status("");
+        self.redraw.set(RedrawReason::HOVER_CHANGED);
+    }
+
     /// The brush strokes in progress, once for every move of the pointer
     /// since the last frame.
     fn drive_strokes(&mut self) {
@@ -9746,6 +9825,19 @@ impl App {
             self.status("Align Faces cancelled");
             return;
         }
+        if self.ui.brush_adjust.is_some() {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                    self.end_brush_adjust(true);
+                    return;
+                }
+                KeyCode::Escape => {
+                    self.end_brush_adjust(false);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.measure.is_some() {
             match code {
                 KeyCode::Escape => {
@@ -9935,6 +10027,8 @@ impl App {
                 self.linked_pick(deselect);
             }
             "view.circle_select" => self.toggle_circle_select(),
+            "brush.radius_adjust" => self.begin_brush_adjust(false),
+            "brush.strength_adjust" => self.begin_brush_adjust(true),
             "sculpt.brush" => {
                 if let Some(PropertyValue::Enum(b)) = action.params.get("brush") {
                     self.ui.sculpt.brush = (*b).min(3);
@@ -10710,6 +10804,20 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // F sizing the brush: left keeps, right puts it back.
+                if self.ui.brush_adjust.is_some() && pressed {
+                    match button {
+                        MouseButton::Left => {
+                            self.end_brush_adjust(true);
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.end_brush_adjust(false);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // The Measure tool: left takes a point, right puts it away.
                 if self.measure.is_some() && pressed {
                     match button {
@@ -10853,6 +10961,9 @@ impl ApplicationHandler for App {
                 }
                 if self.measure.is_some() {
                     self.update_measure();
+                }
+                if self.ui.brush_adjust.is_some() {
+                    self.update_brush_adjust();
                 }
                 if self.circle.is_some() {
                     self.redraw.set(RedrawReason::HOVER_CHANGED);
@@ -12024,6 +12135,41 @@ kreate.ops.object.add_primitive()",
         let t = Instant::now();
         app.history.commit_modal(session.unwrap());
         eprintln!("commit {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// F sizes the brush by the pointer's distance from a ring that stays
+    /// put, Shift+F its strength the same way; Esc puts either back.
+    #[test]
+    fn f_sizes_the_brush_and_shift_f_weights_it() {
+        let mut app = app();
+        let mesh = app.doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let cube = app.doc.add_object(kreate_scene::document::Object::new(
+            "Box",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        app.doc.selection.add(cube);
+        app.set_mode(OpMode::from_tag("sculpt").unwrap());
+        let ppp = app.egui_ctx.pixels_per_point() as f64;
+        let at = |x: f64| Some((x * ppp, 300.0 * ppp));
+        app.ui.sculpt.radius = 50.0;
+        app.ui.sculpt.strength = 0.5;
+
+        app.input.cursor = at(400.0);
+        app.begin_brush_adjust(false);
+        app.input.cursor = at(430.0);
+        app.update_brush_adjust();
+        assert!((app.ui.sculpt.radius - 80.0).abs() < 1e-3, "{}", app.ui.sculpt.radius);
+        app.end_brush_adjust(true);
+        assert!(app.ui.brush_adjust.is_none());
+        assert!((app.ui.sculpt.radius - 80.0).abs() < 1e-3, "kept");
+
+        // The middle is 0.5 x 80 to the left of 430, at 390.
+        app.begin_brush_adjust(true);
+        app.input.cursor = at(420.0);
+        app.update_brush_adjust();
+        assert!((app.ui.sculpt.strength - 0.375).abs() < 1e-3, "{}", app.ui.sculpt.strength);
+        app.end_brush_adjust(false);
+        assert!((app.ui.sculpt.strength - 0.5).abs() < 1e-6, "Esc puts it back");
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second

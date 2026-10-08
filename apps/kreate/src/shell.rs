@@ -284,6 +284,9 @@ pub struct ShellState {
     /// The sculpt brush.
     pub sculpt: SculptSettings,
     pub texture_paint: TexturePaintSettings,
+    /// `F` or `Shift+F` resizing or re-weighting the brush: drawn as a ring
+    /// that stays put while the pointer sets its size.
+    pub brush_adjust: Option<BrushAdjust>,
     /// Where `Ctrl+R` would cut, while it is looking for an edge: one world
     /// polyline per loop. Empty otherwise.
     pub loop_cut_preview: Vec<Vec<kreate_math::DVec3>>,
@@ -641,6 +644,7 @@ impl Default for ShellState {
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
             sculpt: SculptSettings::default(),
+            brush_adjust: None,
             texture_paint: TexturePaintSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
@@ -1160,6 +1164,20 @@ impl Default for TexturePaintSettings {
             strength: 1.0,
         }
     }
+}
+
+/// Blender's `F` / `Shift+F`: the brush's ring held still, its middle where
+/// the pointer was less the value, so the pointer starts on the edge and the
+/// distance from the middle is the new value.
+#[derive(Clone, Copy, Debug)]
+pub struct BrushAdjust {
+    /// The strength, not the radius.
+    pub strength: bool,
+    /// The ring's middle, in points.
+    pub center: egui::Pos2,
+    /// The radius and strength the brush had, for a cancel.
+    pub radius: f32,
+    pub was: f32,
 }
 
 /// The sculpt brush's settings, the application's as the paint brush's are.
@@ -2474,7 +2492,41 @@ fn draw_area(
                         kreate_ops::mode::ActsOn::Texture => Some(state.texture_paint.radius),
                         _ => None,
                     };
-                    if let Some(radius) = brush {
+                    // Being sized: the ring stands still, and for strength a
+                    // second ring inside it is the strength.
+                    if let (Some(radius), Some(adjust)) = (brush, state.brush_adjust) {
+                        let theme = kreate_ui::theme::from_ui(ui);
+                        let painter = ui.painter().with_clip_rect(inner);
+                        painter.circle_stroke(adjust.center, radius, egui::Stroke::new(1.2, theme.text));
+                        if adjust.strength {
+                            let strength = match mode.acts_on() {
+                                kreate_ops::mode::ActsOn::Weights => state.paint.strength,
+                                kreate_ops::mode::ActsOn::Texture => state.texture_paint.strength,
+                                _ => state.sculpt.strength,
+                            };
+                            painter.circle_filled(
+                                adjust.center,
+                                radius * strength,
+                                theme.accent.gamma_multiply(0.35),
+                            );
+                            painter.text(
+                                adjust.center,
+                                egui::Align2::CENTER_CENTER,
+                                format!("{strength:.2}"),
+                                egui::FontId::proportional(13.0),
+                                theme.text,
+                            );
+                        } else {
+                            painter.text(
+                                adjust.center,
+                                egui::Align2::CENTER_CENTER,
+                                // i18n-exempt: a number and its unit
+                                format!("{radius:.0} px"),
+                                egui::FontId::proportional(13.0),
+                                theme.text,
+                            );
+                        }
+                    } else if let Some(radius) = brush {
                         if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| inner.contains(*p))
                         {
                             let theme = kreate_ui::theme::from_ui(ui);

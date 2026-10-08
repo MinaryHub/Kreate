@@ -288,6 +288,10 @@ fn the_pick_cache_survives_an_edit_between_queries() {
 
 /// Ids the application handles itself rather than sending to the registry.
 const APP_ACTIONS: &[&str] = &[
+    // F / Shift+F: the brush's size and strength, which live in the
+    // interface, not the document.
+    "brush.radius_adjust",
+    "brush.strength_adjust",
     // The 3D cursor: placed from the pointer and the selection, which the
     // application knows and the operator (`scene.cursor_set`) is handed.
     "view.cursor_place",
