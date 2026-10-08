@@ -134,9 +134,15 @@ fn render_scene_flags(
         })
         .collect();
     let selected = SELECTED.with(|a| a.get());
+    let colors = COLORS.with(|c| c.borrow().clone());
     let mut refs: Vec<Draw> = uploaded
         .iter()
-        .map(|(m, t)| Draw::new(m, *t).selected(selected).active(selected))
+        .map(|(m, t)| {
+            Draw::new(m, *t)
+                .selected(selected)
+                .active(selected)
+                .with_colors(&colors)
+        })
         .collect();
 
     let mut camera = Camera::default();
@@ -238,6 +244,8 @@ thread_local! {
     static STILL_REFINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether every draw is selected, and active.
     static SELECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The material colours every draw is given, by slot.
+    static COLORS: std::cell::RefCell<Vec<[f32; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Skips the test body when no GPU is present, so a CI runner without one does
@@ -426,6 +434,30 @@ fn a_cube_wireframe_is_visible_against_its_own_shading() {
         changed > 400,
         "only {changed} pixels differ strongly; the wireframe is too faint to see"
     );
+}
+
+#[test]
+fn flat_and_studio_show_the_materials_colour() {
+    // Blender's solid mode, coloured by material: a red material is red in
+    // the flat view and in the studio view, and a slot with no material is
+    // the object's own grey.
+    let plane = vec![(kreate_mesh::primitives::plane(2.0), DAffine3::IDENTITY)];
+    let face_on = |c: &mut Camera| {
+        c.pivot = DVec3::ZERO;
+        c.rotation = glam::DQuat::IDENTITY;
+        c.distance = 3.0;
+    };
+    for shading in [ShadingMode::Flat, ShadingMode::Studio] {
+        COLORS.with(|c| *c.borrow_mut() = vec![[0.8, 0.02, 0.02, 1.0]]);
+        let (img, _) = gpu_or_skip!(render_scene_full(&plane, shading, false, false, face_on));
+        let p = img.at(SIZE / 2, SIZE / 2);
+        assert!(p[0] > 120 && p[1] < 60 && p[2] < 60, "{shading:?}: {p:?}");
+        COLORS.with(|c| *c.borrow_mut() = vec![[0.0; 4]]);
+        let (img, _) = gpu_or_skip!(render_scene_full(&plane, shading, false, false, face_on));
+        let p = img.at(SIZE / 2, SIZE / 2);
+        assert!((p[0] as i32 - p[2] as i32).abs() < 40, "{shading:?} no material is grey: {p:?}");
+    }
+    COLORS.with(|c| c.borrow_mut().clear());
 }
 
 #[test]

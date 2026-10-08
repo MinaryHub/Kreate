@@ -31,6 +31,9 @@ struct ObjectData {
     base_color: vec4<f32>,
     // x: one to colour by the weight in the first UV coordinate.
     paint: vec4<f32>,
+    // The colour of each material slot's faces: the run being drawn is the
+    // instance index. See `SOLID_SLOTS`.
+    slot_colors: array<vec4<f32>, 8>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -209,6 +212,7 @@ fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) normal_packed: u32,
     @location(2) uv: vec2<f32>,
+    @builtin(instance_index) slot: u32,
 ) -> VsOut {
     var out: VsOut;
     let world = object.model * vec4<f32>(position, 1.0);
@@ -220,7 +224,8 @@ fn vs_main(
     );
     out.normal = nm * oct_decode(normal_packed);
     out.view_pos = world.xyz;
-    out.base_color = object.base_color;
+    // The run's material colour; the object's alpha, which x-ray reads.
+    out.base_color = vec4<f32>(object.slot_colors[min(slot, 7u)].rgb, object.base_color.a);
     out.weight = uv.x;
     out.ramp = object.paint.x;
     return out;

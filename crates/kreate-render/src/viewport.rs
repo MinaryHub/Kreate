@@ -71,7 +71,15 @@ struct ObjectData {
     /// x: one to colour the surface by the weight in its first UV coordinate,
     /// Blender's weight-paint ramp, instead of by `base_color`.
     paint: [f32; 4],
+    /// The studio and flat colour of each of the first eight material slots,
+    /// linear: what a run of faces on that slot is drawn in. See
+    /// [`Draw::colors`].
+    slot_colors: [[f32; 4]; SOLID_SLOTS],
 }
+
+/// How many material slots the studio and flat modes colour apart; faces on
+/// later slots take the last one's colour.
+pub const SOLID_SLOTS: usize = 8;
 
 /// Per-draw data for the rendered pass. Matches `RenderedObject` in
 /// `rendered.wgsl`.
@@ -639,6 +647,10 @@ pub struct Draw<'a> {
     /// fewer materials than its mesh has slots draws in the first one instead
     /// of vanishing.
     pub materials: &'a [u32],
+    /// The studio and flat colour of each material slot, linear RGBA: the
+    /// material's base colour, as Blender's solid mode shows it. An alpha of
+    /// zero — or a slot past the end — is the object's own grey.
+    pub colors: &'a [[f32; 4]],
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -661,6 +673,7 @@ impl<'a> Draw<'a> {
             wire_only: false,
             material: 0,
             materials: &[],
+            colors: &[],
             weights: false,
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
@@ -691,6 +704,13 @@ impl<'a> Draw<'a> {
     /// [`Draw::materials`].
     pub fn with_materials(mut self, materials: &'a [u32]) -> Self {
         self.materials = materials;
+        self
+    }
+
+    /// Sets the studio and flat colour of each material slot. See
+    /// [`Draw::colors`].
+    pub fn with_colors(mut self, colors: &'a [[f32; 4]]) -> Self {
+        self.colors = colors;
         self
     }
 
@@ -2944,6 +2964,13 @@ impl Viewport {
                     normal_col1: normal.y_axis.extend(0.0).to_array(),
                     normal_col2: normal.z_axis.extend(0.0).to_array(),
                     base_color: draw.mesh.color.to_array(),
+                    slot_colors: std::array::from_fn(|k| {
+                        draw.colors
+                            .get(k)
+                            .copied()
+                            .filter(|c| c[3] > 0.0)
+                            .unwrap_or(draw.mesh.color.to_array())
+                    }),
                     paint: [
                         if draw.weights { 1.0 } else { 0.0 },
                         // How the outline marks it: see `outline.wgsl`.
@@ -4069,7 +4096,16 @@ impl Viewport {
                 pass.set_vertex_buffer(1, mesh.normals.slice(..));
                 pass.set_vertex_buffer(2, mesh.uvs.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+                // One call per run of faces on a material slot, the slot
+                // carried as the instance index so the shader colours the run
+                // in its material's colour.
+                if mesh.submeshes.is_empty() {
+                    pass.draw_indexed(0..mesh.counts.triangles * 3, 0, 0..1);
+                }
+                for run in &mesh.submeshes {
+                    let slot = run.slot.min(SOLID_SLOTS as u32 - 1);
+                    pass.draw_indexed(run.start..run.start + run.count, 0, slot..slot + 1);
+                }
             }
         }
     }
@@ -5173,7 +5209,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ObjectData>() % 16, 0);
         assert_eq!(std::mem::size_of::<GridGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<Globals>(), 128);
-        assert_eq!(std::mem::size_of::<ObjectData>(), 144);
+        assert_eq!(std::mem::size_of::<ObjectData>(), 144 + 16 * SOLID_SLOTS);
         assert_eq!(std::mem::size_of::<GridGlobals>(), 192);
         assert_eq!(std::mem::size_of::<EdgeGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<EdgeGlobals>(), 128);

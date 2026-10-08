@@ -8876,6 +8876,31 @@ impl App {
                     .unwrap_or_default()
             })
             .collect();
+        // The studio and flat colour of each slot: its material's base
+        // colour, as Blender's solid mode shows it. Read straight from the
+        // document, because those modes compile no materials.
+        let slot_colors: Vec<Vec<[f32; 4]>> = self
+            .evaluated
+            .iter()
+            .map(|(id, _)| {
+                let slots = self
+                    .doc
+                    .object(*id)
+                    .and_then(|o| o.mesh())
+                    .map(|m| self.doc.mesh_slots(m).len())
+                    .unwrap_or(0)
+                    .clamp(1, kreate_render::viewport::SOLID_SLOTS);
+                (0..slots)
+                    .map(|slot| {
+                        self.doc
+                            .material_id_at(*id, slot)
+                            .and_then(|m| self.doc.material(m))
+                            .map(|m| [m.base_color.r, m.base_color.g, m.base_color.b, 1.0])
+                            .unwrap_or([0.0; 4])
+                    })
+                    .collect()
+            })
+            .collect();
         // A boolean's cutter is drawn as edges, or it would cover the very
         // cut it makes. See `boolean_cutters`.
         let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
@@ -8920,6 +8945,7 @@ impl App {
                         // glTF exporter since it was written and never reached
                         // the screen; this is the other end of it.
                         .with_materials(&slot_materials[at])
+                        .with_colors(&slot_colors[at])
                         .selected(
                             self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
                                 && self.doc.selection.contains(*id),
