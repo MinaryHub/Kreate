@@ -20,6 +20,7 @@ pub mod library;
 pub mod migrate;
 pub mod obj;
 pub mod stl;
+pub mod threemf;
 pub mod usd;
 
 pub use build::{build_into, scene_from_document, BuildNote};

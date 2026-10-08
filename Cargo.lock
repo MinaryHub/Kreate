@@ -1578,6 +1578,7 @@ dependencies = [
  "wgpu",
  "winit",
  "winresource",
+ "zip",
 ]
 
 [[package]]

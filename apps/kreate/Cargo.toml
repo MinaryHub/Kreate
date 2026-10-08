@@ -49,3 +49,5 @@ base64 = "0.13"
 winresource = "0.1"
 
 [dev-dependencies]
+# Reading back what an export wrote. See `a_3mf_export_is_in_the_scenes_unit`.
+zip.workspace = true

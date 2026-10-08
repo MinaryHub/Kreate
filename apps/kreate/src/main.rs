@@ -3302,6 +3302,26 @@ impl App {
         self.redraw.set(RedrawReason::UI);
     }
 
+    /// Every shown mesh object as it stands, for a print: its evaluated mesh
+    /// (modifiers applied, not cut by a section view) and where it is.
+    fn printable_parts(&self) -> Vec<(String, Arc<MeshData>, glam::DAffine3)> {
+        self.evaluated
+            .iter()
+            .filter(|(id, _)| self.doc.is_shown(*id))
+            .filter_map(|(id, mesh)| {
+                let object = self.doc.object(*id)?;
+                object.mesh()?;
+                let whole = self
+                    .sectioned
+                    .iter()
+                    .find(|(_, _, out)| Arc::ptr_eq(out, mesh))
+                    .map(|(input, _, _)| input.clone())
+                    .unwrap_or_else(|| mesh.clone());
+                Some((object.name.clone(), whole, self.doc.world_transform(*id)))
+            })
+            .collect()
+    }
+
     /// The section view: every evaluated mesh but the ones being edited cut
     /// by the plane and capped, in its own space. Kept per input and plane,
     /// so an unchanged scene is not cut again every frame.
@@ -5802,6 +5822,7 @@ impl App {
             .add_filter("glTF", &["gltf"])
             .add_filter("Wavefront OBJ", &["obj"])
             .add_filter("STL", &["stl"])
+            .add_filter("3MF (3D printing)", &["3mf"])
             .add_filter("USD (text)", &["usda"])
             .set_title("Export")
             .set_file_name("untitled.glb")
@@ -5821,6 +5842,23 @@ impl App {
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_else(|| "glb".to_string());
         let written = match lower.as_str() {
+            // For printing: every shown part as it stands — modifiers applied,
+            // placed in the world — in the scene's unit.
+            "3mf" => {
+                let parts = self.printable_parts();
+                if parts.is_empty() {
+                    Err("there is no geometry to write".to_string())
+                } else {
+                    let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                        .iter()
+                        .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                        .collect();
+                    Ok(kreate_io::threemf::write_3mf(
+                        &refs,
+                        self.doc.design.length_unit.metres(),
+                    ))
+                }
+            }
             "usda" => {
                 let (text, more) = kreate_io::usd::write_usda(&scene);
                 notes.extend(more);
@@ -11360,6 +11398,28 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// File > Export to .3mf writes each shown part where it stands, in the
+    /// scene's unit — a 2 m cube in a millimetre scene is 2000 across.
+    #[test]
+    fn a_3mf_export_is_in_the_scenes_unit() {
+        let mut app = app();
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let mut p = PropertyMap::new();
+        p.set("length", PropertyValue::Enum(2));
+        app.run_op("scene.units_set", p);
+        app.evaluate_scene();
+        let path = std::env::temp_dir().join(format!("kreate-test-{}.3mf", std::process::id()));
+        app.export_to(&path).expect("written");
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut model = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("3D/3dmodel.model").unwrap(), &mut model)
+            .unwrap();
+        assert!(model.contains("unit=\"millimeter\""));
+        assert!(model.contains("x=\"1000\"") && model.contains("x=\"-1000\""), "{model}");
     }
 
     /// The section view cuts what is drawn and picked, half a cube for a
