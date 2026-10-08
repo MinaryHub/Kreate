@@ -57,9 +57,13 @@ Each platform's build is also published as `kreate-<platform>.zip` with
 for the latest release when it starts, downloads that zip quietly when it is
 newer, and puts it in place the next time it starts (`apps/kreate/src/update.rs`).
 
-- The request is made without signing in, so **the repository has to be
-  public** for installed copies to see releases. `KREATE_UPDATE_REPO=owner/name`
-  points them at another repository, e.g. a public one that holds only releases.
+- The request is made without signing in, and this repository is private, so
+  installed copies read the public **knoxxr/Kreate-releases**, which holds
+  only releases. The workflow publishes each release there as well, with the
+  `RELEASES_TOKEN` secret: a fine-grained token with *Contents: read and
+  write* on that repository. Without the secret that step is skipped and
+  installed copies see nothing new. `KREATE_UPDATE_REPO=owner/name` points a
+  copy at another repository.
 - Drafts and prereleases are never offered.
 - A build run from a `target` folder never updates itself (set `KREATE_UPDATE=1`
   to try it); `KREATE_NO_UPDATE=1` turns updates off.
