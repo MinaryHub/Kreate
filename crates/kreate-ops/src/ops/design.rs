@@ -80,7 +80,9 @@ impl Operator for Mate {
         let local = above.inverse() * motion * above * object.transform.to_affine();
         let (scale, rotation, translation) = local.to_scale_rotation_translation();
         if !translation.is_finite() || !rotation.is_finite() {
-            return Err(OpError::Failed("the parts cannot be put together that way".into()));
+            return Err(OpError::Failed(
+                "the parts cannot be put together that way".into(),
+            ));
         }
         let o = doc.document_mut().object_mut(id).expect("found");
         o.transform.translation = translation;
@@ -354,9 +356,19 @@ mod tests {
         let three = PropertyValue::Floats(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         run(&mut doc, "measure.add", &[("points", three)]).unwrap();
         assert_eq!(doc.design.measurements.len(), 2);
-        run(&mut doc, "measure.remove", &[("index", PropertyValue::Int(0))]).unwrap();
+        run(
+            &mut doc,
+            "measure.remove",
+            &[("index", PropertyValue::Int(0))],
+        )
+        .unwrap();
         assert!(doc.design.measurements[0].angle().is_some());
-        run(&mut doc, "measure.remove", &[("all", PropertyValue::Bool(true))]).unwrap();
+        run(
+            &mut doc,
+            "measure.remove",
+            &[("all", PropertyValue::Bool(true))],
+        )
+        .unwrap();
         assert!(doc.design.measurements.is_empty());
     }
 
@@ -384,9 +396,15 @@ mod tests {
             .unwrap();
         let world = doc.world_transform(a);
         let centre = world.transform_point3(DVec3::ZERO);
-        assert!((centre - DVec3::new(0.0, 0.0, 3.0)).length() < 1e-9, "{centre}");
+        assert!(
+            (centre - DVec3::new(0.0, 0.0, 3.0)).length() < 1e-9,
+            "{centre}"
+        );
         let face = world.transform_vector3(DVec3::X);
-        assert!((face - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-9, "{face}");
+        assert!(
+            (face - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-9,
+            "{face}"
+        );
     }
 
     #[test]

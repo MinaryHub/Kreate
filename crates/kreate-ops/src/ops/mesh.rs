@@ -1004,7 +1004,11 @@ impl Operator for CheckSelect {
     ) -> Result<OpResult, OpError> {
         use kreate_mesh::attribute::Domain;
         let issue = params.issue.min(CHECK_ISSUES.len() as u32 - 1);
-        let thickness = if issue == 6 { params.thickness.max(0.0) } else { 0.0 };
+        let thickness = if issue == 6 {
+            params.thickness.max(0.0)
+        } else {
+            0.0
+        };
         let found = for_each_edit_mesh(doc, |target, mesh| {
             let report = kreate_mesh::check::check(
                 mesh,
@@ -1300,7 +1304,11 @@ impl Operator for ExtrudeRegion {
             }
             // Along an axis: made where they are, then moved in the world,
             // where the axis is.
-            let distance = if along_axis { 0.0 } else { params.offset as f32 };
+            let distance = if along_axis {
+                0.0
+            } else {
+                params.offset as f32
+            };
             if params.along_normals {
                 edit::extrude_selected_faces_along_normals(bm, distance)
             } else {
@@ -3469,7 +3477,10 @@ impl Operator for SelectWhere {
             let facing = if wanted == glam::DVec3::ZERO {
                 String::new()
             } else {
-                format!(" facing ({:.2}, {:.2}, {:.2})", wanted.x, wanted.y, wanted.z)
+                format!(
+                    " facing ({:.2}, {:.2}, {:.2})",
+                    wanted.x, wanted.y, wanted.z
+                )
             };
             return Err(OpError::Failed(format!(
                 "nothing matched: no {what}{facing} in the box from ({:.4}, {:.4}, {:.4}) to ({:.4}, {:.4}, {:.4}){near}. \
@@ -3914,7 +3925,10 @@ mod tests {
         let (median, _) = selection_median(&doc).unwrap();
         assert!((median - glam::DVec3::new(10.0, 0.0, 5.0)).length() < 1e-6);
         assert!((doc.mesh(mesh).unwrap().bounds().max.z - 5.0).abs() < 1e-5);
-        assert!((doc.mesh(mesh).unwrap().bounds().min.z + 1.0).abs() < 1e-5, "the rest stays");
+        assert!(
+            (doc.mesh(mesh).unwrap().bounds().min.z + 1.0).abs() < 1e-5,
+            "the rest stays"
+        );
     }
 
     #[test]

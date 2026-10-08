@@ -10,8 +10,8 @@ use std::sync::Arc;
 use kreate_math::DVec3;
 use kreate_scene::animation::{self, Interpolation};
 use kreate_scene::physics::{
-    BodyKind, Collision, CollisionShape, ObjectPhysics, ParticleKind, ParticleSettings, PhysicsCache,
-    PhysicsWorld, RigidBody, SoftBody, SoftKind,
+    BodyKind, Collision, CollisionShape, ObjectPhysics, ParticleKind, ParticleSettings,
+    PhysicsCache, PhysicsWorld, RigidBody, SoftBody, SoftKind,
 };
 use kreate_scene::{DocMut, Document, ObjectId};
 
@@ -46,9 +46,23 @@ fn active_physics(doc: &Document) -> Option<&ObjectPhysics> {
     o.mesh().map(|_| &o.physics)
 }
 
-/// Sets something on every selected mesh, or cancels when nothing changes.
-fn on_selected(doc: &mut DocMut<'_>, mut set: impl FnMut(&mut ObjectPhysics)) -> OpResult {
-    let ids = selected_meshes(doc.document());
+/// Sets something on every selected mesh — or on the active object alone —
+/// or cancels when nothing changes.
+fn on_selected(
+    doc: &mut DocMut<'_>,
+    active_only: bool,
+    mut set: impl FnMut(&mut ObjectPhysics),
+) -> OpResult {
+    let ids = if active_only {
+        let d = doc.document();
+        d.selection
+            .active
+            .filter(|id| d.object(*id).is_some_and(|o| o.mesh().is_some()))
+            .into_iter()
+            .collect()
+    } else {
+        selected_meshes(doc.document())
+    };
     let changing: Vec<ObjectId> = ids
         .into_iter()
         .filter(|id| {
@@ -98,6 +112,12 @@ pub struct RigidBodyParams {
     /// The fraction of its turning lost each second.
     #[param(min = 0.0, max = 1.0)]
     pub angular_damping: f64,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for RigidBodyParams {
@@ -127,6 +147,7 @@ pub fn rigid_params(body: Option<&RigidBody>) -> RigidBodyParams {
         bounciness: b.bounciness,
         linear_damping: b.linear_damping,
         angular_damping: b.angular_damping,
+        active_only: false,
     }
 }
 
@@ -144,12 +165,24 @@ impl Operator for RigidBodySet {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         !selected_meshes(doc).is_empty()
     }
-    fn current(_ctx: &Context, doc: &Document, _given: &crate::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        _given: &crate::PropertyMap,
+    ) -> Option<Self::Params> {
         Some(rigid_params(active_physics(doc)?.rigid.as_ref()))
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let body = params.enabled.then(|| RigidBody {
-            kind: if params.kind == 1 { BodyKind::Passive } else { BodyKind::Active },
+            kind: if params.kind == 1 {
+                BodyKind::Passive
+            } else {
+                BodyKind::Active
+            },
             shape: match params.shape {
                 1 => CollisionShape::Box,
                 2 => CollisionShape::Sphere,
@@ -162,7 +195,7 @@ impl Operator for RigidBodySet {
             linear_damping: params.linear_damping.clamp(0.0, 1.0),
             angular_damping: params.angular_damping.clamp(0.0, 1.0),
         });
-        Ok(on_selected(doc, |p| p.rigid = body))
+        Ok(on_selected(doc, params.active_only, |p| p.rigid = body))
     }
 }
 
@@ -181,6 +214,12 @@ pub struct CollisionParams {
     /// How much of a particle's speed bounces off.
     #[param(min = 0.0, max = 1.0)]
     pub bounciness: f64,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for CollisionParams {
@@ -196,6 +235,7 @@ pub fn collision_params(c: Option<&Collision>) -> CollisionParams {
         thickness: d.thickness,
         friction: d.friction,
         bounciness: d.bounciness,
+        active_only: false,
     }
 }
 
@@ -213,16 +253,24 @@ impl Operator for CollisionSet {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         !selected_meshes(doc).is_empty()
     }
-    fn current(_ctx: &Context, doc: &Document, _given: &crate::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        _given: &crate::PropertyMap,
+    ) -> Option<Self::Params> {
         Some(collision_params(active_physics(doc)?.collision.as_ref()))
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let c = params.enabled.then(|| Collision {
             thickness: params.thickness.max(0.0),
             friction: params.friction.clamp(0.0, 1.0),
             bounciness: params.bounciness.clamp(0.0, 1.0),
         });
-        Ok(on_selected(doc, |p| p.collision = c))
+        Ok(on_selected(doc, params.active_only, |p| p.collision = c))
     }
 }
 
@@ -254,6 +302,12 @@ pub struct SoftParams {
     /// The vertex group whose vertices stay where the object puts them.
     /// Empty pins nothing.
     pub pin_group: String,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for SoftParams {
@@ -277,6 +331,7 @@ pub fn soft_params(s: Option<&SoftBody>) -> SoftParams {
         shape_stiffness: d.shape_stiffness,
         pressure: d.pressure,
         pin_group: d.pin_group.unwrap_or_default(),
+        active_only: false,
     }
 }
 
@@ -303,10 +358,18 @@ impl Operator for SoftSet {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         !selected_meshes(doc).is_empty()
     }
-    fn current(_ctx: &Context, doc: &Document, _given: &crate::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        _given: &crate::PropertyMap,
+    ) -> Option<Self::Params> {
         Some(soft_params(active_physics(doc)?.soft.as_ref()))
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let kind = match params.kind {
             1 => Some(SoftKind::Cloth),
             2 => Some(SoftKind::Soft),
@@ -323,12 +386,15 @@ impl Operator for SoftSet {
             pressure: params.pressure.clamp(-1.0, 1.0),
             pin_group: pin.clone(),
         };
-        Ok(on_selected(doc, |p| {
+        Ok(on_selected(doc, params.active_only, |p| {
             p.soft = match kind {
                 None => None,
                 // Becoming another kind starts from that kind's own settings:
                 // a cloth's floppiness carried into a soft body is a puddle.
-                Some(k) if p.soft.as_ref().is_some_and(|s| s.kind != k) || p.soft.is_none() && given.kind != SoftKind::Cloth => {
+                Some(k)
+                    if p.soft.as_ref().is_some_and(|s| s.kind != k)
+                        || p.soft.is_none() && given.kind != SoftKind::Cloth =>
+                {
                     Some(SoftBody {
                         pin_group: pin.clone(),
                         ..SoftBody::new(k)
@@ -363,16 +429,28 @@ impl Operator for ParticlesAdd {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_physics(doc).is_some()
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(id) = doc.document().selection.active else {
             return Ok(OpResult::Cancelled);
         };
-        let kind = if params.kind == 1 { ParticleKind::Hair } else { ParticleKind::Emitter };
+        let kind = if params.kind == 1 {
+            ParticleKind::Hair
+        } else {
+            ParticleKind::Emitter
+        };
         let d = doc.document_mut();
         let Some(o) = d.object_mut(id) else {
             return Ok(OpResult::Cancelled);
         };
-        let base = if kind == ParticleKind::Hair { "Hair" } else { "Particles" };
+        let base = if kind == ParticleKind::Hair {
+            "Hair"
+        } else {
+            "Particles"
+        };
         let mut name = base.to_string();
         let mut n = 1;
         while o.physics.particles.iter().any(|s| s.name == name) {
@@ -403,7 +481,11 @@ impl Operator for ParticlesRemove {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         active_physics(doc).is_some_and(|p| !p.particles.is_empty())
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(id) = doc.document().selection.active else {
             return Ok(OpResult::Cancelled);
         };
@@ -516,7 +598,9 @@ pub fn particle_params(doc: &Document, index: u32, s: &ParticleSettings) -> Part
 pub fn particle_param_applies(kind: u32, name: &str) -> bool {
     let hair = kind == 1;
     match name {
-        "frame_start" | "frame_end" | "lifetime" | "normal_speed" | "random_speed" | "instance" => !hair,
+        "frame_start" | "frame_end" | "lifetime" | "normal_speed" | "random_speed" | "instance" => {
+            !hair
+        }
         "hair_length" | "hair_segments" | "hair_dynamic" | "hair_stiffness" => hair,
         _ => true,
     }
@@ -544,7 +628,11 @@ impl Operator for ParticlesSet {
         let s = active_physics(doc)?.particles.get(index as usize)?;
         Some(particle_params(doc, index, s))
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(id) = doc.document().selection.active else {
             return Ok(OpResult::Cancelled);
         };
@@ -574,7 +662,11 @@ impl Operator for ParticlesSet {
         else {
             return Ok(OpResult::Cancelled);
         };
-        let kind = if params.kind == 1 { ParticleKind::Hair } else { ParticleKind::Emitter };
+        let kind = if params.kind == 1 {
+            ParticleKind::Hair
+        } else {
+            ParticleKind::Emitter
+        };
         let after = ParticleSettings {
             name: Some(params.name.trim().to_string())
                 .filter(|n| !n.is_empty())
@@ -653,10 +745,18 @@ impl Operator for WorldSet {
     fn label() -> &'static str {
         "Physics World"
     }
-    fn current(_ctx: &Context, doc: &Document, _given: &crate::PropertyMap) -> Option<Self::Params> {
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        _given: &crate::PropertyMap,
+    ) -> Option<Self::Params> {
         Some(world_params(&doc.physics))
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let w = PhysicsWorld {
             gravity: DVec3::from_array(params.gravity),
             substeps: params.substeps.clamp(1, 100),
@@ -694,7 +794,11 @@ impl Operator for Bake {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         anything_physical(doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let (cache, summary) = kreate_scene::physics::bake::bake(doc.document());
         if summary.rigid + summary.soft + summary.particles == 0 {
             return Err(OpError::Failed(
@@ -739,7 +843,11 @@ impl Operator for FreeBake {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         !doc.physics_cache.is_empty()
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         if doc.document().physics_cache.is_empty() {
             return Ok(OpResult::Cancelled);
         }
@@ -769,7 +877,11 @@ impl Operator for BakeToKeys {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         !doc.physics_cache.rigid.is_empty()
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let cache = doc.document().physics_cache.clone();
         if cache.rigid.is_empty() {
             return Ok(OpResult::Cancelled);
@@ -790,7 +902,9 @@ impl Operator for BakeToKeys {
                     a
                 }
             };
-            let Some(action) = d.action_mut(action) else { continue };
+            let Some(action) = d.action_mut(action) else {
+                continue;
+            };
             // Each angle kept within half a turn of the frame before, so a
             // tumbling body does not spin back round between two keys.
             let mut last: Option<DVec3> = None;
@@ -805,12 +919,16 @@ impl Operator for BakeToKeys {
                 }
                 last = Some(euler);
                 for axis in 0..3u8 {
-                    action
-                        .curve_mut("location", axis)
-                        .insert(frame, t.translation[axis as usize], Interpolation::Linear);
-                    action
-                        .curve_mut("rotation_euler", axis)
-                        .insert(frame, euler[axis as usize], Interpolation::Linear);
+                    action.curve_mut("location", axis).insert(
+                        frame,
+                        t.translation[axis as usize],
+                        Interpolation::Linear,
+                    );
+                    action.curve_mut("rotation_euler", axis).insert(
+                        frame,
+                        euler[axis as usize],
+                        Interpolation::Linear,
+                    );
                 }
             }
             if let Some(o) = d.object_mut(id) {

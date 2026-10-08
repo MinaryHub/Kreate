@@ -796,10 +796,16 @@ fn a_bone_constraint_is_added_set_and_removed_by_operators() {
     assert_eq!((c[0].bone.as_str(), c[0].target.as_str()), ("Head", "Goal"));
     assert_eq!(c[0].kind, ConstraintKind::DampedTrack);
     // The head bone now points along +X, at the goal.
-    let along = doc.posed_bones(rig)[0].matrix3.mul_vec3(kreate_math::DVec3::Y);
-    assert!(along.normalize().dot(kreate_math::DVec3::X) > 0.999, "{along:?}");
+    let along = doc.posed_bones(rig)[0]
+        .matrix3
+        .mul_vec3(kreate_math::DVec3::Y);
+    assert!(
+        along.normalize().dot(kreate_math::DVec3::X) > 0.999,
+        "{along:?}"
+    );
     // Halfway, through the operator the Bone tab sends.
-    let mut set = kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::constraint_params(0, &c[0]));
+    let mut set =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::pose::constraint_params(0, &c[0]));
     set.set("influence", PropertyValue::Float(0.5));
     history
         .dispatch(&registry, &mut doc, &ctx, "pose.constraint_set", &set)
@@ -836,12 +842,21 @@ fn push_down_turns_the_action_into_a_strip_where_its_keys_are() {
     let mut history = History::new();
     let ctx = kreate_ops::operator::Context::default();
     history
-        .dispatch(&registry, &mut doc, &ctx, "anim.nla_push_down", &PropertyMap::new())
+        .dispatch(
+            &registry,
+            &mut doc,
+            &ctx,
+            "anim.nla_push_down",
+            &PropertyMap::new(),
+        )
         .unwrap();
     let o = doc.object(id).unwrap();
     assert!(o.action.is_none());
     assert_eq!(o.nla.len(), 1);
-    assert_eq!((o.nla[0].start, o.nla[0].action_start, o.nla[0].action_end), (5.0, 5.0, 15.0));
+    assert_eq!(
+        (o.nla[0].start, o.nla[0].action_start, o.nla[0].action_end),
+        (5.0, 5.0, 15.0)
+    );
     // It still plays.
     doc.animate(10.0);
     assert!((doc.object(id).unwrap().transform.translation.z - 0.5).abs() < 1e-9);

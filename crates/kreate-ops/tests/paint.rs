@@ -214,12 +214,17 @@ fn a_texture_stroke_paints_under_the_brush_and_undo_takes_only_its_tiles_back() 
         .unwrap();
     // The cube's first material now shows a new white image.
     let material = doc.mesh_slots(mesh)[0].expect("a material");
-    let image = doc.material(material).unwrap().base_color_image.expect("an image");
+    let image = doc
+        .material(material)
+        .unwrap()
+        .base_color_image
+        .expect("an image");
     let pixel = |doc: &kreate_scene::Document, x: u32, y: u32| {
         let img = doc.image(image).unwrap();
         let t = kreate_scene::image::TILE;
         let at = (((y % t) * t + (x % t)) * 4) as usize;
-        img.tile(x / t, y / t).map(|tile| tile.bytes()[at..at + 4].to_vec())
+        img.tile(x / t, y / t)
+            .map(|tile| tile.bytes()[at..at + 4].to_vec())
     };
     assert_eq!(pixel(&doc, 128, 128).unwrap(), vec![255, 255, 255, 255]);
     let before = doc.image(image).unwrap().revision();
@@ -239,10 +244,20 @@ fn a_texture_stroke_paints_under_the_brush_and_undo_takes_only_its_tiles_back() 
     // Red at the middle — the pixel's centre is half a pixel off the dab's,
     // where the falloff is a hair under full.
     let middle = pixel(&doc, 64, 64).unwrap();
-    assert!(middle[0] == 255 && middle[1] <= 3 && middle[2] <= 3, "{middle:?}");
-    assert_eq!(pixel(&doc, 64 + 20, 64).unwrap(), vec![255, 255, 255, 255], "outside, untouched");
+    assert!(
+        middle[0] == 255 && middle[1] <= 3 && middle[2] <= 3,
+        "{middle:?}"
+    );
+    assert_eq!(
+        pixel(&doc, 64 + 20, 64).unwrap(),
+        vec![255, 255, 255, 255],
+        "outside, untouched"
+    );
     let edge = pixel(&doc, 64 + 10, 64).unwrap();
-    assert!(edge[1] > 0 && edge[1] < 255, "the falloff is soft: {edge:?}");
+    assert!(
+        edge[1] > 0 && edge[1] < 255,
+        "the falloff is soft: {edge:?}"
+    );
     assert!(doc.image(image).unwrap().revision() > before);
     // Only the tile it touched was replaced.
     let after: Vec<_> = (0..2)

@@ -543,8 +543,7 @@ impl ModifierCache {
         }
         let cache = &doc.physics_cache;
         let uid = object.uid;
-        let baked = cache.soft_of(uid).is_some()
-            || cache.particles.iter().any(|t| t.object == uid);
+        let baked = cache.soft_of(uid).is_some() || cache.particles.iter().any(|t| t.object == uid);
         let frame = baked.then(|| doc.playback.frame.round() as i64);
         let instance_of = |s: &crate::physics::ParticleSettings| {
             let o = doc.object(doc.object_by_uid(s.instance?)?)?;
@@ -587,7 +586,9 @@ impl ModifierCache {
                 m
             });
             let particles = cache.particles_at(uid, i, at).map(|p| &p[..]);
-            if let Some(m) = crate::physics::particles::system_mesh(&input, s, particles, shaped.as_ref()) {
+            if let Some(m) =
+                crate::physics::particles::system_mesh(&input, s, particles, shaped.as_ref())
+            {
                 parts.push(m);
             }
         }

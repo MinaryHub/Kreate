@@ -103,7 +103,10 @@ impl Document {
                 .iter()
                 .filter_map(|s| {
                     let action = self.copy_action(s.action, &mut out, &mut actions)?;
-                    Some(crate::nla::NlaStrip { action, ..s.clone() })
+                    Some(crate::nla::NlaStrip {
+                        action,
+                        ..s.clone()
+                    })
                 })
                 .collect();
             // Parents are settled below, once every copy exists. Until then
@@ -219,7 +222,10 @@ impl Document {
                 .iter()
                 .filter_map(|s| {
                     let action = other.copy_action(s.action, self, &mut actions)?;
-                    Some(crate::nla::NlaStrip { action, ..s.clone() })
+                    Some(crate::nla::NlaStrip {
+                        action,
+                        ..s.clone()
+                    })
                 })
                 .collect();
             copy.parent = None;

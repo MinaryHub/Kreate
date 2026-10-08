@@ -321,7 +321,13 @@ fn glow_glass_and_ior_travel_as_their_extensions() {
         assert!(used.contains(&name), "{name} not in {used:?}");
     }
     let (back, _) = read(&bytes);
-    let by_name = |n: &str| back.materials().find(|(_, m)| m.name == n).unwrap().1.clone();
+    let by_name = |n: &str| {
+        back.materials()
+            .find(|(_, m)| m.name == n)
+            .unwrap()
+            .1
+            .clone()
+    };
     let lamp = by_name("Lamp");
     assert_eq!(lamp.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
     assert_eq!(lamp.emission_strength, 40.0);

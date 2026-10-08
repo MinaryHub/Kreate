@@ -195,13 +195,13 @@ pub fn chat(
                     ui.horizontal(|ui| {
                         // i18n-exempt: a file's own name, and its size
                         ui.label(egui::RichText::new(&a.name).color(theme.text));
-                        ui.label(egui::RichText::new(&a.detail).small().color(theme.text_faint));
+                        ui.label(
+                            egui::RichText::new(&a.detail)
+                                .small()
+                                .color(theme.text_faint),
+                        );
                         // i18n-exempt: a close mark
-                        if ui
-                            .small_button("x")
-                            .on_hover_text(&text.remove)
-                            .clicked()
-                        {
+                        if ui.small_button("x").on_hover_text(&text.remove).clicked() {
                             queue.push(Command::ChatDetach { index });
                         }
                     });

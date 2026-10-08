@@ -26,7 +26,10 @@ fn scene() -> Document {
         scale: DVec3::ONE,
     };
     let cube = doc.add_object(cube);
-    let lamp = doc.add_light(kreate_scene::Light::of_kind("Lamp", kreate_scene::LightKind::BULB));
+    let lamp = doc.add_light(kreate_scene::Light::of_kind(
+        "Lamp",
+        kreate_scene::LightKind::BULB,
+    ));
     let lamp = doc.add_object(Object::new("Lamp", ObjectData::Light(lamp)));
     doc.set_parent(lamp, Some(cube)).unwrap();
     let camera = doc.add_camera(kreate_scene::Camera::new("Camera"));
@@ -77,12 +80,18 @@ fn a_mesh_s_arrays_add_up() {
             .map(str::to_string)
             .collect()
     };
-    let counts: Vec<usize> = array("faceVertexCounts").iter().map(|c| c.parse().unwrap()).collect();
+    let counts: Vec<usize> = array("faceVertexCounts")
+        .iter()
+        .map(|c| c.parse().unwrap())
+        .collect();
     let indices = array("faceVertexIndices");
     assert_eq!(counts, vec![4; 6]);
     assert_eq!(indices.len(), counts.iter().sum::<usize>());
     // Normals and texture coordinates are per corner.
-    let line = text[text.find("normal3f[] normals").unwrap()..].lines().next().unwrap();
+    let line = text[text.find("normal3f[] normals").unwrap()..]
+        .lines()
+        .next()
+        .unwrap();
     let open = line.find("= [").unwrap();
     let normals = line[open..open + line[open..].find(']').unwrap()]
         .matches('(')

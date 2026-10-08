@@ -440,5 +440,8 @@ fn a_second_clip_on_the_same_node_is_said_and_kept_as_a_muted_strip() {
     doc.object_mut(object).unwrap().action = None;
     doc.animate(25.0);
     let x = doc.object(object).unwrap().transform.translation.x;
-    assert!((x - 5.0).abs() < 1e-5, "the second clip should play now: {x}");
+    assert!(
+        (x - 5.0).abs() < 1e-5,
+        "the second clip should play now: {x}"
+    );
 }

@@ -31,7 +31,10 @@ fn main() {
             let mut m = base.clone();
             let t = Instant::now();
             apply(&mut m, &dabs, &stroke);
-            println!("{brush:?} {n:>3} dabs: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            println!(
+                "{brush:?} {n:>3} dabs: {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
         }
         // As a stroke is drawn: the same stroke re-run with one more dab.
         let dabs: Vec<Dab> = (0..100)

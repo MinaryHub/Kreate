@@ -205,7 +205,9 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
             normal_texture,
             normal_scale,
             emissive_strength: material.emissive_strength().unwrap_or(1.0),
-            transmission: material.transmission().map_or(0.0, |t| t.transmission_factor()),
+            transmission: material
+                .transmission()
+                .map_or(0.0, |t| t.transmission_factor()),
             ior: material.ior().unwrap_or(1.5),
         });
     }
@@ -244,7 +246,11 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
                 })
             })
             .unwrap_or_default();
-        let target_count = mesh.primitives().map(|p| p.morph_targets().len()).max().unwrap_or(0);
+        let target_count = mesh
+            .primitives()
+            .map(|p| p.morph_targets().len())
+            .max()
+            .unwrap_or(0);
         let mut morphs: Vec<Vec<Vec3>> = vec![Vec::new(); target_count];
 
         for primitive in mesh.primitives() {
@@ -294,8 +300,12 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
                 }
             }
             for v in 0..count {
-                vertex_skin.joints.push(joints.get(v).copied().unwrap_or([0; 4]));
-                vertex_skin.weights.push(weights.get(v).copied().unwrap_or([0.0; 4]));
+                vertex_skin
+                    .joints
+                    .push(joints.get(v).copied().unwrap_or([0; 4]));
+                vertex_skin
+                    .weights
+                    .push(weights.get(v).copied().unwrap_or([0.0; 4]));
             }
 
             let primitive_uvs: Option<Vec<Vec2>> = reader
@@ -508,7 +518,9 @@ fn read_animations(
                             node,
                             interpolation: match channel.sampler().interpolation() {
                                 gltf::animation::Interpolation::Step => ChannelInterpolation::Step,
-                                gltf::animation::Interpolation::Linear => ChannelInterpolation::Linear,
+                                gltf::animation::Interpolation::Linear => {
+                                    ChannelInterpolation::Linear
+                                }
                                 gltf::animation::Interpolation::CubicSpline => {
                                     ChannelInterpolation::CubicSpline
                                 }

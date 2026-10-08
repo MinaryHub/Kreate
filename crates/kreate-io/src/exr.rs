@@ -40,10 +40,20 @@ fn attribute(out: &mut Vec<u8>, name: &str, kind: &str, value: &[u8]) {
 ///
 /// Panics if a channel does not have a value for every pixel: that is a
 /// caller's bug, not a file's.
-pub fn write(width: u32, height: u32, channels: &[Channel<'_>], strings: &[(&str, &str)]) -> Vec<u8> {
+pub fn write(
+    width: u32,
+    height: u32,
+    channels: &[Channel<'_>],
+    strings: &[(&str, &str)],
+) -> Vec<u8> {
     let pixels = width as usize * height as usize;
     for c in channels {
-        assert_eq!(c.values.len(), pixels, "channel {} has the wrong number of values", c.name);
+        assert_eq!(
+            c.values.len(),
+            pixels,
+            "channel {} has the wrong number of values",
+            c.name
+        );
     }
     // The format wants the channels in name order, in the header and in every
     // scanline alike.
@@ -78,14 +88,23 @@ pub fn write(width: u32, height: u32, channels: &[Channel<'_>], strings: &[(&str
     centre.extend_from_slice(&0.0f32.to_le_bytes());
     centre.extend_from_slice(&0.0f32.to_le_bytes());
     attribute(&mut out, "screenWindowCenter", "v2f", &centre);
-    attribute(&mut out, "screenWindowWidth", "float", &1.0f32.to_le_bytes());
+    attribute(
+        &mut out,
+        "screenWindowWidth",
+        "float",
+        &1.0f32.to_le_bytes(),
+    );
     for (name, value) in strings {
         attribute(&mut out, name, "string", value.as_bytes());
     }
     out.push(0);
 
     // The offset table, then one block per scanline.
-    let line_bytes: usize = order.iter().map(|c| if c.full_float { 4 } else { 2 }).sum::<usize>() * width as usize;
+    let line_bytes: usize = order
+        .iter()
+        .map(|c| if c.full_float { 4 } else { 2 })
+        .sum::<usize>()
+        * width as usize;
     let table_at = out.len();
     let first_block = table_at + 8 * height as usize;
     for y in 0..height as usize {
@@ -172,13 +191,22 @@ pub fn cryptomatte_attributes(layer: &str, names: &[&str]) -> Vec<(String, Strin
                 c => vec![c],
             })
             .collect();
-        manifest.push_str(&format!("\"{escaped}\":\"{:08x}\"", cryptomatte_id(name).to_bits()));
+        manifest.push_str(&format!(
+            "\"{escaped}\":\"{:08x}\"",
+            cryptomatte_id(name).to_bits()
+        ));
     }
     manifest.push('}');
     vec![
         (format!("cryptomatte/{key}/name"), layer.to_string()),
-        (format!("cryptomatte/{key}/hash"), "MurmurHash3_32".to_string()),
-        (format!("cryptomatte/{key}/conversion"), "uint32_to_float32".to_string()),
+        (
+            format!("cryptomatte/{key}/hash"),
+            "MurmurHash3_32".to_string(),
+        ),
+        (
+            format!("cryptomatte/{key}/conversion"),
+            "uint32_to_float32".to_string(),
+        ),
         (format!("cryptomatte/{key}/manifest"), manifest),
     ]
 }
@@ -203,7 +231,11 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
         Ok(slice)
     };
     let text = |at: &mut usize| -> Result<String, String> {
-        let end = bytes[*at..].iter().position(|b| *b == 0).ok_or("an unterminated name")? + *at;
+        let end = bytes[*at..]
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or("an unterminated name")?
+            + *at;
         let s = String::from_utf8_lossy(&bytes[*at..end]).to_string();
         *at = end + 1;
         Ok(s)
@@ -230,9 +262,17 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
             ("channels", "chlist") => {
                 let mut i = 0;
                 while i < value.len() && value[i] != 0 {
-                    let end = value[i..].iter().position(|b| *b == 0).ok_or("a bad channel list")? + i;
+                    let end = value[i..]
+                        .iter()
+                        .position(|b| *b == 0)
+                        .ok_or("a bad channel list")?
+                        + i;
                     let channel = String::from_utf8_lossy(&value[i..end]).to_string();
-                    let kind = i32::from_le_bytes(value[end + 1..end + 5].try_into().map_err(|_| "a bad channel list")?);
+                    let kind = i32::from_le_bytes(
+                        value[end + 1..end + 5]
+                            .try_into()
+                            .map_err(|_| "a bad channel list")?,
+                    );
                     list.push((channel, kind));
                     i = end + 1 + 16;
                 }
@@ -243,10 +283,15 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
                 }
             }
             ("dataWindow", "box2i") => {
-                let v: Vec<i32> = value.chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+                let v: Vec<i32> = value
+                    .chunks(4)
+                    .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
                 window = Some((v[0], v[1], v[2], v[3]));
             }
-            (_, "string") => strings.push((name.clone(), String::from_utf8_lossy(value).to_string())),
+            (_, "string") => {
+                strings.push((name.clone(), String::from_utf8_lossy(value).to_string()))
+            }
             _ => {}
         }
     }
@@ -270,7 +315,12 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
             }
         }
     }
-    Ok(Read { width, height, channels, strings })
+    Ok(Read {
+        width,
+        height,
+        channels,
+        strings,
+    })
 }
 
 #[cfg(test)]
@@ -287,9 +337,21 @@ mod tests {
             w,
             h,
             &[
-                Channel { name: "R", values: &r, full_float: false },
-                Channel { name: "G", values: &g, full_float: false },
-                Channel { name: "CryptoObject00.R", values: &id, full_float: true },
+                Channel {
+                    name: "R",
+                    values: &r,
+                    full_float: false,
+                },
+                Channel {
+                    name: "G",
+                    values: &g,
+                    full_float: false,
+                },
+                Channel {
+                    name: "CryptoObject00.R",
+                    values: &id,
+                    full_float: true,
+                },
             ],
             &[("cryptomatte/abc/name", "CryptoObject")],
         );
@@ -300,9 +362,18 @@ mod tests {
         assert_eq!(names, ["CryptoObject00.R", "G", "R"]);
         assert_eq!(back.channels[0].1, id, "a full float survives to the bit");
         for (got, want) in back.channels[2].1.iter().zip(r) {
-            assert!((got - want).abs() <= want.abs() * 1e-3 + 1e-3, "{got} against {want}");
+            assert!(
+                (got - want).abs() <= want.abs() * 1e-3 + 1e-3,
+                "{got} against {want}"
+            );
         }
-        assert_eq!(back.strings, [("cryptomatte/abc/name".to_string(), "CryptoObject".to_string())]);
+        assert_eq!(
+            back.strings,
+            [(
+                "cryptomatte/abc/name".to_string(),
+                "CryptoObject".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -311,25 +382,50 @@ mod tests {
         assert_eq!(murmur3_32(b""), 0);
         assert_eq!(murmur3_32(b"hello"), 0x248b_fa47);
         assert_eq!(murmur3_32(b"Hello, world!"), 0xc036_3e43);
-        assert_eq!(murmur3_32(b"The quick brown fox jumps over the lazy dog"), 0x2e4f_f723);
+        assert_eq!(
+            murmur3_32(b"The quick brown fox jumps over the lazy dog"),
+            0x2e4f_f723
+        );
     }
 
     #[test]
     fn a_cryptomatte_id_is_always_an_ordinary_float_and_listed_by_its_bits() {
         for name in ["Cube", "Lamp", "", "a much longer object name.001"] {
             let id = cryptomatte_id(name);
-            assert!(id.is_finite() && (id == 0.0 || id.is_normal()), "{name}: {id}");
+            assert!(
+                id.is_finite() && (id == 0.0 || id.is_normal()),
+                "{name}: {id}"
+            );
         }
         let attrs = cryptomatte_attributes("CryptoObject", &["Cube"]);
-        let manifest = &attrs.iter().find(|(k, _)| k.ends_with("/manifest")).unwrap().1;
-        assert_eq!(manifest, &format!("{{\"Cube\":\"{:08x}\"}}", cryptomatte_id("Cube").to_bits()));
+        let manifest = &attrs
+            .iter()
+            .find(|(k, _)| k.ends_with("/manifest"))
+            .unwrap()
+            .1;
+        assert_eq!(
+            manifest,
+            &format!("{{\"Cube\":\"{:08x}\"}}", cryptomatte_id("Cube").to_bits())
+        );
         // The key is the layer name's hash, seven hex digits.
-        assert!(attrs[0].0.starts_with("cryptomatte/") && attrs[0].0.len() == "cryptomatte/".len() + 7 + "/name".len());
+        assert!(
+            attrs[0].0.starts_with("cryptomatte/")
+                && attrs[0].0.len() == "cryptomatte/".len() + 7 + "/name".len()
+        );
     }
 
     #[test]
     fn the_header_is_what_the_format_says() {
-        let bytes = write(1, 1, &[Channel { name: "Y", values: &[1.0], full_float: false }], &[]);
+        let bytes = write(
+            1,
+            1,
+            &[Channel {
+                name: "Y",
+                values: &[1.0],
+                full_float: false,
+            }],
+            &[],
+        );
         assert_eq!(&bytes[..4], &MAGIC);
         assert_eq!(&bytes[4..8], &[2, 0, 0, 0]);
         // One offset, pointing at the one scanline, which starts with its y.

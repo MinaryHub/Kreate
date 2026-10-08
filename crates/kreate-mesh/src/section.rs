@@ -133,7 +133,9 @@ fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut
         used.insert(start, true);
         let mut at = start;
         let closed = loop {
-            let Some(&to) = next.get(&at) else { break false };
+            let Some(&to) = next.get(&at) else {
+                break false;
+            };
             if to == start {
                 break true;
             }
@@ -367,8 +369,15 @@ mod tests {
         let torus = primitives::torus(1.0, 0.3, 48, 24);
         let full = volume(&torus);
         let half = section(&torus, Vec3::ZERO, Vec3::Z, true);
-        assert!(crate::measure::is_closed(&half), "the ring is capped all round");
-        assert!((volume(&half) - full * 0.5).abs() / full < 0.01, "{} of {full}", volume(&half));
+        assert!(
+            crate::measure::is_closed(&half),
+            "the ring is capped all round"
+        );
+        assert!(
+            (volume(&half) - full * 0.5).abs() / full < 0.01,
+            "{} of {full}",
+            volume(&half)
+        );
         // Nothing of the cap reaches the hole in the middle.
         let middle = half
             .positions()
@@ -379,7 +388,11 @@ mod tests {
         assert!(middle > 0.6, "the cap stays on the ring: {middle}");
         let m = half.triangulate();
         let covered_hole = m.indices.as_chunks::<3>().0.iter().any(|t| {
-            let c = t.iter().map(|i| half.positions()[*i as usize]).sum::<Vec3>() / 3.0;
+            let c = t
+                .iter()
+                .map(|i| half.positions()[*i as usize])
+                .sum::<Vec3>()
+                / 3.0;
             c.z.abs() < 1e-4 && (c.x * c.x + c.y * c.y).sqrt() < 0.6
         });
         assert!(!covered_hole, "a triangle of the cap lies over the hole");

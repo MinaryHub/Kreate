@@ -240,7 +240,11 @@ impl ParticleSettings {
         Self {
             name: name.into(),
             kind,
-            count: if kind == ParticleKind::Hair { 500 } else { 1000 },
+            count: if kind == ParticleKind::Hair {
+                500
+            } else {
+                1000
+            },
             seed: 0,
             frame_start: 1,
             frame_end: 200,
@@ -249,7 +253,11 @@ impl ParticleSettings {
             random_speed: 0.2,
             gravity: 1.0,
             drag: 0.0,
-            size: if kind == ParticleKind::Hair { 0.005 } else { 0.03 },
+            size: if kind == ParticleKind::Hair {
+                0.005
+            } else {
+                0.03
+            },
             instance: None,
             hair_length: 0.2,
             hair_segments: 5,
@@ -435,14 +443,18 @@ mod tests {
 
     #[test]
     fn the_random_sequence_is_the_same_every_time() {
-        let a: Vec<u64> = (0..4).map({
-            let mut r = Rng::new(7);
-            move |_| r.next_u64()
-        }).collect();
-        let b: Vec<u64> = (0..4).map({
-            let mut r = Rng::new(7);
-            move |_| r.next_u64()
-        }).collect();
+        let a: Vec<u64> = (0..4)
+            .map({
+                let mut r = Rng::new(7);
+                move |_| r.next_u64()
+            })
+            .collect();
+        let b: Vec<u64> = (0..4)
+            .map({
+                let mut r = Rng::new(7);
+                move |_| r.next_u64()
+            })
+            .collect();
         assert_eq!(a, b);
         let mut r = Rng::new(1);
         for _ in 0..100 {

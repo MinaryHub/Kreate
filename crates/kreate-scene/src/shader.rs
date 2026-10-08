@@ -298,9 +298,7 @@ impl NodeKind {
             "normal_map" => NodeKind::NormalMap {
                 strength: at(0, 1.0),
             },
-            "mix" => NodeKind::MixColor {
-                factor: at(0, 0.5),
-            },
+            "mix" => NodeKind::MixColor { factor: at(0, 0.5) },
             "math" => NodeKind::Math {
                 op: MathOp::from_index(at(0, 0.0).max(0.0) as u32),
                 a: at(1, 0.5),
@@ -347,7 +345,9 @@ impl NodeKind {
             NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
-            NodeKind::Surface { .. } => &["Base Color", "Metallic", "Roughness", "Normal", "Emission"],
+            NodeKind::Surface { .. } => {
+                &["Base Color", "Metallic", "Roughness", "Normal", "Emission"]
+            }
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
         }
     }
@@ -355,9 +355,10 @@ impl NodeKind {
     /// What each output is called.
     pub fn output_names(&self) -> &'static [&'static str] {
         match self {
-            NodeKind::Color(_) | NodeKind::Multiply | NodeKind::MixColor { .. } | NodeKind::Invert => {
-                &["Color"]
-            }
+            NodeKind::Color(_)
+            | NodeKind::Multiply
+            | NodeKind::MixColor { .. }
+            | NodeKind::Invert => &["Color"],
             NodeKind::Value(_) | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["Value"],
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],

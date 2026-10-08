@@ -785,4 +785,67 @@ mod tests {
             .all(|[a, b]| mesh.positions()[*a as usize].z > 0.0
                 && mesh.positions()[*b as usize].z > 0.0));
     }
+
+    #[test]
+    fn the_physics_tab_changes_the_active_object_and_leaves_the_rest() {
+        // A is a rigid body, B is not; with both selected and B active, the
+        // tab shows B's settings. Changing one of them must not hand B's
+        // "not a rigid body" to A.
+        let r = registry();
+        let mut doc = Document::new();
+        let mut h = History::new();
+        let ctx = Context::default();
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "object.add_primitive(shape=\"cube\")\n\
+             object.rename(name=\"A\")\n\
+             physics.rigid_body_set(enabled=True)\n\
+             object.add_primitive(shape=\"cube\", location=(3.0, 0.0, 0.0))\n\
+             object.rename(name=\"B\")\n\
+             object.select(name=\"A\", extend=True)\n\
+             object.select(name=\"B\", extend=True)\n",
+        );
+        assert!(outcomes.iter().all(|o| o.result.is_ok()), "{outcomes:?}");
+        let id = |doc: &Document, name: &str| {
+            doc.objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        let (a, b) = (id(&doc, "A"), id(&doc, "B"));
+        assert_eq!(doc.selection.active, Some(b));
+        assert_eq!(doc.selection.objects.len(), 2);
+
+        // What the tab sends: B's own values, with one changed.
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "physics.rigid_body_set(enabled=False, friction=0.9, active_only=True)\n",
+        );
+        assert!(outcomes[0].result.is_ok(), "{outcomes:?}");
+        assert!(
+            doc.object(a).unwrap().physics.rigid.is_some(),
+            "A lost its rigid body to B's settings"
+        );
+        assert!(doc.object(b).unwrap().physics.rigid.is_none());
+
+        // The menu's Add Rigid Body still means the whole selection.
+        let outcomes = h.run_script(
+            &r,
+            &mut doc,
+            None,
+            &ctx,
+            "physics.rigid_body_set(enabled=True, kind=\"passive\")\n",
+        );
+        assert!(outcomes[0].result.is_ok(), "{outcomes:?}");
+        assert!(
+            doc.object(a).unwrap().physics.rigid.is_some()
+                && doc.object(b).unwrap().physics.rigid.is_some()
+        );
+    }
 }

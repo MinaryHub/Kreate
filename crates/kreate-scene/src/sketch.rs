@@ -23,7 +23,13 @@ pub enum Constraint {
     /// A point held where it is.
     Fixed { a: u32, at: [f64; 2] },
     /// The angle from line ab to line cd, in radians.
-    Angle { a: u32, b: u32, c: u32, d: u32, value: f64 },
+    Angle {
+        a: u32,
+        b: u32,
+        c: u32,
+        d: u32,
+        value: f64,
+    },
     /// Line ab parallel to line cd.
     Parallel { a: u32, b: u32, c: u32, d: u32 },
     /// Line ab square to line cd.
@@ -101,16 +107,45 @@ impl Constraint {
     pub fn from_parts(tag: &str, p: &[u32], value: f64, at: [f64; 2]) -> Option<Self> {
         let get = |i: usize| p.get(i).copied();
         Some(match tag {
-            "distance" => Constraint::Distance { a: get(0)?, b: get(1)?, value },
-            "horizontal" => Constraint::Horizontal { a: get(0)?, b: get(1)? },
-            "vertical" => Constraint::Vertical { a: get(0)?, b: get(1)? },
+            "distance" => Constraint::Distance {
+                a: get(0)?,
+                b: get(1)?,
+                value,
+            },
+            "horizontal" => Constraint::Horizontal {
+                a: get(0)?,
+                b: get(1)?,
+            },
+            "vertical" => Constraint::Vertical {
+                a: get(0)?,
+                b: get(1)?,
+            },
             "fixed" => Constraint::Fixed { a: get(0)?, at },
-            "angle" => Constraint::Angle { a: get(0)?, b: get(1)?, c: get(2)?, d: get(3)?, value },
-            "parallel" => Constraint::Parallel { a: get(0)?, b: get(1)?, c: get(2)?, d: get(3)? },
-            "perpendicular" => {
-                Constraint::Perpendicular { a: get(0)?, b: get(1)?, c: get(2)?, d: get(3)? }
-            }
-            "equal" => Constraint::Equal { a: get(0)?, b: get(1)?, c: get(2)?, d: get(3)? },
+            "angle" => Constraint::Angle {
+                a: get(0)?,
+                b: get(1)?,
+                c: get(2)?,
+                d: get(3)?,
+                value,
+            },
+            "parallel" => Constraint::Parallel {
+                a: get(0)?,
+                b: get(1)?,
+                c: get(2)?,
+                d: get(3)?,
+            },
+            "perpendicular" => Constraint::Perpendicular {
+                a: get(0)?,
+                b: get(1)?,
+                c: get(2)?,
+                d: get(3)?,
+            },
+            "equal" => Constraint::Equal {
+                a: get(0)?,
+                b: get(1)?,
+                c: get(2)?,
+                d: get(3)?,
+            },
             _ => return None,
         })
     }
@@ -139,7 +174,10 @@ impl Constraint {
                 let turn = u.perp_dot(v).atan2(u.dot(v));
                 let diff = turn - value;
                 // The nearer way round.
-                out.push((diff + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI);
+                out.push(
+                    (diff + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                        - std::f64::consts::PI,
+                );
             }
             Constraint::Parallel { a, b, c, d } => {
                 let (u, v) = (line(a, b), line(c, d));
@@ -278,7 +316,8 @@ pub fn solve(points: &mut [DVec2], constraints: &[Constraint]) -> Solve {
 /// Solves `a x = b` (n × n) by elimination with partial pivoting.
 fn gauss(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
-        let pivot = (col..n).max_by(|i, j| a[i * n + col].abs().total_cmp(&a[j * n + col].abs()))?;
+        let pivot =
+            (col..n).max_by(|i, j| a[i * n + col].abs().total_cmp(&a[j * n + col].abs()))?;
         if a[pivot * n + col].abs() < 1e-300 {
             return None;
         }
@@ -324,13 +363,25 @@ mod tests {
     fn a_rough_square_comes_out_square() {
         let mut p = rough_square();
         let c = vec![
-            Constraint::Fixed { a: 0, at: [0.0, 0.0] },
+            Constraint::Fixed {
+                a: 0,
+                at: [0.0, 0.0],
+            },
             Constraint::Horizontal { a: 0, b: 1 },
             Constraint::Vertical { a: 1, b: 2 },
             Constraint::Horizontal { a: 2, b: 3 },
             Constraint::Vertical { a: 3, b: 0 },
-            Constraint::Distance { a: 0, b: 1, value: 2.0 },
-            Constraint::Equal { a: 0, b: 1, c: 1, d: 2 },
+            Constraint::Distance {
+                a: 0,
+                b: 1,
+                value: 2.0,
+            },
+            Constraint::Equal {
+                a: 0,
+                b: 1,
+                c: 1,
+                d: 2,
+            },
         ];
         let s = solve(&mut p, &c);
         assert!(s.converged, "{s:?}");
@@ -352,20 +403,56 @@ mod tests {
             DVec2::new(2.1, 1.0),
         ];
         let c = vec![
-            Constraint::Fixed { a: 0, at: [0.0, 0.0] },
-            Constraint::Fixed { a: 1, at: [1.0, 0.0] },
-            Constraint::Angle { a: 0, b: 1, c: 2, d: 3, value: 30f64.to_radians() },
-            Constraint::Perpendicular { a: 0, b: 1, c: 4, d: 5 },
+            Constraint::Fixed {
+                a: 0,
+                at: [0.0, 0.0],
+            },
+            Constraint::Fixed {
+                a: 1,
+                at: [1.0, 0.0],
+            },
+            Constraint::Angle {
+                a: 0,
+                b: 1,
+                c: 2,
+                d: 3,
+                value: 30f64.to_radians(),
+            },
+            Constraint::Perpendicular {
+                a: 0,
+                b: 1,
+                c: 4,
+                d: 5,
+            },
         ];
         assert!(solve(&mut p, &c).converged);
         let u = p[3] - p[2];
         assert!((u.y.atan2(u.x).to_degrees() - 30.0).abs() < 1e-6);
-        assert!((p[5] - p[4]).x.abs() < 1e-7, "square to a level line is upright");
-        let mut q = vec![DVec2::ZERO, DVec2::new(1.0, 0.0), DVec2::new(0.0, 1.0), DVec2::new(1.0, 1.4)];
+        assert!(
+            (p[5] - p[4]).x.abs() < 1e-7,
+            "square to a level line is upright"
+        );
+        let mut q = vec![
+            DVec2::ZERO,
+            DVec2::new(1.0, 0.0),
+            DVec2::new(0.0, 1.0),
+            DVec2::new(1.0, 1.4),
+        ];
         let c = vec![
-            Constraint::Fixed { a: 0, at: [0.0, 0.0] },
-            Constraint::Fixed { a: 1, at: [1.0, 0.0] },
-            Constraint::Parallel { a: 0, b: 1, c: 2, d: 3 },
+            Constraint::Fixed {
+                a: 0,
+                at: [0.0, 0.0],
+            },
+            Constraint::Fixed {
+                a: 1,
+                at: [1.0, 0.0],
+            },
+            Constraint::Parallel {
+                a: 0,
+                b: 1,
+                c: 2,
+                d: 3,
+            },
         ];
         assert!(solve(&mut q, &c).converged);
         assert!((q[3] - q[2]).y.abs() < 1e-7);
@@ -374,7 +461,14 @@ mod tests {
     #[test]
     fn what_no_constraint_names_stays_put_and_a_contradiction_says_so() {
         let mut p = vec![DVec2::ZERO, DVec2::new(1.0, 0.0), DVec2::new(5.0, 5.0)];
-        let s = solve(&mut p, &[Constraint::Distance { a: 0, b: 1, value: 3.0 }]);
+        let s = solve(
+            &mut p,
+            &[Constraint::Distance {
+                a: 0,
+                b: 1,
+                value: 3.0,
+            }],
+        );
         assert!(s.converged);
         assert_eq!(p[2], DVec2::new(5.0, 5.0));
         assert!(((p[1] - p[0]).length() - 3.0).abs() < 1e-8);
@@ -382,8 +476,16 @@ mod tests {
         let s = solve(
             &mut p,
             &[
-                Constraint::Distance { a: 0, b: 1, value: 1.0 },
-                Constraint::Distance { a: 0, b: 1, value: 2.0 },
+                Constraint::Distance {
+                    a: 0,
+                    b: 1,
+                    value: 1.0,
+                },
+                Constraint::Distance {
+                    a: 0,
+                    b: 1,
+                    value: 2.0,
+                },
             ],
         );
         assert!(!s.converged);

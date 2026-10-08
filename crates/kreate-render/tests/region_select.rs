@@ -677,7 +677,10 @@ fn many_objects_collect_each_one_s_elements_at_its_base() {
     let mut got = both;
     got.sort_unstable();
     assert_eq!(got, want);
-    assert!(got.iter().any(|f| *f < 6) && got.iter().any(|f| *f >= 6), "{got:?}");
+    assert!(
+        got.iter().any(|f| *f < 6) && got.iter().any(|f| *f >= 6),
+        "{got:?}"
+    );
     // An object left out of the table is not collected.
     let Some(first) = select_with(
         &cubes,

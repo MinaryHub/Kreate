@@ -64,15 +64,21 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
     // tree's single precision is spent where the parts are.
     let mut world: Vec<Vec<DVec3>> = Vec::new();
     for (mesh, place) in parts {
-        world.push(mesh.positions().iter().map(|p| place.transform_point3(p.as_dvec3())).collect());
+        world.push(
+            mesh.positions()
+                .iter()
+                .map(|p| place.transform_point3(p.as_dvec3()))
+                .collect(),
+        );
     }
     let all: Vec<DVec3> = world.iter().flatten().copied().collect();
     if all.is_empty() {
         return Vec::new();
     }
-    let (lo, hi) = all.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), p| {
-        (lo.min(*p), hi.max(*p))
-    });
+    let (lo, hi) = all.iter().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
     let middle = (lo + hi) * 0.5;
     let size = (hi - lo).length().max(1e-9);
     let mut local: Vec<Vec3> = Vec::new();
@@ -81,14 +87,21 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
         let base = local.len() as u32;
         local.extend(points.iter().map(|p| (*p - middle).as_vec3()));
         let t = mesh.triangulate();
-        tris.extend(t.indices.as_chunks::<3>().0.iter().map(|t| t.map(|v| v + base)));
+        tris.extend(
+            t.indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| t.map(|v| v + base)),
+        );
     }
     let bvh = Bvh::build(&local, &tris);
     let toward = view.toward();
     let lift = size * 1e-5;
     let hidden_at = |p: DVec3| -> bool {
         let start = (p - middle + toward * lift).as_vec3();
-        bvh.raycast(&local, &tris, &Ray::new(start, toward.as_vec3()), f32::MAX).is_some()
+        bvh.raycast(&local, &tris, &Ray::new(start, toward.as_vec3()), f32::MAX)
+            .is_some()
     };
 
     let mut lines = Vec::new();
@@ -99,10 +112,15 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
                 let ring = mesh.face_verts(f);
                 let mut n = DVec3::ZERO;
                 for i in 0..ring.len() {
-                    n += points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
+                    n +=
+                        points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
                 }
                 let n = n.normalize_or_zero();
-                if flip { -n } else { n }
+                if flip {
+                    -n
+                } else {
+                    n
+                }
             })
             .collect();
         let mut faces_of: Vec<Vec<usize>> = vec![Vec::new(); mesh.num_edges() as usize];
@@ -163,7 +181,11 @@ fn tidy(lines: Vec<Line2>, tolerance: f64) -> Vec<Line2> {
     let key = |l: &Line2| {
         let q = |v: f64| (v / tolerance).round() as i64;
         let (a, b) = ([q(l.a[0]), q(l.a[1])], [q(l.b[0]), q(l.b[1])]);
-        if a <= b { (a, b) } else { (b, a) }
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
     };
     let mut seen: std::collections::HashMap<([i64; 2], [i64; 2]), usize> = Default::default();
     let mut out: Vec<Line2> = Vec::new();
@@ -212,7 +234,11 @@ pub fn write_dxf(lines: &[Line2], metres_per_unit: f64) -> String {
     pair(&mut out, 70, "2");
     for (name, text, elements) in [
         ("CONTINUOUS", "Solid line", Vec::<f64>::new()),
-        ("DASHED", "Dashed __ __", vec![0.5 * s * 0.01, -0.25 * s * 0.01]),
+        (
+            "DASHED",
+            "Dashed __ __",
+            vec![0.5 * s * 0.01, -0.25 * s * 0.01],
+        ),
     ] {
         pair(&mut out, 0, "LTYPE");
         pair(&mut out, 2, name);
@@ -220,7 +246,11 @@ pub fn write_dxf(lines: &[Line2], metres_per_unit: f64) -> String {
         pair(&mut out, 3, text);
         pair(&mut out, 72, "65");
         pair(&mut out, 73, &elements.len().to_string());
-        pair(&mut out, 40, &format!("{}", elements.iter().map(|e| e.abs()).sum::<f64>()));
+        pair(
+            &mut out,
+            40,
+            &format!("{}", elements.iter().map(|e| e.abs()).sum::<f64>()),
+        );
         for e in elements {
             pair(&mut out, 49, &format!("{e}"));
         }
@@ -243,7 +273,14 @@ pub fn write_dxf(lines: &[Line2], metres_per_unit: f64) -> String {
     for l in lines {
         pair(&mut out, 0, "LINE");
         pair(&mut out, 8, if l.hidden { "HIDDEN" } else { "VISIBLE" });
-        for (code, v) in [(10, l.a[0]), (20, l.a[1]), (30, 0.0), (11, l.b[0]), (21, l.b[1]), (31, 0.0)] {
+        for (code, v) in [
+            (10, l.a[0]),
+            (20, l.a[1]),
+            (30, 0.0),
+            (11, l.b[0]),
+            (21, l.b[1]),
+            (31, 0.0),
+        ] {
             pair(&mut out, code, &format!("{:.6}", v * s));
         }
     }
@@ -278,10 +315,20 @@ pub fn write_svg(lines: &[Line2], metres_per_unit: f64, unit: &str) -> String {
         -hi[1] - margin
     );
     for (hidden, style) in [
-        (true, format!("stroke=\"#888\" stroke-dasharray=\"{:.6} {:.6}\"", stroke * 6.0, stroke * 3.0)),
+        (
+            true,
+            format!(
+                "stroke=\"#888\" stroke-dasharray=\"{:.6} {:.6}\"",
+                stroke * 6.0,
+                stroke * 3.0
+            ),
+        ),
         (false, "stroke=\"#000\"".to_string()),
     ] {
-        let _ = writeln!(out, " <g fill=\"none\" stroke-width=\"{stroke:.6}\" {style}>");
+        let _ = writeln!(
+            out,
+            " <g fill=\"none\" stroke-width=\"{stroke:.6}\" {style}>"
+        );
         for l in lines.iter().filter(|l| l.hidden == hidden) {
             let _ = writeln!(
                 out,
@@ -329,7 +376,10 @@ mod tests {
         let small = kreate_mesh::primitives::cube(1.0);
         let parts = [
             (&big, DAffine3::IDENTITY),
-            (&small, DAffine3::from_translation(DVec3::new(0.0, 3.0, 0.0))),
+            (
+                &small,
+                DAffine3::from_translation(DVec3::new(0.0, 3.0, 0.0)),
+            ),
         ];
         let lines = project_drawing(&parts, View::Front, 0.5);
         assert!((total(&lines, false) - 8.0).abs() < 1e-6, "{lines:?}");
@@ -339,8 +389,16 @@ mod tests {
     #[test]
     fn dxf_and_svg_carry_the_lines_in_the_unit() {
         let lines = [
-            Line2 { a: [0.0, 0.0], b: [0.01, 0.0], hidden: false },
-            Line2 { a: [0.0, 0.0], b: [0.0, 0.02], hidden: true },
+            Line2 {
+                a: [0.0, 0.0],
+                b: [0.01, 0.0],
+                hidden: false,
+            },
+            Line2 {
+                a: [0.0, 0.0],
+                b: [0.0, 0.02],
+                hidden: true,
+            },
         ];
         let dxf = write_dxf(&lines, 1e-3);
         assert!(dxf.contains("$INSUNITS\n70\n4\n"));

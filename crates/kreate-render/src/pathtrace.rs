@@ -166,17 +166,27 @@ struct Scene {
 /// more often than a small dim one — and a point on the one picked uniformly,
 /// so the probability of a point is luminance over the total, whatever the
 /// triangle's size. The shader relies on that.
-fn emitters_of(positions: &[Vec3], triangles: &[[u32; 4]], surfaces: &[PtSurface]) -> (Vec<[f32; 2]>, f32) {
+fn emitters_of(
+    positions: &[Vec3],
+    triangles: &[[u32; 4]],
+    surfaces: &[PtSurface],
+) -> (Vec<[f32; 2]>, f32) {
     let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     let mut out = Vec::new();
     let mut total = 0.0f32;
     for (i, t) in triangles.iter().enumerate() {
-        let Some(surface) = surfaces.get(t[3] as usize) else { continue };
+        let Some(surface) = surfaces.get(t[3] as usize) else {
+            continue;
+        };
         let lum = luminance(surface.emission);
         if lum <= 0.0 {
             continue;
         }
-        let (a, b, c) = (positions[t[0] as usize], positions[t[1] as usize], positions[t[2] as usize]);
+        let (a, b, c) = (
+            positions[t[0] as usize],
+            positions[t[1] as usize],
+            positions[t[2] as usize],
+        );
         let area = 0.5 * (b - a).cross(c - a).length();
         if area <= 0.0 {
             continue;
@@ -597,7 +607,11 @@ impl PathTracer {
     }
 
     /// The environment's importance map, or none for a flat world.
-    pub fn set_environment(&mut self, device: &wgpu::Device, map: Option<&crate::environment::ImportanceMap>) {
+    pub fn set_environment(
+        &mut self,
+        device: &wgpu::Device,
+        map: Option<&crate::environment::ImportanceMap>,
+    ) {
         let data: &[f32] = map.map_or(&[0.0; 4][..], |m| &m.cdf);
         self.env_map = wgpu::util::DeviceExt::create_buffer_init(
             device,

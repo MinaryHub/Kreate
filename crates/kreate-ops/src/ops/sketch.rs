@@ -123,7 +123,11 @@ impl Operator for ConstraintAdd {
         let need_lines = || OpError::Failed("select two edges".into());
         let given = (params.value != 0.0 && params.value.is_finite()).then_some(params.value);
         let mut added: Vec<Constraint> = Vec::new();
-        match KINDS.get(params.kind as usize).copied().unwrap_or("distance") {
+        match KINDS
+            .get(params.kind as usize)
+            .copied()
+            .unwrap_or("distance")
+        {
             "distance" => {
                 let (a, b) = pair.ok_or_else(need_pair)?;
                 let value = given.unwrap_or_else(|| p(a).distance(p(b)));
@@ -358,7 +362,10 @@ impl Operator for MakeSolid {
         });
         graph.link(0, 2, 0).expect("input into the feature");
         graph.link(2, 1, 0).expect("the feature into the output");
-        doc.document_mut().object_mut(id).expect("active").geometry_nodes = Some(graph);
+        doc.document_mut()
+            .object_mut(id)
+            .expect("active")
+            .geometry_nodes = Some(graph);
         Ok(OpResult::Finished)
     }
 }
@@ -424,7 +431,10 @@ mod tests {
             &mut doc,
             &edit,
             "sketch.constraint_set",
-            &[("index", PropertyValue::Int(0)), ("value", PropertyValue::Float(5.0))],
+            &[
+                ("index", PropertyValue::Int(0)),
+                ("value", PropertyValue::Float(5.0)),
+            ],
         )
         .unwrap();
         let [a, b] = doc.mesh(mesh).unwrap().edges()[0];

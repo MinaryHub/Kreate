@@ -2626,7 +2626,11 @@ fn the_sidebar_has_blenders_three_tabs_and_keeps_the_gizmo_in_view() {
     let item = gpu_or_skip!(shot(SidebarTab::Item));
     let tool = gpu_or_skip!(shot(SidebarTab::Tool));
     let view = gpu_or_skip!(shot(SidebarTab::View));
-    for (name, c) in [("sidebar-item", &item), ("sidebar-tool", &tool), ("sidebar-view", &view)] {
+    for (name, c) in [
+        ("sidebar-item", &item),
+        ("sidebar-tool", &tool),
+        ("sidebar-view", &view),
+    ] {
         c.dump(name);
     }
 

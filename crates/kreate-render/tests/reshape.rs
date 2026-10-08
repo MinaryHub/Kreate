@@ -81,7 +81,8 @@ fn a_reshaped_mesh_is_what_a_fresh_extract_would_draw() {
     let cpu = RenderMeshCpu::extract(&before);
     let viewport =
         kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
-    let mesh = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
+    let mesh =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
     let deformer = Deformer::new(&gpu.device);
     let mut reshape = Reshape::new(&gpu.device, &deformer, &mesh, &cpu).expect("a mesh");
 
@@ -124,6 +125,9 @@ fn a_reshaped_mesh_is_what_a_fresh_extract_would_draw() {
             .fold(f32::MAX, f32::min);
         worst = worst.max(best);
     }
-    assert!(moved > n / 10, "the bump has to move a good part: {moved} of {n}");
+    assert!(
+        moved > n / 10,
+        "the bump has to move a good part: {moved} of {n}"
+    );
     assert!(worst < 3.0, "normals off by {worst}°");
 }

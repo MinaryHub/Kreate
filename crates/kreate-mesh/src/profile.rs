@@ -31,7 +31,11 @@ pub fn profile_loops(mesh: &MeshData) -> Vec<Vec<u32>> {
         let (a, b) = (offsets[f] as usize, offsets[f + 1] as usize);
         for c in a..b {
             if uses[edges[c] as usize] == 1 {
-                let to = if c + 1 < b { corners[c + 1] } else { corners[a] };
+                let to = if c + 1 < b {
+                    corners[c + 1]
+                } else {
+                    corners[a]
+                };
                 next.insert(corners[c], to);
             }
         }
@@ -54,7 +58,9 @@ pub fn profile_loops(mesh: &MeshData) -> Vec<Vec<u32>> {
             if seen.get(&at).copied().unwrap_or(false) {
                 break false;
             }
-            let Some(&to) = next.get(&at) else { break false };
+            let Some(&to) = next.get(&at) else {
+                break false;
+            };
             seen.insert(at, true);
             chain.push(at);
             at = to;
@@ -73,7 +79,10 @@ fn flat(p: Vec3) -> Vec2 {
 fn signed_area(points: &[Vec3], l: &[u32]) -> f32 {
     (0..l.len())
         .map(|i| {
-            let (a, b) = (flat(points[l[i] as usize]), flat(points[l[(i + 1) % l.len()] as usize]));
+            let (a, b) = (
+                flat(points[l[i] as usize]),
+                flat(points[l[(i + 1) % l.len()] as usize]),
+            );
             a.x * b.y - b.x * a.y
         })
         .sum::<f32>()
@@ -91,8 +100,11 @@ pub fn extrude_profile(mesh: &MeshData, height: f32) -> MeshData {
     let source = mesh.positions();
     // Which loops are holes: those inside an odd number of others. Each is
     // then turned to run the way its role wants, whichever way it was drawn.
-    let flat_loop =
-        |l: &[u32]| l.iter().map(|v| flat(source[*v as usize])).collect::<Vec<Vec2>>();
+    let flat_loop = |l: &[u32]| {
+        l.iter()
+            .map(|v| flat(source[*v as usize]))
+            .collect::<Vec<Vec2>>()
+    };
     let shapes: Vec<Vec<Vec2>> = loops.iter().map(|l| flat_loop(l)).collect();
     for (i, l) in loops.iter_mut().enumerate() {
         let probe = shapes[i][0];

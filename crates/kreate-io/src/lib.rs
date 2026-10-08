@@ -8,9 +8,9 @@
 
 pub mod build;
 pub mod clipboard;
+pub mod container;
 pub mod drawing;
 pub mod exr;
-pub mod container;
 pub mod gltf_export;
 pub mod gltf_import;
 pub mod image_import;
