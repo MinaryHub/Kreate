@@ -9526,7 +9526,7 @@ impl App {
             }
             "app.mesh_check_select" => {
                 if !self.op_ctx.mode.edits_elements() {
-                    self.set_mode(OpMode::EditMesh);
+                    self.set_mode(OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc)));
                 }
                 self.run_op("mesh.check_select", action.params.clone());
                 if self.history.last().is_some_and(|e| e.op_id == "mesh.check_select") {
