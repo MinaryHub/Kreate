@@ -872,6 +872,9 @@ struct App {
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
     /// The Measure tool, while it is out. See `begin_measure`.
     measure: Option<MeasureTool>,
+    /// Align Faces, while it is out: the first face clicked, once it has
+    /// been — the part that moves, its face's middle and normal.
+    mate: Option<Option<(ObjectId, DVec3, DVec3)>>,
     /// The active object's mass properties, and the evaluated mesh and
     /// placement they were measured for: measured again only when either
     /// changes.
@@ -1022,6 +1025,7 @@ impl App {
             loop_cut_seed: None,
             knife: None,
             measure: None,
+            mate: None,
             mass_cache: None,
             sectioned: Vec::new(),
             circle_radius: 40.0,
@@ -3508,6 +3512,58 @@ impl App {
             }
         };
         self.ui.mass = (mesh.num_faces() > 0).then_some(props);
+    }
+
+    /// The face under the pointer: whose it is, its middle and its outward
+    /// normal, in the world, as it is drawn.
+    fn face_under_pointer(&mut self) -> Option<(ObjectId, DVec3, DVec3)> {
+        let ndc = self.cursor_ndc()?;
+        let aspect = self.viewport_aspect();
+        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let mesh = self.evaluated.iter().find(|(id, _)| *id == hit.object)?.1.clone();
+        let world = self.doc.world_transform(hit.object);
+        let ring = mesh.face_verts(hit.face);
+        let points: Vec<DVec3> = ring
+            .iter()
+            .map(|v| world.transform_point3(mesh.positions()[*v as usize].as_dvec3()))
+            .collect();
+        let mut normal = DVec3::ZERO;
+        for i in 0..points.len() {
+            normal += points[i].cross(points[(i + 1) % points.len()]);
+        }
+        let middle = points.iter().sum::<DVec3>() / points.len().max(1) as f64;
+        Some((hit.object, middle, normal.normalize_or_zero()))
+    }
+
+    /// A click with Align Faces: the first picks the moving part's face, the
+    /// second the face it goes against — and the part goes.
+    fn mate_click(&mut self) {
+        let Some(picked) = self.face_under_pointer() else {
+            self.status("Align Faces: click on a face");
+            return;
+        };
+        match self.mate {
+            Some(None) => {
+                self.mate = Some(Some(picked));
+                self.status("Align Faces: now the face it goes against");
+            }
+            Some(Some((moving, from, from_normal))) => {
+                if picked.0 == moving {
+                    self.status("Align Faces: pick a face of another part");
+                    return;
+                }
+                let Some(uid) = self.doc.object_uid(moving) else { return };
+                let mut p = PropertyMap::new();
+                p.set("uid", PropertyValue::Text(uid.raw().to_string()));
+                p.set("from", PropertyValue::Vec3(from.to_array()));
+                p.set("from_normal", PropertyValue::Vec3(from_normal.to_array()));
+                p.set("to", PropertyValue::Vec3(picked.1.to_array()));
+                p.set("to_normal", PropertyValue::Vec3(picked.2.to_array()));
+                self.run_op("object.mate", p);
+                self.mate = None;
+            }
+            None => {}
+        }
     }
 
     /// View ▸ Measure: click two points for the distance between them, or
@@ -9540,6 +9596,11 @@ impl App {
             self.end_circle_select();
             return;
         }
+        if self.mate.is_some() && code == KeyCode::Escape {
+            self.mate = None;
+            self.status("Align Faces cancelled");
+            return;
+        }
         if self.measure.is_some() {
             match code {
                 KeyCode::Escape => {
@@ -9737,6 +9798,11 @@ impl App {
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.measure" => self.begin_measure(),
+            "object.align_faces" => {
+                self.end_loop_cut_hover();
+                self.mate = Some(None);
+                self.status("Align Faces: click the face of the part that moves, then the face it goes against (Esc stops)");
+            }
             "file.export_drawing" => {
                 let view = action.params.get("view").and_then(|v| v.as_int()).unwrap_or(0);
                 self.export_drawing(view as u32);
@@ -10475,6 +10541,21 @@ impl ApplicationHandler for App {
                         }
                         (MouseButton::Right, true) => {
                             self.end_circle_select();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Align Faces: left picks a face, right gives up.
+                if self.mate.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.mate_click();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.mate = None;
+                            self.status("Align Faces cancelled");
                             return;
                         }
                         _ => {}

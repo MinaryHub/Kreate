@@ -12,8 +12,82 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<UnitsSet>();
     registry.register::<DensitySet>();
     registry.register::<SectionSet>();
+    registry.register::<Mate>();
     registry.register::<MeasureAdd>();
     registry.register::<MeasureRemove>();
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MateParams {
+    /// The part that moves, by its uid.
+    pub uid: String,
+    /// A point on its face and the face's outward normal, in the world.
+    #[param(unit = "length")]
+    pub from: [f64; 3],
+    pub from_normal: [f64; 3],
+    /// A point on the face it goes against, and that face's normal.
+    #[param(unit = "length")]
+    pub to: [f64; 3],
+    pub to_normal: [f64; 3],
+    /// A gap left between the faces.
+    #[param(unit = "length")]
+    pub offset: f64,
+}
+
+/// Puts one part's face flat against another's: turned so the faces look at
+/// each other, moved so the two points meet. What an assembly's mate does,
+/// once — the parts are placed, not bound.
+pub struct Mate;
+
+impl Operator for Mate {
+    type Params = MateParams;
+    fn id() -> &'static str {
+        "object.mate"
+    }
+    fn label() -> &'static str {
+        "Align Faces"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Ok(raw) = params.uid.trim().parse::<u64>() else {
+            return Err(OpError::Failed("no part named".into()));
+        };
+        let d = doc.document();
+        let Some(id) = d.object_by_uid(kreate_scene::Uid::from_raw(raw)) else {
+            return Err(OpError::Failed("no such part".into()));
+        };
+        let (from, to) = (DVec3::from_array(params.from), DVec3::from_array(params.to));
+        let nf = DVec3::from_array(params.from_normal).normalize_or_zero();
+        let nt = DVec3::from_array(params.to_normal).normalize_or_zero();
+        if nf == DVec3::ZERO || nt == DVec3::ZERO || !from.is_finite() || !to.is_finite() {
+            return Err(OpError::Failed("a face needs a direction".into()));
+        }
+        // Turn the moving face to look back at the other, about its point,
+        // then carry its point onto the other's, the gap away.
+        let turn = kreate_math::DQuat::from_rotation_arc(nf, -nt);
+        let to = to + nt * params.offset;
+        let motion = kreate_math::DAffine3::from_translation(to)
+            * kreate_math::DAffine3::from_quat(turn)
+            * kreate_math::DAffine3::from_translation(-from);
+        let object = d.object(id).expect("found");
+        let above = d.world_transform(id) * object.transform.to_affine().inverse();
+        let local = above.inverse() * motion * above * object.transform.to_affine();
+        let (scale, rotation, translation) = local.to_scale_rotation_translation();
+        if !translation.is_finite() || !rotation.is_finite() {
+            return Err(OpError::Failed("the parts cannot be put together that way".into()));
+        }
+        let o = doc.document_mut().object_mut(id).expect("found");
+        o.transform.translation = translation;
+        o.transform.rotation = rotation.normalize();
+        o.transform.scale = scale;
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -284,6 +358,35 @@ mod tests {
         assert!(doc.design.measurements[0].angle().is_some());
         run(&mut doc, "measure.remove", &[("all", PropertyValue::Bool(true))]).unwrap();
         assert!(doc.design.measurements.is_empty());
+    }
+
+    #[test]
+    fn a_face_goes_flat_against_another() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let a = doc.add_object(Object::new("A", ObjectData::Mesh(mesh)));
+        doc.object_mut(a).unwrap().transform.translation = DVec3::new(5.0, 3.0, 0.0);
+        let uid = doc.object_uid(a).unwrap().raw().to_string();
+        let mut history = History::new();
+        let mut p = PropertyMap::new();
+        // A's +X face (its middle at (6, 3, 0)) onto the top of something at
+        // the origin, two up: A ends standing on it, its +X face down.
+        p.set("uid", PropertyValue::Text(uid));
+        p.set("from", PropertyValue::Vec3([6.0, 3.0, 0.0]));
+        p.set("from_normal", PropertyValue::Vec3([1.0, 0.0, 0.0]));
+        p.set("to", PropertyValue::Vec3([0.0, 0.0, 2.0]));
+        p.set("to_normal", PropertyValue::Vec3([0.0, 0.0, 1.0]));
+        history
+            .dispatch(&registry, &mut doc, &Context::default(), "object.mate", &p)
+            .unwrap();
+        let world = doc.world_transform(a);
+        let centre = world.transform_point3(DVec3::ZERO);
+        assert!((centre - DVec3::new(0.0, 0.0, 3.0)).length() < 1e-9, "{centre}");
+        let face = world.transform_vector3(DVec3::X);
+        assert!((face - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-9, "{face}");
     }
 
     #[test]

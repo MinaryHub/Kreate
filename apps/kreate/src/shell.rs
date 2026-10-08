@@ -1449,6 +1449,7 @@ struct Labels {
     render_result_title: String,
     render_hint: String,
     design_units: String,
+    align_faces: String,
     file_export_drawing: String,
     drawing_top: String,
     drawing_front: String,
@@ -1771,6 +1772,7 @@ impl Labels {
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
             design_units: t("design-units"),
+            align_faces: t("menu-align-faces"),
             file_export_drawing: t("menu-export-drawing"),
             drawing_top: t("drawing-top"),
             drawing_front: t("drawing-front"),
@@ -3360,6 +3362,7 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
         MenuNode::Separator,
         entry("view.measure", &l.view_measure, dispatch("view.measure")),
+        entry("object.align_faces", &l.align_faces, dispatch("object.align_faces")),
         MenuNode::Separator,
         entry(
             "view.toggle_projection",
@@ -9592,6 +9595,9 @@ render-view = View Render
 render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
 design-units = Units
+menu-align-faces = Align Faces
+op-object-align-faces-desc = Click a face of the part that moves, then the face it goes against: the part turns and moves so the two sit flat together.
+op-object-mate-desc = Puts one part's face flat against another's.
 menu-export-drawing = Export Drawing
 drawing-top = Top View...
 drawing-front = Front View...
@@ -10599,6 +10605,9 @@ render-view = 렌더 결과 보기
 render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
 design-units = 단위
+menu-align-faces = 면 맞대기
+op-object-align-faces-desc = 움직일 부품의 면을 클릭한 뒤 맞댈 면을 클릭하면, 두 면이 평평하게 붙도록 부품을 돌리고 옮깁니다.
+op-object-mate-desc = 한 부품의 면을 다른 부품의 면에 평평하게 맞댑니다.
 menu-export-drawing = 도면 내보내기
 drawing-top = 위에서 본 도면...
 drawing-front = 앞에서 본 도면...
