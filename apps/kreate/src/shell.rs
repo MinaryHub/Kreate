@@ -5379,6 +5379,13 @@ fn physics_panel(
                 &mut params,
                 keep,
             ) {
+                // The tab shows the active object, so it sets the active
+                // object: the same values sent to the whole selection would
+                // overwrite every other object's own — and switch off the
+                // physics of those the active one had none of.
+                if info.schema.iter().any(|d| d.name == "active_only") {
+                    params.set("active_only", kreate_reflect::PropertyValue::Bool(true));
+                }
                 let dragging = ui.ctx().input(|i| i.pointer.any_down());
                 send_edit(state, op, params, dragging);
             }
@@ -5521,11 +5528,14 @@ fn draw_physics_tab(
         {
             state.queue.run("physics.free_bake", PropertyMap::new());
         }
+        // Said before the click: the rigid bodies stop being rigid bodies,
+        // which otherwise looks like the settings going missing.
         if ui
             .add_enabled(
                 !cache.rigid.is_empty(),
                 egui::Button::new(state.catalog.get("physics-bake-to-keys")),
             )
+            .on_hover_text(state.catalog.get("op-physics-bake-to-keys-desc"))
             .clicked()
         {
             state.queue.run("physics.bake_to_keys", PropertyMap::new());

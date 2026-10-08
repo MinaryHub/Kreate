@@ -46,9 +46,23 @@ fn active_physics(doc: &Document) -> Option<&ObjectPhysics> {
     o.mesh().map(|_| &o.physics)
 }
 
-/// Sets something on every selected mesh, or cancels when nothing changes.
-fn on_selected(doc: &mut DocMut<'_>, mut set: impl FnMut(&mut ObjectPhysics)) -> OpResult {
-    let ids = selected_meshes(doc.document());
+/// Sets something on every selected mesh — or on the active object alone —
+/// or cancels when nothing changes.
+fn on_selected(
+    doc: &mut DocMut<'_>,
+    active_only: bool,
+    mut set: impl FnMut(&mut ObjectPhysics),
+) -> OpResult {
+    let ids = if active_only {
+        let d = doc.document();
+        d.selection
+            .active
+            .filter(|id| d.object(*id).is_some_and(|o| o.mesh().is_some()))
+            .into_iter()
+            .collect()
+    } else {
+        selected_meshes(doc.document())
+    };
     let changing: Vec<ObjectId> = ids
         .into_iter()
         .filter(|id| {
@@ -98,6 +112,12 @@ pub struct RigidBodyParams {
     /// The fraction of its turning lost each second.
     #[param(min = 0.0, max = 1.0)]
     pub angular_damping: f64,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for RigidBodyParams {
@@ -127,6 +147,7 @@ pub fn rigid_params(body: Option<&RigidBody>) -> RigidBodyParams {
         bounciness: b.bounciness,
         linear_damping: b.linear_damping,
         angular_damping: b.angular_damping,
+        active_only: false,
     }
 }
 
@@ -174,7 +195,7 @@ impl Operator for RigidBodySet {
             linear_damping: params.linear_damping.clamp(0.0, 1.0),
             angular_damping: params.angular_damping.clamp(0.0, 1.0),
         });
-        Ok(on_selected(doc, |p| p.rigid = body))
+        Ok(on_selected(doc, params.active_only, |p| p.rigid = body))
     }
 }
 
@@ -193,6 +214,12 @@ pub struct CollisionParams {
     /// How much of a particle's speed bounces off.
     #[param(min = 0.0, max = 1.0)]
     pub bounciness: f64,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for CollisionParams {
@@ -208,6 +235,7 @@ pub fn collision_params(c: Option<&Collision>) -> CollisionParams {
         thickness: d.thickness,
         friction: d.friction,
         bounciness: d.bounciness,
+        active_only: false,
     }
 }
 
@@ -242,7 +270,7 @@ impl Operator for CollisionSet {
             friction: params.friction.clamp(0.0, 1.0),
             bounciness: params.bounciness.clamp(0.0, 1.0),
         });
-        Ok(on_selected(doc, |p| p.collision = c))
+        Ok(on_selected(doc, params.active_only, |p| p.collision = c))
     }
 }
 
@@ -274,6 +302,12 @@ pub struct SoftParams {
     /// The vertex group whose vertices stay where the object puts them.
     /// Empty pins nothing.
     pub pin_group: String,
+    /// The active object only, rather than every selected mesh: what the
+    /// Physics tab sets, because the tab shows the active object's settings —
+    /// applying them to the whole selection turned off the physics of every
+    /// other selected object that the active one did not have.
+    #[param(hidden)]
+    pub active_only: bool,
 }
 
 impl Default for SoftParams {
@@ -297,6 +331,7 @@ pub fn soft_params(s: Option<&SoftBody>) -> SoftParams {
         shape_stiffness: d.shape_stiffness,
         pressure: d.pressure,
         pin_group: d.pin_group.unwrap_or_default(),
+        active_only: false,
     }
 }
 
@@ -351,7 +386,7 @@ impl Operator for SoftSet {
             pressure: params.pressure.clamp(-1.0, 1.0),
             pin_group: pin.clone(),
         };
-        Ok(on_selected(doc, |p| {
+        Ok(on_selected(doc, params.active_only, |p| {
             p.soft = match kind {
                 None => None,
                 // Becoming another kind starts from that kind's own settings:
