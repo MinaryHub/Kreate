@@ -12,6 +12,20 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Physics: rigid bodies that fall, collide and stack; cloth that drapes and
+  can be pinned by a vertex group; soft bodies that wobble back to shape;
+  particles; and hair, still or swinging. Set it up in the Physics tab or
+  Object ▸ Physics, press Bake, and play the timeline. Rigid bodies can be
+  baked to keyframes.
+- In sculpt, weight paint and texture paint, F resizes the brush and Shift+F
+  sets its strength by moving the pointer.
+- Outliner search: find an object by name.
+- Numpad 0 goes through the cameras when one is already the view.
+- Design tools: a scene length unit, measuring and dimensions, exact
+  coordinates, a work plane, mass and volume, a mesh check, a section view,
+  3MF, STEP and drawing (DXF/SVG) export, a parts list, sketches with
+  constraints, and aligning one part's face to another's.
+- The Claude panel takes attached files and pasted images.
 - Updates itself: at start Kreate looks for a newer release on GitHub,
   downloads it in the background, and uses it the next time it starts.
   `KREATE_NO_UPDATE=1` turns this off.
@@ -37,6 +51,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Sculpting keeps up with the pointer: a stroke is worked once a frame, and
+  starting one no longer pauses on a dense mesh.
+- Flat and studio shading show each face's material colour.
 - A `set_*` line that leaves a parameter out keeps its current value instead of
   resetting it to the default.
 - New objects never take a name in use: a second `Cube` is `Cube.001`.
@@ -45,6 +62,7 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- The outliner's scroll bar no longer covers the visibility eyes.
 - A duplicate keeps its materials.
 - A viewport capture taken while the window was hidden came back empty.
 - `material.link` works on an object with no material slots yet.
