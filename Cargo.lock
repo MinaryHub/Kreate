@@ -1546,7 +1546,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kreate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "base64",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-i18n"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -1596,14 +1596,14 @@ dependencies = [
 
 [[package]]
 name = "kreate-input"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kreate-reflect",
 ]
 
 [[package]]
 name = "kreate-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-math"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -1631,14 +1631,14 @@ dependencies = [
 
 [[package]]
 name = "kreate-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "kreate-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-ops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "kreate-io",
@@ -1665,15 +1665,15 @@ dependencies = [
 
 [[package]]
 name = "kreate-ops-derive"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "kreate-reflect"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "kreate-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "kreate-math",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-shader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kreate-math",
  "kreate-scene",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "kreate-math",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "egui",
@@ -1737,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "kreatec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "kreate-io",

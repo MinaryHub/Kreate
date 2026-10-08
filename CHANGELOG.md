@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
 ### Added
 
 - Physics: rigid bodies that fall, collide and stack; cloth that drapes and
@@ -72,5 +74,6 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/knoxxr/Kreate/commits/main
+[Unreleased]: https://github.com/knoxxr/Kreate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/knoxxr/Kreate/releases/tag/v0.2.0
 [0.1.0]: https://github.com/knoxxr/Kreate/commits/main
