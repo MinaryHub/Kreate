@@ -4429,6 +4429,12 @@ impl App {
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
             "run" => {
                 let script = text("script").ok_or("`script` is required")?;
+                // Said, so a person reading the console knows whose lines
+                // these are.
+                self.ui.console_log.push(kreate_ui::console::ConsoleLine {
+                    text: self.ui.catalog.get("console-from-assistant"),
+                    kind: kreate_ui::console::LineKind::Note,
+                });
                 let lines: Vec<_> = self
                     .run_script_reporting(&script)
                     .into_iter()

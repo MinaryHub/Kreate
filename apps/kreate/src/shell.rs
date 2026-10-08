@@ -4994,6 +4994,7 @@ fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labe
     let text = kreate_ui::console::ConsoleText {
         placeholder: l.console_placeholder.clone(),
         empty: l.console_empty.clone(),
+        same_error: state.catalog.get("console-same-error"),
     };
     let mut input = std::mem::take(&mut state.console_input);
     kreate_ui::console::console(ui, &text, &lines, &mut input, &mut state.queue);
@@ -9883,6 +9884,8 @@ node-socket-g = G
 node-socket-strength = Strength
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = Every edit you make appears here as a line of script. Type one to run it.
+console-same-error = ^ the same error
+console-from-assistant = From the AI chat:
 chat-placeholder = Ask for something to be built or changed…
 chat-attach = Attach…
 chat-attach-hint = Attach pictures, PDFs or text files. Ctrl+V in the box pastes a picture or copied files.
@@ -10894,6 +10897,8 @@ node-socket-g = G
 node-socket-strength = 세기
 console-placeholder = kreate.ops.mesh.extrude_region(offset=1.0)
 console-empty = 편집하는 모든 것이 여기에 스크립트 한 줄로 나타납니다. 한 줄 입력해 실행해 보세요.
+console-same-error = ^ 위와 같은 에러
+console-from-assistant = AI 채팅에서 보낸 스크립트:
 chat-placeholder = 만들거나 바꿀 것을 말해 보세요…
 chat-attach = 첨부…
 chat-attach-hint = 사진, PDF, 텍스트 파일을 첨부합니다. 입력 칸에서 Ctrl+V로 사진이나 복사한 파일을 붙여 넣을 수 있습니다.

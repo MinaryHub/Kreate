@@ -39,6 +39,8 @@ pub struct ConsoleText {
     pub placeholder: String,
     /// Shown when there is nothing in the scrollback yet.
     pub empty: String,
+    /// Shown in place of an error that says what the one before it said.
+    pub same_error: String,
 }
 
 /// Draws the console. `input` is what is being typed; Enter sends it.
@@ -61,7 +63,21 @@ pub fn console(
             if lines.is_empty() {
                 ui.weak(&text.empty);
             }
+            // An error the same as the last one is said once: a run of them is
+            // one cause, and the column of repeats is what hides it.
+            let mut last_error: Option<&str> = None;
             for line in lines {
+                if line.kind == LineKind::Error {
+                    if last_error == Some(line.text.as_str()) {
+                        ui.label(
+                            egui::RichText::new(format!("    {}", text.same_error))
+                                .monospace()
+                                .color(theme.text_faint),
+                        );
+                        continue;
+                    }
+                    last_error = Some(line.text.as_str());
+                }
                 let colour = match line.kind {
                     LineKind::History => theme.text_dim,
                     LineKind::Input => theme.text,
