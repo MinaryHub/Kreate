@@ -2994,6 +2994,23 @@ impl App {
     /// Numpad 0: the view through the scene camera — the active object when
     /// it is one, the first camera otherwise — and again, back.
     fn toggle_camera_view(&mut self) {
+        // Already looking through one camera with another one active: go
+        // through that one, as Blender's Ctrl+Numpad 0 does, rather than out.
+        let other = self.doc.selection.active.filter(|a| {
+            Some(*a) != self.camera_view_object
+                && self.doc.object(*a).is_some_and(|o| {
+                    matches!(o.data, kreate_scene::document::ObjectData::Camera(_))
+                })
+        });
+        if let (Some(_), Some(object)) = (self.camera_view, other) {
+            self.camera_view_object = Some(object);
+            let destination = self.view_through(object);
+            self.camera_view_pose = Some(destination);
+            self.motion
+                .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+            self.redraw.set(RedrawReason::CAMERA_MOVED);
+            return;
+        }
         if let Some(before) = self.camera_view.take() {
             self.camera_view_object = None;
             self.camera_view_pose = None;
@@ -12064,6 +12081,22 @@ kreate.ops.object.add_primitive()",
         app.doc.selection.clear();
         app.toggle_local_view();
         assert!(app.local_view.is_none());
+    }
+
+    #[test]
+    fn numpad_zero_goes_through_another_camera_when_it_is_active() {
+        let mut app = app();
+        app.run_op("object.add_camera", PropertyMap::new());
+        let first = app.doc.selection.active.unwrap();
+        app.toggle_camera_view();
+        assert_eq!(app.camera_view_object, Some(first));
+        app.run_op("object.add_camera", PropertyMap::new());
+        let second = app.doc.selection.active.unwrap();
+        app.toggle_camera_view();
+        assert!(app.camera_view.is_some(), "still in a camera view");
+        assert_eq!(app.camera_view_object, Some(second), "the other camera's");
+        app.toggle_camera_view();
+        assert!(app.camera_view.is_none(), "the same camera again leaves");
     }
 
     #[test]
