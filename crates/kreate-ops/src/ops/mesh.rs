@@ -889,6 +889,58 @@ impl Operator for TranslateSelection {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DissolveLimitedParams {
+    /// How far apart two faces' directions may be and still merge.
+    #[param(unit = "angle", min = 0.0, max = 3.0)]
+    pub angle: f64,
+}
+
+impl Default for DissolveLimitedParams {
+    fn default() -> Self {
+        Self {
+            angle: 5f64.to_radians(),
+        }
+    }
+}
+
+/// Merges faces that lie in one plane, across every mesh being edited:
+/// Blender's Limited Dissolve, and what tidies a boolean's or an import's
+/// triangles back into the faces they were.
+pub struct DissolveLimited;
+
+impl Operator for DissolveLimited {
+    type Params = DissolveLimitedParams;
+
+    fn id() -> &'static str {
+        "mesh.dissolve_limited"
+    }
+    fn label() -> &'static str {
+        "Limited Dissolve"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let angle = params.angle.clamp(0.0, std::f64::consts::PI) as f32;
+        let gone: usize = each_bmesh(doc, |bm| {
+            edit::limited_dissolve(bm, angle).map_err(|e| OpError::Failed(e.to_string()))
+        })?
+        .into_iter()
+        .sum();
+        Ok(if gone > 0 {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
 /// What `mesh.check_select` can find, in its numbering.
 pub const CHECK_ISSUES: [&str; 7] = [
     "open",
@@ -3415,6 +3467,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<ExtrudeRegion>();
     registry.register::<MedianSet>();
     registry.register::<CheckSelect>();
+    registry.register::<DissolveLimited>();
     registry.register::<FillHole>();
     registry.register::<InsetFaces>();
     registry.register::<LoopCut>();

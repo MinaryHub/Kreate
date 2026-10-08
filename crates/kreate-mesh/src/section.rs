@@ -159,6 +159,15 @@ fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut
         let p = points[i as usize];
         Vec2::new(p.dot(u), p.dot(v))
     };
+    for [a, b, c] in fill_loops(loops, &flat) {
+        faces.push(vec![a, b, c]);
+    }
+}
+
+/// Fills closed loops lying in a plane, as triangles: loops running
+/// counter-clockwise (as `flat` sees them) are outlines, the others holes,
+/// each hole in the smallest outline around it.
+pub(crate) fn fill_loops(loops: Vec<Vec<u32>>, flat: &impl Fn(u32) -> Vec2) -> Vec<[u32; 3]> {
     let area = |l: &[u32]| -> f32 {
         (0..l.len())
             .map(|i| {
@@ -169,7 +178,6 @@ fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut
             * 0.5
     };
     let (outlines, holes): (Vec<_>, Vec<_>) = loops.into_iter().partition(|l| area(l) > 0.0);
-    // Each hole goes in the smallest outline around it.
     let mut groups: Vec<(Vec<u32>, Vec<Vec<u32>>)> =
         outlines.into_iter().map(|o| (o, Vec::new())).collect();
     for hole in holes {
@@ -182,13 +190,15 @@ fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut
             hs.push(hole);
         }
     }
+    let mut out = Vec::new();
     for (outline, holes) in groups {
-        let polygon = bridge(outline, holes, &flat);
+        let polygon = bridge(outline, holes, flat);
         let flat_points: Vec<Vec2> = polygon.iter().map(|i| flat(*i)).collect();
         for [a, b, c] in ear_clip(&flat_points) {
-            faces.push(vec![polygon[a], polygon[b], polygon[c]]);
+            out.push([polygon[a], polygon[b], polygon[c]]);
         }
     }
+    out
 }
 
 /// Even-odd containment.

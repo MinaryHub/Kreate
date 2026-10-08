@@ -16,6 +16,7 @@ pub mod fill;
 pub mod inset;
 pub mod join;
 pub mod knife;
+pub mod limited;
 pub mod loopcut;
 pub mod merge;
 pub mod normals;
@@ -42,6 +43,7 @@ pub use fill::{fill, fill_selected, grid_fill, the_only_border, Fill, FillError}
 pub use inset::{inset_individual, inset_region, inset_selected, Inset};
 pub use join::{join, separate_selected, Part, Report as JoinReport};
 pub use knife::{knife, Knife};
+pub use limited::limited_dissolve;
 pub use loopcut::{loop_cut, loop_cut_selected, LoopCut};
 pub use merge::{merge_groups, merge_selected, weld_all, weld_by_distance, Merge, MergeTarget};
 pub use normals::{

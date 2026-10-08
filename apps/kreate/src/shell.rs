@@ -1449,6 +1449,7 @@ struct Labels {
     render_result_title: String,
     render_hint: String,
     design_units: String,
+    dissolve_limited: String,
     design_section: String,
     world_image: String,
     duplicate: String,
@@ -1766,6 +1767,7 @@ impl Labels {
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
             design_units: t("design-units"),
+            dissolve_limited: t("menu-dissolve-limited"),
             design_section: t("design-section"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
@@ -6636,6 +6638,11 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                     op("mesh.dissolve", &[("mode", V::Enum(select_mode))]),
                 ),
                 entry(
+                    "mesh.dissolve_limited",
+                    &l.dissolve_limited,
+                    op("mesh.dissolve_limited", &[]),
+                ),
+                entry(
                     "mesh.delete",
                     &l.delete,
                     op("mesh.delete", &[("mode", V::Enum(select_mode))]),
@@ -9215,6 +9222,8 @@ menu-redo = Redo
 menu-extrude = Extrude
 menu-subdivide = Subdivide
 menu-dissolve = Dissolve
+menu-dissolve-limited = Limited Dissolve
+op-mesh-dissolve-limited-desc = Merges faces that lie in one plane into one, as a boolean or an import leaves them in pieces.
 menu-inset = Inset
 menu-bridge = Bridge
 menu-loop-cut = Loop Cut
@@ -10182,6 +10191,8 @@ menu-redo = 다시 실행
 menu-extrude = 돌출
 menu-subdivide = 세분
 menu-dissolve = 녹이기
+menu-dissolve-limited = 평면 녹이기
+op-mesh-dissolve-limited-desc = 같은 평면에 놓인 면들을 하나로 합칩니다. 불리언이나 가져오기가 조각낸 면을 정리할 때 씁니다.
 menu-inset = 인셋
 menu-bridge = 브리지
 menu-loop-cut = 루프 컷

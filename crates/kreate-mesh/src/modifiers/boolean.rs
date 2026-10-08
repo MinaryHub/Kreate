@@ -455,7 +455,15 @@ fn assemble(polygons: Vec<Polygon>) -> MeshData {
             *v = renumber[*v as usize];
         }
     }
-    MeshData::from_faces(kept, &faces)
+    let mesh = MeshData::from_faces(kept, &faces);
+    // Pieces of different faces that came to lie in one plane — the shared
+    // top of two boxes joined — merged, so the result is as tidy as it is
+    // correct. Left as it was when the tidying cannot be done cleanly.
+    let mut bm = mesh.to_bmesh();
+    match crate::edit::limited_dissolve(&mut bm, 1e-4) {
+        Ok(0) | Err(_) => mesh,
+        Ok(_) => bm.to_mesh_data(),
+    }
 }
 
 /// Points to indices, a point within [`WELD`] of one already seen taking its
@@ -894,5 +902,17 @@ mod tests {
         }
         let out = boolean(&a, &rod, BooleanOp::Difference);
         assert!((volume(&out) - 7.5).abs() < 1e-3, "{}", volume(&out));
+    }
+
+    #[test]
+    fn two_overlapping_boxes_join_into_one_tidy_box() {
+        // The top of each box lies in one plane with the other's; the union
+        // is one box, and its sides are one face each rather than pieces.
+        let a = primitives::cube(2.0);
+        let b = moved(primitives::cube(2.0), Vec3::new(1.0, 0.0, 0.0));
+        let out = boolean(&a, &b, BooleanOp::Union);
+        assert!((volume(&out) - 12.0).abs() < 1e-3, "{}", volume(&out));
+        assert_eq!(out.num_faces(), 6, "a box has six sides");
+        assert_eq!(out.validate(), Vec::new());
     }
 }
