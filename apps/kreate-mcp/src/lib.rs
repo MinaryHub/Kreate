@@ -34,6 +34,13 @@ through a camera to a file.\n\
 Workflow: object.* operators work in object mode on the selection and the active object. \
 mesh.* and uv.* operators work in edit mode on the selected elements: enter it with \
 kreate.ops.object.mode_set(mode=\"edit\") and leave it with mode=\"object\". \
+Selecting faces: by direction, kreate.ops.mesh.select_where(mode=\"face\", normal=(0,0,1)) \
+takes every face facing up (angle= widens it, min= and max= limit it to a world box that \
+holds the faces' centers — make the box generous, not a sliver around one guess); by number, \
+get_mesh(faces=true) gives each face's index, center and normal, and \
+kreate.ops.mesh.select_set(mode=\"face\", elements=[...]) selects exactly those. Prefer \
+these to many small boxes: a box that misses selects nothing, and the next line acts on \
+nothing. \
 run_script stops at the first line that fails and says why and how to fix it; read that \
 error, fix the cause (often: select the object, or enter edit mode) and send the rest again \
 rather than repeating the same lines. \
@@ -114,7 +121,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "get_mesh",
-            "description": "One mesh object's vertices: index and position, in world space (default) or the object's own; with faces=true also each face's vertex indices and normal. The indices are the ones mesh.select_set takes. Capped at limit vertices; omitted says how many more there were. selected=true gives only what is selected in edit mode.",
+            "description": "One mesh object's vertices: index and position, in world space (default) or the object's own; with faces=true also each face's index, vertex indices, normal and center. The indices are the ones mesh.select_set takes. Capped at limit vertices; omitted says how many more there were. selected=true gives only what is selected in edit mode.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

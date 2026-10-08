@@ -3360,7 +3360,19 @@ impl Operator for SelectWhere {
             glam::DVec3::from_array(params.min),
             glam::DVec3::from_array(params.max),
         );
-        let inside = |p: glam::DVec3| p.cmpge(lo).all() && p.cmple(hi).all();
+        // The nearest tested point outside the box, for saying where things
+        // are when nothing was caught.
+        let nearest: std::cell::Cell<Option<(f64, glam::DVec3)>> = std::cell::Cell::new(None);
+        let inside = |p: glam::DVec3| {
+            let hit = p.cmpge(lo).all() && p.cmple(hi).all();
+            if !hit {
+                let gap = (p.clamp(lo, hi) - p).length();
+                if nearest.get().is_none_or(|(d, _)| gap < d) {
+                    nearest.set(Some((gap, p)));
+                }
+            }
+            hit
+        };
         let wanted = glam::DVec3::from_array(params.normal).normalize_or_zero();
         let cos_limit = params.angle.cos();
         let mut matched = 0usize;
@@ -3443,8 +3455,27 @@ impl Operator for SelectWhere {
             matched += hits.len();
             !hits.is_empty() || !params.extend
         })?;
-        if matched == 0 && params.extend {
-            return Ok(OpResult::Cancelled);
+        // Nothing caught is a miss to say, not a quiet success: whatever the
+        // next line does to "the selection" would act on nothing.
+        if matched == 0 && !params.deselect {
+            let what = ["vertex", "edge midpoint", "face center"][params.mode.min(2) as usize];
+            let near = match nearest.get() {
+                Some((gap, p)) => format!(
+                    "; the nearest {what} outside the box is at ({:.4}, {:.4}, {:.4}), {gap:.4} m away",
+                    p.x, p.y, p.z
+                ),
+                None => String::new(),
+            };
+            let facing = if wanted == glam::DVec3::ZERO {
+                String::new()
+            } else {
+                format!(" facing ({:.2}, {:.2}, {:.2})", wanted.x, wanted.y, wanted.z)
+            };
+            return Err(OpError::Failed(format!(
+                "nothing matched: no {what}{facing} in the box from ({:.4}, {:.4}, {:.4}) to ({:.4}, {:.4}, {:.4}){near}. \
+                 get_mesh(faces=true) lists every face's index and center",
+                lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+            )));
         }
         Ok(if changed {
             OpResult::Finished
@@ -3772,6 +3803,41 @@ mod tests {
         assert!((b.min.y + 3.0).abs() < 1e-5, "{b:?}");
         assert!((b.max.z - 1.0).abs() < 1e-5, "{b:?}");
         assert_eq!(after.validate(), Vec::new());
+    }
+
+    #[test]
+    fn a_selection_box_that_catches_nothing_says_where_things_are() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, _, ctx) = cube_doc();
+        let err = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.select_where",
+                &params(&[
+                    ("mode", PropertyValue::Enum(2)),
+                    ("min", PropertyValue::Vec3([0.9, 0.9, 0.9])),
+                    ("max", PropertyValue::Vec3([0.95, 0.95, 0.95])),
+                ]),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing matched"), "{err}");
+        assert!(err.contains("nearest face center"), "{err}");
+        // By direction alone, the top is found.
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.select_where",
+            &params(&[
+                ("mode", PropertyValue::Enum(2)),
+                ("normal", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+            ]),
+        )
+        .unwrap();
     }
 
     #[test]

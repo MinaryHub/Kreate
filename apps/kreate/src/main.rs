@@ -4657,7 +4657,20 @@ impl App {
                     } else {
                         n
                     };
-                    json!({ "index": f, "vertices": mesh.face_verts(f), "normal": n.to_array() })
+                    // The middle, in the same space as the vertices: what
+                    // a selection by position tests, and where to look.
+                    let ring = mesh.face_verts(f);
+                    let middle = ring
+                        .iter()
+                        .map(|v| mesh.positions()[*v as usize])
+                        .sum::<kreate_math::Vec3>()
+                        / ring.len().max(1) as f32;
+                    json!({
+                        "index": f,
+                        "vertices": ring,
+                        "normal": n.to_array(),
+                        "center": at(middle),
+                    })
                 })
                 .collect();
             out["faces"] = json!(list);
