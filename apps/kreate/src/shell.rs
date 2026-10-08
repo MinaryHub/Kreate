@@ -1449,6 +1449,10 @@ struct Labels {
     render_result_title: String,
     render_hint: String,
     design_units: String,
+    file_export_drawing: String,
+    drawing_top: String,
+    drawing_front: String,
+    drawing_right: String,
     dissolve_limited: String,
     design_section: String,
     world_image: String,
@@ -1767,6 +1771,10 @@ impl Labels {
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
             design_units: t("design-units"),
+            file_export_drawing: t("menu-export-drawing"),
+            drawing_top: t("drawing-top"),
+            drawing_front: t("drawing-front"),
+            drawing_right: t("drawing-right"),
             dissolve_limited: t("menu-dissolve-limited"),
             design_section: t("design-section"),
             world_image: t("world-image"),
@@ -3258,6 +3266,24 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     "file.export",
                     &l.file_export,
                     Run::Command(Command::ExportScene),
+                ),
+                MenuNode::Sub(
+                    l.file_export_drawing.clone(),
+                    [
+                        (0u32, &l.drawing_top),
+                        (1, &l.drawing_front),
+                        (2, &l.drawing_right),
+                    ]
+                    .into_iter()
+                    .map(|(view, label)| {
+                        let mut p = PropertyMap::new();
+                        p.set("view", kreate_reflect::PropertyValue::Enum(view));
+                        MenuNode::Entry(
+                            MenuEntry::new("file.export_drawing", label, Run::Dispatch("file.export_drawing", p))
+                                .variant("view", kreate_reflect::PropertyValue::Enum(view)),
+                        )
+                    })
+                    .collect(),
                 ),
             ],
         },
@@ -9566,6 +9592,11 @@ render-view = View Render
 render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
 design-units = Units
+menu-export-drawing = Export Drawing
+drawing-top = Top View...
+drawing-front = Front View...
+drawing-right = Right View...
+op-file-export-drawing-desc = Writes the shown parts seen square from one side as a DXF or SVG drawing in the scene's unit, hidden lines dashed.
 design-section = Section View
 panel-physical = Physical Properties
 panel-sketch = Sketch
@@ -10568,6 +10599,11 @@ render-view = 렌더 결과 보기
 render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
 design-units = 단위
+menu-export-drawing = 도면 내보내기
+drawing-top = 위에서 본 도면...
+drawing-front = 앞에서 본 도면...
+drawing-right = 오른쪽에서 본 도면...
+op-file-export-drawing-desc = 보이는 부품을 한쪽에서 똑바로 본 DXF 또는 SVG 도면으로 씬 단위로 씁니다. 숨은 선은 점선입니다.
 design-section = 단면 보기
 panel-physical = 물성
 panel-sketch = 스케치

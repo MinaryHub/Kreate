@@ -8,6 +8,7 @@
 
 pub mod build;
 pub mod clipboard;
+pub mod drawing;
 pub mod exr;
 pub mod container;
 pub mod gltf_export;
@@ -19,6 +20,7 @@ pub mod ktile;
 pub mod library;
 pub mod migrate;
 pub mod obj;
+pub mod step;
 pub mod stl;
 pub mod threemf;
 pub mod usd;

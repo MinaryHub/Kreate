@@ -3302,6 +3302,107 @@ impl App {
         self.redraw.set(RedrawReason::UI);
     }
 
+    /// The bill of materials: each part, how many there are of it (objects
+    /// sharing a mesh are one part used more than once), its size, volume and
+    /// mass at the scene's density — as CSV, in the scene's unit.
+    fn parts_list(&self) -> String {
+        let unit = self.doc.design.length_unit;
+        let symbol = unit.symbol();
+        let mut rows: Vec<(String, usize, [f64; 3], f64, usize)> = Vec::new();
+        let mut by_mesh: Vec<(usize, usize)> = Vec::new();
+        for (name, mesh, world) in self.printable_parts() {
+            let key = Arc::as_ptr(&mesh) as usize;
+            if let Some((_, row)) = by_mesh.iter().find(|(k, _)| *k == key) {
+                rows[*row].1 += 1;
+                continue;
+            }
+            let points: Vec<DVec3> =
+                mesh.positions().iter().map(|p| world.transform_point3(p.as_dvec3())).collect();
+            let (lo, hi) = points.iter().fold(
+                (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            );
+            let size = if points.is_empty() { DVec3::ZERO } else { hi - lo };
+            let mass = kreate_mesh::measure::mass_properties(&mesh, |p| world.transform_point3(p));
+            by_mesh.push((key, rows.len()));
+            rows.push((name, 1, size.to_array(), mass.volume.abs(), mesh.num_faces() as usize));
+        }
+        let per = unit.metres();
+        let mut out = format!(
+            "Part,Quantity,Size X ({symbol}),Size Y ({symbol}),Size Z ({symbol}),Volume ({symbol}3),Mass each (kg),Faces
+"
+        );
+        for (name, count, size, volume, faces) in rows {
+            let name = if name.contains([',', '"']) {
+                format!("\"{}\"", name.replace('"', "\"\""))
+            } else {
+                name
+            };
+            out.push_str(&format!(
+                "{name},{count},{:.4},{:.4},{:.4},{:.4},{:.6},{faces}
+",
+                size[0] / per,
+                size[1] / per,
+                size[2] / per,
+                volume / per.powi(3),
+                volume * self.doc.design.density,
+            ));
+        }
+        out
+    }
+
+    /// File > Export Drawing: the shown parts seen square from one side, as
+    /// a DXF or an SVG drawing in the scene's unit, hidden lines dashed.
+    fn export_drawing(&mut self, view: u32) {
+        let view = kreate_io::drawing::View::ALL[(view as usize).min(2)];
+        let name = match view {
+            kreate_io::drawing::View::Top => "top",
+            kreate_io::drawing::View::Front => "front",
+            kreate_io::drawing::View::Right => "right",
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DXF drawing", &["dxf"])
+            .add_filter("SVG drawing", &["svg"])
+            .set_title("Export Drawing")
+            .set_file_name(format!("{name}.dxf"))
+            .save_file()
+        else {
+            return;
+        };
+        let _ = self.write_drawing(&path, view);
+    }
+
+    fn write_drawing(&mut self, path: &std::path::Path, view: kreate_io::drawing::View) -> Result<(), String> {
+        let parts = self.printable_parts();
+        let refs: Vec<(&MeshData, glam::DAffine3)> =
+            parts.iter().map(|(_, mesh, world)| (&**mesh, *world)).collect();
+        let lines = kreate_io::drawing::project_drawing(&refs, view, 30f64.to_radians());
+        let unit = self.doc.design.length_unit;
+        let svg = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        let text = if svg {
+            let suffix = match unit.symbol() {
+                "m" | "ft" => "",
+                s => s,
+            };
+            kreate_io::drawing::write_svg(&lines, unit.metres(), suffix)
+        } else {
+            kreate_io::drawing::write_dxf(&lines, unit.metres())
+        };
+        match std::fs::write(path, text) {
+            Ok(()) => {
+                self.status(&format!("drawing written: {} lines", lines.len()));
+                Ok(())
+            }
+            Err(e) => {
+                let message = format!("cannot write the drawing: {e}");
+                self.status(&message);
+                Err(message)
+            }
+        }
+    }
+
     /// Every shown mesh object as it stands, for a print: its evaluated mesh
     /// (modifiers applied, not cut by a section view) and where it is.
     fn printable_parts(&self) -> Vec<(String, Arc<MeshData>, glam::DAffine3)> {
@@ -5823,6 +5924,8 @@ impl App {
             .add_filter("Wavefront OBJ", &["obj"])
             .add_filter("STL", &["stl"])
             .add_filter("3MF (3D printing)", &["3mf"])
+            .add_filter("STEP (CAD, faceted)", &["step", "stp"])
+            .add_filter("Parts list (CSV)", &["csv"])
             .add_filter("USD (text)", &["usda"])
             .set_title("Export")
             .set_file_name("untitled.glb")
@@ -5844,6 +5947,29 @@ impl App {
         let written = match lower.as_str() {
             // For printing: every shown part as it stands — modifiers applied,
             // placed in the world — in the scene's unit.
+            // For CAD: each part a faceted solid, in the scene's unit.
+            "step" | "stp" => {
+                let parts = self.printable_parts();
+                if parts.is_empty() {
+                    Err("there is no geometry to write".to_string())
+                } else {
+                    let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                        .iter()
+                        .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                        .collect();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    Ok(kreate_io::step::write_step(
+                        &name,
+                        &refs,
+                        self.doc.design.length_unit.metres(),
+                    )
+                    .into_bytes())
+                }
+            }
+            "csv" => Ok(self.parts_list().into_bytes()),
             "3mf" => {
                 let parts = self.printable_parts();
                 if parts.is_empty() {
@@ -9611,6 +9737,10 @@ impl App {
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.measure" => self.begin_measure(),
+            "file.export_drawing" => {
+                let view = action.params.get("view").and_then(|v| v.as_int()).unwrap_or(0);
+                self.export_drawing(view as u32);
+            }
             // The Object tab's Mesh Check: what is wrong with the active
             // mesh, in the world, and then where.
             "app.mesh_check" => {
@@ -11398,6 +11528,46 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// STEP, the parts list and a drawing, all in the scene's unit; two
+    /// objects sharing a mesh are one part twice in the list.
+    #[test]
+    fn step_parts_list_and_drawing_are_written_in_the_scenes_unit() {
+        let mut app = app();
+        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.duplicate", {
+            let mut p = PropertyMap::new();
+            p.set("linked", PropertyValue::Bool(true));
+            p
+        });
+        let mut p = PropertyMap::new();
+        p.set("length", PropertyValue::Enum(2));
+        app.run_op("scene.units_set", p);
+        app.evaluate_scene();
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let read = |name: &str| {
+            let path = dir.join(format!("kreate-test-{pid}-{name}"));
+            let text = std::fs::read_to_string(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            text
+        };
+        app.export_to(&dir.join(format!("kreate-test-{pid}-a.step"))).unwrap();
+        let step = read("a.step");
+        assert!(step.contains("SI_UNIT(.MILLI.,.METRE.)"));
+        assert_eq!(step.matches("FACETED_BREP(").count(), 2);
+        app.export_to(&dir.join(format!("kreate-test-{pid}-b.csv"))).unwrap();
+        let csv = read("b.csv");
+        let row = csv.lines().nth(1).expect("one part");
+        assert!(row.contains(",2,2000.0000,2000.0000,2000.0000,"), "{csv}");
+        assert_eq!(csv.lines().count(), 2, "{csv}");
+        app.write_drawing(&dir.join(format!("kreate-test-{pid}-c.dxf")), kreate_io::drawing::View::Top)
+            .unwrap();
+        assert!(read("c.dxf").contains("$INSUNITS
+70
+4
+"));
     }
 
     /// File > Export to .3mf writes each shown part where it stands, in the
