@@ -173,6 +173,12 @@ pub struct ShellState {
     /// Lives here because it is view state: derived from the document, rebuilt
     /// when the document's version moves, and of no interest to anything else.
     pub outliner: OutlinerOrder,
+    /// What the outliner's search box holds. Empty: the whole tree.
+    pub outliner_search: String,
+    /// The rows the search matched, as indices into the tree's order, and
+    /// what they were found for — the search and the document's version —
+    /// so typing a letter searches once rather than every frame.
+    outliner_found: Option<(String, u64, usize, Vec<usize>)>,
     /// The rubber-band rectangle to draw, in viewport-relative points.
     ///
     /// Set by the application while a selection drag is in progress. The
@@ -609,6 +615,8 @@ impl Default for ShellState {
             viewport_blockers: Vec::new(),
             sidebars: std::collections::BTreeSet::new(),
             outliner: OutlinerOrder::default(),
+            outliner_search: String::new(),
+            outliner_found: None,
             select_band: None,
             select_band_deselect: false,
             context_menu: ContextMenu::default(),
@@ -2609,17 +2617,89 @@ fn draw_area(
                 }
                 "outliner" => {
                     let order = std::mem::take(&mut state.outliner);
-                    kreate_ui::outliner(
-                        ui,
-                        &state.catalog,
-                        order.ids(),
-                        order.depths(),
-                        order.groups(),
-                        selected,
-                        active,
-                        |index| order.row(doc, index),
-                        &mut state.queue,
-                    );
+                    // A box to find an object by name: what a scene of
+                    // hundreds of parts needs before anything else.
+                    // Right to left, so the box takes what the clear button
+                    // leaves and the row never grows past the panel — a
+                    // wider row widens the tree under it and cuts off its
+                    // eyes.
+                    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let hint = state.catalog.get("outliner-search");
+                        // i18n-exempt: a close mark
+                        if !state.outliner_search.is_empty() && ui.small_button("x").clicked() {
+                            state.outliner_search.clear();
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.outliner_search)
+                                .hint_text(hint)
+                                .desired_width(ui.available_width()),
+                        );
+                    });
+                    let query = state.outliner_search.trim().to_lowercase();
+                    if query.is_empty() {
+                        kreate_ui::outliner(
+                            ui,
+                            &state.catalog,
+                            order.ids(),
+                            order.depths(),
+                            order.groups(),
+                            selected,
+                            active,
+                            |index| order.row(doc, index),
+                            &mut state.queue,
+                        );
+                    } else {
+                        // The objects whose names hold what was typed, in the
+                        // tree's order, flat: a match deep in a hierarchy is
+                        // found without opening its parents.
+                        let fresh = match &state.outliner_found {
+                            Some((q, version, len, _)) => {
+                                *q != query || *version != doc.version() || *len != order.ids().len()
+                            }
+                            None => true,
+                        };
+                        if fresh {
+                            let found: Vec<usize> = order
+                                .ids()
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, key)| {
+                                    doc.object_at_slot(**key)
+                                        .and_then(|id| doc.object(id))
+                                        .is_some_and(|o| o.name.to_lowercase().contains(&query))
+                                })
+                                .map(|(i, _)| i)
+                                .collect();
+                            state.outliner_found =
+                                Some((query.clone(), doc.version(), order.ids().len(), found));
+                        }
+                        let found = state
+                            .outliner_found
+                            .as_ref()
+                            .map(|(_, _, _, f)| f.clone())
+                            .unwrap_or_default();
+                        if found.is_empty() {
+                            ui.weak(state.catalog.get("outliner-search-none"));
+                        }
+                        let ids: Vec<u32> = found.iter().map(|i| order.ids()[*i]).collect();
+                        let depths = vec![0u16; ids.len()];
+                        kreate_ui::outliner(
+                            ui,
+                            &state.catalog,
+                            &ids,
+                            &depths,
+                            &[],
+                            selected,
+                            active,
+                            |index| {
+                                let mut row = order.row(doc, *found.get(index)?)?;
+                                row.depth = 0;
+                                Some(row)
+                            },
+                            &mut state.queue,
+                        );
+                    }
                     state.outliner = order;
                 }
                 "properties" => {
@@ -9986,6 +10066,8 @@ panel-transform = Transform
 panel-surface = Surface
 panel-light = Light
 outliner-hide = Hide in viewport
+outliner-search = Search
+outliner-search-none = No object's name holds that.
 outliner-show = Show in viewport
 tool-select = Select Box
 tool-move = Move
@@ -10999,6 +11081,8 @@ panel-transform = 변환
 panel-surface = 표면
 panel-light = 라이트
 outliner-hide = 뷰포트에서 숨기기
+outliner-search = 검색
+outliner-search-none = 그 이름을 가진 오브젝트가 없습니다.
 outliner-show = 뷰포트에 보이기
 tool-select = 박스 선택
 tool-move = 이동

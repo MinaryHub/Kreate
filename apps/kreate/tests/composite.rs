@@ -2640,7 +2640,7 @@ fn shot_outliner_scrolling() {
     let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
     for i in 0..60 {
         doc.add_object(kreate_scene::document::Object::new(
-            &format!("Part {i}"),
+            format!("Part {i}"),
             kreate_scene::document::ObjectData::Mesh(mesh),
         ));
     }
@@ -2649,4 +2649,24 @@ fn shot_outliner_scrolling() {
         return;
     };
     shot.dump("outliner-scrolling");
+}
+
+/// The outliner's search: only the parts whose names hold what was typed.
+#[test]
+fn shot_outliner_search() {
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    for i in 0..60 {
+        doc.add_object(kreate_scene::document::Object::new(
+            format!("Part {i}"),
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+    }
+    let Some(shot) = composite_with(&doc, "en", false, |state| {
+        state.outliner_search = "part 4".into();
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("outliner-search");
 }
