@@ -596,6 +596,9 @@ pub struct DesignRecord {
     /// Kilograms per cubic metre, when not water's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<f64>,
+    /// The section view, when it is on: axis, offset, flip, cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<(u32, f64, bool, bool)>,
 }
 
 /// The scene's render settings. See `kreate_scene::render`.
@@ -1480,6 +1483,10 @@ pub fn write(
                 .collect(),
             density: (document.design.density != kreate_scene::design::DEFAULT_DENSITY)
                 .then_some(document.design.density),
+            section: document
+                .design
+                .section
+                .map(|s| (s.axis, s.offset, s.flip, s.cap)),
         });
         scene.collections = document
             .collections()
@@ -2162,6 +2169,15 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         if let Some(density) = d.density.filter(|x| x.is_finite() && *x >= 0.0) {
             document.design.density = density;
         }
+        document.design.section = d
+            .section
+            .filter(|s| s.0 <= 3 && s.1.is_finite())
+            .map(|(axis, offset, flip, cap)| kreate_scene::design::Section {
+                axis,
+                offset,
+                flip,
+                cap,
+            });
     }
     if let Some(r) = &scene.render {
         use kreate_scene::render::{OutputFormat, RenderSettings};

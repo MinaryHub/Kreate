@@ -7,7 +7,39 @@
 
 pub use kreate_reflect::LengthUnit;
 
-use kreate_math::DVec3;
+use kreate_math::{DQuat, DVec3};
+
+/// A section view: the scene cut by a plane, the far side taken away, and
+/// the cut capped so walls read as solid. What is drawn, not what is saved:
+/// the meshes are untouched.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Section {
+    /// Which plane: across X, Y or Z, or 3 for the work plane (the 3D
+    /// cursor's Z).
+    pub axis: u32,
+    /// How far along the plane's normal from the origin (or the cursor).
+    pub offset: f64,
+    /// Keep the other side.
+    pub flip: bool,
+    /// Close the cut.
+    pub cap: bool,
+}
+
+impl Section {
+    /// The plane in the world: a point on it, and the normal pointing at the
+    /// side taken away.
+    pub fn plane(&self, cursor: DVec3, cursor_rotation: DQuat) -> (DVec3, DVec3) {
+        let (origin, normal) = match self.axis {
+            0 => (DVec3::ZERO, DVec3::X),
+            1 => (DVec3::ZERO, DVec3::Y),
+            3 => (cursor, cursor_rotation * DVec3::Z),
+            _ => (DVec3::ZERO, DVec3::Z),
+        };
+        let normal = if self.flip { -normal } else { normal };
+        let along = if self.flip { -self.offset } else { self.offset };
+        (origin + normal * along, normal)
+    }
+}
 
 /// A dimension left on the scene: two points and the distance between
 /// them, or three and the angle at the middle one. In the world, so it stays
@@ -59,6 +91,8 @@ pub struct DesignSettings {
     /// What the parts are made of, in kilograms per cubic metre, for their
     /// mass: PLA is about 1240, aluminium 2700, steel 7850.
     pub density: f64,
+    /// The section view, when it is on.
+    pub section: Option<Section>,
 }
 
 impl Default for DesignSettings {
@@ -67,6 +101,7 @@ impl Default for DesignSettings {
             length_unit: LengthUnit::default(),
             measurements: Vec::new(),
             density: DEFAULT_DENSITY,
+            section: None,
         }
     }
 }

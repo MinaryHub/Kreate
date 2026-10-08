@@ -876,6 +876,9 @@ struct App {
     /// placement they were measured for: measured again only when either
     /// changes.
     mass_cache: Option<(usize, [f64; 12], kreate_mesh::measure::MassProperties)>,
+    /// The section view's cut meshes, by the evaluated mesh and the plane in
+    /// its space they were cut from.
+    sectioned: Vec<(Arc<MeshData>, [f64; 7], Arc<MeshData>)>,
     /// The brush size circle select last used, so the next one starts there.
     circle_radius: f32,
     /// Local view (`/`): the objects shown, and the view to go back to.
@@ -1020,6 +1023,7 @@ impl App {
             knife: None,
             measure: None,
             mass_cache: None,
+            sectioned: Vec::new(),
             circle_radius: 40.0,
             local_view: None,
             camera_view: None,
@@ -3298,6 +3302,51 @@ impl App {
         self.redraw.set(RedrawReason::UI);
     }
 
+    /// The section view: every evaluated mesh but the ones being edited cut
+    /// by the plane and capped, in its own space. Kept per input and plane,
+    /// so an unchanged scene is not cut again every frame.
+    fn cut_sections(&mut self, editing: &[ObjectId]) {
+        let Some(section) = self.doc.design.section else {
+            self.sectioned.clear();
+            return;
+        };
+        let (point, normal) = section.plane(self.doc.cursor, self.doc.cursor_rotation);
+        let mut kept = Vec::new();
+        for (id, mesh) in self.evaluated.iter_mut() {
+            if editing.contains(id) {
+                continue;
+            }
+            let world = self.doc.world_transform(*id);
+            let local_point = world.inverse().transform_point3(point);
+            let local_normal = (world.matrix3.transpose() * normal).normalize_or_zero();
+            let key = [
+                local_point.x,
+                local_point.y,
+                local_point.z,
+                local_normal.x,
+                local_normal.y,
+                local_normal.z,
+                f64::from(u8::from(section.cap)),
+            ];
+            let out = self
+                .sectioned
+                .iter()
+                .find(|(input, k, _)| Arc::ptr_eq(input, mesh) && *k == key)
+                .map(|(_, _, out)| out.clone())
+                .unwrap_or_else(|| {
+                    Arc::new(kreate_mesh::section::section(
+                        mesh,
+                        local_point.as_vec3(),
+                        local_normal.as_vec3(),
+                        section.cap,
+                    ))
+                });
+            kept.push((mesh.clone(), key, out.clone()));
+            *mesh = out;
+        }
+        self.sectioned = kept;
+    }
+
     /// The active mesh object's volume, surface and middle, for the Object
     /// tab: as evaluated (modifiers included) and in the world, so it is what
     /// is on screen. Not during a sculpt stroke, which changes the mesh every
@@ -3311,6 +3360,15 @@ impl App {
                 .iter()
                 .find(|(o, _)| *o == id)
                 .map(|(_, m)| (id, m.clone()))
+        });
+        // A section view cuts what is drawn, not the part: measure the whole.
+        let found = found.map(|(id, m)| {
+            let whole = self
+                .sectioned
+                .iter()
+                .find(|(_, _, out)| Arc::ptr_eq(out, &m))
+                .map(|(input, _, _)| input.clone());
+            (id, whole.unwrap_or(m))
         });
         let Some((id, mesh)) = found else {
             self.mass_cache = None;
@@ -6336,6 +6394,7 @@ impl App {
             *mesh = shown;
         }
         self.unhidden = unhidden;
+        self.cut_sections(&editing);
         // Local view: only what it was entered with is drawn or picked.
         if let Some((keep, _)) = &self.local_view {
             self.evaluated.retain(|(id, _)| keep.contains(id));
@@ -11301,6 +11360,29 @@ mod tests {
         assert!(!app.press_belongs_to_viewport(), "on the menu");
         app.input.cursor = Some((500.0 * ppp, 400.0 * ppp));
         assert!(app.press_belongs_to_viewport(), "on the scene beside it");
+    }
+
+    /// The section view cuts what is drawn and picked, half a cube for a
+    /// plane through it, while the Object tab still weighs the whole part.
+    #[test]
+    fn a_section_cuts_the_view_but_not_the_part() {
+        let mut app = app();
+        app.run_op("object.add_primitive", PropertyMap::new());
+        let mut p = PropertyMap::new();
+        p.set("enabled", PropertyValue::Bool(true));
+        p.set("axis", PropertyValue::Enum(0));
+        app.run_op("scene.section_set", p);
+        app.evaluate_scene();
+        let (_, shown) = &app.evaluated[0];
+        assert!(shown.bounds().max.x < 1e-3, "{:?}", shown.bounds());
+        app.publish_mass();
+        assert!((app.ui.mass.unwrap().volume - 8.0).abs() < 1e-9);
+        // Off again, and the whole is drawn.
+        let mut p = PropertyMap::new();
+        p.set("enabled", PropertyValue::Bool(false));
+        app.run_op("scene.section_set", p);
+        app.evaluate_scene();
+        assert!(app.evaluated[0].1.bounds().max.x > 0.9);
     }
 
     /// Mesh Check finds a plane's open rim, and Select takes the user into

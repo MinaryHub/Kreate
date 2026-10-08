@@ -1449,6 +1449,7 @@ struct Labels {
     render_result_title: String,
     render_hint: String,
     design_units: String,
+    design_section: String,
     world_image: String,
     duplicate: String,
     object_copy: String,
@@ -1765,6 +1766,7 @@ impl Labels {
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
             design_units: t("design-units"),
+            design_section: t("design-section"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
             object_copy: t("object-copy"),
@@ -4995,6 +4997,17 @@ fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry
             kreate_reflect::OpParams::to_map(&kreate_ops::ops::design::units_params(doc));
         if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
             send_edit(state, "scene.units_set", params, false);
+        }
+    }
+    // The section view: a plane through the scene, its far side cut away.
+    ui.separator();
+    ui.strong(&l.design_section);
+    if let Some(info) = registry.get("scene.section_set") {
+        let mut params =
+            kreate_reflect::OpParams::to_map(&kreate_ops::ops::design::section_params(doc));
+        if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "scene.section_set", params, dragging);
         }
     }
     // The dimensions on the scene: what each reads, and a way to take it off.
@@ -9412,6 +9425,7 @@ render-view = View Render
 render-result-title = Render Result
 render-hint = Renders through the scene camera with the path tracer. Esc stops a render.
 design-units = Units
+design-section = Section View
 panel-physical = Physical Properties
 panel-mesh-check = Mesh Check
 check-thickness = Thinnest Wall
@@ -10394,6 +10408,7 @@ render-view = 렌더 결과 보기
 render-result-title = 렌더 결과
 render-hint = 씬 카메라로 패스 트레이서 렌더를 합니다. Esc로 멈춥니다.
 design-units = 단위
+design-section = 단면 보기
 panel-physical = 물성
 panel-mesh-check = 메시 검사
 check-thickness = 최소 벽 두께

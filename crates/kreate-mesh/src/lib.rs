@@ -17,6 +17,7 @@ pub mod measure;
 pub mod modifiers;
 pub mod primitives;
 pub mod sculpt;
+pub mod section;
 pub mod selection;
 pub mod tessellate;
 

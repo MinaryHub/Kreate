@@ -58,3 +58,17 @@ fn the_density_is_saved() {
     doc.design.density = 1240.0;
     assert_eq!(round_trip(&doc).design.density, 1240.0);
 }
+
+#[test]
+fn the_section_view_is_saved() {
+    use kreate_scene::design::Section;
+    let mut doc = Document::new();
+    let section = Section {
+        axis: 3,
+        offset: -0.25,
+        flip: true,
+        cap: false,
+    };
+    doc.design.section = Some(section);
+    assert_eq!(round_trip(&doc).design.section, Some(section));
+}

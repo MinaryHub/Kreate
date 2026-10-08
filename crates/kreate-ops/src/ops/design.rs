@@ -2,7 +2,7 @@
 //! left on it. See `kreate_scene::design`.
 
 use kreate_math::DVec3;
-use kreate_scene::design::{LengthUnit, Measurement};
+use kreate_scene::design::{LengthUnit, Measurement, Section};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
@@ -11,8 +11,84 @@ use crate::OpParams;
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<UnitsSet>();
     registry.register::<DensitySet>();
+    registry.register::<SectionSet>();
     registry.register::<MeasureAdd>();
     registry.register::<MeasureRemove>();
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SectionSetParams {
+    /// Cut the view.
+    pub enabled: bool,
+    /// Across which axis, or the work plane (the 3D cursor's Z).
+    #[param(variants("x", "y", "z", "cursor"))]
+    pub axis: u32,
+    /// How far along the axis the plane is.
+    #[param(unit = "length", soft_min = -10.0, soft_max = 10.0)]
+    pub offset: f64,
+    /// Keep the other side.
+    pub flip: bool,
+    /// Close the cut, so walls read as solid.
+    pub cap: bool,
+}
+
+impl Default for SectionSetParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            axis: 0,
+            offset: 0.0,
+            flip: false,
+            cap: true,
+        }
+    }
+}
+
+/// The section as the operator's parameters, for the panel.
+pub fn section_params(doc: &Document) -> SectionSetParams {
+    match doc.design.section {
+        Some(s) => SectionSetParams {
+            enabled: true,
+            axis: s.axis,
+            offset: s.offset,
+            flip: s.flip,
+            cap: s.cap,
+        },
+        None => SectionSetParams::default(),
+    }
+}
+
+/// Turns the section view on or off, or moves its plane.
+pub struct SectionSet;
+
+impl Operator for SectionSet {
+    type Params = SectionSetParams;
+    fn id() -> &'static str {
+        "scene.section_set"
+    }
+    fn label() -> &'static str {
+        "Section View"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let section = (params.enabled && params.offset.is_finite()).then_some(Section {
+            axis: params.axis.min(3),
+            offset: params.offset,
+            flip: params.flip,
+            cap: params.cap,
+        });
+        if doc.document().design.section == section {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut().design.section = section;
+        Ok(OpResult::Finished)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
