@@ -339,27 +339,35 @@ impl Binary<'_> {
                 }
                 let value = match code {
                     b'd' => Value::Floats(
-                        data.chunks_exact(8)
+                        data.as_chunks::<8>()
+                            .0
+                            .iter()
                             .take(count)
-                            .map(|c| f64::from_le_bytes(c.try_into().unwrap_or([0; 8])))
+                            .map(|c| f64::from_le_bytes(*c))
                             .collect(),
                     ),
                     b'f' => Value::Floats(
-                        data.chunks_exact(4)
+                        data.as_chunks::<4>()
+                            .0
+                            .iter()
                             .take(count)
-                            .map(|c| f32::from_le_bytes(c.try_into().unwrap_or([0; 4])) as f64)
+                            .map(|c| f32::from_le_bytes(*c) as f64)
                             .collect(),
                     ),
                     b'l' => Value::Ints(
-                        data.chunks_exact(8)
+                        data.as_chunks::<8>()
+                            .0
+                            .iter()
                             .take(count)
-                            .map(|c| i64::from_le_bytes(c.try_into().unwrap_or([0; 8])))
+                            .map(|c| i64::from_le_bytes(*c))
                             .collect(),
                     ),
                     b'i' => Value::Ints(
-                        data.chunks_exact(4)
+                        data.as_chunks::<4>()
+                            .0
+                            .iter()
                             .take(count)
-                            .map(|c| i32::from_le_bytes(c.try_into().unwrap_or([0; 4])) as i64)
+                            .map(|c| i32::from_le_bytes(*c) as i64)
                             .collect(),
                     ),
                     _ => Value::Ints(data.iter().take(count).map(|b| *b as i64).collect()),
@@ -820,7 +828,9 @@ pub fn parse_fbx(
             continue;
         };
         let positions: Vec<Vec3> = points
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
             .collect();
         // A negative index ends a polygon: its vertex is the bits inverted.
