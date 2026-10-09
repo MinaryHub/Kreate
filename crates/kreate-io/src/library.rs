@@ -160,6 +160,49 @@ pub fn link_object(
     Ok(document.add_object(object))
 }
 
+/// Links every mesh object a library holds, reading it once.
+///
+/// The asset browser's Link: a `.kreate` of props, each arriving where the
+/// library put it, read-only, and refreshed from the library on every open.
+/// The library is named by `library` as it should be written in the
+/// document — absolute for a document not yet saved, which has no folder to
+/// be relative to.
+pub fn link_all(
+    document: &mut Document,
+    document_dir: &Path,
+    library: &str,
+) -> Result<Vec<kreate_scene::document::ObjectId>, LibraryError> {
+    let path = resolve_path(document_dir, library);
+    let file = std::fs::File::open(&path).map_err(|e| LibraryError::Unreadable {
+        path: path.display().to_string(),
+        source: crate::container::ContainerError::Io(e),
+    })?;
+    let loaded = crate::container::read(std::io::BufReader::new(file)).map_err(|e| {
+        LibraryError::Unreadable {
+            path: path.display().to_string(),
+            source: e,
+        }
+    })?;
+    let mut made = Vec::new();
+    for (_, source) in loaded.document.objects() {
+        let ObjectData::Mesh(mesh_id) = source.data else {
+            continue;
+        };
+        let Some(mesh) = loaded.document.mesh(mesh_id) else {
+            continue;
+        };
+        let local_mesh = document.add_mesh(mesh.clone());
+        let mut object = Object::new(source.name.clone(), ObjectData::Mesh(local_mesh));
+        object.transform = source.transform;
+        object.linkage = Linkage::Linked {
+            library: library.to_string(),
+            name: source.name.clone(),
+        };
+        made.push(document.add_object(object));
+    }
+    Ok(made)
+}
+
 /// Re-reads every linked object in `document` from its library.
 ///
 /// This is what makes linking worth having: the asset changed, and the shot that

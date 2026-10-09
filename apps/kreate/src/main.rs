@@ -6181,6 +6181,18 @@ impl App {
                 }
                 Command::AssetResolution { index } => self.ui.asset_resolution = index,
                 Command::AssetRefresh => self.reset_asset_list(),
+                Command::AssetLink { index } => {
+                    if let Some(path) = self
+                        .ui
+                        .asset_entries
+                        .get(index)
+                        .and_then(|e| e.path.clone())
+                    {
+                        let mut params = PropertyMap::new();
+                        params.set("path", PropertyValue::Text(path.display().to_string()));
+                        self.run_op("object.link_library", params);
+                    }
+                }
                 Command::AssetSelect { index } => {
                     self.ui.asset_selected = self.ui.asset_entries.get(index).map(|e| e.id.clone());
                 }

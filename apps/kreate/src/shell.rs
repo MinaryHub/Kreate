@@ -6034,6 +6034,8 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             crate::assets::Source::Local => None,
         },
         add: t("asset-add"),
+        link: t("asset-link"),
+        link_hint: t("asset-link-hint"),
         add_hint: t(match state.asset_kind {
             1 => "asset-add-hint-material",
             2 => "asset-add-hint-hdri",
@@ -6083,6 +6085,15 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             .asset_selected
             .as_ref()
             .and_then(|id| state.asset_entries.iter().position(|e| &e.id == id)),
+        linkable: state
+            .asset_selected
+            .as_ref()
+            .and_then(|id| state.asset_entries.iter().find(|e| &e.id == id))
+            .and_then(|e| e.path.as_ref())
+            .is_some_and(|p| {
+                p.extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("kreate"))
+            }),
         busy: state.asset_busy.clone(),
         error: state.asset_error.clone(),
     };
@@ -11047,6 +11058,8 @@ asset-credit-polyhaven = Assets from Poly Haven (CC0) — polyhaven.com
 asset-source-ambientcg = ambientCG
 asset-credit-ambientcg = Assets from ambientCG (CC0) — ambientcg.com. Materials and HDRIs; no models.
 asset-add = Add
+asset-link = Link
+asset-link-hint = Refer to this file's objects instead of copying them: read-only here, and updated from the file each time this document opens.
 asset-add-hint-model = Double-click to add it to the scene.
 asset-add-hint-material = Double-click to make a material of it and put it on the active object.
 asset-add-hint-hdri = Double-click to light the scene with it.
@@ -12211,6 +12224,8 @@ asset-credit-polyhaven = Poly Haven 에셋 (CC0) — polyhaven.com
 asset-source-ambientcg = ambientCG
 asset-credit-ambientcg = ambientCG 에셋 (CC0) — ambientcg.com. 재질과 HDRI만 있고 모델은 없습니다.
 asset-add = 추가
+asset-link = 링크
+asset-link-hint = 복사하지 않고 이 파일의 오브젝트를 참조합니다. 여기서는 읽기 전용이고, 이 문서를 열 때마다 원본 파일에서 다시 읽습니다.
 asset-add-hint-model = 더블클릭하면 장면에 추가합니다.
 asset-add-hint-material = 더블클릭하면 재질로 만들어 활성 오브젝트에 입힙니다.
 asset-add-hint-hdri = 더블클릭하면 이 HDRI로 장면을 비춥니다.

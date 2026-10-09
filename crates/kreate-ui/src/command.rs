@@ -246,6 +246,11 @@ pub enum Command {
     AssetAdd {
         index: usize,
     },
+    /// From the asset browser: link this `.kreate`'s objects rather than copy
+    /// them.
+    AssetLink {
+        index: usize,
+    },
     /// From the asset browser: this asset is the one looked at.
     AssetSelect {
         index: usize,

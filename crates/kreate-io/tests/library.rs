@@ -458,3 +458,39 @@ fn a_link_survives_a_save_and_reopen() {
         Linkage::Local => panic!("the link became a local copy"),
     }
 }
+
+/// The asset browser's Link: every mesh object of a library at once, each
+/// read-only and naming its library, and coming back changed when the
+/// library changes.
+#[test]
+fn a_whole_library_links_and_follows_its_file() {
+    let dir = scratch("link-all");
+    let library = dir.join("props.kreate");
+    let mut lib = Document::new();
+    lib.add_mesh_object("Chair", triangle(1.0));
+    lib.add_mesh_object("Table", triangle(2.0));
+    let bytes = container::write(&lib, &Manifest::default(), &[]).unwrap();
+    std::fs::write(&library, bytes).unwrap();
+
+    let mut shot = Document::new();
+    let reference = library.display().to_string();
+    let linked = library::link_all(&mut shot, &dir, &reference).expect("linked");
+    assert_eq!(linked.len(), 2);
+    for id in &linked {
+        let object = shot.object(*id).unwrap();
+        assert!(!object.linkage.is_editable());
+    }
+
+    // The library grows its chair; the shot sees it on the next refresh.
+    write_library(&library, "Chair", triangle(5.0));
+    let problems = library::refresh_links(&mut shot, &dir);
+    let mesh = shot
+        .objects()
+        .find(|(_, o)| o.name == "Chair")
+        .and_then(|(_, o)| o.mesh())
+        .expect("the chair's mesh");
+    assert!(
+        shot.mesh(mesh).unwrap().positions()[1].x > 4.0,
+        "{problems:?}"
+    );
+}

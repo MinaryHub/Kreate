@@ -40,6 +40,9 @@ pub struct AssetText {
     pub add_hint: String,
     /// The button that adds the selected asset.
     pub add: String,
+    /// The button that links it instead, for a `.kreate`, and its hover.
+    pub link: String,
+    pub link_hint: String,
 }
 
 /// What the panel shows.
@@ -53,6 +56,8 @@ pub struct AssetView<'a> {
     pub tiles: &'a [AssetTile],
     /// The selected tile, by [`AssetTile::index`].
     pub selected: Option<usize>,
+    /// Whether the selected asset can be linked rather than copied.
+    pub linkable: bool,
     /// A list or an asset on its way.
     pub busy: Option<String>,
     pub error: Option<String>,
@@ -167,6 +172,14 @@ pub fn asset_browser(
                 .clicked()
             {
                 queue.push(Command::AssetAdd { index: tile.index });
+            }
+            if view.linkable
+                && ui
+                    .button(&text.link)
+                    .on_hover_text(&text.link_hint)
+                    .clicked()
+            {
+                queue.push(Command::AssetLink { index: tile.index });
             }
             // i18n-exempt: an asset's own name and its author or path
             ui.label(egui::RichText::new(&tile.name).strong());

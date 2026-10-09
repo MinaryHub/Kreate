@@ -1953,6 +1953,50 @@ impl Operator for Import {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct LinkLibraryParams {
+    /// The `.kreate` to link from, as the document should name it.
+    pub path: String,
+}
+
+/// Links every mesh object of a `.kreate` library: read-only here, and read
+/// again from the library each time the document opens — so fixing a prop
+/// in its library fixes it in every scene that links it.
+pub struct LinkLibrary;
+
+impl Operator for LinkLibrary {
+    type Params = LinkLibraryParams;
+
+    fn id() -> &'static str {
+        "object.link_library"
+    }
+    fn label() -> &'static str {
+        "Link Library"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document_mut();
+        let linked = kreate_io::library::link_all(d, std::path::Path::new("."), params.path.trim())
+            .map_err(|e| OpError::Failed(e.to_string()))?;
+        if linked.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        d.selection.clear();
+        for id in &linked {
+            d.selection.add(*id);
+        }
+        d.selection.active = linked.last().copied();
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Which point a rotation or scale happens about.
 pub const PIVOTS: &[&str] = &["median", "individual", "active", "world_origin", "cursor"];
 
@@ -3489,6 +3533,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetVisible>();
     registry.register::<Paste>();
     registry.register::<Import>();
+    registry.register::<LinkLibrary>();
     registry.register::<AddEmpty>();
     registry.register::<RemoveMaterialSlot>();
     registry.register::<AssignMaterial>();
