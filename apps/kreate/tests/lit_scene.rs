@@ -1691,3 +1691,46 @@ fn an_image_is_the_right_way_up_on_its_uvs() {
          the picture's top should be the plane's top"
     );
 }
+
+/// A cut-out: a plane whose picture is clear on its left half and opaque on
+/// its right, with a threshold, shows the background through the left — and
+/// without the threshold, the whole plane.
+#[test]
+fn a_cut_out_material_is_cut_where_its_picture_is_clear() {
+    if gpu().is_none() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    let shoot = |clip: Option<f32>| {
+        a_plane_wearing_with(|doc| {
+            let mut image =
+                kreate_scene::Image::new("Leaf", 64, 64, kreate_scene::PixelFormat::Rgba8);
+            {
+                let tile = image.tile_mut(0, 0).expect("one tile");
+                let bytes = tile.bytes_mut();
+                let side = kreate_scene::image::TILE as usize;
+                for row in 0..side {
+                    for column in 0..side {
+                        let at = (row * side + column) * 4;
+                        let alpha = if column < 32 { 0 } else { 255 };
+                        bytes[at..at + 4].copy_from_slice(&[230, 20, 20, alpha]);
+                    }
+                }
+            }
+            let id = doc.add_image(image);
+            let material = kreate_scene::Material {
+                base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+                base_color_image: Some(id),
+                alpha_clip: clip,
+                ..Default::default()
+            };
+            kreate_scene::shader::ShaderGraph::for_material(&material)
+        })
+    };
+    let reddish = |f: &[[f32; 4]]| f.iter().filter(|p| p[0] > p[2] + 0.1).count();
+    let (whole, cut) = (reddish(&shoot(None)), reddish(&shoot(Some(0.5))));
+    assert!(
+        whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
+        "{whole} red pixels solid, {cut} cut: about half should go"
+    );
+}

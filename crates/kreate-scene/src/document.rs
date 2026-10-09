@@ -337,6 +337,10 @@ pub struct Material {
     /// The index of refraction, for what passes through: 1.5 for glass, 1.33
     /// for water. glTF's `KHR_materials_ior`, and its default.
     pub ior: f32,
+    /// Where the surface is cut away: wherever its opacity — `alpha`, times
+    /// the base colour image's alpha — is below this. glTF's `MASK` and its
+    /// `alphaCutoff`: a leaf drawn on a card. `None` is solid throughout.
+    pub alpha_clip: Option<f32>,
     /// The material's own shading graph, once somebody has asked for one.
     ///
     /// `None` is the fast path v1 §5.6 describes: the flat fields above *are*
@@ -372,6 +376,7 @@ impl Default for Material {
             emission_strength: 0.0,
             transmission: 0.0,
             ior: 1.5,
+            alpha_clip: None,
             graph: None,
             action: None,
             linkage: Linkage::Local,

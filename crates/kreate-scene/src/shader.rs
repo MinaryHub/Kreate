@@ -202,6 +202,11 @@ pub enum NodeKind {
         transmission: f32,
         /// The index of refraction of what passes through.
         ior: f32,
+        /// Opacity where the Alpha socket is not wired, and what it multiplies
+        /// where it is.
+        alpha: f32,
+        /// Cut away below this opacity; zero is never.
+        clip: f32,
     },
 }
 
@@ -373,13 +378,15 @@ impl NodeKind {
                 Socket::Scalar,
                 Socket::Vector,
             ],
-            // Base colour, metallic, roughness, normal, and a tint on the glow.
+            // Base colour, metallic, roughness, normal, a tint on the glow,
+            // and opacity — last, so the sockets files name keep their numbers.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Vector,
                 Socket::Color,
+                Socket::Scalar,
             ],
         }
     }
@@ -513,6 +520,8 @@ impl NodeKind {
                 emission,
                 transmission,
                 ior,
+                alpha,
+                clip,
             } => {
                 vec![
                     base_color.r,
@@ -525,6 +534,8 @@ impl NodeKind {
                     emission.b,
                     *transmission,
                     *ior,
+                    *alpha,
+                    *clip,
                 ]
             }
             NodeKind::Multiply
@@ -626,6 +637,9 @@ impl NodeKind {
                 emission: SceneRgb::new(at(5, 0.0), at(6, 0.0), at(7, 0.0)),
                 transmission: at(8, 0.0),
                 ior: at(9, 1.5),
+                // Absent in every file written before cut-outs: solid.
+                alpha: at(10, 1.0),
+                clip: at(11, 0.0),
             },
             _ => return None,
         })
@@ -674,9 +688,14 @@ impl NodeKind {
             NodeKind::Bump { .. } => &["Strength", "Distance", "Height", "Normal"],
             NodeKind::Checker { .. } => &["Color1", "Color2", "Scale", "Vector"],
             NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale", "Vector"],
-            NodeKind::Surface { .. } => {
-                &["Base Color", "Metallic", "Roughness", "Normal", "Emission"]
-            }
+            NodeKind::Surface { .. } => &[
+                "Base Color",
+                "Metallic",
+                "Roughness",
+                "Normal",
+                "Emission",
+                "Alpha",
+            ],
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
         }
     }
@@ -789,6 +808,8 @@ impl ShaderGraph {
                     emission: SceneRgb::new(0.0, 0.0, 0.0),
                     transmission: 0.0,
                     ior: 1.5,
+                    alpha: 1.0,
+                    clip: 0.0,
                 },
             )],
             links: Vec::new(),
@@ -825,12 +846,16 @@ impl ShaderGraph {
             emission,
             transmission,
             ior,
+            alpha,
+            clip,
             ..
         } = &mut graph.nodes[0].kind
         {
             *emission = material.emitted();
             *transmission = material.transmission;
             *ior = material.ior;
+            *alpha = material.alpha;
+            *clip = material.alpha_clip.unwrap_or(0.0);
         }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the
@@ -858,6 +883,11 @@ impl ShaderGraph {
             wire(&mut graph, texture, 0, product, 0);
             wire(&mut graph, factor, 0, product, 1);
             wire(&mut graph, product, 0, 0, 0);
+            // A cut-out reads the picture's own alpha: a leaf is where the
+            // image says, and the material's opacity multiplies it.
+            if material.alpha_clip.is_some() {
+                wire(&mut graph, texture, 1, 0, 5);
+            }
         }
         if let Some(image) = material.metallic_roughness_image {
             // glTF's packing: green is roughness, blue is metallic, and each
@@ -1277,6 +1307,8 @@ mod tests {
                     emission: SceneRgb::new(0.0, 0.0, 0.0),
                     transmission: 0.0,
                     ior: 1.5,
+                    alpha: 1.0,
+                    clip: 0.0,
                 },
             )),
             None
@@ -1549,6 +1581,8 @@ mod tests {
                 emission: SceneRgb::new(2.0, 0.5, 0.0),
                 transmission: 0.75,
                 ior: 1.33,
+                alpha: 0.8,
+                clip: 0.5,
             },
         ];
         for kind in kinds {

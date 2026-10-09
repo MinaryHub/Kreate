@@ -9753,6 +9753,26 @@ impl App {
                     .collect()
             })
             .collect();
+        // And where each slot is cut away, read from its image's alpha as the
+        // rendered view reads it.
+        let slot_clips: Vec<Vec<f32>> = self
+            .evaluated
+            .iter()
+            .map(|(id, _)| {
+                if !textured {
+                    return Vec::new();
+                }
+                (0..kreate_render::viewport::SOLID_SLOTS)
+                    .map(|slot| {
+                        self.doc
+                            .material_id_at(*id, slot)
+                            .and_then(|m| self.doc.material(m))
+                            .and_then(|m| m.alpha_clip)
+                            .unwrap_or(0.0)
+                    })
+                    .collect()
+            })
+            .collect();
         let want: Vec<(kreate_scene::document::ImageId, u64)> = images
             .iter()
             .filter_map(|i| Some((*i, self.doc.image(*i)?.revision())))
@@ -9833,6 +9853,7 @@ impl App {
                         .with_materials(&slot_materials[at])
                         .with_colors(&slot_colors[at])
                         .with_layers(&slot_layers[at])
+                        .with_clips(&slot_clips[at])
                         .selected(
                             self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
                                 && self.doc.selection.contains(*id),

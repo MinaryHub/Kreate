@@ -335,3 +335,50 @@ fn glow_glass_and_ior_travel_as_their_extensions() {
     assert_eq!((glass.transmission, glass.ior), (0.9, 1.33));
     assert_eq!(glass.emission_strength, 0.0, "no glow where none was");
 }
+
+/// A cut-out goes out as glTF's MASK with its cutoff and comes back the same;
+/// a BLEND material from another program arrives as glass.
+#[test]
+fn a_cut_out_round_trips_as_mask_and_blend_arrives_as_glass() {
+    let mut doc = Document::new();
+    let image = numbered(&mut doc, "Leaf", 1, ColorSpace::Srgb);
+    let material = doc.add_material(kreate_scene::Material {
+        name: "Leaf".into(),
+        base_color_image: Some(image),
+        alpha_clip: Some(0.3),
+        ..Default::default()
+    });
+    cube_with(&mut doc, "Plant", material);
+    let bytes = write(&doc, true);
+    let json = glb_json(&bytes);
+    assert_eq!(json["materials"][0]["alphaMode"], "MASK");
+    assert!((json["materials"][0]["alphaCutoff"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+    let (back, _) = read(&bytes);
+    let (_, m) = back.materials().next().expect("a material");
+    assert!(m.alpha_clip.is_some_and(|c| (c - 0.3).abs() < 1e-6));
+    assert_eq!(m.transmission, 0.0);
+
+    // The same file, its material made BLEND as another program might.
+    let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let mut root = json.clone();
+    root["materials"][0]["alphaMode"] = serde_json::json!("BLEND");
+    root["materials"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("alphaCutoff");
+    let mut text = serde_json::to_vec(&root).unwrap();
+    while text.len() % 4 != 0 {
+        text.push(b' ');
+    }
+    let mut blended = bytes[..12].to_vec();
+    blended.extend((text.len() as u32).to_le_bytes());
+    blended.extend(&bytes[16..20]);
+    blended.extend(&text);
+    blended.extend(&bytes[20 + length..]);
+    let total = blended.len() as u32;
+    blended[8..12].copy_from_slice(&total.to_le_bytes());
+    let (glass, _) = read(&blended);
+    let (_, m) = glass.materials().next().expect("a material");
+    assert_eq!(m.transmission, 1.0, "BLEND arrives as glass");
+    assert!(m.alpha_clip.is_none());
+}

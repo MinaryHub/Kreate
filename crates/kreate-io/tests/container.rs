@@ -870,6 +870,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         normal_strength: None,
         emission: None,
         transmission: None,
+        alpha_clip: None,
         graph: None,
         action: None,
         extra: Default::default(),
@@ -1210,4 +1211,31 @@ fn the_render_settings_survive_a_save() {
         plain.render,
         kreate_scene::render::RenderSettings::default()
     );
+}
+
+/// A cut-out's threshold is saved with its material, and a material without
+/// one reads back without one.
+#[test]
+fn a_cut_out_threshold_survives_the_file() {
+    let mut doc = Document::new();
+    doc.add_material(kreate_scene::Material {
+        name: "Leaf".into(),
+        alpha_clip: Some(0.4),
+        ..Default::default()
+    });
+    doc.add_material(kreate_scene::Material {
+        name: "Solid".into(),
+        ..Default::default()
+    });
+    let loaded = round_trip(&doc);
+    let clip_of = |name: &str| {
+        loaded
+            .document
+            .materials()
+            .find(|(_, m)| m.name == name)
+            .map(|(_, m)| m.alpha_clip)
+            .expect("the material")
+    };
+    assert_eq!(clip_of("Leaf"), Some(0.4));
+    assert_eq!(clip_of("Solid"), None);
 }

@@ -90,6 +90,9 @@ struct PtMaterialOut {
     normal: vec3<f32>,
     // A bump's surface gradient, in object space.
     gradient: vec3<f32>,
+    // Opacity, and below what the surface is cut away (zero: never).
+    alpha: f32,
+    clip: f32,
 };
 
 // How the texture coordinate changes along `d`, a vector in the triangle's
@@ -546,6 +549,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 pdx,
                 pdy,
             );
+            // Cut away here: the path goes on as if the triangle were not
+            // there, from the point it reached — not counted as a bounce,
+            // as glass is not.
+            if (made.clip > 0.0 && made.alpha < made.clip) {
+                origin = p;
+                skip = hit.triangle;
+                crossings += 1u;
+                continue;
+            }
             // A normal map's tilt, in the frame the UVs give the triangle:
             // +X along U and +Y along V, as the viewport's frame is.
             if (any(made.normal != vec3<f32>(0.0, 0.0, 1.0))) {

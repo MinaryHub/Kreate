@@ -132,6 +132,9 @@ pub struct ImportMaterial {
     pub transmission: f32,
     /// `KHR_materials_ior`.
     pub ior: f32,
+    /// glTF's `MASK`: cut away below this opacity. `None` for `OPAQUE`, and
+    /// for `BLEND`, which arrives as glass — see the glTF reader.
+    pub alpha_clip: Option<f32>,
 }
 
 /// An image as a file carries it: eight bits a channel, four channels.
@@ -164,6 +167,7 @@ impl Default for ImportMaterial {
             emissive_strength: 1.0,
             transmission: 0.0,
             ior: 1.5,
+            alpha_clip: None,
         }
     }
 }

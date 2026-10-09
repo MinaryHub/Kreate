@@ -241,7 +241,7 @@ pub fn compile_with(
     }
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32 }}"
     );
     let _ = writeln!(wgsl);
     wgsl.push_str(&out.functions);
@@ -297,6 +297,21 @@ pub fn compile_with(
     let _ = writeln!(
         wgsl,
         "    out.transmission = clamp(material.values[{0}].x, 0.0, 1.0);\n    out.ior = max(material.values[{0}].y, 1.0);",
+        surface_slot + 2
+    );
+    // Opacity, and below what it is cut away: the constant, times whatever
+    // is wired to Alpha — an image's alpha, as glTF multiplies its factor.
+    let alpha = match out.graph.incoming(output, 5) {
+        Some(_) => format!(
+            "material.values[{}].z * {}",
+            surface_slot + 2,
+            out.input_expr(output, 5, "1.0")?
+        ),
+        None => format!("material.values[{}].z", surface_slot + 2),
+    };
+    let _ = writeln!(
+        wgsl,
+        "    out.alpha = clamp({alpha}, 0.0, 1.0);\n    out.clip = material.values[{}].w;",
         surface_slot + 2
     );
     let _ = writeln!(wgsl, "    return out;\n}}");
@@ -725,6 +740,8 @@ impl Emitter<'_> {
                 emission,
                 transmission,
                 ior,
+                alpha,
+                clip,
             } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
@@ -733,7 +750,7 @@ impl Emitter<'_> {
                     .push([base_color.r, base_color.g, base_color.b, metallic]);
                 self.constants
                     .push([roughness, emission.r, emission.g, emission.b]);
-                self.constants.push([transmission, ior, 0.0, 0.0]);
+                self.constants.push([transmission, ior, alpha, clip]);
             }
         }
         self.emitted[node] = Some(slot);
@@ -847,7 +864,7 @@ impl Emitter<'_> {
 /// [`for_tracer`] strips them from each material.
 pub fn tracer_declarations() -> String {
     format!(
-        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}\n{TEXEL}{PROCEDURAL}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32 }}\n{TEXEL}{PROCEDURAL}"
     )
 }
 
@@ -1605,7 +1622,8 @@ mod tests {
             vec![
                 [0.8, 0.7, 0.6, 0.25],
                 [0.4, 0.0, 0.0, 0.0],
-                [0.0, 1.5, 0.0, 0.0]
+                // Transmission, IOR, opacity, and no cut-out.
+                [0.0, 1.5, 1.0, 0.0]
             ]
         );
         assert!(compiled.images.is_empty());

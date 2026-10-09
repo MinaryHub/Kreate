@@ -18,6 +18,11 @@ use; `scripts/release.sh` turns that section into the next release.
   HDRI lights the world. Downloads are kept in the cache for next time.
 - A saved document reopens seen from where it was looked at when saved:
   the view's angle, distance, lens and projection go in the file.
+- Cut-out materials: a surface is cut away where its base colour image is
+  clear, below the material's Alpha Clip — leaves, labels, grilles — in the
+  studio view, the rendered view and the path-traced render. glTF's `MASK`
+  imports as one and exports as one; `BLEND` (a clock's front, a lamp's
+  shade) imports as glass.
 
 ### Fixed
 

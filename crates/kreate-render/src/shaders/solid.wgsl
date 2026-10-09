@@ -318,7 +318,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     // V turned to run up the picture, which is stored top row first — the
     // rendered view's rule (`kr_texel`), or studio and rendered disagree on
     // which way up a texture is.
-    let image = textureSample(solid_tex, solid_sampler, vec2<f32>(in.weight.x, 1.0 - in.weight.y), max(i32(in.layer), 0)).rgb;
+    // A slot's layer is whole; a cut-out's threshold rides in its fraction,
+    // halved (see `Viewport::prepare`).
+    let texel = textureSample(solid_tex, solid_sampler, vec2<f32>(in.weight.x, 1.0 - in.weight.y), max(i32(in.layer), 0));
+    let image = texel.rgb;
+    let cut = select(0.0, fract(in.layer) * 2.0, in.layer > -0.5);
     var base = in.base_color.rgb;
     if (in.ramp < 0.5 && in.layer > -0.5) {
         base = image;
@@ -351,5 +355,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     // encoding; shading stays in linear space.
     // X-ray: see-through, by the amount the globals say.
     let alpha = select(in.base_color.a, globals.params.z, globals.params.z > 0.0);
+    // A cut-out, as the rendered view cuts it: by the picture's alpha. Last,
+    // after the derivatives the sample took.
+    if (cut > 0.0 && in.ramp < 0.5 && texel.a < cut) {
+        discard;
+    }
     return vec4<f32>(color, alpha);
 }

@@ -39,6 +39,8 @@ fn dispatch(count: u32) -> String {
     out.surface.roughness = 0.5;
     out.normal = vec3<f32>(0.0, 0.0, 1.0);
     out.gradient = vec3<f32>(0.0);
+    out.alpha = 1.0;
+    out.clip = 0.0;
 ",
     );
     if count > 0 {
@@ -58,6 +60,8 @@ fn dispatch(count: u32) -> String {
             out.surface = m.surface;
             out.normal = m.normal;
             out.gradient = m.gradient;
+            out.alpha = m.alpha;
+            out.clip = m.clip;
         }}
 "
             ));

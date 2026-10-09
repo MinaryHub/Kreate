@@ -3431,3 +3431,58 @@ fn a_studio_texture_is_the_right_way_up() {
         "red {red_top} up and {red_bottom} down, blue {blue_top} up and {blue_bottom} down"
     );
 }
+
+/// Studio mode cuts a cut-out as the rendered view does: a picture clear on
+/// its left half shows the background there with a threshold, and the
+/// picture's colour without one.
+#[test]
+fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
+    let gpu = gpu_or_skip!(gpu());
+    let side = 64usize;
+    let mut pixels = vec![0u8; side * side * 4];
+    for row in 0..side {
+        for column in 0..side {
+            let at = (row * side + column) * 4;
+            let alpha = if column < side / 2 { 0 } else { 255 };
+            pixels[at..at + 4].copy_from_slice(&[230, 20, 20, alpha]);
+        }
+    }
+    let shoot = |clip: f32| {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Studio;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.set_solid_images(
+            &gpu.device,
+            &gpu.queue,
+            &[kreate_render::solid_textures::SolidImage {
+                width: side as u32,
+                height: side as u32,
+                pixels: &pixels,
+            }],
+        );
+        let plane_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(2.0, 1, 1));
+        let plane = kreate_render::GpuMesh::upload(
+            &gpu.device,
+            &viewport.layouts,
+            &plane_cpu,
+            glam::Vec4::ONE,
+        );
+        let camera = Camera {
+            distance: 4.0,
+            ..Camera::default()
+        };
+        let (layers, clips) = ([0], [clip]);
+        let mut draws = vec![Draw::new(&plane, glam::DAffine3::IDENTITY)
+            .with_layers(&layers)
+            .with_clips(&clips)];
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        read_frame(&gpu, &mut viewport, &draws)
+    };
+    let reddish = |f: &[[f32; 4]]| f.iter().filter(|p| p[0] > p[2] + 0.1).count();
+    let (whole, cut) = (reddish(&shoot(0.0)), reddish(&shoot(0.5)));
+    assert!(
+        whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
+        "{whole} red pixels solid, {cut} cut: about half should go"
+    );
+}

@@ -660,6 +660,9 @@ pub struct Draw<'a> {
     /// viewport's [`crate::solid_textures::SolidTextures`] — or a negative
     /// for its colour. Empty: colours everywhere.
     pub layers: &'a [i32],
+    /// Per slot, beside `layers`: below what alpha of its image the slot is
+    /// cut away; zero, or a slot past the end, for never.
+    pub clips: &'a [f32],
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -684,6 +687,7 @@ impl<'a> Draw<'a> {
             materials: &[],
             colors: &[],
             layers: &[],
+            clips: &[],
             weights: false,
             sculpt_overlay: false,
             // Full until measured. A draw that is never passed through
@@ -730,6 +734,12 @@ impl<'a> Draw<'a> {
     /// Sets the image layer each material slot shows. See [`Draw::layers`].
     pub fn with_layers(mut self, layers: &'a [i32]) -> Self {
         self.layers = layers;
+        self
+    }
+
+    /// Each slot's cut-out threshold. See [`Draw::clips`].
+    pub fn with_clips(mut self, clips: &'a [f32]) -> Self {
+        self.clips = clips;
         self
     }
 
@@ -3010,7 +3020,22 @@ impl Viewport {
                     }),
                     slot_layers: std::array::from_fn(|row| {
                         std::array::from_fn(|k| {
-                            draw.layers.get(row * 4 + k).map_or(-1.0, |l| *l as f32)
+                            let slot = row * 4 + k;
+                            // The layer whole; a cut-out's threshold in the
+                            // fraction, halved so it never rounds to the next.
+                            draw.layers.get(slot).map_or(-1.0, |l| {
+                                let clip = draw
+                                    .clips
+                                    .get(slot)
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    .clamp(0.0, 0.998);
+                                if *l >= 0 {
+                                    *l as f32 + clip * 0.5
+                                } else {
+                                    *l as f32
+                                }
+                            })
                         })
                     }),
                     paint: [

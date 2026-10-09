@@ -262,10 +262,21 @@ fn from_imported(
             normal_texture,
             normal_scale,
             emissive_strength: material.emissive_strength().unwrap_or(1.0),
-            transmission: material
-                .transmission()
-                .map_or(0.0, |t| t.transmission_factor()),
+            // `BLEND` is see-through in a way a rasteriser blends; here it is
+            // glass, which is what a model's blended part — a clock's front, a
+            // lamp's shade — almost always is. Unless the file already says
+            // how much passes through.
+            transmission: material.transmission().map_or(
+                if material.alpha_mode() == gltf::material::AlphaMode::Blend {
+                    1.0
+                } else {
+                    0.0
+                },
+                |t| t.transmission_factor(),
+            ),
             ior: material.ior().unwrap_or(1.5),
+            alpha_clip: (material.alpha_mode() == gltf::material::AlphaMode::Mask)
+                .then(|| material.alpha_cutoff().unwrap_or(0.5)),
         });
     }
 
