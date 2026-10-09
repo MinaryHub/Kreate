@@ -1150,7 +1150,7 @@ impl App {
         ) {
             Ok(kreate_ops::OpResult::Finished) => {
                 if let Some(entry) = self.history.last() {
-                    println!("{}", entry.to_script_call());
+                    println!("{}", entry.to_script_preview(kreate::shell::SCRIPT_PREVIEW));
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
@@ -3352,7 +3352,7 @@ impl App {
         if let Some(session) = stroke.session {
             self.history.commit_modal(session);
             if let Some(entry) = self.history.last() {
-                println!("{}", entry.to_script_call());
+                println!("{}", entry.to_script_preview(kreate::shell::SCRIPT_PREVIEW));
             }
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -5709,7 +5709,10 @@ impl App {
                 "metered": self.ui.view_status.metered,
                 "through_camera": self.camera_view_object.and_then(|id| doc.object(id)).map(|o| o.name.clone()),
             },
-            "last_operation": self.history.last().map(|e| e.to_script_call()),
+            "last_operation": self
+                .history
+                .last()
+                .map(|e| e.to_script_preview(kreate::shell::SCRIPT_PREVIEW)),
         })
     }
 
@@ -6964,7 +6967,7 @@ impl App {
                 let call = self
                     .history
                     .last()
-                    .map(|e| e.to_script_call())
+                    .map(|e| e.to_script_preview(kreate::shell::SCRIPT_PREVIEW))
                     .unwrap_or_default();
                 println!("  adjusted {name} -> {call}");
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -8572,7 +8575,7 @@ impl App {
             if let Some(PaintStroke { session, .. }) = self.paint_stroke.take() {
                 self.history.commit_modal(session);
                 if let Some(entry) = self.history.last() {
-                    println!("{}", entry.to_script_call());
+                    println!("{}", entry.to_script_preview(kreate::shell::SCRIPT_PREVIEW));
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }

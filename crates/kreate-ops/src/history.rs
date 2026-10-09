@@ -102,6 +102,31 @@ impl HistoryEntry {
         shown.to_script_call(&self.op_id)
     }
 
+    /// The script line for a person to read: any text value longer than
+    /// `max` bytes cut short and its length said.
+    ///
+    /// What the console and the status bar show. A paste carries the whole of
+    /// what was pasted — an imported model is megabytes of it — and laying
+    /// that out as text every frame stopped the application and filled the
+    /// font atlas until every label was garbled. The line itself, for
+    /// replaying, is [`HistoryEntry::to_script_call`], whole.
+    pub fn to_script_preview(&self, max: usize) -> String {
+        let mut shown = PropertyMap::new();
+        for (name, value) in self.params.iter().filter(|(n, _)| !self.quiet.contains(n)) {
+            let value = match value {
+                // By bytes, which is free to ask: counting the characters of
+                // megabytes every frame is the cost this is here to avoid.
+                kreate_reflect::PropertyValue::Text(t) if t.len() > max => {
+                    let head: String = t.chars().take(max).collect();
+                    kreate_reflect::PropertyValue::Text(format!("{head}… ({} bytes)", t.len()))
+                }
+                other => other.clone(),
+            };
+            shown.set(name, value);
+        }
+        shown.to_script_call(&self.op_id)
+    }
+
     pub fn bytes(&self) -> usize {
         self.payload.bytes() + self.op_id.len() + self.label.len()
     }
@@ -1144,6 +1169,25 @@ mod tests {
         assert!(!h.can_undo() && h.can_redo());
         assert!(h.redo(&r, &mut doc, &Context::default()).is_ok());
         assert!(h.can_undo() && !h.can_redo());
+    }
+
+    #[test]
+    fn a_long_text_value_is_shortened_for_reading_and_kept_for_replaying() {
+        let mut params = PropertyMap::new();
+        params.set("data", kreate_reflect::PropertyValue::Text("ab".repeat(500_000)));
+        params.set("name", kreate_reflect::PropertyValue::Text("Chair".into()));
+        let entry = HistoryEntry {
+            op_id: "object.paste".into(),
+            params,
+            label: "Paste".into(),
+            payload: UndoPayload::Snapshot(Box::new(Document::new())),
+            quiet: Vec::new(),
+        };
+        let shown = entry.to_script_preview(20);
+        assert!(shown.len() < 200, "{shown}");
+        assert!(shown.contains("(1000000 bytes)"));
+        assert!(shown.contains("Chair"));
+        assert!(entry.to_script_call().len() > 1_000_000);
     }
 
     #[test]

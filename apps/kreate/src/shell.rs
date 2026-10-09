@@ -2152,7 +2152,7 @@ pub fn draw(
             if let Some(entry) = history.last() {
                 ui.separator();
                 // i18n-exempt: a generated script line is API text, not prose
-                ui.monospace(entry.to_script_call());
+                ui.monospace(entry.to_script_preview(SCRIPT_PREVIEW));
             }
             // The standing counts on the right, where Blender keeps its
             // statistics: what is true of the scene, apart from what just
@@ -5562,6 +5562,10 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
     ]
 }
 
+/// How much of a long text value a script line shows: a paste carries
+/// megabytes, and the line is for reading.
+pub const SCRIPT_PREVIEW: usize = 120;
+
 /// The console: the history as script lines, what was typed, and the answers.
 ///
 /// The history's lines are read fresh each frame rather than copied into the
@@ -5574,7 +5578,7 @@ fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labe
         .entries()
         .iter()
         .map(|entry| ConsoleLine {
-            text: entry.to_script_call(),
+            text: entry.to_script_preview(SCRIPT_PREVIEW),
             kind: LineKind::History,
         })
         .collect();
