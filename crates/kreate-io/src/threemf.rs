@@ -133,6 +133,461 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+// --- reading -------------------------------------------------------------
+
+/// Why a 3MF file could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ThreeMfError {
+    #[error("not a 3MF file: {0}")]
+    Zip(String),
+    #[error("the package has no model part")]
+    NoModel,
+    #[error("the model is not text: {0}")]
+    Encoding(String),
+}
+
+/// One XML tag, as far as 3MF needs: its name without a prefix, its
+/// attributes, and whether it opens, closes or is both.
+#[derive(Debug)]
+struct Tag {
+    name: String,
+    attributes: Vec<(String, String)>,
+    closing: bool,
+    empty: bool,
+}
+
+impl Tag {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Every tag in `xml`, in order. Text between tags is not wanted — 3MF puts
+/// everything in attributes — so it is passed over, as are comments,
+/// declarations and processing instructions.
+///
+/// Not a general XML parser, and it does not need to be one: what it reads
+/// is a model part, whose structure the specification fixes.
+fn tags(xml: &str) -> Vec<Tag> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open + 1..];
+        if let Some(after) = rest.strip_prefix("!--") {
+            rest = after.find("-->").map_or("", |e| &after[e + 3..]);
+            continue;
+        }
+        if rest.starts_with('?') || rest.starts_with('!') {
+            rest = rest.find('>').map_or("", |e| &rest[e + 1..]);
+            continue;
+        }
+        // The end of the tag: the first `>` not inside a quoted value.
+        let mut quote = None;
+        let mut end = None;
+        for (k, c) in rest.char_indices() {
+            match (quote, c) {
+                (None, '"' | '\'') => quote = Some(c),
+                (Some(q), c) if c == q => quote = None,
+                (None, '>') => {
+                    end = Some(k);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        let body = &rest[..end];
+        rest = &rest[end + 1..];
+        let closing = body.starts_with('/');
+        let empty = body.ends_with('/');
+        let body = body.trim_start_matches('/').trim_end_matches('/');
+        let name_end = body.find(|c: char| c.is_whitespace()).unwrap_or(body.len());
+        let name = local(&body[..name_end]).to_string();
+        let mut attributes = Vec::new();
+        let mut a = &body[name_end..];
+        while let Some(eq) = a.find('=') {
+            let key = local(a[..eq].trim()).to_string();
+            let v = a[eq + 1..].trim_start();
+            let Some(q) = v.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                break;
+            };
+            let Some(close) = v[1..].find(q) else { break };
+            attributes.push((key, unescape(&v[1..1 + close])));
+            a = &v[close + 2..];
+        }
+        out.push(Tag {
+            name,
+            attributes,
+            closing,
+            empty,
+        });
+    }
+    out
+}
+
+/// A name without its namespace prefix.
+fn local(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+fn unescape(v: &str) -> String {
+    v.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// 3MF's twelve numbers, as the matrix they are: rows of a row-vector
+/// transform, the last row the translation.
+fn matrix(text: Option<&str>) -> glam::Mat4 {
+    let m: Vec<f32> = text
+        .unwrap_or("")
+        .split_ascii_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    if m.len() != 12 {
+        return glam::Mat4::IDENTITY;
+    }
+    glam::Mat4::from_cols(
+        glam::Vec4::new(m[0], m[1], m[2], 0.0),
+        glam::Vec4::new(m[3], m[4], m[5], 0.0),
+        glam::Vec4::new(m[6], m[7], m[8], 0.0),
+        glam::Vec4::new(m[9], m[10], m[11], 1.0),
+    )
+}
+
+/// An sRGB `#RRGGBB` or `#RRGGBBAA`, linear.
+fn colour(text: &str) -> Option<[f32; 4]> {
+    let hex = text.strip_prefix('#')?;
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+    let linear = |b: u8| kreate_math::srgb_to_linear(b as f32 / 255.0);
+    let alpha = if hex.len() >= 8 {
+        byte(6)? as f32 / 255.0
+    } else {
+        1.0
+    };
+    Some([linear(byte(0)?), linear(byte(2)?), linear(byte(4)?), alpha])
+}
+
+/// An object of the model: a mesh, or parts of other objects placed — each
+/// part by the model part it is in (`None` for this one), its id there, and
+/// its placement.
+#[derive(Default)]
+struct Object {
+    name: String,
+    mesh: Option<crate::ir::ImportMesh>,
+    components: Vec<(Option<String>, String, glam::Mat4)>,
+}
+
+/// What one model part holds: its objects by id, what it builds, and its
+/// unit.
+struct Part {
+    objects: Vec<(String, Object)>,
+    items: Vec<(String, glam::Mat4)>,
+    unit: f32,
+}
+
+/// Reads one model part. Its base materials join `materials`; its groups'
+/// ids are its own, as the specification scopes them.
+fn read_part(
+    xml: &str,
+    materials: &mut Vec<crate::ir::ImportMaterial>,
+    notes: &mut Vec<crate::ir::LossyNote>,
+) -> Part {
+    use crate::ir::{ImportMaterial, ImportMesh, LossyNote};
+    let mut part = Part {
+        objects: Vec::new(),
+        items: Vec::new(),
+        unit: 1e-3,
+    };
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut current: Option<(String, Object)> = None;
+    // The object's own material, for triangles that do not name one.
+    let mut default_material: Option<i32> = None;
+    let mut group: Option<(String, Vec<usize>)> = None;
+    // A component's part, by its path, made relative to the package.
+    let path_of = |tag: &Tag| {
+        tag.get("path")
+            .map(|p| p.trim_start_matches('/').to_string())
+    };
+    for tag in tags(xml) {
+        match (tag.name.as_str(), tag.closing) {
+            ("model", false) => {
+                part.unit = match tag.get("unit").unwrap_or("millimeter") {
+                    "micron" => 1e-6,
+                    "centimeter" => 1e-2,
+                    "inch" => 0.0254,
+                    "foot" => 0.3048,
+                    "meter" => 1.0,
+                    _ => 1e-3,
+                };
+            }
+            ("basematerials", false) => {
+                group = Some((tag.get("id").unwrap_or("").to_string(), Vec::new()));
+                if tag.empty {
+                    groups.extend(group.take());
+                }
+            }
+            ("basematerials", true) => groups.extend(group.take()),
+            ("base", false) => {
+                if let Some((_, entries)) = &mut group {
+                    entries.push(materials.len());
+                    materials.push(ImportMaterial {
+                        name: tag.get("name").unwrap_or("Material").to_string(),
+                        base_color: tag
+                            .get("displaycolor")
+                            .and_then(colour)
+                            .unwrap_or([0.8, 0.8, 0.8, 1.0]),
+                        ..Default::default()
+                    });
+                }
+            }
+            ("object", false) => {
+                let id = tag.get("id").unwrap_or("").to_string();
+                let name = tag
+                    .get("name")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Object {id}"));
+                default_material = material_of(&groups, tag.get("pid"), tag.get("pindex"));
+                current = Some((
+                    id,
+                    Object {
+                        name,
+                        ..Default::default()
+                    },
+                ));
+                if tag.empty {
+                    part.objects.extend(current.take());
+                }
+            }
+            ("object", true) => part.objects.extend(current.take()),
+            ("mesh", false) => {
+                if let Some((_, object)) = &mut current {
+                    object.mesh = Some(ImportMesh {
+                        name: object.name.clone(),
+                        positions: Vec::new(),
+                        faces: Vec::new(),
+                        corner_uvs: None,
+                        corner_normals: None,
+                        face_materials: None,
+                        smoothing_groups: None,
+                    });
+                }
+            }
+            ("vertex", false) => {
+                if let Some(mesh) = current.as_mut().and_then(|(_, o)| o.mesh.as_mut()) {
+                    let at = |k: &str| tag.get(k).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    mesh.positions
+                        .push(glam::Vec3::new(at("x"), at("y"), at("z")));
+                }
+            }
+            ("triangle", false) => {
+                if let Some(mesh) = current.as_mut().and_then(|(_, o)| o.mesh.as_mut()) {
+                    let at = |k: &str| tag.get(k).and_then(|v| v.parse::<u32>().ok());
+                    let (Some(a), Some(b), Some(c)) = (at("v1"), at("v2"), at("v3")) else {
+                        continue;
+                    };
+                    let n = mesh.positions.len() as u32;
+                    let face = mesh.faces.len();
+                    if a >= n || b >= n || c >= n {
+                        notes.push(LossyNote::OutOfRangeIndex {
+                            mesh: mesh.name.clone(),
+                            face,
+                        });
+                        continue;
+                    }
+                    let material =
+                        material_of(&groups, tag.get("pid"), tag.get("p1")).or(default_material);
+                    if let Some(m) = material {
+                        mesh.face_materials
+                            .get_or_insert_with(|| vec![-1; face])
+                            .push(m);
+                    } else if let Some(list) = &mut mesh.face_materials {
+                        list.push(-1);
+                    }
+                    mesh.faces.push(vec![a, b, c]);
+                }
+            }
+            ("component", false) => {
+                if let Some((_, object)) = &mut current {
+                    object.components.push((
+                        path_of(&tag),
+                        tag.get("objectid").unwrap_or("").to_string(),
+                        matrix(tag.get("transform")),
+                    ));
+                }
+            }
+            ("item", false) => part.items.push((
+                tag.get("objectid").unwrap_or("").to_string(),
+                matrix(tag.get("transform")),
+            )),
+            _ => {}
+        }
+    }
+    part
+}
+
+/// Reads a 3MF package into the IR: each object with a mesh a mesh, each
+/// build item and each component a node placed as the file says, in the
+/// unit the model declares.
+///
+/// With the production extension's parts too: a slicer's package keeps each
+/// object in a model part of its own under `3D/Objects`, and the build names
+/// them by path.
+pub fn parse_3mf(bytes: &[u8]) -> Result<crate::ir::ImportScene, ThreeMfError> {
+    use crate::ir::{ImportNode, ImportNodeData, ImportScene, ImportTransform, SourceMetadata};
+    use std::collections::HashMap;
+    use std::io::Read;
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| ThreeMfError::Zip(e.to_string()))?;
+    let mut text_of = |name: &str| -> Option<String> {
+        let mut entry = zip.by_name(name.trim_start_matches('/')).ok()?;
+        let mut text = String::new();
+        entry.read_to_string(&mut text).ok()?;
+        Some(text)
+    };
+    // The model part is wherever the package's relationships say; the
+    // conventional place when they do not.
+    let target = text_of("_rels/.rels")
+        .and_then(|rels| {
+            tags(&rels)
+                .into_iter()
+                .find(|t| {
+                    t.name == "Relationship"
+                        && t.get("Type").is_some_and(|ty| ty.ends_with("/3dmodel"))
+                })
+                .and_then(|t| t.get("Target").map(str::to_string))
+        })
+        .unwrap_or_else(|| "3D/3dmodel.model".to_string())
+        .trim_start_matches('/')
+        .to_string();
+    let xml = text_of(&target).ok_or(ThreeMfError::NoModel)?;
+
+    let mut source = SourceMetadata::new("3mf");
+    let mut materials = Vec::new();
+    let main = read_part(&xml, &mut materials, &mut source.notes);
+    source.unit_scale = main.unit;
+    let items = main.items.clone();
+    let mut parts: HashMap<String, Part> = HashMap::new();
+    parts.insert(target.clone(), main);
+    // Every part a component names, and every part those name in turn.
+    let mut wanted: Vec<String> = Vec::new();
+    loop {
+        for part in parts.values() {
+            for (_, object) in &part.objects {
+                for (path, _, _) in &object.components {
+                    if let Some(path) = path {
+                        if !parts.contains_key(path) && !wanted.contains(path) {
+                            wanted.push(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let Some(path) = wanted.pop() else { break };
+        let part = match text_of(&path) {
+            Some(text) => read_part(&text, &mut materials, &mut source.notes),
+            None => Part {
+                objects: Vec::new(),
+                items: Vec::new(),
+                unit: source.unit_scale,
+            },
+        };
+        parts.insert(path, part);
+        if parts.len() > 4096 {
+            break;
+        }
+    }
+
+    let mut scene = ImportScene::new(source);
+    scene.materials = materials;
+    // Each object's mesh once, however many places use it.
+    let mut meshes: HashMap<(String, String), usize> = HashMap::new();
+    struct Placing<'a> {
+        parts: &'a mut HashMap<String, Part>,
+        meshes: &'a mut HashMap<(String, String), usize>,
+        scene: &'a mut ImportScene,
+    }
+    impl Placing<'_> {
+        fn place(
+            &mut self,
+            path: &str,
+            id: &str,
+            transform: glam::Mat4,
+            parent: Option<usize>,
+            depth: usize,
+        ) {
+            if depth > 32 {
+                return;
+            }
+            let Some(part) = self.parts.get_mut(path) else {
+                return;
+            };
+            let Some(object) = part
+                .objects
+                .iter_mut()
+                .find(|(k, _)| k == id)
+                .map(|(_, o)| o)
+            else {
+                return;
+            };
+            let key = (path.to_string(), id.to_string());
+            let mesh = match self.meshes.get(&key) {
+                Some(m) => Some(*m),
+                None => object.mesh.take().map(|mesh| {
+                    self.scene.meshes.push(mesh);
+                    let m = self.scene.meshes.len() - 1;
+                    self.meshes.insert(key, m);
+                    m
+                }),
+            };
+            let name = object.name.clone();
+            let components = object.components.clone();
+            let (scale, rotation, translation) = transform.to_scale_rotation_translation();
+            let mut node = ImportNode::new(name);
+            node.parent = parent;
+            node.transform = ImportTransform {
+                translation,
+                rotation,
+                scale,
+            };
+            if let Some(mesh) = mesh {
+                node.data = ImportNodeData::Mesh(mesh);
+            }
+            self.scene.nodes.push(node);
+            let me = self.scene.nodes.len() - 1;
+            for (child_path, child, m) in components {
+                let child_path = child_path.unwrap_or_else(|| path.to_string());
+                self.place(&child_path, &child, m, Some(me), depth + 1);
+            }
+        }
+    }
+    let mut placing = Placing {
+        parts: &mut parts,
+        meshes: &mut meshes,
+        scene: &mut scene,
+    };
+    for (id, transform) in &items {
+        placing.place(&target, id, *transform, None, 0);
+    }
+    Ok(scene)
+}
+
+/// The scene material a `pid` and an index into its group name.
+fn material_of(
+    groups: &[(String, Vec<usize>)],
+    pid: Option<&str>,
+    index: Option<&str>,
+) -> Option<i32> {
+    let (_, entries) = groups.iter().find(|(id, _)| Some(id.as_str()) == pid)?;
+    let index: usize = index.unwrap_or("0").parse().ok()?;
+    entries.get(index).map(|m| *m as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +655,74 @@ mod tests {
     fn an_unknown_unit_is_millimetres() {
         assert_eq!(unit_name(0.5).0, "millimeter");
         assert_eq!(unit_name(0.0254).0, "inch");
+    }
+
+    #[test]
+    fn a_written_package_reads_back_in_its_unit_and_place() {
+        let cube = kreate_mesh::primitives::cube(2.0);
+        let mesh = cube;
+        let placed = DAffine3::from_translation(kreate_math::DVec3::new(0.01, 0.0, 0.0));
+        let bytes = write_3mf(&[("Box".into(), &mesh, placed)], 1e-3);
+        let scene = parse_3mf(&bytes).expect("reads");
+        assert_eq!(scene.source.unit_scale, 1e-3);
+        assert_eq!(scene.meshes.len(), 1);
+        assert_eq!(scene.meshes[0].faces.len(), 12, "a cube in triangles");
+        assert_eq!(scene.nodes.len(), 1);
+        assert_eq!(scene.nodes[0].name, "Box");
+    }
+
+    #[test]
+    fn components_materials_and_a_transform_come_through() {
+        let model = r##"<?xml version="1.0" encoding="UTF-8"?>
+<model unit="centimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+  <!-- a comment with a <tag> in it -->
+  <resources>
+    <basematerials id="5">
+      <base name="Red" displaycolor="#FF0000" />
+      <base name="Blue &amp; Grey" displaycolor="#0000FFFF" />
+    </basematerials>
+    <object id="1" type="model" pid="5" pindex="0" name="Tri">
+      <mesh>
+        <vertices>
+          <vertex x="0" y="0" z="0" /><vertex x="1" y="0" z="0" /><vertex x="0" y="1" z="0" />
+          <vertex x="0" y="0" z="1" />
+        </vertices>
+        <triangles>
+          <triangle v1="0" v2="1" v3="2" />
+          <triangle v1="0" v2="1" v3="3" pid="5" p1="1" />
+          <triangle v1="0" v2="1" v3="9" />
+        </triangles>
+      </mesh>
+    </object>
+    <object id="2" type="model" name="Pair">
+      <components>
+        <component objectid="1" />
+        <component objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0" />
+      </components>
+    </object>
+  </resources>
+  <build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 3" /></build>
+</model>"##;
+        let mut buffer = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut buffer));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("3D/3dmodel.model", options).expect("a part");
+            zip.write_all(model.as_bytes()).expect("written");
+            zip.finish().expect("finished");
+        }
+        let scene = parse_3mf(&buffer).expect("reads");
+        assert_eq!(scene.source.unit_scale, 1e-2);
+        assert_eq!(scene.materials.len(), 2);
+        assert_eq!(scene.materials[1].name, "Blue & Grey");
+        assert!(scene.materials[0].base_color[0] > 0.99 && scene.materials[0].base_color[2] < 0.01);
+        let mesh = &scene.meshes[0];
+        assert_eq!(mesh.faces.len(), 2, "the bad triangle is dropped");
+        assert_eq!(mesh.face_materials, Some(vec![0, 1]));
+        // The pair and its two parts, one moved along X.
+        assert_eq!(scene.nodes.len(), 3);
+        assert_eq!(scene.nodes[0].transform.translation.z, 3.0);
+        assert_eq!(scene.nodes[2].parent, Some(0));
+        assert_eq!(scene.nodes[2].transform.translation.x, 5.0);
     }
 }

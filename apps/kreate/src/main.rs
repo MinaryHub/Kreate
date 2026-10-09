@@ -4700,6 +4700,16 @@ impl App {
                     Ok(json!({ "message": said }))
                 }
             }
+            "import" => {
+                let path = text("path").ok_or("`path` is required")?;
+                self.import_into(std::path::Path::new(&path));
+                let said = self.ui.status.clone().unwrap_or_default();
+                if said.starts_with("cannot") {
+                    Err(said)
+                } else {
+                    Ok(json!({ "message": said }))
+                }
+            }
             "save" => {
                 let path = match text("path") {
                     Some(p) => std::path::PathBuf::from(p),
@@ -6016,6 +6026,15 @@ impl App {
                 Command::SaveDocument => self.save_document(false),
                 Command::SaveDocumentAs => self.save_document(true),
                 Command::ExportScene => self.export_scene(),
+                Command::ImportScene => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Scene", SCENE_FORMATS)
+                        .set_title("Import")
+                        .pick_file()
+                    {
+                        self.import_into(&path);
+                    }
+                }
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
@@ -6060,7 +6079,7 @@ impl App {
         }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kreate document", &["kreate"])
-            .add_filter("Scene", &["gltf", "glb", "obj", "stl"])
+            .add_filter("Scene", SCENE_FORMATS)
             .set_title("Open")
             .pick_file()
         else {
@@ -6395,20 +6414,27 @@ impl App {
                     self.load_from(path);
                 }
             }
-            "gltf" | "glb" | "obj" | "stl" => match import_scene(path) {
-                Ok((document, _notes)) => match kreate_io::clipboard::encode(&document) {
-                    Ok(text) => {
-                        let mut params = PropertyMap::new();
-                        params.set("data", PropertyValue::Text(text));
-                        self.run_op("object.paste", params);
-                        self.status(&format!("added {}", path.display()));
-                    }
-                    Err(e) => self.status(&format!("cannot add {}: {e}", path.display())),
-                },
-                Err(e) => self.status(&format!("cannot import {}: {e}", path.display())),
-            },
+            e if SCENE_FORMATS.contains(&e) => self.import_into(path),
             "hdr" | "exr" => self.set_world_image_from(path),
             _ => self.status(&format!("cannot open {} here", path.display())),
+        }
+    }
+
+    /// Adds a scene file's contents to the document: through the IR into a
+    /// document of its own, then pasted — one undo step, which a script line
+    /// replays, and selected as a paste is.
+    fn import_into(&mut self, path: &std::path::Path) {
+        match import_scene(path) {
+            Ok((document, _notes)) => match kreate_io::clipboard::encode(&document) {
+                Ok(text) => {
+                    let mut params = PropertyMap::new();
+                    params.set("data", PropertyValue::Text(text));
+                    self.run_op("object.paste", params);
+                    self.status(&format!("added {}", path.display()));
+                }
+                Err(e) => self.status(&format!("cannot add {}: {e}", path.display())),
+            },
+            Err(e) => self.status(&format!("cannot import {}: {e}", path.display())),
         }
     }
 
@@ -12103,6 +12129,9 @@ fn load_document(path: Option<&str>) -> Document {
     doc
 }
 
+/// The scene files Open, Import and a drop read, by extension.
+const SCENE_FORMATS: &[&str] = &["gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off"];
+
 /// Reads a scene file into a fresh document, through the IR.
 ///
 /// Every format lands here, which is the point: what a file said and what the
@@ -12116,7 +12145,32 @@ fn import_scene(
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Import".to_string());
     let scene = match lower.as_str() {
+        // A texture an FBX names but does not carry is looked for beside it:
+        // where it says, then by its file name alone — what a model copied
+        // from another machine still has.
+        "fbx" => {
+            let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            kreate_io::parse_fbx(&bytes, &|named: &str| {
+                let named = named.replace('\\', "/");
+                let relative = dir.join(&named);
+                let bare = named.rsplit('/').next().map(|n| dir.join(n));
+                std::fs::read(relative)
+                    .ok()
+                    .or_else(|| bare.and_then(|b| std::fs::read(b).ok()))
+            })
+            .map_err(|e| e.to_string())?
+        }
+        "3mf" => kreate_io::parse_3mf(&bytes).map_err(|e| e.to_string())?,
+        "ply" => kreate_io::parse_ply(&bytes, &name).map_err(|e| e.to_string())?,
+        "off" => {
+            let text = String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
+            kreate_io::parse_off(&text, &name).map_err(|e| e.to_string())?
+        }
         "gltf" | "glb" => kreate_io::gltf_import::parse_gltf(
             &bytes,
             // glTF declares its own units and orientation, so there is nothing

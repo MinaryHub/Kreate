@@ -179,13 +179,22 @@ pub fn tools() -> Value {
         },
         {
             "name": "open_file",
-            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a glTF (.gltf/.glb), OBJ or STL scene to import. Unsaved changes in the current document are lost.",
+            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a scene to import — glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF or OFF. Unsaved changes in the current document are lost. To add a scene to the open document instead, use import_file.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },
                 "required": ["path"]
             },
             "annotations": { "destructiveHint": true }
+        },
+        {
+            "name": "import_file",
+            "description": "Adds a scene file's contents to the open document, beside what is there, as one undo step: glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF or OFF. What it adds is selected.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "An absolute path." } },
+                "required": ["path"]
+            }
         },
         {
             "name": "save_file",
@@ -284,6 +293,7 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "undo" => ("undo", pick(&["steps"])),
         "redo" => ("redo", pick(&["steps"])),
         "open_file" => ("open", pick(&["path"])),
+        "import_file" => ("import", pick(&["path"])),
         "save_file" => ("save", pick(&["path"])),
         "export_file" => ("export", pick(&["path"])),
         other => return Err((-32602, format!("no tool called `{other}`"))),

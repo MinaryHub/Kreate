@@ -1295,6 +1295,7 @@ struct Labels {
     file_save: String,
     file_save_as: String,
     file_export: String,
+    file_import: String,
     file_run_script: String,
     menu_search: String,
     menu_copy_script: String,
@@ -1622,6 +1623,7 @@ impl Labels {
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
             file_export: t("menu-file-export"),
+            file_import: t("menu-file-import"),
             file_run_script: t("menu-file-run-script"),
             menu_search: t("menu-search"),
             menu_copy_script: t("menu-copy-script"),
@@ -3555,6 +3557,12 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     dispatch("file.run_script"),
                 ),
                 Separator,
+                // Beside what is there, as one undo step: where Open replaces.
+                entry(
+                    "file.import",
+                    &l.file_import,
+                    Run::Command(Command::ImportScene),
+                ),
                 // After a separator, because an export is not a save: the
                 // document keeps no path from it and treating a `.glb` as a
                 // working file loses everything the format cannot hold.
@@ -10199,6 +10207,7 @@ const KIND_KEYS: &[&str] = &[
 pub const EN_FTL: &str = r#"
 menu-file-new = New
 menu-file-open = Open...
+menu-file-import = Import...
 menu-file-save = Save
 menu-file-save-as = Save As...
 menu-file-export = Export...
@@ -11158,6 +11167,7 @@ op-file-open-desc = Opens a .kreate file, replacing the open document.
 op-file-save-desc = Writes the document to its file, or asks where if it has none yet.
 op-file-save-as-desc = Writes the document to a new file and works from there on.
 op-file-export-desc = Writes the scene in an interchange format. The document keeps its own file.
+op-file-import-desc = Adds a scene file — glTF, FBX, OBJ, STL, PLY, 3MF or OFF — to this document, beside what is there. Open replaces the document instead.
 op-edit-undo-desc = Takes back the last change.
 op-edit-redo-desc = Does the last undone change again.
 op-edit-copy-desc = Copies the selected objects, with their meshes, materials and textures.
@@ -11324,6 +11334,7 @@ op-object-duplicate-linked-true-desc = Copies the selected objects but shares on
 pub const KO_FTL: &str = r#"
 menu-file-new = 새로
 menu-file-open = 열기...
+menu-file-import = 가져오기...
 menu-file-save = 저장
 menu-file-save-as = 다른 이름으로 저장...
 menu-file-export = 내보내기...
@@ -12289,6 +12300,7 @@ op-file-open-desc = .kreate 파일을 열어 지금 문서를 대체합니다.
 op-file-save-desc = 문서를 파일에 씁니다. 아직 파일이 없으면 어디에 쓸지 묻습니다.
 op-file-save-as-desc = 문서를 새 파일에 쓰고, 이후로는 그 파일로 작업합니다.
 op-file-export-desc = 장면을 교환 형식으로 내보냅니다. 문서의 파일은 그대로입니다.
+op-file-import-desc = 장면 파일(glTF, FBX, OBJ, STL, PLY, 3MF, OFF)을 지금 문서에 더합니다. 열기는 문서를 바꿉니다.
 op-edit-undo-desc = 마지막 변경을 되돌립니다.
 op-edit-redo-desc = 되돌린 변경을 다시 적용합니다.
 op-edit-copy-desc = 선택한 물체를 메시·재질·텍스처와 함께 복사합니다.
@@ -13234,6 +13246,7 @@ mod tests {
             "menu-file-save",
             "menu-file-save-as",
             "menu-file-export",
+            "menu-file-import",
             "material-new",
             "material-none",
             "material-base-colour",
