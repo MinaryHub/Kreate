@@ -233,8 +233,19 @@ fn shoot_with(gpu: &Gpu, doc: &Document, camera: Camera, traced: bool) -> Vec<[f
         let traced_materials = materials.for_tracer(doc);
         let extracted: Vec<_> = meshes
             .iter()
-            .map(|(mesh, transform, material, _)| {
+            .map(|(mesh, transform, material, slots)| {
                 let cpu = RenderMeshCpu::extract(mesh);
+                // As `Materials::runs_of` resolves them.
+                let runs: Vec<(u32, u32)> = cpu
+                    .submeshes
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.start,
+                            slots.get(r.slot as usize).copied().unwrap_or(*material),
+                        )
+                    })
+                    .collect();
                 let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
                 let normals: Vec<kreate_math::Vec3> = cpu
                     .normals
@@ -248,21 +259,25 @@ fn shoot_with(gpu: &Gpu, doc: &Document, camera: Camera, traced: bool) -> Vec<[f
                     cpu.indices.clone(),
                     *transform,
                     *material,
+                    runs,
                 )
             })
             .collect();
         let pt_meshes: Vec<_> = extracted
             .iter()
-            .map(|(positions, uvs, normals, indices, transform, surface)| {
-                kreate_render::pathtrace::PtMesh {
-                    positions,
-                    uvs,
-                    normals,
-                    indices,
-                    transform: *transform,
-                    surface: *surface,
-                }
-            })
+            .map(
+                |(positions, uvs, normals, indices, transform, surface, runs)| {
+                    kreate_render::pathtrace::PtMesh {
+                        positions,
+                        uvs,
+                        normals,
+                        indices,
+                        transform: *transform,
+                        surface: *surface,
+                        runs,
+                    }
+                },
+            )
             .collect();
         let pt_images: Vec<_> = traced_materials
             .images
@@ -1238,22 +1253,24 @@ fn one_object_can_wear_two_materials_at_once() {
     ));
     doc.selection.add(object);
 
-    // Looking straight down at the plane, which lies in the XY plane.
-    let frame = shoot_from(
-        &gpu,
-        &doc,
-        Camera {
-            distance: 4.0,
-            ..Camera::default()
-        },
-    );
-    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
-    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
-    assert!(
-        reddish > 300 && bluish > 300,
-        "one object drew {reddish} red pixels and {bluish} blue ones; \
-         both halves have to be there, or the slots are not reaching the draw"
-    );
+    // Looking straight down at the plane, which lies in the XY plane — in
+    // the viewport and in the path tracer, which is handed the slots too.
+    let camera = Camera {
+        distance: 4.0,
+        ..Camera::default()
+    };
+    for (frame, how) in [
+        (shoot_from(&gpu, &doc, camera), "drawn"),
+        (shoot_traced(&gpu, &doc, camera), "traced"),
+    ] {
+        let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+        let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+        assert!(
+            reddish > 300 && bluish > 300,
+            "one object {how} {reddish} red pixels and {bluish} blue ones; \
+             both halves have to be there, or the slots are not reaching it"
+        );
+    }
 }
 
 /// Shadows stay while the view moves. The new document, under its own lamp,

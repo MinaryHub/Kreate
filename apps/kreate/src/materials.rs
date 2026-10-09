@@ -191,6 +191,29 @@ impl Materials {
             .collect()
     }
 
+    /// Where an object's mesh changes material, as the path tracer takes it:
+    /// each run of triangles sharing a slot, from its first index on, with
+    /// the compiled material that slot resolves to — the same resolution
+    /// [`Materials::slots_of`] gives the viewport's draws.
+    pub fn runs_of(
+        &self,
+        doc: &Document,
+        object: kreate_scene::ObjectId,
+        submeshes: &[kreate_render::mesh_gpu::Submesh],
+    ) -> Vec<(u32, u32)> {
+        let slots = self.slots_of(doc, object);
+        let whole = self.index_of(doc, object);
+        submeshes
+            .iter()
+            .map(|run| {
+                (
+                    run.start,
+                    slots.get(run.slot as usize).copied().unwrap_or(whole),
+                )
+            })
+            .collect()
+    }
+
     /// Whether these compiled to the same code as `other`.
     ///
     /// The whole list, because a material inserted in the middle moves every

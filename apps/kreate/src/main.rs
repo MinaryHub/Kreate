@@ -9822,6 +9822,7 @@ impl App {
                             v.to_bits().hash(&mut h);
                         }
                         materials.index_of(&self.doc, *id).hash(&mut h);
+                        materials.slots_of(&self.doc, *id).hash(&mut h);
                     }
                     format!("{surfaces:?}").hash(&mut h);
                     // The code and its numbers: a colour typed into a node
@@ -9851,6 +9852,7 @@ impl App {
                                     .iter()
                                     .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
                                     .collect();
+                                let runs = materials.runs_of(&self.doc, *id, &cpu.submeshes);
                                 (
                                     positions,
                                     uvs,
@@ -9858,6 +9860,7 @@ impl App {
                                     cpu.indices,
                                     self.doc.world_transform(*id),
                                     materials.index_of(&self.doc, *id),
+                                    runs,
                                 )
                             })
                             .collect();
@@ -9869,20 +9872,24 @@ impl App {
                                 p.indices.clone(),
                                 p.transform,
                                 first_panel + i as u32,
+                                Vec::new(),
                             )
                         }));
                         let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
                             .iter()
-                            .map(|(positions, uvs, normals, indices, transform, surface)| {
-                                kreate_render::pathtrace::PtMesh {
-                                    positions,
-                                    uvs,
-                                    normals,
-                                    indices,
-                                    transform: *transform,
-                                    surface: *surface,
-                                }
-                            })
+                            .map(
+                                |(positions, uvs, normals, indices, transform, surface, runs)| {
+                                    kreate_render::pathtrace::PtMesh {
+                                        positions,
+                                        uvs,
+                                        normals,
+                                        indices,
+                                        transform: *transform,
+                                        surface: *surface,
+                                        runs,
+                                    }
+                                },
+                            )
                             .collect();
                         let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
                             .iter()

@@ -112,6 +112,11 @@ pub struct PtMesh<'a> {
     pub indices: &'a [u32],
     pub transform: DAffine3,
     pub surface: u32,
+    /// Where the mesh changes surface, for one whose faces wear different
+    /// materials: from each run's first index into `indices` on, that
+    /// surface. Empty for one surface throughout; before the first run is
+    /// `surface`.
+    pub runs: &'a [(u32, u32)],
 }
 
 /// A thin lens: depth of field, from a camera with an aperture.
@@ -543,8 +548,17 @@ impl PathTracer {
                 let wn = (normal_matrix * n.as_dvec3()).normalize_or_zero().as_vec3();
                 normals.push([wn.x, wn.y, wn.z, 0.0]);
             }
-            for t in mesh.indices.as_chunks::<3>().0 {
-                triangles.push([base + t[0], base + t[1], base + t[2], mesh.surface]);
+            let mut run = 0;
+            let mut surface = mesh.surface;
+            for (k, t) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+                while let Some(&(start, next)) = mesh.runs.get(run) {
+                    if start as usize > k * 3 {
+                        break;
+                    }
+                    surface = next;
+                    run += 1;
+                }
+                triangles.push([base + t[0], base + t[1], base + t[2], surface]);
             }
         }
         let indices: Vec<[u32; 3]> = triangles.iter().map(|t| [t[0], t[1], t[2]]).collect();

@@ -2202,6 +2202,7 @@ fn traced_scene(
             indices: &m.indices,
             transform: *t,
             surface: 0,
+            runs: &[],
         })
         .collect();
     let mut meshes = meshes;
@@ -2916,6 +2917,7 @@ fn glowing_panel_patch_sided(
                 indices: &m.indices,
                 transform: *t,
                 surface: *surface,
+                runs: &[],
             },
         )
         .collect();
@@ -3047,6 +3049,7 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
         indices: &floor_cpu.indices,
         transform: glam::DAffine3::IDENTITY,
         surface: 0,
+        runs: &[],
     }];
     let matte = kreate_render::pathtrace::PtSurface {
         base_color: [0.8; 3],
@@ -3185,6 +3188,7 @@ fn floor_shot(gpu: &Gpu, graph: &kreate_scene::shader::ShaderGraph, traced: bool
         indices: &floor_cpu.indices,
         transform: glam::DAffine3::IDENTITY,
         surface: 0,
+        runs: &[],
     }];
     let surface = kreate_render::pathtrace::PtSurface {
         base_color: [0.8, 0.8, 0.8],
