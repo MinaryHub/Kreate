@@ -50,7 +50,6 @@ use; `scripts/release.sh` turns that section into the next release.
 - Cameras and lights from glTF files look and shine where the file says:
   each was tipped a quarter turn, a level camera looking at the floor and a
   sun shining sideways. Written out again, they stay the right way round.
-
 - A `.gltf` whose buffers and textures are files beside it opens and
   imports; it needed everything embedded. References that leave the file's
   folder are refused.
