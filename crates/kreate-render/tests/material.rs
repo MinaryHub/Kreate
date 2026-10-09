@@ -93,7 +93,7 @@ fn textured() -> (ShaderGraph, kreate_scene::Document) {
     let mut graph = flat();
     let surface = graph.output().expect("a surface");
     let image = graph
-        .add_node(Node::new("Albedo", NodeKind::Image { image: Some(id) }))
+        .add_node(Node::new("Albedo", NodeKind::image(Some(id))))
         .expect("added");
     graph
         .link(Link {

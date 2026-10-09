@@ -612,7 +612,9 @@ pub struct SetNodeValueParams {
     /// the numbering `NodeKind::values` uses, less the surface's colour. A
     /// texture's scale is zero; a Noise's detail, roughness and distortion
     /// one to three, a Voronoi's randomness one, and a Wave's distortion,
-    /// detail, detail scale and bands-or-rings one to four.
+    /// detail, detail scale and bands-or-rings one to four. An image's
+    /// projection (zero by UV, one box) is zero, its box blend and scale one
+    /// and two.
     #[param(min = 0.0)]
     pub field: u32,
     pub value: f64,
@@ -668,6 +670,12 @@ impl Operator for SetNodeValue {
             }
             (NodeKind::Voronoi { randomness, .. }, 1) => *randomness = v.clamp(0.0, 1.0),
             (NodeKind::Wave { detail_scale, .. }, 3) => *detail_scale = v,
+            (NodeKind::Image { projection, .. }, 0) => {
+                *projection =
+                    kreate_scene::shader::Projection::from_index(v.round().max(0.0) as u32)
+            }
+            (NodeKind::Image { blend, .. }, 1) => *blend = v.clamp(0.0, 1.0),
+            (NodeKind::Image { scale, .. }, 2) => *scale = v,
             (NodeKind::Wave { kind, .. }, 4) => {
                 *kind = kreate_scene::shader::WaveKind::from_index(v.round().max(0.0) as u32)
             }
@@ -730,7 +738,7 @@ impl Operator for SetNodeImage {
             .get_mut(params.node as usize)
             .map(|n| &mut n.kind)
         {
-            Some(NodeKind::Image { image: slot }) => {
+            Some(NodeKind::Image { image: slot, .. }) => {
                 if *slot == image {
                     return Ok(OpResult::Cancelled);
                 }

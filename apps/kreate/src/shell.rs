@@ -7044,9 +7044,41 @@ fn graph_view(
                     max: 2.0,
                     label: t("node-socket-strength"),
                 }],
-                NodeKind::Image { image } => vec![FieldView::Image {
-                    name: image.and_then(|id| doc.image(id)).map(|i| i.name.clone()),
-                }],
+                NodeKind::Image {
+                    image,
+                    projection,
+                    blend,
+                    scale,
+                } => {
+                    let mut fields = vec![
+                        FieldView::Image {
+                            name: image.and_then(|id| doc.image(id)).map(|i| i.name.clone()),
+                        },
+                        FieldView::Choice {
+                            field: 0,
+                            value: projection.index(),
+                            options: vec![t("node-projection-flat"), t("node-projection-box")],
+                        },
+                    ];
+                    // The box's own numbers, only while it is a box.
+                    if *projection == kreate_scene::shader::Projection::Box {
+                        fields.push(FieldView::Value {
+                            field: 1,
+                            value: *blend,
+                            min: 0.0,
+                            max: 1.0,
+                            label: t("node-socket-blend"),
+                        });
+                        fields.push(FieldView::Value {
+                            field: 2,
+                            value: *scale,
+                            min: 0.0,
+                            max: 100.0,
+                            label: t("node-socket-scale"),
+                        });
+                    }
+                    fields
+                }
                 NodeKind::Math { op, .. } => vec![FieldView::Choice {
                     field: 0,
                     value: op.index(),
@@ -10831,6 +10863,9 @@ node-socket-fac = Fac
 node-socket-distance = Distance
 node-wave-bands = Bands
 node-wave-rings = Rings
+node-projection-flat = Flat (UV)
+node-projection-box = Box (triplanar)
+node-socket-blend = Blend
 node-socket-factor = Factor
 node-socket-emission = Emission
 node-math-add = Add
@@ -11953,6 +11988,9 @@ node-socket-fac = 계수
 node-socket-distance = 거리
 node-wave-bands = 띠
 node-wave-rings = 고리
+node-projection-flat = 평면 (UV)
+node-projection-box = 박스 (트라이플래너)
+node-socket-blend = 블렌드
 node-socket-factor = 비율
 node-socket-emission = 발광
 node-math-add = 더하기

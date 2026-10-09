@@ -78,7 +78,7 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{MathOp, NodeKind, ShaderGraph, Socket, WaveKind};
+use kreate_scene::shader::{MathOp, NodeKind, Projection, ShaderGraph, Socket, WaveKind};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -354,12 +354,22 @@ impl Emitter<'_> {
                 self.constants.push([v, 0.0, 0.0, 0.0]);
                 let _ = writeln!(self.body, "    let n{node} = material.values[{slot}].x;");
             }
-            NodeKind::Image { image } => {
+            NodeKind::Image {
+                image,
+                projection,
+                blend,
+                scale,
+            } => {
                 // A slot even though nothing reads it, so that the constant
                 // layout depends on the graph's shape and not on which kinds
                 // happen to need numbers. A layout that skipped a node would
                 // change when an image was swapped for a colour.
                 self.constants.push([0.0; 4]);
+                // And for a box, a second: the blend and the scale. Only for
+                // a box, which is a different shape anyway.
+                if projection == Projection::Box {
+                    self.constants.push([blend, scale, 0.0, 0.0]);
+                }
                 match image {
                     Some(id) => {
                         let space = (self.space_of)(id);
@@ -388,10 +398,39 @@ impl Emitter<'_> {
                         // the same way the coordinate is — and taken from the
                         // *unwrapped* UV, which is the point of passing them:
                         // see the module docs on the seam `fract` would draw.
-                        let _ = writeln!(
-                            self.body,
-                            "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
-                        );
+                        match projection {
+                            Projection::Flat => {
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
+                                );
+                            }
+                            Projection::Box => {
+                                // Three samples, one down each axis, each with
+                                // the position's own gradients in that plane —
+                                // and weighted by how squarely the surface
+                                // faces it. A blend of zero is a hard edge
+                                // (a high power), one an even mix.
+                                let b = slot + 1;
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_k = mix(48.0, 1.0, clamp(material.values[{b}].x, 0.0, 1.0));\n    let n{node}_a = pow(abs(geometry.normal), vec3<f32>(n{node}_k)) + vec3<f32>(1e-6);\n    let n{node}_w = n{node}_a / (n{node}_a.x + n{node}_a.y + n{node}_a.z);\n    let n{node}_p = geometry.position * material.values[{b}].y;\n    let n{node}_dx = geometry.position_dx * material.values[{b}].y;\n    let n{node}_dy = geometry.position_dy * material.values[{b}].y;"
+                                );
+                                let mut taps = Vec::new();
+                                for (axis, plane) in [("x", "yz"), ("y", "xz"), ("z", "xy")] {
+                                    let _ = writeln!(
+                                        self.body,
+                                        "    let n{node}_{axis} = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(n{node}_p.{plane}) * n{node}_rect.zw, {layer}, n{node}_dx.{plane} * n{node}_rect.zw, n{node}_dy.{plane} * n{node}_rect.zw);"
+                                    );
+                                    taps.push(format!("n{node}_{axis} * n{node}_w.{axis}"));
+                                }
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_rgba = {};",
+                                    taps.join(" + ")
+                                );
+                            }
+                        }
                     }
                     None => {
                         // White, so a material being built looks unfinished
@@ -942,6 +981,38 @@ mod tests {
     }
 
     #[test]
+    fn a_box_projected_image_samples_three_ways_and_type_checks() {
+        let mut g = flat();
+        let image = g
+            .add_node(Node::new(
+                "Tiles",
+                NodeKind::Image {
+                    image: Some(an_image()),
+                    projection: Projection::Box,
+                    blend: 0.3,
+                    scale: 2.0,
+                },
+            ))
+            .expect("added");
+        g.link(Link {
+            from_node: image,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 0,
+        })
+        .expect("a colour into the base colour");
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        // One image, sampled down each axis.
+        assert_eq!(compiled.images.len(), 1);
+        assert_eq!(compiled.wgsl.matches("textureSampleGrad").count(), 3);
+        // The rectangle's slot is still the one the renderer fills, and the
+        // blend and scale sit after it.
+        let rect = compiled.image_slots[0];
+        assert_eq!(compiled.constants[rect + 1][..2], [0.3, 2.0]);
+    }
+
+    #[test]
     fn a_material_without_a_procedural_texture_carries_no_noise() {
         assert!(!compile(&flat()).expect("compiles").wgsl.contains("kr_"));
     }
@@ -1156,12 +1227,7 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let image = graph
-            .add_node(Node::new(
-                "Albedo",
-                NodeKind::Image {
-                    image: Some(an_image()),
-                },
-            ))
+            .add_node(Node::new("Albedo", NodeKind::image(Some(an_image()))))
             .expect("added");
         graph
             .link(Link {
@@ -1202,7 +1268,7 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let image = graph
-            .add_node(Node::new("Albedo", NodeKind::Image { image: None }))
+            .add_node(Node::new("Albedo", NodeKind::image(None)))
             .expect("added");
         graph
             .link(Link {

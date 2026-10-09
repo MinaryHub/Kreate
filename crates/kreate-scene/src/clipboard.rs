@@ -282,7 +282,7 @@ impl Document {
         // And the graph's own image nodes, through the same table.
         if let Some(graph) = &mut material.graph {
             for node in &mut graph.nodes {
-                if let crate::shader::NodeKind::Image { image } = &mut node.kind {
+                if let crate::shader::NodeKind::Image { image, .. } = &mut node.kind {
                     *image = image.and_then(&mut carry);
                 }
             }
