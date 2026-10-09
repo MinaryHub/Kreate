@@ -197,6 +197,34 @@ pub fn tools() -> Value {
             }
         },
         {
+            "name": "search_assets",
+            "description": "Searches free asset libraries for models, materials (texture sets) or HDRIs (environment lights): Poly Haven and ambientCG, both CC0, or the user's own asset folders. Returns up to `limit` matches, each with the id add_asset takes. ambientCG has no models.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words to match against names, categories and tags, e.g. \"wooden floor\"." },
+                    "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "local"], "description": "Default polyhaven." },
+                    "limit": { "type": "integer", "description": "Default 20." }
+                },
+                "required": ["kind"]
+            }
+        },
+        {
+            "name": "add_asset",
+            "description": "Downloads an asset found by search_assets and adds it: a model into the scene beside what is there, a material onto the active object (made from its texture maps), an HDRI as the world's light. Downloads run in the background; the asset appears when it has arrived — check with get_scene.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "local"], "description": "Default polyhaven." },
+                    "resolution": { "type": "string", "enum": ["1k", "2k", "4k"], "description": "Texture size. Default 1k." }
+                },
+                "required": ["id", "kind"]
+            }
+        },
+        {
             "name": "save_file",
             "description": "Saves the document as .kreate. Without a path it saves over the file it came from; a path saves it there and makes that its file.",
             "inputSchema": {
@@ -294,6 +322,8 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "redo" => ("redo", pick(&["steps"])),
         "open_file" => ("open", pick(&["path"])),
         "import_file" => ("import", pick(&["path"])),
+        "search_assets" => ("assets", pick(&["query", "kind", "source", "limit"])),
+        "add_asset" => ("add_asset", pick(&["id", "kind", "source", "resolution"])),
         "save_file" => ("save", pick(&["path"])),
         "export_file" => ("export", pick(&["path"])),
         other => return Err((-32602, format!("no tool called `{other}`"))),

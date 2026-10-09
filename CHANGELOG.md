@@ -24,6 +24,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - Link a `.kreate` from the Assets editor rather than copy it: its objects
   are read-only here and read again from the file each time the document
   opens, so fixing a prop in its library fixes it in every scene.
+- The AI chat can find and add assets: `search_assets` looks through
+  Poly Haven, ambientCG or your folders, and `add_asset` brings one in.
 - A saved document reopens seen from where it was looked at when saved:
   the view's angle, distance, lens and projection go in the file.
 - Cut-out materials: a surface is cut away where its base colour image is

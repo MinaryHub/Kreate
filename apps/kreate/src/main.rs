@@ -4829,6 +4829,61 @@ impl App {
                     Ok(json!({ "message": said }))
                 }
             }
+            "assets" => {
+                use kreate::assets::{Kind, Source};
+                let kind = text("kind")
+                    .and_then(|k| Kind::from_tag(&k))
+                    .ok_or("`kind` is model, material or hdri")?;
+                let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
+                    .ok_or("`source` is polyhaven, ambientcg or local")?;
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let query = text("query").unwrap_or_default();
+                let entries = kreate::assets::list_now(source, kind, &self.ui.asset_folders)?;
+                let found: Vec<serde_json::Value> = entries
+                    .iter()
+                    .filter(|e| e.matches(&query))
+                    .take(limit.clamp(1, 200))
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "name": e.name,
+                            "tags": e.tags,
+                            "authors": e.authors,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "source": source.tag(), "kind": kind.tag(), "found": found }))
+            }
+            "add_asset" => {
+                use kreate::assets::{Kind, Source};
+                let kind = text("kind")
+                    .and_then(|k| Kind::from_tag(&k))
+                    .ok_or("`kind` is model, material or hdri")?;
+                let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
+                    .ok_or("`source` is polyhaven, ambientcg or local")?;
+                let id = text("id").ok_or("`id` is required")?;
+                let resolution = match text("resolution").as_deref() {
+                    Some("2k") => "2k",
+                    Some("4k") => "4k",
+                    _ => "1k",
+                };
+                let entry = kreate::assets::list_now(source, kind, &self.ui.asset_folders)?
+                    .into_iter()
+                    .find(|e| e.id == id)
+                    .ok_or_else(|| {
+                        format!("no {} called `{id}` in {}", kind.tag(), source.tag())
+                    })?;
+                let library = self
+                    .assets
+                    .as_ref()
+                    .ok_or("the asset library is not running")?;
+                if self.ui.asset_fetching.insert(entry.id.clone()) {
+                    library.fetch(entry.clone(), resolution);
+                }
+                Ok(
+                    json!({ "message": format!("fetching {}; it is added when it arrives", entry.name) }),
+                )
+            }
             "import" => {
                 let path = text("path").ok_or("`path` is required")?;
                 // Here and now, not on a thread: the connector is told what
@@ -12816,6 +12871,63 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// The connector finds an asset and adds it: search by words, add by
+    /// the id the search gave, the model arriving in the scene once fetched.
+    #[test]
+    fn the_connector_searches_the_asset_folders_and_adds_what_it_found() {
+        let dir =
+            std::env::temp_dir().join(format!("kreate-connector-assets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let mesh = kreate_mesh::primitives::cube(1.0);
+        std::fs::write(
+            dir.join("wooden_crate.obj"),
+            kreate_io::write_obj(&[("Crate".to_string(), &mesh)], Default::default()),
+        )
+        .expect("written");
+        let mut app = app();
+        app.assets = Some(kreate::assets::Library::new(|| {}));
+        app.ui.asset_folders = vec![dir.clone()];
+        let found = app
+            .bridge_call(
+                "assets",
+                &serde_json::json!({"kind": "model", "source": "local", "query": "crate"}),
+            )
+            .expect("searched");
+        let id = found["found"][0]["id"]
+            .as_str()
+            .expect("one found")
+            .to_string();
+        assert!(app
+            .bridge_call(
+                "assets",
+                &serde_json::json!({"kind": "model", "source": "local", "query": "barrel"}),
+            )
+            .expect("searched")["found"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()));
+
+        let before = app.doc.objects().count();
+        app.bridge_call(
+            "add_asset",
+            &serde_json::json!({"kind": "model", "source": "local", "id": id}),
+        )
+        .expect("asked for");
+        let start = std::time::Instant::now();
+        while app.doc.objects().count() == before && start.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.serve_assets();
+            app.serve_imports();
+        }
+        assert_eq!(app.doc.objects().count(), before + 1);
+        assert!(app
+            .bridge_call(
+                "add_asset",
+                &serde_json::json!({"kind": "model", "source": "local", "id": "nope"})
+            )
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File ▸ Import reads the file off the main thread and adds it as one
     /// step whose script line names the file — not the file's bytes.

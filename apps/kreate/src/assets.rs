@@ -697,24 +697,7 @@ impl Library {
     /// Lists one kind from one source.
     pub fn list(&self, source: Source, kind: Kind, folders: Vec<PathBuf>) {
         self.spawn(move || {
-            let result = match source {
-                Source::Local => Ok(scan_folders(&folders)
-                    .into_iter()
-                    .filter(|e| e.kind == kind)
-                    .collect()),
-                Source::PolyHaven => cache_root()
-                    .ok_or_else(|| "no cache folder".to_string())
-                    .and_then(|root| {
-                        cached_text(
-                            &format!("{API}/assets?t={}", kind.polyhaven()),
-                            &root
-                                .join("polyhaven")
-                                .join(format!("{}.json", kind.polyhaven())),
-                        )
-                    })
-                    .and_then(|json| parse_polyhaven_list(&json, kind)),
-                Source::AmbientCg => ambientcg_list(kind),
-            };
+            let result = list_now(source, kind, &folders);
             Event::Listed {
                 source,
                 kind,
@@ -799,6 +782,59 @@ impl Library {
 
     pub fn poll(&self) -> Vec<Event> {
         self.rx.try_iter().collect()
+    }
+}
+
+/// One kind from one source, here and now: what [`Library::list`] does on a
+/// thread, for a caller that waits — the connector, answering a search.
+pub fn list_now(source: Source, kind: Kind, folders: &[PathBuf]) -> Result<Vec<Entry>, String> {
+    match source {
+        Source::Local => Ok(scan_folders(folders)
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .collect()),
+        Source::PolyHaven => cache_root()
+            .ok_or_else(|| "no cache folder".to_string())
+            .and_then(|root| {
+                cached_text(
+                    &format!("{API}/assets?t={}", kind.polyhaven()),
+                    &root
+                        .join("polyhaven")
+                        .join(format!("{}.json", kind.polyhaven())),
+                )
+            })
+            .and_then(|json| parse_polyhaven_list(&json, kind)),
+        Source::AmbientCg => ambientcg_list(kind),
+    }
+}
+
+impl Source {
+    /// The name the connector uses.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Source::Local => "local",
+            Source::PolyHaven => "polyhaven",
+            Source::AmbientCg => "ambientcg",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.tag() == tag)
+    }
+}
+
+impl Kind {
+    /// The name the connector uses.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Kind::Model => "model",
+            Kind::Material => "material",
+            Kind::Hdri => "hdri",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.tag() == tag)
     }
 }
 
