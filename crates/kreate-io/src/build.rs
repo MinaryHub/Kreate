@@ -1036,6 +1036,7 @@ fn build_materials(
                 MaterialMap::MetallicRoughness.color_space(),
             );
             let normal_image = image_for(m.normal_texture, MaterialMap::Normal.color_space());
+            let emission_image = image_for(m.emissive_texture, MaterialMap::Emission.color_space());
             doc.add_material(kreate_scene::Material {
                 name: m.name.clone(),
                 // Linear on both sides — glTF's factor is linear, and so is the
@@ -1051,6 +1052,7 @@ fn build_materials(
                 base_color_image,
                 metallic_roughness_image,
                 normal_image,
+                emission_image,
                 normal_strength: m.normal_scale,
                 // The glow's colour and how bright, kept apart as the
                 // datablock keeps them; a file with a colour and no strength
@@ -1176,6 +1178,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
                 &mut notes,
             ),
             normal_texture: texture(MaterialMap::Normal, material.normal_image, &mut notes),
+            emissive_texture: texture(MaterialMap::Emission, material.emission_image, &mut notes),
             normal_scale: material.normal_strength,
             emissive_strength: if material.emission_strength > 0.0 {
                 material.emission_strength

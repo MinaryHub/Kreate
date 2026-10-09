@@ -1391,6 +1391,7 @@ struct Labels {
     material_base_colour: String,
     material_metallic_roughness: String,
     material_normal_map: String,
+    material_emission_map: String,
     material_uses_nodes: String,
     node_use_nodes: String,
     node_use_nodes_hint: String,
@@ -1721,6 +1722,7 @@ impl Labels {
             material_base_colour: t("material-base-colour"),
             material_metallic_roughness: t("material-metallic-roughness"),
             material_normal_map: t("material-normal-map"),
+            material_emission_map: t("material-emission-map"),
             material_uses_nodes: t("material-uses-nodes"),
             node_use_nodes: t("node-use-nodes"),
             node_use_nodes_hint: t("node-use-nodes-hint"),
@@ -9401,6 +9403,7 @@ fn draw_material_tab(
                 kreate_scene::MaterialMap::BaseColor => &l.material_base_colour,
                 kreate_scene::MaterialMap::MetallicRoughness => &l.material_metallic_roughness,
                 kreate_scene::MaterialMap::Normal => &l.material_normal_map,
+                kreate_scene::MaterialMap::Emission => &l.material_emission_map,
             };
             let map_id = index as u32;
             ui.label(label);
@@ -10517,6 +10520,7 @@ material-none = This object has no material.
 material-base-colour = Base Colour
 material-metallic-roughness = Metallic / Roughness
 material-normal-map = Normal Map
+material-emission-map = Emission Map
 material-empty-slot = Empty
 material-no-slots = No slots
 material-add-slot = Add a material slot
@@ -11668,6 +11672,7 @@ material-none = 이 물체에는 재질이 없습니다.
 material-base-colour = 베이스 컬러
 material-metallic-roughness = 메탈릭 / 러프니스
 material-normal-map = 노멀 맵
+material-emission-map = 발광 맵
 material-empty-slot = 비어 있음
 material-no-slots = 슬롯 없음
 material-add-slot = 재질 슬롯 추가

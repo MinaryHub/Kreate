@@ -124,6 +124,8 @@ pub struct ImportMaterial {
     /// glTF's packing: roughness in green, metallic in blue.
     pub metallic_roughness_texture: Option<usize>,
     pub normal_texture: Option<usize>,
+    /// glTF's `emissiveTexture`: what the glow is multiplied by.
+    pub emissive_texture: Option<usize>,
     /// glTF's `normalTexture.scale`.
     pub normal_scale: f32,
     /// What `emissive` is multiplied by: `KHR_materials_emissive_strength`.
@@ -163,6 +165,7 @@ impl Default for ImportMaterial {
             base_color_texture: None,
             metallic_roughness_texture: None,
             normal_texture: None,
+            emissive_texture: None,
             normal_scale: 1.0,
             emissive_strength: 1.0,
             transmission: 0.0,

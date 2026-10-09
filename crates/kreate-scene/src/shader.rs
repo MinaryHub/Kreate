@@ -922,6 +922,12 @@ impl ShaderGraph {
             wire(&mut graph, texture, 0, decode, 0);
             wire(&mut graph, decode, 0, 0, 3);
         }
+        if let Some(image) = material.emission_image {
+            // The glow's tint: the strength and colour stay the material's,
+            // the picture says where and in what colour.
+            let texture = add(&mut graph, "Emission", NodeKind::image(Some(image)));
+            wire(&mut graph, texture, 0, 0, 4);
+        }
         graph.arrange();
         graph
     }
@@ -941,7 +947,9 @@ impl ShaderGraph {
                 Some(NodeKind::NormalMap { .. })
                 | Some(NodeKind::SeparateRgb)
                 | Some(NodeKind::MultiplyValue) => true,
-                Some(NodeKind::Surface { .. }) => l.to_socket != 0,
+                // Metallic, roughness and the normal are numbers; the base
+                // colour, the glow's tint and an alpha are not about which.
+                Some(NodeKind::Surface { .. }) => matches!(l.to_socket, 1..=3),
                 _ => false,
             }
         });

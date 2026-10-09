@@ -1015,7 +1015,7 @@ pub struct SetMaterialImageParams {
     ///
     /// Base colour first and so the default, which keeps every script written
     /// before there were other maps meaning what it meant.
-    #[param(variants("base_color", "metallic_roughness", "normal"))]
+    #[param(variants("base_color", "metallic_roughness", "normal", "emission"))]
     pub map: u32,
     /// The image datablock's identity, in decimal. Empty takes the texture off.
     ///

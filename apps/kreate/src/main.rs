@@ -6762,11 +6762,12 @@ impl App {
             return;
         };
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg", "hdr"])
+            .add_filter("Image", &["png", "jpg", "jpeg", "hdr", "exr"])
             .set_title(match slot {
                 kreate_scene::MaterialMap::BaseColor => "Base Colour",
                 kreate_scene::MaterialMap::MetallicRoughness => "Metallic / Roughness",
                 kreate_scene::MaterialMap::Normal => "Normal Map",
+                kreate_scene::MaterialMap::Emission => "Emission Map",
             })
             .pick_file()
         else {
@@ -6922,7 +6923,7 @@ impl App {
             .map(|g| g.image_space(node as usize))
             .unwrap_or(kreate_scene::ColorSpace::Srgb);
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg", "hdr"])
+            .add_filter("Image", &["png", "jpg", "jpeg", "hdr", "exr"])
             .set_title("Image Texture")
             .pick_file()
         else {

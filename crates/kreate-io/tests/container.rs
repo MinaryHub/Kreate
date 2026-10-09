@@ -871,6 +871,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         emission: None,
         transmission: None,
         alpha_clip: None,
+        emission_uid: None,
         graph: None,
         action: None,
         extra: Default::default(),

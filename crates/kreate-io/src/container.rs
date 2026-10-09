@@ -826,6 +826,9 @@ pub struct MaterialRecord {
     /// The normal map's identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal_uid: Option<u64>,
+    /// The glow's image, by identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_uid: Option<u64>,
     /// The normal map's strength, written only when it is not one.
     ///
     /// Absent reads as one, which is the value every file written before this
@@ -1561,6 +1564,10 @@ pub fn write(
                         .normal_image
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
+                    emission_uid: m
+                        .emission_image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
                     normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
                     emission: (m.emission_strength != 0.0).then_some([
                         m.emission.r,
@@ -2100,6 +2107,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
             normal_image: record
                 .normal_uid
+                .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            emission_image: record
+                .emission_uid
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
             normal_strength: record.normal_strength.unwrap_or(1.0),
             emission: record

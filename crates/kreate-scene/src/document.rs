@@ -319,6 +319,9 @@ pub struct Material {
     /// it scales the map's X and Y before the vector is renormalised, so zero
     /// is a flat surface and one is the map as painted.
     pub normal_strength: f32,
+    /// A colour image the glow is multiplied by: where a surface glows, and in
+    /// what colour — a screen, a lit window. glTF's `emissiveTexture`.
+    pub emission_image: Option<ImageId>,
     /// The colour the surface glows with, beside how brightly.
     ///
     /// Two fields rather than one radiance, the way a light keeps its tint
@@ -372,6 +375,7 @@ impl Default for Material {
             metallic_roughness_image: None,
             normal_image: None,
             normal_strength: 1.0,
+            emission_image: None,
             emission: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
             emission_strength: 0.0,
             transmission: 0.0,
@@ -396,15 +400,17 @@ pub enum MaterialMap {
     BaseColor,
     MetallicRoughness,
     Normal,
+    Emission,
 }
 
 impl MaterialMap {
     /// Every map, in the order the panel lists them and the operator numbers
     /// them.
-    pub const ALL: [MaterialMap; 3] = [
+    pub const ALL: [MaterialMap; 4] = [
         MaterialMap::BaseColor,
         MaterialMap::MetallicRoughness,
         MaterialMap::Normal,
+        MaterialMap::Emission,
     ];
 
     /// A stable name for scripts and files. Not the discriminant, for the
@@ -414,6 +420,7 @@ impl MaterialMap {
             MaterialMap::BaseColor => "base_color",
             MaterialMap::MetallicRoughness => "metallic_roughness",
             MaterialMap::Normal => "normal",
+            MaterialMap::Emission => "emission",
         }
     }
 
@@ -425,7 +432,7 @@ impl MaterialMap {
     /// sRGB's curve moves every value but the two ends.
     pub fn color_space(self) -> crate::image::ColorSpace {
         match self {
-            MaterialMap::BaseColor => crate::image::ColorSpace::Srgb,
+            MaterialMap::BaseColor | MaterialMap::Emission => crate::image::ColorSpace::Srgb,
             MaterialMap::MetallicRoughness | MaterialMap::Normal => crate::image::ColorSpace::Raw,
         }
     }
@@ -473,6 +480,7 @@ impl Material {
             MaterialMap::BaseColor => self.base_color_image,
             MaterialMap::MetallicRoughness => self.metallic_roughness_image,
             MaterialMap::Normal => self.normal_image,
+            MaterialMap::Emission => self.emission_image,
         }
     }
 
@@ -482,6 +490,7 @@ impl Material {
             MaterialMap::BaseColor => &mut self.base_color_image,
             MaterialMap::MetallicRoughness => &mut self.metallic_roughness_image,
             MaterialMap::Normal => &mut self.normal_image,
+            MaterialMap::Emission => &mut self.emission_image,
         }
     }
 }

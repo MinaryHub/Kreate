@@ -382,3 +382,29 @@ fn a_cut_out_round_trips_as_mask_and_blend_arrives_as_glass() {
     assert_eq!(m.transmission, 1.0, "BLEND arrives as glass");
     assert!(m.alpha_clip.is_none());
 }
+
+/// An emission map goes out as glTF's emissiveTexture, as a colour, and
+/// comes back on the same material in the same space.
+#[test]
+fn an_emission_map_round_trips_as_a_colour() {
+    let mut doc = Document::new();
+    let glow = numbered(&mut doc, "Screen", 44, ColorSpace::Srgb);
+    let material = doc.add_material(Material {
+        name: "Monitor".into(),
+        emission: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+        emission_strength: 3.0,
+        emission_image: Some(glow),
+        ..Default::default()
+    });
+    cube_with(&mut doc, "Monitor", material);
+    let bytes = write(&doc, true);
+    let json = glb_json(&bytes);
+    assert!(json["materials"][0]["emissiveTexture"]["index"].is_u64());
+    let (back, _) = read(&bytes);
+    let (_, m) = back.materials().next().expect("a material");
+    let image = m.emission_image.expect("the glow's picture came back");
+    assert_eq!(back.image(image).unwrap().color_space, ColorSpace::Srgb);
+    // And the graph tints the glow by it.
+    let graph = m.shading_graph();
+    assert!(graph.incoming(0, 4).is_some(), "the emission socket is fed");
+}

@@ -1356,6 +1356,14 @@ fn emit_material(
                 extras: Default::default(),
             })
         }),
+        emissive_texture: described
+            .and_then(|m| m.emissive_texture)
+            .map(|i| json::texture::Info {
+                index: json::Index::new(i as u32),
+                tex_coord: 0,
+                extensions: None,
+                extras: Default::default(),
+            }),
         emissive_factor: json::material::EmissiveFactor(
             described.map(|m| m.emissive.to_array()).unwrap_or_default(),
         ),

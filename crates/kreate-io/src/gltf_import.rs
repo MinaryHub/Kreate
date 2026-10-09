@@ -241,6 +241,9 @@ fn from_imported(
                 t.texture().source().index(),
             )
         });
+        let emissive_texture = material
+            .emissive_texture()
+            .and_then(|t| texture("emission", t.tex_coord(), t.texture().source().index()));
         let (normal_texture, normal_scale) = match material.normal_texture() {
             Some(t) => (
                 texture("normal", t.tex_coord(), t.texture().source().index()),
@@ -260,6 +263,7 @@ fn from_imported(
             base_color_texture,
             metallic_roughness_texture,
             normal_texture,
+            emissive_texture,
             normal_scale,
             emissive_strength: material.emissive_strength().unwrap_or(1.0),
             // `BLEND` is see-through in a way a rasteriser blends; here it is
@@ -870,13 +874,6 @@ fn note_unread_features(document: &gltf::Document, scene: &mut ImportScene) {
         .count();
     if occlusion > 0 {
         mention(format!("{occlusion} occlusion maps were not read"));
-    }
-    let emissive = document
-        .materials()
-        .filter(|m| m.emissive_texture().is_some())
-        .count();
-    if emissive > 0 {
-        mention(format!("{emissive} emission maps were not read"));
     }
     scene.source.notes.extend(notes);
 }

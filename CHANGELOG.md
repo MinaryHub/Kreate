@@ -24,6 +24,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - Link a `.kreate` from the Assets editor rather than copy it: its objects
   are read-only here and read again from the file each time the document
   opens, so fixing a prop in its library fixes it in every scene.
+- An Emission Map on a material: a picture the glow is multiplied by — a
+  screen, a lit window. glTF's emissive texture imports and exports as one.
 - FBX cameras (lens and film back) and lights (point, sun, spot) are
   imported; FBX gives lights no unit, so the brightness taken is noted.
 - The AI chat can find and add assets: `search_assets` looks through
