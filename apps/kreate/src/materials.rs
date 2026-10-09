@@ -85,59 +85,82 @@ impl Materials {
             .unwrap_or(0)
     }
 
-    /// Each compiled material as the path tracer's flat surface, by compiled
-    /// index: base colour, metallic and roughness — the material's flat
-    /// fields, which is what its graph was built from unless it has one.
+    /// The materials as the path tracer runs them, by compiled index.
     ///
-    /// With the images they read, which the surfaces name by position.
-    pub fn flat_surfaces(
-        &self,
-        doc: &Document,
-    ) -> (Vec<kreate_render::pathtrace::PtSurface>, Vec<TextureImage>) {
-        let default = kreate_render::pathtrace::PtSurface {
-            base_color: [0.8, 0.8, 0.8],
-            metallic: 0.0,
-            roughness: 0.5,
-            ..Default::default()
-        };
-        let mut out = vec![default; self.compiled.len()];
-        let mut images: Vec<TextureImage> = Vec::new();
-        let mut take = |id: Option<kreate_scene::document::ImageId>,
-                        space: kreate_scene::ColorSpace|
-         -> Option<usize> {
-            let image = doc.image(id?)?;
-            images.push(TextureImage {
-                width: image.width(),
-                height: image.height(),
-                kind: kind_of(space),
-                pixels: encoded_rgba(image, space),
-            });
-            Some(images.len() - 1)
-        };
+    /// **The viewport's code, not a second reading of the graph.** Each
+    /// surface names its compiled material, and the tracer runs that
+    /// material's own function — rewritten by the compiler to read the
+    /// tracer's buffers — for its colour, metal, roughness and normal. What
+    /// stays flat is what the tracer needs before it shades: the glow, which
+    /// it aims at, and the glass, which it chooses by.
+    ///
+    /// Every material's images go over in its own order, each array counting
+    /// its own, which is where the code was told its layers are.
+    pub fn for_tracer(&self, doc: &Document) -> TracerMaterials {
+        let mut surfaces = vec![
+            kreate_render::pathtrace::PtSurface {
+                base_color: [0.8, 0.8, 0.8],
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            };
+            self.compiled.len()
+        ];
         // In a fixed order, so the same document hands over the same list.
         let mut ids: Vec<_> = self.index.iter().collect();
         ids.sort_by_key(|(_, index)| **index);
         for (id, index) in ids {
-            if let (Some(m), Some(slot)) = (doc.material(*id), out.get_mut(*index as usize)) {
+            if let (Some(m), Some(slot)) = (doc.material(*id), surfaces.get_mut(*index as usize)) {
                 *slot = kreate_render::pathtrace::PtSurface {
                     base_color: [m.base_color.r, m.base_color.g, m.base_color.b],
                     metallic: m.metallic,
                     roughness: m.roughness,
-                    base_color_image: take(m.base_color_image, kreate_scene::ColorSpace::Srgb),
-                    metallic_roughness_image: take(
-                        m.metallic_roughness_image,
-                        kreate_scene::ColorSpace::Raw,
-                    ),
                     emission: graph_emission(m),
                     transmission: graph_glass(m).0,
                     ior: graph_glass(m).1,
                     // A material glows both ways, as the rasterised view
                     // draws it; only a light's panel is one-sided.
                     one_sided: false,
+                    ..Default::default()
                 };
             }
         }
-        (out, images)
+        let mut images: Vec<TextureImage> = Vec::new();
+        let mut values: Vec<[f32; 4]> = Vec::new();
+        let mut code = kreate_shader::tracer_declarations();
+        let (mut colour, mut data) = (0u32, 0u32);
+        for (index, compiled) in self.compiled.iter().enumerate() {
+            code.push_str(&kreate_shader::for_tracer(
+                compiled,
+                index,
+                values.len() as u32,
+                colour,
+                data,
+            ));
+            let mut constants = compiled.constants.clone();
+            // A whole layer each: the unit square.
+            for slot in &compiled.image_slots {
+                if let Some(rect) = constants.get_mut(*slot) {
+                    *rect = [0.0, 0.0, 1.0, 1.0];
+                }
+            }
+            values.extend(constants);
+            for image in pixels_for(doc, compiled) {
+                match image.kind {
+                    kreate_render::material::TextureKind::Color => colour += 1,
+                    kreate_render::material::TextureKind::Data => data += 1,
+                }
+                images.push(image);
+            }
+            surfaces[index].material = Some(index as u32);
+        }
+        TracerMaterials {
+            surfaces,
+            images,
+            code,
+            count: self.compiled.len() as u32,
+            values,
+        }
     }
 
     /// One compiled material per mesh slot, in slot order.
@@ -181,6 +204,30 @@ impl Materials {
                 .iter()
                 .zip(&other.compiled)
                 .all(|(a, b)| a.wgsl == b.wgsl)
+    }
+}
+
+/// What [`Materials::for_tracer`] hands the path tracer.
+pub struct TracerMaterials {
+    /// One per compiled material, each naming its own code.
+    pub surfaces: Vec<kreate_render::pathtrace::PtSurface>,
+    /// Every material's images, in order.
+    pub images: Vec<TextureImage>,
+    /// The materials' functions, `material_sample_0` onwards.
+    pub code: String,
+    pub count: u32,
+    /// Every material's constants, one after another.
+    pub values: Vec<[f32; 4]>,
+}
+
+impl TracerMaterials {
+    /// As the tracer takes them.
+    pub fn materials(&self) -> kreate_render::pathtrace::PtMaterials<'_> {
+        kreate_render::pathtrace::PtMaterials {
+            code: &self.code,
+            count: self.count,
+            values: &self.values,
+        }
     }
 }
 

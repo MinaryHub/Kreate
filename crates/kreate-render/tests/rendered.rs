@@ -2215,7 +2215,14 @@ fn traced_scene(
         ior: 1.5,
         ..Default::default()
     };
-    viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[surface, glass], images);
+    viewport.set_path_trace_scene(
+        &gpu.device,
+        &gpu.queue,
+        &meshes,
+        &[surface, glass],
+        images,
+        &Default::default(),
+    );
     let mut draws = vec![
         Draw::new(&cube, lift),
         Draw::new(&floor, glam::DAffine3::IDENTITY),
@@ -2929,6 +2936,7 @@ fn glowing_panel_patch_sided(
         &meshes,
         &[floor_surface, glow],
         &[],
+        &Default::default(),
     );
     let mut draws = vec![
         Draw::new(&floor, glam::DAffine3::IDENTITY),
@@ -3045,7 +3053,14 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
         roughness: 0.9,
         ..Default::default()
     };
-    viewport.set_path_trace_scene(&gpu.device, &gpu.queue, &meshes, &[matte], &[]);
+    viewport.set_path_trace_scene(
+        &gpu.device,
+        &gpu.queue,
+        &meshes,
+        &[matte],
+        &[],
+        &Default::default(),
+    );
     let camera = Camera {
         pivot: glam::DVec3::ZERO,
         distance: 3.0,
@@ -3124,5 +3139,224 @@ fn a_one_sided_panel_lights_only_what_it_faces() {
     assert!(
         facing_away < both * 0.02,
         "a panel facing away lit the floor: {facing_away} against {both}"
+    );
+}
+
+/// A floor wearing `graph`, path traced under a low sun across its diagonal:
+/// the compiled material run by the tracer, the way the application hands it
+/// over. Low, so that a surface tilted toward it is lit more and one tilted
+/// away less — overhead, every tilt would only darken.
+fn traced_floor(gpu: &Gpu, graph: &kreate_scene::shader::ShaderGraph) -> Vec<[f32; 4]> {
+    floor_shot(gpu, graph, true)
+}
+
+/// The same floor, traced or rasterised.
+fn floor_shot(gpu: &Gpu, graph: &kreate_scene::shader::ShaderGraph, traced: bool) -> Vec<[f32; 4]> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.path_trace = traced;
+    viewport.path_trace_denoise = false;
+    viewport.show_bloom = false;
+    viewport.show_reflections = false;
+    viewport.ambient_occlusion = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.set_display(&gpu.queue, FRAMED);
+    graph_material(gpu, &mut viewport, graph);
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(4.0, 1, 1));
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    let compiled = kreate_shader::compile(graph).expect("compiles");
+    let code = format!(
+        "{}{}",
+        kreate_shader::tracer_declarations(),
+        kreate_shader::for_tracer(&compiled, 0, 0, 0, 0)
+    );
+    let positions: Vec<[f32; 3]> = floor_cpu.positions.iter().map(|p| p.0).collect();
+    let normals: Vec<glam::Vec3> = floor_cpu
+        .normals
+        .iter()
+        .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+        .collect();
+    let meshes = [kreate_render::pathtrace::PtMesh {
+        positions: &positions,
+        uvs: &floor_cpu.uvs,
+        normals: &normals,
+        indices: &floor_cpu.indices,
+        transform: glam::DAffine3::IDENTITY,
+        surface: 0,
+    }];
+    let surface = kreate_render::pathtrace::PtSurface {
+        base_color: [0.8, 0.8, 0.8],
+        roughness: 0.5,
+        material: Some(0),
+        ..Default::default()
+    };
+    viewport.set_path_trace_scene(
+        &gpu.device,
+        &gpu.queue,
+        &meshes,
+        &[surface],
+        &[],
+        &kreate_render::pathtrace::PtMaterials {
+            code: &code,
+            count: 1,
+            values: &compiled.constants,
+        },
+    );
+    let camera = Camera {
+        pivot: glam::DVec3::ZERO,
+        distance: 3.0,
+        ..Camera::default()
+    };
+    let mut draws = vec![Draw::new(&floor, glam::DAffine3::IDENTITY)];
+    let mut out = Vec::new();
+    for _ in 0..32 {
+        let low = PlacedLight {
+            direction: glam::Vec3::new(-0.6, -0.6, -0.5).normalize(),
+            ..key_light(20_000.0)
+        };
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[low]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
+    out
+}
+
+/// A grey surface with `kind` wired from its output `from` into socket `to`.
+fn grey_with(
+    kind: kreate_scene::shader::NodeKind,
+    from: usize,
+    to: usize,
+) -> kreate_scene::shader::ShaderGraph {
+    let mut graph =
+        kreate_scene::shader::ShaderGraph::standard("test", grey().base_color, 0.0, 0.5);
+    let node = graph
+        .add_node(kreate_scene::shader::Node::new("node", kind))
+        .expect("added");
+    graph
+        .link(kreate_scene::shader::Link {
+            from_node: node,
+            from_socket: from,
+            to_node: 0,
+            to_socket: to,
+        })
+        .expect("the sockets agree");
+    graph
+}
+
+/// The tracer runs the material's own code: a checker reaches its picture
+/// in both colours, read where each ray lands on the object.
+#[test]
+fn the_path_tracer_paints_with_the_materials_own_code() {
+    let gpu = gpu_or_skip!(gpu());
+    let frame = traced_floor(
+        &gpu,
+        &grey_with(
+            kreate_scene::shader::NodeKind::Checker {
+                scale: 1.0,
+                color1: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
+                color2: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
+            },
+            0,
+            0,
+        ),
+    );
+    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 200 && bluish > 200,
+        "the traced floor has {reddish} red pixels and {bluish} blue ones"
+    );
+}
+
+/// And its bump: a wave's bands tilt the traced floor's light both ways
+/// against the flat floor's.
+///
+/// Bands a metre apart: the tracer averages over each pixel, and bands finer
+/// than one would average to a floor that is only darker.
+#[test]
+fn the_path_tracer_tilts_the_light_by_a_bump() {
+    let gpu = gpu_or_skip!(gpu());
+    let flat = traced_floor(
+        &gpu,
+        &kreate_scene::shader::ShaderGraph::standard("test", grey().base_color, 0.0, 0.5),
+    );
+    let mut graph = grey_with(
+        kreate_scene::shader::NodeKind::Bump {
+            strength: 1.0,
+            distance: 0.3,
+        },
+        0,
+        3,
+    );
+    let wave = graph
+        .add_node(kreate_scene::shader::Node::new(
+            "wave",
+            kreate_scene::shader::NodeKind::Wave {
+                kind: kreate_scene::shader::WaveKind::Bands,
+                scale: 0.5,
+                distortion: 0.0,
+                detail: 2.0,
+                detail_scale: 1.0,
+            },
+        ))
+        .expect("added");
+    graph
+        .link(kreate_scene::shader::Link {
+            from_node: wave,
+            from_socket: 1,
+            to_node: 1,
+            to_socket: 2,
+        })
+        .expect("a number into the height");
+    let bumped = traced_floor(&gpu, &graph);
+    let lum = |p: &[f32; 4]| p[0] + p[1] + p[2];
+    // Lit where the viewport lights it: the tilt goes the same way in both.
+    // A sign wrong in either would light each band's other side.
+    let raster_flat = floor_shot(
+        &gpu,
+        &kreate_scene::shader::ShaderGraph::standard("test", grey().base_color, 0.0, 0.5),
+        false,
+    );
+    let raster_bumped = floor_shot(&gpu, &graph, false);
+    // Over the floor only — the sky above it is the same in all four — and
+    // each about its own mean there: a bump darkens overall, in both, and
+    // that would agree whichever way the bands were lit.
+    let sky = raster_flat[0];
+    let floor: Vec<usize> = (0..flat.len()).filter(|i| raster_flat[*i] != sky).collect();
+    assert!(floor.len() > 1000, "the floor is not in the picture");
+    let centred = |after: &[[f32; 4]], before: &[[f32; 4]]| {
+        let d: Vec<f32> = floor
+            .iter()
+            .map(|i| lum(&after[*i]) - lum(&before[*i]))
+            .collect();
+        let mean = d.iter().sum::<f32>() / d.len() as f32;
+        d.into_iter().map(|x| x - mean).collect::<Vec<f32>>()
+    };
+    let traced_change = centred(&bumped, &flat);
+    let raster_change = centred(&raster_bumped, &raster_flat);
+    // Correlated, not merely alike: a tilt either way darkens a little by
+    // itself, so even bands lit from the wrong side would agree some.
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+    let agreement = dot(&traced_change, &raster_change)
+        / (dot(&traced_change, &traced_change) * dot(&raster_change, &raster_change)).sqrt();
+    assert!(
+        agreement > 0.6,
+        "the traced bump and the viewport's correlate by only {agreement}"
+    );
+    let brighter = flat
+        .iter()
+        .zip(&bumped)
+        .filter(|(a, b)| lum(b) > lum(a) + 0.1)
+        .count();
+    let darker = flat
+        .iter()
+        .zip(&bumped)
+        .filter(|(a, b)| lum(b) + 0.1 < lum(a))
+        .count();
+    assert!(
+        brighter > 100 && darker > 100,
+        "against the flat floor, {brighter} traced pixels are lighter and {darker} darker"
     );
 }

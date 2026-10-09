@@ -761,6 +761,123 @@ impl Emitter<'_> {
     }
 }
 
+/// What a path tracer declares once, ahead of every material it runs: the
+/// two structs the material functions trade in, and the noise library.
+///
+/// Once rather than per material, because a module with two `struct
+/// MaterialSample`s does not compile — which is also why
+/// [`for_tracer`] strips them from each material.
+pub fn tracer_declarations() -> String {
+    format!(
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}\n{PROCEDURAL}"
+    )
+}
+
+/// A compiled material rewritten to run inside the path tracer, as
+/// `material_sample_{index}`.
+///
+/// **The same code, not a second interpretation of the graph.** What the
+/// viewport runs is what this returns, with its names moved: the tracer has
+/// one buffer of every material's constants rather than a uniform each, and
+/// one array of images per space rather than an atlas each. So each
+/// `material.values[slot]` reads `values + slot` of that buffer, and each
+/// image's layer is moved up by where this material's images start in its
+/// space's array. The tracer gives each image a whole layer, so the
+/// rectangles it writes into the constants are the unit square.
+pub fn for_tracer(
+    compiled: &Compiled,
+    index: usize,
+    values: u32,
+    colour_layer: u32,
+    data_layer: u32,
+) -> String {
+    let code = compiled.wgsl.replace(PROCEDURAL, "");
+    let mut out = String::new();
+    for line in code.lines() {
+        // The declarations the tracer makes once, and the bindings it has
+        // its own of.
+        if line.starts_with("struct MaterialConstants")
+            || line.starts_with("struct MaterialSample")
+            || line.starts_with("struct MaterialGeometry")
+            || line.starts_with("@group(")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let out = out
+        .replace(
+            "fn material_sample(",
+            &format!("fn material_sample_{index}("),
+        )
+        .replace("kr_height_", &format!("kr_height_{index}_"));
+    let out = renumber(&out, "material.values[", "]", |n| {
+        format!("pt_material_values[{}u]", values + n)
+    });
+    let out = out
+        .replace(
+            "textureSampleGrad(material_textures, material_sampler, ",
+            "textureSampleGrad(pt_colour_images, pt_image_sampler, ",
+        )
+        .replace(
+            "textureSampleGrad(material_data, material_sampler, ",
+            "textureSampleGrad(pt_data_images, pt_image_sampler, ",
+        );
+    let out = relayer(&out, "pt_colour_images", colour_layer);
+    relayer(&out, "pt_data_images", data_layer)
+}
+
+/// Replaces each `{open}N{close}` with `with(N)`; anything else after
+/// `open` is left as it was.
+fn renumber(text: &str, open: &str, close: &str, with: impl Fn(u32) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(open) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + open.len()..];
+        match after
+            .find(close)
+            .and_then(|end| Some((end, after[..end].trim().parse::<u32>().ok()?)))
+        {
+            Some((end, n)) => {
+                out.push_str(&with(n));
+                rest = &after[end + close.len()..];
+            }
+            None => {
+                out.push_str(open);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Moves the layer of every sample from `array` up by `base`: the second
+/// argument after the sampler, which is a number the compiler wrote.
+fn relayer(text: &str, array: &str, base: u32) -> String {
+    let open = format!("textureSampleGrad({array}, pt_image_sampler, ");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&open) {
+        out.push_str(&rest[..at + open.len()]);
+        rest = &rest[at + open.len()..];
+        // The coordinate, then the layer.
+        let Some(comma) = rest.find(',') else { break };
+        out.push_str(&rest[..comma + 1]);
+        rest = &rest[comma + 1..];
+        let Some(end) = rest.find(',') else { break };
+        match rest[..end].trim().parse::<u32>() {
+            Ok(layer) => out.push_str(&format!(" {}", base + layer)),
+            Err(_) => out.push_str(&rest[..end]),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What the procedural textures are made of, written once into a material
 /// that uses any.
 ///
@@ -1148,6 +1265,61 @@ mod tests {
         let compiled = compile(&g).expect("compiles");
         validates(&compiled);
         assert!(!compiled.wgsl.contains("kr_height_"));
+    }
+
+    #[test]
+    fn materials_rewritten_for_the_tracer_live_in_one_module() {
+        // Two materials of every kind of node, side by side in one module
+        // against the tracer's bindings: no declaration twice, no name the
+        // viewport's bindings own, and each image moved to its layer.
+        let mut bumped = procedural(WaveKind::Rings, 3.0);
+        let bump = bumped
+            .add_node(Node::new("b", NodeKind::new_of("bump").expect("a kind")))
+            .expect("added");
+        let wave = bumped
+            .add_node(Node::new("w", NodeKind::new_of("wave").expect("a kind")))
+            .expect("added");
+        for (from, fs, to, ts) in [(wave, 1, bump, 2), (bump, 0, 0, 3)] {
+            bumped
+                .link(Link {
+                    from_node: from,
+                    from_socket: fs,
+                    to_node: to,
+                    to_socket: ts,
+                })
+                .expect("connects");
+        }
+        let (mapped, ids) = crate::map_tests::mapped();
+        let first = compile(&bumped).expect("compiles");
+        let second = compile_with(&mapped, crate::map_tests::spaces(ids)).expect("compiles");
+        let a = for_tracer(&first, 0, 0, 0, 0);
+        let b = for_tracer(&second, 1, first.constants.len() as u32, 5, 7);
+        assert!(!a.contains("material.values") && !b.contains("material.values"));
+        assert!(!b.contains("material_textures") && !b.contains("material_data"));
+        assert!(b.contains("pt_colour_images, pt_image_sampler"));
+        assert!(b.contains("pt_data_images, pt_image_sampler"));
+        // The data images are the second material's first two of their kind:
+        // layers seven and eight.
+        assert!(b.contains(", 7, ") && b.contains(", 8, "), "{b}");
+        let source = format!(
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}
+@group(0) @binding(0) var<storage, read> pt_material_values: array<vec4<f32>>;
+@group(0) @binding(1) var pt_colour_images: texture_2d_array<f32>;
+@group(0) @binding(2) var pt_data_images: texture_2d_array<f32>;
+@group(0) @binding(3) var pt_image_sampler: sampler;
+{}
+{a}
+{b}",
+            tracer_declarations()
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
     }
 
     #[test]
@@ -1581,7 +1753,7 @@ mod map_tests {
     use kreate_math::SceneRgb;
 
     /// A material with all three maps, each its own image.
-    fn mapped() -> (ShaderGraph, [ImageId; 3]) {
+    pub(crate) fn mapped() -> (ShaderGraph, [ImageId; 3]) {
         let mut doc = kreate_scene::Document::new();
         let mut add = |name: &str| {
             doc.add_image(kreate_scene::Image::new(
@@ -1610,7 +1782,7 @@ mod map_tests {
 
     /// The spaces a document would answer with: the colour map sRGB, the
     /// others raw.
-    fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
+    pub(crate) fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
         move |id| {
             if id == ids[0] {
                 ColorSpace::Srgb

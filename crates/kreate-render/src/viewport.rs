@@ -4501,8 +4501,10 @@ impl Viewport {
         self.path_trace && self.shading == ShadingMode::Rendered && self.pathtracer.has_scene()
     }
 
-    /// Hands the path tracer its scene: the meshes, placed, and the flat
-    /// surfaces they are made of. Starts its sum again.
+    /// Hands the path tracer its scene: the meshes, placed, the flat
+    /// surfaces they are made of and the compiled materials those name.
+    /// Starts its sum again.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_path_trace_scene(
         &mut self,
         device: &wgpu::Device,
@@ -4510,9 +4512,10 @@ impl Viewport {
         meshes: &[crate::pathtrace::PtMesh<'_>],
         surfaces: &[crate::pathtrace::PtSurface],
         images: &[crate::pathtrace::PtImage<'_>],
+        materials: &crate::pathtrace::PtMaterials<'_>,
     ) {
         self.pathtracer
-            .set_scene(device, queue, meshes, surfaces, images);
+            .set_scene(device, queue, meshes, surfaces, images, materials);
         self.accum_samples = 0;
     }
 

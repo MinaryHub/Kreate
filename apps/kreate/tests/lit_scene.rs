@@ -91,8 +91,19 @@ fn shoot(gpu: &Gpu, doc: &Document) -> Vec<[f32; 4]> {
 /// the shading uniform, so a uniform that stopped following the camera would be
 /// invisible to a test that changed anything else at the same time.
 fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
+    shoot_with(gpu, doc, camera, false)
+}
+
+/// The same, path traced: the scene handed to the tracer the way the frame
+/// loop hands it over, and a few samples summed.
+fn shoot_traced(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
+    shoot_with(gpu, doc, camera, true)
+}
+
+fn shoot_with(gpu: &Gpu, doc: &Document, camera: Camera, traced: bool) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
+    viewport.path_trace = traced;
     viewport.show_grid = false;
     viewport.show_wireframe = false;
 
@@ -216,6 +227,87 @@ fn shoot_from(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
         &marker_lines,
         &marker_points,
     );
+    if traced {
+        // As `main` builds it: the materials' code and images from
+        // `for_tracer`, each object naming its compiled material.
+        let traced_materials = materials.for_tracer(doc);
+        let extracted: Vec<_> = meshes
+            .iter()
+            .map(|(mesh, transform, material, _)| {
+                let cpu = RenderMeshCpu::extract(mesh);
+                let positions: Vec<[f32; 3]> = cpu.positions.iter().map(|p| p.0).collect();
+                let normals: Vec<kreate_math::Vec3> = cpu
+                    .normals
+                    .iter()
+                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                    .collect();
+                (
+                    positions,
+                    cpu.uvs.clone(),
+                    normals,
+                    cpu.indices.clone(),
+                    *transform,
+                    *material,
+                )
+            })
+            .collect();
+        let pt_meshes: Vec<_> = extracted
+            .iter()
+            .map(|(positions, uvs, normals, indices, transform, surface)| {
+                kreate_render::pathtrace::PtMesh {
+                    positions,
+                    uvs,
+                    normals,
+                    indices,
+                    transform: *transform,
+                    surface: *surface,
+                }
+            })
+            .collect();
+        let pt_images: Vec<_> = traced_materials
+            .images
+            .iter()
+            .map(|i| kreate_render::pathtrace::PtImage {
+                width: i.width,
+                height: i.height,
+                pixels: &i.pixels,
+                color: i.kind == kreate_render::material::TextureKind::Color,
+            })
+            .collect();
+        viewport.set_path_trace_scene(
+            &gpu.device,
+            &gpu.queue,
+            &pt_meshes,
+            &traced_materials.surfaces,
+            &pt_images,
+            &traced_materials.materials(),
+        );
+        assert!(viewport.path_tracing(), "the tracer took no scene");
+        // Samples before the one read back.
+        for _ in 0..15 {
+            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("sample"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            viewport.render(&mut encoder, &view, &draws);
+            gpu.queue.submit([encoder.finish()]);
+        }
+    }
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1355,5 +1447,109 @@ fn a_bump_shades_a_flat_face_in_stripes() {
         brighter > 100 && darker > 100,
         "against the flat face, {brighter} pixels of the bumped one are lighter \
          and {darker} darker; bands tilt both ways, so both should be many"
+    );
+}
+
+/// The path tracer runs every material the way the viewport does — several
+/// at once, an image projected from three sides, a procedural colour and a
+/// bump — handed over as the frame loop hands them. A material whose code or
+/// layers did not fit the tracer's would fail its pipeline here, and the
+/// checker would not be in the picture.
+#[test]
+fn the_path_tracer_draws_the_documents_own_materials() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    for id in doc
+        .objects()
+        .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>()
+    {
+        doc.remove_object(id);
+    }
+    use kreate_scene::shader::{Link, Node, NodeKind, Projection};
+    // An image material first, so the checker's code comes second and reads
+    // constants and layers after another material's.
+    let image = doc.add_image(kreate_scene::Image::new(
+        "Grey",
+        8,
+        8,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
+    let mut boxed = grey_with(
+        NodeKind::Image {
+            image: Some(image),
+            projection: Projection::Box,
+            blend: 0.2,
+            scale: 1.0,
+        },
+        0,
+        0,
+    );
+    let bump = boxed
+        .add_node(Node::new("Bump", NodeKind::new_of("bump").expect("a kind")))
+        .expect("added");
+    let noise = boxed
+        .add_node(Node::new(
+            "Noise",
+            NodeKind::new_of("noise").expect("a kind"),
+        ))
+        .expect("added");
+    for (from_node, from_socket, to_node, to_socket) in [(noise, 0, bump, 2), (bump, 0, 0, 3)] {
+        boxed
+            .link(Link {
+                from_node,
+                from_socket,
+                to_node,
+                to_socket,
+            })
+            .expect("connects");
+    }
+    let first = doc.add_material(kreate_scene::Material {
+        name: "Boxed".into(),
+        graph: Some(boxed),
+        ..Default::default()
+    });
+    let checker = doc.add_material(kreate_scene::Material {
+        name: "Checker".into(),
+        graph: Some(grey_with(
+            NodeKind::Checker {
+                scale: 2.0,
+                color1: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
+                color2: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
+            },
+            0,
+            0,
+        )),
+        ..Default::default()
+    });
+    for (material, x) in [(first, 5.0), (checker, 0.0)] {
+        let mesh = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 1, 1));
+        doc.set_mesh_slot(mesh, 0, Some(material));
+        let object = doc.add_object(kreate_scene::document::Object::new(
+            "Plane",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        if let Some(o) = doc.object_mut(object) {
+            o.transform.translation = glam::DVec3::new(x, 0.0, 0.0);
+        }
+    }
+    let frame = shoot_traced(
+        &gpu,
+        &doc,
+        Camera {
+            distance: 4.0,
+            ..Camera::default()
+        },
+    );
+    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 100 && bluish > 100,
+        "the traced checker drew {reddish} red pixels and {bluish} blue ones"
     );
 }

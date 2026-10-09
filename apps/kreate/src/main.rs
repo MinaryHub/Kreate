@@ -9792,7 +9792,9 @@ impl App {
             // changed — not when the camera moved.
             if gfx.viewport.path_trace {
                 if let Some(materials) = self.materials.as_ref() {
-                    let (mut surfaces, images) = materials.flat_surfaces(&self.doc);
+                    let traced_materials = materials.for_tracer(&self.doc);
+                    let images = &traced_materials.images;
+                    let mut surfaces = traced_materials.surfaces.clone();
                     // Each area light as the glowing panel it is, one-sided,
                     // each with a surface of its own after the materials'.
                     let panels = scenelights::area_panels(&self.doc);
@@ -9822,10 +9824,16 @@ impl App {
                         materials.index_of(&self.doc, *id).hash(&mut h);
                     }
                     format!("{surfaces:?}").hash(&mut h);
+                    // The code and its numbers: a colour typed into a node
+                    // changes the second and must reach the picture.
+                    traced_materials.code.hash(&mut h);
+                    for v in traced_materials.values.iter().flatten() {
+                        v.to_bits().hash(&mut h);
+                    }
                     for p in &panels {
                         format!("{:?}{:?}", p.positions, p.transform).hash(&mut h);
                     }
-                    for image in &images {
+                    for image in images {
                         (image.width, image.height, image.pixels.len()).hash(&mut h);
                         image.pixels.iter().step_by(97).for_each(|b| b.hash(&mut h));
                     }
@@ -9891,6 +9899,7 @@ impl App {
                             &meshes,
                             &surfaces,
                             &pt_images,
+                            &traced_materials.materials(),
                         );
                     }
                 }
