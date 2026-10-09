@@ -114,6 +114,37 @@ pub enum NodeKind {
     Math { op: MathOp, a: f32, b: f32 },
     /// One minus a colour: Blender's Invert Color.
     Invert,
+    /// Fractal gradient noise, read at the surface's position in its object:
+    /// Blender's Noise Texture. The numbers are what unwired sockets take.
+    ///
+    /// Object space rather than UVs, so a mesh nobody unwrapped still gets a
+    /// texture without seams — and it moves with the object, not the world.
+    Noise {
+        scale: f32,
+        /// How many octaves, fractional between two.
+        detail: f32,
+        /// How much each octave keeps of the one before.
+        roughness: f32,
+        /// How far the position is pushed by noise of its own first.
+        distortion: f32,
+    },
+    /// Cells around scattered points: Blender's Voronoi Texture, F1.
+    Voronoi { scale: f32, randomness: f32 },
+    /// Alternating cubes of two colours: Blender's Checker Texture.
+    Checker {
+        scale: f32,
+        color1: SceneRgb,
+        color2: SceneRgb,
+    },
+    /// Bands or rings, bent by noise: Blender's Wave Texture, which is where
+    /// wood and marble start.
+    Wave {
+        kind: WaveKind,
+        scale: f32,
+        distortion: f32,
+        detail: f32,
+        detail_scale: f32,
+    },
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -144,6 +175,28 @@ pub enum MathOp {
     Power,
     Minimum,
     Maximum,
+}
+
+/// Which way a Wave node's stripes run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaveKind {
+    /// Straight, across the diagonal.
+    #[default]
+    Bands,
+    /// Around the object's origin: wood.
+    Rings,
+}
+
+impl WaveKind {
+    pub const ALL: [Self; 2] = [Self::Bands, Self::Rings];
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
 }
 
 impl MathOp {
@@ -188,6 +241,14 @@ impl NodeKind {
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
             NodeKind::MixColor { .. } => &[Socket::Scalar, Socket::Color, Socket::Color],
             NodeKind::Invert => &[Socket::Color],
+            NodeKind::Noise { .. } | NodeKind::Wave { .. } => &[
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+            ],
+            NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Scalar],
+            NodeKind::Checker { .. } => &[Socket::Color, Socket::Color, Socket::Scalar],
             // Base colour, metallic, roughness, normal, and a tint on the glow.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
@@ -213,6 +274,10 @@ impl NodeKind {
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar],
             NodeKind::MixColor { .. } | NodeKind::Invert => &[Socket::Color],
             NodeKind::NormalMap { .. } => &[Socket::Vector],
+            // Blender's order: the noises lead with their number, the
+            // patterns with their colour.
+            NodeKind::Noise { .. } | NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Color],
+            NodeKind::Checker { .. } | NodeKind::Wave { .. } => &[Socket::Color, Socket::Scalar],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -235,6 +300,10 @@ impl NodeKind {
             NodeKind::MixColor { .. } => "mix",
             NodeKind::Math { .. } => "math",
             NodeKind::Invert => "invert",
+            NodeKind::Noise { .. } => "noise",
+            NodeKind::Voronoi { .. } => "voronoi",
+            NodeKind::Checker { .. } => "checker",
+            NodeKind::Wave { .. } => "wave",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -250,6 +319,33 @@ impl NodeKind {
             NodeKind::NormalMap { strength } => vec![*strength],
             NodeKind::MixColor { factor } => vec![*factor],
             NodeKind::Math { op, a, b } => vec![op.index() as f32, *a, *b],
+            NodeKind::Noise {
+                scale,
+                detail,
+                roughness,
+                distortion,
+            } => vec![*scale, *detail, *roughness, *distortion],
+            NodeKind::Voronoi { scale, randomness } => vec![*scale, *randomness],
+            NodeKind::Checker {
+                scale,
+                color1,
+                color2,
+            } => vec![
+                *scale, color1.r, color1.g, color1.b, color2.r, color2.g, color2.b,
+            ],
+            NodeKind::Wave {
+                kind,
+                scale,
+                distortion,
+                detail,
+                detail_scale,
+            } => vec![
+                *scale,
+                *distortion,
+                *detail,
+                *detail_scale,
+                kind.index() as f32,
+            ],
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -305,6 +401,30 @@ impl NodeKind {
                 b: at(2, 0.5),
             },
             "invert" => NodeKind::Invert,
+            // Blender's defaults, so a node dropped in looks like the one a
+            // tutorial shows.
+            "noise" => NodeKind::Noise {
+                scale: at(0, 5.0),
+                detail: at(1, 2.0),
+                roughness: at(2, 0.5),
+                distortion: at(3, 0.0),
+            },
+            "voronoi" => NodeKind::Voronoi {
+                scale: at(0, 5.0),
+                randomness: at(1, 1.0),
+            },
+            "checker" => NodeKind::Checker {
+                scale: at(0, 5.0),
+                color1: SceneRgb::new(at(1, 0.8), at(2, 0.8), at(3, 0.8)),
+                color2: SceneRgb::new(at(4, 0.2), at(5, 0.2), at(6, 0.2)),
+            },
+            "wave" => NodeKind::Wave {
+                scale: at(0, 5.0),
+                distortion: at(1, 0.0),
+                detail: at(2, 2.0),
+                detail_scale: at(3, 1.0),
+                kind: WaveKind::from_index(at(4, 0.0).max(0.0) as u32),
+            },
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -326,7 +446,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 10] = [
+    pub const ADDABLE: [&'static str; 14] = [
         "color",
         "value",
         "image",
@@ -337,6 +457,10 @@ impl NodeKind {
         "mix",
         "math",
         "invert",
+        "noise",
+        "voronoi",
+        "checker",
+        "wave",
     ];
 
     /// What each input is called, for a person.
@@ -345,6 +469,10 @@ impl NodeKind {
             NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
+            NodeKind::Noise { .. } => &["Scale", "Detail", "Roughness", "Distortion"],
+            NodeKind::Voronoi { .. } => &["Scale", "Randomness"],
+            NodeKind::Checker { .. } => &["Color1", "Color2", "Scale"],
+            NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale"],
             NodeKind::Surface { .. } => {
                 &["Base Color", "Metallic", "Roughness", "Normal", "Emission"]
             }
@@ -363,6 +491,9 @@ impl NodeKind {
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],
             NodeKind::NormalMap { .. } => &["Normal"],
+            NodeKind::Noise { .. } => &["Fac", "Color"],
+            NodeKind::Voronoi { .. } => &["Distance", "Color"],
+            NodeKind::Checker { .. } | NodeKind::Wave { .. } => &["Color", "Fac"],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -1168,6 +1299,28 @@ mod tests {
             NodeKind::SeparateRgb,
             NodeKind::MultiplyValue,
             NodeKind::NormalMap { strength: 0.4 },
+            NodeKind::Noise {
+                scale: 3.0,
+                detail: 4.5,
+                roughness: 0.6,
+                distortion: 0.2,
+            },
+            NodeKind::Voronoi {
+                scale: 7.0,
+                randomness: 0.25,
+            },
+            NodeKind::Checker {
+                scale: 2.0,
+                color1: SceneRgb::new(1.0, 0.0, 0.0),
+                color2: SceneRgb::new(0.0, 0.0, 1.0),
+            },
+            NodeKind::Wave {
+                kind: WaveKind::Rings,
+                scale: 1.5,
+                distortion: 4.0,
+                detail: 3.0,
+                detail_scale: 2.0,
+            },
             NodeKind::Surface {
                 base_color: SceneRgb::new(0.9, 0.8, 0.7),
                 metallic: 0.6,

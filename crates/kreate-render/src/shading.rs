@@ -680,7 +680,7 @@ mod tests {
         assert!(!source.contains("fn probe_shading"));
         // One material function, from the material, and the fragment calls it.
         assert_eq!(source.matches("fn material_sample").count(), 1);
-        assert!(source.contains("material_sample(in.uv, uv_dx, uv_dy)"));
+        assert!(source.contains("material_sample(in.uv, uv_dx, uv_dy, geometry)"));
     }
 
     /// A plain grey material, compiled.

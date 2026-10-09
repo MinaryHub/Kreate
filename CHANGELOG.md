@@ -18,6 +18,13 @@ use; `scripts/release.sh` turns that section into the next release.
   spacing, a stabiliser, front-faces-only, auto-smooth, Y/Z and radial
   symmetry, alpha stamps and pen pressure; Voxel Remesh (Ctrl+R) and dynamic
   topology.
+- Shader nodes: Noise, Voronoi, Checker and Wave textures (bands or rings,
+  for wood and marble). They read the surface's position in its object, so
+  they need no UV unwrap and move with the object.
+- Rigid bodies: a gravity factor of their own (Physics tab), so one body can
+  float, fall slowly or rise while the rest of the scene falls.
+- Bevel: with an even number of segments, the corner where three bevelled
+  edges meet is filled with quads rather than a fan of triangles.
 
 ### Fixed
 

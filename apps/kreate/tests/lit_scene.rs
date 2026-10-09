@@ -1208,3 +1208,78 @@ fn the_new_documents_shadow_stays_while_the_view_moves() {
         dark(&moving)
     );
 }
+
+/// A procedural texture reaches the picture. A plane wearing a red and blue
+/// checker, seen face on: both colours on one face, which neither a flat
+/// material nor its lighting can make — the texture is read at each pixel's
+/// own position in the object.
+#[test]
+fn a_checker_texture_paints_one_face_in_two_colours() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    for id in doc
+        .objects()
+        .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>()
+    {
+        doc.remove_object(id);
+    }
+    // One face, so that two colours cannot be two faces' worth of anything.
+    let mesh = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 1, 1));
+    let mut graph = kreate_scene::shader::ShaderGraph::standard(
+        "Checker",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    );
+    let checker = graph
+        .add_node(kreate_scene::shader::Node::new(
+            "Checker",
+            kreate_scene::shader::NodeKind::Checker {
+                scale: 2.0,
+                color1: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
+                color2: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
+            },
+        ))
+        .expect("added");
+    graph
+        .link(kreate_scene::shader::Link {
+            from_node: checker,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 0,
+        })
+        .expect("a colour into the base colour");
+    let material = doc.add_material(kreate_scene::Material {
+        name: "Checker".into(),
+        graph: Some(graph),
+        ..Default::default()
+    });
+    doc.set_mesh_slot(mesh, 0, Some(material));
+    let object = doc.add_object(kreate_scene::document::Object::new(
+        "Plane",
+        kreate_scene::document::ObjectData::Mesh(mesh),
+    ));
+    doc.selection.add(object);
+
+    let frame = shoot_from(
+        &gpu,
+        &doc,
+        Camera {
+            distance: 4.0,
+            ..Camera::default()
+        },
+    );
+    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 200 && bluish > 200,
+        "one face drew {reddish} red pixels and {bluish} blue ones; a checker \
+         has both, or the texture is not being read where the surface is"
+    );
+}

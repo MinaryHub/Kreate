@@ -55,9 +55,15 @@
 //! # What the emitted function is
 //!
 //! ```text
-//! fn material_sample(uv, uv_dx, uv_dy) -> MaterialSample
+//! fn material_sample(uv, uv_dx, uv_dy, geometry) -> MaterialSample
 //! struct MaterialSample { surface: Surface, normal: vec3<f32> }
+//! struct MaterialGeometry { position, normal, position_dx, position_dy }
 //! ```
+//!
+//! `geometry` is the point being shaded *in its object's space*, and how that
+//! point moves across a pixel: what a procedural texture is read at. Object
+//! space so that a texture moves with its object and does not swim when the
+//! camera does, which an eye-relative position would make it do.
 //!
 //! The UV's screen derivatives are *arguments*. A fragment pass has them from
 //! `dpdx`, and a compute pass — §2.5's path tracer — has none and must supply
@@ -72,7 +78,7 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{MathOp, NodeKind, ShaderGraph, Socket};
+use kreate_scene::shader::{MathOp, NodeKind, ShaderGraph, Socket, WaveKind};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -86,7 +92,7 @@ pub struct Compiled {
     /// refraction (y): what a renderer reads to know the material is glass,
     /// which decides when it is drawn.
     pub transmission_slot: usize,
-    /// The function `material_sample(uv, uv_dx, uv_dy) -> MaterialSample`
+    /// The function `material_sample(uv, uv_dx, uv_dy, geometry) -> MaterialSample`
     /// and its struct, and nothing else: no entry point, no library. A pass
     /// appends this to the shading library and calls it.
     pub wgsl: String,
@@ -171,6 +177,7 @@ pub fn compile_with(
         notes: Vec::new(),
         body: String::new(),
         emitted: vec![None; graph.nodes.len()],
+        procedural: false,
     };
     out.emit(output)?;
 
@@ -216,12 +223,22 @@ pub fn compile_with(
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}"
+    );
+    // Only when something reads it: the text is the pipeline cache's key, and
+    // two hundred lines of noise in every flat plastic's shader is a slower
+    // compile for nothing.
+    if out.procedural {
+        wgsl.push_str(PROCEDURAL);
+    }
+    let _ = writeln!(
+        wgsl,
         "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
     );
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> MaterialSample {{\n{}    var s: Surface;",
+        "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, geometry: MaterialGeometry) -> MaterialSample {{\n{}    var s: Surface;",
         out.body
     );
 
@@ -298,6 +315,9 @@ struct Emitter<'a> {
     /// been emitted at all, which is what keeps a node feeding two sockets from
     /// being evaluated twice.
     emitted: Vec<Option<usize>>,
+    /// Whether a procedural texture was reached, and so the noise library is
+    /// wanted.
+    procedural: bool,
 }
 
 impl Emitter<'_> {
@@ -454,6 +474,87 @@ impl Emitter<'_> {
                     "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
                 );
             }
+            NodeKind::Noise {
+                scale,
+                detail,
+                roughness,
+                distortion,
+            } => {
+                self.procedural = true;
+                self.constants.push([scale, detail, roughness, distortion]);
+                let [s, d, r, w] = self.numbers(node, slot)?;
+                let p = format!("n{node}_p");
+                let _ = writeln!(self.body, "    let {p} = geometry.position * {s};");
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_q = kr_distort({p}, {w}, {d}, {r});"
+                );
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_fbm(n{node}_q, {d}, {r});"
+                );
+                // Two more octave stacks for the colour, so only when the
+                // colour is wired — reading the shape, as everything here does.
+                if self.feeds(node, 1) {
+                    let _ = writeln!(
+                        self.body,
+                        "    let n{node}_c = vec3<f32>(n{node}_f, kr_fbm(n{node}_q + vec3<f32>(17.3, 5.1, 9.7), {d}, {r}), kr_fbm(n{node}_q + vec3<f32>(3.9, 23.2, 13.4), {d}, {r}));"
+                    );
+                }
+            }
+            NodeKind::Voronoi { scale, randomness } => {
+                self.procedural = true;
+                self.constants.push([scale, randomness, 0.0, 0.0]);
+                let s = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let j = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_v = kr_voronoi(geometry.position * {s}, clamp({j}, 0.0, 1.0));"
+                );
+                let _ = writeln!(self.body, "    let n{node}_f = n{node}_v.x;");
+                let _ = writeln!(self.body, "    let n{node}_c = n{node}_v.yzw;");
+            }
+            NodeKind::Checker {
+                scale,
+                color1,
+                color2,
+            } => {
+                self.procedural = true;
+                self.constants.push([scale, 0.0, 0.0, 0.0]);
+                self.constants.push([color1.r, color1.g, color1.b, 0.0]);
+                self.constants.push([color2.r, color2.g, color2.b, 0.0]);
+                let a = self.input_expr(node, 0, &format!("material.values[{}].rgb", slot + 1))?;
+                let b = self.input_expr(node, 1, &format!("material.values[{}].rgb", slot + 2))?;
+                let s = self.input_expr(node, 2, &format!("material.values[{slot}].x"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_checker(geometry.position * {s});"
+                );
+                let _ = writeln!(self.body, "    let n{node}_c = mix({b}, {a}, n{node}_f);");
+            }
+            NodeKind::Wave {
+                kind,
+                scale,
+                distortion,
+                detail,
+                detail_scale,
+            } => {
+                self.procedural = true;
+                self.constants
+                    .push([scale, distortion, detail, detail_scale]);
+                let [s, w, d, ds] = self.numbers(node, slot)?;
+                // Which way the stripes run is the shape, like a Math node's
+                // operation: it changes what the code does, not a number in it.
+                let rings = match kind {
+                    WaveKind::Bands => "false",
+                    WaveKind::Rings => "true",
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_wave(geometry.position * {s}, {rings}, {w}, {d}, {ds});"
+                );
+                let _ = writeln!(self.body, "    let n{node}_c = vec3<f32>(n{node}_f);");
+            }
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -474,6 +575,24 @@ impl Emitter<'_> {
         }
         self.emitted[node] = Some(slot);
         Ok(())
+    }
+
+    /// A node's four scalar inputs, each a wire or its slot's channel.
+    fn numbers(&self, node: usize, slot: usize) -> Result<[String; 4], CompileError> {
+        let mut out: [String; 4] = Default::default();
+        for (socket, channel) in ["x", "y", "z", "w"].into_iter().enumerate() {
+            out[socket] =
+                self.input_expr(node, socket, &format!("material.values[{slot}].{channel}"))?;
+        }
+        Ok(out)
+    }
+
+    /// Whether anything reads an output.
+    fn feeds(&self, node: usize, socket: usize) -> bool {
+        self.graph
+            .links
+            .iter()
+            .any(|l| l.from_node == node && l.from_socket == socket)
     }
 
     /// What feeds one input: a wire's expression, or the fallback.
@@ -501,6 +620,22 @@ impl Emitter<'_> {
             // statement names the whole `vec4` and the sockets slice it.
             (NodeKind::Image { .. }, Socket::Color) => format!("n{}_rgba.rgb", link.from_node),
             (NodeKind::Image { .. }, Socket::Scalar) => format!("n{}_rgba.a", link.from_node),
+            // A procedural texture names its number and its colour apart,
+            // because only some of them compute both.
+            (
+                NodeKind::Noise { .. }
+                | NodeKind::Voronoi { .. }
+                | NodeKind::Checker { .. }
+                | NodeKind::Wave { .. },
+                Socket::Scalar,
+            ) => format!("n{}_f", link.from_node),
+            (
+                NodeKind::Noise { .. }
+                | NodeKind::Voronoi { .. }
+                | NodeKind::Checker { .. }
+                | NodeKind::Wave { .. },
+                _,
+            ) => format!("n{}_c", link.from_node),
             (NodeKind::SeparateRgb, _) => {
                 let channel = ["x", "y", "z"]
                     .get(link.from_socket)
@@ -511,6 +646,130 @@ impl Emitter<'_> {
         })
     }
 }
+
+/// What the procedural textures are made of, written once into a material
+/// that uses any.
+///
+/// Hashed with integers (Jarzynski and Olano's PCG3D) rather than the
+/// `fract(sin(...))` every listing uses: that one depends on how a GPU rounds
+/// a large sine, so the same material would be a different texture on
+/// another vendor's card — and a different one again in the path tracer.
+///
+/// `kr_` on every name, because this lands in the same module as the shading
+/// library and a pass's own functions.
+const PROCEDURAL: &str = r#"
+fn kr_pcg3d(seed: vec3<u32>) -> vec3<u32> {
+    var v = seed * 1664525u + vec3<u32>(1013904223u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v = v ^ (v >> vec3<u32>(16u));
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+// Three numbers in [0, 1) for a lattice point.
+fn kr_cell(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(kr_pcg3d(bitcast<vec3<u32>>(vec3<i32>(c)))) * (1.0 / 4294967296.0);
+}
+
+fn kr_corner(i: vec3<f32>, f: vec3<f32>, o: vec3<f32>) -> f32 {
+    return dot(kr_cell(i + o) * 2.0 - vec3<f32>(1.0), f - o);
+}
+
+// Gradient noise, roughly -1 to 1.
+fn kr_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * f * (f * (f * 6.0 - vec3<f32>(15.0)) + vec3<f32>(10.0));
+    let x00 = mix(kr_corner(i, f, vec3<f32>(0.0, 0.0, 0.0)), kr_corner(i, f, vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(kr_corner(i, f, vec3<f32>(0.0, 1.0, 0.0)), kr_corner(i, f, vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(kr_corner(i, f, vec3<f32>(0.0, 0.0, 1.0)), kr_corner(i, f, vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(kr_corner(i, f, vec3<f32>(0.0, 1.0, 1.0)), kr_corner(i, f, vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// Octaves of noise, zero to one. A fractional detail fades the last octave in,
+// so dragging the number does not jump.
+fn kr_fbm(p: vec3<f32>, detail: f32, roughness: f32) -> f32 {
+    let octaves = clamp(detail, 0.0, 15.0);
+    let whole = i32(floor(octaves));
+    let gain = clamp(roughness, 0.0, 1.0);
+    var sum = 0.0;
+    var norm = 0.0;
+    var amplitude = 1.0;
+    var frequency = 1.0;
+    for (var o = 0; o <= whole; o++) {
+        sum += amplitude * kr_noise(p * frequency);
+        norm += amplitude;
+        amplitude *= gain;
+        frequency *= 2.0;
+    }
+    var value = sum / norm;
+    let part = octaves - f32(whole);
+    if part > 0.0 {
+        let more = (sum + amplitude * kr_noise(p * frequency)) / (norm + amplitude);
+        value = mix(value, more, part);
+    }
+    return clamp(value * 0.5 + 0.5, 0.0, 1.0);
+}
+
+// The position pushed by noise of its own: Blender's distortion.
+fn kr_distort(p: vec3<f32>, amount: f32, detail: f32, roughness: f32) -> vec3<f32> {
+    if amount == 0.0 {
+        return p;
+    }
+    let d = vec3<f32>(
+        kr_fbm(p + vec3<f32>(13.5, 0.0, 0.0), detail, roughness),
+        kr_fbm(p + vec3<f32>(0.0, 13.5, 0.0), detail, roughness),
+        kr_fbm(p + vec3<f32>(0.0, 0.0, 13.5), detail, roughness),
+    );
+    return p + (d * 2.0 - vec3<f32>(1.0)) * amount;
+}
+
+// The distance to the nearest scattered point, and that point's cell's colour.
+fn kr_voronoi(p: vec3<f32>, randomness: f32) -> vec4<f32> {
+    let i = floor(p);
+    var best = 1e9;
+    var cell = i;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let c = i + vec3<f32>(f32(x), f32(y), f32(z));
+                let point = c + kr_cell(c) * randomness;
+                let d = distance(p, point);
+                if d < best {
+                    best = d;
+                    cell = c;
+                }
+            }
+        }
+    }
+    return vec4<f32>(best, kr_cell(cell + vec3<f32>(71.0, 37.0, 11.0)));
+}
+
+// One where the cube the point is in is even, zero where odd. Nudged off the
+// integers so a face lying exactly on one does not flicker between the two.
+fn kr_checker(p: vec3<f32>) -> f32 {
+    let c = floor(p * 0.999999 + vec3<f32>(1e-6));
+    let s = c.x + c.y + c.z;
+    return select(0.0, 1.0, s - 2.0 * floor(s * 0.5) < 0.5);
+}
+
+// Blender's sine profile, along the diagonal or out from the origin.
+fn kr_wave(p: vec3<f32>, rings: bool, distortion: f32, detail: f32, detail_scale: f32) -> f32 {
+    var n = (p.x + p.y + p.z) * 10.0;
+    if rings {
+        n = length(p) * 20.0;
+    }
+    if distortion != 0.0 {
+        n += distortion * (kr_fbm(p * detail_scale, detail, 0.5) * 2.0 - 1.0);
+    }
+    return 0.5 + 0.5 * sin(n - 1.5707963);
+}
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -568,6 +827,123 @@ mod tests {
         );
         naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    /// Parses and validates, against the stand-in `Surface`.
+    fn validates(compiled: &Compiled) {
+        let source = format!(
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}\n{}",
+            compiled.wgsl
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    /// Every procedural texture, each output wired somewhere: noise's colour
+    /// mixed with a checker by a voronoi's distance into the base colour, a
+    /// wave's number into the roughness and the noise's into the metallic.
+    fn procedural(wave: WaveKind, noise_scale: f32) -> ShaderGraph {
+        let mut g = flat();
+        let add = |g: &mut ShaderGraph, kind| g.add_node(Node::new("n", kind)).expect("added");
+        let noise = add(
+            &mut g,
+            NodeKind::Noise {
+                scale: noise_scale,
+                detail: 2.5,
+                roughness: 0.5,
+                distortion: 0.3,
+            },
+        );
+        let voronoi = add(&mut g, NodeKind::new_of("voronoi").expect("a kind"));
+        let checker = add(&mut g, NodeKind::new_of("checker").expect("a kind"));
+        let wave = add(
+            &mut g,
+            NodeKind::Wave {
+                kind: wave,
+                scale: 2.0,
+                distortion: 3.0,
+                detail: 2.0,
+                detail_scale: 1.0,
+            },
+        );
+        let mix = add(&mut g, NodeKind::MixColor { factor: 0.5 });
+        for (from, fs, to, ts) in [
+            (voronoi, 0, mix, 0),
+            (noise, 1, mix, 1),
+            (checker, 0, mix, 2),
+            (voronoi, 1, checker, 0),
+            (mix, 0, 0, 0),
+            (wave, 1, 0, 2),
+            (noise, 0, 0, 1),
+            (checker, 1, wave, 0),
+        ] {
+            g.link(Link {
+                from_node: from,
+                from_socket: fs,
+                to_node: to,
+                to_socket: ts,
+            })
+            .unwrap_or_else(|e| panic!("{from}->{to}: {e:?}"));
+        }
+        g
+    }
+
+    #[test]
+    fn procedural_textures_compile_and_type_check() {
+        for kind in WaveKind::ALL {
+            let compiled = compile(&procedural(kind, 5.0)).expect("compiles");
+            validates(&compiled);
+            assert_eq!(compiled.wgsl.matches("fn kr_fbm").count(), 1);
+            assert!(compiled.wgsl.contains("geometry.position"));
+        }
+        // Each unwired, too: the fallbacks are expressions of their own.
+        for tag in ["noise", "voronoi", "checker", "wave"] {
+            let mut g = flat();
+            let node = g
+                .add_node(Node::new("n", NodeKind::new_of(tag).expect("a kind")))
+                .expect("added");
+            let colour = node_output(&g, node, Socket::Color);
+            g.link(Link {
+                from_node: node,
+                from_socket: colour,
+                to_node: 0,
+                to_socket: 0,
+            })
+            .expect("a colour into the base colour");
+            validates(&compile(&g).expect("compiles"));
+        }
+    }
+
+    fn node_output(g: &ShaderGraph, node: usize, socket: Socket) -> usize {
+        g.nodes[node]
+            .kind
+            .outputs()
+            .iter()
+            .position(|s| *s == socket)
+            .expect("the socket")
+    }
+
+    #[test]
+    fn a_textures_numbers_are_constants_and_its_kind_is_the_shape() {
+        // A scale typed into a panel must not recompile; bands to rings must,
+        // because it is a different function.
+        let a = compile(&procedural(WaveKind::Bands, 5.0)).expect("compiles");
+        let b = compile(&procedural(WaveKind::Bands, 9.0)).expect("compiles");
+        let c = compile(&procedural(WaveKind::Rings, 5.0)).expect("compiles");
+        assert_eq!(a.wgsl, b.wgsl);
+        assert_ne!(a.constants, b.constants);
+        assert_ne!(a.wgsl, c.wgsl);
+    }
+
+    #[test]
+    fn a_material_without_a_procedural_texture_carries_no_noise() {
+        assert!(!compile(&flat()).expect("compiles").wgsl.contains("kr_"));
     }
 
     #[test]

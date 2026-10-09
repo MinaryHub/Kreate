@@ -6932,59 +6932,99 @@ fn graph_view(
                     default: None,
                 })
                 .collect();
-            let inputs = kind
-                .inputs()
-                .iter()
-                .zip(kind.input_names())
-                .enumerate()
-                .map(|(i, (s, name))| SocketView {
-                    label: socket_label(name),
-                    ty: ty(*s),
-                    connected: graph.incoming(n, i).is_some(),
-                    default: match (kind, i) {
-                        (NodeKind::Surface { base_color, .. }, 0) => Some(FieldView::Color {
-                            field: 0,
-                            swatch: swatch(*base_color),
-                        }),
-                        (NodeKind::Surface { metallic, .. }, 1) => Some(FieldView::Value {
-                            field: 1,
-                            value: *metallic,
-                            min: 0.0,
-                            max: 1.0,
-                            label: String::new(),
-                        }),
-                        (NodeKind::Surface { roughness, .. }, 2) => Some(FieldView::Value {
-                            field: 2,
-                            value: *roughness,
-                            min: 0.0,
-                            max: 1.0,
-                            label: String::new(),
-                        }),
-                        (NodeKind::MixColor { factor }, 0) => Some(FieldView::Value {
-                            field: 0,
-                            value: *factor,
-                            min: 0.0,
-                            max: 1.0,
-                            label: String::new(),
-                        }),
-                        (NodeKind::Math { a, .. }, 0) => Some(FieldView::Value {
-                            field: 1,
-                            value: *a,
-                            min: -1000.0,
-                            max: 1000.0,
-                            label: String::new(),
-                        }),
-                        (NodeKind::Math { b, .. }, 1) => Some(FieldView::Value {
-                            field: 2,
-                            value: *b,
-                            min: -1000.0,
-                            max: 1000.0,
-                            label: String::new(),
-                        }),
-                        _ => None,
-                    },
-                })
-                .collect();
+            let inputs =
+                kind.inputs()
+                    .iter()
+                    .zip(kind.input_names())
+                    .enumerate()
+                    .map(|(i, (s, name))| SocketView {
+                        label: socket_label(name),
+                        ty: ty(*s),
+                        connected: graph.incoming(n, i).is_some(),
+                        default: match (kind, i) {
+                            (NodeKind::Surface { base_color, .. }, 0) => Some(FieldView::Color {
+                                field: 0,
+                                swatch: swatch(*base_color),
+                            }),
+                            (NodeKind::Surface { metallic, .. }, 1) => Some(FieldView::Value {
+                                field: 1,
+                                value: *metallic,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::Surface { roughness, .. }, 2) => Some(FieldView::Value {
+                                field: 2,
+                                value: *roughness,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::MixColor { factor }, 0) => Some(FieldView::Value {
+                                field: 0,
+                                value: *factor,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::Math { a, .. }, 0) => Some(FieldView::Value {
+                                field: 1,
+                                value: *a,
+                                min: -1000.0,
+                                max: 1000.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::Math { b, .. }, 1) => Some(FieldView::Value {
+                                field: 2,
+                                value: *b,
+                                min: -1000.0,
+                                max: 1000.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::Checker { color1, .. }, 0) => Some(FieldView::Color {
+                                field: 0,
+                                swatch: swatch(*color1),
+                            }),
+                            (NodeKind::Checker { color2, .. }, 1) => Some(FieldView::Color {
+                                field: 1,
+                                swatch: swatch(*color2),
+                            }),
+                            // A texture's numbers are its sockets' defaults, in
+                            // the order `NodeKind::values` keeps them.
+                            (
+                                NodeKind::Noise { .. }
+                                | NodeKind::Voronoi { .. }
+                                | NodeKind::Checker { .. }
+                                | NodeKind::Wave { .. },
+                                _,
+                            ) => {
+                                let field = match kind {
+                                    // The checker's two colours come first in
+                                    // its sockets and after the scale in its numbers.
+                                    NodeKind::Checker { .. } => 0,
+                                    _ => i,
+                                };
+                                let (min, max) =
+                                    match (kind, field) {
+                                        (_, 0) => (0.0, 100.0),
+                                        (NodeKind::Noise { .. }, 1)
+                                        | (NodeKind::Wave { .. }, 2) => (0.0, 15.0),
+                                        (NodeKind::Noise { .. }, 2)
+                                        | (NodeKind::Voronoi { .. }, 1) => (0.0, 1.0),
+                                        _ => (-100.0, 100.0),
+                                    };
+                                Some(FieldView::Value {
+                                    field: field as u32,
+                                    value: kind.values().get(field).copied().unwrap_or(0.0),
+                                    min,
+                                    max,
+                                    label: String::new(),
+                                })
+                            }
+                            _ => None,
+                        },
+                    })
+                    .collect();
             let fields = match kind {
                 NodeKind::Color(c) => vec![FieldView::Color {
                     field: 0,
@@ -7015,6 +7055,11 @@ fn graph_view(
                         .map(|o| t(&format!("node-math-{}", o.tag())))
                         .collect(),
                 }],
+                NodeKind::Wave { kind, .. } => vec![FieldView::Choice {
+                    field: 4,
+                    value: kind.index(),
+                    options: vec![t("node-wave-bands"), t("node-wave-rings")],
+                }],
                 _ => Vec::new(),
             };
             NodeView {
@@ -7026,7 +7071,11 @@ fn graph_view(
                 inputs,
                 family: match kind {
                     NodeKind::Color(_) | NodeKind::Value(_) => Family::Input,
-                    NodeKind::Image { .. } => Family::Texture,
+                    NodeKind::Image { .. }
+                    | NodeKind::Noise { .. }
+                    | NodeKind::Voronoi { .. }
+                    | NodeKind::Checker { .. }
+                    | NodeKind::Wave { .. } => Family::Texture,
                     NodeKind::Multiply
                     | NodeKind::MultiplyValue
                     | NodeKind::SeparateRgb
@@ -10767,6 +10816,21 @@ node-kind-normal-map = Normal Map
 node-kind-mix = Mix
 node-kind-math = Math
 node-kind-invert = Invert Color
+node-kind-noise = Noise Texture
+node-kind-voronoi = Voronoi Texture
+node-kind-checker = Checker Texture
+node-kind-wave = Wave Texture
+node-socket-scale = Scale
+node-socket-detail = Detail
+node-socket-distortion = Distortion
+node-socket-randomness = Randomness
+node-socket-detail-scale = Detail Scale
+node-socket-color1 = Color 1
+node-socket-color2 = Color 2
+node-socket-fac = Fac
+node-socket-distance = Distance
+node-wave-bands = Bands
+node-wave-rings = Rings
 node-socket-factor = Factor
 node-socket-emission = Emission
 node-math-add = Add
@@ -11874,6 +11938,21 @@ node-kind-normal-map = 노멀 맵
 node-kind-mix = 혼합
 node-kind-math = 수학
 node-kind-invert = 색 반전
+node-kind-noise = 노이즈 텍스처
+node-kind-voronoi = 보로노이 텍스처
+node-kind-checker = 체커 텍스처
+node-kind-wave = 웨이브 텍스처
+node-socket-scale = 스케일
+node-socket-detail = 디테일
+node-socket-distortion = 왜곡
+node-socket-randomness = 무작위성
+node-socket-detail-scale = 디테일 스케일
+node-socket-color1 = 색상 1
+node-socket-color2 = 색상 2
+node-socket-fac = 계수
+node-socket-distance = 거리
+node-wave-bands = 띠
+node-wave-rings = 고리
 node-socket-factor = 비율
 node-socket-emission = 발광
 node-math-add = 더하기

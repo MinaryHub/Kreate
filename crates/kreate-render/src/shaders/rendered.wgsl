@@ -57,6 +57,10 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     /// The surface coordinate, for the material.
     @location(2) uv: vec2<f32>,
+    /// The point and its normal in the object's own space, for a procedural
+    /// texture: one that moves with the object rather than the camera.
+    @location(3) local: vec3<f32>,
+    @location(4) local_normal: vec3<f32>,
 }
 
 @vertex
@@ -71,8 +75,10 @@ fn vs_rendered(
     out.world = world.xyz;
 
     out.uv = uv;
+    out.local = position;
 
     let n = oct_decode(packed_normal);
+    out.local_normal = n;
     // The inverse transpose, because a non-uniform scale tilts a normal
     // transformed by the model matrix — which reads as broken shading rather
     // than as a transform bug.
@@ -141,7 +147,12 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // control flow, and the material needs the UV's to choose a mip level.
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
-    let sample = material_sample(in.uv, uv_dx, uv_dy);
+    var geometry: MaterialGeometry;
+    geometry.position = in.local;
+    geometry.normal = normalize(in.local_normal);
+    geometry.position_dx = dpdx(in.local);
+    geometry.position_dy = dpdy(in.local);
+    let sample = material_sample(in.uv, uv_dx, uv_dy, geometry);
     let surface = sample.surface;
     let normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
 
