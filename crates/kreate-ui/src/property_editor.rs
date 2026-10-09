@@ -14,6 +14,9 @@
 //! - **Angles are edited in degrees and stored in radians.** Nobody types
 //!   `0.2617993877`.
 
+/// The longest text a property offers to edit in a box, in bytes.
+const LONGEST_TYPED: usize = 4096;
+
 use egui::Ui;
 use kreate_i18n::{Catalog, TextKind};
 use kreate_reflect::{PropertyDesc, PropertyKind, PropertyMap, PropertyValue, Unit};
@@ -553,6 +556,13 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
             }
         }
 
+        // Text too long to be typed is not offered for typing: a box holding
+        // megabytes is laid out every frame, which stops the application.
+        // Its size is what a person can use.
+        (PropertyKind::Text, Some(PropertyValue::Text(v))) if v.len() > LONGEST_TYPED => {
+            // i18n-exempt: a byte count
+            ui.weak(format!("{} bytes", v.len()));
+        }
         (PropertyKind::Text, Some(PropertyValue::Text(v))) => {
             let mut text = v;
             if ui.text_edit_singleline(&mut text).changed() {

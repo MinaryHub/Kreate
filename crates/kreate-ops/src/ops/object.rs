@@ -1827,6 +1827,10 @@ pub struct PasteParams {
     /// history, redone a week later with the copied objects long deleted, must
     /// produce what it produced the first time. Nothing but its own bytes can
     /// promise that.
+    ///
+    /// Hidden from the adjust panel: it is megabytes for an imported model,
+    /// and nothing a person would type.
+    #[param(hidden)]
     pub data: String,
 }
 
