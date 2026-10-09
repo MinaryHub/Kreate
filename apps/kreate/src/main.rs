@@ -168,6 +168,9 @@ struct Input {
     scroll: f64,
     shift_down: bool,
     ctrl_down: bool,
+    /// The platform's command key: Cmd on macOS, Ctrl elsewhere. What copy
+    /// and paste are held with, which on a Mac is not Ctrl.
+    command_down: bool,
     alt_down: bool,
     /// How hard a pen is pressing, 0 to 1, while one is down; `None` for a
     /// mouse.
@@ -7463,6 +7466,7 @@ impl App {
         self.drag_select = None;
         self.input.shift_down = false;
         self.input.ctrl_down = false;
+        self.input.command_down = false;
         self.input.alt_down = false;
     }
 
@@ -11642,6 +11646,11 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => {
                 self.input.shift_down = m.state().shift_key();
                 self.input.ctrl_down = m.state().control_key();
+                self.input.command_down = if cfg!(target_os = "macos") {
+                    m.state().super_key()
+                } else {
+                    m.state().control_key()
+                };
                 self.input.alt_down = m.state().alt_key();
                 // Shift is precision while a transform runs. Handled from the
                 // modifier event rather than from a key press, because it is a
@@ -11672,11 +11681,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // Ctrl+V in the chat's box: a picture or files on the
-                // clipboard are attached. egui pastes only text, and does it
-                // itself.
+                // Cmd+V on a Mac, Ctrl+V elsewhere, in the chat's box: a
+                // picture or files on the clipboard are attached. egui pastes
+                // only text, and does it itself.
                 if self.ui.chat_focused
-                    && self.input.ctrl_down
+                    && self.input.command_down
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyV)
                 {
                     self.paste_into_chat();
