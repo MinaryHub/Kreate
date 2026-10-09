@@ -12,6 +12,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Import FBX (binary and ASCII: meshes, hierarchy, materials and diffuse
+  textures), 3MF (including slicer packages that keep each object in its own
+  part), PLY (text and binary) and OFF, beside glTF, OBJ and STL.
+- File ▸ Import adds a scene file to the open document as one undo step;
+  Open still replaces it. The AI connector gains `import_file` to match.
 - Sculpting: ten more brushes (Clay Strips, Crease, Flatten, Scrape, Fill,
   Pinch, Layer, Snake Hook, Mask, Face Set); a mask that every brush respects;
   face sets that can be hidden, isolated and shown again; falloff shapes,

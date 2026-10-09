@@ -227,6 +227,9 @@ pub enum Command {
     /// "save" would invite a user to treat a `.glb` as their working file and
     /// find out later what it dropped.
     ExportScene,
+    /// Ask for a scene file and add what it holds to the document, as one
+    /// undo step — beside what is there, where Open would replace it.
+    ImportScene,
     /// Open a recovered autosave, and forget it either way.
     RecoverDocument {
         path: std::path::PathBuf,
