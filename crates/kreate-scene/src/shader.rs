@@ -60,7 +60,17 @@ pub enum Socket {
     /// it into a direction is where the `* 2 - 1` lives — wired straight into a
     /// colour it would be a surface lit by a purple picture of itself.
     Vector,
+    /// A point a texture is read at: the surface's position in its object,
+    /// its UV, or either moved by a Mapping node.
+    ///
+    /// Not a [`Socket::Vector`], though Blender draws both alike: a normal
+    /// wired in as a place to read a noise at is a texture that follows the
+    /// light around, which nobody meant.
+    Coordinate,
 }
+
+/// Most stops a Color Ramp holds.
+pub const RAMP_STOPS: usize = 8;
 
 /// What a node does.
 ///
@@ -123,6 +133,23 @@ pub enum NodeKind {
     /// Two colours mixed by a factor: Blender's Mix (Color, Mix). `factor` is
     /// what an unwired Factor socket takes.
     MixColor { factor: f32 },
+    /// A number mapped through a row of colours: Blender's Color Ramp. The
+    /// first `count` stops are used, each a position and a colour; what is
+    /// before the first is its colour, after the last the last's.
+    ColorRamp {
+        interpolation: RampMode,
+        count: u8,
+        stops: [(f32, SceneRgb); RAMP_STOPS],
+    },
+    /// Where a surface point is, several ways: Blender's Texture Coordinate.
+    TexCoord,
+    /// A coordinate scaled, then rotated (in degrees, X then Y then Z), then
+    /// moved: Blender's Mapping, as a point.
+    Mapping {
+        location: [f32; 3],
+        rotation: [f32; 3],
+        scale: [f32; 3],
+    },
     /// Two numbers through an operation: Blender's Math. `a` and `b` are
     /// what unwired sockets take.
     Math { op: MathOp, a: f32, b: f32 },
@@ -189,6 +216,37 @@ pub enum MathOp {
     Power,
     Minimum,
     Maximum,
+}
+
+/// How a Color Ramp goes from one stop to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RampMode {
+    #[default]
+    Linear,
+    /// Each stop's colour until the next: hard bands.
+    Constant,
+    /// Smoothly in and out of each stop.
+    Ease,
+}
+
+impl RampMode {
+    pub const ALL: [Self; 3] = [Self::Linear, Self::Constant, Self::Ease];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Constant => "constant",
+            Self::Ease => "ease",
+        }
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
 }
 
 /// How an image is laid on a surface.
@@ -290,14 +348,25 @@ impl NodeKind {
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
             NodeKind::MixColor { .. } => &[Socket::Scalar, Socket::Color, Socket::Color],
             NodeKind::Invert => &[Socket::Color],
+            // Each texture's point last, so the sockets files already name
+            // keep their numbers.
             NodeKind::Noise { .. } | NodeKind::Wave { .. } => &[
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Scalar,
+                Socket::Coordinate,
             ],
-            NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Scalar],
-            NodeKind::Checker { .. } => &[Socket::Color, Socket::Color, Socket::Scalar],
+            NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Scalar, Socket::Coordinate],
+            NodeKind::Checker { .. } => &[
+                Socket::Color,
+                Socket::Color,
+                Socket::Scalar,
+                Socket::Coordinate,
+            ],
+            NodeKind::ColorRamp { .. } => &[Socket::Scalar],
+            NodeKind::TexCoord => &[],
+            NodeKind::Mapping { .. } => &[Socket::Coordinate],
             NodeKind::Bump { .. } => &[
                 Socket::Scalar,
                 Socket::Scalar,
@@ -333,6 +402,10 @@ impl NodeKind {
             // patterns with their colour.
             NodeKind::Noise { .. } | NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Color],
             NodeKind::Checker { .. } | NodeKind::Wave { .. } => &[Socket::Color, Socket::Scalar],
+            NodeKind::ColorRamp { .. } => &[Socket::Color],
+            // Object, UV, and the normal as a direction to read at.
+            NodeKind::TexCoord => &[Socket::Coordinate, Socket::Coordinate, Socket::Coordinate],
+            NodeKind::Mapping { .. } => &[Socket::Coordinate],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -360,6 +433,9 @@ impl NodeKind {
             NodeKind::Voronoi { .. } => "voronoi",
             NodeKind::Checker { .. } => "checker",
             NodeKind::Wave { .. } => "wave",
+            NodeKind::ColorRamp { .. } => "color_ramp",
+            NodeKind::TexCoord => "tex_coord",
+            NodeKind::Mapping { .. } => "mapping",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -409,6 +485,27 @@ impl NodeKind {
                 *detail_scale,
                 kind.index() as f32,
             ],
+            NodeKind::ColorRamp {
+                interpolation,
+                count,
+                stops,
+            } => {
+                let mut v = vec![interpolation.index() as f32, *count as f32];
+                for (at, c) in stops {
+                    v.extend([*at, c.r, c.g, c.b]);
+                }
+                v
+            }
+            NodeKind::Mapping {
+                location,
+                rotation,
+                scale,
+            } => location
+                .iter()
+                .chain(rotation)
+                .chain(scale)
+                .copied()
+                .collect(),
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -431,6 +528,7 @@ impl NodeKind {
                 ]
             }
             NodeKind::Multiply
+            | NodeKind::TexCoord
             | NodeKind::SeparateRgb
             | NodeKind::MultiplyValue
             | NodeKind::Invert => Vec::new(),
@@ -497,6 +595,29 @@ impl NodeKind {
                 detail_scale: at(3, 1.0),
                 kind: WaveKind::from_index(at(4, 0.0).max(0.0) as u32),
             },
+            "color_ramp" => {
+                // Black to white, as Blender's starts.
+                let mut stops = [(1.0, SceneRgb::new(1.0, 1.0, 1.0)); RAMP_STOPS];
+                for (i, stop) in stops.iter_mut().enumerate() {
+                    let base = 2 + i * 4;
+                    let (at_d, grey) = if i == 0 { (0.0, 0.0) } else { (1.0, 1.0) };
+                    *stop = (
+                        at(base, at_d),
+                        SceneRgb::new(at(base + 1, grey), at(base + 2, grey), at(base + 3, grey)),
+                    );
+                }
+                NodeKind::ColorRamp {
+                    interpolation: RampMode::from_index(at(0, 0.0).max(0.0) as u32),
+                    count: (at(1, 2.0).round() as i64).clamp(2, RAMP_STOPS as i64) as u8,
+                    stops,
+                }
+            }
+            "tex_coord" => NodeKind::TexCoord,
+            "mapping" => NodeKind::Mapping {
+                location: [at(0, 0.0), at(1, 0.0), at(2, 0.0)],
+                rotation: [at(3, 0.0), at(4, 0.0), at(5, 0.0)],
+                scale: [at(6, 1.0), at(7, 1.0), at(8, 1.0)],
+            },
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -518,7 +639,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 15] = [
+    pub const ADDABLE: [&'static str; 18] = [
         "color",
         "value",
         "image",
@@ -534,6 +655,9 @@ impl NodeKind {
         "checker",
         "wave",
         "bump",
+        "color_ramp",
+        "tex_coord",
+        "mapping",
     ];
 
     /// What each input is called, for a person.
@@ -542,11 +666,14 @@ impl NodeKind {
             NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
-            NodeKind::Noise { .. } => &["Scale", "Detail", "Roughness", "Distortion"],
-            NodeKind::Voronoi { .. } => &["Scale", "Randomness"],
+            NodeKind::Noise { .. } => &["Scale", "Detail", "Roughness", "Distortion", "Vector"],
+            NodeKind::Voronoi { .. } => &["Scale", "Randomness", "Vector"],
+            NodeKind::ColorRamp { .. } => &["Fac"],
+            NodeKind::TexCoord => &[],
+            NodeKind::Mapping { .. } => &["Vector"],
             NodeKind::Bump { .. } => &["Strength", "Distance", "Height", "Normal"],
-            NodeKind::Checker { .. } => &["Color1", "Color2", "Scale"],
-            NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale"],
+            NodeKind::Checker { .. } => &["Color1", "Color2", "Scale", "Vector"],
+            NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale", "Vector"],
             NodeKind::Surface { .. } => {
                 &["Base Color", "Metallic", "Roughness", "Normal", "Emission"]
             }
@@ -568,6 +695,9 @@ impl NodeKind {
             NodeKind::Noise { .. } => &["Fac", "Color"],
             NodeKind::Voronoi { .. } => &["Distance", "Color"],
             NodeKind::Checker { .. } | NodeKind::Wave { .. } => &["Color", "Fac"],
+            NodeKind::ColorRamp { .. } => &["Color"],
+            NodeKind::TexCoord => &["Object", "UV", "Normal"],
+            NodeKind::Mapping { .. } => &["Vector"],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -1378,6 +1508,17 @@ mod tests {
             NodeKind::Bump {
                 strength: 0.7,
                 distance: 0.02,
+            },
+            NodeKind::ColorRamp {
+                interpolation: RampMode::Ease,
+                count: 3,
+                stops: [(0.25, SceneRgb::new(0.1, 0.2, 0.3)); RAMP_STOPS],
+            },
+            NodeKind::TexCoord,
+            NodeKind::Mapping {
+                location: [1.0, 2.0, 3.0],
+                rotation: [10.0, 20.0, 30.0],
+                scale: [0.5, 0.25, 2.0],
             },
             NodeKind::Noise {
                 scale: 3.0,

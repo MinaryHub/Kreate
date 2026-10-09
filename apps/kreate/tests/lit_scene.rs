@@ -1553,3 +1553,58 @@ fn the_path_tracer_draws_the_documents_own_materials() {
         "the traced checker drew {reddish} red pixels and {bluish} blue ones"
     );
 }
+
+/// A texture read at the UV instead of the object's position, through a
+/// ramp: the checker's number picks between the ramp's two stops, so both
+/// colours are on the face — by UV, which a 2 m plane spans 0 to 1 of.
+#[test]
+fn a_checker_read_by_uv_through_a_ramp_paints_two_colours() {
+    if gpu().is_none() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    use kreate_scene::shader::{Link, Node, NodeKind, RampMode, RAMP_STOPS};
+    let mut stops = [(1.0, kreate_math::SceneRgb::new(0.02, 0.02, 0.8)); RAMP_STOPS];
+    stops[0] = (0.0, kreate_math::SceneRgb::new(0.8, 0.02, 0.02));
+    let mut graph = grey_with(
+        NodeKind::ColorRamp {
+            interpolation: RampMode::Constant,
+            count: 2,
+            stops,
+        },
+        0,
+        0,
+    );
+    let coords = graph
+        .add_node(Node::new("Coords", NodeKind::TexCoord))
+        .expect("added");
+    let checker = graph
+        .add_node(Node::new(
+            "Checker",
+            NodeKind::Checker {
+                scale: 4.0,
+                color1: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+                color2: kreate_math::SceneRgb::new(0.0, 0.0, 0.0),
+            },
+        ))
+        .expect("added");
+    for (from_node, from_socket, to_node, to_socket) in
+        [(coords, 1, checker, 3), (checker, 1, 1, 0)]
+    {
+        graph
+            .link(Link {
+                from_node,
+                from_socket,
+                to_node,
+                to_socket,
+            })
+            .expect("connects");
+    }
+    let frame = a_plane_wearing(graph);
+    let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
+    let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
+    assert!(
+        reddish > 200 && bluish > 200,
+        "the face drew {reddish} red pixels and {bluish} blue ones"
+    );
+}

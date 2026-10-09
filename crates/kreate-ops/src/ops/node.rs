@@ -246,7 +246,10 @@ pub struct AddNodeParams {
         "voronoi",
         "checker",
         "wave",
-        "bump"
+        "bump",
+        "color_ramp",
+        "tex_coord",
+        "mapping"
     ))]
     pub kind: u32,
     /// Where it lands, in graph units.
@@ -309,6 +312,9 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::Checker { .. } => "Checker Texture",
         NodeKind::Wave { .. } => "Wave Texture",
         NodeKind::Bump { .. } => "Bump",
+        NodeKind::ColorRamp { .. } => "Color Ramp",
+        NodeKind::TexCoord => "Texture Coordinate",
+        NodeKind::Mapping { .. } => "Mapping",
         NodeKind::Surface { .. } => "Principled BSDF",
     }
 }
@@ -540,7 +546,7 @@ pub struct SetNodeColorParams {
     pub node: u32,
     /// Which of the node's colours. Zero for an RGB node's own colour, a
     /// surface's base colour and a checker's first; one for a checker's
-    /// second.
+    /// second. A Color Ramp's stops by number.
     #[param(min = 0.0)]
     pub field: u32,
     /// As a swatch shows it, the way `material.set_properties` takes it.
@@ -597,6 +603,9 @@ impl Operator for SetNodeColor {
             (NodeKind::Surface { base_color, .. }, 0) => *base_color = colour,
             (NodeKind::Checker { color1, .. }, 0) => *color1 = colour,
             (NodeKind::Checker { color2, .. }, 1) => *color2 = colour,
+            (NodeKind::ColorRamp { stops, .. }, i) if (i as usize) < stops.len() => {
+                stops[i as usize].1 = colour
+            }
             _ => return Ok(OpResult::Cancelled),
         }
         Ok(OpResult::Finished)
@@ -616,7 +625,10 @@ pub struct SetNodeValueParams {
     /// one to three, a Voronoi's randomness one, and a Wave's distortion,
     /// detail, detail scale and bands-or-rings one to four. An image's
     /// projection (zero by UV, one box) is zero, its box blend and scale one
-    /// and two. A bump's strength and distance are zero and one.
+    /// and two. A bump's strength and distance are zero and one. A Color Ramp's
+    /// blending is zero, its number of stops one, and each stop's position
+    /// two onwards; a Mapping's location, rotation and scale are zero to
+    /// eight, three each.
     #[param(min = 0.0)]
     pub field: u32,
     pub value: f64,
@@ -672,6 +684,27 @@ impl Operator for SetNodeValue {
             }
             (NodeKind::Voronoi { randomness, .. }, 1) => *randomness = v.clamp(0.0, 1.0),
             (NodeKind::Wave { detail_scale, .. }, 3) => *detail_scale = v,
+            (NodeKind::ColorRamp { interpolation, .. }, 0) => {
+                *interpolation =
+                    kreate_scene::shader::RampMode::from_index(v.round().max(0.0) as u32)
+            }
+            (NodeKind::ColorRamp { count, .. }, 1) => {
+                *count = (v.round() as i64).clamp(2, kreate_scene::shader::RAMP_STOPS as i64) as u8
+            }
+            (NodeKind::ColorRamp { stops, .. }, i) if (2..2 + stops.len() as u32).contains(&i) => {
+                stops[i as usize - 2].0 = v.clamp(0.0, 1.0)
+            }
+            (
+                NodeKind::Mapping {
+                    location,
+                    rotation,
+                    scale,
+                },
+                i,
+            ) if i < 9 => {
+                let i = i as usize;
+                [location, rotation, scale][i / 3][i % 3] = v
+            }
             (NodeKind::Bump { strength, .. }, 0) => *strength = v.clamp(0.0, 1.0),
             (NodeKind::Bump { distance, .. }, 1) => *distance = v,
             (NodeKind::Image { projection, .. }, 0) => {
