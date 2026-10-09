@@ -178,6 +178,7 @@ pub fn compile_with(
         body: String::new(),
         emitted: vec![None; graph.nodes.len()],
         procedural: false,
+        functions: String::new(),
     };
     out.emit(output)?;
 
@@ -233,9 +234,10 @@ pub fn compile_with(
     }
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
     );
     let _ = writeln!(wgsl);
+    wgsl.push_str(&out.functions);
     let _ = writeln!(
         wgsl,
         "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, geometry: MaterialGeometry) -> MaterialSample {{\n{}    var s: Surface;",
@@ -260,6 +262,8 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    var out: MaterialSample;");
     let _ = writeln!(wgsl, "    out.surface = s;");
     let _ = writeln!(wgsl, "    out.normal = {normal};");
+    let gradient = out.gradient_expr(output, 3)?;
+    let _ = writeln!(wgsl, "    out.gradient = {gradient};");
     // In the roughness's slot, beside it: emitted light, in nits — tinted by
     // whatever is wired to the Emission socket, so a texture can say where a
     // surface glows and the material says how brightly.
@@ -318,6 +322,8 @@ struct Emitter<'a> {
     /// Whether a procedural texture was reached, and so the noise library is
     /// wanted.
     procedural: bool,
+    /// Functions the body calls: a bump's height, which it reads three times.
+    functions: String,
 }
 
 impl Emitter<'_> {
@@ -336,7 +342,11 @@ impl Emitter<'_> {
         // statement that reads it. WGSL wants a declaration before its use, and
         // a graph is acyclic by construction — `ShaderGraph::link` refuses the
         // alternative.
+        // Not a bump's height: that is read in a function of its own, at three
+        // points, and evaluating it here as well would be a fourth for nothing.
+        let bump = matches!(kind, NodeKind::Bump { .. });
         let feeding: Vec<usize> = (0..kind.inputs().len())
+            .filter(|socket| !(bump && *socket == 2))
             .filter_map(|socket| self.graph.incoming(node, socket).map(|l| l.from_node))
             .collect();
         for upstream in feeding {
@@ -498,6 +508,47 @@ impl Emitter<'_> {
                 let c = self.input_expr(node, 0, "vec3<f32>(0.0)")?;
                 let _ = writeln!(self.body, "    let n{node} = vec3<f32>(1.0) - {c};");
             }
+            NodeKind::Bump { strength, distance } => {
+                self.constants.push([strength, distance, 0.0, 0.0]);
+                let strength = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let distance = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                match self.graph.incoming(node, 2).map(|l| l.from_node) {
+                    Some(from) => {
+                        // The height's subgraph, as a function of where it is
+                        // read. Emitted with its own record of what has been
+                        // written — the function cannot see the body's `let`s —
+                        // into the same constants, so its slots are the shape's.
+                        let body = std::mem::take(&mut self.body);
+                        let emitted = std::mem::replace(
+                            &mut self.emitted,
+                            vec![None; self.graph.nodes.len()],
+                        );
+                        self.emit(from)?;
+                        let height = self.input_expr(node, 2, "0.0")?;
+                        let inner = std::mem::replace(&mut self.body, body);
+                        self.emitted = emitted;
+                        let _ = writeln!(
+                            self.functions,
+                            "fn kr_height_{node}(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, geometry: MaterialGeometry) -> f32 {{\n{inner}    return {height};\n}}\n"
+                        );
+                        // Read here and one pixel across and down, the way a
+                        // fragment's derivatives would — but by evaluating, so
+                        // the same code runs where there are no derivatives.
+                        // Then Mikkelsen's surface gradient, in object space.
+                        let _ = writeln!(
+                            self.body,
+                            "    var n{node}_gx = geometry;\n    n{node}_gx.position = geometry.position + geometry.position_dx;\n    var n{node}_gy = geometry;\n    n{node}_gy.position = geometry.position + geometry.position_dy;\n    let n{node}_h = kr_height_{node}(uv, uv_dx, uv_dy, geometry);\n    let n{node}_dhx = (kr_height_{node}(uv + uv_dx, uv_dx, uv_dy, n{node}_gx) - n{node}_h) * {distance};\n    let n{node}_dhy = (kr_height_{node}(uv + uv_dy, uv_dx, uv_dy, n{node}_gy) - n{node}_h) * {distance};\n    let n{node}_r1 = cross(geometry.position_dy, geometry.normal);\n    let n{node}_r2 = cross(geometry.normal, geometry.position_dx);\n    let n{node}_det = dot(geometry.position_dx, n{node}_r1);\n    let n{node}_g = select(vec3<f32>(0.0), (n{node}_dhx * n{node}_r1 + n{node}_dhy * n{node}_r2) * (sign(n{node}_det) / max(abs(n{node}_det), 1e-30)), abs(n{node}_det) > 1e-30) * clamp({strength}, 0.0, 1.0);"
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(self.body, "    let n{node}_g = vec3<f32>(0.0);");
+                    }
+                }
+                // The tilt passes a normal wired into it through unchanged:
+                // the bump's own tilt rides beside it, as a gradient.
+                let n = self.input_expr(node, 3, "vec3<f32>(0.0, 0.0, 1.0)")?;
+                let _ = writeln!(self.body, "    let n{node} = {n};");
+            }
             NodeKind::NormalMap { strength } => {
                 self.constants.push([strength, 0.0, 0.0, 0.0]);
                 // Unwired is the flat normal's encoding, so the node alone is
@@ -632,6 +683,30 @@ impl Emitter<'_> {
             .links
             .iter()
             .any(|l| l.from_node == node && l.from_socket == socket)
+    }
+
+    /// The surface gradient a normal input carries: what every bump up its
+    /// wire adds, in object space. Zero when nothing bumps it.
+    fn gradient_expr(&self, node: usize, socket: usize) -> Result<String, CompileError> {
+        let Some(link) = self.graph.incoming(node, socket) else {
+            return Ok("vec3<f32>(0.0)".to_string());
+        };
+        let from = self
+            .graph
+            .nodes
+            .get(link.from_node)
+            .ok_or(CompileError::BrokenLink)?;
+        Ok(match from.kind {
+            NodeKind::Bump { .. } => {
+                let below = self.gradient_expr(link.from_node, 3)?;
+                if below == "vec3<f32>(0.0)" {
+                    format!("n{}_g", link.from_node)
+                } else {
+                    format!("(n{}_g + {below})", link.from_node)
+                }
+            }
+            _ => "vec3<f32>(0.0)".to_string(),
+        })
     }
 
     /// What feeds one input: a wire's expression, or the fallback.
@@ -1010,6 +1085,69 @@ mod tests {
         // blend and scale sit after it.
         let rect = compiled.image_slots[0];
         assert_eq!(compiled.constants[rect + 1][..2], [0.3, 2.0]);
+    }
+
+    #[test]
+    fn a_bump_reads_its_height_three_times_and_chains_with_a_normal_map() {
+        let mut g = flat();
+        let add = |g: &mut ShaderGraph, kind| g.add_node(Node::new("n", kind)).expect("added");
+        let noise = add(&mut g, NodeKind::new_of("noise").expect("a kind"));
+        let bump = add(&mut g, NodeKind::new_of("bump").expect("a kind"));
+        let image = add(&mut g, NodeKind::image(Some(an_image())));
+        let map = add(&mut g, NodeKind::NormalMap { strength: 1.0 });
+        let second = add(&mut g, NodeKind::new_of("bump").expect("a kind"));
+        let wave = add(&mut g, NodeKind::new_of("wave").expect("a kind"));
+        for (from, fs, to, ts) in [
+            (noise, 0, bump, 2),
+            (image, 0, map, 0),
+            (map, 0, bump, 3),
+            (wave, 1, second, 2),
+            (bump, 0, second, 3),
+            (second, 0, 0, 3),
+            // The same noise also colours the surface: it is in the body and
+            // in the height function both.
+            (noise, 1, 0, 0),
+        ] {
+            g.link(Link {
+                from_node: from,
+                from_socket: fs,
+                to_node: to,
+                to_socket: ts,
+            })
+            .unwrap_or_else(|e| panic!("{from}->{to}: {e:?}"));
+        }
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        assert_eq!(
+            compiled.wgsl.matches(&format!("kr_height_{bump}(")).count(),
+            4
+        );
+        assert!(compiled
+            .wgsl
+            .contains(&format!("out.gradient = (n{second}_g + n{bump}_g);")));
+        // The normal map's tilt goes through both bumps to the surface.
+        assert!(compiled.wgsl.contains(&format!("let n{bump} = n{map};")));
+    }
+
+    #[test]
+    fn without_a_bump_the_gradient_is_zero() {
+        let compiled = compile(&flat()).expect("compiles");
+        assert!(compiled.wgsl.contains("out.gradient = vec3<f32>(0.0);"));
+        // A bump with no height tilts nothing, and needs no function.
+        let mut g = flat();
+        let bump = g
+            .add_node(Node::new("b", NodeKind::new_of("bump").expect("a kind")))
+            .expect("added");
+        g.link(Link {
+            from_node: bump,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 3,
+        })
+        .expect("a normal into the normal");
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        assert!(!compiled.wgsl.contains("kr_height_"));
     }
 
     #[test]

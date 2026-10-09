@@ -6981,6 +6981,20 @@ fn graph_view(
                                 max: 1000.0,
                                 label: String::new(),
                             }),
+                            (NodeKind::Bump { strength, .. }, 0) => Some(FieldView::Value {
+                                field: 0,
+                                value: *strength,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
+                            (NodeKind::Bump { distance, .. }, 1) => Some(FieldView::Value {
+                                field: 1,
+                                value: *distance,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
                             (NodeKind::Checker { color1, .. }, 0) => Some(FieldView::Color {
                                 field: 0,
                                 swatch: swatch(*color1),
@@ -7114,7 +7128,7 @@ fn graph_view(
                     | NodeKind::MixColor { .. }
                     | NodeKind::Math { .. }
                     | NodeKind::Invert => Family::Converter,
-                    NodeKind::NormalMap { .. } => Family::Vector,
+                    NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => Family::Vector,
                     NodeKind::Surface { .. } => Family::Shader,
                 },
             }
@@ -10866,6 +10880,8 @@ node-wave-rings = Rings
 node-projection-flat = Flat (UV)
 node-projection-box = Box (triplanar)
 node-socket-blend = Blend
+node-kind-bump = Bump
+node-socket-height = Height
 node-socket-factor = Factor
 node-socket-emission = Emission
 node-math-add = Add
@@ -11991,6 +12007,8 @@ node-wave-rings = 고리
 node-projection-flat = 평면 (UV)
 node-projection-box = 박스 (트라이플래너)
 node-socket-blend = 블렌드
+node-kind-bump = 범프
+node-socket-height = 높이
 node-socket-factor = 비율
 node-socket-emission = 발광
 node-math-add = 더하기

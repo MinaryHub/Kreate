@@ -109,6 +109,12 @@ pub enum NodeKind {
     /// map scales the roughness dial rather than replacing it, for the reason
     /// a base colour map tints.
     MultiplyValue,
+    /// A height, turned into a tilt of the surface: Blender's Bump.
+    ///
+    /// `distance` is how far one unit of height stands off the surface, in
+    /// metres, and `strength` how much of the tilt is used. A normal wired in
+    /// is tilted further, so a bump can sit on top of a normal map.
+    Bump { strength: f32, distance: f32 },
     /// A tangent-space normal map's colour, decoded into a direction.
     ///
     /// `strength` scales the tilt before renormalising, which is glTF's
@@ -292,6 +298,12 @@ impl NodeKind {
             ],
             NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Scalar],
             NodeKind::Checker { .. } => &[Socket::Color, Socket::Color, Socket::Scalar],
+            NodeKind::Bump { .. } => &[
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Vector,
+            ],
             // Base colour, metallic, roughness, normal, and a tint on the glow.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
@@ -316,7 +328,7 @@ impl NodeKind {
             NodeKind::SeparateRgb => &[Socket::Scalar, Socket::Scalar, Socket::Scalar],
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar],
             NodeKind::MixColor { .. } | NodeKind::Invert => &[Socket::Color],
-            NodeKind::NormalMap { .. } => &[Socket::Vector],
+            NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => &[Socket::Vector],
             // Blender's order: the noises lead with their number, the
             // patterns with their colour.
             NodeKind::Noise { .. } | NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Color],
@@ -340,6 +352,7 @@ impl NodeKind {
             NodeKind::SeparateRgb => "separate_rgb",
             NodeKind::MultiplyValue => "multiply_value",
             NodeKind::NormalMap { .. } => "normal_map",
+            NodeKind::Bump { .. } => "bump",
             NodeKind::MixColor { .. } => "mix",
             NodeKind::Math { .. } => "math",
             NodeKind::Invert => "invert",
@@ -360,6 +373,7 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
+            NodeKind::Bump { strength, distance } => vec![*strength, *distance],
             NodeKind::MixColor { factor } => vec![*factor],
             NodeKind::Math { op, a, b } => vec![op.index() as f32, *a, *b],
             NodeKind::Image {
@@ -448,6 +462,10 @@ impl NodeKind {
             "normal_map" => NodeKind::NormalMap {
                 strength: at(0, 1.0),
             },
+            "bump" => NodeKind::Bump {
+                strength: at(0, 1.0),
+                distance: at(1, 0.1),
+            },
             "mix" => NodeKind::MixColor { factor: at(0, 0.5) },
             "math" => NodeKind::Math {
                 op: MathOp::from_index(at(0, 0.0).max(0.0) as u32),
@@ -500,7 +518,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 14] = [
+    pub const ADDABLE: [&'static str; 15] = [
         "color",
         "value",
         "image",
@@ -515,6 +533,7 @@ impl NodeKind {
         "voronoi",
         "checker",
         "wave",
+        "bump",
     ];
 
     /// What each input is called, for a person.
@@ -525,6 +544,7 @@ impl NodeKind {
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
             NodeKind::Noise { .. } => &["Scale", "Detail", "Roughness", "Distortion"],
             NodeKind::Voronoi { .. } => &["Scale", "Randomness"],
+            NodeKind::Bump { .. } => &["Strength", "Distance", "Height", "Normal"],
             NodeKind::Checker { .. } => &["Color1", "Color2", "Scale"],
             NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale"],
             NodeKind::Surface { .. } => {
@@ -544,7 +564,7 @@ impl NodeKind {
             NodeKind::Value(_) | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["Value"],
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],
-            NodeKind::NormalMap { .. } => &["Normal"],
+            NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => &["Normal"],
             NodeKind::Noise { .. } => &["Fac", "Color"],
             NodeKind::Voronoi { .. } => &["Distance", "Color"],
             NodeKind::Checker { .. } | NodeKind::Wave { .. } => &["Color", "Fac"],
@@ -1355,6 +1375,10 @@ mod tests {
             NodeKind::SeparateRgb,
             NodeKind::MultiplyValue,
             NodeKind::NormalMap { strength: 0.4 },
+            NodeKind::Bump {
+                strength: 0.7,
+                distance: 0.02,
+            },
             NodeKind::Noise {
                 scale: 3.0,
                 detail: 4.5,

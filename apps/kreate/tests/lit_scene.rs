@@ -1209,16 +1209,10 @@ fn the_new_documents_shadow_stays_while_the_view_moves() {
     );
 }
 
-/// A procedural texture reaches the picture. A plane wearing a red and blue
-/// checker, seen face on: both colours on one face, which neither a flat
-/// material nor its lighting can make — the texture is read at each pixel's
-/// own position in the object.
-#[test]
-fn a_checker_texture_paints_one_face_in_two_colours() {
-    let Some(gpu) = gpu() else {
-        eprintln!("no GPU adapter; skipping");
-        return;
-    };
+/// The starter scene's lamp over one square face, seen face on, wearing a
+/// material made of `graph`.
+fn a_plane_wearing(graph: kreate_scene::shader::ShaderGraph) -> Vec<[f32; 4]> {
+    let gpu = gpu().expect("checked by the caller");
     let mut doc = Document::new();
     kreate::startup::starting_scene(&mut doc);
     for id in doc
@@ -1229,34 +1223,10 @@ fn a_checker_texture_paints_one_face_in_two_colours() {
     {
         doc.remove_object(id);
     }
-    // One face, so that two colours cannot be two faces' worth of anything.
+    // One face, so that anything varying across it is the material's doing.
     let mesh = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 1, 1));
-    let mut graph = kreate_scene::shader::ShaderGraph::standard(
-        "Checker",
-        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
-        0.0,
-        0.5,
-    );
-    let checker = graph
-        .add_node(kreate_scene::shader::Node::new(
-            "Checker",
-            kreate_scene::shader::NodeKind::Checker {
-                scale: 2.0,
-                color1: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
-                color2: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
-            },
-        ))
-        .expect("added");
-    graph
-        .link(kreate_scene::shader::Link {
-            from_node: checker,
-            from_socket: 0,
-            to_node: 0,
-            to_socket: 0,
-        })
-        .expect("a colour into the base colour");
     let material = doc.add_material(kreate_scene::Material {
-        name: "Checker".into(),
+        name: "Procedural".into(),
         graph: Some(graph),
         ..Default::default()
     });
@@ -1266,20 +1236,124 @@ fn a_checker_texture_paints_one_face_in_two_colours() {
         kreate_scene::document::ObjectData::Mesh(mesh),
     ));
     doc.selection.add(object);
-
-    let frame = shoot_from(
+    shoot_from(
         &gpu,
         &doc,
         Camera {
             distance: 4.0,
             ..Camera::default()
         },
+    )
+}
+
+/// A grey surface with one node wired into one of its sockets.
+fn grey_with(
+    kind: kreate_scene::shader::NodeKind,
+    from_socket: usize,
+    to_socket: usize,
+) -> kreate_scene::shader::ShaderGraph {
+    let mut graph = kreate_scene::shader::ShaderGraph::standard(
+        "Grey",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
     );
+    let node = graph
+        .add_node(kreate_scene::shader::Node::new("Node", kind))
+        .expect("added");
+    graph
+        .link(kreate_scene::shader::Link {
+            from_node: node,
+            from_socket,
+            to_node: 0,
+            to_socket,
+        })
+        .expect("the sockets agree");
+    graph
+}
+
+/// A procedural texture reaches the picture. A plane wearing a red and blue
+/// checker, seen face on: both colours on one face, which neither a flat
+/// material nor its lighting can make — the texture is read at each pixel's
+/// own position in the object.
+#[test]
+fn a_checker_texture_paints_one_face_in_two_colours() {
+    if gpu().is_none() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    let frame = a_plane_wearing(grey_with(
+        kreate_scene::shader::NodeKind::Checker {
+            scale: 2.0,
+            color1: kreate_math::SceneRgb::new(0.8, 0.02, 0.02),
+            color2: kreate_math::SceneRgb::new(0.02, 0.02, 0.8),
+        },
+        0,
+        0,
+    ));
     let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
     let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
     assert!(
         reddish > 200 && bluish > 200,
         "one face drew {reddish} red pixels and {bluish} blue ones; a checker \
          has both, or the texture is not being read where the surface is"
+    );
+}
+
+/// A bump tilts the light on a flat face. Grey, one face, the same lamp: with
+/// a wave's bands as its height the face goes light and dark in stripes, where
+/// without it every pixel of it is lit nearly alike.
+#[test]
+fn a_bump_shades_a_flat_face_in_stripes() {
+    if gpu().is_none() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    let flat = a_plane_wearing(kreate_scene::shader::ShaderGraph::standard(
+        "Grey",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    ));
+    let mut graph = grey_with(
+        kreate_scene::shader::NodeKind::Bump {
+            strength: 1.0,
+            distance: 0.05,
+        },
+        0,
+        3,
+    );
+    let wave = graph
+        .add_node(kreate_scene::shader::Node::new(
+            "Wave",
+            kreate_scene::shader::NodeKind::new_of("wave").expect("a kind"),
+        ))
+        .expect("added");
+    graph
+        .link(kreate_scene::shader::Link {
+            from_node: wave,
+            from_socket: 1,
+            to_node: 1,
+            to_socket: 2,
+        })
+        .expect("a number into the height");
+    let bumped = a_plane_wearing(graph);
+    // Pixel by pixel against the flat face: the background is the same in
+    // both, so whatever differs is the face, lit at another angle.
+    let lum = |p: &[f32; 4]| p[0] + p[1] + p[2];
+    let brighter = flat
+        .iter()
+        .zip(&bumped)
+        .filter(|(a, b)| lum(b) > lum(a) + 0.05)
+        .count();
+    let darker = flat
+        .iter()
+        .zip(&bumped)
+        .filter(|(a, b)| lum(b) + 0.05 < lum(a))
+        .count();
+    assert!(
+        brighter > 100 && darker > 100,
+        "against the flat face, {brighter} pixels of the bumped one are lighter \
+         and {darker} darker; bands tilt both ways, so both should be many"
     );
 }

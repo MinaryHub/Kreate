@@ -245,7 +245,8 @@ pub struct AddNodeParams {
         "noise",
         "voronoi",
         "checker",
-        "wave"
+        "wave",
+        "bump"
     ))]
     pub kind: u32,
     /// Where it lands, in graph units.
@@ -307,6 +308,7 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::Voronoi { .. } => "Voronoi Texture",
         NodeKind::Checker { .. } => "Checker Texture",
         NodeKind::Wave { .. } => "Wave Texture",
+        NodeKind::Bump { .. } => "Bump",
         NodeKind::Surface { .. } => "Principled BSDF",
     }
 }
@@ -614,7 +616,7 @@ pub struct SetNodeValueParams {
     /// one to three, a Voronoi's randomness one, and a Wave's distortion,
     /// detail, detail scale and bands-or-rings one to four. An image's
     /// projection (zero by UV, one box) is zero, its box blend and scale one
-    /// and two.
+    /// and two. A bump's strength and distance are zero and one.
     #[param(min = 0.0)]
     pub field: u32,
     pub value: f64,
@@ -670,6 +672,8 @@ impl Operator for SetNodeValue {
             }
             (NodeKind::Voronoi { randomness, .. }, 1) => *randomness = v.clamp(0.0, 1.0),
             (NodeKind::Wave { detail_scale, .. }, 3) => *detail_scale = v,
+            (NodeKind::Bump { strength, .. }, 0) => *strength = v.clamp(0.0, 1.0),
+            (NodeKind::Bump { distance, .. }, 1) => *distance = v,
             (NodeKind::Image { projection, .. }, 0) => {
                 *projection =
                     kreate_scene::shader::Projection::from_index(v.round().max(0.0) as u32)

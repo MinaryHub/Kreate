@@ -24,6 +24,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - Image Texture node: Box (triplanar) projection, which lays an image on
   from the object's three axes with a blend between them — a tiling texture
   on a mesh with no UVs, without stretching.
+- Bump node: turns a height — a noise, a wave, an image's channel — into a
+  tilt of the surface, and can sit on top of a normal map.
 - Rigid bodies: a gravity factor of their own (Physics tab), so one body can
   float, fall slowly or rise while the rest of the scene falls.
 - Bevel: with an even number of segments, the corner where three bevelled
