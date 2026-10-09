@@ -157,6 +157,23 @@ impl DocumentFile {
         format!("{marker}{name} — Kreate")
     }
 
+    /// Keeps the viewport's view with the document, for the next open.
+    ///
+    /// In the manifest's open map rather than in the document: where somebody
+    /// was looking is not part of the scene and must not mark it changed, and
+    /// a build that does not know the field carries it through untouched.
+    pub fn set_view(&mut self, camera: &kreate_render::Camera) {
+        let record = view_record(camera);
+        if self.manifest.extra.get("view") != Some(&record) {
+            self.manifest.extra.insert("view".into(), record);
+        }
+    }
+
+    /// The view the file was saved with, if it kept one.
+    pub fn view(&self) -> Option<kreate_render::Camera> {
+        view_from_record(self.manifest.extra.get("view")?)
+    }
+
     /// Reads a document from a `.kreate` archive.
     pub fn open(path: &Path) -> Result<(Document, Self), String> {
         let file = std::fs::File::open(path).map_err(|e| format!("cannot open: {e}"))?;
@@ -354,6 +371,53 @@ impl Default for DocumentFile {
 /// and machine-local, and on Windows the roaming profile that holds preferences
 /// is synchronised across machines. Putting documents there would copy a user's
 /// work around a network without them asking.
+/// A view as the file writes it: where it orbits, how it is turned, how far
+/// back it stands, its lens and its projection.
+pub fn view_record(camera: &kreate_render::Camera) -> serde_json::Value {
+    let r = camera.rotation;
+    serde_json::json!({
+        "pivot": camera.pivot.to_array(),
+        "rotation": [r.x, r.y, r.z, r.w],
+        "distance": camera.distance,
+        "fov_y": camera.fov_y,
+        "orthographic": camera.projection == kreate_render::Projection::Orthographic,
+    })
+}
+
+/// A view from what [`view_record`] wrote; `None` when it is not one. The
+/// orbit style is not the file's to say — it is a preference — and stays the
+/// default's.
+pub fn view_from_record(v: &serde_json::Value) -> Option<kreate_render::Camera> {
+    let numbers = |key: &str, n: usize| -> Option<Vec<f64>> {
+        let a = v.get(key)?.as_array()?;
+        let out: Vec<f64> = a.iter().filter_map(|x| x.as_f64()).collect();
+        (out.len() == n && out.iter().all(|x| x.is_finite())).then_some(out)
+    };
+    let pivot = numbers("pivot", 3)?;
+    let r = numbers("rotation", 4)?;
+    let rotation = glam::DQuat::from_xyzw(r[0], r[1], r[2], r[3]);
+    let distance = v.get("distance")?.as_f64()?;
+    let fov_y = v.get("fov_y")?.as_f64()?;
+    if rotation.length() < 1e-6
+        || !(distance.is_finite() && distance > 0.0)
+        || !(fov_y > 0.0 && fov_y < 3.1)
+    {
+        return None;
+    }
+    Some(kreate_render::Camera {
+        pivot: glam::DVec3::new(pivot[0], pivot[1], pivot[2]),
+        rotation: rotation.normalize(),
+        distance,
+        fov_y,
+        projection: if v.get("orthographic").and_then(|o| o.as_bool()) == Some(true) {
+            kreate_render::Projection::Orthographic
+        } else {
+            kreate_render::Projection::Perspective
+        },
+        ..kreate_render::Camera::default()
+    })
+}
+
 pub fn autosave_root() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -647,4 +711,49 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&temporary);
         format!("cannot replace {}: {e}", path.display())
     })
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_view_comes_back_and_a_broken_one_does_not() {
+        let mut camera = kreate_render::Camera::default();
+        camera.pivot = glam::DVec3::new(1.0, -2.0, 0.5);
+        camera.distance = 3.25;
+        camera.fov_y = 0.6;
+        camera.projection = kreate_render::Projection::Orthographic;
+        let back = view_from_record(&view_record(&camera)).expect("a view");
+        assert_eq!(back.pivot, camera.pivot);
+        assert!(back.rotation.abs_diff_eq(camera.rotation, 1e-12));
+        assert_eq!(back.distance, 3.25);
+        assert_eq!(back.fov_y, 0.6);
+        assert_eq!(back.projection, kreate_render::Projection::Orthographic);
+        for broken in [
+            serde_json::json!({}),
+            serde_json::json!({"pivot": [0, 0], "rotation": [0, 0, 0, 1], "distance": 1.0, "fov_y": 0.5}),
+            serde_json::json!({"pivot": [0, 0, 0], "rotation": [0, 0, 0, 1], "distance": -1.0, "fov_y": 0.5}),
+            serde_json::json!({"pivot": [0, 0, 0], "rotation": [0, 0, 0, 0], "distance": 1.0, "fov_y": 0.5}),
+        ] {
+            assert!(view_from_record(&broken).is_none(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn the_view_rides_in_the_file_and_does_not_mark_it_changed() {
+        let dir = std::env::temp_dir().join(format!("kreate-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("viewed.kreate");
+        let document = Document::new();
+        let mut file = DocumentFile::new();
+        let mut camera = kreate_render::Camera::default();
+        camera.distance = 12.5;
+        file.set_view(&camera);
+        file.save(&path, &document).expect("saved");
+        let (opened, reopened) = DocumentFile::open(&path).expect("opened");
+        assert_eq!(reopened.view().map(|v| v.distance), Some(12.5));
+        assert!(!reopened.is_modified(&opened));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

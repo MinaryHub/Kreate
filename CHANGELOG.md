@@ -17,6 +17,9 @@ use; `scripts/release.sh` turns that section into the next release.
   scene, a material is made of its maps and put on the active object, an
   HDRI lights the world. Downloads are kept in the cache for next time.
 
+- A saved document reopens seen from where it was looked at when saved:
+  the view's angle, distance, lens and projection go in the file.
+
 ### Fixed
 
 - A `.gltf` whose buffers and textures are files beside it opens and

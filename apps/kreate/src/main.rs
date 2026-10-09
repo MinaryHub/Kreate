@@ -6304,6 +6304,14 @@ impl App {
         match DocumentFile::open(path) {
             Ok((document, file)) => {
                 self.adopt(document);
+                // Where it was looked at from when it was saved — over the
+                // framing `adopt` gave it, which is for a file that kept none.
+                if let Some(view) = file.view() {
+                    self.camera = view;
+                    self.motion = kreate_render::CameraMotion::new(view);
+                    self.camera_view = None;
+                    self.camera_view_object = None;
+                }
                 self.file = file;
                 self.remember_recent(path);
                 self.status(&format!("opened {}", path.display()));
@@ -6362,6 +6370,7 @@ impl App {
         } else {
             path
         };
+        self.file.set_view(&self.camera);
         match self.file.save(&path, &self.doc) {
             Ok(()) => {
                 self.remember_recent(&path);
@@ -6918,6 +6927,9 @@ impl App {
     /// Called once a frame. Both halves are almost always two comparisons and
     /// nothing else, which is why they can live on the frame path at all.
     fn tick_document(&mut self) {
+        // The view goes with an autosave too, so a recovered document opens
+        // where it was being looked at.
+        self.file.set_view(&self.camera);
         self.file.maybe_autosave(&self.doc);
         let title = self.file.title(&self.doc);
         if title != self.shown_title {
@@ -11544,7 +11556,15 @@ impl ApplicationHandler for App {
             target,
         });
         self.window = Some(window);
-        self.frame_all();
+        // A document opened at launch keeps the view it was saved with; a
+        // new one is framed.
+        match self.file.view() {
+            Some(view) => {
+                self.camera = view;
+                self.motion = kreate_render::CameraMotion::new(view);
+            }
+            None => self.frame_all(),
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -12781,6 +12801,30 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// File ▸ Open shows a document from where it was looked at when it was
+    /// saved — not framed afresh, not the last document's view.
+    #[test]
+    fn an_opened_document_is_seen_from_its_saved_view() {
+        let dir = std::env::temp_dir().join(format!("kreate-open-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("looked.kreate");
+        let mut saved = Camera::default();
+        saved.pivot = DVec3::new(2.0, 1.0, 0.0);
+        saved.distance = 6.5;
+        saved.projection = kreate_render::Projection::Orthographic;
+        let mut file = DocumentFile::new();
+        file.set_view(&saved);
+        file.save(&path, &load_document(None)).expect("saved");
+
+        let mut app = app();
+        app.camera.distance = 40.0;
+        app.load_from(&path);
+        assert_eq!(app.camera.pivot, saved.pivot);
+        assert_eq!(app.camera.distance, 6.5);
+        assert_eq!(app.camera.projection, kreate_render::Projection::Orthographic);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File ▸ New shows the view a fresh start shows: the default angle,
     /// lens and projection, out of any scene camera — not the last
