@@ -1185,14 +1185,42 @@ pub struct BrushAdjust {
 }
 
 /// The sculpt brush's settings, the application's as the paint brush's are.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SculptSettings {
-    /// Draw, smooth, grab, inflate.
+    /// Which brush, as `kreate_mesh::sculpt::Brush::ALL` numbers them.
     pub brush: u32,
     /// Its radius on screen, in points.
     pub radius: f32,
     pub strength: f32,
     pub mirror_x: bool,
+    pub mirror_y: bool,
+    pub mirror_z: bool,
+    /// Repeated round Z this many times; 1 is once.
+    pub radial: u32,
+    /// How it fades to its rim, as `Falloff::ALL` numbers them.
+    pub falloff: u32,
+    /// Only what faces the view.
+    pub front_only: bool,
+    /// How much each dab also smooths.
+    pub auto_smooth: f32,
+    /// Dabs this far apart, as a fraction of the brush's radius.
+    pub spacing: f32,
+    /// The stabiliser: how far the brush trails the pointer, 0 to nearly 1.
+    pub lazy: f32,
+    /// A picture stamped through the brush: a built-in name or an image's.
+    pub alpha: String,
+    /// The pen's pressure scales the strength.
+    pub pressure_strength: bool,
+    /// The pen's pressure scales the size.
+    pub pressure_size: bool,
+    /// Dynamic topology: the surface is cut finer where the brush goes.
+    pub dyntopo: bool,
+    /// Dynamic topology's edge length, as a fraction of the brush's radius.
+    pub detail: f32,
+    /// The voxel remesh's voxel size, in the mesh's units.
+    pub voxel_size: f32,
+    /// The mask and face sets shown on the surface.
+    pub show_overlay: bool,
 }
 
 impl Default for SculptSettings {
@@ -1202,6 +1230,21 @@ impl Default for SculptSettings {
             radius: 50.0,
             strength: 0.5,
             mirror_x: false,
+            mirror_y: false,
+            mirror_z: false,
+            radial: 1,
+            falloff: 0,
+            front_only: false,
+            auto_smooth: 0.0,
+            spacing: 0.25,
+            lazy: 0.0,
+            alpha: String::new(),
+            pressure_strength: true,
+            pressure_size: false,
+            dyntopo: false,
+            detail: 0.2,
+            voxel_size: 0.05,
+            show_overlay: true,
         }
     }
 }
@@ -1342,10 +1385,13 @@ struct Labels {
     menu_sculpt: String,
     menu_texture: String,
     new_texture: String,
-    sculpt_draw: String,
-    sculpt_smooth: String,
-    sculpt_grab: String,
-    sculpt_inflate: String,
+    /// Every sculpt brush's name, in `Tool::SCULPT`'s order.
+    sculpt_brushes: Vec<String>,
+    sculpt_mask_clear: String,
+    sculpt_mask_invert: String,
+    sculpt_face_set_from_mask: String,
+    sculpt_show_all: String,
+    sculpt_remesh: String,
     pose_ik_add: String,
     menu_weights: String,
     group_add: String,
@@ -1667,10 +1713,15 @@ impl Labels {
             menu_sculpt: t("menu-sculpt"),
             menu_texture: t("menu-texture"),
             new_texture: t("op-paint-new-texture"),
-            sculpt_draw: t("sculpt-draw"),
-            sculpt_smooth: t("sculpt-smooth"),
-            sculpt_grab: t("sculpt-grab"),
-            sculpt_inflate: t("sculpt-inflate"),
+            sculpt_brushes: kreate_ui::toolbar::Tool::SCULPT
+                .iter()
+                .map(|tool| t(tool.label_key()))
+                .collect(),
+            sculpt_mask_clear: t("sculpt-mask-clear"),
+            sculpt_mask_invert: t("sculpt-mask-invert"),
+            sculpt_face_set_from_mask: t("sculpt-face-set-from-mask"),
+            sculpt_show_all: t("sculpt-show-all"),
+            sculpt_remesh: t("sculpt-remesh"),
             pose_ik_add: t("op-pose-ik-add"),
             menu_weights: t("menu-weights"),
             group_add: t("op-object-vertex-group-add"),
@@ -2994,7 +3045,7 @@ fn draw_area_header(
                         // other key does and what the menus after it contain.
                         draw_mode_menu(ui, state, doc, mode);
                         ui.separator();
-                        draw_brush_settings(ui, state, l, area.id.0, mode);
+                        draw_brush_settings(ui, state, area.id.0, mode);
                     }
 
                     // Every editor has a View menu, and the area operations
@@ -3093,7 +3144,6 @@ fn draw_area_header(
 fn draw_brush_settings(
     ui: &mut Ui,
     state: &mut ShellState,
-    l: &Labels,
     area: u32,
     mode: kreate_ops::operator::Mode,
 ) {
@@ -3127,38 +3177,38 @@ fn draw_brush_settings(
     }
     // The sculpt brush, in its header.
     if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
-        let names = [
-            &l.sculpt_draw,
-            &l.sculpt_smooth,
-            &l.sculpt_grab,
-            &l.sculpt_inflate,
-        ];
+        let names: Vec<String> = kreate_ui::toolbar::Tool::SCULPT
+            .iter()
+            .map(|t| state.catalog.get(t.label_key()))
+            .collect();
         let s = &mut state.sculpt;
+        let last = names.len() as u32 - 1;
         egui::ComboBox::from_id_salt(("sculpt-brush", area))
-            .selected_text(names[s.brush.min(3) as usize].as_str())
+            .selected_text(names[s.brush.min(last) as usize].as_str())
             .show_ui(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
                     ui.selectable_value(&mut s.brush, i as u32, name.as_str());
                 }
             });
-        ui.label(state.catalog.get("paint-radius"));
+        // The size and strength without their names — the box under the
+        // brush column names them — so the four drop-downs and the mode's
+        // own menus still fit the header.
+        let (radius, strength) = (state.catalog.get("paint-radius"), state.catalog.get("paint-strength"));
         ui.add(
             egui::DragValue::new(&mut state.sculpt.radius)
                 .range(4.0..=400.0)
                 .speed(1.0)
                 .suffix(" px"),
-        );
-        ui.label(state.catalog.get("paint-strength"));
+        )
+        .on_hover_text(radius);
         ui.add(
             egui::DragValue::new(&mut state.sculpt.strength)
                 .range(0.0..=1.0)
                 .speed(0.01)
                 .max_decimals(2),
-        );
-        ui.checkbox(
-            &mut state.sculpt.mirror_x,
-            state.catalog.get("sculpt-mirror-x"),
-        );
+        )
+        .on_hover_text(strength);
+        draw_sculpt_menus(ui, state);
         ui.separator();
     }
     // The brush, where Blender keeps it: in the header of
@@ -3638,25 +3688,44 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
             }),
             kreate_ops::mode::Menu::Sculpt => out.push(TopMenu {
                 label: l.menu_sculpt.clone(),
-                nodes: [
-                    &l.sculpt_draw,
-                    &l.sculpt_smooth,
-                    &l.sculpt_grab,
-                    &l.sculpt_inflate,
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(i, label)| {
-                    MenuNode::Entry(
-                        MenuEntry::new(
-                            "sculpt.brush",
-                            label,
-                            Run::Command(Command::SetSculptBrush(i as u32)),
-                        )
-                        .variant("brush", kreate_reflect::PropertyValue::Enum(i as u32)),
-                    )
-                })
-                .collect(),
+                nodes: {
+                    use kreate_reflect::PropertyValue as V;
+                    let mut nodes: Vec<MenuNode> = l
+                        .sculpt_brushes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, label)| {
+                            MenuNode::Entry(
+                                MenuEntry::new(
+                                    "sculpt.brush",
+                                    label,
+                                    Run::Command(Command::SetSculptBrush(i as u32)),
+                                )
+                                .variant("brush", V::Enum(i as u32)),
+                            )
+                        })
+                        .collect();
+                    nodes.push(MenuNode::Separator);
+                    for (label, action) in [(&l.sculpt_mask_clear, 0u32), (&l.sculpt_mask_invert, 1)] {
+                        nodes.push(MenuNode::Entry(
+                            MenuEntry::new("sculpt.mask", label, op("sculpt.mask", &[("action", V::Enum(action))]))
+                                .variant("action", V::Enum(action)),
+                        ));
+                    }
+                    nodes.push(MenuNode::Entry(MenuEntry::new(
+                        "sculpt.face_set_from_mask",
+                        &l.sculpt_face_set_from_mask,
+                        op("sculpt.face_set_from_mask", &[]),
+                    )));
+                    nodes.push(MenuNode::Entry(MenuEntry::new(
+                        "sculpt.face_set_visibility",
+                        &l.sculpt_show_all,
+                        op("sculpt.face_set_visibility", &[("action", V::Enum(2))]),
+                    )));
+                    nodes.push(MenuNode::Separator);
+                    nodes.push(entry("sculpt.remesh", &l.sculpt_remesh, dispatch("sculpt.remesh")));
+                    nodes
+                },
             }),
             kreate_ops::mode::Menu::Texture => out.push(TopMenu {
                 label: l.menu_texture.clone(),
@@ -4607,10 +4676,8 @@ fn draw_toolbar(
                         Tool::Inset => Some("mesh.inset"),
                         Tool::Bevel => Some("mesh.bevel"),
                         Tool::LoopCut => Some("mesh.loop_cut"),
-                        Tool::SculptDraw
-                        | Tool::SculptSmooth
-                        | Tool::SculptGrab
-                        | Tool::SculptInflate => None,
+                        t if t.is_sculpt() => None,
+                        _ => None,
                     };
                     let tip = match op.and_then(|id| state.command_info.get(id)) {
                         Some(info) if !info.shortcut.is_empty() => {
@@ -4668,14 +4735,12 @@ fn draw_toolbar(
                             }
                             // The brush the next stroke uses: the same
                             // setting as the header's brush menu.
-                            Tool::SculptDraw
-                            | Tool::SculptSmooth
-                            | Tool::SculptGrab
-                            | Tool::SculptInflate => {
+                            t if t.is_sculpt() => {
                                 if let Some(i) = Tool::SCULPT.iter().position(|t| t == tool) {
                                     state.sculpt.brush = i as u32;
                                 }
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -4683,6 +4748,123 @@ fn draw_toolbar(
         },
     );
     rect
+}
+
+/// Sculpt mode's other settings, in the header's drop-downs as Blender keeps
+/// them: symmetry, the stroke, the mask and face sets, and the topology.
+fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
+    use kreate_reflect::PropertyValue as V;
+    let c = |key: &str| state.catalog.get(key);
+    let (symmetry, stroke, mask, topology) = (
+        c("sculpt-menu-symmetry"),
+        c("sculpt-menu-stroke"),
+        c("sculpt-menu-mask"),
+        c("sculpt-menu-topology"),
+    );
+    let labels: Vec<String> = [
+        "sculpt-mirror-x", "sculpt-mirror-y", "sculpt-mirror-z", "sculpt-radial", "sculpt-falloff",
+        "sculpt-spacing", "sculpt-lazy", "sculpt-front-only", "sculpt-auto-smooth", "sculpt-alpha",
+        "sculpt-pressure-strength", "sculpt-pressure-size", "sculpt-mask-clear", "sculpt-mask-invert",
+        "sculpt-mask-fill", "sculpt-face-set-from-mask", "sculpt-show-all", "sculpt-show-overlay",
+        "sculpt-dyntopo", "sculpt-detail", "sculpt-voxel-size", "sculpt-remesh",
+    ]
+    .iter()
+    .map(|k| c(k))
+    .collect();
+    let falloffs: Vec<String> = ["smooth", "sphere", "root", "sharp", "linear", "constant"]
+        .iter()
+        .map(|k| c(&format!("sculpt-falloff-{k}")))
+        .collect();
+    let s = &mut state.sculpt;
+    let mut run: Vec<(&'static str, PropertyMap)> = Vec::new();
+    ui.menu_button(symmetry, |ui| {
+        ui.checkbox(&mut s.mirror_x, &labels[0]);
+        ui.checkbox(&mut s.mirror_y, &labels[1]);
+        ui.checkbox(&mut s.mirror_z, &labels[2]);
+        ui.horizontal(|ui| {
+            ui.label(&labels[3]);
+            ui.add(egui::DragValue::new(&mut s.radial).range(1..=64));
+        });
+    });
+    ui.menu_button(stroke, |ui| {
+        egui::Grid::new("sculpt-stroke").num_columns(2).show(ui, |ui| {
+            ui.label(&labels[4]);
+            egui::ComboBox::from_id_salt("sculpt-falloff")
+                .selected_text(falloffs[s.falloff.min(5) as usize].as_str())
+                .show_ui(ui, |ui| {
+                    for (i, f) in falloffs.iter().enumerate() {
+                        ui.selectable_value(&mut s.falloff, i as u32, f.as_str());
+                    }
+                });
+            ui.end_row();
+            ui.label(&labels[5]);
+            ui.add(egui::DragValue::new(&mut s.spacing).range(0.02..=2.0).speed(0.01));
+            ui.end_row();
+            ui.label(&labels[6]);
+            ui.add(egui::DragValue::new(&mut s.lazy).range(0.0..=0.95).speed(0.01));
+            ui.end_row();
+            ui.label(&labels[8]);
+            ui.add(egui::DragValue::new(&mut s.auto_smooth).range(0.0..=1.0).speed(0.01));
+            ui.end_row();
+            ui.label(&labels[9]);
+            egui::ComboBox::from_id_salt("sculpt-alpha")
+                .selected_text(if s.alpha.is_empty() { "—" } else { s.alpha.as_str() })
+                .show_ui(ui, |ui| {
+                    // i18n-exempt: the built-in alphas' names, which scripts use too
+                    for name in ["", "noise", "stripes", "dots"] {
+                        let shown = if name.is_empty() { "—" } else { name };
+                        ui.selectable_value(&mut s.alpha, name.to_string(), shown);
+                    }
+                });
+            ui.end_row();
+        });
+        ui.checkbox(&mut s.front_only, &labels[7]);
+        ui.checkbox(&mut s.pressure_strength, &labels[10]);
+        ui.checkbox(&mut s.pressure_size, &labels[11]);
+    });
+    ui.menu_button(mask, |ui| {
+        for (k, label) in [(0u32, &labels[12]), (1, &labels[13]), (2, &labels[14])] {
+            if ui.button(label).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("action", V::Enum(k));
+                run.push(("sculpt.mask", p));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button(&labels[15]).clicked() {
+            run.push(("sculpt.face_set_from_mask", PropertyMap::new()));
+            ui.close();
+        }
+        if ui.button(&labels[16]).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("action", V::Enum(2));
+            run.push(("sculpt.face_set_visibility", p));
+            ui.close();
+        }
+        ui.checkbox(&mut s.show_overlay, &labels[17]);
+    });
+    ui.menu_button(topology, |ui| {
+        ui.checkbox(&mut s.dyntopo, &labels[18]);
+        ui.horizontal(|ui| {
+            ui.label(&labels[19]);
+            ui.add(egui::DragValue::new(&mut s.detail).range(0.02..=1.0).speed(0.005));
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(&labels[20]);
+            ui.add(egui::DragValue::new(&mut s.voxel_size).range(0.001..=10.0).speed(0.001));
+        });
+        if ui.button(&labels[21]).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("voxel_size", V::Float(s.voxel_size as f64));
+            run.push(("sculpt.voxel_remesh", p));
+            ui.close();
+        }
+    });
+    for (op, p) in run {
+        state.queue.run(op, p);
+    }
 }
 
 /// Sculpt mode's brush settings, in a box under the brush column: where the
@@ -9921,6 +10103,11 @@ op-object-origin-set = Set Origin
 op-object-origin-set-desc = Moves the origin of the selected meshes without moving what is drawn.
 op-object-transform-apply = Apply Transform
 op-object-transform-apply-desc = Bakes the transform into the mesh and resets it, leaving everything in place.
+op-sculpt-mask-desc = Clears, inverts or fills the sculpt mask. Masked parts are left alone by every brush.
+op-sculpt-face-set-from-mask-desc = Makes the fully masked faces a new face set.
+op-sculpt-face-set-visibility-desc = Hides the face set under the pointer, shows it alone, or shows everything again.
+op-sculpt-remesh-desc = Rebuilds the mesh as even squares at the voxel size the Topology menu holds. Fills holes; the mask and face sets start again.
+op-sculpt-voxel-remesh-desc = Rebuilds the mesh as even squares at a voxel size. Fills holes; the mask and face sets start again.
 op-physics-rigid-body-set-desc = Makes the selected objects rigid bodies: active ones fall and tumble, passive ones stay put and are in the way.
 op-physics-soft-set-desc = Makes the selected objects cloth, which hangs and drapes, or soft bodies, which wobble back to their shape.
 op-physics-collision-set-desc = Makes the selected objects something cloth, soft bodies and particles collide with.
@@ -10051,7 +10238,48 @@ sculpt-draw = Draw
 sculpt-smooth = Smooth
 sculpt-grab = Grab
 sculpt-inflate = Inflate
+sculpt-clay-strips = Clay Strips
+sculpt-crease = Crease
+sculpt-flatten = Flatten
+sculpt-scrape = Scrape
+sculpt-fill = Fill
+sculpt-pinch = Pinch
+sculpt-layer = Layer
+sculpt-snake-hook = Snake Hook
+sculpt-mask = Mask
+sculpt-face-set = Face Set
 sculpt-mirror-x = X Symmetry
+sculpt-mirror-y = Y Symmetry
+sculpt-mirror-z = Z Symmetry
+sculpt-radial = Radial
+sculpt-menu-symmetry = Symmetry
+sculpt-menu-stroke = Stroke
+sculpt-menu-mask = Mask
+sculpt-menu-topology = Topology
+sculpt-falloff = Falloff
+sculpt-falloff-smooth = Smooth
+sculpt-falloff-sphere = Sphere
+sculpt-falloff-root = Root
+sculpt-falloff-sharp = Sharp
+sculpt-falloff-linear = Linear
+sculpt-falloff-constant = Constant
+sculpt-spacing = Spacing
+sculpt-lazy = Stabilize
+sculpt-front-only = Front Faces Only
+sculpt-auto-smooth = Auto Smooth
+sculpt-alpha = Alpha
+sculpt-pressure-strength = Pressure for Strength
+sculpt-pressure-size = Pressure for Size
+sculpt-mask-clear = Clear Mask
+sculpt-mask-invert = Invert Mask
+sculpt-mask-fill = Fill Mask
+sculpt-face-set-from-mask = Face Set from Mask
+sculpt-show-all = Show All
+sculpt-show-overlay = Show Mask and Face Sets
+sculpt-dyntopo = Dynamic Topology
+sculpt-detail = Detail Size
+sculpt-voxel-size = Voxel Size
+sculpt-remesh = Voxel Remesh
 op-sculpt-stroke = Sculpt
 op-sculpt-stroke-desc = One stroke of a sculpt brush.
 op-sculpt-brush = Sculpt Brush
@@ -10965,6 +11193,11 @@ op-object-origin-set = 원점 설정
 op-object-origin-set-desc = 그려진 모양은 그대로 두고 선택한 메시의 원점을 옮깁니다.
 op-object-transform-apply = 트랜스폼 적용
 op-object-transform-apply-desc = 트랜스폼을 메시에 굳히고 초기화합니다. 화면의 모습은 그대로입니다.
+op-sculpt-mask-desc = 스컬프트 마스크를 지우거나, 반전하거나, 채웁니다. 마스크된 곳은 어떤 브러시도 건드리지 않습니다.
+op-sculpt-face-set-from-mask-desc = 완전히 마스크된 면을 새 페이스 세트로 만듭니다.
+op-sculpt-face-set-visibility-desc = 포인터 아래의 페이스 세트를 숨기거나, 그것만 보이거나, 모두 다시 보입니다.
+op-sculpt-remesh-desc = 토폴로지 메뉴의 복셀 크기로 메시를 고른 사각형 면으로 다시 만듭니다. 구멍은 메워지고 마스크와 페이스 세트는 새로 시작합니다.
+op-sculpt-voxel-remesh-desc = 복셀 크기에 맞춰 메시를 고른 사각형 면으로 다시 만듭니다. 구멍은 메워지고 마스크와 페이스 세트는 새로 시작합니다.
 op-physics-rigid-body-set-desc = 선택한 오브젝트를 강체로 만듭니다. 액티브는 떨어지고 구르며, 패시브는 제자리에서 다른 것을 막습니다.
 op-physics-soft-set-desc = 선택한 오브젝트를 늘어지고 덮이는 천이나, 출렁이다 제 모양으로 돌아오는 소프트바디로 만듭니다.
 op-physics-collision-set-desc = 선택한 오브젝트에 천, 소프트바디, 파티클이 부딪히게 합니다.
@@ -11096,7 +11329,48 @@ sculpt-draw = 그리기
 sculpt-smooth = 매끄럽게
 sculpt-grab = 잡기
 sculpt-inflate = 부풀리기
+sculpt-clay-strips = 클레이 스트립
+sculpt-crease = 주름
+sculpt-flatten = 평평하게
+sculpt-scrape = 깎기
+sculpt-fill = 채우기
+sculpt-pinch = 모으기
+sculpt-layer = 층 올리기
+sculpt-snake-hook = 끌어 뽑기
+sculpt-mask = 마스크
+sculpt-face-set = 페이스 세트
 sculpt-mirror-x = X 대칭
+sculpt-mirror-y = Y 대칭
+sculpt-mirror-z = Z 대칭
+sculpt-radial = 방사형
+sculpt-menu-symmetry = 대칭
+sculpt-menu-stroke = 스트로크
+sculpt-menu-mask = 마스크
+sculpt-menu-topology = 토폴로지
+sculpt-falloff = 감쇠
+sculpt-falloff-smooth = 부드럽게
+sculpt-falloff-sphere = 구
+sculpt-falloff-root = 루트
+sculpt-falloff-sharp = 날카롭게
+sculpt-falloff-linear = 직선
+sculpt-falloff-constant = 일정
+sculpt-spacing = 간격
+sculpt-lazy = 손떨림 보정
+sculpt-front-only = 앞면만
+sculpt-auto-smooth = 자동 다듬기
+sculpt-alpha = 알파
+sculpt-pressure-strength = 압력으로 세기
+sculpt-pressure-size = 압력으로 크기
+sculpt-mask-clear = 마스크 지우기
+sculpt-mask-invert = 마스크 반전
+sculpt-mask-fill = 마스크 채우기
+sculpt-face-set-from-mask = 마스크로 페이스 세트
+sculpt-show-all = 모두 보이기
+sculpt-show-overlay = 마스크와 페이스 세트 표시
+sculpt-dyntopo = 다이나믹 토폴로지
+sculpt-detail = 디테일 크기
+sculpt-voxel-size = 복셀 크기
+sculpt-remesh = 복셀 리메시
 op-sculpt-stroke = 스컬프트
 op-sculpt-stroke-desc = 스컬프트 붓의 한 획.
 op-sculpt-brush = 스컬프트 붓

@@ -39,6 +39,16 @@ pub enum Tool {
     SculptGrab,
     /// Swells the surface along its normals.
     SculptInflate,
+    SculptClayStrips,
+    SculptCrease,
+    SculptFlatten,
+    SculptScrape,
+    SculptFill,
+    SculptPinch,
+    SculptLayer,
+    SculptSnakeHook,
+    SculptMask,
+    SculptFaceSet,
 }
 
 impl Tool {
@@ -57,6 +67,16 @@ impl Tool {
             Tool::SculptSmooth => "sculpt-smooth",
             Tool::SculptGrab => "sculpt-grab",
             Tool::SculptInflate => "sculpt-inflate",
+            Tool::SculptClayStrips => "sculpt-clay-strips",
+            Tool::SculptCrease => "sculpt-crease",
+            Tool::SculptFlatten => "sculpt-flatten",
+            Tool::SculptScrape => "sculpt-scrape",
+            Tool::SculptFill => "sculpt-fill",
+            Tool::SculptPinch => "sculpt-pinch",
+            Tool::SculptLayer => "sculpt-layer",
+            Tool::SculptSnakeHook => "sculpt-snake-hook",
+            Tool::SculptMask => "sculpt-mask",
+            Tool::SculptFaceSet => "sculpt-face-set",
         }
     }
 
@@ -66,12 +86,27 @@ impl Tool {
     pub const EDIT: [Tool; 4] = [Tool::Extrude, Tool::Inset, Tool::Bevel, Tool::LoopCut];
     /// Sculpt mode's brushes, in the order of the brush menu — so a brush's
     /// index here is its number in the brush setting.
-    pub const SCULPT: [Tool; 4] = [
+    pub const SCULPT: [Tool; 14] = [
         Tool::SculptDraw,
         Tool::SculptSmooth,
         Tool::SculptGrab,
         Tool::SculptInflate,
+        Tool::SculptClayStrips,
+        Tool::SculptCrease,
+        Tool::SculptFlatten,
+        Tool::SculptScrape,
+        Tool::SculptFill,
+        Tool::SculptPinch,
+        Tool::SculptLayer,
+        Tool::SculptSnakeHook,
+        Tool::SculptMask,
+        Tool::SculptFaceSet,
     ];
+
+    /// Whether it is one of sculpt mode's brushes.
+    pub fn is_sculpt(self) -> bool {
+        Self::SCULPT.contains(&self)
+    }
 }
 
 /// Side of the icon's drawing area, in points.
@@ -229,6 +264,96 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
                 );
                 p.line_segment([from, tip], thin);
                 arrow_head(ui, tip, Vec2::new(dx, dy), area.width() * 0.12, ink);
+            }
+        }
+        // Strips laid one on another.
+        Tool::SculptClayStrips => {
+            for (k, y) in [0.78f32, 0.6, 0.42].iter().enumerate() {
+                let inset = k as f32 * 0.1;
+                p.line_segment([at(0.12 + inset, *y), at(0.88 - inset, *y)], Stroke::new(2.4, ink));
+            }
+        }
+        // A sharp groove.
+        Tool::SculptCrease => {
+            let v = [at(0.08, 0.35), at(0.42, 0.35), at(0.5, 0.8), at(0.58, 0.35), at(0.92, 0.35)];
+            p.add(egui::Shape::line(v.to_vec(), line));
+        }
+        // A bump pressed flat by a bar above it.
+        Tool::SculptFlatten => {
+            p.line_segment([at(0.08, 0.7), at(0.92, 0.7)], line);
+            p.line_segment([at(0.2, 0.4), at(0.8, 0.4)], Stroke::new(2.4, ink));
+            p.line_segment([at(0.5, 0.12), at(0.5, 0.32)], thin);
+            arrow_head(ui, at(0.5, 0.36), Vec2::new(0.0, 1.0), area.width() * 0.14, ink);
+        }
+        // A blade across a bump.
+        Tool::SculptScrape => {
+            let ground: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let x = 0.08 + i as f32 / 20.0 * 0.84;
+                    let bump = (-((x - 0.5) / 0.17).powi(2)).exp() * 0.3;
+                    at(x, 0.8 - bump.min(0.15))
+                })
+                .collect();
+            p.add(egui::Shape::line(ground, line));
+            p.line_segment([at(0.15, 0.3), at(0.85, 0.62)], Stroke::new(2.2, ink));
+        }
+        // A pit with its top filled in.
+        Tool::SculptFill => {
+            let pit: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let x = 0.08 + i as f32 / 20.0 * 0.84;
+                    let dip = (-((x - 0.5) / 0.17).powi(2)).exp() * 0.35;
+                    at(x, 0.45 + dip)
+                })
+                .collect();
+            p.add(egui::Shape::line(pit, thin));
+            p.line_segment([at(0.08, 0.45), at(0.92, 0.45)], line);
+        }
+        // Two arrows meeting.
+        Tool::SculptPinch => {
+            p.line_segment([at(0.08, 0.5), at(0.36, 0.5)], line);
+            arrow_head(ui, at(0.42, 0.5), Vec2::new(1.0, 0.0), area.width() * 0.16, ink);
+            p.line_segment([at(0.92, 0.5), at(0.64, 0.5)], line);
+            arrow_head(ui, at(0.58, 0.5), Vec2::new(-1.0, 0.0), area.width() * 0.16, ink);
+        }
+        // A flat-topped plateau.
+        Tool::SculptLayer => {
+            let v = [at(0.08, 0.78), at(0.28, 0.78), at(0.34, 0.45), at(0.66, 0.45), at(0.72, 0.78), at(0.92, 0.78)];
+            p.add(egui::Shape::line(v.to_vec(), line));
+        }
+        // A surface pulled up into a hook.
+        Tool::SculptSnakeHook => {
+            let hook: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let t = i as f32 / 20.0;
+                    at(0.12 + t * 0.62 + t * t * 0.1, 0.82 - t * t * 0.62)
+                })
+                .collect();
+            p.add(egui::Shape::line(hook, line));
+            arrow_head(ui, at(0.84, 0.2), Vec2::new(0.4, -1.0).normalized(), area.width() * 0.16, ink);
+        }
+        // A circle, half of it dark: what is held back.
+        Tool::SculptMask => {
+            let c = at(0.5, 0.5);
+            let r = area.width() * 0.36;
+            p.circle_stroke(c, r, line);
+            let half: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (0.5 + i as f32 / 16.0);
+                    Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::convex_polygon(half, ink.gamma_multiply(0.7), Stroke::NONE));
+        }
+        // Four cells, one filled: faces in groups.
+        Tool::SculptFaceSet => {
+            for (x, y) in [(0.12f32, 0.12f32), (0.52, 0.12), (0.12, 0.52), (0.52, 0.52)] {
+                let r = Rect::from_min_max(at(x, y), at(x + 0.36, y + 0.36));
+                if (x, y) == (0.52, 0.52) {
+                    p.rect_filled(r, 1.0, ink.gamma_multiply(0.8));
+                } else {
+                    p.rect_stroke(r, 1.0, thin, egui::StrokeKind::Middle);
+                }
             }
         }
         // A dashed rectangle with a cursor arrow: the marquee.

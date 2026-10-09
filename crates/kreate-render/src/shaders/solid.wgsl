@@ -132,7 +132,7 @@ fn vs_cluster(
         out.normal = vec3<f32>(0.0, 0.0, 1.0);
         out.view_pos = vec3<f32>(0.0);
         out.base_color = instance.base_color;
-        out.weight = 0.0;
+        out.weight = vec2<f32>(0.0);
         out.ramp = 0.0;
         return out;
     }
@@ -148,7 +148,7 @@ fn vs_cluster(
     out.normal = nm * oct_decode(cluster_normals[index]);
     out.view_pos = world.xyz;
     out.base_color = instance.base_color;
-    out.weight = 0.0;
+    out.weight = vec2<f32>(0.0);
     out.ramp = 0.0;
     return out;
 }
@@ -184,10 +184,25 @@ struct VsOut {
     // supply the colour from different uniforms in different vertex shaders and
     // the fragment stage cannot tell which.
     @location(2) @interpolate(flat) base_color: vec4<f32>,
-    // The weight being painted, and whether to show it — see `ramp`.
-    @location(3) weight: f32,
+    // The weight being painted, and whether to show it — see `ramp`. In
+    // sculpt mode, the mask (x) and the face set (y).
+    @location(3) weight: vec2<f32>,
     @location(4) @interpolate(flat) ramp: f32,
 };
+
+// A face set's colour: a hue from its number, soft, so the form still reads.
+fn face_set_color(id: f32) -> vec3<f32> {
+    let h = fract(id * 0.618034) * 6.0;
+    let x = 1.0 - abs(h % 2.0 - 1.0);
+    var rgb: vec3<f32>;
+    if (h < 1.0) { rgb = vec3<f32>(1.0, x, 0.0); }
+    else if (h < 2.0) { rgb = vec3<f32>(x, 1.0, 0.0); }
+    else if (h < 3.0) { rgb = vec3<f32>(0.0, 1.0, x); }
+    else if (h < 4.0) { rgb = vec3<f32>(0.0, x, 1.0); }
+    else if (h < 5.0) { rgb = vec3<f32>(x, 0.0, 1.0); }
+    else { rgb = vec3<f32>(1.0, 0.0, x); }
+    return mix(vec3<f32>(0.9), rgb, 0.5);
+}
 
 // Blender's weight ramp: blue at nothing, through green, to red at all.
 fn weight_color(w: f32) -> vec3<f32> {
@@ -226,7 +241,7 @@ fn vs_main(
     out.view_pos = world.xyz;
     // The run's material colour; the object's alpha, which x-ray reads.
     out.base_color = vec4<f32>(object.slot_colors[min(slot, 7u)].rgb, object.base_color.a);
-    out.weight = uv.x;
+    out.weight = uv;
     out.ramp = object.paint.x;
     return out;
 }
@@ -286,7 +301,17 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
 
     // The ramp is light's reflectance like any colour: shaded, so the form
     // still reads under the weights, as Blender's weight paint does.
-    var base = select(in.base_color.rgb, weight_color(in.weight), in.ramp > 0.5);
+    var base = in.base_color.rgb;
+    if (in.ramp > 0.5 && in.ramp < 1.5) {
+        base = weight_color(in.weight.x);
+    } else if (in.ramp > 1.5) {
+        // Sculpt: a face set tints its faces, and the mask darkens what it
+        // holds, as Blender shows both.
+        if (in.weight.y > 0.5) {
+            base = base * face_set_color(in.weight.y);
+        }
+        base = base * (1.0 - 0.7 * clamp(in.weight.x, 0.0, 1.0));
+    }
     // Blender's Face Orientation overlay: blue where the front of a face is
     // seen, red where its back is — a flipped normal shows at a glance.
     if (globals.params.y > 0.5) {

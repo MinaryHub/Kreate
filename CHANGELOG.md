@@ -10,6 +10,15 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Sculpting: ten more brushes (Clay Strips, Crease, Flatten, Scrape, Fill,
+  Pinch, Layer, Snake Hook, Mask, Face Set); a mask that every brush respects;
+  face sets that can be hidden, isolated and shown again; falloff shapes,
+  spacing, a stabiliser, front-faces-only, auto-smooth, Y/Z and radial
+  symmetry, alpha stamps and pen pressure; Voxel Remesh (Ctrl+R) and dynamic
+  topology.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added

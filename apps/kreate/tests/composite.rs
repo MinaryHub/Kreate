@@ -326,12 +326,16 @@ fn composite_with(
             // application shows it.
             let painting = mode.acts_on() == kreate_ops::mode::ActsOn::Weights
                 && doc.selection.active == Some(id);
+            let sculpting = mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt
+                && doc.selection.active == Some(id);
             let mesh = if painting {
                 let group = doc.object(id).and_then(|o| o.active_group.clone());
                 std::sync::Arc::new(kreate_ops::ops::paint::weight_display(
                     &mesh,
                     group.as_deref(),
                 ))
+            } else if sculpting {
+                kreate::sculptview::SculptDisplay::default().show(&mesh).unwrap_or(mesh)
             } else {
                 mesh
             };
@@ -354,6 +358,10 @@ fn composite_with(
                 .selected(!edit_mode && doc.selection.contains(*id))
                 .weights(
                     mode.acts_on() == kreate_ops::mode::ActsOn::Weights
+                        && doc.selection.active == Some(*id),
+                )
+                .sculpt_overlay(
+                    mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt
                         && doc.selection.active == Some(*id),
                 )
         })
@@ -2022,6 +2030,33 @@ fn shot_sculpt() {
     narrow.dump("sculpt-narrow-ko");
 }
 
+/// Sculpt mode with a mask on one side and two face sets: the mask darkens,
+/// the face sets tint.
+#[test]
+fn shot_sculpt_mask_and_face_sets() {
+    use kreate_mesh::{AttrData, Domain};
+    let mut doc = Document::new();
+    let mut ball = kreate_mesh::primitives::uv_sphere(1.0, 48, 24);
+    let mask: Vec<f32> = ball.positions().iter().map(|p| if p.x > 0.3 { 1.0 } else { 0.0 }).collect();
+    ball.attributes_mut().insert(kreate_mesh::sculpt::MASK, Domain::Point, AttrData::F32(std::sync::Arc::new(mask)));
+    let sets: Vec<i32> = (0..ball.num_faces())
+        .map(|f| {
+            let z = ball.face_verts(f).iter().map(|v| ball.positions()[*v as usize].z).sum::<f32>();
+            if z > 1.0 { 1 } else if z < -1.0 { 2 } else { 0 }
+        })
+        .collect();
+    ball.attributes_mut().insert(kreate_mesh::sculpt::FACE_SET, Domain::Face, AttrData::I32(std::sync::Arc::new(sets)));
+    let m = doc.add_mesh(ball);
+    let id = doc.add_object(kreate_scene::document::Object::new("Ball", kreate_scene::document::ObjectData::Mesh(m)));
+    doc.selection.add(id);
+    doc.selection.active = Some(id);
+    let Some(shot) = composite_in_mode(&doc, "en", kreate_ops::operator::Mode::Sculpt, |_| {}) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("sculpt-overlay");
+}
+
 /// Help ▸ Contact's form, with a message being written, and About.
 #[test]
 fn shot_contact() {
@@ -2700,3 +2735,4 @@ fn shot_outliner_search() {
     };
     shot.dump("outliner-search");
 }
+

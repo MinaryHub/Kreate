@@ -635,6 +635,8 @@ pub struct Draw<'a> {
     pub material: u32,
     /// Coloured by weight: see [`Draw::weights`].
     pub weights: bool,
+    /// Sculpt mode's mask and face sets shown: see [`Draw::sculpt_overlay`].
+    pub sculpt_overlay: bool,
     /// One material per mesh material *slot*, for a mesh with more than one.
     ///
     /// **Borrowed rather than owned** so that `Draw` stays `Copy` and a frame
@@ -675,6 +677,7 @@ impl<'a> Draw<'a> {
             materials: &[],
             colors: &[],
             weights: false,
+            sculpt_overlay: false,
             // Full until measured. A draw that is never passed through
             // `prepare` renders completely, which is the safe default: the
             // failure mode of forgetting to measure is a slow frame, not a
@@ -688,6 +691,13 @@ impl<'a> Draw<'a> {
     /// application puts the weights there, on a copy made for the screen.
     pub fn weights(mut self, on: bool) -> Self {
         self.weights = on;
+        self
+    }
+
+    /// Shows sculpt mode's mask, from the first UV coordinate, as darkening,
+    /// and its face sets, from the second, as tints.
+    pub fn sculpt_overlay(mut self, on: bool) -> Self {
+        self.sculpt_overlay = on;
         self
     }
 
@@ -2972,7 +2982,13 @@ impl Viewport {
                             .unwrap_or(draw.mesh.color.to_array())
                     }),
                     paint: [
-                        if draw.weights { 1.0 } else { 0.0 },
+                        if draw.weights {
+                            1.0
+                        } else if draw.sculpt_overlay {
+                            2.0
+                        } else {
+                            0.0
+                        },
                         // How the outline marks it: see `outline.wgsl`.
                         if !draw.selected {
                             0.0
@@ -4516,7 +4532,7 @@ impl Viewport {
             for v in d.transform.to_cols_array() {
                 v.to_bits().hash(&mut h);
             }
-            (d.material, d.weights, d.detail.draw, d.wire_only).hash(&mut h);
+            (d.material, d.weights, d.sculpt_overlay, d.detail.draw, d.wire_only).hash(&mut h);
         }
         let signature = h.finish();
         if signature != self.accum_signature {

@@ -17,6 +17,8 @@ pub mod measure;
 pub mod modifiers;
 pub mod primitives;
 pub mod profile;
+pub mod dyntopo;
+pub mod remesh;
 pub mod sculpt;
 pub mod section;
 pub mod selection;

@@ -14,18 +14,15 @@ fn main() {
         let stroke = Stroke {
             brush,
             strength: 0.5,
-            invert: false,
             grab: Vec3::new(0.0, 0.0, 0.2),
-            mirror_x: true,
+            mirror: [true, false, false],
+            ..Stroke::default()
         };
         for n in [1usize, 10, 100] {
             let dabs: Vec<Dab> = (0..n)
                 .map(|i| {
                     let a = i as f32 * 0.02;
-                    Dab {
-                        centre: Vec3::new(a.cos(), a.sin(), 0.0),
-                        radius: 0.1,
-                    }
+                    Dab::new(Vec3::new(a.cos(), a.sin(), 0.0), 0.1)
                 })
                 .collect();
             let mut m = base.clone();
@@ -35,10 +32,7 @@ fn main() {
         }
         // As a stroke is drawn: the same stroke re-run with one more dab.
         let dabs: Vec<Dab> = (0..100)
-            .map(|i| Dab {
-                centre: Vec3::new((i as f32 * 0.02).cos(), (i as f32 * 0.02).sin(), 0.0),
-                radius: 0.1,
-            })
+            .map(|i| Dab::new(Vec3::new((i as f32 * 0.02).cos(), (i as f32 * 0.02).sin(), 0.0), 0.1))
             .collect();
         let mut cache = StrokeCache::new(&base, &stroke, 0.1);
         let t = Instant::now();

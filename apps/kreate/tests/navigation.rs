@@ -291,6 +291,11 @@ const APP_ACTIONS: &[&str] = &[
     // F / Shift+F: the brush's size and strength, which live in the
     // interface, not the document.
     "brush.radius_adjust",
+    // The face set under the pointer, which only the application can find,
+    // and a remesh at the size the header holds.
+    "sculpt.face_set_hide",
+    "sculpt.face_set_isolate",
+    "sculpt.remesh",
     "brush.strength_adjust",
     // The 3D cursor: placed from the pointer and the selection, which the
     // application knows and the operator (`scene.cursor_set`) is handed.

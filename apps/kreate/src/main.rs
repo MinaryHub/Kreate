@@ -169,6 +169,9 @@ struct Input {
     shift_down: bool,
     ctrl_down: bool,
     alt_down: bool,
+    /// How hard a pen is pressing, 0 to 1, while one is down; `None` for a
+    /// mouse.
+    pen_pressure: Option<f32>,
     /// When the oldest unprocessed input arrived, for the latency measurement.
     first_event_at: Option<Instant>,
 }
@@ -373,6 +376,10 @@ struct SculptStroke {
     brush: u32,
     invert: bool,
     dabs: Vec<f64>,
+    /// The pen's pressure at each dab.
+    pressures: Vec<f64>,
+    /// The face set a face set stroke paints: one past the highest there is.
+    face_set: i32,
     /// Where the last dab went, in the world, to space the next one.
     last: DVec3,
     radius_world: f64,
@@ -867,6 +874,9 @@ struct App {
     /// an unchanged mesh is the same handle and is not uploaded again. Keyed
     /// on the evaluated mesh it was made from and the group.
     weight_display: Option<(Arc<MeshData>, Option<String>, Arc<MeshData>)>,
+    /// The sculpted mesh with its mask and face sets where the overlay reads
+    /// them. See `kreate::sculptview`.
+    sculpt_display: kreate::sculptview::SculptDisplay,
     /// Meshes with hidden elements, as drawn outside edit mode: without the
     /// hide layers. Input handle and the copy.
     unhidden: Vec<(Arc<MeshData>, Arc<MeshData>)>,
@@ -1027,6 +1037,7 @@ impl App {
             driven_at: u64::MAX,
             paint_stroke: None,
             sculpt_stroke: None,
+            sculpt_display: Default::default(),
             stroke_moved: false,
             texture_stroke: None,
             weight_display: None,
@@ -5719,7 +5730,7 @@ impl App {
                 }
                 Command::SetSelectMode(mode) => self.set_select_mode(mode),
                 Command::SetSculptBrush(brush) => {
-                    self.ui.sculpt.brush = brush.min(3);
+                    self.ui.sculpt.brush = brush.min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
                     self.redraw.set(RedrawReason::UI);
                 }
                 Command::SnapToAxis(axis) => {
@@ -6694,6 +6705,15 @@ impl App {
         } else {
             self.weight_display = None;
         }
+        // In sculpt mode the mask and face sets are shown on the surface.
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt && self.ui.sculpt.show_overlay {
+            let active = self.doc.selection.active;
+            if let Some((_, mesh)) = self.evaluated.iter_mut().find(|(id, _)| Some(*id) == active) {
+                if let Some(shown) = self.sculpt_display.show(mesh) {
+                    *mesh = shown;
+                }
+            }
+        }
         // Both caches are keyed on handle identity, so an edit leaves the old
         // entry behind rather than replacing it — they have to be told when a
         // handle has left the scene or they grow with every edit. The modifier
@@ -7366,6 +7386,26 @@ impl App {
         }
     }
 
+    /// H and Shift+H in sculpt: the face set under the pointer hidden, or
+    /// shown alone.
+    fn face_set_visibility(&mut self, action: u32) {
+        let Some(object) = self.doc.selection.active else { return };
+        let Some(ndc) = self.cursor_ndc() else { return };
+        let aspect = self.viewport_aspect();
+        let Some(hit) = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)
+            .filter(|h| h.object == object)
+        else {
+            self.status("point at the face set to hide");
+            return;
+        };
+        let mut p = PropertyMap::new();
+        p.set("action", PropertyValue::Enum(action));
+        p.set("face", PropertyValue::Int(hit.face as i64));
+        self.run_op("sculpt.face_set_visibility", p);
+    }
+
     /// The brush settings of the mode the viewport is in, if it paints or
     /// sculpts: radius in points, strength.
     fn brush_values(&mut self) -> Option<(&mut f32, &mut f32)> {
@@ -7482,12 +7522,19 @@ impl App {
             return;
         };
         let Some(at) = self.sculpt_hit() else { return };
-        let settings = self.ui.sculpt;
+        let settings = self.ui.sculpt.clone();
         let brush = if self.input.shift_down {
             1
         } else {
             settings.brush
         };
+        let face_set = self
+            .doc
+            .object(object)
+            .and_then(|o| o.mesh())
+            .and_then(|m| self.doc.mesh(m))
+            .map(|m| kreate_mesh::sculpt::face_sets_of(m).into_iter().max().unwrap_or(0) + 1)
+            .unwrap_or(1);
         // The brush's screen radius as a world length at the depth it touched.
         let height = self
             .viewport_px
@@ -7503,6 +7550,8 @@ impl App {
             brush,
             invert: self.input.ctrl_down,
             dabs: Vec::new(),
+            pressures: Vec::new(),
+            face_set,
             last: at,
             radius_world,
             hold: at,
@@ -7514,15 +7563,20 @@ impl App {
     }
 
     fn add_sculpt_dab(&mut self, at: DVec3) {
+        let pressure = self.input.pen_pressure.unwrap_or(1.0).clamp(0.0, 1.0) as f64;
+        let settings = &self.ui.sculpt;
+        let (by_strength, by_size) = (settings.pressure_strength, settings.pressure_size);
         let Some(stroke) = self.sculpt_stroke.as_mut() else {
             return;
         };
         let to_local = self.doc.world_transform(stroke.object).inverse();
         let local = to_local.transform_point3(at);
+        let size = if by_size { pressure.max(0.1) } else { 1.0 };
         let radius = to_local
-            .transform_vector3(DVec3::X * stroke.radius_world)
+            .transform_vector3(DVec3::X * stroke.radius_world * size)
             .length();
         stroke.dabs.extend([local.x, local.y, local.z, radius]);
+        stroke.pressures.push(if by_strength { pressure } else { 1.0 });
         stroke.last = at;
     }
 
@@ -7555,8 +7609,24 @@ impl App {
                     grab = to_local.transform_vector3(on - hold);
                 }
             }
-        } else if let Some(at) = self.sculpt_hit() {
-            let step = radius * 0.25;
+        } else if let Some(at) = if brush == 11 {
+            // The snake hook pulls the surface off itself: the pointer on the
+            // plane through the last dab, facing the view.
+            self.cursor_ndc().and_then(|ndc| {
+                let aspect = self.viewport_aspect();
+                let eye = self.camera.eye();
+                let dir = self.camera.ray_direction(ndc, aspect).as_dvec3();
+                let n = self.camera.forward();
+                let denom = dir.dot(n);
+                (denom.abs() > 1e-9).then(|| eye + dir * ((last - eye).dot(n) / denom))
+            })
+        } else {
+            self.sculpt_hit()
+        } {
+            // The stabiliser: the brush trails the pointer.
+            let lazy = self.ui.sculpt.lazy.clamp(0.0, 0.95) as f64;
+            let at = last.lerp(at, 1.0 - lazy);
+            let step = radius * (self.ui.sculpt.spacing.max(0.02) as f64);
             let gap = at.distance(last);
             if gap >= step {
                 // Driven once a frame, a fast pointer has gone several
@@ -7569,7 +7639,8 @@ impl App {
                 self.add_sculpt_dab(at);
             }
         }
-        let settings = self.ui.sculpt;
+        let settings = self.ui.sculpt.clone();
+        let view = to_local.transform_vector3(self.camera.forward());
         let Some(stroke) = self.sculpt_stroke.as_mut() else {
             return;
         };
@@ -7587,6 +7658,22 @@ impl App {
         params.set("invert", PropertyValue::Bool(stroke.invert));
         params.set("grab", PropertyValue::Vec3(grab.to_array()));
         params.set("mirror_x", PropertyValue::Bool(settings.mirror_x));
+        params.set("mirror_y", PropertyValue::Bool(settings.mirror_y));
+        params.set("mirror_z", PropertyValue::Bool(settings.mirror_z));
+        params.set("radial", PropertyValue::Int(settings.radial.max(1) as i64));
+        params.set("falloff", PropertyValue::Enum(settings.falloff));
+        params.set("view", PropertyValue::Vec3(view.to_array()));
+        params.set("front_only", PropertyValue::Bool(settings.front_only));
+        params.set("auto_smooth", PropertyValue::Float(settings.auto_smooth as f64));
+        params.set("alpha", PropertyValue::Text(settings.alpha.clone()));
+        params.set("face_set", PropertyValue::Int(stroke.face_set as i64));
+        if stroke.pressures.iter().any(|p| *p != 1.0) {
+            params.set("pressures", PropertyValue::Floats(stroke.pressures.clone()));
+        }
+        if settings.dyntopo {
+            params.set("dyntopo", PropertyValue::Bool(true));
+            params.set("detail", PropertyValue::Float(settings.detail as f64));
+        }
         match stroke.session.as_mut() {
             Some(session) => {
                 if let Err(e) = self.history.update_modal(
@@ -7907,7 +7994,11 @@ impl App {
     /// the navigation gizmo — because a button that went down has to come up. It
     /// not doing so was what made navigation stick on and then appear broken.
     fn end_mouse_drag(&mut self, slot: usize) {
-        // A stroke ends where the button comes up: one step to undo.
+        // A stroke ends where the button comes up: one step to undo — with
+        // the last movement in it, which waits for a frame otherwise.
+        if slot == 0 && std::mem::take(&mut self.stroke_moved) {
+            self.drive_strokes();
+        }
         if slot == 0 {
             if let Some(SculptStroke {
                 session: Some(session),
@@ -9057,6 +9148,12 @@ impl App {
                             self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights
                                 && self.doc.selection.active == Some(*id),
                         )
+                        // The sculpted mesh, with its mask and face sets.
+                        .sculpt_overlay(
+                            self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt
+                                && self.ui.sculpt.show_overlay
+                                && self.doc.selection.active == Some(*id),
+                        )
                         // The object's first material, which is what every
                         // slot a mesh does not name falls back to. Zero when
                         // the materials have not been compiled yet, which is
@@ -10031,11 +10128,18 @@ impl App {
                 self.linked_pick(deselect);
             }
             "view.circle_select" => self.toggle_circle_select(),
+            "sculpt.face_set_hide" => self.face_set_visibility(0),
+            "sculpt.face_set_isolate" => self.face_set_visibility(1),
+            "sculpt.remesh" => {
+                let mut p = PropertyMap::new();
+                p.set("voxel_size", PropertyValue::Float(self.ui.sculpt.voxel_size as f64));
+                self.run_op("sculpt.voxel_remesh", p);
+            }
             "brush.radius_adjust" => self.begin_brush_adjust(false),
             "brush.strength_adjust" => self.begin_brush_adjust(true),
             "sculpt.brush" => {
                 if let Some(PropertyValue::Enum(b)) = action.params.get("brush") {
-                    self.ui.sculpt.brush = (*b).min(3);
+                    self.ui.sculpt.brush = (*b).min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
                 }
             }
             "view.local_view" => self.toggle_local_view(),
@@ -10934,6 +11038,18 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // A pen: Windows reports it as a touch with a force, alongside
+            // the pointer it also moves. Its pressure is all that is taken
+            // from here — the pointer drives the stroke as a mouse would —
+            // and it is forgotten when the pen lifts, so a mouse afterwards
+            // presses at full strength.
+            WindowEvent::Touch(touch) => {
+                use winit::event::TouchPhase;
+                self.input.pen_pressure = match touch.phase {
+                    TouchPhase::Ended | TouchPhase::Cancelled => None,
+                    _ => touch.force.map(|f| f.normalized() as f32),
+                };
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.track_drag_select();
                 let p = (position.x, position.y);
