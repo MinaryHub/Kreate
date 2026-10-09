@@ -10891,6 +10891,10 @@ impl App {
                 if let Some(PropertyValue::Float(mm)) = action.params.get("lens") {
                     let mm = mm.clamp(1.0, 1000.0);
                     self.camera.fov_y = 2.0 * (12.0 / mm).atan();
+                    // And where the easing is headed, or it eases straight
+                    // back to the old lens: a settled camera is set to its
+                    // target every frame.
+                    self.motion.target.fov_y = self.camera.fov_y;
                     self.motion.interrupt(&self.camera);
                     self.redraw.set(RedrawReason::CAMERA_MOVED);
                 }
@@ -10948,6 +10952,10 @@ impl App {
                         kreate_render::Projection::Perspective
                     }
                 };
+                // The easing's target too: a settled camera is set to its
+                // target every frame, which put the old projection straight
+                // back.
+                self.motion.target.projection = self.camera.projection;
                 self.redraw.set(RedrawReason::CAMERA_MOVED);
             }
             // Navigation drags carry their motion in the input state rather than
@@ -13266,6 +13274,39 @@ kreate.ops.object.add_primitive()",
         assert_eq!(app.camera_view_object, Some(second), "the other camera's");
         app.toggle_camera_view();
         assert!(app.camera_view.is_none(), "the same camera again leaves");
+    }
+
+    #[test]
+    fn orthographic_stays_orthographic_once_the_camera_settles() {
+        // A settled camera is set to the easing's target every frame; a switch
+        // that changed only the drawn camera was undone on the next one.
+        let mut app = app();
+        app.dispatch(&Action::new("view.toggle_projection"));
+        assert_eq!(
+            app.camera.projection,
+            kreate_render::Projection::Orthographic
+        );
+        for _ in 0..5 {
+            app.motion.advance(&mut app.camera, 1.0 / 60.0);
+        }
+        assert_eq!(
+            app.camera.projection,
+            kreate_render::Projection::Orthographic,
+            "it went back"
+        );
+
+        // And the lens, the same way.
+        let mut lens = PropertyMap::new();
+        lens.set("lens", PropertyValue::Float(100.0));
+        app.dispatch(&Action {
+            op_id: "view.set_lens".into(),
+            params: lens,
+        });
+        let fov = app.camera.fov_y;
+        for _ in 0..5 {
+            app.motion.advance(&mut app.camera, 1.0 / 60.0);
+        }
+        assert_eq!(app.camera.fov_y, fov, "the lens went back");
     }
 
     #[test]
