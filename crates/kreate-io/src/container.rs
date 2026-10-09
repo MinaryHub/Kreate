@@ -931,7 +931,7 @@ fn graph_record(graph: &kreate_scene::shader::ShaderGraph, document: &Document) 
                 position: node.position,
                 values: node.kind.values(),
                 image_uid: match node.kind {
-                    kreate_scene::shader::NodeKind::Image { image } => image
+                    kreate_scene::shader::NodeKind::Image { image, .. } => image
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
                     _ => None,

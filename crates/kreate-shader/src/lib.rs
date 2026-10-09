@@ -55,9 +55,15 @@
 //! # What the emitted function is
 //!
 //! ```text
-//! fn material_sample(uv, uv_dx, uv_dy) -> MaterialSample
+//! fn material_sample(uv, uv_dx, uv_dy, geometry) -> MaterialSample
 //! struct MaterialSample { surface: Surface, normal: vec3<f32> }
+//! struct MaterialGeometry { position, normal, position_dx, position_dy }
 //! ```
+//!
+//! `geometry` is the point being shaded *in its object's space*, and how that
+//! point moves across a pixel: what a procedural texture is read at. Object
+//! space so that a texture moves with its object and does not swim when the
+//! camera does, which an eye-relative position would make it do.
 //!
 //! The UV's screen derivatives are *arguments*. A fragment pass has them from
 //! `dpdx`, and a compute pass — §2.5's path tracer — has none and must supply
@@ -72,7 +78,7 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{MathOp, NodeKind, ShaderGraph, Socket};
+use kreate_scene::shader::{MathOp, NodeKind, Projection, ShaderGraph, Socket, WaveKind};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -86,7 +92,7 @@ pub struct Compiled {
     /// refraction (y): what a renderer reads to know the material is glass,
     /// which decides when it is drawn.
     pub transmission_slot: usize,
-    /// The function `material_sample(uv, uv_dx, uv_dy) -> MaterialSample`
+    /// The function `material_sample(uv, uv_dx, uv_dy, geometry) -> MaterialSample`
     /// and its struct, and nothing else: no entry point, no library. A pass
     /// appends this to the shading library and calls it.
     pub wgsl: String,
@@ -171,6 +177,8 @@ pub fn compile_with(
         notes: Vec::new(),
         body: String::new(),
         emitted: vec![None; graph.nodes.len()],
+        procedural: false,
+        functions: String::new(),
     };
     out.emit(output)?;
 
@@ -216,12 +224,23 @@ pub fn compile_with(
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}"
     );
-    let _ = writeln!(wgsl);
+    // Only when something reads it: the text is the pipeline cache's key, and
+    // two hundred lines of noise in every flat plastic's shader is a slower
+    // compile for nothing.
+    if out.procedural {
+        wgsl.push_str(PROCEDURAL);
+    }
     let _ = writeln!(
         wgsl,
-        "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> MaterialSample {{\n{}    var s: Surface;",
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}"
+    );
+    let _ = writeln!(wgsl);
+    wgsl.push_str(&out.functions);
+    let _ = writeln!(
+        wgsl,
+        "fn material_sample(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, geometry: MaterialGeometry) -> MaterialSample {{\n{}    var s: Surface;",
         out.body
     );
 
@@ -243,6 +262,8 @@ pub fn compile_with(
     let _ = writeln!(wgsl, "    var out: MaterialSample;");
     let _ = writeln!(wgsl, "    out.surface = s;");
     let _ = writeln!(wgsl, "    out.normal = {normal};");
+    let gradient = out.gradient_expr(output, 3)?;
+    let _ = writeln!(wgsl, "    out.gradient = {gradient};");
     // In the roughness's slot, beside it: emitted light, in nits — tinted by
     // whatever is wired to the Emission socket, so a texture can say where a
     // surface glows and the material says how brightly.
@@ -298,6 +319,11 @@ struct Emitter<'a> {
     /// been emitted at all, which is what keeps a node feeding two sockets from
     /// being evaluated twice.
     emitted: Vec<Option<usize>>,
+    /// Whether a procedural texture was reached, and so the noise library is
+    /// wanted.
+    procedural: bool,
+    /// Functions the body calls: a bump's height, which it reads three times.
+    functions: String,
 }
 
 impl Emitter<'_> {
@@ -316,7 +342,11 @@ impl Emitter<'_> {
         // statement that reads it. WGSL wants a declaration before its use, and
         // a graph is acyclic by construction — `ShaderGraph::link` refuses the
         // alternative.
+        // Not a bump's height: that is read in a function of its own, at three
+        // points, and evaluating it here as well would be a fourth for nothing.
+        let bump = matches!(kind, NodeKind::Bump { .. });
         let feeding: Vec<usize> = (0..kind.inputs().len())
+            .filter(|socket| !(bump && *socket == 2))
             .filter_map(|socket| self.graph.incoming(node, socket).map(|l| l.from_node))
             .collect();
         for upstream in feeding {
@@ -334,12 +364,22 @@ impl Emitter<'_> {
                 self.constants.push([v, 0.0, 0.0, 0.0]);
                 let _ = writeln!(self.body, "    let n{node} = material.values[{slot}].x;");
             }
-            NodeKind::Image { image } => {
+            NodeKind::Image {
+                image,
+                projection,
+                blend,
+                scale,
+            } => {
                 // A slot even though nothing reads it, so that the constant
                 // layout depends on the graph's shape and not on which kinds
                 // happen to need numbers. A layout that skipped a node would
                 // change when an image was swapped for a colour.
                 self.constants.push([0.0; 4]);
+                // And for a box, a second: the blend and the scale. Only for
+                // a box, which is a different shape anyway.
+                if projection == Projection::Box {
+                    self.constants.push([blend, scale, 0.0, 0.0]);
+                }
                 match image {
                     Some(id) => {
                         let space = (self.space_of)(id);
@@ -368,10 +408,39 @@ impl Emitter<'_> {
                         // the same way the coordinate is — and taken from the
                         // *unwrapped* UV, which is the point of passing them:
                         // see the module docs on the seam `fract` would draw.
-                        let _ = writeln!(
-                            self.body,
-                            "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
-                        );
+                        match projection {
+                            Projection::Flat => {
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
+                                );
+                            }
+                            Projection::Box => {
+                                // Three samples, one down each axis, each with
+                                // the position's own gradients in that plane —
+                                // and weighted by how squarely the surface
+                                // faces it. A blend of zero is a hard edge
+                                // (a high power), one an even mix.
+                                let b = slot + 1;
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_k = mix(48.0, 1.0, clamp(material.values[{b}].x, 0.0, 1.0));\n    let n{node}_a = pow(abs(geometry.normal), vec3<f32>(n{node}_k)) + vec3<f32>(1e-6);\n    let n{node}_w = n{node}_a / (n{node}_a.x + n{node}_a.y + n{node}_a.z);\n    let n{node}_p = geometry.position * material.values[{b}].y;\n    let n{node}_dx = geometry.position_dx * material.values[{b}].y;\n    let n{node}_dy = geometry.position_dy * material.values[{b}].y;"
+                                );
+                                let mut taps = Vec::new();
+                                for (axis, plane) in [("x", "yz"), ("y", "xz"), ("z", "xy")] {
+                                    let _ = writeln!(
+                                        self.body,
+                                        "    let n{node}_{axis} = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(n{node}_p.{plane}) * n{node}_rect.zw, {layer}, n{node}_dx.{plane} * n{node}_rect.zw, n{node}_dy.{plane} * n{node}_rect.zw);"
+                                    );
+                                    taps.push(format!("n{node}_{axis} * n{node}_w.{axis}"));
+                                }
+                                let _ = writeln!(
+                                    self.body,
+                                    "    let n{node}_rgba = {};",
+                                    taps.join(" + ")
+                                );
+                            }
+                        }
                     }
                     None => {
                         // White, so a material being built looks unfinished
@@ -439,6 +508,47 @@ impl Emitter<'_> {
                 let c = self.input_expr(node, 0, "vec3<f32>(0.0)")?;
                 let _ = writeln!(self.body, "    let n{node} = vec3<f32>(1.0) - {c};");
             }
+            NodeKind::Bump { strength, distance } => {
+                self.constants.push([strength, distance, 0.0, 0.0]);
+                let strength = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let distance = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                match self.graph.incoming(node, 2).map(|l| l.from_node) {
+                    Some(from) => {
+                        // The height's subgraph, as a function of where it is
+                        // read. Emitted with its own record of what has been
+                        // written — the function cannot see the body's `let`s —
+                        // into the same constants, so its slots are the shape's.
+                        let body = std::mem::take(&mut self.body);
+                        let emitted = std::mem::replace(
+                            &mut self.emitted,
+                            vec![None; self.graph.nodes.len()],
+                        );
+                        self.emit(from)?;
+                        let height = self.input_expr(node, 2, "0.0")?;
+                        let inner = std::mem::replace(&mut self.body, body);
+                        self.emitted = emitted;
+                        let _ = writeln!(
+                            self.functions,
+                            "fn kr_height_{node}(uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, geometry: MaterialGeometry) -> f32 {{\n{inner}    return {height};\n}}\n"
+                        );
+                        // Read here and one pixel across and down, the way a
+                        // fragment's derivatives would — but by evaluating, so
+                        // the same code runs where there are no derivatives.
+                        // Then Mikkelsen's surface gradient, in object space.
+                        let _ = writeln!(
+                            self.body,
+                            "    var n{node}_gx = geometry;\n    n{node}_gx.position = geometry.position + geometry.position_dx;\n    var n{node}_gy = geometry;\n    n{node}_gy.position = geometry.position + geometry.position_dy;\n    let n{node}_h = kr_height_{node}(uv, uv_dx, uv_dy, geometry);\n    let n{node}_dhx = (kr_height_{node}(uv + uv_dx, uv_dx, uv_dy, n{node}_gx) - n{node}_h) * {distance};\n    let n{node}_dhy = (kr_height_{node}(uv + uv_dy, uv_dx, uv_dy, n{node}_gy) - n{node}_h) * {distance};\n    let n{node}_r1 = cross(geometry.position_dy, geometry.normal);\n    let n{node}_r2 = cross(geometry.normal, geometry.position_dx);\n    let n{node}_det = dot(geometry.position_dx, n{node}_r1);\n    let n{node}_g = select(vec3<f32>(0.0), (n{node}_dhx * n{node}_r1 + n{node}_dhy * n{node}_r2) * (sign(n{node}_det) / max(abs(n{node}_det), 1e-30)), abs(n{node}_det) > 1e-30) * clamp({strength}, 0.0, 1.0);"
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(self.body, "    let n{node}_g = vec3<f32>(0.0);");
+                    }
+                }
+                // The tilt passes a normal wired into it through unchanged:
+                // the bump's own tilt rides beside it, as a gradient.
+                let n = self.input_expr(node, 3, "vec3<f32>(0.0, 0.0, 1.0)")?;
+                let _ = writeln!(self.body, "    let n{node} = {n};");
+            }
             NodeKind::NormalMap { strength } => {
                 self.constants.push([strength, 0.0, 0.0, 0.0]);
                 // Unwired is the flat normal's encoding, so the node alone is
@@ -453,6 +563,87 @@ impl Emitter<'_> {
                     self.body,
                     "    let n{node} = normalize(vec3<f32>(n{node}_t.xy * material.values[{slot}].x, max(n{node}_t.z, 1e-3)));"
                 );
+            }
+            NodeKind::Noise {
+                scale,
+                detail,
+                roughness,
+                distortion,
+            } => {
+                self.procedural = true;
+                self.constants.push([scale, detail, roughness, distortion]);
+                let [s, d, r, w] = self.numbers(node, slot)?;
+                let p = format!("n{node}_p");
+                let _ = writeln!(self.body, "    let {p} = geometry.position * {s};");
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_q = kr_distort({p}, {w}, {d}, {r});"
+                );
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_fbm(n{node}_q, {d}, {r});"
+                );
+                // Two more octave stacks for the colour, so only when the
+                // colour is wired — reading the shape, as everything here does.
+                if self.feeds(node, 1) {
+                    let _ = writeln!(
+                        self.body,
+                        "    let n{node}_c = vec3<f32>(n{node}_f, kr_fbm(n{node}_q + vec3<f32>(17.3, 5.1, 9.7), {d}, {r}), kr_fbm(n{node}_q + vec3<f32>(3.9, 23.2, 13.4), {d}, {r}));"
+                    );
+                }
+            }
+            NodeKind::Voronoi { scale, randomness } => {
+                self.procedural = true;
+                self.constants.push([scale, randomness, 0.0, 0.0]);
+                let s = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let j = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_v = kr_voronoi(geometry.position * {s}, clamp({j}, 0.0, 1.0));"
+                );
+                let _ = writeln!(self.body, "    let n{node}_f = n{node}_v.x;");
+                let _ = writeln!(self.body, "    let n{node}_c = n{node}_v.yzw;");
+            }
+            NodeKind::Checker {
+                scale,
+                color1,
+                color2,
+            } => {
+                self.procedural = true;
+                self.constants.push([scale, 0.0, 0.0, 0.0]);
+                self.constants.push([color1.r, color1.g, color1.b, 0.0]);
+                self.constants.push([color2.r, color2.g, color2.b, 0.0]);
+                let a = self.input_expr(node, 0, &format!("material.values[{}].rgb", slot + 1))?;
+                let b = self.input_expr(node, 1, &format!("material.values[{}].rgb", slot + 2))?;
+                let s = self.input_expr(node, 2, &format!("material.values[{slot}].x"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_checker(geometry.position * {s});"
+                );
+                let _ = writeln!(self.body, "    let n{node}_c = mix({b}, {a}, n{node}_f);");
+            }
+            NodeKind::Wave {
+                kind,
+                scale,
+                distortion,
+                detail,
+                detail_scale,
+            } => {
+                self.procedural = true;
+                self.constants
+                    .push([scale, distortion, detail, detail_scale]);
+                let [s, w, d, ds] = self.numbers(node, slot)?;
+                // Which way the stripes run is the shape, like a Math node's
+                // operation: it changes what the code does, not a number in it.
+                let rings = match kind {
+                    WaveKind::Bands => "false",
+                    WaveKind::Rings => "true",
+                };
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_f = kr_wave(geometry.position * {s}, {rings}, {w}, {d}, {ds});"
+                );
+                let _ = writeln!(self.body, "    let n{node}_c = vec3<f32>(n{node}_f);");
             }
             NodeKind::Surface {
                 base_color,
@@ -474,6 +665,48 @@ impl Emitter<'_> {
         }
         self.emitted[node] = Some(slot);
         Ok(())
+    }
+
+    /// A node's four scalar inputs, each a wire or its slot's channel.
+    fn numbers(&self, node: usize, slot: usize) -> Result<[String; 4], CompileError> {
+        let mut out: [String; 4] = Default::default();
+        for (socket, channel) in ["x", "y", "z", "w"].into_iter().enumerate() {
+            out[socket] =
+                self.input_expr(node, socket, &format!("material.values[{slot}].{channel}"))?;
+        }
+        Ok(out)
+    }
+
+    /// Whether anything reads an output.
+    fn feeds(&self, node: usize, socket: usize) -> bool {
+        self.graph
+            .links
+            .iter()
+            .any(|l| l.from_node == node && l.from_socket == socket)
+    }
+
+    /// The surface gradient a normal input carries: what every bump up its
+    /// wire adds, in object space. Zero when nothing bumps it.
+    fn gradient_expr(&self, node: usize, socket: usize) -> Result<String, CompileError> {
+        let Some(link) = self.graph.incoming(node, socket) else {
+            return Ok("vec3<f32>(0.0)".to_string());
+        };
+        let from = self
+            .graph
+            .nodes
+            .get(link.from_node)
+            .ok_or(CompileError::BrokenLink)?;
+        Ok(match from.kind {
+            NodeKind::Bump { .. } => {
+                let below = self.gradient_expr(link.from_node, 3)?;
+                if below == "vec3<f32>(0.0)" {
+                    format!("n{}_g", link.from_node)
+                } else {
+                    format!("(n{}_g + {below})", link.from_node)
+                }
+            }
+            _ => "vec3<f32>(0.0)".to_string(),
+        })
     }
 
     /// What feeds one input: a wire's expression, or the fallback.
@@ -501,6 +734,22 @@ impl Emitter<'_> {
             // statement names the whole `vec4` and the sockets slice it.
             (NodeKind::Image { .. }, Socket::Color) => format!("n{}_rgba.rgb", link.from_node),
             (NodeKind::Image { .. }, Socket::Scalar) => format!("n{}_rgba.a", link.from_node),
+            // A procedural texture names its number and its colour apart,
+            // because only some of them compute both.
+            (
+                NodeKind::Noise { .. }
+                | NodeKind::Voronoi { .. }
+                | NodeKind::Checker { .. }
+                | NodeKind::Wave { .. },
+                Socket::Scalar,
+            ) => format!("n{}_f", link.from_node),
+            (
+                NodeKind::Noise { .. }
+                | NodeKind::Voronoi { .. }
+                | NodeKind::Checker { .. }
+                | NodeKind::Wave { .. },
+                _,
+            ) => format!("n{}_c", link.from_node),
             (NodeKind::SeparateRgb, _) => {
                 let channel = ["x", "y", "z"]
                     .get(link.from_socket)
@@ -511,6 +760,247 @@ impl Emitter<'_> {
         })
     }
 }
+
+/// What a path tracer declares once, ahead of every material it runs: the
+/// two structs the material functions trade in, and the noise library.
+///
+/// Once rather than per material, because a module with two `struct
+/// MaterialSample`s does not compile — which is also why
+/// [`for_tracer`] strips them from each material.
+pub fn tracer_declarations() -> String {
+    format!(
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}\n{PROCEDURAL}"
+    )
+}
+
+/// A compiled material rewritten to run inside the path tracer, as
+/// `material_sample_{index}`.
+///
+/// **The same code, not a second interpretation of the graph.** What the
+/// viewport runs is what this returns, with its names moved: the tracer has
+/// one buffer of every material's constants rather than a uniform each, and
+/// one array of images per space rather than an atlas each. So each
+/// `material.values[slot]` reads `values + slot` of that buffer, and each
+/// image's layer is moved up by where this material's images start in its
+/// space's array. The tracer gives each image a whole layer, so the
+/// rectangles it writes into the constants are the unit square.
+pub fn for_tracer(
+    compiled: &Compiled,
+    index: usize,
+    values: u32,
+    colour_layer: u32,
+    data_layer: u32,
+) -> String {
+    let code = compiled.wgsl.replace(PROCEDURAL, "");
+    let mut out = String::new();
+    for line in code.lines() {
+        // The declarations the tracer makes once, and the bindings it has
+        // its own of.
+        if line.starts_with("struct MaterialConstants")
+            || line.starts_with("struct MaterialSample")
+            || line.starts_with("struct MaterialGeometry")
+            || line.starts_with("@group(")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let out = out
+        .replace(
+            "fn material_sample(",
+            &format!("fn material_sample_{index}("),
+        )
+        .replace("kr_height_", &format!("kr_height_{index}_"));
+    let out = renumber(&out, "material.values[", "]", |n| {
+        format!("pt_material_values[{}u]", values + n)
+    });
+    let out = out
+        .replace(
+            "textureSampleGrad(material_textures, material_sampler, ",
+            "textureSampleGrad(pt_colour_images, pt_image_sampler, ",
+        )
+        .replace(
+            "textureSampleGrad(material_data, material_sampler, ",
+            "textureSampleGrad(pt_data_images, pt_image_sampler, ",
+        );
+    let out = relayer(&out, "pt_colour_images", colour_layer);
+    relayer(&out, "pt_data_images", data_layer)
+}
+
+/// Replaces each `{open}N{close}` with `with(N)`; anything else after
+/// `open` is left as it was.
+fn renumber(text: &str, open: &str, close: &str, with: impl Fn(u32) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(open) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + open.len()..];
+        match after
+            .find(close)
+            .and_then(|end| Some((end, after[..end].trim().parse::<u32>().ok()?)))
+        {
+            Some((end, n)) => {
+                out.push_str(&with(n));
+                rest = &after[end + close.len()..];
+            }
+            None => {
+                out.push_str(open);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Moves the layer of every sample from `array` up by `base`: the second
+/// argument after the sampler, which is a number the compiler wrote.
+fn relayer(text: &str, array: &str, base: u32) -> String {
+    let open = format!("textureSampleGrad({array}, pt_image_sampler, ");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&open) {
+        out.push_str(&rest[..at + open.len()]);
+        rest = &rest[at + open.len()..];
+        // The coordinate, then the layer.
+        let Some(comma) = rest.find(',') else { break };
+        out.push_str(&rest[..comma + 1]);
+        rest = &rest[comma + 1..];
+        let Some(end) = rest.find(',') else { break };
+        match rest[..end].trim().parse::<u32>() {
+            Ok(layer) => out.push_str(&format!(" {}", base + layer)),
+            Err(_) => out.push_str(&rest[..end]),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What the procedural textures are made of, written once into a material
+/// that uses any.
+///
+/// Hashed with integers (Jarzynski and Olano's PCG3D) rather than the
+/// `fract(sin(...))` every listing uses: that one depends on how a GPU rounds
+/// a large sine, so the same material would be a different texture on
+/// another vendor's card — and a different one again in the path tracer.
+///
+/// `kr_` on every name, because this lands in the same module as the shading
+/// library and a pass's own functions.
+const PROCEDURAL: &str = r#"
+fn kr_pcg3d(seed: vec3<u32>) -> vec3<u32> {
+    var v = seed * 1664525u + vec3<u32>(1013904223u);
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v = v ^ (v >> vec3<u32>(16u));
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+// Three numbers in [0, 1) for a lattice point.
+fn kr_cell(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(kr_pcg3d(bitcast<vec3<u32>>(vec3<i32>(c)))) * (1.0 / 4294967296.0);
+}
+
+fn kr_corner(i: vec3<f32>, f: vec3<f32>, o: vec3<f32>) -> f32 {
+    return dot(kr_cell(i + o) * 2.0 - vec3<f32>(1.0), f - o);
+}
+
+// Gradient noise, roughly -1 to 1.
+fn kr_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * f * (f * (f * 6.0 - vec3<f32>(15.0)) + vec3<f32>(10.0));
+    let x00 = mix(kr_corner(i, f, vec3<f32>(0.0, 0.0, 0.0)), kr_corner(i, f, vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(kr_corner(i, f, vec3<f32>(0.0, 1.0, 0.0)), kr_corner(i, f, vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(kr_corner(i, f, vec3<f32>(0.0, 0.0, 1.0)), kr_corner(i, f, vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(kr_corner(i, f, vec3<f32>(0.0, 1.0, 1.0)), kr_corner(i, f, vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+// Octaves of noise, zero to one. A fractional detail fades the last octave in,
+// so dragging the number does not jump.
+fn kr_fbm(p: vec3<f32>, detail: f32, roughness: f32) -> f32 {
+    let octaves = clamp(detail, 0.0, 15.0);
+    let whole = i32(floor(octaves));
+    let gain = clamp(roughness, 0.0, 1.0);
+    var sum = 0.0;
+    var norm = 0.0;
+    var amplitude = 1.0;
+    var frequency = 1.0;
+    for (var o = 0; o <= whole; o++) {
+        sum += amplitude * kr_noise(p * frequency);
+        norm += amplitude;
+        amplitude *= gain;
+        frequency *= 2.0;
+    }
+    var value = sum / norm;
+    let part = octaves - f32(whole);
+    if part > 0.0 {
+        let more = (sum + amplitude * kr_noise(p * frequency)) / (norm + amplitude);
+        value = mix(value, more, part);
+    }
+    return clamp(value * 0.5 + 0.5, 0.0, 1.0);
+}
+
+// The position pushed by noise of its own: Blender's distortion.
+fn kr_distort(p: vec3<f32>, amount: f32, detail: f32, roughness: f32) -> vec3<f32> {
+    if amount == 0.0 {
+        return p;
+    }
+    let d = vec3<f32>(
+        kr_fbm(p + vec3<f32>(13.5, 0.0, 0.0), detail, roughness),
+        kr_fbm(p + vec3<f32>(0.0, 13.5, 0.0), detail, roughness),
+        kr_fbm(p + vec3<f32>(0.0, 0.0, 13.5), detail, roughness),
+    );
+    return p + (d * 2.0 - vec3<f32>(1.0)) * amount;
+}
+
+// The distance to the nearest scattered point, and that point's cell's colour.
+fn kr_voronoi(p: vec3<f32>, randomness: f32) -> vec4<f32> {
+    let i = floor(p);
+    var best = 1e9;
+    var cell = i;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let c = i + vec3<f32>(f32(x), f32(y), f32(z));
+                let point = c + kr_cell(c) * randomness;
+                let d = distance(p, point);
+                if d < best {
+                    best = d;
+                    cell = c;
+                }
+            }
+        }
+    }
+    return vec4<f32>(best, kr_cell(cell + vec3<f32>(71.0, 37.0, 11.0)));
+}
+
+// One where the cube the point is in is even, zero where odd. Nudged off the
+// integers so a face lying exactly on one does not flicker between the two.
+fn kr_checker(p: vec3<f32>) -> f32 {
+    let c = floor(p * 0.999999 + vec3<f32>(1e-6));
+    let s = c.x + c.y + c.z;
+    return select(0.0, 1.0, s - 2.0 * floor(s * 0.5) < 0.5);
+}
+
+// Blender's sine profile, along the diagonal or out from the origin.
+fn kr_wave(p: vec3<f32>, rings: bool, distortion: f32, detail: f32, detail_scale: f32) -> f32 {
+    var n = (p.x + p.y + p.z) * 10.0;
+    if rings {
+        n = length(p) * 20.0;
+    }
+    if distortion != 0.0 {
+        n += distortion * (kr_fbm(p * detail_scale, detail, 0.5) * 2.0 - 1.0);
+    }
+    return 0.5 + 0.5 * sin(n - 1.5707963);
+}
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -568,6 +1058,273 @@ mod tests {
         );
         naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    /// Parses and validates, against the stand-in `Surface`.
+    fn validates(compiled: &Compiled) {
+        let source = format!(
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}\n{}",
+            compiled.wgsl
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    /// Every procedural texture, each output wired somewhere: noise's colour
+    /// mixed with a checker by a voronoi's distance into the base colour, a
+    /// wave's number into the roughness and the noise's into the metallic.
+    fn procedural(wave: WaveKind, noise_scale: f32) -> ShaderGraph {
+        let mut g = flat();
+        let add = |g: &mut ShaderGraph, kind| g.add_node(Node::new("n", kind)).expect("added");
+        let noise = add(
+            &mut g,
+            NodeKind::Noise {
+                scale: noise_scale,
+                detail: 2.5,
+                roughness: 0.5,
+                distortion: 0.3,
+            },
+        );
+        let voronoi = add(&mut g, NodeKind::new_of("voronoi").expect("a kind"));
+        let checker = add(&mut g, NodeKind::new_of("checker").expect("a kind"));
+        let wave = add(
+            &mut g,
+            NodeKind::Wave {
+                kind: wave,
+                scale: 2.0,
+                distortion: 3.0,
+                detail: 2.0,
+                detail_scale: 1.0,
+            },
+        );
+        let mix = add(&mut g, NodeKind::MixColor { factor: 0.5 });
+        for (from, fs, to, ts) in [
+            (voronoi, 0, mix, 0),
+            (noise, 1, mix, 1),
+            (checker, 0, mix, 2),
+            (voronoi, 1, checker, 0),
+            (mix, 0, 0, 0),
+            (wave, 1, 0, 2),
+            (noise, 0, 0, 1),
+            (checker, 1, wave, 0),
+        ] {
+            g.link(Link {
+                from_node: from,
+                from_socket: fs,
+                to_node: to,
+                to_socket: ts,
+            })
+            .unwrap_or_else(|e| panic!("{from}->{to}: {e:?}"));
+        }
+        g
+    }
+
+    #[test]
+    fn procedural_textures_compile_and_type_check() {
+        for kind in WaveKind::ALL {
+            let compiled = compile(&procedural(kind, 5.0)).expect("compiles");
+            validates(&compiled);
+            assert_eq!(compiled.wgsl.matches("fn kr_fbm").count(), 1);
+            assert!(compiled.wgsl.contains("geometry.position"));
+        }
+        // Each unwired, too: the fallbacks are expressions of their own.
+        for tag in ["noise", "voronoi", "checker", "wave"] {
+            let mut g = flat();
+            let node = g
+                .add_node(Node::new("n", NodeKind::new_of(tag).expect("a kind")))
+                .expect("added");
+            let colour = node_output(&g, node, Socket::Color);
+            g.link(Link {
+                from_node: node,
+                from_socket: colour,
+                to_node: 0,
+                to_socket: 0,
+            })
+            .expect("a colour into the base colour");
+            validates(&compile(&g).expect("compiles"));
+        }
+    }
+
+    fn node_output(g: &ShaderGraph, node: usize, socket: Socket) -> usize {
+        g.nodes[node]
+            .kind
+            .outputs()
+            .iter()
+            .position(|s| *s == socket)
+            .expect("the socket")
+    }
+
+    #[test]
+    fn a_textures_numbers_are_constants_and_its_kind_is_the_shape() {
+        // A scale typed into a panel must not recompile; bands to rings must,
+        // because it is a different function.
+        let a = compile(&procedural(WaveKind::Bands, 5.0)).expect("compiles");
+        let b = compile(&procedural(WaveKind::Bands, 9.0)).expect("compiles");
+        let c = compile(&procedural(WaveKind::Rings, 5.0)).expect("compiles");
+        assert_eq!(a.wgsl, b.wgsl);
+        assert_ne!(a.constants, b.constants);
+        assert_ne!(a.wgsl, c.wgsl);
+    }
+
+    #[test]
+    fn a_box_projected_image_samples_three_ways_and_type_checks() {
+        let mut g = flat();
+        let image = g
+            .add_node(Node::new(
+                "Tiles",
+                NodeKind::Image {
+                    image: Some(an_image()),
+                    projection: Projection::Box,
+                    blend: 0.3,
+                    scale: 2.0,
+                },
+            ))
+            .expect("added");
+        g.link(Link {
+            from_node: image,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 0,
+        })
+        .expect("a colour into the base colour");
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        // One image, sampled down each axis.
+        assert_eq!(compiled.images.len(), 1);
+        assert_eq!(compiled.wgsl.matches("textureSampleGrad").count(), 3);
+        // The rectangle's slot is still the one the renderer fills, and the
+        // blend and scale sit after it.
+        let rect = compiled.image_slots[0];
+        assert_eq!(compiled.constants[rect + 1][..2], [0.3, 2.0]);
+    }
+
+    #[test]
+    fn a_bump_reads_its_height_three_times_and_chains_with_a_normal_map() {
+        let mut g = flat();
+        let add = |g: &mut ShaderGraph, kind| g.add_node(Node::new("n", kind)).expect("added");
+        let noise = add(&mut g, NodeKind::new_of("noise").expect("a kind"));
+        let bump = add(&mut g, NodeKind::new_of("bump").expect("a kind"));
+        let image = add(&mut g, NodeKind::image(Some(an_image())));
+        let map = add(&mut g, NodeKind::NormalMap { strength: 1.0 });
+        let second = add(&mut g, NodeKind::new_of("bump").expect("a kind"));
+        let wave = add(&mut g, NodeKind::new_of("wave").expect("a kind"));
+        for (from, fs, to, ts) in [
+            (noise, 0, bump, 2),
+            (image, 0, map, 0),
+            (map, 0, bump, 3),
+            (wave, 1, second, 2),
+            (bump, 0, second, 3),
+            (second, 0, 0, 3),
+            // The same noise also colours the surface: it is in the body and
+            // in the height function both.
+            (noise, 1, 0, 0),
+        ] {
+            g.link(Link {
+                from_node: from,
+                from_socket: fs,
+                to_node: to,
+                to_socket: ts,
+            })
+            .unwrap_or_else(|e| panic!("{from}->{to}: {e:?}"));
+        }
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        assert_eq!(
+            compiled.wgsl.matches(&format!("kr_height_{bump}(")).count(),
+            4
+        );
+        assert!(compiled
+            .wgsl
+            .contains(&format!("out.gradient = (n{second}_g + n{bump}_g);")));
+        // The normal map's tilt goes through both bumps to the surface.
+        assert!(compiled.wgsl.contains(&format!("let n{bump} = n{map};")));
+    }
+
+    #[test]
+    fn without_a_bump_the_gradient_is_zero() {
+        let compiled = compile(&flat()).expect("compiles");
+        assert!(compiled.wgsl.contains("out.gradient = vec3<f32>(0.0);"));
+        // A bump with no height tilts nothing, and needs no function.
+        let mut g = flat();
+        let bump = g
+            .add_node(Node::new("b", NodeKind::new_of("bump").expect("a kind")))
+            .expect("added");
+        g.link(Link {
+            from_node: bump,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 3,
+        })
+        .expect("a normal into the normal");
+        let compiled = compile(&g).expect("compiles");
+        validates(&compiled);
+        assert!(!compiled.wgsl.contains("kr_height_"));
+    }
+
+    #[test]
+    fn materials_rewritten_for_the_tracer_live_in_one_module() {
+        // Two materials of every kind of node, side by side in one module
+        // against the tracer's bindings: no declaration twice, no name the
+        // viewport's bindings own, and each image moved to its layer.
+        let mut bumped = procedural(WaveKind::Rings, 3.0);
+        let bump = bumped
+            .add_node(Node::new("b", NodeKind::new_of("bump").expect("a kind")))
+            .expect("added");
+        let wave = bumped
+            .add_node(Node::new("w", NodeKind::new_of("wave").expect("a kind")))
+            .expect("added");
+        for (from, fs, to, ts) in [(wave, 1, bump, 2), (bump, 0, 0, 3)] {
+            bumped
+                .link(Link {
+                    from_node: from,
+                    from_socket: fs,
+                    to_node: to,
+                    to_socket: ts,
+                })
+                .expect("connects");
+        }
+        let (mapped, ids) = crate::map_tests::mapped();
+        let first = compile(&bumped).expect("compiles");
+        let second = compile_with(&mapped, crate::map_tests::spaces(ids)).expect("compiles");
+        let a = for_tracer(&first, 0, 0, 0, 0);
+        let b = for_tracer(&second, 1, first.constants.len() as u32, 5, 7);
+        assert!(!a.contains("material.values") && !b.contains("material.values"));
+        assert!(!b.contains("material_textures") && !b.contains("material_data"));
+        assert!(b.contains("pt_colour_images, pt_image_sampler"));
+        assert!(b.contains("pt_data_images, pt_image_sampler"));
+        // The data images are the second material's first two of their kind:
+        // layers seven and eight.
+        assert!(b.contains(", 7, ") && b.contains(", 8, "), "{b}");
+        let source = format!(
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32 }}
+@group(0) @binding(0) var<storage, read> pt_material_values: array<vec4<f32>>;
+@group(0) @binding(1) var pt_colour_images: texture_2d_array<f32>;
+@group(0) @binding(2) var pt_data_images: texture_2d_array<f32>;
+@group(0) @binding(3) var pt_image_sampler: sampler;
+{}
+{a}
+{b}",
+            tracer_declarations()
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    #[test]
+    fn a_material_without_a_procedural_texture_carries_no_noise() {
+        assert!(!compile(&flat()).expect("compiles").wgsl.contains("kr_"));
     }
 
     #[test]
@@ -780,12 +1537,7 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let image = graph
-            .add_node(Node::new(
-                "Albedo",
-                NodeKind::Image {
-                    image: Some(an_image()),
-                },
-            ))
+            .add_node(Node::new("Albedo", NodeKind::image(Some(an_image()))))
             .expect("added");
         graph
             .link(Link {
@@ -826,7 +1578,7 @@ mod tests {
         let mut graph = flat();
         let surface = graph.output().expect("a surface");
         let image = graph
-            .add_node(Node::new("Albedo", NodeKind::Image { image: None }))
+            .add_node(Node::new("Albedo", NodeKind::image(None)))
             .expect("added");
         graph
             .link(Link {
@@ -1001,7 +1753,7 @@ mod map_tests {
     use kreate_math::SceneRgb;
 
     /// A material with all three maps, each its own image.
-    fn mapped() -> (ShaderGraph, [ImageId; 3]) {
+    pub(crate) fn mapped() -> (ShaderGraph, [ImageId; 3]) {
         let mut doc = kreate_scene::Document::new();
         let mut add = |name: &str| {
             doc.add_image(kreate_scene::Image::new(
@@ -1030,7 +1782,7 @@ mod map_tests {
 
     /// The spaces a document would answer with: the colour map sRGB, the
     /// others raw.
-    fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
+    pub(crate) fn spaces(ids: [ImageId; 3]) -> impl Fn(ImageId) -> ColorSpace {
         move |id| {
             if id == ids[0] {
                 ColorSpace::Srgb

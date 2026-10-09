@@ -52,6 +52,35 @@ fn flat() -> ShaderGraph {
     ShaderGraph::standard("Grey", kreate_math::SceneRgb::new(0.8, 0.7, 0.6), 0.2, 0.4)
 }
 
+/// Every procedural texture, chained into the surface.
+fn procedural() -> ShaderGraph {
+    let mut graph = flat();
+    let mut add = |tag| {
+        graph
+            .add_node(Node::new(tag, NodeKind::new_of(tag).expect("a kind")))
+            .expect("added")
+    };
+    let (noise, voronoi, checker, wave) =
+        (add("noise"), add("voronoi"), add("checker"), add("wave"));
+    for (from_node, from_socket, to_node, to_socket) in [
+        (noise, 1, checker, 0),
+        (voronoi, 1, checker, 1),
+        (checker, 0, 0, 0),
+        (wave, 1, 0, 2),
+        (noise, 0, wave, 1),
+    ] {
+        graph
+            .link(Link {
+                from_node,
+                from_socket,
+                to_node,
+                to_socket,
+            })
+            .expect("connects");
+    }
+    graph
+}
+
 /// The same with an image feeding its base colour.
 fn textured() -> (ShaderGraph, kreate_scene::Document) {
     let mut doc = kreate_scene::Document::new();
@@ -64,7 +93,7 @@ fn textured() -> (ShaderGraph, kreate_scene::Document) {
     let mut graph = flat();
     let surface = graph.output().expect("a surface");
     let image = graph
-        .add_node(Node::new("Albedo", NodeKind::Image { image: Some(id) }))
+        .add_node(Node::new("Albedo", NodeKind::image(Some(id))))
         .expect("added");
     graph
         .link(Link {
@@ -105,7 +134,10 @@ fn vs(@builtin(vertex_index) index: u32) -> Vertex {
 
 @fragment
 fn fs(in: Vertex) -> @location(0) vec4<f32> {
-    let s = material_sample(in.uv, dpdx(in.uv), dpdy(in.uv)).surface;
+    var geometry: MaterialGeometry;
+    geometry.position = vec3<f32>(in.uv, 0.0);
+    geometry.normal = vec3<f32>(0.0, 0.0, 1.0);
+    let s = material_sample(in.uv, dpdx(in.uv), dpdy(in.uv), geometry).surface;
     return vec4<f32>(shade_point(s, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0), vec2<u32>(0u, 0u)), 1.0);
 }
 "#
@@ -124,7 +156,16 @@ fn a_compiled_material_builds_a_pipeline_against_the_real_library() {
     // layout mismatch is a validation error on a user's machine at the moment
     // they first select a material.
     let gpu = gpu_or_skip!(gpu());
-    let (source, _) = composed(&flat());
+    // And a material of procedural textures, whose library of noise lands in
+    // the same module as the shading one: a name the two shared would be a
+    // redefinition only the real composition shows.
+    for graph in [flat(), procedural()] {
+        build(&gpu, &graph);
+    }
+}
+
+fn build(gpu: &Gpu, graph: &ShaderGraph) {
+    let (source, _) = composed(graph);
     let module = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {

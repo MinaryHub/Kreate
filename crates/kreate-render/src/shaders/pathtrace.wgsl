@@ -74,6 +74,52 @@ const PT_SURFACE: u32 = 4u;
 // The environment's cumulative distributions: the rows, then each row's
 // columns. See `environment::ImportanceMap`.
 @group(0) @binding(13) var<storage, read> pt_env_cdf: array<f32>;
+// Every material's constants, one after another: what the compiled materials
+// read where the viewport's read their own uniform. See `pt_material`.
+@group(0) @binding(14) var<storage, read> pt_material_values: array<vec4<f32>>;
+// Each vertex in its object's own space, two to a vertex: the position, then
+// the normal. What a procedural texture is read at, so that it sits on the
+// object here as it does in the viewport.
+@group(0) @binding(15) var<storage, read> pt_local: array<vec4<f32>>;
+
+// What a compiled material decided at a point: the generated `pt_material`
+// fills it, from whichever material the surface names.
+struct PtMaterialOut {
+    surface: Surface,
+    // Tangent-space, +Z out of the surface.
+    normal: vec3<f32>,
+    // A bump's surface gradient, in object space.
+    gradient: vec3<f32>,
+};
+
+// How the texture coordinate changes along `d`, a vector in the triangle's
+// plane: `d` written in the edges' terms, and the UVs' edges in the same.
+fn pt_uv_along(d: vec3<f32>, e1: vec3<f32>, e2: vec3<f32>, du1: vec2<f32>, du2: vec2<f32>) -> vec2<f32> {
+    let g11 = dot(e1, e1);
+    let g12 = dot(e1, e2);
+    let g22 = dot(e2, e2);
+    let det = g11 * g22 - g12 * g12;
+    if (abs(det) < 1e-30) {
+        return vec2<f32>(0.0);
+    }
+    let r1 = dot(d, e1);
+    let r2 = dot(d, e2);
+    let a = (g22 * r1 - g12 * r2) / det;
+    let b = (g11 * r2 - g12 * r1) / det;
+    return du1 * a + du2 * b;
+}
+
+// The vector in the plane of (f1, f2) whose dots with them are r1 and r2.
+fn pt_dual(f1: vec3<f32>, f2: vec3<f32>, r1: f32, r2: f32) -> vec3<f32> {
+    let g11 = dot(f1, f1);
+    let g12 = dot(f1, f2);
+    let g22 = dot(f2, f2);
+    let det = g11 * g22 - g12 * g12;
+    if (abs(det) < 1e-30) {
+        return vec3<f32>(0.0);
+    }
+    return f1 * ((g22 * r1 - g12 * r2) / det) + f2 * ((g11 * r2 - g12 * r1) / det);
+}
 
 // --- random numbers -----------------------------------------------------------
 
@@ -413,6 +459,13 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         dir = normalize(focus - origin);
     }
 
+    // How wide a pixel is, as an angle: the ray cone a texture is read over.
+    // A bump reads its height one pixel's width across and one down, as the
+    // viewport does from its derivatives.
+    let beside = pt.inv_view_proj * vec4<f32>(ndc + vec2<f32>(2.0 / f32(pt.size.x), 0.0), 0.5, 1.0);
+    let spread = length(normalize(beside.xyz / beside.w - near.xyz / near.w) - normalize(mid.xyz / mid.w - near.xyz / near.w));
+    var travelled = 0.0;
+
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
     // Glass is not counted against the bounces: a path through a block of it
@@ -455,10 +508,76 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (dot(geometric, dir) > 0.0) {
             geometric = -geometric;
         }
-        if (dot(n, geometric) < 0.0) {
+        let turned = dot(n, geometric) < 0.0;
+        let m = tri.w * PT_SURFACE;
+        travelled += hit.t;
+
+        // The surface's own material, compiled from its graph — the code the
+        // viewport runs — when it has one; light panels have none.
+        let material_index = pt_surfaces[m + 3u].y;
+        var made: PtMaterialOut;
+        if (material_index > 0.0) {
+            let la = pt_local[tri.x * 2u].xyz;
+            let lb = pt_local[tri.y * 2u].xyz;
+            let lc = pt_local[tri.z * 2u].xyz;
+            let local_p = la * w + lb * hit.u + lc * hit.v;
+            let local_n = normalize(pt_local[tri.x * 2u + 1u].xyz * w + pt_local[tri.y * 2u + 1u].xyz * hit.u + pt_local[tri.z * 2u + 1u].xyz * hit.v);
+            let uva = pt_uvs[tri.x];
+            let du1 = pt_uvs[tri.y] - uva;
+            let du2 = pt_uvs[tri.z] - uva;
+            let uv = uva * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v;
+            let e1l = lb - la;
+            let e2l = lc - la;
+            let e1w = pt_positions[tri.y].xyz - a;
+            let e2w = pt_positions[tri.z].xyz - a;
+            // How much bigger the object is here than in its own space.
+            let grow = sqrt(length(cross(e1w, e2w)) / max(length(cross(e1l, e2l)), 1e-30));
+            let width = max(spread * travelled, 1e-4) / max(grow, 1e-30);
+            let around = pt_orthonormal(local_n);
+            let pdx = around[0] * width;
+            let pdy = around[1] * width;
+            made = pt_material(
+                u32(material_index) - 1u,
+                uv,
+                pt_uv_along(pdx, e1l, e2l, du1, du2),
+                pt_uv_along(pdy, e1l, e2l, du1, du2),
+                local_p,
+                local_n,
+                pdx,
+                pdy,
+            );
+            // A normal map's tilt, in the frame the UVs give the triangle:
+            // +X along U and +Y along V, as the viewport's frame is.
+            if (any(made.normal != vec3<f32>(0.0, 0.0, 1.0))) {
+                let r = du1.x * du2.y - du2.x * du1.y;
+                if (abs(r) > 1e-20) {
+                    var t = (e1w * du2.y - e2w * du1.y) / r;
+                    var b = (e2w * du1.x - e1w * du2.x) / r;
+                    t = t - n * dot(n, t);
+                    b = b - n * dot(n, b);
+                    if (dot(t, t) > 1e-20 && dot(b, b) > 1e-20) {
+                        let tilted = normalize(t) * made.normal.x + normalize(b) * made.normal.y + n * made.normal.z;
+                        if (dot(tilted, tilted) > 1e-20) {
+                            n = normalize(tilted);
+                        }
+                    }
+                }
+            }
+            // A bump's gradient, carried from the object's space into the
+            // world's: the world vector with the same dots against the
+            // triangle's edges, measured against a normal grown as the
+            // object has been.
+            if (any(made.gradient != vec3<f32>(0.0))) {
+                let g = pt_dual(e1w, e2w, dot(made.gradient, e1l), dot(made.gradient, e2l));
+                let tilted = n - g * grow;
+                if (dot(tilted, tilted) > 1e-20) {
+                    n = normalize(tilted);
+                }
+            }
+        }
+        if (turned) {
             n = -n;
         }
-        let m = tri.w * PT_SURFACE;
         // A glowing surface adds its light wherever a path meets it — whole
         // when nothing could have aimed at it, weighted against the aiming
         // otherwise. See `pt_emitter_pdf`.
@@ -479,9 +598,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         s.base_color = pt_surfaces[m].rgb;
         s.metallic = pt_surfaces[m].a;
         s.roughness = extra.x;
+        if (material_index > 0.0) {
+            s = made.surface;
+        }
         // The images multiply the dials, as the rasterised material does: the
         // same corner of the same picture, wrapped the same way.
-        if (extra.y >= 0.0 || extra.z >= 0.0) {
+        if (material_index <= 0.0 && (extra.y >= 0.0 || extra.z >= 0.0)) {
             let uv = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v);
             if (extra.y >= 0.0) {
                 s.base_color *= textureSampleLevel(pt_colour_images, pt_image_sampler, uv, i32(extra.y), 0.0).rgb;

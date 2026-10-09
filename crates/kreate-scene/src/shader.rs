@@ -74,13 +74,21 @@ pub enum NodeKind {
     Color(SceneRgb),
     /// A constant number.
     Value(f32),
-    /// An image, sampled at the surface's UV.
+    /// An image, sampled at the surface's UV — or projected from three sides.
     ///
     /// `None` is a slot nobody has filled, which is an ordinary state while a
     /// material is being built — it reads as the fallback rather than failing
     /// to compile, for the same reason a world with a missing image lands on a
     /// colour.
-    Image { image: Option<ImageId> },
+    Image {
+        image: Option<ImageId>,
+        projection: Projection,
+        /// For a box projection: how softly the three sides cross over, zero
+        /// a hard edge and one an even blend.
+        blend: f32,
+        /// For a box projection: repeats per metre of the object.
+        scale: f32,
+    },
     /// Two colours, multiplied.
     ///
     /// Here because a texture has to *tint* rather than replace: glTF's base
@@ -101,6 +109,12 @@ pub enum NodeKind {
     /// map scales the roughness dial rather than replacing it, for the reason
     /// a base colour map tints.
     MultiplyValue,
+    /// A height, turned into a tilt of the surface: Blender's Bump.
+    ///
+    /// `distance` is how far one unit of height stands off the surface, in
+    /// metres, and `strength` how much of the tilt is used. A normal wired in
+    /// is tilted further, so a bump can sit on top of a normal map.
+    Bump { strength: f32, distance: f32 },
     /// A tangent-space normal map's colour, decoded into a direction.
     ///
     /// `strength` scales the tilt before renormalising, which is glTF's
@@ -114,6 +128,37 @@ pub enum NodeKind {
     Math { op: MathOp, a: f32, b: f32 },
     /// One minus a colour: Blender's Invert Color.
     Invert,
+    /// Fractal gradient noise, read at the surface's position in its object:
+    /// Blender's Noise Texture. The numbers are what unwired sockets take.
+    ///
+    /// Object space rather than UVs, so a mesh nobody unwrapped still gets a
+    /// texture without seams — and it moves with the object, not the world.
+    Noise {
+        scale: f32,
+        /// How many octaves, fractional between two.
+        detail: f32,
+        /// How much each octave keeps of the one before.
+        roughness: f32,
+        /// How far the position is pushed by noise of its own first.
+        distortion: f32,
+    },
+    /// Cells around scattered points: Blender's Voronoi Texture, F1.
+    Voronoi { scale: f32, randomness: f32 },
+    /// Alternating cubes of two colours: Blender's Checker Texture.
+    Checker {
+        scale: f32,
+        color1: SceneRgb,
+        color2: SceneRgb,
+    },
+    /// Bands or rings, bent by noise: Blender's Wave Texture, which is where
+    /// wood and marble start.
+    Wave {
+        kind: WaveKind,
+        scale: f32,
+        distortion: f32,
+        detail: f32,
+        detail_scale: f32,
+    },
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -144,6 +189,52 @@ pub enum MathOp {
     Power,
     Minimum,
     Maximum,
+}
+
+/// How an image is laid on a surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Projection {
+    /// By the mesh's UVs.
+    #[default]
+    Flat,
+    /// From the object's three axes, each side blended by how squarely it
+    /// faces that axis: Blender's Box, otherwise called triplanar. A mesh
+    /// nobody unwrapped still takes a tiling texture without stretching.
+    Box,
+}
+
+impl Projection {
+    pub const ALL: [Self; 2] = [Self::Flat, Self::Box];
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+}
+
+/// Which way a Wave node's stripes run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaveKind {
+    /// Straight, across the diagonal.
+    #[default]
+    Bands,
+    /// Around the object's origin: wood.
+    Rings,
+}
+
+impl WaveKind {
+    pub const ALL: [Self; 2] = [Self::Bands, Self::Rings];
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
 }
 
 impl MathOp {
@@ -179,6 +270,17 @@ impl MathOp {
 }
 
 impl NodeKind {
+    /// An image node laid on by UV, as every image node was before there was
+    /// a choice.
+    pub fn image(image: Option<ImageId>) -> Self {
+        NodeKind::Image {
+            image,
+            projection: Projection::Flat,
+            blend: 0.2,
+            scale: 1.0,
+        }
+    }
+
     /// The types of this node's inputs, in order.
     pub fn inputs(&self) -> &'static [Socket] {
         match self {
@@ -188,6 +290,20 @@ impl NodeKind {
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
             NodeKind::MixColor { .. } => &[Socket::Scalar, Socket::Color, Socket::Color],
             NodeKind::Invert => &[Socket::Color],
+            NodeKind::Noise { .. } | NodeKind::Wave { .. } => &[
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+            ],
+            NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Scalar],
+            NodeKind::Checker { .. } => &[Socket::Color, Socket::Color, Socket::Scalar],
+            NodeKind::Bump { .. } => &[
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Vector,
+            ],
             // Base colour, metallic, roughness, normal, and a tint on the glow.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
@@ -212,7 +328,11 @@ impl NodeKind {
             NodeKind::SeparateRgb => &[Socket::Scalar, Socket::Scalar, Socket::Scalar],
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar],
             NodeKind::MixColor { .. } | NodeKind::Invert => &[Socket::Color],
-            NodeKind::NormalMap { .. } => &[Socket::Vector],
+            NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => &[Socket::Vector],
+            // Blender's order: the noises lead with their number, the
+            // patterns with their colour.
+            NodeKind::Noise { .. } | NodeKind::Voronoi { .. } => &[Socket::Scalar, Socket::Color],
+            NodeKind::Checker { .. } | NodeKind::Wave { .. } => &[Socket::Color, Socket::Scalar],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -232,9 +352,14 @@ impl NodeKind {
             NodeKind::SeparateRgb => "separate_rgb",
             NodeKind::MultiplyValue => "multiply_value",
             NodeKind::NormalMap { .. } => "normal_map",
+            NodeKind::Bump { .. } => "bump",
             NodeKind::MixColor { .. } => "mix",
             NodeKind::Math { .. } => "math",
             NodeKind::Invert => "invert",
+            NodeKind::Noise { .. } => "noise",
+            NodeKind::Voronoi { .. } => "voronoi",
+            NodeKind::Checker { .. } => "checker",
+            NodeKind::Wave { .. } => "wave",
             NodeKind::Surface { .. } => "surface",
         }
     }
@@ -248,8 +373,42 @@ impl NodeKind {
             NodeKind::Color(c) => vec![c.r, c.g, c.b],
             NodeKind::Value(v) => vec![*v],
             NodeKind::NormalMap { strength } => vec![*strength],
+            NodeKind::Bump { strength, distance } => vec![*strength, *distance],
             NodeKind::MixColor { factor } => vec![*factor],
             NodeKind::Math { op, a, b } => vec![op.index() as f32, *a, *b],
+            NodeKind::Image {
+                projection,
+                blend,
+                scale,
+                ..
+            } => vec![projection.index() as f32, *blend, *scale],
+            NodeKind::Noise {
+                scale,
+                detail,
+                roughness,
+                distortion,
+            } => vec![*scale, *detail, *roughness, *distortion],
+            NodeKind::Voronoi { scale, randomness } => vec![*scale, *randomness],
+            NodeKind::Checker {
+                scale,
+                color1,
+                color2,
+            } => vec![
+                *scale, color1.r, color1.g, color1.b, color2.r, color2.g, color2.b,
+            ],
+            NodeKind::Wave {
+                kind,
+                scale,
+                distortion,
+                detail,
+                detail_scale,
+            } => vec![
+                *scale,
+                *distortion,
+                *detail,
+                *detail_scale,
+                kind.index() as f32,
+            ],
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -271,8 +430,7 @@ impl NodeKind {
                     *ior,
                 ]
             }
-            NodeKind::Image { .. }
-            | NodeKind::Multiply
+            NodeKind::Multiply
             | NodeKind::SeparateRgb
             | NodeKind::MultiplyValue
             | NodeKind::Invert => Vec::new(),
@@ -291,12 +449,22 @@ impl NodeKind {
         Some(match tag {
             "color" => NodeKind::Color(SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8))),
             "value" => NodeKind::Value(at(0, 0.5)),
-            "image" => NodeKind::Image { image },
+            // A file from before projections has no numbers: by UV.
+            "image" => NodeKind::Image {
+                image,
+                projection: Projection::from_index(at(0, 0.0).max(0.0) as u32),
+                blend: at(1, 0.2),
+                scale: at(2, 1.0),
+            },
             "multiply" => NodeKind::Multiply,
             "separate_rgb" => NodeKind::SeparateRgb,
             "multiply_value" => NodeKind::MultiplyValue,
             "normal_map" => NodeKind::NormalMap {
                 strength: at(0, 1.0),
+            },
+            "bump" => NodeKind::Bump {
+                strength: at(0, 1.0),
+                distance: at(1, 0.1),
             },
             "mix" => NodeKind::MixColor { factor: at(0, 0.5) },
             "math" => NodeKind::Math {
@@ -305,6 +473,30 @@ impl NodeKind {
                 b: at(2, 0.5),
             },
             "invert" => NodeKind::Invert,
+            // Blender's defaults, so a node dropped in looks like the one a
+            // tutorial shows.
+            "noise" => NodeKind::Noise {
+                scale: at(0, 5.0),
+                detail: at(1, 2.0),
+                roughness: at(2, 0.5),
+                distortion: at(3, 0.0),
+            },
+            "voronoi" => NodeKind::Voronoi {
+                scale: at(0, 5.0),
+                randomness: at(1, 1.0),
+            },
+            "checker" => NodeKind::Checker {
+                scale: at(0, 5.0),
+                color1: SceneRgb::new(at(1, 0.8), at(2, 0.8), at(3, 0.8)),
+                color2: SceneRgb::new(at(4, 0.2), at(5, 0.2), at(6, 0.2)),
+            },
+            "wave" => NodeKind::Wave {
+                scale: at(0, 5.0),
+                distortion: at(1, 0.0),
+                detail: at(2, 2.0),
+                detail_scale: at(3, 1.0),
+                kind: WaveKind::from_index(at(4, 0.0).max(0.0) as u32),
+            },
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -326,7 +518,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 10] = [
+    pub const ADDABLE: [&'static str; 15] = [
         "color",
         "value",
         "image",
@@ -337,6 +529,11 @@ impl NodeKind {
         "mix",
         "math",
         "invert",
+        "noise",
+        "voronoi",
+        "checker",
+        "wave",
+        "bump",
     ];
 
     /// What each input is called, for a person.
@@ -345,6 +542,11 @@ impl NodeKind {
             NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
+            NodeKind::Noise { .. } => &["Scale", "Detail", "Roughness", "Distortion"],
+            NodeKind::Voronoi { .. } => &["Scale", "Randomness"],
+            NodeKind::Bump { .. } => &["Strength", "Distance", "Height", "Normal"],
+            NodeKind::Checker { .. } => &["Color1", "Color2", "Scale"],
+            NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale"],
             NodeKind::Surface { .. } => {
                 &["Base Color", "Metallic", "Roughness", "Normal", "Emission"]
             }
@@ -362,7 +564,10 @@ impl NodeKind {
             NodeKind::Value(_) | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["Value"],
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],
-            NodeKind::NormalMap { .. } => &["Normal"],
+            NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => &["Normal"],
+            NodeKind::Noise { .. } => &["Fac", "Color"],
+            NodeKind::Voronoi { .. } => &["Distance", "Color"],
+            NodeKind::Checker { .. } | NodeKind::Wave { .. } => &["Color", "Fac"],
             NodeKind::Surface { .. } => &[],
         }
     }
@@ -517,11 +722,7 @@ impl ShaderGraph {
                 .expect("the sockets agree")
         };
         if let Some(image) = material.base_color_image {
-            let texture = add(
-                &mut graph,
-                "Base Colour",
-                NodeKind::Image { image: Some(image) },
-            );
+            let texture = add(&mut graph, "Base Colour", NodeKind::image(Some(image)));
             let factor = add(&mut graph, "Tint", NodeKind::Color(material.base_color));
             let product = add(&mut graph, "Base Colour x Tint", NodeKind::Multiply);
             wire(&mut graph, texture, 0, product, 0);
@@ -534,7 +735,7 @@ impl ShaderGraph {
             let texture = add(
                 &mut graph,
                 "Metallic Roughness",
-                NodeKind::Image { image: Some(image) },
+                NodeKind::image(Some(image)),
             );
             let channels = add(&mut graph, "Channels", NodeKind::SeparateRgb);
             wire(&mut graph, texture, 0, channels, 0);
@@ -550,7 +751,7 @@ impl ShaderGraph {
             }
         }
         if let Some(image) = material.normal_image {
-            let texture = add(&mut graph, "Normal", NodeKind::Image { image: Some(image) });
+            let texture = add(&mut graph, "Normal", NodeKind::image(Some(image)));
             let decode = add(
                 &mut graph,
                 "Normal Map",
@@ -743,7 +944,7 @@ impl ShaderGraph {
         self.nodes
             .iter()
             .filter_map(|n| match n.kind {
-                NodeKind::Image { image } => image,
+                NodeKind::Image { image, .. } => image,
                 _ => None,
             })
             .collect()
@@ -827,7 +1028,7 @@ mod tests {
         // being used as the other.
         let mut g = graph();
         let image = g
-            .add_node(Node::new("Albedo", NodeKind::Image { image: None }))
+            .add_node(Node::new("Albedo", NodeKind::image(None)))
             .expect("added");
         let surface = g.output().expect("a surface");
         // Colour into base colour: fine.
@@ -1010,7 +1211,7 @@ mod tests {
         // inserting a kind in the middle reinterpret every file ever written —
         // the same rule `Mode::tag` follows and for the same reason.
         assert_eq!(NodeKind::Value(0.0).tag(), "value");
-        assert_eq!(NodeKind::Image { image: None }.tag(), "image");
+        assert_eq!(NodeKind::image(None).tag(), "image");
         assert_eq!(NodeKind::Color(SceneRgb::new(0.0, 0.0, 0.0)).tag(), "color");
     }
 
@@ -1071,7 +1272,7 @@ mod tests {
             .collect();
         assert_eq!(feeding.len(), 2, "a factor is unwired");
         assert!(
-            feeding.contains(&&NodeKind::Image { image: Some(image) }),
+            feeding.contains(&&NodeKind::image(Some(image))),
             "the texture is not a factor"
         );
         assert!(
@@ -1163,11 +1364,43 @@ mod tests {
         let kinds = [
             NodeKind::Color(SceneRgb::new(0.1, 0.2, 0.3)),
             NodeKind::Value(0.7),
-            NodeKind::Image { image: Some(image) },
+            NodeKind::image(Some(image)),
+            NodeKind::Image {
+                image: Some(image),
+                projection: Projection::Box,
+                blend: 0.6,
+                scale: 3.0,
+            },
             NodeKind::Multiply,
             NodeKind::SeparateRgb,
             NodeKind::MultiplyValue,
             NodeKind::NormalMap { strength: 0.4 },
+            NodeKind::Bump {
+                strength: 0.7,
+                distance: 0.02,
+            },
+            NodeKind::Noise {
+                scale: 3.0,
+                detail: 4.5,
+                roughness: 0.6,
+                distortion: 0.2,
+            },
+            NodeKind::Voronoi {
+                scale: 7.0,
+                randomness: 0.25,
+            },
+            NodeKind::Checker {
+                scale: 2.0,
+                color1: SceneRgb::new(1.0, 0.0, 0.0),
+                color2: SceneRgb::new(0.0, 0.0, 1.0),
+            },
+            NodeKind::Wave {
+                kind: WaveKind::Rings,
+                scale: 1.5,
+                distortion: 4.0,
+                detail: 3.0,
+                detail_scale: 2.0,
+            },
             NodeKind::Surface {
                 base_color: SceneRgb::new(0.9, 0.8, 0.7),
                 metallic: 0.6,
@@ -1179,7 +1412,7 @@ mod tests {
         ];
         for kind in kinds {
             let image = match kind {
-                NodeKind::Image { image } => image,
+                NodeKind::Image { image, .. } => image,
                 _ => None,
             };
             assert_eq!(

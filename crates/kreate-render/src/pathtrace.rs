@@ -15,17 +15,82 @@
 
 use glam::{DAffine3, Mat4, Vec3};
 
-fn source() -> String {
+fn source(materials: &str, count: u32) -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{materials}\n{}",
         crate::shading::shader_source(),
-        include_str!("shaders/pathtrace.wgsl")
+        include_str!("shaders/pathtrace.wgsl"),
+        dispatch(count)
     )
+}
+
+/// `pt_material`: which compiled material a surface names, by number.
+///
+/// Generated because WGSL has no function pointers: one arm per material,
+/// each calling the function the application compiled for it. With none,
+/// the arms are not there and nothing names the material structs — which is
+/// a tracer handed only flat surfaces.
+fn dispatch(count: u32) -> String {
+    let mut out = String::from(
+        "fn pt_material(id: u32, uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, p: vec3<f32>, n: vec3<f32>, pdx: vec3<f32>, pdy: vec3<f32>) -> PtMaterialOut {
+    var out: PtMaterialOut;
+    out.surface.base_color = vec3<f32>(0.8);
+    out.surface.metallic = 0.0;
+    out.surface.roughness = 0.5;
+    out.normal = vec3<f32>(0.0, 0.0, 1.0);
+    out.gradient = vec3<f32>(0.0);
+",
+    );
+    if count > 0 {
+        out.push_str(
+            "    var g: MaterialGeometry;
+    g.position = p;
+    g.normal = n;
+    g.position_dx = pdx;
+    g.position_dy = pdy;
+    switch id {
+",
+        );
+        for i in 0..count {
+            out.push_str(&format!(
+                "        case {i}u: {{
+            let m = material_sample_{i}(uv, uv_dx, uv_dy, g);
+            out.surface = m.surface;
+            out.normal = m.normal;
+            out.gradient = m.gradient;
+        }}
+"
+            ));
+        }
+        out.push_str("        default: {}\n    }\n");
+    }
+    out.push_str("    return out;\n}\n");
+    out
 }
 
 /// The tracer's shader as a device receives it, for the portability tests.
 pub fn shader_source() -> String {
-    source()
+    source("", 0)
+}
+
+/// The tracer's shader with materials, as [`PathTracer::set_scene`] builds it.
+pub fn shader_source_with(materials: &PtMaterials<'_>) -> String {
+    source(materials.code, materials.count)
+}
+
+/// The scene's compiled materials, as the tracer runs them.
+///
+/// Made by the application, which can see the compiler: `kreate-render`
+/// cannot, for the reason it cannot see a document. `code` is the compiler's
+/// declarations once and then each material as `material_sample_{i}`, its
+/// constants read from `values` and its images from the layers `images`
+/// gives them — see `kreate_shader::for_tracer`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PtMaterials<'a> {
+    pub code: &'a str,
+    pub count: u32,
+    /// Every material's constants, one after another.
+    pub values: &'a [[f32; 4]],
 }
 
 /// The resolve's shader, for the portability tests.
@@ -76,6 +141,10 @@ pub struct PtSurface {
     /// How much passes through, zero to one, and how it bends.
     pub transmission: f32,
     pub ior: f32,
+    /// Which of the compiled materials gives the surface its colour, metal,
+    /// roughness and normal, if any: the flat values and images above are
+    /// then not read. A light's panel has none.
+    pub material: Option<u32>,
 }
 
 /// An image a surface reads: four bytes a pixel, row by row; sRGB-encoded for
@@ -154,6 +223,10 @@ struct Scene {
     /// The glowing triangles: each one's index and its place in the
     /// cumulative distribution.
     emitters: wgpu::Buffer,
+    /// Every material's constants.
+    values: wgpu::Buffer,
+    /// Each vertex in its object's space: position, then normal.
+    local: wgpu::Buffer,
     emitter_count: u32,
     emitter_total: f32,
 }
@@ -208,6 +281,10 @@ pub struct PathTracer {
     env_map: wgpu::Buffer,
     env_size: Option<(u32, u32)>,
     trace: wgpu::ComputePipeline,
+    trace_layout: wgpu::PipelineLayout,
+    /// The materials' code the trace pipeline was built with: a scene with
+    /// other code rebuilds it, one with the same keeps it.
+    trace_code: (String, u32),
     resolve: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
@@ -290,25 +367,16 @@ impl PathTracer {
                 },
                 storage(12, true, c),
                 storage(13, true, c),
+                storage(14, true, c),
+                storage(15, true, c),
             ],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("path trace"),
-            source: wgpu::ShaderSource::Wgsl(source().into()),
         });
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path trace"),
             bind_group_layouts: &[Some(&scene_layout), None, Some(shading)],
             immediate_size: 0,
         });
-        let trace = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("path trace"),
-            layout: Some(&trace_layout),
-            module: &module,
-            entry_point: Some("pt_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let trace = Self::trace_pipeline(device, &trace_layout, &source("", 0));
 
         let f = wgpu::ShaderStages::FRAGMENT;
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -390,6 +458,8 @@ impl PathTracer {
             env_size: None,
             image_sampler,
             trace,
+            trace_layout,
+            trace_code: (String::new(), 0),
             resolve,
             scene_layout,
             resolve_layout,
@@ -405,6 +475,25 @@ impl PathTracer {
         }
     }
 
+    fn trace_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        source: &str,
+    ) -> wgpu::ComputePipeline {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("path trace"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("path trace"),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some("pt_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    }
+
     /// Whether a scene has been handed over.
     pub fn has_scene(&self) -> bool {
         self.scene.is_some()
@@ -413,6 +502,10 @@ impl PathTracer {
     /// Hands over the scene: its meshes, placed, and the surfaces they name.
     /// Builds the BVH, which is the part that costs; done when the scene
     /// changes, not when the camera does.
+    ///
+    /// Each image goes to a layer of the array its kind goes in, in the order
+    /// given, each array counting its own: what `materials` was told.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_scene(
         &mut self,
         device: &wgpu::Device,
@@ -420,7 +513,17 @@ impl PathTracer {
         meshes: &[PtMesh<'_>],
         surfaces: &[PtSurface],
         images: &[PtImage<'_>],
+        materials: &PtMaterials<'_>,
     ) {
+        if (materials.code, materials.count) != (self.trace_code.0.as_str(), self.trace_code.1) {
+            self.trace = Self::trace_pipeline(
+                device,
+                &self.trace_layout,
+                &source(materials.code, materials.count),
+            );
+            self.trace_code = (materials.code.to_string(), materials.count);
+        }
+        let mut local: Vec<[f32; 4]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
         let mut positions: Vec<Vec3> = Vec::new();
         let mut normals: Vec<[f32; 4]> = Vec::new();
@@ -433,6 +536,8 @@ impl PathTracer {
                 (0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])),
             );
             for (p, n) in mesh.positions.iter().zip(mesh.normals) {
+                local.push([p[0], p[1], p[2], 1.0]);
+                local.push([n.x, n.y, n.z, 0.0]);
                 let w = to_world.transform_point3(glam::DVec3::from_array(p.map(|c| c as f64)));
                 positions.push(w.as_vec3());
                 let wn = (normal_matrix * n.as_dvec3()).normalize_or_zero().as_vec3();
@@ -501,7 +606,13 @@ impl PathTracer {
                         s.transmission,
                     ],
                     [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
-                    [if s.one_sided { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    [
+                        if s.one_sided { 1.0 } else { 0.0 },
+                        // One past the material, so zero is none.
+                        s.material.map_or(0.0, |m| m as f32 + 1.0),
+                        0.0,
+                        0.0,
+                    ],
                 ]
             })
             .collect();
@@ -599,6 +710,11 @@ impl PathTracer {
             order: upload("path trace order", bytemuck::cast_slice(&order)),
             surfaces: upload("path trace surfaces", bytemuck::cast_slice(&surface_data)),
             emitters: upload("path trace emitters", bytemuck::cast_slice(&emitter_data)),
+            values: upload(
+                "path trace material values",
+                bytemuck::cast_slice(materials.values),
+            ),
+            local: upload("path trace local", bytemuck::cast_slice(&local)),
             emitter_count,
             emitter_total,
         });
@@ -700,6 +816,14 @@ impl PathTracer {
             entries.push(wgpu::BindGroupEntry {
                 binding: 13,
                 resource: self.env_map.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 14,
+                resource: scene.values.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 15,
+                resource: scene.local.as_entire_binding(),
             });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),

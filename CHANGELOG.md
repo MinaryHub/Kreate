@@ -18,6 +18,21 @@ use; `scripts/release.sh` turns that section into the next release.
   spacing, a stabiliser, front-faces-only, auto-smooth, Y/Z and radial
   symmetry, alpha stamps and pen pressure; Voxel Remesh (Ctrl+R) and dynamic
   topology.
+- Shader nodes: Noise, Voronoi, Checker and Wave textures (bands or rings,
+  for wood and marble). They read the surface's position in its object, so
+  they need no UV unwrap and move with the object.
+- Image Texture node: Box (triplanar) projection, which lays an image on
+  from the object's three axes with a blend between them — a tiling texture
+  on a mesh with no UVs, without stretching.
+- Bump node: turns a height — a noise, a wave, an image's channel — into a
+  tilt of the surface, and can sit on top of a normal map.
+- The path-traced render runs each material's node graph — the same code
+  the viewport draws with — so procedural textures, projected images, normal
+  maps and bumps appear in the final render, not only in the viewport.
+- Rigid bodies: a gravity factor of their own (Physics tab), so one body can
+  float, fall slowly or rise while the rest of the scene falls.
+- Bevel: with an even number of segments, the corner where three bevelled
+  edges meet is filled with quads rather than a fan of triangles.
 
 ### Fixed
 

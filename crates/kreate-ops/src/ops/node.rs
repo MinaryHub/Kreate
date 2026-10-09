@@ -241,7 +241,12 @@ pub struct AddNodeParams {
         "normal_map",
         "mix",
         "math",
-        "invert"
+        "invert",
+        "noise",
+        "voronoi",
+        "checker",
+        "wave",
+        "bump"
     ))]
     pub kind: u32,
     /// Where it lands, in graph units.
@@ -299,6 +304,11 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::MixColor { .. } => "Mix",
         NodeKind::Math { .. } => "Math",
         NodeKind::Invert => "Invert Color",
+        NodeKind::Noise { .. } => "Noise Texture",
+        NodeKind::Voronoi { .. } => "Voronoi Texture",
+        NodeKind::Checker { .. } => "Checker Texture",
+        NodeKind::Wave { .. } => "Wave Texture",
+        NodeKind::Bump { .. } => "Bump",
         NodeKind::Surface { .. } => "Principled BSDF",
     }
 }
@@ -528,8 +538,9 @@ pub struct SetNodeColorParams {
     pub slot: u32,
     #[param(min = 0.0)]
     pub node: u32,
-    /// Which of the node's colours. Zero for an RGB node's own colour and for
-    /// a surface's base colour, which are the only colours a node holds.
+    /// Which of the node's colours. Zero for an RGB node's own colour, a
+    /// surface's base colour and a checker's first; one for a checker's
+    /// second.
     #[param(min = 0.0)]
     pub field: u32,
     /// As a swatch shows it, the way `material.set_properties` takes it.
@@ -584,6 +595,8 @@ impl Operator for SetNodeColor {
         match (&mut node.kind, params.field) {
             (NodeKind::Color(c), 0) => *c = colour,
             (NodeKind::Surface { base_color, .. }, 0) => *base_color = colour,
+            (NodeKind::Checker { color1, .. }, 0) => *color1 = colour,
+            (NodeKind::Checker { color2, .. }, 1) => *color2 = colour,
             _ => return Ok(OpResult::Cancelled),
         }
         Ok(OpResult::Finished)
@@ -598,7 +611,12 @@ pub struct SetNodeValueParams {
     pub node: u32,
     /// Which of the node's numbers: zero for a Value node's value and a Normal
     /// Map's strength; one and two for a surface's metallic and roughness —
-    /// the numbering `NodeKind::values` uses, less the surface's colour.
+    /// the numbering `NodeKind::values` uses, less the surface's colour. A
+    /// texture's scale is zero; a Noise's detail, roughness and distortion
+    /// one to three, a Voronoi's randomness one, and a Wave's distortion,
+    /// detail, detail scale and bands-or-rings one to four. An image's
+    /// projection (zero by UV, one box) is zero, its box blend and scale one
+    /// and two. A bump's strength and distance are zero and one.
     #[param(min = 0.0)]
     pub field: u32,
     pub value: f64,
@@ -641,6 +659,30 @@ impl Operator for SetNodeValue {
             (NodeKind::Math { b, .. }, 2) => *b = v,
             (NodeKind::Surface { metallic, .. }, 1) => *metallic = v.clamp(0.0, 1.0),
             (NodeKind::Surface { roughness, .. }, 2) => *roughness = v.clamp(0.0, 1.0),
+            (NodeKind::Noise { scale, .. }, 0)
+            | (NodeKind::Voronoi { scale, .. }, 0)
+            | (NodeKind::Checker { scale, .. }, 0)
+            | (NodeKind::Wave { scale, .. }, 0) => *scale = v,
+            (NodeKind::Noise { detail, .. }, 1) | (NodeKind::Wave { detail, .. }, 2) => {
+                *detail = v.clamp(0.0, 15.0)
+            }
+            (NodeKind::Noise { roughness, .. }, 2) => *roughness = v.clamp(0.0, 1.0),
+            (NodeKind::Noise { distortion, .. }, 3) | (NodeKind::Wave { distortion, .. }, 1) => {
+                *distortion = v
+            }
+            (NodeKind::Voronoi { randomness, .. }, 1) => *randomness = v.clamp(0.0, 1.0),
+            (NodeKind::Wave { detail_scale, .. }, 3) => *detail_scale = v,
+            (NodeKind::Bump { strength, .. }, 0) => *strength = v.clamp(0.0, 1.0),
+            (NodeKind::Bump { distance, .. }, 1) => *distance = v,
+            (NodeKind::Image { projection, .. }, 0) => {
+                *projection =
+                    kreate_scene::shader::Projection::from_index(v.round().max(0.0) as u32)
+            }
+            (NodeKind::Image { blend, .. }, 1) => *blend = v.clamp(0.0, 1.0),
+            (NodeKind::Image { scale, .. }, 2) => *scale = v,
+            (NodeKind::Wave { kind, .. }, 4) => {
+                *kind = kreate_scene::shader::WaveKind::from_index(v.round().max(0.0) as u32)
+            }
             _ => return Ok(OpResult::Cancelled),
         }
         Ok(OpResult::Finished)
@@ -700,7 +742,7 @@ impl Operator for SetNodeImage {
             .get_mut(params.node as usize)
             .map(|n| &mut n.kind)
         {
-            Some(NodeKind::Image { image: slot }) => {
+            Some(NodeKind::Image { image: slot, .. }) => {
                 if *slot == image {
                     return Ok(OpResult::Cancelled);
                 }

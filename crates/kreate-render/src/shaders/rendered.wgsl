@@ -57,6 +57,10 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     /// The surface coordinate, for the material.
     @location(2) uv: vec2<f32>,
+    /// The point and its normal in the object's own space, for a procedural
+    /// texture: one that moves with the object rather than the camera.
+    @location(3) local: vec3<f32>,
+    @location(4) local_normal: vec3<f32>,
 }
 
 @vertex
@@ -71,8 +75,10 @@ fn vs_rendered(
     out.world = world.xyz;
 
     out.uv = uv;
+    out.local = position;
 
     let n = oct_decode(packed_normal);
+    out.local_normal = n;
     // The inverse transpose, because a non-uniform scale tilts a normal
     // transformed by the model matrix — which reads as broken shading rather
     // than as a transform bug.
@@ -133,7 +139,8 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // worse than a lit one — the same judgement `solid.wgsl` makes, and the
     // reason neither pass culls.
     var geometric = normalize(in.normal);
-    if dot(geometric, view) < 0.0 {
+    let flipped = dot(geometric, view) < 0.0;
+    if flipped {
         geometric = -geometric;
     }
 
@@ -141,9 +148,31 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // control flow, and the material needs the UV's to choose a mip level.
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
-    let sample = material_sample(in.uv, uv_dx, uv_dy);
+    var geometry: MaterialGeometry;
+    geometry.position = in.local;
+    geometry.normal = normalize(in.local_normal);
+    geometry.position_dx = dpdx(in.local);
+    geometry.position_dy = dpdy(in.local);
+    let sample = material_sample(in.uv, uv_dx, uv_dy, geometry);
     let surface = sample.surface;
-    let normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
+    var normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
+    // A bump's tilt, as a surface gradient in the object's space: carried
+    // into this one the way a normal is, by the inverse transpose, and
+    // measured against the normal's own length there — the gradient was
+    // taken against a unit normal, and the interpolated one is not.
+    // On a face seen from behind the normal was turned over, and the tilt
+    // turns with it.
+    if any(sample.gradient != vec3<f32>(0.0)) {
+        let to_eye = mat3x3<f32>(object.normal_col0.xyz, object.normal_col1.xyz, object.normal_col2.xyz);
+        var g = to_eye * sample.gradient / max(length(in.normal), 1e-20);
+        if flipped {
+            g = -g;
+        }
+        let tilted = normal - g;
+        if dot(tilted, tilted) > 1e-20 {
+            normal = normalize(tilted);
+        }
+    }
 
     // `in.clip` is the fragment's position in pixels here — the same builtin
     // the vertex stage wrote, reinterpreted by the rasteriser. Which tile that
