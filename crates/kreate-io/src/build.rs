@@ -1370,6 +1370,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
     }
 
     let animations = export_animations(doc, &bone_nodes, &nodes, &morph_targets, &mut notes);
+    let point_samples = export_point_samples(doc, &nodes);
 
     (
         ExportScene {
@@ -1383,9 +1384,81 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             animations,
             skins,
             morph_targets,
+            point_samples,
         },
         notes,
     )
+}
+
+/// The meshes whose shape plays over time, as their points frame by frame:
+/// a baked cloth or soft body from its bake, and a skinned mesh or one with
+/// shape keys moving from the document played at each frame of the range.
+/// Only where the shape keeps the cage's point count — what a modifier stack
+/// adds or takes away has no point to sample against.
+fn export_point_samples(doc: &Document, nodes: &[ExportNode]) -> Vec<crate::ir::PointSamples> {
+    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let start = doc.playback.start as f64;
+    let mut out = Vec::new();
+    let mesh_node = |index: usize| matches!(nodes.get(index).map(|n| &n.data), Some(ImportNodeData::Mesh(_)));
+    // Baked cloth and soft bodies: the bake holds the points.
+    let cache = &doc.physics_cache;
+    for (index, (_, object)) in doc.objects().enumerate() {
+        let Some(track) = cache.soft_of(object.uid) else { continue };
+        let Some(cage) = object.mesh().and_then(|m| doc.mesh(m)) else { continue };
+        if !mesh_node(index) || track.frames.iter().any(|f| f.len() != cage.num_verts() as usize) {
+            continue;
+        }
+        out.push(crate::ir::PointSamples {
+            node: index,
+            times: (0..track.frames.len())
+                .map(|k| ((cache.start as f64 + k as f64 - start) / fps) as f32)
+                .collect(),
+            points: track.frames.iter().map(|f| f.to_vec()).collect(),
+        });
+    }
+    // Skins and shape keys: the document played.
+    let moving: Vec<(usize, kreate_scene::ObjectId)> = doc
+        .objects()
+        .enumerate()
+        .filter(|(index, (_, o))| {
+            mesh_node(*index)
+                && cache.soft_of(o.uid).is_none()
+                && (o.skin.is_some()
+                    || o.action.and_then(|a| doc.action(a)).is_some_and(|a| {
+                        a.curves
+                            .iter()
+                            .any(|c| kreate_scene::animation::parse_shape_path(&c.path.property).is_some())
+                    }))
+        })
+        .map(|(index, (id, _))| (index, id))
+        .collect();
+    if moving.is_empty() {
+        return out;
+    }
+    let mut scene = doc.clone();
+    let mut eval = kreate_scene::ModifierCache::new();
+    let ctx = kreate_scene::modifier::EvalCtx::still();
+    let frames: Vec<i32> = (doc.playback.start..=doc.playback.end.max(doc.playback.start)).collect();
+    let mut samples: Vec<crate::ir::PointSamples> = moving
+        .iter()
+        .map(|(index, _)| crate::ir::PointSamples { node: *index, ..Default::default() })
+        .collect();
+    for f in &frames {
+        scene.animate(*f as f64);
+        for ((_, id), s) in moving.iter().zip(samples.iter_mut()) {
+            let Some(cage) = scene.object(*id).and_then(|o| o.mesh()).and_then(|m| scene.mesh(m)) else {
+                continue;
+            };
+            let count = cage.num_verts();
+            if let Some(m) = eval.evaluated_base(&scene, *id, &ctx).filter(|m| m.num_verts() == count) {
+                s.times.push(((*f as f64 - start) / fps) as f32);
+                s.points.push(m.positions().to_vec());
+            }
+        }
+        eval.sweep();
+    }
+    out.extend(samples.into_iter().filter(|s| s.times.len() == frames.len()));
+    out
 }
 
 /// The objects' actions as one clip, sampled from the document itself.
@@ -1418,6 +1491,10 @@ fn export_animations(
     // Keys before the range would be negative seconds; the clip starts at
     // whichever is earlier.
     let mut origin = doc.playback.start as f64;
+    // A bake's first frame is on the clock too.
+    if !doc.physics_cache.rigid.is_empty() {
+        origin = origin.min(doc.physics_cache.start as f64);
+    }
     for (_, object) in doc.objects() {
         if let Some(action) = object.action.and_then(|a| doc.action(a)) {
             // Bones' and shape keys' keys too: their tracks share the clip's
@@ -1442,7 +1519,40 @@ fn export_animations(
         });
     }
     let mut tracks = Vec::new();
+    // Baked rigid bodies move as the bake says, every frame of it — over
+    // whatever their keys said, as they play.
+    let cache = &doc.physics_cache;
     for (index, (_, object)) in doc.objects().enumerate() {
+        let Some(track) = cache.rigid_of(object.uid) else {
+            continue;
+        };
+        let transforms = track
+            .frames
+            .iter()
+            .map(|t| {
+                if object.parent.is_some() {
+                    kreate_math::DTransform::from_affine(object.parent_inverse * t.to_affine())
+                } else {
+                    *t
+                }
+            })
+            .collect();
+        tracks.push(crate::ir::ExportTrack {
+            node: index,
+            times: (0..track.frames.len())
+                .map(|k| ((cache.start as f64 + k as f64 - origin) / fps) as f32)
+                .collect(),
+            transforms,
+            step: false,
+            translation: true,
+            rotation: true,
+            scale: false,
+        });
+    }
+    for (index, (_, object)) in doc.objects().enumerate() {
+        if cache.rigid_of(object.uid).is_some() {
+            continue;
+        }
         let Some(action) = object.action.and_then(|a| doc.action(a)) else {
             continue;
         };

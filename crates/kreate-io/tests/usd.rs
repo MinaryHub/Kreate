@@ -102,3 +102,51 @@ fn a_child_is_nested_inside_its_parent() {
     // And the parent's translation is the object's.
     assert!(text.contains("(1, 2, 3, 1) )"), "{text}");
 }
+
+#[test]
+fn keyed_motion_and_a_baked_body_go_out_as_time_samples() {
+    use kreate_scene::animation::{Action, Interpolation};
+    let mut doc = scene();
+    let cube = doc.objects().find(|(_, o)| o.name == "Cube.001").unwrap().0;
+    let mut action = Action::new("Slide");
+    for (frame, x) in [(1.0, 0.0), (24.0, 5.0)] {
+        action.curve_mut("location", 0).insert(frame, x, Interpolation::Linear);
+    }
+    let a = doc.add_action(action);
+    doc.object_mut(cube).unwrap().action = Some(a);
+    let text = usda(&doc);
+    assert!(text.contains("timeCodesPerSecond = 24"), "{text}");
+    assert!(text.contains("xformOp:transform.timeSamples"));
+    assert_eq!(text.matches('{').count(), text.matches('}').count(), "balanced");
+
+    // A rigid body, baked: its fall, sampled every frame.
+    let mut doc = Document::new();
+    doc.physics.frame_end = 12;
+    let m = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let mut o = Object::new("Box", ObjectData::Mesh(m));
+    o.transform.translation.z = 3.0;
+    o.physics.rigid = Some(kreate_scene::physics::RigidBody::default());
+    doc.add_object(o);
+    let (cache, _) = kreate_scene::physics::bake::bake(&doc);
+    doc.physics_cache = std::sync::Arc::new(cache);
+    let text = usda(&doc);
+    let samples = text.split("xformOp:transform.timeSamples").nth(1).expect("sampled");
+    assert_eq!(samples.split('}').next().unwrap().matches("( (").count(), 12, "one a frame");
+}
+
+#[test]
+fn baked_cloth_goes_out_as_moving_points() {
+    let mut doc = Document::new();
+    doc.playback.end = 10;
+    doc.physics.frame_end = 10;
+    let m = doc.add_mesh(kreate_mesh::primitives::grid(1.0, 3, 3));
+    let mut o = Object::new("Sheet", ObjectData::Mesh(m));
+    o.physics.soft = Some(kreate_scene::physics::SoftBody::default());
+    doc.add_object(o);
+    let (cache, _) = kreate_scene::physics::bake::bake(&doc);
+    doc.physics_cache = std::sync::Arc::new(cache);
+    let text = usda(&doc);
+    assert!(text.contains("points.timeSamples"), "{text}");
+    let samples = text.split("points.timeSamples").nth(1).unwrap();
+    assert_eq!(samples.split("\n        }").next().unwrap().matches(": [").count(), 10);
+}

@@ -17,7 +17,11 @@
 
 use std::fmt::Write as _;
 
-use crate::ir::{ExportScene, ImportLightKind, ImportNodeData, LossyNote};
+use crate::ir::{ExportScene, ExportTrack, ImportLightKind, ImportNodeData, LossyNote, PointSamples};
+
+/// Time codes a second: the stage's clock. Every time written is seconds
+/// times this, so the scene's own frame rate does not have to match.
+const TIME_CODES: f32 = 24.0;
 use kreate_math::Vec3;
 use kreate_mesh::attribute::names;
 
@@ -31,6 +35,19 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
     let _ = writeln!(out, "    metersPerUnit = 1");
     let _ = writeln!(out, "    upAxis = \"Z\"");
     let _ = writeln!(out, "    doc = \"Written by Kreate\"");
+    // The range time samples cover, when anything moves.
+    let last = scene
+        .animations
+        .iter()
+        .flat_map(|a| a.tracks.iter().flat_map(|t| t.times.iter()))
+        .chain(scene.point_samples.iter().flat_map(|s| s.times.iter()))
+        .fold(None, |m: Option<f32>, t| Some(m.map_or(*t, |m| m.max(*t))));
+    if let Some(last) = last {
+        let _ = writeln!(out, "    startTimeCode = 0");
+        let _ = writeln!(out, "    endTimeCode = {}", (last * TIME_CODES).ceil());
+        let _ = writeln!(out, "    timeCodesPerSecond = {TIME_CODES}");
+        let _ = writeln!(out, "    framesPerSecond = {TIME_CODES}");
+    }
     let _ = writeln!(out, ")");
     let _ = writeln!(out);
     let _ = writeln!(out, "def Xform \"World\"");
@@ -90,14 +107,14 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
         }
     }
     let _ = writeln!(out, "}}");
-    if !scene.animations.is_empty() {
-        notes.push(LossyNote::Unsupported {
-            what: "animation is not written to USD yet; the scene went out as it stands".into(),
-        });
-    }
     if !scene.skins.is_empty() {
         notes.push(LossyNote::Unsupported {
-            what: "skins are not written to USD yet; skinned meshes went out at rest".into(),
+            what: "skinned meshes went out as moving points, frame by frame, not as a UsdSkel rig".into(),
+        });
+    }
+    if scene.animations.iter().any(|a| !a.weights.is_empty()) {
+        notes.push(LossyNote::Unsupported {
+            what: "shape keys went out as moving points, not as blend shapes".into(),
         });
     }
     (out, notes)
@@ -145,13 +162,26 @@ fn matrix(m: &kreate_math::DAffine3) -> String {
     )
 }
 
-fn write_transform(out: &mut String, node: &crate::ir::ExportNode, pad: &str) {
+fn write_transform(out: &mut String, node: &crate::ir::ExportNode, pad: &str, track: Option<&ExportTrack>) {
     let _ = writeln!(
         out,
         "{pad}matrix4d xformOp:transform = {}",
         matrix(&node.transform.to_affine())
     );
+    if let Some(track) = track {
+        // Each time's whole placement; a step track is held to the next.
+        let _ = writeln!(out, "{pad}matrix4d xformOp:transform.timeSamples = {{");
+        for (t, at) in track.times.iter().zip(&track.transforms) {
+            let _ = writeln!(out, "{pad}    {}: {},", t * TIME_CODES, matrix(&at.to_affine()));
+        }
+        let _ = writeln!(out, "{pad}}}");
+    }
     let _ = writeln!(out, "{pad}uniform token[] xformOpOrder = [\"xformOp:transform\"]");
+}
+
+/// The track that moves node `i`, if one does.
+fn track_of<'a>(scene: &'a ExportScene<'_>, i: usize) -> Option<&'a ExportTrack> {
+    scene.animations.iter().flat_map(|a| &a.tracks).find(|t| t.node == i)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,20 +197,22 @@ fn write_node(
     let node = &scene.nodes[i];
     let pad = "    ".repeat(depth);
     let inner = "    ".repeat(depth + 1);
+    let track = track_of(scene, i);
     match node.data {
         ImportNodeData::Mesh(m) => {
             // An Xform holding the mesh, so the node's children nest under
             // a transform and not under geometry.
             let _ = writeln!(out, "{pad}def Xform \"{name}\"");
             let _ = writeln!(out, "{pad}{{");
-            write_transform(out, node, &inner);
-            write_mesh(out, scene, m, &format!("{name}_mesh"), None, materials, depth + 1, notes);
+            write_transform(out, node, &inner, track);
+            let samples = scene.point_samples.iter().find(|s| s.node == i);
+            write_mesh(out, scene, m, &format!("{name}_mesh"), samples, materials, depth + 1, notes);
         }
         ImportNodeData::Light(l) => {
             let Some(light) = scene.lights.get(l) else {
                 let _ = writeln!(out, "{pad}def Xform \"{name}\"");
                 let _ = writeln!(out, "{pad}{{");
-                write_transform(out, node, &inner);
+                write_transform(out, node, &inner, track);
                 return;
             };
             let (kind, intensity, extra) = match light.kind {
@@ -220,7 +252,7 @@ fn write_node(
             };
             let _ = writeln!(out, "{pad}def {kind} \"{name}\"{api}");
             let _ = writeln!(out, "{pad}{{");
-            write_transform(out, node, &inner);
+            write_transform(out, node, &inner, track);
             let [r, g, b] = light.color;
             let _ = writeln!(out, "{inner}color3f inputs:color = ({r}, {g}, {b})");
             let _ = writeln!(out, "{inner}float inputs:intensity = {intensity}");
@@ -229,7 +261,7 @@ fn write_node(
         ImportNodeData::Camera(c) => {
             let _ = writeln!(out, "{pad}def Camera \"{name}\"");
             let _ = writeln!(out, "{pad}{{");
-            write_transform(out, node, &inner);
+            write_transform(out, node, &inner, track);
             if let Some(camera) = scene.cameras.get(c) {
                 // A 36 × 24 mm back, and the lens that gives the angle on it.
                 let aperture = 24.0f32;
@@ -261,7 +293,7 @@ fn write_node(
         ImportNodeData::Empty => {
             let _ = writeln!(out, "{pad}def Xform \"{name}\"");
             let _ = writeln!(out, "{pad}{{");
-            write_transform(out, node, &inner);
+            write_transform(out, node, &inner, track);
         }
     }
 }
@@ -272,7 +304,7 @@ fn write_mesh(
     scene: &ExportScene<'_>,
     index: usize,
     name: &str,
-    _unused: Option<()>,
+    samples: Option<&PointSamples>,
     materials: &[String],
     depth: usize,
     notes: &mut Vec<LossyNote>,
@@ -291,6 +323,18 @@ fn write_mesh(
         "{inner}point3f[] points = [{}]",
         list(&mut positions.iter().map(|p| format!("({}, {}, {})", p.x, p.y, p.z)))
     );
+    if let Some(samples) = samples.filter(|s| s.points.iter().all(|p| p.len() == positions.len())) {
+        let _ = writeln!(out, "{inner}point3f[] points.timeSamples = {{");
+        for (t, points) in samples.times.iter().zip(&samples.points) {
+            let _ = writeln!(
+                out,
+                "{inner}    {}: [{}],",
+                t * TIME_CODES,
+                list(&mut points.iter().map(|p| format!("({}, {}, {})", p.x, p.y, p.z)))
+            );
+        }
+        let _ = writeln!(out, "{inner}}}");
+    }
     let counts: Vec<String> = (0..mesh.num_faces()).map(|f| mesh.face_len(f).to_string()).collect();
     let _ = writeln!(out, "{inner}int[] faceVertexCounts = [{}]", counts.join(", "));
     let _ = writeln!(

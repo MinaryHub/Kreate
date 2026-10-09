@@ -929,6 +929,21 @@ pub struct ExportScene<'a> {
     /// Per mesh, parallel to `meshes` (and possibly shorter): the shape keys
     /// it carries as morph targets, by name — each a `shape:<name>` layer.
     pub morph_targets: Vec<Vec<String>>,
+    /// Meshes whose shape changes over time — skinned, shape keys playing,
+    /// cloth baked — as their points at each frame. For a format that can
+    /// say "these points, at this time" and has no rig of its own to carry.
+    pub point_samples: Vec<PointSamples>,
+}
+
+/// One mesh node's points over time, in its own space.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointSamples {
+    /// Index into [`ExportScene::nodes`].
+    pub node: usize,
+    /// Seconds, increasing.
+    pub times: Vec<f32>,
+    /// Every point, at each time; as many as the mesh has.
+    pub points: Vec<Vec<Vec3>>,
 }
 
 impl<'a> ExportScene<'a> {
@@ -944,6 +959,7 @@ impl<'a> ExportScene<'a> {
             animations: Vec::new(),
             skins: Vec::new(),
             morph_targets: Vec::new(),
+            point_samples: Vec::new(),
         }
     }
 
