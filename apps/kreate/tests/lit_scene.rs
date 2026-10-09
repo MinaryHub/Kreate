@@ -1321,6 +1321,14 @@ fn the_new_documents_shadow_stays_while_the_view_moves() {
 /// The starter scene's lamp over one square face, seen face on, wearing a
 /// material made of `graph`.
 fn a_plane_wearing(graph: kreate_scene::shader::ShaderGraph) -> Vec<[f32; 4]> {
+    a_plane_wearing_with(|_| graph)
+}
+
+/// The same, with the graph made in the document — for one that names an
+/// image the document has to hold.
+fn a_plane_wearing_with(
+    make: impl FnOnce(&mut Document) -> kreate_scene::shader::ShaderGraph,
+) -> Vec<[f32; 4]> {
     let gpu = gpu().expect("checked by the caller");
     let mut doc = Document::new();
     kreate::startup::starting_scene(&mut doc);
@@ -1334,6 +1342,7 @@ fn a_plane_wearing(graph: kreate_scene::shader::ShaderGraph) -> Vec<[f32; 4]> {
     }
     // One face, so that anything varying across it is the material's doing.
     let mesh = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 1, 1));
+    let graph = make(&mut doc);
     let material = doc.add_material(kreate_scene::Material {
         name: "Procedural".into(),
         graph: Some(graph),
@@ -1623,5 +1632,62 @@ fn a_checker_read_by_uv_through_a_ramp_paints_two_colours() {
     assert!(
         reddish > 200 && bluish > 200,
         "the face drew {reddish} red pixels and {bluish} blue ones"
+    );
+}
+
+/// A picture is the right way up: V runs up it, as in Blender and OBJ. A
+/// plane wearing an image red in its top half and blue in its bottom shows
+/// the red at its +Y edge, where its V is high — which the default view puts
+/// at the top of the screen. Upside down, the halves trade places.
+#[test]
+fn an_image_is_the_right_way_up_on_its_uvs() {
+    if gpu().is_none() {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    }
+    use kreate_scene::shader::NodeKind;
+    let pictured = a_plane_wearing_with(|doc| {
+        let mut image =
+            kreate_scene::Image::new("Halves", 64, 64, kreate_scene::PixelFormat::Rgba8);
+        {
+            let tile = image.tile_mut(0, 0).expect("one tile");
+            let bytes = tile.bytes_mut();
+            let side = kreate_scene::image::TILE as usize;
+            for row in 0..side {
+                for column in 0..side {
+                    let at = (row * side + column) * 4;
+                    // Stored top row first: the top half red.
+                    bytes[at..at + 4].copy_from_slice(if row < 32 {
+                        &[255u8, 0, 0, 255]
+                    } else {
+                        &[0u8, 0, 255, 255]
+                    });
+                }
+            }
+        }
+        let id = doc.add_image(image);
+        grey_with(NodeKind::image(Some(id)), 0, 0)
+    });
+    let reddish = |p: &[f32; 4]| p[0] > p[2] + 0.05;
+    let bluish = |p: &[f32; 4]| p[2] > p[0] + 0.05;
+    // Where the plane's +Y edge is on the screen: the default camera looks
+    // down the plane with +Y away from it, so up the screen.
+    let rows = |pick: &dyn Fn(&[f32; 4]) -> bool, top: bool| {
+        let range = if top {
+            0..(SIZE as usize / 2)
+        } else {
+            (SIZE as usize / 2)..SIZE as usize
+        };
+        range
+            .flat_map(|y| (0..SIZE as usize).map(move |x| y * SIZE as usize + x))
+            .filter(|i| pick(&pictured[*i]))
+            .count()
+    };
+    let (red_top, red_bottom) = (rows(&reddish, true), rows(&reddish, false));
+    let (blue_top, blue_bottom) = (rows(&bluish, true), rows(&bluish, false));
+    assert!(
+        red_top > red_bottom && blue_bottom > blue_top,
+        "red {red_top} up and {red_bottom} down, blue {blue_top} up and {blue_bottom} down: \
+         the picture's top should be the plane's top"
     );
 }

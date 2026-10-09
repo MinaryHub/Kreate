@@ -604,7 +604,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // The images multiply the dials, as the rasterised material does: the
         // same corner of the same picture, wrapped the same way.
         if (material_index <= 0.0 && (extra.y >= 0.0 || extra.z >= 0.0)) {
-            let uv = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v);
+            // Turned so V runs up the picture, as the compiled materials do.
+            let at = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v);
+            let uv = vec2<f32>(at.x, 1.0 - at.y);
             if (extra.y >= 0.0) {
                 s.base_color *= textureSampleLevel(pt_colour_images, pt_image_sampler, uv, i32(extra.y), 0.0).rgb;
             }

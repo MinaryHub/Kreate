@@ -226,6 +226,13 @@ pub fn compile_with(
         wgsl,
         "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}"
     );
+    // Where a coordinate lands in an image, which is stored top row first
+    // while V runs up — Blender's and OBJ's way, and Kreate's. Without the
+    // turn every texture was upside down, which an atlas of parts shows as
+    // the wrong part on every face.
+    if !out.images.is_empty() {
+        wgsl.push_str(TEXEL);
+    }
     // Only when something reads it: the text is the pipeline cache's key, and
     // two hundred lines of noise in every flat plastic's shader is a slower
     // compile for nothing.
@@ -412,7 +419,7 @@ impl Emitter<'_> {
                             Projection::Flat => {
                                 let _ = writeln!(
                                     self.body,
-                                    "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(uv) * n{node}_rect.zw, {layer}, uv_dx * n{node}_rect.zw, uv_dy * n{node}_rect.zw);"
+                                    "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + kr_texel(uv) * n{node}_rect.zw, {layer}, kr_down(uv_dx) * n{node}_rect.zw, kr_down(uv_dy) * n{node}_rect.zw);"
                                 );
                             }
                             Projection::Box => {
@@ -430,7 +437,7 @@ impl Emitter<'_> {
                                 for (axis, plane) in [("x", "yz"), ("y", "xz"), ("z", "xy")] {
                                     let _ = writeln!(
                                         self.body,
-                                        "    let n{node}_{axis} = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + fract(n{node}_p.{plane}) * n{node}_rect.zw, {layer}, n{node}_dx.{plane} * n{node}_rect.zw, n{node}_dy.{plane} * n{node}_rect.zw);"
+                                        "    let n{node}_{axis} = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + kr_texel(n{node}_p.{plane}) * n{node}_rect.zw, {layer}, kr_down(n{node}_dx.{plane}) * n{node}_rect.zw, kr_down(n{node}_dy.{plane}) * n{node}_rect.zw);"
                                     );
                                     taps.push(format!("n{node}_{axis} * n{node}_w.{axis}"));
                                 }
@@ -840,7 +847,7 @@ impl Emitter<'_> {
 /// [`for_tracer`] strips them from each material.
 pub fn tracer_declarations() -> String {
     format!(
-        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}\n{PROCEDURAL}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32 }}\n{TEXEL}{PROCEDURAL}"
     )
 }
 
@@ -862,7 +869,7 @@ pub fn for_tracer(
     colour_layer: u32,
     data_layer: u32,
 ) -> String {
-    let code = compiled.wgsl.replace(PROCEDURAL, "");
+    let code = compiled.wgsl.replace(PROCEDURAL, "").replace(TEXEL, "");
     let mut out = String::new();
     for line in code.lines() {
         // The declarations the tracer makes once, and the bindings it has
@@ -948,6 +955,10 @@ fn relayer(text: &str, array: &str, base: u32) -> String {
     out.push_str(rest);
     out
 }
+
+/// The image coordinate of a texture coordinate, and of a step in one: wrapped,
+/// and turned so that V runs up the picture.
+const TEXEL: &str = "fn kr_texel(uv: vec2<f32>) -> vec2<f32> { return vec2<f32>(fract(uv.x), 1.0 - fract(uv.y)); }\nfn kr_down(d: vec2<f32>) -> vec2<f32> { return vec2<f32>(d.x, -d.y); }\n";
 
 /// What the procedural textures are made of, written once into a material
 /// that uses any.

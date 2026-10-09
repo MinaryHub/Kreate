@@ -23,6 +23,10 @@ use; `scripts/release.sh` turns that section into the next release.
   imports; it needed everything embedded. References that leave the file's
   folder are refused.
 - glTF import no longer reports that every texture went unread.
+- Textures are the right way up. V runs up the picture, as in Blender and
+  OBJ; every image was drawn upside down, which on a model whose texture
+  holds all its parts — most from Poly Haven — put the wrong part on every
+  face.
 
 ## [0.3.0] - 2026-10-09
 
