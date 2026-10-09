@@ -23,6 +23,17 @@ pub struct RigidRecord {
     pub bounciness: f64,
     pub linear_damping: f64,
     pub angular_damping: f64,
+    /// Absent in files from before it was settable: the world's full pull.
+    #[serde(default = "full_gravity", skip_serializing_if = "is_full_gravity")]
+    pub gravity: f64,
+}
+
+fn full_gravity() -> f64 {
+    1.0
+}
+
+fn is_full_gravity(g: &f64) -> bool {
+    *g == 1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +134,7 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
             bounciness: r.bounciness,
             linear_damping: r.linear_damping,
             angular_damping: r.angular_damping,
+            gravity: r.gravity,
         }),
         collision: p.collision.map(|c| CollisionRecord {
             thickness: c.thickness,
@@ -195,6 +207,11 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
             bounciness: b.bounciness.clamp(0.0, 1.0),
             linear_damping: b.linear_damping.clamp(0.0, 1.0),
             angular_damping: b.angular_damping.clamp(0.0, 1.0),
+            gravity: if b.gravity.is_finite() {
+                b.gravity.clamp(-10.0, 10.0)
+            } else {
+                1.0
+            },
         }),
         collision: r.collision.as_ref().map(|c| Collision {
             thickness: c.thickness.max(0.0),
@@ -284,6 +301,7 @@ mod tests {
                 bounciness: 0.75,
                 linear_damping: 0.125,
                 angular_damping: 0.375,
+                gravity: 0.25,
             }),
             collision: Some(Collision {
                 thickness: 0.07,

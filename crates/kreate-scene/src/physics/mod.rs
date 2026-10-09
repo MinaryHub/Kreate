@@ -85,6 +85,10 @@ pub struct RigidBody {
     /// The fraction of its speed it loses each second, moving and turning.
     pub linear_damping: f64,
     pub angular_damping: f64,
+    /// How much gravity pulls it, as a fraction of the scene's: 1 falls as
+    /// everything does, 0 floats — still pushed by what hits it, still in the
+    /// way — and below 0 rises.
+    pub gravity: f64,
 }
 
 impl Default for RigidBody {
@@ -98,6 +102,7 @@ impl Default for RigidBody {
             bounciness: 0.0,
             linear_damping: 0.04,
             angular_damping: 0.1,
+            gravity: 1.0,
         }
     }
 }
