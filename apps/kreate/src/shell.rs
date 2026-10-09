@@ -6034,7 +6034,10 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 Some(p) => p.display().to_string(),
                 None => e.authors.clone(),
             },
-            texture: state.asset_textures.get(&e.id).map(|h| h.id()),
+            texture: state.asset_textures.get(&e.id).map(|h| {
+                let [w, h2] = h.size();
+                (h.id(), [w as f32, h2 as f32])
+            }),
         })
         .collect();
     let folders: Vec<String> = state

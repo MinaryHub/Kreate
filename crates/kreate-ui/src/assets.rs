@@ -18,8 +18,8 @@ pub struct AssetTile {
     pub name: String,
     /// Shown on hover: who made it, or where it is.
     pub detail: String,
-    /// The picture, when it has arrived.
-    pub texture: Option<egui::TextureId>,
+    /// The picture and its size in pixels, when it has arrived.
+    pub texture: Option<(egui::TextureId, [f32; 2])>,
 }
 
 /// The panel's translated strings.
@@ -171,19 +171,31 @@ pub fn asset_browser(
                         ui.vertical(|ui| {
                             ui.set_width(TILE);
                             let size = egui::vec2(TILE, TILE);
-                            let response = match tile.texture {
-                                Some(texture) => ui.add(
-                                    egui::Image::new((texture, size))
-                                        .corner_radius(4.0)
-                                        .sense(egui::Sense::click()),
-                                ),
-                                None => {
-                                    let (rect, response) =
-                                        ui.allocate_exact_size(size, egui::Sense::click());
-                                    ui.painter().rect_filled(rect, 4.0, theme.accent_wash);
-                                    response
+                            let (rect, response) =
+                                ui.allocate_exact_size(size, egui::Sense::click());
+                            match tile.texture {
+                                // Fitted, not stretched: a tall bottle stays
+                                // tall, centred in its square.
+                                Some((texture, [w, h])) if w > 0.0 && h > 0.0 => {
+                                    let scale = (TILE / w).min(TILE / h);
+                                    let fitted = egui::Rect::from_center_size(
+                                        rect.center(),
+                                        egui::vec2(w * scale, h * scale),
+                                    );
+                                    ui.painter().image(
+                                        texture,
+                                        fitted,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
                                 }
-                            };
+                                _ => {
+                                    ui.painter().rect_filled(rect, 4.0, theme.accent_wash);
+                                }
+                            }
                             let response = response.on_hover_text(format!(
                                 "{}\n{}\n{}",
                                 tile.name, tile.detail, text.add_hint

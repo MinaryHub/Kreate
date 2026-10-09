@@ -522,7 +522,8 @@ pub fn local_maps(dir: &Path) -> Maps {
 fn thumbnail_of(bytes: &[u8]) -> Option<Picture> {
     let image = image::load_from_memory(bytes)
         .ok()?
-        .thumbnail(128, 128)
+        // Twice the tile, for a screen of two pixels a point.
+        .thumbnail(256, 256)
         .to_rgba8();
     Some((image.width(), image.height(), image.into_raw()))
 }
@@ -687,11 +688,11 @@ impl Library {
                 };
                 let image = match source {
                     Source::PolyHaven => cache_root().and_then(|root| {
-                        let dest = root.join("polyhaven").join("thumbs").join(format!("{id}.png"));
+                        let dest = root.join("polyhaven").join("thumbs").join(format!("{id}_256.png"));
                         if !dest.exists() {
                             download(
                                 &format!(
-                                    "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=128&height=128"
+                                    "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=256&height=256"
                                 ),
                                 &dest,
                             )
