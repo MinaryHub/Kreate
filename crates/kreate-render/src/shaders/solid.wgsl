@@ -315,7 +315,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     // still reads under the weights, as Blender's weight paint does.
     // Sampled before any branch: a sample needs its neighbours' coordinates,
     // which a branch some pixels skip does not give it.
-    let image = textureSample(solid_tex, solid_sampler, in.weight, max(i32(in.layer), 0)).rgb;
+    // V turned to run up the picture, which is stored top row first — the
+    // rendered view's rule (`kr_texel`), or studio and rendered disagree on
+    // which way up a texture is.
+    let image = textureSample(solid_tex, solid_sampler, vec2<f32>(in.weight.x, 1.0 - in.weight.y), max(i32(in.layer), 0)).rgb;
     var base = in.base_color.rgb;
     if (in.ramp < 0.5 && in.layer > -0.5) {
         base = image;

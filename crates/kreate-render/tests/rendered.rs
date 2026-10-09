@@ -3364,3 +3364,70 @@ fn the_path_tracer_tilts_the_light_by_a_bump() {
         "against the flat floor, {brighter} traced pixels are lighter and {darker} darker"
     );
 }
+
+/// Studio mode shows a texture the right way up, as the rendered view does:
+/// a picture red in its top half lands red at the plane's +Y edge, which the
+/// default view puts at the top of the screen.
+#[test]
+fn a_studio_texture_is_the_right_way_up() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Studio;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    let side = 64usize;
+    let mut pixels = vec![0u8; side * side * 4];
+    for row in 0..side {
+        for column in 0..side {
+            let at = (row * side + column) * 4;
+            pixels[at..at + 4].copy_from_slice(if row < side / 2 {
+                &[255, 0, 0, 255]
+            } else {
+                &[0, 0, 255, 255]
+            });
+        }
+    }
+    viewport.set_solid_images(
+        &gpu.device,
+        &gpu.queue,
+        &[kreate_render::solid_textures::SolidImage {
+            width: side as u32,
+            height: side as u32,
+            pixels: &pixels,
+        }],
+    );
+    let plane_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(2.0, 1, 1));
+    let plane =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &plane_cpu, glam::Vec4::ONE);
+    let camera = Camera {
+        distance: 4.0,
+        ..Camera::default()
+    };
+    let layers = [0];
+    let mut draws = vec![Draw {
+        layers: &layers,
+        ..Draw::new(&plane, glam::DAffine3::IDENTITY)
+    }];
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    let frame = read_frame(&gpu, &mut viewport, &draws);
+    let w = SIZE as usize;
+    let count = |top: bool, red: bool| {
+        let rows = if top { 0..w / 2 } else { w / 2..w };
+        rows.flat_map(|y| (0..w).map(move |x| y * w + x))
+            .filter(|i| {
+                let p = frame[*i];
+                if red {
+                    p[0] > p[2] + 0.05
+                } else {
+                    p[2] > p[0] + 0.05
+                }
+            })
+            .count()
+    };
+    let (red_top, red_bottom) = (count(true, true), count(false, true));
+    let (blue_top, blue_bottom) = (count(true, false), count(false, false));
+    assert!(
+        red_top > red_bottom && blue_bottom > blue_top,
+        "red {red_top} up and {red_bottom} down, blue {blue_top} up and {blue_bottom} down"
+    );
+}

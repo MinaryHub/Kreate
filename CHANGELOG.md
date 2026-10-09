@@ -26,7 +26,7 @@ use; `scripts/release.sh` turns that section into the next release.
 - Textures are the right way up. V runs up the picture, as in Blender and
   OBJ; every image was drawn upside down, which on a model whose texture
   holds all its parts — most from Poly Haven — put the wrong part on every
-  face.
+  face. In the studio view as well as the rendered one.
 
 ## [0.3.0] - 2026-10-09
 

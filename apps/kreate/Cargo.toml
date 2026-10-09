@@ -51,4 +51,3 @@ zip.workspace = true
 winresource = "0.1"
 
 [dev-dependencies]
-gltf.workspace = true
