@@ -60,3 +60,33 @@ fn fs_hashed(@builtin(position) position: vec4<f32>) {
         discard;
     }
 }
+
+// A cut-out's shadow: a leaf's, not its card's. The object's picture —
+// the solid modes' image array, which holds base colours with their alpha —
+// is read where the light sees the surface, and where it is clearer than the
+// threshold nothing is drawn into the map. `params.z` is the layer, `params.w`
+// the threshold.
+@group(2) @binding(0) var cut_images: texture_2d_array<f32>;
+@group(2) @binding(1) var cut_sampler: sampler;
+
+struct CutOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_cutout(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>) -> CutOut {
+    var out: CutOut;
+    out.clip = globals.view_proj * object.model * vec4<f32>(position, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs_cutout(in: CutOut) {
+    // V turned to run up the picture, as every other read of it is.
+    let alpha = textureSample(cut_images, cut_sampler, vec2<f32>(in.uv.x, 1.0 - in.uv.y), i32(object.params.z)).a;
+    if (alpha < object.params.w) {
+        discard;
+    }
+}

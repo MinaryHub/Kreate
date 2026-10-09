@@ -2064,7 +2064,7 @@ impl Viewport {
         });
         let lights = crate::lights::Lights::new(device, 8);
         let tiles_0 = crate::tiles::Tiles::new(device);
-        let shadows_0 = crate::shadow::ShadowMaps::new(device);
+        let shadows_0 = crate::shadow::ShadowMaps::new(device, &solid_textures.layout);
         let shadow_buf_0 = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow entries"),
             size: (std::mem::size_of::<crate::shadow::GpuShadow>() * 8) as u64,
@@ -3061,8 +3061,14 @@ impl Viewport {
             );
             // The shadow pass draws the same geometry from a different
             // camera, so it needs the same model matrix and nothing else.
-            self.shadows
-                .set_object(queue, i, &m, self.see_through(draw), self.accum_samples);
+            self.shadows.set_object(
+                queue,
+                i,
+                &m,
+                self.see_through(draw),
+                self.accum_samples,
+                Self::cut_of(draw),
+            );
             drawn = drawn.union(transformed_bounds(&m, draw.mesh.bounds));
             queue.write_buffer(
                 &self.rendered_objects.buffer,
@@ -4633,6 +4639,14 @@ impl Viewport {
         glam::Mat4::from_translation(glam::Vec3::new(2.0 * jx / w, -2.0 * jy / h, 0.0)) * view_proj
     }
 
+    /// A cut-out's shadow picture: the first slot's image layer and threshold,
+    /// when it has both. One per object — a shadow pass draws an object whole.
+    fn cut_of(draw: &Draw) -> Option<(u32, f32)> {
+        let layer = *draw.layers.first()?;
+        let clip = *draw.clips.first()?;
+        (layer >= 0 && clip > 0.0).then_some((layer as u32, clip))
+    }
+
     /// Whether the surfaces go through the smoothing pass: on, and there are
     /// surfaces — a wireframe has none, and its lines smooth themselves.
     fn smoothing(&self) -> bool {
@@ -4675,6 +4689,7 @@ impl Viewport {
             self.shadows.encode(
                 encoder,
                 layer,
+                &self.solid_textures.bind,
                 draws.iter().enumerate().filter_map(|(i, draw)| {
                     // Detail is deliberately ignored: an object simplified out
                     // of the picture still casts a shadow onto what is left,
@@ -4687,13 +4702,14 @@ impl Viewport {
                     if draw.mesh.counts.triangles == 0 || see_through >= 1.0 || draw.wire_only {
                         return None;
                     }
-                    Some((
-                        i as u32,
-                        &draw.mesh.positions,
-                        &draw.mesh.indices,
-                        draw.mesh.counts.triangles,
-                        see_through > 0.0,
-                    ))
+                    Some(crate::shadow::ShadowDraw {
+                        index: i as u32,
+                        positions: &draw.mesh.positions,
+                        indices: &draw.mesh.indices,
+                        triangles: draw.mesh.counts.triangles,
+                        see_through: see_through > 0.0,
+                        uvs: Self::cut_of(draw).map(|_| &draw.mesh.uvs),
+                    })
                 }),
             );
         }

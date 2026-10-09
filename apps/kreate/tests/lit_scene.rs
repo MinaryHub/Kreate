@@ -1329,6 +1329,15 @@ fn a_plane_wearing(graph: kreate_scene::shader::ShaderGraph) -> Vec<[f32; 4]> {
 fn a_plane_wearing_with(
     make: impl FnOnce(&mut Document) -> kreate_scene::shader::ShaderGraph,
 ) -> Vec<[f32; 4]> {
+    a_plane_shot(make, |_| {}, false)
+}
+
+/// The same, built from a material rather than a graph, rasterised or traced.
+fn a_plane_shot(
+    make: impl FnOnce(&mut Document) -> kreate_scene::shader::ShaderGraph,
+    adjust: impl FnOnce(&mut kreate_scene::Material),
+    traced: bool,
+) -> Vec<[f32; 4]> {
     let gpu = gpu().expect("checked by the caller");
     let mut doc = Document::new();
     kreate::startup::starting_scene(&mut doc);
@@ -1343,24 +1352,27 @@ fn a_plane_wearing_with(
     // One face, so that anything varying across it is the material's doing.
     let mesh = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 1, 1));
     let graph = make(&mut doc);
-    let material = doc.add_material(kreate_scene::Material {
+    let mut material = kreate_scene::Material {
         name: "Procedural".into(),
         graph: Some(graph),
         ..Default::default()
-    });
+    };
+    adjust(&mut material);
+    let material = doc.add_material(material);
     doc.set_mesh_slot(mesh, 0, Some(material));
     let object = doc.add_object(kreate_scene::document::Object::new(
         "Plane",
         kreate_scene::document::ObjectData::Mesh(mesh),
     ));
     doc.selection.add(object);
-    shoot_from(
+    shoot_with(
         &gpu,
         &doc,
         Camera {
             distance: 4.0,
             ..Camera::default()
         },
+        traced,
     )
 }
 
@@ -1701,36 +1713,50 @@ fn a_cut_out_material_is_cut_where_its_picture_is_clear() {
         eprintln!("no GPU adapter; skipping");
         return;
     }
-    let shoot = |clip: Option<f32>| {
-        a_plane_wearing_with(|doc| {
-            let mut image =
-                kreate_scene::Image::new("Leaf", 64, 64, kreate_scene::PixelFormat::Rgba8);
-            {
-                let tile = image.tile_mut(0, 0).expect("one tile");
-                let bytes = tile.bytes_mut();
-                let side = kreate_scene::image::TILE as usize;
-                for row in 0..side {
-                    for column in 0..side {
-                        let at = (row * side + column) * 4;
-                        let alpha = if column < 32 { 0 } else { 255 };
-                        bytes[at..at + 4].copy_from_slice(&[230, 20, 20, alpha]);
+    let shoot = |clip: Option<f32>, traced: bool| {
+        let image_id = std::cell::Cell::new(None);
+        a_plane_shot(
+            |doc| {
+                let mut image =
+                    kreate_scene::Image::new("Leaf", 64, 64, kreate_scene::PixelFormat::Rgba8);
+                {
+                    let tile = image.tile_mut(0, 0).expect("one tile");
+                    let bytes = tile.bytes_mut();
+                    let side = kreate_scene::image::TILE as usize;
+                    for row in 0..side {
+                        for column in 0..side {
+                            let at = (row * side + column) * 4;
+                            let alpha = if column < 32 { 0 } else { 255 };
+                            bytes[at..at + 4].copy_from_slice(&[230, 20, 20, alpha]);
+                        }
                     }
                 }
-            }
-            let id = doc.add_image(image);
-            let material = kreate_scene::Material {
-                base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
-                base_color_image: Some(id),
-                alpha_clip: clip,
-                ..Default::default()
-            };
-            kreate_scene::shader::ShaderGraph::for_material(&material)
-        })
+                let id = doc.add_image(image);
+                image_id.set(Some(id));
+                kreate_scene::shader::ShaderGraph::for_material(&kreate_scene::Material {
+                    base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+                    base_color_image: Some(id),
+                    alpha_clip: clip,
+                    ..Default::default()
+                })
+            },
+            |material| {
+                material.base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+                material.base_color_image = image_id.get();
+                material.alpha_clip = clip;
+            },
+            traced,
+        )
     };
     let reddish = |f: &[[f32; 4]]| f.iter().filter(|p| p[0] > p[2] + 0.1).count();
-    let (whole, cut) = (reddish(&shoot(None)), reddish(&shoot(Some(0.5))));
-    assert!(
-        whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
-        "{whole} red pixels solid, {cut} cut: about half should go"
-    );
+    for traced in [false, true] {
+        let (whole, cut) = (
+            reddish(&shoot(None, traced)),
+            reddish(&shoot(Some(0.5), traced)),
+        );
+        assert!(
+            whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
+            "traced {traced}: {whole} red pixels solid, {cut} cut: about half should go"
+        );
+    }
 }

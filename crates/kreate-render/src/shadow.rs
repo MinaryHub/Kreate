@@ -748,6 +748,8 @@ pub struct ShadowMaps {
     /// The same pass for a see-through object: its texels drop out by its
     /// transmission. See `shadow.wgsl`.
     hashed: wgpu::RenderPipeline,
+    /// For a cut-out: its picture's alpha decides what casts.
+    cut: wgpu::RenderPipeline,
     object_stride: u32,
     object_capacity: u32,
 }
@@ -769,8 +771,21 @@ const OBJECT_SIZE: u64 = 80;
 
 pub const MAX_SHADOWS: usize = 16;
 
+/// One draw into a shadow map: which object slot, its geometry, and — for a
+/// cut-out — its UVs.
+pub struct ShadowDraw<'a> {
+    pub index: u32,
+    pub positions: &'a wgpu::Buffer,
+    pub indices: &'a wgpu::Buffer,
+    pub triangles: u32,
+    pub see_through: bool,
+    pub uvs: Option<&'a wgpu::Buffer>,
+}
+
 impl ShadowMaps {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// `cut_layout` is the solid modes' image array's layout: a cut-out's
+    /// shadow reads its picture from there.
+    pub fn new(device: &wgpu::Device, cut_layout: &wgpu::BindGroupLayout) -> Self {
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow maps"),
             size: wgpu::Extent3d {
@@ -868,6 +883,59 @@ impl ShadowMaps {
         };
         let pipeline = pipeline_of("shadow", None);
         let hashed = pipeline_of("shadow see-through", Some("fs_hashed"));
+        let cut_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow cut-out"),
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&object_layout),
+                Some(cut_layout),
+            ],
+            immediate_size: 0,
+        });
+        let cut = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow cut-out"),
+            layout: Some(&cut_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_cutout"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: 12,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 2,
+                        }],
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_cutout"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(crate::gpu::depth_write_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let stride = Self::stride(device);
         let (objects, object_bind) = Self::make_objects(device, &object_layout, stride, 8);
@@ -901,6 +969,7 @@ impl ShadowMaps {
             array,
             pipeline,
             hashed,
+            cut,
             object_layout,
             globals,
             globals_binds,
@@ -978,11 +1047,17 @@ impl ShadowMaps {
         model: &glam::Mat4,
         see_through: f32,
         seed: u32,
+        cut: Option<(u32, f32)>,
     ) {
         let mut data = [0.0f32; 20];
         data[..16].copy_from_slice(&model.to_cols_array());
         data[16] = see_through.clamp(0.0, 1.0);
         data[17] = (seed % 4096) as f32;
+        // A cut-out's picture: its layer, and below what alpha it is clear.
+        if let Some((layer, clip)) = cut {
+            data[18] = layer as f32;
+            data[19] = clip;
+        }
         queue.write_buffer(
             &self.objects,
             (self.object_stride * index) as u64,
@@ -1006,11 +1081,14 @@ impl ShadowMaps {
     /// `draws` yields `(index, positions, indices, triangles)` — the index is
     /// the slot [`ShadowMaps::set_object`] wrote, so the two cannot disagree
     /// about which matrix belongs to which draw.
+    ///
+    /// A draw that brings its UVs is a cut-out, read against `cut_images`.
     pub fn encode<'a>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         layer: usize,
-        draws: impl IntoIterator<Item = (u32, &'a wgpu::Buffer, &'a wgpu::Buffer, u32, bool)>,
+        cut_images: &wgpu::BindGroup,
+        draws: impl IntoIterator<Item = ShadowDraw<'a>>,
     ) {
         let Some(view) = self.layers.get(layer) else {
             return;
@@ -1037,20 +1115,38 @@ impl ShadowMaps {
             return;
         };
         pass.set_bind_group(0, globals, &[]);
-        let mut hashing = false;
-        for (index, positions, indices, triangles, see_through) in draws {
+        pass.set_bind_group(2, cut_images, &[]);
+        // 0 solid, 1 hashed, 2 cut-out: the pipeline bound now.
+        let mut bound = 0u8;
+        for draw in draws {
+            let ShadowDraw {
+                index,
+                positions,
+                indices,
+                triangles,
+                see_through,
+                uvs,
+            } = draw;
             if triangles == 0 {
                 continue;
             }
-            if see_through != hashing {
-                pass.set_pipeline(if see_through {
-                    &self.hashed
-                } else {
-                    &self.pipeline
+            let want = match (uvs.is_some(), see_through) {
+                (true, _) => 2,
+                (false, true) => 1,
+                (false, false) => 0,
+            };
+            if want != bound {
+                pass.set_pipeline(match want {
+                    2 => &self.cut,
+                    1 => &self.hashed,
+                    _ => &self.pipeline,
                 });
-                hashing = see_through;
+                bound = want;
             }
             pass.set_bind_group(1, &self.object_bind, &[self.object_stride * index]);
+            if let Some(uvs) = uvs {
+                pass.set_vertex_buffer(1, uvs.slice(..));
+            }
             pass.set_vertex_buffer(0, positions.slice(..));
             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..triangles * 3, 0, 0..1);

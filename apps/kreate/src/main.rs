@@ -9832,11 +9832,19 @@ impl App {
         let textured =
             self.solid_textures && gfx.viewport.shading != kreate_render::ShadingMode::Rendered;
         let mut images: Vec<kreate_scene::document::ImageId> = Vec::new();
+        // A cut-out's picture goes up whatever the mode: the rendered view's
+        // shadow pass reads it to cast a leaf's shadow rather than its card's.
+        let cuts = |id: &kreate_scene::ObjectId, slot: usize| {
+            self.doc
+                .material_id_at(*id, slot)
+                .and_then(|m| self.doc.material(m))
+                .is_some_and(|m| m.alpha_clip.is_some())
+        };
         let slot_layers: Vec<Vec<i32>> = self
             .evaluated
             .iter()
             .map(|(id, _)| {
-                if !textured {
+                if !textured && !cuts(id, 0) {
                     return Vec::new();
                 }
                 let slots = self
@@ -9875,7 +9883,7 @@ impl App {
             .evaluated
             .iter()
             .map(|(id, _)| {
-                if !textured {
+                if !textured && !cuts(id, 0) {
                     return Vec::new();
                 }
                 (0..kreate_render::viewport::SOLID_SLOTS)
@@ -9893,7 +9901,7 @@ impl App {
             .iter()
             .filter_map(|i| Some((*i, self.doc.image(*i)?.revision())))
             .collect();
-        if textured && want != self.solid_images {
+        if (textured || !images.is_empty()) && want != self.solid_images {
             let pixels: Vec<(u32, u32, Vec<u8>)> = images
                 .iter()
                 .filter_map(|i| self.doc.image(*i))

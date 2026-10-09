@@ -121,6 +121,7 @@ impl Materials {
                     // A material glows both ways, as the rasterised view
                     // draws it; only a light's panel is one-sided.
                     one_sided: false,
+                    alpha_clip: m.alpha_clip.unwrap_or(0.0),
                     ..Default::default()
                 };
             }
@@ -145,6 +146,16 @@ impl Materials {
                 }
             }
             values.extend(constants);
+            // A cut-out's picture, for the tracer to test each ray against:
+            // the material's first colour image, which a flat material's
+            // graph reaches first and is its base colour.
+            if surfaces[index].alpha_clip > 0.0 {
+                surfaces[index].base_color_image = compiled
+                    .image_spaces
+                    .iter()
+                    .position(|s| *s == kreate_scene::ColorSpace::Srgb)
+                    .map(|k| images.len() + k);
+            }
             for image in pixels_for(doc, compiled) {
                 match image.kind {
                     kreate_render::material::TextureKind::Color => colour += 1,

@@ -154,6 +154,10 @@ pub struct PtSurface {
     /// roughness and normal, if any: the flat values and images above are
     /// then not read. A light's panel has none.
     pub material: Option<u32>,
+    /// A cut-out's threshold, read against `base_color_image`'s alpha where a
+    /// ray meets the surface — so the cut is a hole for shadows too, which
+    /// the material's code, run only at the hit kept, cannot make.
+    pub alpha_clip: f32,
 }
 
 /// An image a surface reads: four bytes a pixel, row by row; sRGB-encoded for
@@ -628,7 +632,7 @@ impl PathTracer {
                         if s.one_sided { 1.0 } else { 0.0 },
                         // One past the material, so zero is none.
                         s.material.map_or(0.0, |m| m as f32 + 1.0),
-                        0.0,
+                        s.alpha_clip.clamp(0.0, 1.0),
                         0.0,
                     ],
                 ]

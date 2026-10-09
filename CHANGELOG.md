@@ -33,6 +33,8 @@ use; `scripts/release.sh` turns that section into the next release.
   studio view, the rendered view and the path-traced render. glTF's `MASK`
   imports as one and exports as one; `BLEND` (a clock's front, a lamp's
   shade) imports as glass.
+- A cut-out casts the shadow of what is left of it — a leaf's, not its
+  card's — in the rendered view and the path-traced render.
 
 ### Changed
 

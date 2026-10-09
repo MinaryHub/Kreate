@@ -3486,3 +3486,104 @@ fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
         "{whole} red pixels solid, {cut} cut: about half should go"
     );
 }
+
+/// A cut-out casts the shadow of what is left of it. A card clear on its
+/// left half, a metre over a floor, under a sun from the upper right: the
+/// left half's shadow falls on the floor beside the card, where nothing else
+/// is — dark when the card is solid, lit when it is cut.
+#[test]
+fn a_cut_out_casts_only_its_opaque_part() {
+    let gpu = gpu_or_skip!(gpu());
+    let side = 64usize;
+    let mut pixels = vec![0u8; side * side * 4];
+    for row in 0..side {
+        for column in 0..side {
+            let at = (row * side + column) * 4;
+            let alpha = if column < side / 2 { 0 } else { 255 };
+            pixels[at..at + 4].copy_from_slice(&[200, 200, 200, alpha]);
+        }
+    }
+    let shoot = |clip: f32| {
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+        viewport.shading = ShadingMode::Rendered;
+        viewport.show_grid = false;
+        viewport.show_wireframe = false;
+        viewport.show_bloom = false;
+        viewport.show_reflections = false;
+        viewport.ambient_occlusion = false;
+        viewport.set_display(&gpu.queue, FRAMED);
+        one_material(&gpu, &mut viewport, grey());
+        viewport.set_solid_images(
+            &gpu.device,
+            &gpu.queue,
+            &[kreate_render::solid_textures::SolidImage {
+                width: side as u32,
+                height: side as u32,
+                pixels: &pixels,
+            }],
+        );
+        let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(10.0, 1, 1));
+        let card_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(2.0, 1, 1));
+        let floor = kreate_render::GpuMesh::upload(
+            &gpu.device,
+            &viewport.layouts,
+            &floor_cpu,
+            glam::Vec4::ONE,
+        );
+        let card = kreate_render::GpuMesh::upload(
+            &gpu.device,
+            &viewport.layouts,
+            &card_cpu,
+            glam::Vec4::ONE,
+        );
+        // Looking straight down at the floor left of the card: x from about
+        // -3.2 to 0.2, the card's own edge at -1.
+        let camera = Camera {
+            pivot: glam::DVec3::new(-1.5, 0.0, 0.0),
+            distance: 4.0,
+            rotation: glam::DQuat::IDENTITY,
+            ..Camera::default()
+        };
+        let (layers, clips) = ([0], [clip]);
+        let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 1.0));
+        let mut draws = vec![
+            Draw::new(&floor, glam::DAffine3::IDENTITY),
+            Draw::new(&card, lift)
+                .with_layers(&layers)
+                .with_clips(&clips),
+        ];
+        // Down and to the left at forty-five degrees: a metre up lands a
+        // metre left, so the card's clear half (x -1..0) shades x -2..-1.
+        let sun = PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: glam::Vec3::new(-1.0, 0.0, -1.0).normalize(),
+            amount: [20_000.0; 3],
+            ..PlacedLight::default()
+        };
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[sun]);
+            viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+            out = read_frame(&gpu, &mut viewport, &draws);
+        }
+        out
+    };
+    let lum = |p: &[f32; 4]| p[0] + p[1] + p[2];
+    let w = SIZE as usize;
+    // Where x -2..-1 and y -0.5..0.5 land on screen.
+    let patch = |frame: &[[f32; 4]]| -> f32 {
+        let (mut sum, mut n) = (0.0, 0.0);
+        for y in (w * 2 / 5)..(w * 3 / 5) {
+            for x in (w * 2 / 5)..(w * 3 / 5) {
+                sum += lum(&frame[y * w + x]);
+                n += 1.0;
+            }
+        }
+        sum / n
+    };
+    let (solid, cut) = (patch(&shoot(0.0)), patch(&shoot(0.5)));
+    assert!(
+        cut > solid * 1.5,
+        "the floor where the clear half's shadow would fall: {solid} under a solid card, {cut} under a cut one"
+    );
+}

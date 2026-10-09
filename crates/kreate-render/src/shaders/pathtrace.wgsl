@@ -219,6 +219,19 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: u32)
                 if (any && pt_random() < pt_surfaces[tri.w * PT_SURFACE + 1u].w) {
                     continue;
                 }
+                // A cut-out: where its picture is clear there is nothing to
+                // hit — for the camera's rays and the shadows' alike, so a
+                // leaf casts a leaf's shadow and not its card's.
+                let cut = pt_surfaces[tri.w * PT_SURFACE + 3u].z;
+                let layer = pt_surfaces[tri.w * PT_SURFACE + 1u].y;
+                if (cut > 0.0 && layer >= 0.0) {
+                    let w = 1.0 - u - v;
+                    let at = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * u + pt_uvs[tri.z] * v);
+                    let alpha = textureSampleLevel(pt_colour_images, pt_image_sampler, vec2<f32>(at.x, 1.0 - at.y), i32(layer), 0.0).a;
+                    if (alpha < cut) {
+                        continue;
+                    }
+                }
                 let near = select(1e-4, -1e-5, skip != PT_NONE);
                 if (t > near && t < nearest) {
                     nearest = t;
