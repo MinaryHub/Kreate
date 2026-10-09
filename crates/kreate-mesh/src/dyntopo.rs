@@ -324,28 +324,29 @@ impl DynCache {
     }
 
     /// The surface as a mesh: the living triangles, over the vertices they
-    /// use.
+    /// use. Built straight into the mesh's own arrays — a list per triangle
+    /// was most of a frame's cost on a dense surface.
     fn to_mesh(&self) -> MeshData {
         let mut map = vec![u32::MAX; self.pos.len()];
-        let mut positions = Vec::new();
-        let mut faces = Vec::new();
+        let mut positions = Vec::with_capacity(self.pos.len());
+        let mut corners = Vec::with_capacity(self.tris.len() * 3);
         for (t, tri) in self.tris.iter().enumerate() {
             if !self.alive[t] {
                 continue;
             }
-            let face: Vec<u32> = tri
-                .iter()
-                .map(|v| {
-                    if map[*v as usize] == u32::MAX {
-                        map[*v as usize] = positions.len() as u32;
-                        positions.push(self.pos[*v as usize]);
-                    }
-                    map[*v as usize]
-                })
-                .collect();
-            faces.push(face);
+            for v in tri {
+                if map[*v as usize] == u32::MAX {
+                    map[*v as usize] = positions.len() as u32;
+                    positions.push(self.pos[*v as usize]);
+                }
+                corners.push(map[*v as usize]);
+            }
         }
-        MeshData::from_faces(positions, &faces)
+        let offsets: Vec<u32> = (0..=corners.len() as u32 / 3).map(|f| f * 3).collect();
+        let mut mesh = MeshData::from_csr(positions.len() as u32, offsets, corners, Vec::new())
+            .expect("every corner names a vertex just made");
+        mesh.positions_mut().copy_from_slice(&positions);
+        mesh
     }
 }
 
@@ -400,6 +401,35 @@ mod tests {
         assert!(fine <= 0.15, "the longest edge under the brush: {fine}");
         assert!(edges(&m).iter().any(|l| *l > 0.45), "the far grid untouched");
         assert!(m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max) > 0.02, "and drawn");
+    }
+
+    #[test]
+    #[ignore]
+    fn cost() {
+        let base = primitives::uv_sphere(1.0, 128, 64);
+        let s = stroke(Brush::Draw);
+        let mut cache = DynCache::new(&base, &s, 0.03);
+        let mut dabs = Vec::new();
+        let (mut run, mut out) = (0.0, 0.0);
+        for i in 0..40 {
+            let a = i as f32 * 0.03;
+            dabs.push(Dab::new(Vec3::new(a.cos(), a.sin(), 0.0), 0.15));
+            let start = cache.applied.len();
+            let t = std::time::Instant::now();
+            let copies = stroke_copies(&s);
+            for d in &dabs[start..] {
+                for (sign, turn) in &copies {
+                    let dab = Dab { centre: *turn * (d.centre * *sign), ..*d };
+                    cache.dab(dab, None, &s, 0.03);
+                }
+            }
+            cache.applied = dabs.clone();
+            run += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let _ = cache.to_mesh();
+            out += t.elapsed().as_secs_f64();
+        }
+        eprintln!("per frame: dabs {:.2} ms, to_mesh {:.2} ms", run * 25.0, out * 25.0);
     }
 
     #[test]

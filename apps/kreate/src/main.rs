@@ -380,6 +380,12 @@ struct SculptStroke {
     pressures: Vec<f64>,
     /// The face set a face set stroke paints: one past the highest there is.
     face_set: i32,
+    /// With dynamic topology, the surface as the stroke found it: what the
+    /// brush finds its way onto. The live mesh changes its triangles every
+    /// frame, and a tree rebuilt for each of them costs more than the
+    /// stroke; the surface the brush meets moves only as far as it has
+    /// pushed it.
+    pick_scene: Option<Vec<(kreate_scene::document::ObjectId, Arc<MeshData>)>>,
     /// Where the last dab went, in the world, to space the next one.
     last: DVec3,
     radius_world: f64,
@@ -897,6 +903,9 @@ struct App {
     solid_textures: bool,
     /// A physics bake running off the main thread.
     bake_job: Option<BakeJob>,
+    /// The tree a dynamic-topology stroke finds the surface in: see
+    /// `SculptStroke::pick_scene`.
+    stroke_pick: kreate::pick::PickCache,
     /// The token the next staged bake is handed over by.
     bake_tokens: u32,
     /// The images the viewport holds for them, and each one's revision, so
@@ -1065,6 +1074,7 @@ impl App {
             sculpt_display: Default::default(),
             solid_textures: true,
             bake_job: None,
+            stroke_pick: kreate::pick::PickCache::new(),
             bake_tokens: 0,
             solid_images: Vec::new(),
             stroke_moved: false,
@@ -7600,9 +7610,14 @@ impl App {
         let object = self.doc.selection.active?;
         let ndc = self.cursor_ndc()?;
         let aspect = self.viewport_aspect();
-        let hit = self
-            .pick
-            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let hit = match self.sculpt_stroke.as_ref().and_then(|s| s.pick_scene.as_ref()) {
+            Some(scene) => self
+                .stroke_pick
+                .raycast_ndc(&self.doc, scene, &self.camera, ndc, aspect)?,
+            None => self
+                .pick
+                .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?,
+        };
         (hit.object == object).then_some(hit.point)
     }
 
@@ -7648,6 +7663,13 @@ impl App {
             dabs: Vec::new(),
             pressures: Vec::new(),
             face_set,
+            pick_scene: settings.dyntopo.then(|| {
+                self.evaluated
+                    .iter()
+                    .filter(|(id, _)| *id == object)
+                    .cloned()
+                    .collect()
+            }),
             last: at,
             radius_world,
             hold: at,
@@ -8096,6 +8118,9 @@ impl App {
             self.drive_strokes();
         }
         if slot == 0 {
+            if self.sculpt_stroke.as_ref().is_some_and(|s| s.pick_scene.is_some()) {
+                self.stroke_pick = kreate::pick::PickCache::new();
+            }
             if let Some(SculptStroke {
                 session: Some(session),
                 ..
@@ -12523,6 +12548,63 @@ kreate.ops.object.add_primitive()",
         app.bake_job.as_ref().unwrap().cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         wait(&mut app);
         assert_eq!(app.history.entries().len(), steps + 1, "cancelled: nothing new");
+    }
+
+    /// What a frame of a dynamic-topology stroke costs, piece by piece.
+    #[test]
+    #[ignore]
+    fn dyntopo_frame_cost() {
+        use std::time::Instant;
+        let mut app = app();
+        let mesh = app.doc.add_mesh(kreate_mesh::primitives::uv_sphere(1.0, 128, 64));
+        let id = app.doc.add_object(kreate_scene::document::Object::new(
+            "Ball",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        ));
+        app.doc.selection.add(id);
+        app.set_mode(OpMode::from_tag("sculpt").unwrap());
+        app.evaluate_scene();
+        // As the application does: the stroke finds the surface on the mesh
+        // as it began, whose tree is built once.
+        let start: Vec<_> = app.evaluated.clone();
+        let mut stroke_pick = kreate::pick::PickCache::new();
+        let _ = stroke_pick.raycast(&app.doc, &start, DVec3::new(0.0, -5.0, 0.0), DVec3::Y, f64::INFINITY);
+        let mut dabs: Vec<f64> = Vec::new();
+        let mut session: Option<kreate_ops::ModalSession> = None;
+        let (mut op, mut eval, mut pick) = (0.0, 0.0, 0.0);
+        let frames = 40;
+        for i in 0..frames {
+            let a = i as f64 * 0.03;
+            dabs.extend([a.cos(), a.sin(), 0.0, 0.15]);
+            let mut params = PropertyMap::new();
+            params.set("dabs", PropertyValue::Floats(dabs.clone()));
+            params.set("dyntopo", PropertyValue::Bool(true));
+            params.set("detail", PropertyValue::Float(0.15));
+            let t = Instant::now();
+            match session.as_mut() {
+                Some(s) => {
+                    app.history
+                        .update_modal(&app.registry, &mut app.doc, None, &app.op_ctx, s, &params)
+                        .unwrap();
+                }
+                None => {
+                    session = app
+                        .history
+                        .begin_modal(&app.registry, &mut app.doc, None, &app.op_ctx, "sculpt.stroke", &params)
+                        .unwrap();
+                }
+            }
+            op += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            app.evaluate_scene();
+            eval += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let _ = stroke_pick.raycast(&app.doc, &start, DVec3::new(0.0, -5.0, 0.0), DVec3::Y, f64::INFINITY);
+            pick += t.elapsed().as_secs_f64();
+        }
+        let ms = |s: f64| s * 1000.0 / frames as f64;
+        let faces = app.doc.mesh(mesh).unwrap().num_faces();
+        eprintln!("faces {faces}; per frame: operator {:.2} ms, evaluate {:.2} ms, pick {:.2} ms", ms(op), ms(eval), ms(pick));
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second
