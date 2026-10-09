@@ -342,6 +342,22 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// The whole way, against the real releases: an older version finds the
+    /// latest, downloads this platform's zip and stages the executable.
+    /// Needs the network, so it runs only when asked.
+    #[test]
+    #[ignore]
+    fn the_latest_release_is_fetched_and_staged() {
+        let root = scratch("fetch");
+        let staged = fetch_and_stage(&root, DEFAULT_REPO, "0.0.1").expect("fetched");
+        let version = staged.expect("a newer release than 0.0.1");
+        let (v, files) = super::staged(&root).expect("staged");
+        assert_eq!(v, version);
+        assert!(files.join(exe_file_name()).is_file());
+        assert_eq!(fetch_and_stage(&root, DEFAULT_REPO, "0.0.1"), Ok(None), "not twice");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn versions_compare_as_numbers() {
         assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
