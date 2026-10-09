@@ -703,6 +703,13 @@ struct App {
     chat_attachments: Vec<kreate::attach::Attachment>,
     /// Help ▸ Contact's messages on their way. See `kreate::contact`.
     outbox: Option<kreate::contact::Outbox>,
+    /// Scene files read on threads of their own, and what wakes the loop
+    /// when one is ready. See `import_into`.
+    imports: (
+        std::sync::mpsc::Sender<ImportReady>,
+        std::sync::mpsc::Receiver<ImportReady>,
+    ),
+    import_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// The asset browser's lists, pictures and downloads.
     assets: Option<kreate::assets::Library>,
     window: Option<Arc<Window>>,
@@ -1014,6 +1021,8 @@ impl App {
             chat_streaming: false,
             chat_attachments: Vec::new(),
             outbox: None,
+            imports: std::sync::mpsc::channel(),
+            import_wake: None,
             assets: None,
             window: None,
             gfx: None,
@@ -4822,7 +4831,20 @@ impl App {
             }
             "import" => {
                 let path = text("path").ok_or("`path` is required")?;
-                self.import_into(std::path::Path::new(&path));
+                // Here and now, not on a thread: the connector is told what
+                // happened when it returns.
+                let mut params = PropertyMap::new();
+                params.set("path", PropertyValue::Text(path.clone()));
+                self.run_op("object.import", params);
+                if self
+                    .history
+                    .last()
+                    .is_some_and(|e| e.op_id == "object.import")
+                {
+                    self.status(&format!("added {path}"));
+                } else {
+                    self.status(&format!("cannot import {path}"));
+                }
                 let said = self.ui.status.clone().unwrap_or_default();
                 if said.starts_with("cannot") {
                     Err(said)
@@ -6201,7 +6223,7 @@ impl App {
                 }
                 Command::ImportScene => {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Scene", SCENE_FORMATS)
+                        .add_filter("Scene", kreate_io::scene_file::SCENE_FORMATS)
                         .add_filter("Kreate document", &["kreate"])
                         .set_title("Import")
                         .pick_file()
@@ -6261,7 +6283,7 @@ impl App {
         }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kreate document", &["kreate"])
-            .add_filter("Scene", SCENE_FORMATS)
+            .add_filter("Scene", kreate_io::scene_file::SCENE_FORMATS)
             .set_title("Open")
             .pick_file()
         else {
@@ -6279,7 +6301,7 @@ impl App {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
         {
-            match import_scene(path) {
+            match kreate_io::scene_file::read_scene_file(path) {
                 Ok((document, notes)) => {
                     self.adopt(document);
                     self.file = DocumentFile::new();
@@ -6605,7 +6627,7 @@ impl App {
                     self.load_from(path);
                 }
             }
-            e if SCENE_FORMATS.contains(&e) => self.import_into(path),
+            e if kreate_io::scene_file::SCENE_FORMATS.contains(&e) => self.import_into(path),
             "hdr" | "exr" => self.set_world_image_from(path),
             _ => self.status(&format!("cannot open {} here", path.display())),
         }
@@ -6619,21 +6641,47 @@ impl App {
         self.ui.asset_list_wanted = true;
     }
 
-    /// Adds a scene file's contents to the document: through the IR into a
-    /// document of its own, then pasted — one undo step, which a script line
-    /// replays, and selected as a paste is.
+    /// Adds a scene file's contents to the document, beside what is there.
+    ///
+    /// Read on a thread of its own and added when it is ready, so a large
+    /// model does not stop the interface: [`App::serve_imports`] runs
+    /// `object.import` for it, one undo step whose script line names the file.
     fn import_into(&mut self, path: &std::path::Path) {
-        match import_scene(path) {
-            Ok((document, _notes)) => match kreate_io::clipboard::encode(&document) {
-                Ok(text) => {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.status(&format!("importing {name}…"));
+        let (tx, wake) = (self.imports.0.clone(), self.import_wake.clone());
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            let result = match kreate_io::scene_file::read_scene_file(&path) {
+                Ok((document, _)) => {
+                    kreate_io::scene_file::prepare(&path, document);
+                    Ok(path)
+                }
+                Err(why) => Err(format!("cannot import {}: {why}", path.display())),
+            };
+            let _ = tx.send(result);
+            if let Some(wake) = wake {
+                wake();
+            }
+        });
+    }
+
+    /// Adds what the import threads have read.
+    fn serve_imports(&mut self) {
+        let ready: Vec<ImportReady> = self.imports.1.try_iter().collect();
+        for result in ready {
+            match result {
+                Ok(path) => {
                     let mut params = PropertyMap::new();
-                    params.set("data", PropertyValue::Text(text));
-                    self.run_op("object.paste", params);
+                    params.set("path", PropertyValue::Text(path.display().to_string()));
+                    self.run_op("object.import", params);
                     self.status(&format!("added {}", path.display()));
                 }
-                Err(e) => self.status(&format!("cannot add {}: {e}", path.display())),
-            },
-            Err(e) => self.status(&format!("cannot import {}: {e}", path.display())),
+                Err(why) => self.status(&why),
+            }
         }
     }
 
@@ -9529,6 +9577,7 @@ impl App {
         // job wakes the loop: the first list and the first pictures are
         // asked for by drawing the panel, with nothing yet running to wake it.
         self.serve_assets();
+        self.serve_imports();
         // Again after the panels: an edit they made this frame — a material
         // value dragged — is drawn this frame, and the reasons are cleared
         // when it ends. Checked only before, a settled view showed the old
@@ -11419,6 +11468,9 @@ fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
 /// visibly, and entering sculpt mode says so.
 const SCULPT_DENSE_ENOUGH: u32 = 1000;
 
+/// A scene file read for importing: its path, ready to add, or why not.
+type ImportReady = Result<std::path::PathBuf, String>;
+
 /// What became of one line of a script.
 struct ScriptLine {
     text: String,
@@ -11438,6 +11490,7 @@ impl ApplicationHandler for App {
         self.serve_chat();
         self.serve_outbox();
         self.serve_assets();
+        self.serve_imports();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -12365,83 +12418,6 @@ fn load_document(path: Option<&str>) -> Document {
     doc
 }
 
-/// The scene files Open, Import and a drop read, by extension.
-const SCENE_FORMATS: &[&str] = &["gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off"];
-
-/// Reads a scene file into a fresh document, through the IR.
-///
-/// Every format lands here, which is the point: what a file said and what the
-/// document holds is one conversion in one place, and §5.7's fidelity contract
-/// is written against it.
-fn import_scene(
-    path: &std::path::Path,
-) -> Result<(Document, Vec<kreate_io::build::BuildNote>), String> {
-    // A Kreate document added to another: everything in it, as a paste.
-    if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
-    {
-        return DocumentFile::open(path)
-            .map(|(doc, _)| (doc, Vec::new()))
-            .map_err(|e| e.to_string());
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
-    let lower = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let name = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Import".to_string());
-    let scene = match lower.as_str() {
-        // A texture an FBX names but does not carry is looked for beside it:
-        // where it says, then by its file name alone — what a model copied
-        // from another machine still has.
-        "fbx" => {
-            let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-            kreate_io::parse_fbx(&bytes, &|named: &str| {
-                let named = named.replace('\\', "/");
-                let relative = dir.join(&named);
-                let bare = named.rsplit('/').next().map(|n| dir.join(n));
-                std::fs::read(relative)
-                    .ok()
-                    .or_else(|| bare.and_then(|b| std::fs::read(b).ok()))
-            })
-            .map_err(|e| e.to_string())?
-        }
-        "3mf" => kreate_io::parse_3mf(&bytes).map_err(|e| e.to_string())?,
-        "ply" => kreate_io::parse_ply(&bytes, &name).map_err(|e| e.to_string())?,
-        "off" => {
-            let text = String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
-            kreate_io::parse_off(&text, &name).map_err(|e| e.to_string())?
-        }
-        "gltf" | "glb" => kreate_io::gltf_import::parse_gltf_file(
-            path,
-            // glTF declares its own units and orientation, so there is nothing
-            // for an option to override: second-guessing the one format that
-            // bothers to say would be the wrong kind of helpful.
-            &kreate_io::gltf_import::GltfOptions::default(),
-        )
-        .map_err(|e| e.to_string())?,
-        "stl" => kreate_io::stl::parse_stl(&bytes, &kreate_io::stl::StlOptions::default())
-            .map_err(|e| e.to_string())?,
-        _ => {
-            let text = String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
-            parse_obj(&text, ObjOptions::default()).map_err(|e| e.to_string())?
-        }
-    };
-    for note in &scene.source.notes {
-        tracing::info!(?note, "import note");
-    }
-    let mut doc = Document::new();
-    let (made, notes) = kreate_io::build::build_into(&scene, &mut doc);
-    if let Some(first) = made.first() {
-        doc.selection.add(*first);
-    }
-    Ok((doc, notes))
-}
-
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -12513,6 +12489,12 @@ fn main() {
     let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     app.outbox = Some(kreate::contact::Outbox::new(move || {
         if let Ok(proxy) = outbox_proxy.lock() {
+            let _ = proxy.send_event(());
+        }
+    }));
+    let import_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    app.import_wake = Some(std::sync::Arc::new(move || {
+        if let Ok(proxy) = import_proxy.lock() {
             let _ = proxy.send_event(());
         }
     }));
@@ -12822,6 +12804,40 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// File ▸ Import reads the file off the main thread and adds it as one
+    /// step whose script line names the file — not the file's bytes.
+    #[test]
+    fn an_import_is_read_aside_and_recorded_by_its_path() {
+        let dir = std::env::temp_dir().join(format!("kreate-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("pair.obj");
+        let mesh = kreate_mesh::primitives::cube(1.0);
+        std::fs::write(
+            &path,
+            kreate_io::write_obj(
+                &[("A".to_string(), &mesh), ("B".to_string(), &mesh)],
+                Default::default(),
+            ),
+        )
+        .expect("written");
+        let mut app = app();
+        let before = app.doc.objects().count();
+        app.import_into(&path);
+        let start = std::time::Instant::now();
+        while app.doc.objects().count() == before && start.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.serve_imports();
+        }
+        assert_eq!(app.doc.objects().count(), before + 2);
+        let line = app.history.last().expect("a step").to_script_call();
+        assert!(line.starts_with("kreate.ops.object.import("), "{line}");
+        assert!(line.len() < 400, "the line names the file: {line}");
+        // And undoing it takes both away.
+        assert!(app.history.undo(&mut app.doc), "undone");
+        assert_eq!(app.doc.objects().count(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File ▸ Open shows a document from where it was looked at when it was
     /// saved — not framed afresh, not the last document's view.
@@ -13749,6 +13765,12 @@ kreate.ops.object.add_primitive()",
         std::fs::write(&path, bytes).unwrap();
         let (objects, steps) = (app.doc.object_count(), app.history.entries().len());
         app.open_dropped(&path);
+        // Read on a thread, added when it is ready.
+        let start = std::time::Instant::now();
+        while app.doc.object_count() == objects && start.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.serve_imports();
+        }
         assert_eq!(
             app.doc.object_count(),
             objects + 1,

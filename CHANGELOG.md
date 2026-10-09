@@ -24,6 +24,13 @@ use; `scripts/release.sh` turns that section into the next release.
   imports as one and exports as one; `BLEND` (a clock's front, a lamp's
   shade) imports as glass.
 
+### Changed
+
+- Importing a model — File ▸ Import, a dropped file, an asset — reads it in
+  the background, so a large one no longer stops the window, and records
+  the step as the file's path rather than the whole model: undo history
+  and autosaves stay small.
+
 ### Fixed
 
 - A `.gltf` whose buffers and textures are files beside it opens and

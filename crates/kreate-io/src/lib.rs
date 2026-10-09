@@ -25,6 +25,7 @@ pub mod obj;
 pub mod off;
 pub mod physics_record;
 pub mod ply;
+pub mod scene_file;
 pub mod step;
 pub mod stl;
 pub mod threemf;

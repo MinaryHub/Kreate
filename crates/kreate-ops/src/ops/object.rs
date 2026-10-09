@@ -1897,6 +1897,62 @@ impl Operator for Paste {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ImportParams {
+    /// The scene file: glTF, FBX, OBJ, STL, PLY, 3MF, OFF or a `.kreate`.
+    pub path: String,
+}
+
+/// Adds a scene file's contents beside what is there: File ▸ Import, a
+/// dropped file, an asset from the browser.
+///
+/// **The file's path rides in the parameters, not its contents.** A paste
+/// carries its bytes because the clipboard will not be there to replay it
+/// from; a file usually will, and carrying an imported model in the history
+/// — fifty megabytes for a clock — made every line of it that heavy. The
+/// application reads the file ahead on a thread of its own
+/// (`kreate_io::scene_file::prepare`), so adding it does not stop the
+/// interface; a replay reads it where it is.
+pub struct Import;
+
+impl Operator for Import {
+    type Params = ImportParams;
+
+    fn id() -> &'static str {
+        "object.import"
+    }
+    fn label() -> &'static str {
+        "Import"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let path = std::path::Path::new(params.path.trim());
+        let fragment = kreate_io::scene_file::take(path)
+            .map_err(|why| OpError::Failed(format!("cannot import {}: {why}", path.display())))?;
+        if fragment.object_count() == 0 {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        let added = d.merge_from(&fragment);
+        if added.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        d.selection.clear();
+        for id in &added {
+            d.selection.add(*id);
+        }
+        d.selection.active = added.last().copied();
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Which point a rotation or scale happens about.
 pub const PIVOTS: &[&str] = &["median", "individual", "active", "world_origin", "cursor"];
 
@@ -3432,6 +3488,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddMaterialSlot>();
     registry.register::<SetVisible>();
     registry.register::<Paste>();
+    registry.register::<Import>();
     registry.register::<AddEmpty>();
     registry.register::<RemoveMaterialSlot>();
     registry.register::<AssignMaterial>();
