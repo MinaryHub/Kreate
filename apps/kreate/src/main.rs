@@ -12824,7 +12824,10 @@ mod tests {
         app.load_from(&path);
         assert_eq!(app.camera.pivot, saved.pivot);
         assert_eq!(app.camera.distance, 6.5);
-        assert_eq!(app.camera.projection, kreate_render::Projection::Orthographic);
+        assert_eq!(
+            app.camera.projection,
+            kreate_render::Projection::Orthographic
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
