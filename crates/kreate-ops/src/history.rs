@@ -1174,7 +1174,10 @@ mod tests {
     #[test]
     fn a_long_text_value_is_shortened_for_reading_and_kept_for_replaying() {
         let mut params = PropertyMap::new();
-        params.set("data", kreate_reflect::PropertyValue::Text("ab".repeat(500_000)));
+        params.set(
+            "data",
+            kreate_reflect::PropertyValue::Text("ab".repeat(500_000)),
+        );
         params.set("name", kreate_reflect::PropertyValue::Text("Chair".into()));
         let entry = HistoryEntry {
             op_id: "object.paste".into(),

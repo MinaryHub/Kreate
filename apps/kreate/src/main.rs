@@ -6242,6 +6242,14 @@ impl App {
         if !self.confirm_discarding_changes("start a new document") {
             return;
         }
+        // The view a fresh start shows: Kreate's own camera, out of any
+        // scene camera and any glide in progress, and then framed as
+        // `adopt` frames. Keeping the last document's angle, lens or
+        // orthographic view made a new document look like an old one.
+        self.camera = Camera::default();
+        self.motion = kreate_render::CameraMotion::new(Camera::default());
+        self.camera_view = None;
+        self.camera_view_object = None;
         self.adopt(load_document(None));
         self.file = DocumentFile::new();
         self.status("new document");
@@ -12773,6 +12781,24 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// File ▸ New shows the view a fresh start shows: the default angle,
+    /// lens and projection, out of any scene camera — not the last
+    /// document's view.
+    #[test]
+    fn a_new_document_is_seen_from_the_default_view() {
+        let mut app = app();
+        let fresh = Camera::default();
+        app.camera.rotation = glam::DQuat::from_rotation_z(1.2) * app.camera.rotation;
+        app.camera.fov_y = 0.3;
+        app.camera.projection = kreate_render::Projection::Orthographic;
+        app.camera_view = Some(app.camera);
+        app.new_document();
+        assert!(app.camera.rotation.abs_diff_eq(fresh.rotation, 1e-9));
+        assert_eq!(app.camera.fov_y, fresh.fov_y);
+        assert_eq!(app.camera.projection, fresh.projection);
+        assert!(app.camera_view.is_none());
+    }
 
     /// The Lasso tool's drag selects with its path; without one, a box.
     #[test]
