@@ -4483,6 +4483,10 @@ fn draw_rename(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::Rect) 
     let Some((at, text)) = state.rename.as_mut() else {
         return;
     };
+    // The viewport it was asked for in, as the context menu is.
+    if !viewport.contains(*at) {
+        return;
+    }
     let mut done: Option<bool> = None;
     let title = state.catalog.format("outliner-rename", TextKind::Ui, &[]);
     egui::Area::new(egui::Id::new("rename-popup"))
@@ -8042,6 +8046,12 @@ fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::
     let Some(at) = state.context_menu.at else {
         return;
     };
+    // In the viewport it was opened in, and no other: every 3D viewport
+    // draws its overlays, and a menu drawn by each was two menus with one
+    // set of widget ids between them.
+    if !viewport.contains(at) {
+        return;
+    }
     let mut close = false;
     let shown = egui::Area::new(egui::Id::new("viewport-context-menu"))
         .order(egui::Order::Foreground)
