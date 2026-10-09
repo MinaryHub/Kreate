@@ -529,6 +529,9 @@ pub struct StrokeCache {
     mask: Vec<f32>,
     hidden: Vec<bool>,
     face_sets: Vec<i32>,
+    /// The mask, hidden vertices and face sets the stroke began with, which
+    /// the ones above move away from as a mask or face-set brush paints.
+    started_with: (Vec<f32>, Vec<bool>, Vec<i32>),
     /// The stroke settings, its grab left out: a grab is re-done from the
     /// start every time anyway.
     key: Stroke,
@@ -543,7 +546,34 @@ impl StrokeCache {
     /// is right.
     pub fn new(mesh: &MeshData, stroke: &Stroke, radius: f32) -> Self {
         let original = mesh.positions().to_vec();
-        let n = original.len();
+        let started_with = Self::protection(mesh);
+        let (mask, hidden, face_sets) = started_with.clone();
+        let smoothing = stroke.brush == Brush::Smooth || stroke.auto_smooth > 0.0;
+        Self {
+            grid: Grid::new(&original, radius),
+            normal: normals_of(&original, mesh),
+            corners: mesh.corner_verts().to_vec(),
+            near: smoothing.then(|| Neighbours::new(mesh)),
+            faces_of: (stroke.brush == Brush::FaceSet).then(|| VertexFaces::new(mesh)),
+            current: original.clone(),
+            original,
+            mask,
+            hidden,
+            face_sets,
+            started_with,
+            key: Self::key(stroke),
+            applied: Vec::new(),
+            moved: false,
+            masked: false,
+            painted_sets: false,
+        }
+    }
+
+    /// What keeps vertices from a brush: the mask, the hidden ones, and the
+    /// face sets — as the mesh has them now, with the defaults where it has
+    /// none.
+    fn protection(mesh: &MeshData) -> (Vec<f32>, Vec<bool>, Vec<i32>) {
+        let n = mesh.positions().len();
         let attrs = mesh.attributes();
         let mask = attrs
             .get_f32(MASK)
@@ -561,24 +591,7 @@ impl StrokeCache {
             .filter(|s| s.len() == nf)
             .map(|s| s.to_vec())
             .unwrap_or_else(|| vec![0; nf]);
-        let smoothing = stroke.brush == Brush::Smooth || stroke.auto_smooth > 0.0;
-        Self {
-            grid: Grid::new(&original, radius),
-            normal: normals_of(&original, mesh),
-            corners: mesh.corner_verts().to_vec(),
-            near: smoothing.then(|| Neighbours::new(mesh)),
-            faces_of: (stroke.brush == Brush::FaceSet).then(|| VertexFaces::new(mesh)),
-            current: original.clone(),
-            original,
-            mask,
-            hidden,
-            face_sets,
-            key: Self::key(stroke),
-            applied: Vec::new(),
-            moved: false,
-            masked: false,
-            painted_sets: false,
-        }
+        (mask, hidden, face_sets)
     }
 
     fn key(stroke: &Stroke) -> Stroke {
@@ -589,11 +602,18 @@ impl StrokeCache {
     }
 
     /// Whether `dabs` on `mesh` with `stroke` continues what this has done.
+    ///
+    /// The mask, the hidden vertices and the face sets as well as the shape:
+    /// masking everything, stroking, then inverting the mask and stroking
+    /// the same dabs again left the positions and the dabs as they were, so
+    /// the second stroke picked up the first's state — the old mask — and
+    /// moved nothing.
     pub fn fits(&self, mesh: &MeshData, stroke: &Stroke, dabs: &[Dab]) -> bool {
         self.key == Self::key(stroke)
             && dabs.starts_with(&self.applied)
             && mesh.corner_verts() == self.corners.as_slice()
             && mesh.positions() == self.original.as_slice()
+            && Self::protection(mesh) == self.started_with
     }
 
     /// Applies what of `dabs` is new and writes the result into `mesh`, which
