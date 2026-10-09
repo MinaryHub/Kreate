@@ -336,6 +336,9 @@ const APP_ACTIONS: &[&str] = &[
     "app.rename",
     "view.toggle_face_orientation",
     "view.toggle_textures",
+    // A bake on its own thread, which only the application can run.
+    "physics.bake_start",
+    "physics.bake_cancel",
     // File commands are the application's, not the document's: there is no
     // undo step for "the document you had open is gone".
     "file.new",

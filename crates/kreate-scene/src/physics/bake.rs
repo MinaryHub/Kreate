@@ -64,6 +64,15 @@ fn local_for(doc: &Document, id: ObjectId, world: DAffine3) -> DTransform {
 
 /// Runs every simulation in `doc` over its physics frame range.
 pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
+    bake_with(doc, |_, _| true).expect("a bake that is never stopped finishes")
+}
+
+/// The same, telling `progress` how many frames of how many are done after
+/// each one; it answers whether to go on. `None` when it said to stop.
+pub fn bake_with(
+    doc: &Document,
+    mut progress: impl FnMut(usize, usize) -> bool,
+) -> Option<(PhysicsCache, BakeSummary)> {
     let settings = doc.physics;
     let start = settings.frame_start;
     let end = settings.frame_end.max(start);
@@ -177,7 +186,11 @@ pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
         }
     }
 
+    let total = (end - start) as usize;
     for frame in start + 1..=end {
+        if !progress((frame - start - 1) as usize, total) {
+            return None;
+        }
         scene.animate(frame as f64);
         for (id, c) in colliders.iter_mut() {
             c.place(scene.world_transform(*id));
@@ -247,7 +260,8 @@ pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
             })
             .collect(),
     };
-    (cache, summary)
+    progress(total, total);
+    Some((cache, summary))
 }
 
 #[cfg(test)]
@@ -266,6 +280,23 @@ mod tests {
     fn short(doc: &mut Document, frames: i32) {
         doc.physics.frame_start = 1;
         doc.physics.frame_end = frames;
+    }
+
+    #[test]
+    fn a_bake_reports_its_frames_and_stops_when_told() {
+        let mut doc = Document::new();
+        short(&mut doc, 20);
+        let cube = add(&mut doc, "Cube", kreate_mesh::primitives::cube(1.0), DVec3::new(0.0, 0.0, 3.0));
+        doc.object_mut(cube).unwrap().physics.rigid = Some(RigidBody::default());
+        let mut seen = Vec::new();
+        assert!(bake_with(&doc, |done, total| {
+            seen.push((done, total));
+            true
+        })
+        .is_some());
+        assert_eq!(seen.first(), Some(&(0, 19)));
+        assert_eq!(seen.last(), Some(&(19, 19)));
+        assert!(bake_with(&doc, |done, _| done < 5).is_none(), "stopped");
     }
 
     #[test]

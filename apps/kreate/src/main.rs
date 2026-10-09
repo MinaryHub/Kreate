@@ -391,6 +391,21 @@ struct SculptStroke {
     session: Option<kreate_ops::ModalSession>,
 }
 
+/// A physics bake on its own thread.
+struct BakeJob {
+    token: u32,
+    /// Frames done in the high half, of how many in the low.
+    progress: Arc<std::sync::atomic::AtomicU64>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The result once it is done; `Some(None)` when it was stopped.
+    result: Arc<std::sync::Mutex<Option<Option<BakeResult>>>>,
+}
+
+type BakeResult = (
+    kreate_scene::physics::PhysicsCache,
+    kreate_scene::physics::bake::BakeSummary,
+);
+
 /// A texture paint stroke in progress: the dabs laid so far in the image's
 /// UV square, and — once anything has changed — its modal session.
 struct TextureStroke {
@@ -880,6 +895,10 @@ struct App {
     /// The studio and flat modes show base-colour images. On by default: a
     /// texture that was mapped is what the user expects to see.
     solid_textures: bool,
+    /// A physics bake running off the main thread.
+    bake_job: Option<BakeJob>,
+    /// The token the next staged bake is handed over by.
+    bake_tokens: u32,
     /// The images the viewport holds for them, and each one's revision, so
     /// they go up again only when they change.
     solid_images: Vec<(kreate_scene::document::ImageId, u64)>,
@@ -1045,6 +1064,8 @@ impl App {
             sculpt_stroke: None,
             sculpt_display: Default::default(),
             solid_textures: true,
+            bake_job: None,
+            bake_tokens: 0,
             solid_images: Vec::new(),
             stroke_moved: false,
             texture_stroke: None,
@@ -7394,6 +7415,73 @@ impl App {
         }
     }
 
+    /// Starts a physics bake on its own thread, so the window keeps drawing
+    /// and the bake can be stopped. Its result goes in through
+    /// `physics.bake` like any bake — one undo step, a script line — handed
+    /// over by a token.
+    fn start_bake(&mut self) {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        if self.bake_job.is_some() {
+            return;
+        }
+        if !self.doc.objects().any(|(_, o)| !o.physics.is_empty()) {
+            self.status("nothing has physics: give an object a rigid body, cloth or particles first");
+            return;
+        }
+        self.bake_tokens = self.bake_tokens.wrapping_add(1).max(1);
+        let job = BakeJob {
+            token: self.bake_tokens,
+            progress: Arc::new(AtomicU64::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let doc = self.doc.clone();
+        let (progress, cancel, result) = (job.progress.clone(), job.cancel.clone(), job.result.clone());
+        let spawned = std::thread::Builder::new().name("bake".into()).spawn(move || {
+            let out = kreate_scene::physics::bake::bake_with(&doc, |done, total| {
+                progress.store(((done as u64) << 32) | total as u64, Ordering::Relaxed);
+                !cancel.load(Ordering::Relaxed)
+            });
+            if let Ok(mut slot) = result.lock() {
+                *slot = Some(out);
+            }
+        });
+        if spawned.is_ok() {
+            self.bake_job = Some(job);
+            self.redraw.set(RedrawReason::UI);
+        }
+    }
+
+    /// Hands a finished bake in, or says it was stopped; and keeps the
+    /// progress where the Physics tab reads it.
+    fn poll_bake(&mut self) {
+        let Some(job) = &self.bake_job else {
+            self.ui.bake_progress = None;
+            return;
+        };
+        let p = job.progress.load(std::sync::atomic::Ordering::Relaxed);
+        self.ui.bake_progress = Some(((p >> 32) as usize, (p & 0xffff_ffff) as usize));
+        let finished = job.result.lock().ok().and_then(|mut r| r.take());
+        let Some(outcome) = finished else {
+            // Still running: draw again, so the bar moves.
+            self.redraw.set(RedrawReason::UI);
+            return;
+        };
+        let token = job.token;
+        self.bake_job = None;
+        self.ui.bake_progress = None;
+        match outcome {
+            Some((cache, summary)) => {
+                kreate_ops::ops::physics::stage_bake(token, cache, summary);
+                let mut p = PropertyMap::new();
+                p.set("staged", PropertyValue::Int(token as i64));
+                self.run_op("physics.bake", p);
+            }
+            None => self.status("Bake cancelled"),
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
     /// H and Shift+H in sculpt: the face set under the pointer hidden, or
     /// shown alone.
     fn face_set_visibility(&mut self, action: u32) {
@@ -9995,6 +10083,13 @@ impl App {
             self.status("Align Faces cancelled");
             return;
         }
+        // Esc stops a bake that is running, before it means anything else.
+        if code == KeyCode::Escape {
+            if let Some(job) = &self.bake_job {
+                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
         if self.ui.brush_adjust.is_some() {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
@@ -10317,6 +10412,12 @@ impl App {
                     gfx.viewport.ambient_occlusion = !gfx.viewport.ambient_occlusion;
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "physics.bake_start" => self.start_bake(),
+            "physics.bake_cancel" => {
+                if let Some(job) = &self.bake_job {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             "view.toggle_textures" => {
                 self.solid_textures = !self.solid_textures;
@@ -11287,6 +11388,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_bake();
         let downloaded = self
             .update_ready
             .as_ref()
@@ -12386,6 +12488,41 @@ kreate.ops.object.add_primitive()",
         assert!((app.ui.sculpt.strength - 0.375).abs() < 1e-3, "{}", app.ui.sculpt.strength);
         app.end_brush_adjust(false);
         assert!((app.ui.sculpt.strength - 0.5).abs() < 1e-6, "Esc puts it back");
+    }
+
+    /// A bake on its own thread: the bar moves, the result goes in as one
+    /// undo step through `physics.bake`, and a cancelled one leaves nothing.
+    #[test]
+    fn a_background_bake_lands_as_one_step_and_a_cancelled_one_does_not() {
+        let mut app = app();
+        let mesh = app.doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+        let mut o = kreate_scene::document::Object::new("Box", kreate_scene::document::ObjectData::Mesh(mesh));
+        o.transform.translation = DVec3::new(0.0, 0.0, 3.0);
+        o.physics.rigid = Some(kreate_scene::physics::RigidBody::default());
+        app.doc.add_object(o);
+        app.doc.physics.frame_end = 30;
+        let wait = |app: &mut App| {
+            for _ in 0..2000 {
+                app.poll_bake();
+                if app.bake_job.is_none() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            panic!("the bake never finished");
+        };
+        let steps = app.history.entries().len();
+        app.start_bake();
+        assert!(app.bake_job.is_some());
+        wait(&mut app);
+        assert!(!app.doc.physics_cache.is_empty());
+        assert_eq!(app.history.entries().len(), steps + 1);
+        assert!(app.history.last().unwrap().to_script_call().contains("physics.bake"));
+
+        app.start_bake();
+        app.bake_job.as_ref().unwrap().cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        wait(&mut app);
+        assert_eq!(app.history.entries().len(), steps + 1, "cancelled: nothing new");
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second

@@ -678,7 +678,27 @@ fn anything_physical(doc: &Document) -> bool {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
-pub struct BakeParams {}
+pub struct BakeParams {
+    /// A bake already made off the main thread, handed over by
+    /// [`stage_bake`]. Zero, or one not staged, bakes here and now — which is
+    /// what a script replaying this line does.
+    #[param(hidden)]
+    pub staged: u32,
+}
+
+/// Bakes made elsewhere, waiting for the operator that puts them in.
+static STAGED: std::sync::Mutex<Vec<Staged>> = std::sync::Mutex::new(Vec::new());
+
+/// A bake waiting: its token, the result, and what it did.
+type Staged = (u32, PhysicsCache, kreate_scene::physics::bake::BakeSummary);
+
+/// Hands a bake made off the main thread to the next `physics.bake` that
+/// names `token`, so it goes in as one undo step like any other.
+pub fn stage_bake(token: u32, cache: PhysicsCache, summary: kreate_scene::physics::bake::BakeSummary) {
+    let mut held = STAGED.lock().unwrap_or_else(|e| e.into_inner());
+    held.retain(|(t, _, _)| *t != token);
+    held.push((token, cache, summary));
+}
 
 /// Runs every simulation over the physics frame range and keeps the result.
 pub struct Bake;
@@ -694,8 +714,17 @@ impl Operator for Bake {
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         anything_physical(doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
-        let (cache, summary) = kreate_scene::physics::bake::bake(doc.document());
+    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+        let staged = {
+            let mut held = STAGED.lock().unwrap_or_else(|e| e.into_inner());
+            held.iter()
+                .position(|(t, _, _)| *t == params.staged && params.staged != 0)
+                .map(|i| held.remove(i))
+        };
+        let (cache, summary) = match staged {
+            Some((_, cache, summary)) => (cache, summary),
+            None => kreate_scene::physics::bake::bake(doc.document()),
+        };
         if summary.rigid + summary.soft + summary.particles == 0 {
             return Err(OpError::Failed(
                 "nothing to bake: no active rigid body, cloth, soft body or emitter".into(),

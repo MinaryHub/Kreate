@@ -44,6 +44,9 @@ pub struct ContextMenu {
 }
 
 pub struct ShellState {
+    /// A physics bake running off the main thread: frames done, of how many.
+    /// The Physics tab shows it with a Cancel button.
+    pub bake_progress: Option<(usize, usize)>,
     pub catalog: Catalog,
     /// Every editor this build can show.
     ///
@@ -585,6 +588,7 @@ impl ShellState {
 impl Default for ShellState {
     fn default() -> Self {
         Self {
+            bake_progress: None,
             editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
             material_slot: 0,
@@ -2421,7 +2425,7 @@ fn physics_node(l: &Labels) -> MenuNode {
                 op("physics.particles_add", &[]),
             )),
             MenuNode::Separator,
-            MenuNode::Entry(MenuEntry::new("physics.bake", &l.physics_bake_menu, op("physics.bake", &[]))),
+            MenuNode::Entry(MenuEntry::new("physics.bake_start", &l.physics_bake_menu, dispatch("physics.bake_start"))),
             MenuNode::Entry(MenuEntry::new("physics.free_bake", &l.physics_free_menu, op("physics.free_bake", &[]))),
         ],
     )
@@ -5588,8 +5592,20 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
         ph::world_params(&doc.physics).to_map(), |_| true);
     let cache = &doc.physics_cache;
     ui.horizontal(|ui| {
+        if let Some((done, total)) = state.bake_progress {
+            // A bake is running: how far, and a way to stop it.
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                    .desired_width(140.0)
+                    .text(format!("{done} / {total}")),
+            );
+            if ui.button(state.catalog.get("physics-bake-cancel")).clicked() {
+                state.queue.dispatch("physics.bake_cancel", PropertyMap::new());
+            }
+            return;
+        }
         if ui.button(state.catalog.get("physics-bake")).clicked() {
-            state.queue.run("physics.bake", PropertyMap::new());
+            state.queue.dispatch("physics.bake_start", PropertyMap::new());
         }
         if ui
             .add_enabled(!cache.is_empty(), egui::Button::new(state.catalog.get("physics-free-bake")))
@@ -10180,6 +10196,8 @@ physics-add-hair = Add Hair
 physics-remove-system = Remove this particle system
 physics-world = Scene Physics
 physics-bake = Bake
+physics-bake-cancel = Cancel
+op-physics-bake-start-desc = Runs every simulation from the first frame of the physics range to the last, in the background; Esc or Cancel stops it. Play the timeline to see it.
 physics-free-bake = Free Bake
 physics-bake-to-keys = Bake to Keyframes
 physics-baked = Baked: frames { $start } to { $end }. Play the timeline to see it.
@@ -11273,6 +11291,8 @@ physics-add-hair = 헤어 추가
 physics-remove-system = 이 파티클 시스템 제거
 physics-world = 장면 물리
 physics-bake = 베이크
+physics-bake-cancel = 취소
+op-physics-bake-start-desc = 모든 시뮬레이션을 물리 범위의 첫 프레임부터 끝 프레임까지 뒤에서 계산합니다. Esc나 취소로 멈춥니다. 타임라인을 재생해 보세요.
 physics-free-bake = 베이크 지우기
 physics-bake-to-keys = 키프레임으로 굽기
 physics-baked = 베이크됨: { $start }~{ $end } 프레임. 타임라인을 재생해 보세요.
