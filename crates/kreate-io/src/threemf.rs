@@ -264,14 +264,7 @@ fn matrix(text: Option<&str>) -> glam::Mat4 {
 fn colour(text: &str) -> Option<[f32; 4]> {
     let hex = text.strip_prefix('#')?;
     let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
-    let linear = |b: u8| {
-        let c = b as f32 / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
+    let linear = |b: u8| kreate_math::srgb_to_linear(b as f32 / 255.0);
     let alpha = if hex.len() >= 8 {
         byte(6)? as f32 / 255.0
     } else {
