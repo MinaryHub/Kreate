@@ -127,6 +127,12 @@ pub struct ShellState {
     pub asset_list_wanted: bool,
     pub asset_busy: Option<String>,
     pub asset_error: Option<String>,
+    /// The asset looked at, by entry id: kept across a search narrowing the
+    /// grid, and across a list read again.
+    pub asset_selected: Option<String>,
+    /// Assets on their way, by entry id: a second request for one is not a
+    /// second copy.
+    pub asset_fetching: std::collections::HashSet<String>,
     /// What goes with the next message. The application holds the files;
     /// this is what the panel shows of them.
     pub chat_attachments: Vec<kreate_ui::chat::ChatAttachment>,
@@ -632,6 +638,8 @@ impl Default for ShellState {
             asset_list_wanted: false,
             asset_busy: None,
             asset_error: None,
+            asset_selected: None,
+            asset_fetching: std::collections::HashSet::new(),
             chat_attachments: Vec::new(),
             chat_focused: false,
             chat_busy: false,
@@ -6008,6 +6016,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 "https://polyhaven.com".to_string(),
             )
         }),
+        add: t("asset-add"),
         add_hint: t(match state.asset_kind {
             1 => "asset-add-hint-material",
             2 => "asset-add-hint-hdri",
@@ -6052,6 +6061,10 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             .then_some((&crate::assets::RESOLUTIONS[..], state.asset_resolution)),
         folders: (source == crate::assets::Source::Local).then_some(&folders[..]),
         tiles: &tiles,
+        selected: state
+            .asset_selected
+            .as_ref()
+            .and_then(|id| state.asset_entries.iter().position(|e| &e.id == id)),
         busy: state.asset_busy.clone(),
         error: state.asset_error.clone(),
     };
@@ -11007,9 +11020,10 @@ asset-add-folder = Add Folder…
 asset-remove-folder = Stop reading this folder
 asset-no-folders = Add a folder of models, textures or HDRIs to browse it here.
 asset-credit-polyhaven = Assets from Poly Haven (CC0) — polyhaven.com
-asset-add-hint-model = Click to add it to the scene.
-asset-add-hint-material = Click to make a material of it and put it on the active object.
-asset-add-hint-hdri = Click to light the scene with it.
+asset-add = Add
+asset-add-hint-model = Double-click to add it to the scene.
+asset-add-hint-material = Double-click to make a material of it and put it on the active object.
+asset-add-hint-hdri = Double-click to light the scene with it.
 asset-fetching = Fetching { $name }…
 editor-shader = Shader Editor
 editor-geometry-nodes = Geometry Nodes
@@ -12168,9 +12182,10 @@ asset-add-folder = 폴더 추가…
 asset-remove-folder = 이 폴더 그만 읽기
 asset-no-folders = 모델, 텍스처, HDRI가 있는 폴더를 추가하면 여기서 볼 수 있습니다.
 asset-credit-polyhaven = Poly Haven 에셋 (CC0) — polyhaven.com
-asset-add-hint-model = 클릭하면 장면에 추가합니다.
-asset-add-hint-material = 클릭하면 재질로 만들어 활성 오브젝트에 입힙니다.
-asset-add-hint-hdri = 클릭하면 이 HDRI로 장면을 비춥니다.
+asset-add = 추가
+asset-add-hint-model = 더블클릭하면 장면에 추가합니다.
+asset-add-hint-material = 더블클릭하면 재질로 만들어 활성 오브젝트에 입힙니다.
+asset-add-hint-hdri = 더블클릭하면 이 HDRI로 장면을 비춥니다.
 asset-fetching = { $name } 받는 중…
 editor-shader = 셰이더 에디터
 editor-geometry-nodes = 지오메트리 노드

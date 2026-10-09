@@ -246,6 +246,10 @@ pub enum Command {
     AssetAdd {
         index: usize,
     },
+    /// From the asset browser: this asset is the one looked at.
+    AssetSelect {
+        index: usize,
+    },
     /// From the asset browser: read the list again.
     AssetRefresh,
     /// From the asset browser: ask for a folder to read.

@@ -4326,6 +4326,7 @@ impl App {
                     }
                 }
                 Event::Fetched { entry, result } => {
+                    self.ui.asset_fetching.remove(&entry.id);
                     self.ui.asset_busy = None;
                     match result {
                         Ok(r) => ready.push((entry, r)),
@@ -6155,10 +6156,17 @@ impl App {
                 }
                 Command::AssetResolution { index } => self.ui.asset_resolution = index,
                 Command::AssetRefresh => self.reset_asset_list(),
+                Command::AssetSelect { index } => {
+                    self.ui.asset_selected = self.ui.asset_entries.get(index).map(|e| e.id.clone());
+                }
                 Command::AssetAdd { index } => {
-                    if let (Some(entry), Some(library)) =
-                        (self.ui.asset_entries.get(index).cloned(), &self.assets)
-                    {
+                    let entry = self.ui.asset_entries.get(index).cloned();
+                    // Already on its way: the first request adds it.
+                    let fresh = entry
+                        .as_ref()
+                        .is_some_and(|e| self.ui.asset_fetching.insert(e.id.clone()));
+                    if let (Some(entry), Some(library), true) = (entry, &self.assets, fresh) {
+                        self.ui.asset_selected = Some(entry.id.clone());
                         let size = kreate::assets::RESOLUTIONS
                             .get(self.ui.asset_resolution)
                             .copied()

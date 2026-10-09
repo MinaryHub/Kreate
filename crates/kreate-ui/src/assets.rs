@@ -36,8 +36,10 @@ pub struct AssetText {
     pub no_folders: String,
     /// The line an online source asks for, and where it links.
     pub credit: Option<(String, String)>,
-    /// What clicking a tile does, for its hover.
+    /// What double-clicking a tile does, for its hover.
     pub add_hint: String,
+    /// The button that adds the selected asset.
+    pub add: String,
 }
 
 /// What the panel shows.
@@ -49,6 +51,8 @@ pub struct AssetView<'a> {
     /// For the local source: the folders read.
     pub folders: Option<&'a [String]>,
     pub tiles: &'a [AssetTile],
+    /// The selected tile, by [`AssetTile::index`].
+    pub selected: Option<usize>,
     /// A list or an asset on its way.
     pub busy: Option<String>,
     pub error: Option<String>,
@@ -150,6 +154,32 @@ pub fn asset_browser(
     }
     ui.separator();
 
+    // The selected asset, and the button that adds it: for whoever would
+    // rather not double-click, and to say which one a double-click adds.
+    if let Some(tile) = view
+        .selected
+        .and_then(|s| view.tiles.iter().find(|t| t.index == s))
+    {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(view.busy.is_none(), egui::Button::new(&text.add))
+                .on_hover_text(&text.add_hint)
+                .clicked()
+            {
+                queue.push(Command::AssetAdd { index: tile.index });
+            }
+            // i18n-exempt: an asset's own name and its author or path
+            ui.label(egui::RichText::new(&tile.name).strong());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&tile.detail)
+                        .small()
+                        .color(theme.text_dim),
+                )
+                .truncate(),
+            );
+        });
+    }
     let mut seen = Vec::new();
     if view.tiles.is_empty() {
         if view.busy.is_none() {
@@ -200,16 +230,25 @@ pub fn asset_browser(
                                 "{}\n{}\n{}",
                                 tile.name, tile.detail, text.add_hint
                             ));
-                            if response.hovered() {
+                            let selected = view.selected == Some(tile.index);
+                            if selected || response.hovered() {
                                 ui.painter().rect_stroke(
                                     response.rect,
                                     4.0,
-                                    egui::Stroke::new(2.0, theme.accent),
+                                    egui::Stroke::new(
+                                        if selected { 2.5 } else { 1.0 },
+                                        theme.accent,
+                                    ),
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            if response.clicked() {
+                            // One click looks, two add: a stray click on a
+                            // grid of pictures should not put a chair in the
+                            // scene.
+                            if response.double_clicked() {
                                 queue.push(Command::AssetAdd { index: tile.index });
+                            } else if response.clicked() && !selected {
+                                queue.push(Command::AssetSelect { index: tile.index });
                             }
                             // i18n-exempt: an asset's own name
                             ui.add(
