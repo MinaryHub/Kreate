@@ -1,0 +1,913 @@
+//! The asset browser's library: what can be added, from where, and the
+//! fetching of it.
+//!
+//! Two sources. **Local folders** the user names, read for scene files,
+//! environment images and folders of texture maps. **Poly Haven**, whose
+//! models, textures and HDRIs are CC0 and whose API is free for any use,
+//! asking only that requests say which program they come from and that the
+//! program says where its assets come from — the panel's credit line.
+//!
+//! # Why curl
+//!
+//! For the reason `contact` gives: an HTTPS stack in Rust brings certificate
+//! bundles the dependency policy does not allow, and `curl` is on every
+//! machine Kreate runs on, using the system's own certificates.
+//!
+//! # Everything lands in the cache first
+//!
+//! A list, a thumbnail and an asset's files are each written under
+//! [`cache_root`] and read from there, so a second look costs nothing and a
+//! machine that has gone offline still has what it fetched. An asset's files
+//! keep the layout its source gives them, which is what lets a glTF find the
+//! textures it names beside it.
+//!
+//! What arrives over the network is not trusted: it is parsed by the same
+//! bounded readers as a file somebody opened, and a download is capped.
+
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+
+/// What an asset is, which decides what adding it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// A scene file: added beside what is there.
+    Model,
+    /// A set of texture maps: a material, put on the active object.
+    Material,
+    /// An environment image: the world's light.
+    Hdri,
+}
+
+impl Kind {
+    pub const ALL: [Self; 3] = [Self::Model, Self::Material, Self::Hdri];
+
+    fn polyhaven(self) -> &'static str {
+        match self {
+            Kind::Model => "models",
+            Kind::Material => "textures",
+            Kind::Hdri => "hdris",
+        }
+    }
+}
+
+/// Where the assets come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    Local,
+    PolyHaven,
+}
+
+impl Source {
+    pub const ALL: [Self; 2] = [Self::Local, Self::PolyHaven];
+}
+
+/// One asset, as the browser lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    /// Unique within its source: Poly Haven's slug, or a local path.
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub source: Source,
+    /// What a search matches beside the name: categories and tags.
+    pub tags: Vec<String>,
+    /// Who made it, for the tile's hover.
+    pub authors: String,
+    /// For a local asset, the file or the folder of maps.
+    pub path: Option<PathBuf>,
+}
+
+impl Entry {
+    /// Whether every word of `search` is in the name or a tag.
+    pub fn matches(&self, search: &str) -> bool {
+        let name = self.name.to_lowercase();
+        search.split_whitespace().all(|word| {
+            let word = word.to_lowercase();
+            name.contains(&word) || self.tags.iter().any(|t| t.contains(&word))
+        })
+    }
+}
+
+/// An asset fetched and on disk, ready to add.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ready {
+    /// A scene file.
+    Model(PathBuf),
+    /// Texture maps, each where it is on disk.
+    Material(Maps),
+    /// An environment image.
+    Hdri(PathBuf),
+}
+
+/// A material's maps. Only the colour is required.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Maps {
+    pub color: Option<PathBuf>,
+    pub roughness: Option<PathBuf>,
+    /// OpenGL-convention (+Y up), which is Kreate's.
+    pub normal: Option<PathBuf>,
+    pub metallic: Option<PathBuf>,
+}
+
+/// A picture as eight-bit RGBA rows: width, height, pixels.
+pub type Picture = (u32, u32, Vec<u8>);
+
+/// What a background job reports.
+#[derive(Debug)]
+pub enum Event {
+    Listed {
+        source: Source,
+        kind: Kind,
+        result: Result<Vec<Entry>, String>,
+    },
+    /// A thumbnail, as eight-bit RGBA rows; `None` when there is none.
+    Thumbnail { id: String, image: Option<Picture> },
+    Fetched {
+        entry: Entry,
+        result: Result<Ready, String>,
+    },
+}
+
+/// The sizes Poly Haven offers that are worth fetching by default.
+pub const RESOLUTIONS: [&str; 3] = ["1k", "2k", "4k"];
+
+/// Where fetched assets are kept: beside the autosaves, in the cache the
+/// platform clears when it needs room.
+pub fn cache_root() -> Option<PathBuf> {
+    crate::docfile::autosave_root().and_then(|dir| dir.parent().map(|p| p.join("assets")))
+}
+
+/// The local folders the browser reads, one a line.
+pub fn folders_path() -> Option<PathBuf> {
+    crate::prefs::config_dir().map(|dir| dir.join("asset_folders.txt"))
+}
+
+pub fn load_folders() -> Vec<PathBuf> {
+    folders_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| {
+            text.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_folders(folders: &[PathBuf]) -> Result<(), std::io::Error> {
+    let Some(path) = folders_path() else {
+        return Ok(());
+    };
+    let text: String = folders
+        .iter()
+        .map(|p| format!("{}\n", p.display()))
+        .collect();
+    crate::prefs::write_atomic(&path, &text)
+}
+
+// --- the network ------------------------------------------------------------
+
+/// What every request says it is: Poly Haven asks for a name it can tell
+/// apart from others.
+fn user_agent() -> String {
+    format!(
+        "Kreate/{} (+https://github.com/knoxxr/Kreate)",
+        crate::version::VERSION
+    )
+}
+
+/// The most one download may be. Poly Haven's 4k models are well under it.
+const MAX_BYTES: &str = "1073741824";
+
+/// Fetches `url` into `dest`, through a temporary file renamed into place —
+/// so an interrupted download is never mistaken for a finished one.
+fn download(url: &str, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let partial = dest.with_extension("part");
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let out = crate::claude::quiet_command(curl)
+        .args(["--silent", "--show-error", "--fail", "--location"])
+        .args(["--max-time", "600", "--max-filesize", MAX_BYTES])
+        .arg("--user-agent")
+        .arg(user_agent())
+        .arg("--output")
+        .arg(&partial)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("cannot start curl: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&partial);
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if why.is_empty() {
+            format!("could not fetch {url}")
+        } else {
+            why
+        });
+    }
+    std::fs::rename(&partial, dest).map_err(|e| e.to_string())
+}
+
+/// `url` as text, cached at `dest` for a day: an asset list changes when
+/// somebody publishes, not by the minute.
+fn cached_text(url: &str, dest: &Path) -> Result<String, String> {
+    let fresh = std::fs::metadata(dest)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 24 * 3600);
+    if !fresh {
+        if let Err(e) = download(url, dest) {
+            // Offline with an old copy: the old copy.
+            if !dest.exists() {
+                return Err(e);
+            }
+        }
+    }
+    std::fs::read_to_string(dest).map_err(|e| e.to_string())
+}
+
+// --- Poly Haven ---------------------------------------------------------------
+
+const API: &str = "https://api.polyhaven.com";
+
+/// Poly Haven's list of one kind, as entries, by name.
+pub fn parse_polyhaven_list(json: &str, kind: Kind) -> Result<Vec<Entry>, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let map = value
+        .as_object()
+        .ok_or("the list is not an object of assets")?;
+    let words = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(str::to_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out: Vec<Entry> = map
+        .iter()
+        .map(|(id, a)| {
+            let mut tags = words(&a["categories"]);
+            tags.extend(words(&a["tags"]));
+            let authors = a["authors"]
+                .as_object()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            Entry {
+                id: id.clone(),
+                name: a["name"].as_str().unwrap_or(id).to_string(),
+                kind,
+                source: Source::PolyHaven,
+                tags,
+                authors,
+                path: None,
+            }
+        })
+        .collect();
+    out.sort_by_key(|e| e.name.to_lowercase());
+    Ok(out)
+}
+
+/// What to download for one asset: each file's place under the asset's
+/// directory and its URL, and what the result is once they are there.
+#[derive(Debug, PartialEq)]
+pub struct Plan {
+    pub files: Vec<(String, String)>,
+    /// The result, with paths relative to the asset's directory.
+    pub ready: Ready,
+}
+
+/// Reads Poly Haven's file list for one asset at `resolution`, falling back
+/// to the nearest smaller one it has.
+pub fn polyhaven_plan(json: &str, kind: Kind, resolution: &str) -> Result<Plan, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let at = |key: &str| -> Option<&serde_json::Value> {
+        let sizes = value.get(key)?;
+        let order = RESOLUTIONS
+            .iter()
+            .position(|r| *r == resolution)
+            .unwrap_or(0);
+        RESOLUTIONS[..=order]
+            .iter()
+            .rev()
+            .find_map(|r| sizes.get(*r))
+            .or_else(|| sizes.as_object()?.values().next())
+    };
+    let url = |v: &serde_json::Value| v["url"].as_str().map(str::to_string);
+    let name_of = |u: &str| u.rsplit('/').next().unwrap_or("file").to_string();
+    match kind {
+        Kind::Model => {
+            let gltf = at("gltf")
+                .and_then(|g| g.get("gltf"))
+                .ok_or("this model has no glTF")?;
+            let main = url(gltf).ok_or("the glTF has no address")?;
+            let main_name = name_of(&main);
+            let mut files = vec![(main_name.clone(), main)];
+            if let Some(include) = gltf["include"].as_object() {
+                for (relative, file) in include {
+                    // Only paths that stay inside the asset's directory: a
+                    // name is the file's to give, and `..` is not one.
+                    if relative
+                        .split(['/', '\\'])
+                        .any(|p| p == ".." || p.is_empty())
+                    {
+                        continue;
+                    }
+                    if let Some(u) = url(file) {
+                        files.push((relative.clone(), u));
+                    }
+                }
+            }
+            Ok(Plan {
+                files,
+                ready: Ready::Model(PathBuf::from(main_name)),
+            })
+        }
+        Kind::Material => {
+            let mut files = Vec::new();
+            let mut map = |key: &str| -> Option<PathBuf> {
+                let u = url(at(key)?.get("jpg").or_else(|| at(key)?.get("png"))?)?;
+                let name = name_of(&u);
+                files.push((name.clone(), u));
+                Some(PathBuf::from(name))
+            };
+            let maps = Maps {
+                color: map("Diffuse"),
+                roughness: map("Rough"),
+                normal: map("nor_gl"),
+                metallic: map("Metal"),
+            };
+            if maps.color.is_none() {
+                return Err("this texture has no colour map".into());
+            }
+            Ok(Plan {
+                files,
+                ready: Ready::Material(maps),
+            })
+        }
+        Kind::Hdri => {
+            let file = at("hdri")
+                .and_then(|h| h.get("hdr").or_else(|| h.get("exr")))
+                .ok_or("this HDRI has no image")?;
+            let u = url(file).ok_or("the image has no address")?;
+            let name = name_of(&u);
+            Ok(Plan {
+                files: vec![(name.clone(), u)],
+                ready: Ready::Hdri(PathBuf::from(name)),
+            })
+        }
+    }
+}
+
+fn under(dir: &Path, ready: Ready) -> Ready {
+    let join = |p: Option<PathBuf>| p.map(|p| dir.join(p));
+    match ready {
+        Ready::Model(p) => Ready::Model(dir.join(p)),
+        Ready::Hdri(p) => Ready::Hdri(dir.join(p)),
+        Ready::Material(m) => Ready::Material(Maps {
+            color: join(m.color),
+            roughness: join(m.roughness),
+            normal: join(m.normal),
+            metallic: join(m.metallic),
+        }),
+    }
+}
+
+// --- local folders ------------------------------------------------------------
+
+/// Extensions read as models, and as environments.
+const SCENES: &[&str] = &[
+    "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "kreate",
+];
+const ENVIRONMENTS: &[&str] = &["hdr", "exr"];
+const IMAGES: &[&str] = &["png", "jpg", "jpeg"];
+
+/// Which map an image file is, by the words texture sites put in its name.
+fn map_role(name: &str) -> Option<&'static str> {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&["nor_gl", "normal_gl", "normalgl", "_nrm", "normal", "_nor"])
+        && !has(&["nor_dx", "normaldx"])
+    {
+        Some("normal")
+    } else if has(&["rough"]) {
+        Some("roughness")
+    } else if has(&["metal"]) {
+        Some("metallic")
+    } else if has(&["diff", "albedo", "basecolor", "base_color", "color", "col_"]) {
+        Some("color")
+    } else {
+        None
+    }
+}
+
+/// The assets in `folders`, to a few levels down: each scene file a model,
+/// each HDR or EXR an environment, and each folder holding a colour map a
+/// material made of the maps beside it.
+pub fn scan_folders(folders: &[PathBuf]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<Entry>) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut images = Vec::new();
+        let mut children: Vec<PathBuf> = Vec::new();
+        for item in read.flatten() {
+            let path = item.path();
+            if path.is_dir() {
+                if depth < 4 {
+                    children.push(path);
+                }
+                continue;
+            }
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let kind = if SCENES.contains(&ext.as_str()) {
+                Some(Kind::Model)
+            } else if ENVIRONMENTS.contains(&ext.as_str()) {
+                Some(Kind::Hdri)
+            } else {
+                if IMAGES.contains(&ext.as_str()) {
+                    images.push(path.clone());
+                }
+                None
+            };
+            if let Some(kind) = kind {
+                out.push(Entry {
+                    id: path.display().to_string(),
+                    name: stem.replace(['_', '-'], " "),
+                    kind,
+                    source: Source::Local,
+                    tags: vec![ext],
+                    authors: String::new(),
+                    path: Some(path),
+                });
+            }
+        }
+        if images.iter().any(|p| {
+            map_role(&p.file_name().unwrap_or_default().to_string_lossy()) == Some("color")
+        }) {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().replace(['_', '-'], " "))
+                .unwrap_or_else(|| "Material".into());
+            out.push(Entry {
+                id: dir.display().to_string(),
+                name,
+                kind: Kind::Material,
+                source: Source::Local,
+                tags: Vec::new(),
+                authors: String::new(),
+                path: Some(dir.to_path_buf()),
+            });
+        }
+        children.sort();
+        for child in children {
+            walk(&child, depth + 1, out);
+        }
+    }
+    for folder in folders {
+        walk(folder, 0, &mut out);
+    }
+    out.sort_by_key(|e| e.name.to_lowercase());
+    out
+}
+
+/// A local material's maps, from the folder it is.
+pub fn local_maps(dir: &Path) -> Maps {
+    let mut maps = Maps::default();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.sort();
+    for path in files {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !IMAGES.contains(&ext.as_str()) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let slot = match map_role(&name) {
+            Some("color") => &mut maps.color,
+            Some("roughness") => &mut maps.roughness,
+            Some("normal") => &mut maps.normal,
+            Some("metallic") => &mut maps.metallic,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(path);
+        }
+    }
+    maps
+}
+
+/// A small picture of an image file: what a local material's tile shows.
+fn thumbnail_of(bytes: &[u8]) -> Option<Picture> {
+    let image = image::load_from_memory(bytes)
+        .ok()?
+        .thumbnail(128, 128)
+        .to_rgba8();
+    Some((image.width(), image.height(), image.into_raw()))
+}
+
+// --- adding ------------------------------------------------------------------
+
+/// A material made of texture maps, as a node graph: the colour into the
+/// base colour, a grey map's red into roughness and metallic, and a normal
+/// map through a Normal Map node. `None` when the colour map cannot be read.
+///
+/// The images and the material are added to `doc` directly — outside the
+/// history, as an image picked for a material is; what the caller does with
+/// the material is the undo step.
+pub fn material_from_maps(
+    doc: &mut kreate_scene::Document,
+    name: &str,
+    maps: &Maps,
+) -> Option<kreate_scene::document::MaterialId> {
+    use kreate_scene::shader::{Link, Node, NodeKind, ShaderGraph};
+    use kreate_scene::ColorSpace;
+    let load = |path: &Option<PathBuf>, space| {
+        path.as_ref()
+            .and_then(|p| kreate_io::load_image_file(p, space).ok())
+    };
+    let colour = load(&maps.color, ColorSpace::Srgb)?;
+    let colour = doc.add_image(colour);
+    let mut graph =
+        ShaderGraph::standard(name, kreate_math::SceneRgb::new(0.8, 0.8, 0.8), 0.0, 0.5);
+    let wire = |graph: &mut ShaderGraph, from_node, from_socket, to_node, to_socket| {
+        let _ = graph.link(Link {
+            from_node,
+            from_socket,
+            to_node,
+            to_socket,
+        });
+    };
+    if let Some(node) = graph.add_node(Node::new("Color", NodeKind::image(Some(colour)))) {
+        wire(&mut graph, node, 0, 0, 0);
+    }
+    // A grey map's number is its red: through a channel split.
+    for (path, label, socket) in [
+        (&maps.roughness, "Roughness", 2),
+        (&maps.metallic, "Metallic", 1),
+    ] {
+        let Some(image) = load(path, ColorSpace::Raw) else {
+            continue;
+        };
+        let image = doc.add_image(image);
+        let (Some(texture), Some(split)) = (
+            graph.add_node(Node::new(label, NodeKind::image(Some(image)))),
+            graph.add_node(Node::new(label, NodeKind::SeparateRgb)),
+        ) else {
+            continue;
+        };
+        wire(&mut graph, texture, 0, split, 0);
+        wire(&mut graph, split, 0, 0, socket);
+    }
+    if let Some(image) = load(&maps.normal, ColorSpace::Raw) {
+        let image = doc.add_image(image);
+        if let (Some(texture), Some(decode)) = (
+            graph.add_node(Node::new("Normal", NodeKind::image(Some(image)))),
+            graph.add_node(Node::new(
+                "Normal Map",
+                NodeKind::NormalMap { strength: 1.0 },
+            )),
+        ) {
+            wire(&mut graph, texture, 0, decode, 0);
+            wire(&mut graph, decode, 0, 0, 3);
+        }
+    }
+    graph.arrange();
+    Some(doc.add_material(kreate_scene::Material {
+        name: name.to_string(),
+        graph: Some(graph),
+        ..Default::default()
+    }))
+}
+
+// --- the library ----------------------------------------------------------------
+
+/// A thumbnail asked for: the entry's id, its source, and its path if local.
+type Wanted = (String, Source, Option<PathBuf>);
+
+/// Lists, thumbnails and fetches, each on a thread of its own, reporting
+/// through [`Library::poll`].
+pub struct Library {
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// Thumbnails asked for and not yet sent, for the few workers to share.
+    thumbs: Arc<Mutex<Vec<Wanted>>>,
+    thumb_workers: usize,
+}
+
+impl Library {
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            tx,
+            rx,
+            wake: Arc::new(wake),
+            thumbs: Arc::new(Mutex::new(Vec::new())),
+            thumb_workers: 0,
+        }
+    }
+
+    fn spawn(&self, job: impl FnOnce() -> Event + Send + 'static) {
+        let (tx, wake) = (self.tx.clone(), Arc::clone(&self.wake));
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            wake();
+        });
+    }
+
+    /// Lists one kind from one source.
+    pub fn list(&self, source: Source, kind: Kind, folders: Vec<PathBuf>) {
+        self.spawn(move || {
+            let result = match source {
+                Source::Local => Ok(scan_folders(&folders)
+                    .into_iter()
+                    .filter(|e| e.kind == kind)
+                    .collect()),
+                Source::PolyHaven => cache_root()
+                    .ok_or_else(|| "no cache folder".to_string())
+                    .and_then(|root| {
+                        cached_text(
+                            &format!("{API}/assets?t={}", kind.polyhaven()),
+                            &root
+                                .join("polyhaven")
+                                .join(format!("{}.json", kind.polyhaven())),
+                        )
+                    })
+                    .and_then(|json| parse_polyhaven_list(&json, kind)),
+            };
+            Event::Listed {
+                source,
+                kind,
+                result,
+            }
+        });
+    }
+
+    /// Asks for an entry's thumbnail; it arrives as an [`Event::Thumbnail`].
+    pub fn thumbnail(&mut self, entry: &Entry) {
+        if let Ok(mut queue) = self.thumbs.lock() {
+            queue.push((entry.id.clone(), entry.source, entry.path.clone()));
+        }
+        // A few workers between them, newest request first: what is on the
+        // screen now, not what scrolled past.
+        while self.thumb_workers < 4 {
+            self.thumb_workers += 1;
+            let (queue, tx, wake) = (
+                Arc::clone(&self.thumbs),
+                self.tx.clone(),
+                Arc::clone(&self.wake),
+            );
+            std::thread::spawn(move || loop {
+                let next = queue.lock().ok().and_then(|mut q| q.pop());
+                let Some((id, source, path)) = next else {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                };
+                let image = match source {
+                    Source::PolyHaven => cache_root().and_then(|root| {
+                        let dest = root.join("polyhaven").join("thumbs").join(format!("{id}.png"));
+                        if !dest.exists() {
+                            download(
+                                &format!(
+                                    "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=128&height=128"
+                                ),
+                                &dest,
+                            )
+                            .ok()?;
+                        }
+                        thumbnail_of(&std::fs::read(dest).ok()?)
+                    }),
+                    Source::Local => path.and_then(|p| {
+                        let file = if p.is_dir() { local_maps(&p).color? } else { p };
+                        let ext = file.extension()?.to_string_lossy().to_lowercase();
+                        if !IMAGES.contains(&ext.as_str()) {
+                            return None;
+                        }
+                        thumbnail_of(&std::fs::read(file).ok()?)
+                    }),
+                };
+                let _ = tx.send(Event::Thumbnail { id, image });
+                wake();
+            });
+        }
+    }
+
+    /// Gets an asset's files onto the disk, for adding.
+    pub fn fetch(&self, entry: Entry, resolution: &'static str) {
+        self.spawn(move || {
+            let result = fetch(&entry, resolution);
+            Event::Fetched { entry, result }
+        });
+    }
+
+    pub fn poll(&self) -> Vec<Event> {
+        self.rx.try_iter().collect()
+    }
+}
+
+fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
+    match entry.source {
+        Source::Local => {
+            let path = entry.path.clone().ok_or("the asset has no path")?;
+            Ok(match entry.kind {
+                Kind::Model => Ready::Model(path),
+                Kind::Hdri => Ready::Hdri(path),
+                Kind::Material => Ready::Material(local_maps(&path)),
+            })
+        }
+        Source::PolyHaven => {
+            // A slug from the list, and still checked: it becomes a folder.
+            if entry.id.is_empty()
+                || !entry
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!("`{}` is not an asset name", entry.id));
+            }
+            let root = cache_root().ok_or("no cache folder")?;
+            let dir = root
+                .join("polyhaven")
+                .join(entry.kind.polyhaven())
+                .join(&entry.id)
+                .join(resolution);
+            let json = cached_text(
+                &format!("{API}/files/{}", entry.id),
+                &root
+                    .join("polyhaven")
+                    .join("files")
+                    .join(format!("{}.json", entry.id)),
+            )?;
+            let plan = polyhaven_plan(&json, entry.kind, resolution)?;
+            for (relative, url) in &plan.files {
+                let dest = dir.join(relative);
+                if !dest.exists() {
+                    download(url, &dest)?;
+                }
+            }
+            Ok(under(&dir, plan.ready))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIST: &str = r#"{
+        "wooden_floor": {"name": "Wooden Floor", "categories": ["floor", "wood"], "tags": ["Planks"], "authors": {"Rob": "All"}},
+        "aerial_rocks": {"name": "Aerial Rocks", "categories": ["rock"], "tags": [], "authors": {"Ana": "All", "Bo": "Photos"}}
+    }"#;
+
+    #[test]
+    fn a_list_reads_by_name_and_searches_its_tags() {
+        let entries = parse_polyhaven_list(LIST, Kind::Material).expect("parses");
+        assert_eq!(entries[0].name, "Aerial Rocks");
+        assert_eq!(entries[0].authors, "Ana, Bo");
+        assert!(entries[1].matches("planks"));
+        assert!(entries[1].matches("wood FLOOR"));
+        assert!(!entries[1].matches("rock"));
+    }
+
+    #[test]
+    fn a_models_plan_keeps_its_textures_beside_it_and_inside_its_folder() {
+        let files = r#"{"gltf": {"1k": {"gltf": {"url": "https://dl/x/Chair.gltf", "include": {
+            "Chair.bin": {"url": "https://dl/x/Chair.bin"},
+            "textures/chair_diff_1k.jpg": {"url": "https://dl/x/chair_diff_1k.jpg"},
+            "../../escape.txt": {"url": "https://dl/x/escape.txt"}
+        }}}}}"#;
+        let plan = polyhaven_plan(files, Kind::Model, "2k").expect("plans");
+        assert_eq!(plan.ready, Ready::Model(PathBuf::from("Chair.gltf")));
+        let names: Vec<&str> = plan.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"textures/chair_diff_1k.jpg"));
+        assert!(!names.iter().any(|n| n.contains("..")), "{names:?}");
+    }
+
+    #[test]
+    fn a_textures_plan_takes_its_maps_at_the_size_asked_or_smaller() {
+        let files = r#"{
+            "Diffuse": {"1k": {"jpg": {"url": "https://dl/a_diff_1k.jpg"}}, "2k": {"jpg": {"url": "https://dl/a_diff_2k.jpg"}}},
+            "Rough": {"1k": {"jpg": {"url": "https://dl/a_rough_1k.jpg"}}},
+            "nor_gl": {"2k": {"jpg": {"url": "https://dl/a_nor_gl_2k.jpg"}}}
+        }"#;
+        let plan = polyhaven_plan(files, Kind::Material, "2k").expect("plans");
+        let Ready::Material(maps) = plan.ready else {
+            panic!("a material")
+        };
+        assert_eq!(maps.color, Some(PathBuf::from("a_diff_2k.jpg")));
+        assert_eq!(maps.roughness, Some(PathBuf::from("a_rough_1k.jpg")));
+        assert_eq!(maps.normal, Some(PathBuf::from("a_nor_gl_2k.jpg")));
+        assert_eq!(maps.metallic, None);
+        assert!(polyhaven_plan("{}", Kind::Material, "1k").is_err());
+    }
+
+    #[test]
+    fn an_hdris_plan_prefers_the_hdr() {
+        let files = r#"{"hdri": {"1k": {"exr": {"url": "https://dl/s.exr"}, "hdr": {"url": "https://dl/s.hdr"}}}}"#;
+        let plan = polyhaven_plan(files, Kind::Hdri, "1k").expect("plans");
+        assert_eq!(plan.ready, Ready::Hdri(PathBuf::from("s.hdr")));
+    }
+
+    #[test]
+    fn maps_make_a_material_whose_graph_reads_each_and_compiles() {
+        let dir = std::env::temp_dir().join(format!("kreate-maps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let write = |name: &str| {
+            let path = dir.join(name);
+            image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255]))
+                .save(&path)
+                .expect("written");
+            path
+        };
+        let maps = Maps {
+            color: Some(write("wood_diff.png")),
+            roughness: Some(write("wood_rough.png")),
+            normal: Some(write("wood_nor_gl.png")),
+            metallic: None,
+        };
+        let mut doc = kreate_scene::Document::new();
+        let material = material_from_maps(&mut doc, "Wood", &maps).expect("made");
+        let graph = doc
+            .material(material)
+            .and_then(|m| m.graph.clone())
+            .expect("a graph");
+        // Colour, roughness and normal each reach the surface.
+        for socket in [0, 2, 3] {
+            assert!(graph.incoming(0, socket).is_some(), "socket {socket}");
+        }
+        assert!(graph.incoming(0, 1).is_none(), "no metal map");
+        let compiled = kreate_shader::compile_with(&graph, |id| {
+            doc.image(id)
+                .map(|i| i.color_space)
+                .unwrap_or(kreate_scene::ColorSpace::Srgb)
+        })
+        .expect("compiles");
+        assert_eq!(compiled.images.len(), 3);
+        // The colour is a colour and the rest are numbers.
+        assert_eq!(
+            compiled.image_spaces,
+            vec![
+                kreate_scene::ColorSpace::Srgb,
+                kreate_scene::ColorSpace::Raw,
+                kreate_scene::ColorSpace::Raw
+            ]
+        );
+        assert!(material_from_maps(&mut doc, "None", &Maps::default()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_is_read_for_models_environments_and_materials() {
+        let root = std::env::temp_dir().join(format!("kreate-assets-{}", std::process::id()));
+        let wood = root.join("textures").join("oak_planks");
+        std::fs::create_dir_all(&wood).expect("made");
+        for (path, bytes) in [
+            (root.join("chair.glb"), &b"glb"[..]),
+            (root.join("sky_1k.hdr"), b"hdr"),
+            (wood.join("oak_planks_diff_1k.jpg"), b"jpg"),
+            (wood.join("oak_planks_rough_1k.jpg"), b"jpg"),
+            (wood.join("oak_planks_nor_gl_1k.jpg"), b"jpg"),
+            (wood.join("oak_planks_nor_dx_1k.jpg"), b"jpg"),
+            (root.join("notes.txt"), b"txt"),
+        ] {
+            std::fs::write(path, bytes).expect("written");
+        }
+        let entries = scan_folders(std::slice::from_ref(&root));
+        let kinds: Vec<(Kind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
+        assert!(kinds.contains(&(Kind::Model, "chair")), "{kinds:?}");
+        assert!(kinds.contains(&(Kind::Hdri, "sky 1k")));
+        assert!(kinds.contains(&(Kind::Material, "oak planks")));
+        assert_eq!(entries.len(), 3);
+        let maps = local_maps(&wood);
+        assert!(maps
+            .color
+            .is_some_and(|p| p.ends_with("oak_planks_diff_1k.jpg")));
+        assert!(maps
+            .normal
+            .is_some_and(|p| p.ends_with("oak_planks_nor_gl_1k.jpg")));
+        assert!(maps.roughness.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

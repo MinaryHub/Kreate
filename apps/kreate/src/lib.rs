@@ -7,6 +7,7 @@
 //! invisible to everything except a human looking at the screen.
 
 pub mod appcall;
+pub mod assets;
 pub mod attach;
 pub mod breadcrumbs;
 pub mod bridge;

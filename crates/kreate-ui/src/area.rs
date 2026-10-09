@@ -107,6 +107,8 @@ impl EditorId {
     pub const GRAPH: Self = Self::known("graph");
     /// The drivers of the selected objects: expressions and their variables.
     pub const DRIVERS: Self = Self::known("drivers");
+    /// Models, materials and environments to add, local or online.
+    pub const ASSETS: Self = Self::known("assets");
 
     /// An id spelled out in this build.
     pub const fn known(id: &'static str) -> Self {
@@ -171,6 +173,7 @@ impl EditorRegistry {
             (EditorId::PREFERENCES, "editor-preferences", false),
             (EditorId::CONSOLE, "editor-console", false),
             (EditorId::CLAUDE, "editor-claude", false),
+            (EditorId::ASSETS, "editor-assets", false),
             (EditorId::SHADER, "editor-shader", true),
             (EditorId::GEOMETRY, "editor-geometry-nodes", true),
             (EditorId::TIMELINE, "editor-timeline", true),

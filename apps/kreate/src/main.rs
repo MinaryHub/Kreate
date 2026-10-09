@@ -703,6 +703,8 @@ struct App {
     chat_attachments: Vec<kreate::attach::Attachment>,
     /// Help ▸ Contact's messages on their way. See `kreate::contact`.
     outbox: Option<kreate::contact::Outbox>,
+    /// The asset browser's lists, pictures and downloads.
+    assets: Option<kreate::assets::Library>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     egui_ctx: egui::Context,
@@ -1012,6 +1014,7 @@ impl App {
             chat_streaming: false,
             chat_attachments: Vec::new(),
             outbox: None,
+            assets: None,
             window: None,
             gfx: None,
             egui_ctx: egui::Context::default(),
@@ -4266,6 +4269,122 @@ impl App {
     // What `kreate-mcp` asks for, served on the main thread, where the
     // document is. See `kreate::bridge`.
 
+    /// The asset browser: lists asked for, pictures and downloads arrived.
+    fn serve_assets(&mut self) {
+        use kreate::assets::{Event, Kind, Source};
+        let Some(library) = &mut self.assets else {
+            return;
+        };
+        let source = Source::ALL
+            .get(self.ui.asset_source)
+            .copied()
+            .unwrap_or(Source::Local);
+        let kind = Kind::ALL
+            .get(self.ui.asset_kind)
+            .copied()
+            .unwrap_or(Kind::Model);
+        if std::mem::take(&mut self.ui.asset_list_wanted) {
+            self.ui.asset_busy = Some(self.ui.catalog.format(
+                "asset-loading",
+                kreate_i18n::TextKind::Ui,
+                &[],
+            ));
+            library.list(source, kind, self.ui.asset_folders.clone());
+        }
+        for id in std::mem::take(&mut self.ui.asset_wanted) {
+            if let Some(entry) = self.ui.asset_entries.iter().find(|e| e.id == id) {
+                library.thumbnail(entry);
+                self.ui.asset_asked.insert(id);
+            }
+        }
+        let mut ready = Vec::new();
+        let mut changed = false;
+        for event in library.poll() {
+            changed = true;
+            match event {
+                Event::Listed {
+                    source: s,
+                    kind: k,
+                    result,
+                } => {
+                    // A list for a choice since changed is not the one shown.
+                    if (s, k) != (source, kind) {
+                        continue;
+                    }
+                    self.ui.asset_busy = None;
+                    match result {
+                        Ok(entries) => {
+                            self.ui.asset_error = None;
+                            self.ui.asset_entries = entries;
+                        }
+                        Err(why) => self.ui.asset_error = Some(why),
+                    }
+                }
+                Event::Thumbnail { id, image } => {
+                    if let Some(image) = image {
+                        self.ui.asset_incoming.push((id, image));
+                    }
+                }
+                Event::Fetched { entry, result } => {
+                    self.ui.asset_busy = None;
+                    match result {
+                        Ok(r) => ready.push((entry, r)),
+                        Err(why) => self.ui.asset_error = Some(why),
+                    }
+                }
+            }
+        }
+        for (entry, r) in ready {
+            self.add_asset(&entry, r);
+        }
+        if changed {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// An asset's files are on the disk: add it as its kind says.
+    fn add_asset(&mut self, entry: &kreate::assets::Entry, ready: kreate::assets::Ready) {
+        use kreate::assets::Ready;
+        match ready {
+            Ready::Model(path) => self.import_into(&path),
+            Ready::Hdri(path) => self.set_world_image_from(&path),
+            Ready::Material(maps) => self.add_material_asset(&entry.name, &maps),
+        }
+    }
+
+    /// A material made of texture maps — colour, and roughness, metal and a
+    /// normal map when there are — as a node graph, put on the active object.
+    ///
+    /// The images and the material are added outside the history, as an image
+    /// picked for a material is; putting it on the object is the undo step.
+    fn add_material_asset(&mut self, name: &str, maps: &kreate::assets::Maps) {
+        let Some(material) = kreate::assets::material_from_maps(&mut self.doc, name, maps) else {
+            return self.status(&format!("cannot read the colour map of {name}"));
+        };
+        let Some(uid) = self.doc.material_uid(material) else {
+            return;
+        };
+        let has_mesh = self.doc.selection.active.is_some_and(|id| {
+            matches!(
+                self.doc.object(id).map(|o| &o.data),
+                Some(kreate_scene::document::ObjectData::Mesh(_))
+            )
+        });
+        if has_mesh {
+            let mut params = PropertyMap::new();
+            params.set("slot", PropertyValue::Int(0));
+            params.set("uid", PropertyValue::Text(uid.raw().to_string()));
+            self.run_op("material.link", params);
+            self.status(&format!("{name} is on the active object"));
+        } else {
+            self.status(&format!(
+                "made the material {name}; select a mesh and choose it in the Material tab"
+            ));
+        }
+    }
+
     /// What became of the messages Help ▸ Contact sent.
     fn serve_outbox(&mut self) {
         use kreate_ui::contact::ContactStatus;
@@ -6026,9 +6145,53 @@ impl App {
                 Command::SaveDocument => self.save_document(false),
                 Command::SaveDocumentAs => self.save_document(true),
                 Command::ExportScene => self.export_scene(),
+                Command::AssetSource { index } => {
+                    self.ui.asset_source = index;
+                    self.reset_asset_list();
+                }
+                Command::AssetKind { index } => {
+                    self.ui.asset_kind = index;
+                    self.reset_asset_list();
+                }
+                Command::AssetResolution { index } => self.ui.asset_resolution = index,
+                Command::AssetRefresh => self.reset_asset_list(),
+                Command::AssetAdd { index } => {
+                    if let (Some(entry), Some(library)) =
+                        (self.ui.asset_entries.get(index).cloned(), &self.assets)
+                    {
+                        let size = kreate::assets::RESOLUTIONS
+                            .get(self.ui.asset_resolution)
+                            .copied()
+                            .unwrap_or("1k");
+                        library.fetch(entry.clone(), size);
+                        self.ui.asset_error = None;
+                        self.ui.asset_busy = Some(self.ui.catalog.format(
+                            "asset-fetching",
+                            kreate_i18n::TextKind::Ui,
+                            &[("name", entry.name.as_str())],
+                        ));
+                    }
+                }
+                Command::AssetAddFolder => {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        if !self.ui.asset_folders.contains(&folder) {
+                            self.ui.asset_folders.push(folder);
+                            let _ = kreate::assets::save_folders(&self.ui.asset_folders);
+                        }
+                        self.reset_asset_list();
+                    }
+                }
+                Command::AssetRemoveFolder { index } => {
+                    if index < self.ui.asset_folders.len() {
+                        self.ui.asset_folders.remove(index);
+                        let _ = kreate::assets::save_folders(&self.ui.asset_folders);
+                        self.reset_asset_list();
+                    }
+                }
                 Command::ImportScene => {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Scene", SCENE_FORMATS)
+                        .add_filter("Kreate document", &["kreate"])
                         .set_title("Import")
                         .pick_file()
                     {
@@ -6418,6 +6581,14 @@ impl App {
             "hdr" | "exr" => self.set_world_image_from(path),
             _ => self.status(&format!("cannot open {} here", path.display())),
         }
+    }
+
+    /// Forgets what the asset browser shows, so the next frame lists afresh.
+    fn reset_asset_list(&mut self) {
+        self.ui.asset_entries.clear();
+        self.ui.asset_error = None;
+        self.ui.asset_busy = None;
+        self.ui.asset_list_wanted = true;
     }
 
     /// Adds a scene file's contents to the document: through the IR into a
@@ -11210,6 +11381,7 @@ impl ApplicationHandler for App {
         self.serve_bridge();
         self.serve_chat();
         self.serve_outbox();
+        self.serve_assets();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -12140,6 +12312,15 @@ const SCENE_FORMATS: &[&str] = &["gltf", "glb", "fbx", "obj", "stl", "ply", "3mf
 fn import_scene(
     path: &std::path::Path,
 ) -> Result<(Document, Vec<kreate_io::build::BuildNote>), String> {
+    // A Kreate document added to another: everything in it, as a paste.
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
+    {
+        return DocumentFile::open(path)
+            .map(|(doc, _)| (doc, Vec::new()))
+            .map_err(|e| e.to_string());
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
     let lower = path
         .extension()
@@ -12171,8 +12352,8 @@ fn import_scene(
             let text = String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
             kreate_io::parse_off(&text, &name).map_err(|e| e.to_string())?
         }
-        "gltf" | "glb" => kreate_io::gltf_import::parse_gltf(
-            &bytes,
+        "gltf" | "glb" => kreate_io::gltf_import::parse_gltf_file(
+            path,
             // glTF declares its own units and orientation, so there is nothing
             // for an option to override: second-guessing the one format that
             // bothers to say would be the wrong kind of helpful.
@@ -12271,6 +12452,13 @@ fn main() {
             let _ = proxy.send_event(());
         }
     }));
+    let assets_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    app.assets = Some(kreate::assets::Library::new(move || {
+        if let Ok(proxy) = assets_proxy.lock() {
+            let _ = proxy.send_event(());
+        }
+    }));
+    app.ui.asset_folders = kreate::assets::load_folders();
     let proxy = std::sync::Mutex::new(event_loop.create_proxy());
     if let Some(info) = kreate::bridge::info_path() {
         match kreate::bridge::start(&info, move || {
