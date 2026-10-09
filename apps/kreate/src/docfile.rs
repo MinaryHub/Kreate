@@ -719,11 +719,13 @@ mod view_tests {
 
     #[test]
     fn a_saved_view_comes_back_and_a_broken_one_does_not() {
-        let mut camera = kreate_render::Camera::default();
-        camera.pivot = glam::DVec3::new(1.0, -2.0, 0.5);
-        camera.distance = 3.25;
-        camera.fov_y = 0.6;
-        camera.projection = kreate_render::Projection::Orthographic;
+        let camera = kreate_render::Camera {
+            pivot: glam::DVec3::new(1.0, -2.0, 0.5),
+            distance: 3.25,
+            fov_y: 0.6,
+            projection: kreate_render::Projection::Orthographic,
+            ..Default::default()
+        };
         let back = view_from_record(&view_record(&camera)).expect("a view");
         assert_eq!(back.pivot, camera.pivot);
         assert!(back.rotation.abs_diff_eq(camera.rotation, 1e-12));
@@ -747,8 +749,10 @@ mod view_tests {
         let path = dir.join("viewed.kreate");
         let document = Document::new();
         let mut file = DocumentFile::new();
-        let mut camera = kreate_render::Camera::default();
-        camera.distance = 12.5;
+        let camera = kreate_render::Camera {
+            distance: 12.5,
+            ..Default::default()
+        };
         file.set_view(&camera);
         file.save(&path, &document).expect("saved");
         let (opened, reopened) = DocumentFile::open(&path).expect("opened");

@@ -12809,10 +12809,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kreate-open-view-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("made");
         let path = dir.join("looked.kreate");
-        let mut saved = Camera::default();
-        saved.pivot = DVec3::new(2.0, 1.0, 0.0);
-        saved.distance = 6.5;
-        saved.projection = kreate_render::Projection::Orthographic;
+        let saved = Camera {
+            pivot: DVec3::new(2.0, 1.0, 0.0),
+            distance: 6.5,
+            projection: kreate_render::Projection::Orthographic,
+            ..Camera::default()
+        };
         let mut file = DocumentFile::new();
         file.set_view(&saved);
         file.save(&path, &load_document(None)).expect("saved");
