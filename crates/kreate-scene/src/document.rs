@@ -2005,16 +2005,28 @@ impl Document {
         self.collections.remove(id)
     }
 
-    /// Whether `object` is drawn: its own eye, and its collection's.
+    /// Whether `object` is drawn: its own eye, every parent's above it, and
+    /// its collection's.
     ///
-    /// Linear in the members of the hidden collections — nothing at all when
-    /// none is hidden, which is the ordinary case.
+    /// A parent hidden hides what hangs from it — the chair goes with the
+    /// table — while each child keeps its own eye for when the parent comes
+    /// back. Linear in the members of the hidden collections — nothing at all
+    /// when none is hidden, which is the ordinary case.
     pub fn is_shown(&self, object: ObjectId) -> bool {
-        self.objects.get(object).is_some_and(|o| o.visible)
-            && !self
-                .collections
-                .iter()
-                .any(|(_, c)| c.hide && c.objects.contains(&object))
+        let mut at = Some(object);
+        // Bounded by the object count, so a parent loop cannot hang the
+        // viewport; the parenting operators refuse one, but a file may not.
+        for _ in 0..=self.objects.len() {
+            let Some(id) = at else { break };
+            match self.objects.get(id) {
+                Some(o) if o.visible => at = o.parent,
+                _ => return false,
+            }
+        }
+        !self
+            .collections
+            .iter()
+            .any(|(_, c)| c.hide && c.objects.contains(&object))
     }
 
     // --- convenience --------------------------------------------------------
@@ -2562,6 +2574,25 @@ mod tests {
             DTransform::from_translation(DVec3::new(1000.0, 0.0, 0.0));
         d.object_mut(hidden).unwrap().visible = false;
         assert!(d.world_bounds().max.x < 2.0);
+    }
+
+    #[test]
+    fn a_hidden_parent_hides_its_children_and_they_return_with_it() {
+        let mut d = Document::new();
+        let table = d.add_mesh_object("Table", kreate_mesh::primitives::cube(1.0));
+        let chair = d.add_mesh_object("Chair", kreate_mesh::primitives::cube(1.0));
+        let cushion = d.add_mesh_object("Cushion", kreate_mesh::primitives::cube(1.0));
+        d.set_parent(chair, Some(table)).unwrap();
+        d.set_parent(cushion, Some(chair)).unwrap();
+        d.object_mut(table).unwrap().visible = false;
+        // Hidden all the way down, though their own eyes are open.
+        assert!(!d.is_shown(chair) && !d.is_shown(cushion));
+        assert!(d.object(cushion).unwrap().visible);
+        d.object_mut(table).unwrap().visible = true;
+        assert!(d.is_shown(chair) && d.is_shown(cushion));
+        // A child hidden on its own stays hidden; its parent does not.
+        d.object_mut(chair).unwrap().visible = false;
+        assert!(d.is_shown(table) && !d.is_shown(cushion));
     }
 
     #[test]

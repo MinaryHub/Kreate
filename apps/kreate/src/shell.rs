@@ -896,6 +896,7 @@ impl OutlinerOrder {
             selected: doc.selection.contains(id),
             active: doc.selection.active == Some(id),
             visible: object.visible,
+            shown: doc.is_shown(id),
             kind,
             data_name,
             materials,

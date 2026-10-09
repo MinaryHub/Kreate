@@ -59,7 +59,12 @@ pub struct OutlinerRow {
     pub depth: usize,
     pub selected: bool,
     pub active: bool,
+    /// The object's own eye.
     pub visible: bool,
+    /// Whether it is drawn at all: its eye, every parent's and its
+    /// collection's. A child of a hidden parent keeps its eye open and is
+    /// drawn faint, so the user sees why it is gone and that it will return.
+    pub shown: bool,
     pub kind: RowKind,
     /// How many objects share this row's mesh. Greater than one means editing it
     /// changes every user, which the outliner must say before the user is
@@ -91,6 +96,7 @@ impl OutlinerRow {
             selected: false,
             active: false,
             visible: true,
+            shown: true,
             kind,
             mesh_users: 1,
             data_name: None,
@@ -560,7 +566,7 @@ fn draw_object_row(
         // A drawn icon for what the object is, the way Blender's tree says
         // mesh, light or camera before the name does.
         let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
-        object_icon(ui, row.kind, icon_rect, row.visible);
+        object_icon(ui, row.kind, icon_rect, row.shown);
         ui.interact(
             icon_rect,
             ui.id().with(("kind", row.id)),
@@ -572,7 +578,7 @@ fn draw_object_row(
         if row.active {
             label = label.strong();
         }
-        if !row.visible {
+        if !row.shown {
             label = label.weak();
         }
 

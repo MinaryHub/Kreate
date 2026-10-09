@@ -42,6 +42,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Hiding an object in the outliner hides its children with it. Each child
+  keeps its own eye, drawn faint while its parent is hidden, and comes back
+  when the parent does.
 - Importing a model — File ▸ Import, a dropped file, an asset — reads it in
   the background, so a large one no longer stops the window, and records
   the step as the file's path rather than the whole model: undo history
