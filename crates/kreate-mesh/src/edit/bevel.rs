@@ -674,7 +674,7 @@ fn grid_onto_round(
     segments: u32,
 ) -> Option<Vec<FaceId>> {
     let n = segments as usize;
-    if n < 2 || n % 2 != 0 || corners.len() != 3 {
+    if n < 2 || !n.is_multiple_of(2) || corners.len() != 3 {
         return None;
     }
     let ring = mesh.face_verts(face);
