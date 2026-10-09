@@ -43,6 +43,159 @@ pub enum GeoNodeKind {
     ExtrudeProfile { height: f32 },
     /// A sketch's outline turned a full turn about its Y axis.
     RevolveProfile { segments: u32 },
+    /// Points scattered over the faces, so many to a square metre: what
+    /// Instance on Points puts copies on. Each remembers the face's normal.
+    DistributePoints { density: f32, seed: u32 },
+    /// A copy of the second input at every point of the first: sized,
+    /// turned at random and stood on the surface's normal if asked.
+    InstanceOnPoints {
+        scale: f32,
+        random_scale: f32,
+        random_rotation: bool,
+        align: bool,
+        seed: u32,
+    },
+    /// Every vertex moved: by an offset, and along its normal by a noise
+    /// that varies over the surface — a field, sampled where each vertex is.
+    SetPosition {
+        offset: [f32; 3],
+        noise: f32,
+        noise_scale: f32,
+        seed: u32,
+    },
+}
+
+/// The point layer [`GeoNodeKind::DistributePoints`] leaves each point's
+/// normal in.
+pub const POINT_NORMAL: &str = ".geo_normal";
+
+/// Area-weighted vertex normals; a vertex on no face points up.
+fn vertex_normals(m: &MeshData) -> Vec<Vec3> {
+    let p = m.positions();
+    let mut out = vec![Vec3::ZERO; p.len()];
+    for f in 0..m.num_faces() {
+        let ring = m.face_verts(f);
+        let mut n = Vec3::ZERO;
+        for i in 0..ring.len() {
+            n += p[ring[i] as usize].cross(p[ring[(i + 1) % ring.len()] as usize]);
+        }
+        for v in ring {
+            out[*v as usize] += n;
+        }
+    }
+    out.into_iter().map(|n| n.normalize_or(Vec3::Z)).collect()
+}
+
+/// Points over `m`'s faces, `density` to a unit of area, by a seeded
+/// scatter: vertices with no faces, each with its face's normal.
+fn distribute_points(m: &MeshData, density: f32, seed: u32) -> MeshData {
+    let surface = crate::physics::particles::Surface::of(m);
+    let tri = m.triangulate();
+    let area: f64 = tri
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| m.positions()[i as usize]);
+            0.5 * (b - a).cross(c - a).length() as f64
+        })
+        .sum();
+    let count = ((area * density.max(0.0) as f64).round() as usize).min(1_000_000);
+    if surface.is_empty() || count == 0 {
+        return MeshData::empty();
+    }
+    let mut rng = crate::physics::Rng::new(seed as u64 + 7);
+    let mut positions = Vec::with_capacity(count);
+    let mut normals = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (p, n) = surface.sample(&mut rng);
+        positions.push(p.as_vec3());
+        normals.push(n.as_vec3());
+    }
+    let mut out = MeshData::from_faces(positions, &[]);
+    out.attributes_mut().insert(
+        POINT_NORMAL,
+        kreate_mesh::Domain::Point,
+        kreate_mesh::AttrData::F32x3(std::sync::Arc::new(normals)),
+    );
+    out
+}
+
+/// A copy of `shape` at every vertex of `points`.
+fn instance_on_points(
+    points: &MeshData,
+    shape: &MeshData,
+    scale: f32,
+    random_scale: f32,
+    random_rotation: bool,
+    align: bool,
+    seed: u32,
+) -> MeshData {
+    if points.num_verts() == 0 || shape.num_verts() == 0 {
+        return MeshData::empty();
+    }
+    let normals: Vec<Vec3> = match points.attributes().get_f32x3(POINT_NORMAL) {
+        Some(n) if n.len() == points.num_verts() as usize => n.to_vec(),
+        _ => vertex_normals(points),
+    };
+    let mut rng = crate::physics::Rng::new(seed as u64 + 11);
+    let transforms: Vec<DAffine3> = points
+        .positions()
+        .iter()
+        .zip(&normals)
+        .map(|(p, n)| {
+            let up = if align { n.as_dvec3().normalize_or(DVec3::Z) } else { DVec3::Z };
+            let stand = DQuat::from_rotation_arc(DVec3::Z, up);
+            let spin = if random_rotation {
+                DQuat::from_axis_angle(DVec3::Z, rng.unit() * std::f64::consts::TAU)
+            } else {
+                DQuat::IDENTITY
+            };
+            let s = scale as f64 * (1.0 - random_scale.clamp(0.0, 1.0) as f64 * rng.unit());
+            DAffine3::from_scale_rotation_translation(DVec3::splat(s), stand * spin, p.as_dvec3())
+        })
+        .collect();
+    let parts: Vec<Part<'_>> = transforms
+        .into_iter()
+        .map(|transform| Part { mesh: shape, transform })
+        .collect();
+    join(&parts).0
+}
+
+/// Smooth noise in space, -1 to 1: a hashed value at each lattice corner,
+/// blended. The field Set Position samples.
+fn noise3(p: Vec3, seed: u32) -> f32 {
+    let hash = |x: i32, y: i32, z: i32| {
+        let mut h = (x as u32).wrapping_mul(0x8da6_b343)
+            ^ (y as u32).wrapping_mul(0xd816_3841)
+            ^ (z as u32).wrapping_mul(0xcb1a_b31f)
+            ^ seed.wrapping_mul(0x2545_f491);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x5bd1_e995);
+        h ^= h >> 15;
+        (h as f32 / u32::MAX as f32) * 2.0 - 1.0
+    };
+    let f = p.floor();
+    let t = p - f;
+    let s = t * t * (Vec3::splat(3.0) - 2.0 * t);
+    let (x, y, z) = (f.x as i32, f.y as i32, f.z as i32);
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let c = |dx: i32, dy: i32, dz: i32| hash(x + dx, y + dy, z + dz);
+    lerp(
+        lerp(lerp(c(0, 0, 0), c(1, 0, 0), s.x), lerp(c(0, 1, 0), c(1, 1, 0), s.x), s.y),
+        lerp(lerp(c(0, 0, 1), c(1, 0, 1), s.x), lerp(c(0, 1, 1), c(1, 1, 1), s.x), s.y),
+        s.z,
+    )
+}
+
+/// Every vertex by `offset`, and along its normal by the noise there.
+fn set_position(m: &mut MeshData, offset: Vec3, noise: f32, scale: f32, seed: u32) {
+    let normals = vertex_normals(m);
+    for (p, n) in m.positions_mut().iter_mut().zip(&normals) {
+        let along = if noise != 0.0 { noise * noise3(*p * scale, seed) } else { 0.0 };
+        *p += offset + *n * along;
+    }
 }
 
 /// The primitive shapes, in [`GeoNodeKind::Primitive`]'s order.
@@ -53,7 +206,7 @@ impl GeoNodeKind {
     pub fn inputs(&self) -> usize {
         match self {
             GeoNodeKind::Input | GeoNodeKind::Primitive { .. } => 0,
-            GeoNodeKind::Join => 2,
+            GeoNodeKind::Join | GeoNodeKind::InstanceOnPoints { .. } => 2,
             _ => 1,
         }
     }
@@ -76,12 +229,15 @@ impl GeoNodeKind {
             GeoNodeKind::Primitive { .. } => "primitive",
             GeoNodeKind::ExtrudeProfile { .. } => "extrude_profile",
             GeoNodeKind::RevolveProfile { .. } => "revolve_profile",
+            GeoNodeKind::DistributePoints { .. } => "distribute_points",
+            GeoNodeKind::InstanceOnPoints { .. } => "instance_on_points",
+            GeoNodeKind::SetPosition { .. } => "set_position",
         }
     }
 
     /// The kinds the Add menu offers, in its order. Not the group's input or
     /// output: a graph has one of each.
-    pub const ADDABLE: [&'static str; 8] = [
+    pub const ADDABLE: [&'static str; 11] = [
         "transform",
         "array",
         "subdivide",
@@ -90,6 +246,9 @@ impl GeoNodeKind {
         "primitive",
         "extrude_profile",
         "revolve_profile",
+        "distribute_points",
+        "instance_on_points",
+        "set_position",
     ];
 
     /// The node's numbers, flat — for a file, and for its fields by index.
@@ -111,6 +270,26 @@ impl GeoNodeKind {
             GeoNodeKind::Primitive { shape, size } => vec![*shape as f32, *size],
             GeoNodeKind::ExtrudeProfile { height } => vec![*height],
             GeoNodeKind::RevolveProfile { segments } => vec![*segments as f32],
+            GeoNodeKind::DistributePoints { density, seed } => vec![*density, *seed as f32],
+            GeoNodeKind::InstanceOnPoints {
+                scale,
+                random_scale,
+                random_rotation,
+                align,
+                seed,
+            } => vec![
+                *scale,
+                *random_scale,
+                if *random_rotation { 1.0 } else { 0.0 },
+                if *align { 1.0 } else { 0.0 },
+                *seed as f32,
+            ],
+            GeoNodeKind::SetPosition {
+                offset,
+                noise,
+                noise_scale,
+                seed,
+            } => vec![offset[0], offset[1], offset[2], *noise, *noise_scale, *seed as f32],
         }
     }
 
@@ -147,6 +326,23 @@ impl GeoNodeKind {
             },
             "revolve_profile" => GeoNodeKind::RevolveProfile {
                 segments: at(0, 32.0).clamp(3.0, 512.0) as u32,
+            },
+            "distribute_points" => GeoNodeKind::DistributePoints {
+                density: at(0, 10.0).clamp(0.0, 100_000.0),
+                seed: at(1, 0.0).clamp(0.0, 1e6) as u32,
+            },
+            "instance_on_points" => GeoNodeKind::InstanceOnPoints {
+                scale: at(0, 1.0),
+                random_scale: at(1, 0.0).clamp(0.0, 1.0),
+                random_rotation: at(2, 0.0) >= 0.5,
+                align: at(3, 1.0) >= 0.5,
+                seed: at(4, 0.0).clamp(0.0, 1e6) as u32,
+            },
+            "set_position" => GeoNodeKind::SetPosition {
+                offset: [at(0, 0.0), at(1, 0.0), at(2, 0.0)],
+                noise: at(3, 0.1),
+                noise_scale: at(4, 2.0).max(0.0),
+                seed: at(5, 0.0).clamp(0.0, 1e6) as u32,
             },
             _ => return None,
         })
@@ -203,6 +399,31 @@ impl GeoNodeKind {
             ],
             GeoNodeKind::ExtrudeProfile { .. } => vec![number("height", 0, -1000.0, 1000.0)],
             GeoNodeKind::RevolveProfile { .. } => vec![number("segments", 0, 3.0, 512.0)],
+            GeoNodeKind::DistributePoints { .. } => vec![
+                number("density", 0, 0.0, 100_000.0),
+                number("seed", 1, 0.0, 1e6),
+            ],
+            GeoNodeKind::InstanceOnPoints { .. } => vec![
+                number("scale", 0, -100.0, 100.0),
+                number("random-scale", 1, 0.0, 1.0),
+                GeoField {
+                    choice: Some(&["no", "yes"]),
+                    ..number("random-rotation", 2, 0.0, 1.0)
+                },
+                GeoField {
+                    choice: Some(&["no", "yes"]),
+                    ..number("align", 3, 0.0, 1.0)
+                },
+                number("seed", 4, 0.0, 1e6),
+            ],
+            GeoNodeKind::SetPosition { .. } => vec![
+                number("offset-x", 0, -1000.0, 1000.0),
+                number("offset-y", 1, -1000.0, 1000.0),
+                number("offset-z", 2, -1000.0, 1000.0),
+                number("noise", 3, -100.0, 100.0),
+                number("noise-scale", 4, 0.0, 1000.0),
+                number("seed", 5, 0.0, 1e6),
+            ],
         }
     }
 
@@ -404,6 +625,31 @@ impl GeoGraph {
             return done.clone();
         }
         let out = match &self.nodes[n].kind {
+            GeoNodeKind::DistributePoints { density, seed } => {
+                let m = self.socket(n, 0, input, memo, depth);
+                distribute_points(&m, *density, *seed)
+            }
+            GeoNodeKind::InstanceOnPoints {
+                scale,
+                random_scale,
+                random_rotation,
+                align,
+                seed,
+            } => {
+                let points = self.socket(n, 0, input, memo, depth);
+                let shape = self.socket(n, 1, input, memo, depth);
+                instance_on_points(&points, &shape, *scale, *random_scale, *random_rotation, *align, *seed)
+            }
+            GeoNodeKind::SetPosition {
+                offset,
+                noise,
+                noise_scale,
+                seed,
+            } => {
+                let mut m = self.socket(n, 0, input, memo, depth);
+                set_position(&mut m, Vec3::from_array(*offset), *noise, *noise_scale, *seed);
+                m
+            }
             GeoNodeKind::Input => input.clone(),
             GeoNodeKind::Output => self.socket(n, 0, input, memo, depth),
             GeoNodeKind::Transform {
@@ -560,6 +806,66 @@ mod tests {
         assert!(g.remove(&[t]));
         assert_eq!(g.nodes.len(), 3);
         assert!(g.links.iter().all(|l| l.from_node < 3 && l.to_node < 3));
+    }
+
+    #[test]
+    fn points_scattered_over_a_plane_each_carry_an_instance() {
+        let plane = kreate_mesh::primitives::plane(2.0);
+        let mut g = GeoGraph::passthrough();
+        let d = add(&mut g, GeoNodeKind::DistributePoints { density: 10.0, seed: 3 });
+        let p = add(&mut g, GeoNodeKind::Primitive { shape: 0, size: 0.1 });
+        let i = add(
+            &mut g,
+            GeoNodeKind::InstanceOnPoints {
+                scale: 1.0,
+                random_scale: 0.5,
+                random_rotation: true,
+                align: true,
+                seed: 1,
+            },
+        );
+        g.link(0, d, 0).unwrap();
+        g.link(d, i, 0).unwrap();
+        g.link(p, i, 1).unwrap();
+        g.link(i, 1, 0).unwrap();
+        let out = g.evaluate(&plane).unwrap();
+        // Four square units at ten a unit: forty cubes, six faces each.
+        assert_eq!(out.num_faces(), 40 * 6);
+        // On the plane, within it.
+        assert!(out.positions().iter().all(|q| q.x.abs() < 1.1 && q.y.abs() < 1.1 && q.z.abs() < 0.15));
+        // The same seed scatters the same.
+        assert_eq!(g.evaluate(&plane).unwrap().positions(), out.positions());
+    }
+
+    #[test]
+    fn instances_stand_on_the_surface_they_were_scattered_over() {
+        // A wall facing +X: aligned, the cubes' up is the wall's normal.
+        let mut wall = kreate_mesh::primitives::plane(2.0);
+        for q in wall.positions_mut() {
+            *q = Vec3::new(0.0, q.x, q.y);
+        }
+        let points = distribute_points(&wall, 5.0, 0);
+        let pin = kreate_mesh::MeshData::from_faces(
+            vec![Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.01, 0.0, 0.0)],
+            &[vec![0, 1, 2]],
+        );
+        let out = instance_on_points(&points, &pin, 1.0, 0.0, false, true, 0);
+        let n = points.attributes().get_f32x3(POINT_NORMAL).unwrap()[0];
+        let tip = out.positions()[1] - out.positions()[0];
+        assert!(tip.normalize().dot(n) > 0.999, "standing on the wall: {tip:?} vs {n:?}");
+    }
+
+    #[test]
+    fn set_position_moves_along_the_normals_by_its_noise() {
+        let ball = kreate_mesh::primitives::uv_sphere(1.0, 32, 16);
+        let mut lumpy = ball.clone();
+        set_position(&mut lumpy, Vec3::ZERO, 0.2, 3.0, 4);
+        let radii: Vec<f32> = lumpy.positions().iter().map(|q| q.length()).collect();
+        assert!(radii.iter().any(|r| *r > 1.02) && radii.iter().any(|r| *r < 0.98), "in and out");
+        assert!(radii.iter().all(|r| (r - 1.0).abs() <= 0.2001), "no further than the noise");
+        let mut moved = ball.clone();
+        set_position(&mut moved, Vec3::new(0.0, 0.0, 2.0), 0.0, 1.0, 0);
+        assert!(moved.positions().iter().zip(ball.positions()).all(|(a, b)| (a.z - b.z - 2.0).abs() < 1e-6));
     }
 
     #[test]

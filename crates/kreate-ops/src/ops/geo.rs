@@ -157,6 +157,9 @@ pub fn default_name(kind: &GeoNodeKind) -> &'static str {
         GeoNodeKind::Primitive { .. } => "Mesh Primitive",
         GeoNodeKind::ExtrudeProfile { .. } => "Extrude Profile",
         GeoNodeKind::RevolveProfile { .. } => "Revolve Profile",
+        GeoNodeKind::DistributePoints { .. } => "Distribute Points on Faces",
+        GeoNodeKind::InstanceOnPoints { .. } => "Instance on Points",
+        GeoNodeKind::SetPosition { .. } => "Set Position",
     }
 }
 
