@@ -14,6 +14,7 @@ pub mod cluster_cull;
 pub mod deform;
 pub mod reshape;
 pub mod skin;
+pub mod solid_textures;
 pub mod denoise;
 pub mod display;
 pub mod environment;

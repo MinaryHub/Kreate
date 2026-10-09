@@ -75,6 +75,9 @@ struct ObjectData {
     /// linear: what a run of faces on that slot is drawn in. See
     /// [`Draw::colors`].
     slot_colors: [[f32; 4]; SOLID_SLOTS],
+    /// The image layer each slot shows when the solid modes show textures,
+    /// four to a `vec4`; below zero for none. See [`Draw::layers`].
+    slot_layers: [[f32; 4]; SOLID_SLOTS / 4],
 }
 
 /// How many material slots the studio and flat modes colour apart; faces on
@@ -653,6 +656,10 @@ pub struct Draw<'a> {
     /// material's base colour, as Blender's solid mode shows it. An alpha of
     /// zero — or a slot past the end — is the object's own grey.
     pub colors: &'a [[f32; 4]],
+    /// The solid-mode image each material slot shows — a layer of the
+    /// viewport's [`crate::solid_textures::SolidTextures`] — or a negative
+    /// for its colour. Empty: colours everywhere.
+    pub layers: &'a [i32],
     /// How much of this object to draw, filled in by [`Viewport::prepare`].
     ///
     /// Carried on the draw rather than recomputed in each pass because four
@@ -676,6 +683,7 @@ impl<'a> Draw<'a> {
             material: 0,
             materials: &[],
             colors: &[],
+            layers: &[],
             weights: false,
             sculpt_overlay: false,
             // Full until measured. A draw that is never passed through
@@ -719,6 +727,12 @@ impl<'a> Draw<'a> {
 
     /// Sets the studio and flat colour of each material slot. See
     /// [`Draw::colors`].
+    /// Sets the image layer each material slot shows. See [`Draw::layers`].
+    pub fn with_layers(mut self, layers: &'a [i32]) -> Self {
+        self.layers = layers;
+        self
+    }
+
     pub fn with_colors(mut self, colors: &'a [[f32; 4]]) -> Self {
         self.colors = colors;
         self
@@ -1495,6 +1509,9 @@ pub struct Viewport {
     /// The surfaces see-through, Blender's X-ray: every edge behind shows.
     pub xray: bool,
     solid_xray: wgpu::RenderPipeline,
+    /// The images the studio and flat modes show. See
+    /// [`crate::solid_textures`].
+    solid_textures: crate::solid_textures::SolidTextures,
     /// Darkens the studio view's corners and creases.
     ao: crate::ao::Ao,
     /// Whether the studio view darkens corners and creases.
@@ -1728,9 +1745,17 @@ impl Viewport {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/overlay_edge.wgsl").into()),
         });
 
+        // The images the solid modes can show, in group 3 — after the
+        // cluster path's storage in 2, which shares this shader.
+        let solid_textures = crate::solid_textures::SolidTextures::new(device);
         let solid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("solid layout"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&object_layout)],
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&object_layout),
+                None,
+                Some(&solid_textures.layout),
+            ],
             immediate_size: 0,
         });
         let grid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2318,6 +2343,7 @@ impl Viewport {
                 Some(&cluster_globals_layout),
                 Some(&cluster_instance_layout),
                 Some(&layouts.cluster_draw),
+                Some(&solid_textures.layout),
             ],
             immediate_size: 0,
         });
@@ -2401,6 +2427,7 @@ impl Viewport {
         Self {
             solid,
             solid_xray,
+            solid_textures,
             xray: false,
             grid,
             globals_buf,
@@ -2980,6 +3007,11 @@ impl Viewport {
                             .copied()
                             .filter(|c| c[3] > 0.0)
                             .unwrap_or(draw.mesh.color.to_array())
+                    }),
+                    slot_layers: std::array::from_fn(|row| {
+                        std::array::from_fn(|k| {
+                            draw.layers.get(row * 4 + k).map_or(-1.0, |l| *l as f32)
+                        })
                     }),
                     paint: [
                         if draw.weights {
@@ -4073,6 +4105,7 @@ impl Viewport {
             }
             pass.set_pipeline(&self.cluster_solid);
             pass.set_bind_group(0, &self.cluster_globals_bind, &[]);
+            pass.set_bind_group(3, &self.solid_textures.bind, &[]);
             // Indexed by position among the *surviving* draws, because that is
             // what `prepare` handed the cull. Enumerating all draws here would
             // shift every argument offset by however many were culled.
@@ -4102,6 +4135,7 @@ impl Viewport {
                 &self.solid
             });
             pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(3, &self.solid_textures.bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
                 if mesh.counts.triangles == 0 || !draw.surface() {
@@ -4124,6 +4158,17 @@ impl Viewport {
                 }
             }
         }
+    }
+
+    /// The images the studio and flat modes show, one layer each in order:
+    /// a slot names its image by that position in [`Draw::layers`].
+    pub fn set_solid_images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        images: &[crate::solid_textures::SolidImage<'_>],
+    ) {
+        self.solid_textures.set(device, queue, images);
     }
 
     /// Begins the viewport render pass.
@@ -5225,7 +5270,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ObjectData>() % 16, 0);
         assert_eq!(std::mem::size_of::<GridGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<Globals>(), 128);
-        assert_eq!(std::mem::size_of::<ObjectData>(), 144 + 16 * SOLID_SLOTS);
+        assert_eq!(std::mem::size_of::<ObjectData>(), 144 + 16 * SOLID_SLOTS + 4 * SOLID_SLOTS);
         assert_eq!(std::mem::size_of::<GridGlobals>(), 192);
         assert_eq!(std::mem::size_of::<EdgeGlobals>() % 16, 0);
         assert_eq!(std::mem::size_of::<EdgeGlobals>(), 128);

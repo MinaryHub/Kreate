@@ -1040,6 +1040,8 @@ pub struct Overlays {
     pub reflections: bool,
     pub contact_shadows: bool,
     pub path_trace: bool,
+    /// The studio and flat modes show base-colour images, not just colours.
+    pub textures: bool,
 }
 
 impl Default for ViewStatus {
@@ -1463,6 +1465,7 @@ struct Labels {
     overlay_grid: String,
     overlay_wireframe: String,
     overlay_face_orientation: String,
+    overlay_textures: String,
     overlay_statistics: String,
     overlay_dimensions: String,
     overlay_ao: String,
@@ -1801,6 +1804,7 @@ impl Labels {
             overlay_grid: t("overlay-grid"),
             overlay_wireframe: t("overlay-wireframe"),
             overlay_face_orientation: t("overlay-face-orientation"),
+            overlay_textures: t("overlay-textures"),
             overlay_statistics: t("overlay-statistics"),
             overlay_dimensions: t("overlay-dimensions"),
             overlay_ao: t("overlay-ao"),
@@ -3184,6 +3188,7 @@ fn draw_brush_settings(
         let s = &mut state.sculpt;
         let last = names.len() as u32 - 1;
         egui::ComboBox::from_id_salt(("sculpt-brush", area))
+            .width(92.0)
             .selected_text(names[s.brush.min(last) as usize].as_str())
             .show_ui(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
@@ -3641,10 +3646,16 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
 
 /// Select, Add, and the menus the mode's card names.
 fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<TopMenu> {
-    let mut out = vec![TopMenu {
-        label: l.menu_select.clone(),
-        nodes: select_nodes(l, mode, select_mode),
-    }];
+    // Sculpt mode selects nothing — the brush is the whole interaction, and
+    // Blender's has no Select menu there — and its header needs the room.
+    let mut out = if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+        Vec::new()
+    } else {
+        vec![TopMenu {
+            label: l.menu_select.clone(),
+            nodes: select_nodes(l, mode, select_mode),
+        }]
+    };
     // What Add adds is the mode's: objects where objects are acted on, a bone
     // where a skeleton is being built, and nothing in pose mode — a pose adds
     // nothing, as Blender's has no Add menu there.
@@ -4305,6 +4316,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 &l.overlay_path_trace,
                 on.path_trace,
             ),
+            ("view.toggle_textures", &l.overlay_textures, on.textures),
         ] {
             // A check box per setting, as Blender's popover: what is on is
             // readable without toggling it to find out. The menu stays open,
@@ -4777,16 +4789,22 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
         .collect();
     let s = &mut state.sculpt;
     let mut run: Vec<(&'static str, PropertyMap)> = Vec::new();
-    ui.menu_button(symmetry, |ui| {
-        ui.checkbox(&mut s.mirror_x, &labels[0]);
-        ui.checkbox(&mut s.mirror_y, &labels[1]);
-        ui.checkbox(&mut s.mirror_z, &labels[2]);
+    // Symmetry rides in the stroke's menu rather than one of its own, so
+    // the header still has room for the mode's menus.
+    ui.menu_button(stroke, |ui| {
+        ui.strong(&symmetry);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut s.mirror_x, "X");
+            ui.checkbox(&mut s.mirror_y, "Y");
+            ui.checkbox(&mut s.mirror_z, "Z");
+        })
+        .response
+        .on_hover_text(format!("{} / {} / {}", labels[0], labels[1], labels[2]));
         ui.horizontal(|ui| {
             ui.label(&labels[3]);
             ui.add(egui::DragValue::new(&mut s.radial).range(1..=64));
         });
-    });
-    ui.menu_button(stroke, |ui| {
+        ui.separator();
         egui::Grid::new("sculpt-stroke").num_columns(2).show(ui, |ui| {
             ui.label(&labels[4]);
             egui::ComboBox::from_id_salt("sculpt-falloff")
@@ -10059,6 +10077,8 @@ overlay-bloom = Bloom (Rendered)
 overlay-reflections = Reflections (Rendered)
 overlay-contact-shadows = Contact Shadows (Rendered)
 overlay-path-trace = Path Tracing (Rendered)
+overlay-textures = Textures (Studio and Flat)
+op-view-toggle-textures-desc = Shows each material's base-colour image across its UVs in the studio and flat modes, not just its colour.
 op-view-toggle-path-trace = Path Tracing
 op-view-toggle-path-trace-desc = The rendered view traced with light bouncing between surfaces; it refines while the view is still.
 op-view-toggle-reflections = Reflections
@@ -11134,6 +11154,8 @@ overlay-bloom = 블룸 (렌더)
 overlay-reflections = 반사 (렌더)
 overlay-contact-shadows = 접촉 그림자 (렌더)
 overlay-path-trace = 패스 트레이싱 (렌더)
+overlay-textures = 텍스처 (스튜디오·플랫)
+op-view-toggle-textures-desc = 스튜디오·플랫 모드에서 재질의 베이스 컬러 이미지를 UV대로 보여 줍니다. 끄면 색만 보입니다.
 op-view-toggle-path-trace = 패스 트레이싱
 op-view-toggle-path-trace-desc = 렌더 보기를 빛이 면 사이를 튕기는 방식으로 그립니다. 화면이 멈추면 점점 깨끗해집니다.
 op-view-toggle-reflections = 반사

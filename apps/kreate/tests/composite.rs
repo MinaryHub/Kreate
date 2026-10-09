@@ -351,10 +351,45 @@ fn composite_with(
             ))
         })
         .collect();
+    // The base-colour images the solid modes show, as the application
+    // gathers them: one layer per image, each object's slot naming its layer.
+    let mut images: Vec<kreate_scene::document::ImageId> = Vec::new();
+    let layers: Vec<Vec<i32>> = uploaded
+        .iter()
+        .map(|(id, _)| {
+            let image = doc
+                .material_id_at(*id, 0)
+                .and_then(|m| doc.material(m))
+                .and_then(|m| m.base_color_image);
+            match image {
+                Some(i) => {
+                    if !images.contains(&i) {
+                        images.push(i);
+                    }
+                    vec![images.iter().position(|x| *x == i).unwrap() as i32]
+                }
+                None => Vec::new(),
+            }
+        })
+        .collect();
+    let pixels: Vec<(u32, u32, Vec<u8>)> = images
+        .iter()
+        .filter_map(|i| doc.image(*i))
+        .map(|img| (img.width(), img.height(), kreate::materials::encoded_rgba(img, img.color_space)))
+        .collect();
+    if !pixels.is_empty() {
+        let sources: Vec<_> = pixels
+            .iter()
+            .map(|(w, h, p)| kreate_render::solid_textures::SolidImage { width: *w, height: *h, pixels: p })
+            .collect();
+        viewport.set_solid_images(&gpu.device, &gpu.queue, &sources);
+    }
     let mut draws: Vec<kreate_render::Draw> = uploaded
         .iter()
-        .map(|(id, m)| {
+        .zip(&layers)
+        .map(|((id, m), layers)| {
             kreate_render::Draw::new(m, doc.world_transform(*id))
+                .with_layers(layers)
                 .selected(!edit_mode && doc.selection.contains(*id))
                 .weights(
                     mode.acts_on() == kreate_ops::mode::ActsOn::Weights
@@ -2736,3 +2771,33 @@ fn shot_outliner_search() {
     shot.dump("outliner-search");
 }
 
+
+/// Studio mode showing a cube's checker texture across its UVs.
+#[test]
+fn shot_solid_texture() {
+    let mut doc = doc_with_cube();
+    let cube = doc.objects().next().map(|(id, _)| id).unwrap();
+    let mesh = doc.object(cube).and_then(|o| o.mesh()).unwrap();
+    let mut image = kreate_scene::Image::new("Checker", 64, 64, kreate_scene::PixelFormat::Rgba8);
+    for y in 0..64u32 {
+        for x in 0..64u32 {
+            let on = ((x / 8) + (y / 8)) % 2 == 0;
+            let tile = kreate_scene::TILE;
+            let t = image.tile_mut(x / tile, y / tile).unwrap();
+            let at = (((y % tile) * tile + (x % tile)) * 4) as usize;
+            let c = if on { [230u8, 60, 40, 255] } else { [240, 240, 240, 255] };
+            t.bytes_mut()[at..at + 4].copy_from_slice(&c);
+        }
+    }
+    let image = doc.add_image(image);
+    let material = doc.add_material(kreate_scene::document::Material {
+        base_color_image: Some(image),
+        ..Default::default()
+    });
+    doc.set_mesh_slots(mesh, vec![Some(material)]);
+    let Some(shot) = composite(&doc, "en") else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("solid-texture");
+}

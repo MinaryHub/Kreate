@@ -877,6 +877,12 @@ struct App {
     /// The sculpted mesh with its mask and face sets where the overlay reads
     /// them. See `kreate::sculptview`.
     sculpt_display: kreate::sculptview::SculptDisplay,
+    /// The studio and flat modes show base-colour images. On by default: a
+    /// texture that was mapped is what the user expects to see.
+    solid_textures: bool,
+    /// The images the viewport holds for them, and each one's revision, so
+    /// they go up again only when they change.
+    solid_images: Vec<(kreate_scene::document::ImageId, u64)>,
     /// Meshes with hidden elements, as drawn outside edit mode: without the
     /// hide layers. Input handle and the copy.
     unhidden: Vec<(Arc<MeshData>, Arc<MeshData>)>,
@@ -1038,6 +1044,8 @@ impl App {
             paint_stroke: None,
             sculpt_stroke: None,
             sculpt_display: Default::default(),
+            solid_textures: true,
+            solid_images: Vec::new(),
             stroke_moved: false,
             texture_stroke: None,
             weight_display: None,
@@ -9121,6 +9129,65 @@ impl App {
                     .collect()
             })
             .collect();
+        // The image each slot shows in the studio and flat modes, as a layer
+        // of the viewport's solid textures; -1 for its colour. The images
+        // go up only when the set, or one of them, changes.
+        let textured = self.solid_textures && gfx.viewport.shading != kreate_render::ShadingMode::Rendered;
+        let mut images: Vec<kreate_scene::document::ImageId> = Vec::new();
+        let slot_layers: Vec<Vec<i32>> = self
+            .evaluated
+            .iter()
+            .map(|(id, _)| {
+                if !textured {
+                    return Vec::new();
+                }
+                let slots = self
+                    .doc
+                    .object(*id)
+                    .and_then(|o| o.mesh())
+                    .map(|m| self.doc.mesh_slots(m).len())
+                    .unwrap_or(0)
+                    .clamp(1, kreate_render::viewport::SOLID_SLOTS);
+                (0..slots)
+                    .map(|slot| {
+                        let Some(image) = self
+                            .doc
+                            .material_id_at(*id, slot)
+                            .and_then(|m| self.doc.material(m))
+                            .and_then(|m| m.base_color_image)
+                            .filter(|i| self.doc.image(*i).is_some())
+                        else {
+                            return -1;
+                        };
+                        match images.iter().position(|i| *i == image) {
+                            Some(at) => at as i32,
+                            None if images.len() < kreate_render::solid_textures::MAX_LAYERS => {
+                                images.push(image);
+                                images.len() as i32 - 1
+                            }
+                            None => -1,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let want: Vec<(kreate_scene::document::ImageId, u64)> = images
+            .iter()
+            .filter_map(|i| Some((*i, self.doc.image(*i)?.revision())))
+            .collect();
+        if textured && want != self.solid_images {
+            let pixels: Vec<(u32, u32, Vec<u8>)> = images
+                .iter()
+                .filter_map(|i| self.doc.image(*i))
+                .map(|img| (img.width(), img.height(), kreate::materials::encoded_rgba(img, img.color_space)))
+                .collect();
+            let sources: Vec<kreate_render::solid_textures::SolidImage<'_>> = pixels
+                .iter()
+                .map(|(w, h, p)| kreate_render::solid_textures::SolidImage { width: *w, height: *h, pixels: p })
+                .collect();
+            gfx.viewport.set_solid_images(&gfx.gpu.device, &gfx.gpu.queue, &sources);
+            self.solid_images = want;
+        }
         // A boolean's cutter is drawn as edges, or it would cover the very
         // cut it makes. See `boolean_cutters`.
         let cutters = kreate_scene::modifier::boolean_cutters(&self.doc);
@@ -9172,6 +9239,7 @@ impl App {
                         // the screen; this is the other end of it.
                         .with_materials(&slot_materials[at])
                         .with_colors(&slot_colors[at])
+                        .with_layers(&slot_layers[at])
                         .selected(
                             self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
                                 && self.doc.selection.contains(*id),
@@ -9251,6 +9319,7 @@ impl App {
             reflections: gfx.viewport.show_reflections,
             contact_shadows: gfx.viewport.contact_shadows,
             path_trace: gfx.viewport.path_trace,
+            textures: self.solid_textures,
         };
         if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
             gfx.viewport
@@ -10247,6 +10316,10 @@ impl App {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.ambient_occlusion = !gfx.viewport.ambient_occlusion;
                 }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+            }
+            "view.toggle_textures" => {
+                self.solid_textures = !self.solid_textures;
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             "view.toggle_face_orientation" => {

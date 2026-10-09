@@ -259,7 +259,7 @@ impl TextureImage {
 /// answer to "what are this image's bytes". A tile that is not resident reads
 /// as transparent black — a partly loaded image is a real state (§3.6) and half
 /// a texture beats a failure.
-fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) -> Vec<u8> {
+pub fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) -> Vec<u8> {
     kreate_io::image_import::rgba8_of(image, space)
 }
 

@@ -34,10 +34,16 @@ struct ObjectData {
     // The colour of each material slot's faces: the run being drawn is the
     // instance index. See `SOLID_SLOTS`.
     slot_colors: array<vec4<f32>, 8>,
+    // The image layer each slot shows in the solid modes, four to a vec4;
+    // below zero for its colour.
+    slot_layers: array<vec4<f32>, 2>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var<uniform> object: ObjectData;
+// The images the solid modes show: see `solid_textures.rs`.
+@group(3) @binding(0) var solid_tex: texture_2d_array<f32>;
+@group(3) @binding(1) var solid_sampler: sampler;
 
 // ---------------------------------------------------------------------------
 // The cluster path.
@@ -134,6 +140,7 @@ fn vs_cluster(
         out.base_color = instance.base_color;
         out.weight = vec2<f32>(0.0);
         out.ramp = 0.0;
+        out.layer = -1.0;
         return out;
     }
 
@@ -150,6 +157,7 @@ fn vs_cluster(
     out.base_color = instance.base_color;
     out.weight = vec2<f32>(0.0);
     out.ramp = 0.0;
+    out.layer = -1.0;
     return out;
 }
 
@@ -188,6 +196,8 @@ struct VsOut {
     // sculpt mode, the mask (x) and the face set (y).
     @location(3) weight: vec2<f32>,
     @location(4) @interpolate(flat) ramp: f32,
+    // The image layer the face shows, below zero for none.
+    @location(5) @interpolate(flat) layer: f32,
 };
 
 // A face set's colour: a hue from its number, soft, so the form still reads.
@@ -243,6 +253,8 @@ fn vs_main(
     out.base_color = vec4<f32>(object.slot_colors[min(slot, 7u)].rgb, object.base_color.a);
     out.weight = uv;
     out.ramp = object.paint.x;
+    let s = min(slot, 7u);
+    out.layer = object.slot_layers[s / 4u][s % 4u];
     return out;
 }
 
@@ -301,7 +313,13 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
 
     // The ramp is light's reflectance like any colour: shaded, so the form
     // still reads under the weights, as Blender's weight paint does.
+    // Sampled before any branch: a sample needs its neighbours' coordinates,
+    // which a branch some pixels skip does not give it.
+    let image = textureSample(solid_tex, solid_sampler, in.weight, max(i32(in.layer), 0)).rgb;
     var base = in.base_color.rgb;
+    if (in.ramp < 0.5 && in.layer > -0.5) {
+        base = image;
+    }
     if (in.ramp > 0.5 && in.ramp < 1.5) {
         base = weight_color(in.weight.x);
     } else if (in.ramp > 1.5) {
