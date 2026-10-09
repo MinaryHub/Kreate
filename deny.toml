@@ -21,6 +21,10 @@ ignore = [
     # decorations use, and the graphics cluster is pinned. Revisit when egui
     # moves its font parsing (skrifa is the named successor).
     { id = "RUSTSEC-2026-0192", reason = "no safe upgrade; pinned by the egui/winit cluster" },
+    # paste is a finished proc macro whose author stopped maintaining it; it
+    # runs only at compile time and arrives through image's EXR decoder
+    # (exr -> pulp). Revisit when exr drops it.
+    { id = "RUSTSEC-2024-0436", reason = "compile-time macro only; arrives through image's exr feature" },
 ]
 
 [licenses]
