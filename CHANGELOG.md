@@ -32,6 +32,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - The path-traced render runs each material's node graph — the same code
   the viewport draws with — so procedural textures, projected images, normal
   maps and bumps appear in the final render, not only in the viewport.
+- The path-traced render shows each face's own material on an object whose
+  faces wear several; it used the first slot's for the whole object.
 - Rigid bodies: a gravity factor of their own (Physics tab), so one body can
   float, fall slowly or rise while the rest of the scene falls.
 - Bevel: with an even number of segments, the corner where three bevelled
