@@ -308,15 +308,28 @@ fn what_the_importer_does_not_read_is_recorded() {
     // out when the export they sent someone turns out to be a static pose.
     let mut root: serde_json::Value =
         serde_json::from_slice(&gltf_with(&asymmetric(), None, &[0, 1, 2])).unwrap();
-    root["cameras"] = json!([{ "type": "perspective",
-        "perspective": { "yfov": 1.0, "znear": 0.1 } }]);
-    let bytes = serde_json::to_vec(&root).unwrap();
+    // An occlusion map: a standard surface here has no slot for one. The
+    // picture is a file beside the document, read through its path.
+    let dir = std::env::temp_dir().join(format!("kreate-occlusion-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("made");
+    let mut png = Vec::new();
+    image::RgbaImage::new(1, 1)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encoded");
+    std::fs::write(dir.join("occlusion.png"), png).expect("written");
+    root["images"] = json!([{ "uri": "occlusion.png" }]);
+    root["textures"] = json!([{ "source": 0 }]);
+    root["materials"] = json!([{ "occlusionTexture": { "index": 0 } }]);
+    root["meshes"][0]["primitives"][0]["material"] = json!(0);
+    let path = dir.join("occluded.gltf");
+    std::fs::write(&path, serde_json::to_vec(&root).unwrap()).expect("written");
 
-    let scene = gltf_import::parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    let scene = gltf_import::parse_gltf_file(&path, &GltfOptions::default()).expect("parses");
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         scene.source.notes.iter().any(|n| matches!(
             n,
-            LossyNote::Unsupported { what } if what.contains("cameras")
+            LossyNote::Unsupported { what } if what.contains("occlusion")
         )),
         "an unread feature was dropped silently: {:?}",
         scene.source.notes
@@ -484,4 +497,60 @@ fn every_truncation_of_a_valid_file_is_handled() {
         let _ = gltf_import::parse_gltf(&bytes[..len], &GltfOptions::default());
     }
     assert!(gltf_import::parse_gltf(&bytes, &GltfOptions::default()).is_ok());
+}
+
+/// A triangle whose buffer is a file beside it, named `uri`.
+fn triangle_beside(dir: &std::path::Path, uri: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("made");
+    let points: Vec<u8> = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    std::fs::write(dir.join("tri.bin"), &points).expect("written");
+    let json = format!(
+        r#"{{"asset": {{"version": "2.0"}}, "scene": 0, "scenes": [{{"nodes": [0]}}],
+        "nodes": [{{"mesh": 0, "name": "Tri"}}],
+        "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}}}]}}],
+        "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]}}],
+        "bufferViews": [{{"buffer": 0, "byteLength": 36}}],
+        "buffers": [{{"uri": "{uri}", "byteLength": 36}}]}}"#
+    );
+    let path = dir.join("tri.gltf");
+    std::fs::write(&path, json).expect("written");
+    path
+}
+
+/// What an exporter writing a folder hands over: a `.gltf` whose buffer is a
+/// file beside it. Read from its path; and a reference that leaves the
+/// folder is refused before anything is read.
+#[test]
+fn a_gltf_on_disk_reads_the_buffer_beside_it_and_nothing_further() {
+    use kreate_io::gltf_import::{parse_gltf, parse_gltf_file, GltfError, GltfOptions};
+    let dir = std::env::temp_dir().join(format!("kreate-gltf-{}", std::process::id()));
+    let path = triangle_beside(&dir, "tri.bin");
+    let scene = parse_gltf_file(&path, &GltfOptions::default()).expect("reads");
+    assert_eq!(scene.meshes[0].faces.len(), 1);
+    // From memory the same file cannot find its buffer: what the path is for.
+    assert!(parse_gltf(
+        &std::fs::read(&path).expect("read"),
+        &GltfOptions::default()
+    )
+    .is_err());
+    for outside in [
+        "../tri.bin",
+        "/etc/hosts",
+        "file:///etc/hosts",
+        "C:/x.bin",
+        "a/../../b.bin",
+    ] {
+        let path = triangle_beside(&dir, outside);
+        assert!(
+            matches!(
+                parse_gltf_file(&path, &GltfOptions::default()),
+                Err(GltfError::Outside(_))
+            ),
+            "{outside}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

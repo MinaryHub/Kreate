@@ -230,6 +230,30 @@ pub enum Command {
     /// Ask for a scene file and add what it holds to the document, as one
     /// undo step — beside what is there, where Open would replace it.
     ImportScene,
+    /// From the asset browser: list this source (by its place in the menu).
+    AssetSource {
+        index: usize,
+    },
+    /// From the asset browser: list this kind — models, materials, HDRIs.
+    AssetKind {
+        index: usize,
+    },
+    /// From the asset browser: fetch at this size.
+    AssetResolution {
+        index: usize,
+    },
+    /// From the asset browser: fetch and add this asset.
+    AssetAdd {
+        index: usize,
+    },
+    /// From the asset browser: read the list again.
+    AssetRefresh,
+    /// From the asset browser: ask for a folder to read.
+    AssetAddFolder,
+    /// From the asset browser: stop reading this folder.
+    AssetRemoveFolder {
+        index: usize,
+    },
     /// Open a recovered autosave, and forget it either way.
     RecoverDocument {
         path: std::path::PathBuf,

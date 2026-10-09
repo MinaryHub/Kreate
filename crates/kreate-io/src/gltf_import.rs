@@ -97,17 +97,74 @@ pub enum GltfError {
     Parse(#[from] gltf::Error),
     #[error("mesh {mesh:?} primitive {primitive} has no positions")]
     NoPositions { mesh: String, primitive: usize },
+    #[error("the file names {0:?}, which is not a file beside it")]
+    Outside(String),
 }
 
 /// Reads a `.gltf` or `.glb` from memory.
 ///
 /// Self-contained files only: a `.gltf` that references external `.bin` buffers
 /// or image files needs those resolved relative to its path, which a byte slice
-/// cannot do. `import_slice` handles embedded base64 buffers and `.glb`, which
-/// covers the overwhelming majority of files that get passed around.
+/// cannot do — [`parse_gltf_file`] does. `import_slice` handles embedded base64
+/// buffers and `.glb`.
 pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, GltfError> {
     let (document, buffers, images) = gltf::import_slice(bytes)?;
+    from_imported(document, buffers, images, options)
+}
 
+/// Reads a `.gltf` or `.glb` from disk, with the buffers and images it names
+/// beside it — what an exporter writing a folder, and Poly Haven, hand over.
+///
+/// **Only beside it.** A file says where its parts are, and a file that came
+/// from somebody else could name `../../.ssh/id_rsa` or an absolute path;
+/// read as an image, that would put a private file into a document somebody
+/// might share. So every reference is checked before anything is read: an
+/// embedded `data:` URI, or a relative path that does not climb out.
+pub fn parse_gltf_file(
+    path: &std::path::Path,
+    options: &GltfOptions,
+) -> Result<ImportScene, GltfError> {
+    let bytes = std::fs::read(path).map_err(|e| GltfError::Parse(gltf::Error::Io(e)))?;
+    let parsed = gltf::Gltf::from_slice(&bytes)?;
+    let uris = parsed
+        .buffers()
+        .filter_map(|b| match b.source() {
+            gltf::buffer::Source::Uri(u) => Some(u.to_string()),
+            gltf::buffer::Source::Bin => None,
+        })
+        .chain(parsed.images().filter_map(|i| match i.source() {
+            gltf::image::Source::Uri { uri, .. } => Some(uri.to_string()),
+            gltf::image::Source::View { .. } => None,
+        }));
+    for uri in uris {
+        if !beside(&uri) {
+            return Err(GltfError::Outside(uri));
+        }
+    }
+    let (document, buffers, images) = gltf::import(path)?;
+    from_imported(document, buffers, images, options)
+}
+
+/// Whether a glTF reference stays with its file: embedded, or a relative
+/// path that does not climb out of the file's folder.
+fn beside(uri: &str) -> bool {
+    if uri.starts_with("data:") {
+        return true;
+    }
+    // A scheme (`file:`, `http:`), a drive letter, or a root.
+    if uri.contains(':') || uri.starts_with('/') || uri.starts_with('\\') {
+        return false;
+    }
+    !uri.split(['/', '\\'])
+        .any(|part| part == ".." || part.eq_ignore_ascii_case("%2e%2e"))
+}
+
+fn from_imported(
+    document: gltf::Document,
+    buffers: Vec<gltf::buffer::Data>,
+    images: Vec<gltf::image::Data>,
+    options: &GltfOptions,
+) -> Result<ImportScene, GltfError> {
     let mut source = SourceMetadata::new("gltf");
     // Applied exactly once, here at the boundary. Every position, and every
     // normal, passes through this and nothing downstream knows the file was
@@ -454,7 +511,7 @@ pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, Gl
         scene.meshes.push(import);
     }
 
-    note_unread_features(&document, &mut scene.source.notes);
+    note_unread_features(&document, &mut scene);
     Ok(scene)
 }
 
@@ -776,30 +833,41 @@ fn read_u32_accessor(
 /// Not silence. A file whose rig or animation is dropped has to say so, or the
 /// user discovers it when the export they made for someone else turns out to be
 /// a static pose.
-fn note_unread_features(document: &gltf::Document, notes: &mut Vec<LossyNote>) {
+fn note_unread_features(document: &gltf::Document, scene: &mut ImportScene) {
+    // Measured against what was read, not by what the file has: this list
+    // once said every texture went unread long after textures were, and a
+    // note that is always there is a note nobody reads.
+    let mut notes = Vec::new();
     let mut mention = |what: String| notes.push(LossyNote::Unsupported { what });
-
-    if document.animations().len() > 0 {
-        mention(format!(
-            "{} animations were not read",
-            document.animations().len()
-        ));
+    let missing = |present: usize, read: usize| present.saturating_sub(read);
+    let n = missing(document.animations().len(), scene.animations.len());
+    if n > 0 {
+        mention(format!("{n} animations were not read"));
     }
-    if document.skins().len() > 0 {
-        mention(format!("{} skins were not read", document.skins().len()));
+    let n = missing(document.skins().len(), scene.skins.len());
+    if n > 0 {
+        mention(format!("{n} skins were not read"));
     }
-    if document.cameras().len() > 0 {
-        mention(format!(
-            "{} cameras were not read",
-            document.cameras().len()
-        ));
+    let n = missing(document.cameras().len(), scene.cameras.len());
+    if n > 0 {
+        mention(format!("{n} cameras were not read"));
     }
-    if document.textures().len() > 0 {
-        mention(format!(
-            "{} textures were not read; materials keep their factors only",
-            document.textures().len()
-        ));
+    // The maps a standard surface here has no slot for.
+    let occlusion = document
+        .materials()
+        .filter(|m| m.occlusion_texture().is_some())
+        .count();
+    if occlusion > 0 {
+        mention(format!("{occlusion} occlusion maps were not read"));
     }
+    let emissive = document
+        .materials()
+        .filter(|m| m.emissive_texture().is_some())
+        .count();
+    if emissive > 0 {
+        mention(format!("{emissive} emission maps were not read"));
+    }
+    scene.source.notes.extend(notes);
 }
 
 /// A decoded glTF image as eight-bit RGBA, or `None` for a float one.

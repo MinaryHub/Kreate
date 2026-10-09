@@ -104,6 +104,29 @@ pub struct ShellState {
     /// Claude is answering. The process behind it is the application's.
     pub chat_input: String,
     pub chat_log: Vec<kreate_ui::chat::ChatMessage>,
+    /// The asset browser. Which source, kind and size are chosen, by their
+    /// place in `kreate::assets`'s lists, and what is typed to search.
+    pub asset_source: usize,
+    pub asset_kind: usize,
+    pub asset_resolution: usize,
+    pub asset_search: String,
+    /// What the chosen source has of the chosen kind; the application's
+    /// library fills it.
+    pub asset_entries: Vec<crate::assets::Entry>,
+    /// The local folders read.
+    pub asset_folders: Vec<std::path::PathBuf>,
+    /// Pictures arrived and not yet made textures, and the textures.
+    pub asset_incoming: Vec<(String, crate::assets::Picture)>,
+    pub asset_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Tiles on screen with no picture asked for yet, by entry id: the
+    /// application asks its library and moves them to `asset_asked`.
+    pub asset_wanted: Vec<String>,
+    pub asset_asked: std::collections::HashSet<String>,
+    /// Set when the panel is drawn with nothing listed and nothing on its
+    /// way: the application lists.
+    pub asset_list_wanted: bool,
+    pub asset_busy: Option<String>,
+    pub asset_error: Option<String>,
     /// What goes with the next message. The application holds the files;
     /// this is what the panel shows of them.
     pub chat_attachments: Vec<kreate_ui::chat::ChatAttachment>,
@@ -596,6 +619,19 @@ impl Default for ShellState {
             console_log: Vec::new(),
             chat_input: String::new(),
             chat_log: Vec::new(),
+            asset_source: 1,
+            asset_kind: 0,
+            asset_resolution: 0,
+            asset_search: String::new(),
+            asset_entries: Vec::new(),
+            asset_folders: Vec::new(),
+            asset_incoming: Vec::new(),
+            asset_textures: std::collections::HashMap::new(),
+            asset_wanted: Vec::new(),
+            asset_asked: std::collections::HashSet::new(),
+            asset_list_wanted: false,
+            asset_busy: None,
+            asset_error: None,
             chat_attachments: Vec::new(),
             chat_focused: false,
             chat_busy: false,
@@ -2927,6 +2963,9 @@ fn draw_area(
                 }
                 "claude" => {
                     draw_chat(ui, state, l);
+                }
+                "assets" => {
+                    draw_assets(ui, state);
                 }
                 "shader" => {
                     draw_shader_editor(ui, state, doc, area.id, l);
@@ -5930,6 +5969,101 @@ fn draw_render_tab(
     if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "render.set_settings", params, dragging);
+    }
+}
+
+/// The asset browser: the chosen source's assets of the chosen kind, as
+/// pictures, with the search applied.
+fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
+    let t = |key: &str| state.catalog.format(key, kreate_i18n::TextKind::Ui, &[]);
+    let source = crate::assets::Source::ALL
+        .get(state.asset_source)
+        .copied()
+        .unwrap_or(crate::assets::Source::Local);
+    let text = kreate_ui::assets::AssetText {
+        sources: vec![t("asset-source-local"), t("asset-source-polyhaven")],
+        kinds: vec![
+            t("asset-kind-models"),
+            t("asset-kind-materials"),
+            t("asset-kind-hdris"),
+        ],
+        search: t("asset-search"),
+        resolution: t("asset-resolution"),
+        refresh: t("asset-refresh"),
+        empty: t(
+            if source == crate::assets::Source::Local && state.asset_folders.is_empty() {
+                "asset-no-folders"
+            } else {
+                "asset-empty"
+            },
+        ),
+        loading: t("asset-loading"),
+        add_folder: t("asset-add-folder"),
+        remove_folder: t("asset-remove-folder"),
+        no_folders: t("asset-no-folders"),
+        // Poly Haven asks a program that uses its API to say so.
+        credit: (source == crate::assets::Source::PolyHaven).then(|| {
+            (
+                t("asset-credit-polyhaven"),
+                "https://polyhaven.com".to_string(),
+            )
+        }),
+        add_hint: t(match state.asset_kind {
+            1 => "asset-add-hint-material",
+            2 => "asset-add-hint-hdri",
+            _ => "asset-add-hint-model",
+        }),
+    };
+    // Pictures that arrived since the last frame become textures, once.
+    for (id, (w, h, pixels)) in std::mem::take(&mut state.asset_incoming) {
+        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
+        let handle =
+            ui.ctx()
+                .load_texture(format!("asset-{id}"), image, egui::TextureOptions::LINEAR);
+        state.asset_textures.insert(id, handle);
+    }
+    let tiles: Vec<kreate_ui::assets::AssetTile> = state
+        .asset_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.matches(&state.asset_search))
+        .map(|(index, e)| kreate_ui::assets::AssetTile {
+            index,
+            name: e.name.clone(),
+            detail: match &e.path {
+                Some(p) => p.display().to_string(),
+                None => e.authors.clone(),
+            },
+            texture: state.asset_textures.get(&e.id).map(|h| h.id()),
+        })
+        .collect();
+    let folders: Vec<String> = state
+        .asset_folders
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let view = kreate_ui::assets::AssetView {
+        source: state.asset_source,
+        kind: state.asset_kind,
+        resolutions: (source == crate::assets::Source::PolyHaven)
+            .then_some((&crate::assets::RESOLUTIONS[..], state.asset_resolution)),
+        folders: (source == crate::assets::Source::Local).then_some(&folders[..]),
+        tiles: &tiles,
+        busy: state.asset_busy.clone(),
+        error: state.asset_error.clone(),
+    };
+    let mut search = std::mem::take(&mut state.asset_search);
+    let seen = kreate_ui::assets::asset_browser(ui, &text, &view, &mut search, &mut state.queue);
+    state.asset_search = search;
+    for index in seen {
+        if let Some(entry) = state.asset_entries.get(index) {
+            if !state.asset_asked.contains(&entry.id) && !state.asset_wanted.contains(&entry.id) {
+                state.asset_wanted.push(entry.id.clone());
+            }
+        }
+    }
+    if state.asset_entries.is_empty() && state.asset_busy.is_none() && state.asset_error.is_none() {
+        state.asset_list_wanted = true;
     }
 }
 
@@ -10855,6 +10989,25 @@ editor-uv = UV Editor
 editor-preferences = Preferences
 editor-console = Console
 editor-claude = AI Chat
+editor-assets = Assets
+asset-source-local = Local folders
+asset-source-polyhaven = Poly Haven
+asset-kind-models = Models
+asset-kind-materials = Materials
+asset-kind-hdris = HDRIs
+asset-search = Search names and tags
+asset-resolution = Texture size to download
+asset-refresh = Refresh
+asset-empty = Nothing to show.
+asset-loading = Loading…
+asset-add-folder = Add Folder…
+asset-remove-folder = Stop reading this folder
+asset-no-folders = Add a folder of models, textures or HDRIs to browse it here.
+asset-credit-polyhaven = Assets from Poly Haven (CC0) — polyhaven.com
+asset-add-hint-model = Click to add it to the scene.
+asset-add-hint-material = Click to make a material of it and put it on the active object.
+asset-add-hint-hdri = Click to light the scene with it.
+asset-fetching = Fetching { $name }…
 editor-shader = Shader Editor
 editor-geometry-nodes = Geometry Nodes
 geo-no-graph = This object has no geometry nodes.
@@ -11997,6 +12150,25 @@ editor-uv = UV 에디터
 editor-preferences = 환경 설정
 editor-console = 콘솔
 editor-claude = AI 채팅
+editor-assets = 에셋
+asset-source-local = 로컬 폴더
+asset-source-polyhaven = Poly Haven
+asset-kind-models = 모델
+asset-kind-materials = 재질
+asset-kind-hdris = HDRI
+asset-search = 이름과 태그 검색
+asset-resolution = 내려받을 텍스처 크기
+asset-refresh = 새로고침
+asset-empty = 표시할 것이 없습니다.
+asset-loading = 불러오는 중…
+asset-add-folder = 폴더 추가…
+asset-remove-folder = 이 폴더 그만 읽기
+asset-no-folders = 모델, 텍스처, HDRI가 있는 폴더를 추가하면 여기서 볼 수 있습니다.
+asset-credit-polyhaven = Poly Haven 에셋 (CC0) — polyhaven.com
+asset-add-hint-model = 클릭하면 장면에 추가합니다.
+asset-add-hint-material = 클릭하면 재질로 만들어 활성 오브젝트에 입힙니다.
+asset-add-hint-hdri = 클릭하면 이 HDRI로 장면을 비춥니다.
+asset-fetching = { $name } 받는 중…
 editor-shader = 셰이더 에디터
 editor-geometry-nodes = 지오메트리 노드
 geo-no-graph = 이 오브젝트에는 지오메트리 노드가 없습니다.

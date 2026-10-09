@@ -7,6 +7,7 @@
 //! replacing the toolkit would replace one crate rather than the application.
 
 pub mod area;
+pub mod assets;
 pub mod chat;
 pub mod command;
 pub mod command_info;

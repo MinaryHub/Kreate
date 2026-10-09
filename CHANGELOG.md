@@ -10,6 +10,20 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- An Assets editor: models, materials and HDRIs from your own folders or
+  from Poly Haven (CC0), searchable, with pictures. A model is added to the
+  scene, a material is made of its maps and put on the active object, an
+  HDRI lights the world. Downloads are kept in the cache for next time.
+
+### Fixed
+
+- A `.gltf` whose buffers and textures are files beside it opens and
+  imports; it needed everything embedded. References that leave the file's
+  folder are refused.
+- glTF import no longer reports that every texture went unread.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
