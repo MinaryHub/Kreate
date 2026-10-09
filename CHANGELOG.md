@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
 ### Added
 
 - Import FBX (binary and ASCII: meshes, hierarchy, materials and diffuse
@@ -123,6 +125,7 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/knoxxr/Kreate/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/knoxxr/Kreate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/knoxxr/Kreate/releases/tag/v0.3.0
 [0.2.0]: https://github.com/knoxxr/Kreate/releases/tag/v0.2.0
 [0.1.0]: https://github.com/knoxxr/Kreate/commits/main
