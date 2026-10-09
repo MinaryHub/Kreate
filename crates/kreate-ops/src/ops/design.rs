@@ -32,11 +32,15 @@ pub struct MateParams {
     /// A gap left between the faces.
     #[param(unit = "length")]
     pub offset: f64,
+    /// The part it goes against, by its uid. Given, the moving part is
+    /// attached to it — parented, where it now sits — so the two stay
+    /// together when that part moves: the mate holds, as an assembly's does.
+    pub target: String,
 }
 
 /// Puts one part's face flat against another's: turned so the faces look at
-/// each other, moved so the two points meet. What an assembly's mate does,
-/// once — the parts are placed, not bound.
+/// each other, moved so the two points meet — and, given the other part,
+/// attaches it there, so the mate holds when that part moves.
 pub struct Mate;
 
 impl Operator for Mate {
@@ -82,10 +86,23 @@ impl Operator for Mate {
         if !translation.is_finite() || !rotation.is_finite() {
             return Err(OpError::Failed("the parts cannot be put together that way".into()));
         }
-        let o = doc.document_mut().object_mut(id).expect("found");
+        let target = params
+            .target
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|raw| d.object_by_uid(kreate_scene::Uid::from_raw(raw)))
+            .filter(|t| *t != id);
+        let d = doc.document_mut();
+        let o = d.object_mut(id).expect("found");
         o.transform.translation = translation;
         o.transform.rotation = rotation.normalize();
         o.transform.scale = scale;
+        if let Some(target) = target {
+            // Where it now sits, kept: parenting does not move it. A part
+            // that would end up its own ancestor stays unattached.
+            let _ = d.set_parent(id, Some(target));
+        }
         Ok(OpResult::Finished)
     }
 }

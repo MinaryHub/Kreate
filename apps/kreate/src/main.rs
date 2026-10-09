@@ -3459,6 +3459,8 @@ impl App {
             parts.iter().map(|(_, mesh, world)| (&**mesh, *world)).collect();
         let lines = kreate_io::drawing::project_drawing(&refs, view, 30f64.to_radians());
         let unit = self.doc.design.length_unit;
+        // The overall width and height, written as the scene writes lengths.
+        let dims = kreate_io::drawing::overall_dimensions(&lines, kreate_reflect::format_length);
         let svg = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
@@ -3467,9 +3469,9 @@ impl App {
                 "m" | "ft" => "",
                 s => s,
             };
-            kreate_io::drawing::write_svg(&lines, unit.metres(), suffix)
+            kreate_io::drawing::write_svg_with(&lines, &dims, unit.metres(), suffix)
         } else {
-            kreate_io::drawing::write_dxf(&lines, unit.metres())
+            kreate_io::drawing::write_dxf_with(&lines, &dims, unit.metres())
         };
         match std::fs::write(path, text) {
             Ok(()) => {
@@ -3636,6 +3638,9 @@ impl App {
                 p.set("from_normal", PropertyValue::Vec3(from_normal.to_array()));
                 p.set("to", PropertyValue::Vec3(picked.1.to_array()));
                 p.set("to_normal", PropertyValue::Vec3(picked.2.to_array()));
+                if let Some(target) = self.doc.object_uid(picked.0) {
+                    p.set("target", PropertyValue::Text(target.raw().to_string()));
+                }
                 self.run_op("object.mate", p);
                 self.mate = None;
             }
@@ -6351,8 +6356,42 @@ impl App {
         if self.doc.drive() > 0 {
             self.redraw.set(RedrawReason::SCENE_CHANGED);
         }
+        if self.solve_active_sketch() {
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
         // After the run, so the run's own writes are not a change to answer.
         self.driven_at = self.doc.version();
+    }
+
+    /// After any edit, the active sketch's constraints hold again: a point
+    /// dragged by hand settles where they let it, as a CAD sketcher's does.
+    /// Like the drivers, not a step of its own — the edit's undo puts back a
+    /// sketch that was solved, and the solve is the same every time.
+    fn solve_active_sketch(&mut self) -> bool {
+        let Some(id) = self.doc.selection.active else { return false };
+        let Some(object) = self.doc.object(id) else { return false };
+        if object.sketch.is_empty() {
+            return false;
+        }
+        let Some(mesh_id) = object.mesh() else { return false };
+        let constraints = object.sketch.clone();
+        let Some(mesh) = self.doc.mesh(mesh_id) else { return false };
+        let before: Vec<glam::DVec2> = mesh
+            .positions()
+            .iter()
+            .map(|p| glam::DVec2::new(p.x as f64, p.y as f64))
+            .collect();
+        let mut points = before.clone();
+        kreate_scene::sketch::solve(&mut points, &constraints);
+        if points.iter().zip(&before).all(|(a, b)| a.distance(*b) < 1e-7) {
+            return false;
+        }
+        let Some(mesh) = self.doc.mesh_mut(mesh_id) else { return false };
+        for (p, q) in mesh.positions_mut().iter_mut().zip(&points) {
+            p.x = q.x as f32;
+            p.y = q.y as f32;
+        }
+        true
     }
 
     /// Moves the clock to `frame` and plays every animation there.
@@ -12605,6 +12644,34 @@ kreate.ops.object.add_primitive()",
         let ms = |s: f64| s * 1000.0 / frames as f64;
         let faces = app.doc.mesh(mesh).unwrap().num_faces();
         eprintln!("faces {faces}; per frame: operator {:.2} ms, evaluate {:.2} ms, pick {:.2} ms", ms(op), ms(eval), ms(pick));
+    }
+
+    /// A sketch point dragged by hand settles back where the constraints
+    /// let it, without a step of its own.
+    #[test]
+    fn a_sketch_solves_itself_after_an_edit() {
+        let mut app = app();
+        let mesh = app.doc.add_mesh(kreate_mesh::MeshData::from_faces(
+            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::new(1.0, 1.0, 0.0)],
+            &[vec![0, 1, 2]],
+        ));
+        let mut o = kreate_scene::document::Object::new("Sketch", kreate_scene::document::ObjectData::Mesh(mesh));
+        o.sketch = vec![
+            kreate_scene::sketch::Constraint::Fixed { a: 0, at: [0.0, 0.0] },
+            kreate_scene::sketch::Constraint::Distance { a: 0, b: 1, value: 1.0 },
+            kreate_scene::sketch::Constraint::Horizontal { a: 0, b: 1 },
+        ];
+        let id = app.doc.add_object(o);
+        app.doc.selection.add(id);
+        app.doc.selection.active = Some(id);
+        app.run_drivers();
+        // Dragged off its line, too far.
+        app.doc.mesh_mut(mesh).unwrap().positions_mut()[1] = glam::Vec3::new(1.6, 0.4, 0.0);
+        let steps = app.history.entries().len();
+        app.run_drivers();
+        let p = app.doc.mesh(mesh).unwrap().positions()[1];
+        assert!((p.length() - 1.0).abs() < 1e-4 && p.y.abs() < 1e-4, "back on its constraints: {p:?}");
+        assert_eq!(app.history.entries().len(), steps);
     }
 
     /// The Measure tool: two clicks leave a distance, Ctrl on the second
