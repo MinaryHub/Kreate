@@ -367,7 +367,7 @@ fn a_cut_out_round_trips_as_mask_and_blend_arrives_as_glass() {
         .unwrap()
         .remove("alphaCutoff");
     let mut text = serde_json::to_vec(&root).unwrap();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let mut blended = bytes[..12].to_vec();
