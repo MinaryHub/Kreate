@@ -56,10 +56,17 @@ impl Kind {
 pub enum Source {
     Local,
     PolyHaven,
+    /// ambientCG: CC0 materials and HDRIs, each a zip of its maps.
+    AmbientCg,
 }
 
 impl Source {
-    pub const ALL: [Self; 2] = [Self::Local, Self::PolyHaven];
+    pub const ALL: [Self; 3] = [Self::Local, Self::PolyHaven, Self::AmbientCg];
+
+    /// Whether assets come over the network, and so in a size to choose.
+    pub fn online(self) -> bool {
+        self != Source::Local
+    }
 }
 
 /// One asset, as the browser lists it.
@@ -659,6 +666,7 @@ impl Library {
                         )
                     })
                     .and_then(|json| parse_polyhaven_list(&json, kind)),
+                Source::AmbientCg => ambientcg_list(kind),
             };
             Event::Listed {
                 source,
@@ -696,6 +704,17 @@ impl Library {
                                 &format!(
                                     "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=256&height=256"
                                 ),
+                                &dest,
+                            )
+                            .ok()?;
+                        }
+                        thumbnail_of(&std::fs::read(dest).ok()?)
+                    }),
+                    Source::AmbientCg => cache_root().and_then(|root| {
+                        let dest = root.join("ambientcg").join("thumbs").join(format!("{id}.png"));
+                        if !dest.exists() {
+                            download(
+                                &format!("https://acg-media.struffelproductions.com/file/ambientCG-Web/media/thumbnail/256-PNG/{id}.png"),
                                 &dest,
                             )
                             .ok()?;
@@ -775,7 +794,184 @@ fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
             }
             Ok(under(&dir, plan.ready))
         }
+        Source::AmbientCg => ambientcg_fetch(entry, resolution),
     }
+}
+
+// --- ambientCG --------------------------------------------------------------
+
+const ACG_API: &str = "https://ambientcg.com/api/v2/full_json";
+
+/// ambientCG's name for a kind; it has no models.
+fn ambientcg_type(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Material => Some("Material"),
+        Kind::Hdri => Some("HDRI"),
+        Kind::Model => None,
+    }
+}
+
+/// One page of ambientCG's list as entries, and whether another follows.
+pub fn parse_ambientcg_page(json: &str, kind: Kind) -> Result<(Vec<Entry>, bool), String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let assets = value["foundAssets"]
+        .as_array()
+        .ok_or("the list has no assets")?;
+    let entries = assets
+        .iter()
+        .filter_map(|a| {
+            let id = a["assetId"].as_str()?.to_string();
+            let mut tags: Vec<String> = a["tags"]
+                .as_array()
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|s| s.as_str())
+                        .map(str::to_lowercase)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(category) = a["category"].as_str() {
+                tags.push(category.to_lowercase());
+            }
+            Some(Entry {
+                name: a["displayName"].as_str().unwrap_or(&id).to_string(),
+                id,
+                kind,
+                source: Source::AmbientCg,
+                tags,
+                authors: "ambientCG".into(),
+                path: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let more = !value["nextPageHttp"].is_null() && !entries.is_empty();
+    Ok((entries, more))
+}
+
+/// Every ambientCG asset of a kind, each page cached for a day.
+///
+/// The first page says how many there are; the rest are asked for at once
+/// rather than one after another — ambientCG takes seconds a page, and nine
+/// in a row was half a minute before the first picture.
+fn ambientcg_list(kind: Kind) -> Result<Vec<Entry>, String> {
+    let Some(ty) = ambientcg_type(kind) else {
+        return Ok(Vec::new());
+    };
+    let root = cache_root().ok_or("no cache folder")?;
+    let page = move |offset: usize| -> Result<String, String> {
+        cached_text(
+            &format!("{ACG_API}?type={ty}&limit=250&offset={offset}&sort=popular&include=tagData"),
+            &root.join("ambientcg").join(format!("{ty}_{offset}.json")),
+        )
+    };
+    let first = page(0)?;
+    let total = serde_json::from_str::<serde_json::Value>(&first)
+        .ok()
+        .and_then(|v| v["numberOfResults"].as_u64())
+        .unwrap_or(0) as usize;
+    let (mut out, _) = parse_ambientcg_page(&first, kind)?;
+    // Bounded: a count from the network sizes no more than forty pages.
+    let offsets: Vec<usize> = (1..total.div_ceil(250).min(40)).map(|n| n * 250).collect();
+    let pages: Vec<std::thread::JoinHandle<Result<String, String>>> = offsets
+        .into_iter()
+        .map(|offset| {
+            let page = page.clone();
+            std::thread::spawn(move || page(offset))
+        })
+        .collect();
+    for handle in pages {
+        let json = handle
+            .join()
+            .map_err(|_| "a page of the list could not be read".to_string())??;
+        out.extend(parse_ambientcg_page(&json, kind)?.0);
+    }
+    Ok(out)
+}
+
+/// Downloads an ambientCG asset's zip and takes out what Kreate reads: a
+/// material's maps, or an HDRI's EXR.
+fn ambientcg_fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
+    if entry.id.is_empty()
+        || !entry
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(format!("`{}` is not an asset name", entry.id));
+    }
+    let size = resolution.to_ascii_uppercase();
+    let file = match entry.kind {
+        Kind::Material => format!("{}_{size}-JPG", entry.id),
+        Kind::Hdri => format!("{}_{size}", entry.id),
+        Kind::Model => return Err("ambientCG has no models".into()),
+    };
+    let root = cache_root().ok_or("no cache folder")?;
+    let dir = root.join("ambientcg").join(&file);
+    let zip = dir.join(format!("{file}.zip"));
+    if !zip.exists() {
+        download(&format!("https://ambientcg.com/get?file={file}.zip"), &zip)?;
+    }
+    let wanted = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        match entry.kind {
+            Kind::Hdri => lower.ends_with(".exr") || lower.ends_with(".hdr"),
+            _ => lower.ends_with(".jpg") || lower.ends_with(".png"),
+        }
+    };
+    let extracted = unzip_flat(&zip, &dir, wanted)?;
+    match entry.kind {
+        Kind::Hdri => extracted
+            .into_iter()
+            .next()
+            .map(Ready::Hdri)
+            .ok_or_else(|| "the download has no HDR image".into()),
+        _ => {
+            let maps = local_maps(&dir);
+            if maps.color.is_none() {
+                return Err("the download has no colour map".into());
+            }
+            Ok(Ready::Material(maps))
+        }
+    }
+}
+
+/// Takes the files `wanted` from a zip into `dir`, by their names alone — a
+/// path inside a downloaded zip is not one to write to — and returns where
+/// they went. Already-extracted files are left as they are.
+fn unzip_flat(
+    zip: &Path,
+    dir: &Path,
+    wanted: impl Fn(&str) -> bool,
+) -> Result<Vec<PathBuf>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(zip).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for i in 0..archive.len() {
+        let mut item = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(name) = item
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        else {
+            continue;
+        };
+        if !wanted(&name) {
+            continue;
+        }
+        let dest = dir.join(&name);
+        if !dest.exists() {
+            // Capped as a download is: a zip says how big its parts are, and
+            // a part that claims a little and unpacks to a lot is not read on.
+            let mut bytes = Vec::new();
+            item.by_ref()
+                .take(1 << 30)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(&dest, bytes).map_err(|e| e.to_string())?;
+        }
+        out.push(dest);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -786,6 +982,53 @@ mod tests {
         "wooden_floor": {"name": "Wooden Floor", "categories": ["floor", "wood"], "tags": ["Planks"], "authors": {"Rob": "All"}},
         "aerial_rocks": {"name": "Aerial Rocks", "categories": ["rock"], "tags": [], "authors": {"Ana": "All", "Bo": "Photos"}}
     }"#;
+
+    #[test]
+    fn an_ambientcg_page_reads_and_says_whether_another_follows() {
+        let page = r#"{"foundAssets": [
+            {"assetId": "Wood049", "displayName": "Wood 049", "tags": ["Planks", "floor"], "category": "Wood"},
+            {"assetId": "Rock030", "displayName": "Rock 030", "tags": [], "category": "Rock"}
+        ], "nextPageHttp": "https://ambientcg.com/api/v2/full_json?offset=250"}"#;
+        let (entries, more) = parse_ambientcg_page(page, Kind::Material).expect("parses");
+        assert!(more);
+        assert_eq!(entries[0].id, "Wood049");
+        assert!(entries[0].matches("wood planks"));
+        assert_eq!(entries[1].source, Source::AmbientCg);
+        let last = r#"{"foundAssets": [], "nextPageHttp": null}"#;
+        assert!(!parse_ambientcg_page(last, Kind::Hdri).expect("parses").1);
+    }
+
+    #[test]
+    fn a_zip_gives_up_its_files_by_name_and_no_further() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("kreate-unzip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let zip_path = dir.join("pack.zip");
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).expect("made"));
+            let options = zip::write::SimpleFileOptions::default();
+            for name in [
+                "Wood_Color.jpg",
+                "deep/Wood_NormalGL.jpg",
+                "../escape.jpg",
+                "Wood.blend",
+            ] {
+                zip.start_file(name, options).expect("a part");
+                zip.write_all(b"x").expect("written");
+            }
+            zip.finish().expect("finished");
+        }
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("made");
+        let got = unzip_flat(&zip_path, &out, |n| n.ends_with(".jpg")).expect("unzipped");
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["Wood_Color.jpg", "Wood_NormalGL.jpg"]);
+        assert!(!dir.join("escape.jpg").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_list_reads_by_name_and_searches_its_tags() {

@@ -16,6 +16,8 @@ use; `scripts/release.sh` turns that section into the next release.
   from Poly Haven (CC0), searchable, with pictures. A model is added to the
   scene, a material is made of its maps and put on the active object, an
   HDRI lights the world. Downloads are kept in the cache for next time.
+- ambientCG in the Assets editor: its two thousand CC0 materials and its
+  HDRIs, beside Poly Haven's.
 - A saved document reopens seen from where it was looked at when saved:
   the view's angle, distance, lens and projection go in the file.
 - Cut-out materials: a surface is cut away where its base colour image is
