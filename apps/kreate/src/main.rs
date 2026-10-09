@@ -4328,8 +4328,8 @@ impl App {
                 Event::Fetched { entry, result } => {
                     self.ui.asset_fetching.remove(&entry.id);
                     self.ui.asset_busy = None;
-                    match result {
-                        Ok(r) => ready.push((entry, r)),
+                    match *result {
+                        Ok(r) => ready.push((*entry, r)),
                         Err(why) => self.ui.asset_error = Some(why),
                     }
                 }

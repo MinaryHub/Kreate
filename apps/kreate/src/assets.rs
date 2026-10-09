@@ -123,9 +123,11 @@ pub enum Event {
     },
     /// A thumbnail, as eight-bit RGBA rows; `None` when there is none.
     Thumbnail { id: String, image: Option<Picture> },
+    /// Boxed: an entry and a set of paths are several times the size of the
+    /// other events, and every event would pay for them.
     Fetched {
-        entry: Entry,
-        result: Result<Ready, String>,
+        entry: Box<Entry>,
+        result: Box<Result<Ready, String>>,
     },
 }
 
@@ -719,7 +721,10 @@ impl Library {
     pub fn fetch(&self, entry: Entry, resolution: &'static str) {
         self.spawn(move || {
             let result = fetch(&entry, resolution);
-            Event::Fetched { entry, result }
+            Event::Fetched {
+                entry: Box::new(entry),
+                result: Box::new(result),
+            }
         });
     }
 
