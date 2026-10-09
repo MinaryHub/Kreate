@@ -9494,6 +9494,10 @@ impl App {
         self.apply_keymap_edits();
         self.save_workspaces();
         self.drain_ui_commands();
+        // The asset browser's requests go out from here too, not only when a
+        // job wakes the loop: the first list and the first pictures are
+        // asked for by drawing the panel, with nothing yet running to wake it.
+        self.serve_assets();
         // Again after the panels: an edit they made this frame — a material
         // value dragged — is drawn this frame, and the reasons are cleared
         // when it ends. Checked only before, a settled view showed the old
