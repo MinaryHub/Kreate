@@ -21,7 +21,7 @@ ahash.workspace = true
 thiserror.workspace = true
 # png/jpeg for a texture, hdr for an environment. Nothing else is turned on:
 # every extra decoder is parsing surface for a file a user was handed.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr", "exr"] }
 half = "2"
 # FBX compresses its large arrays with zlib. Already built for `zip`.
 flate2 = "1"

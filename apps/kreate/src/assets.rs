@@ -527,6 +527,53 @@ pub fn local_maps(dir: &Path) -> Maps {
     maps
 }
 
+/// A small picture of an environment image: its light squeezed into eight
+/// bits, so a bright sky reads as a sky and not as white.
+fn environment_thumbnail(path: &Path) -> Option<Picture> {
+    let image = kreate_io::load_image_file(path, kreate_scene::ColorSpace::Raw).ok()?;
+    let (w, h) = (image.width(), image.height());
+    // The working-space pixels, as the world's light is uploaded: half floats.
+    let halves = crate::environment::pixels_of(&image);
+    let at = |x: u32, y: u32, c: usize| -> f32 {
+        let i = (y as usize * w as usize + x as usize) * 8 + c * 2;
+        halves
+            .get(i..i + 2)
+            .map_or(0.0, |b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+    };
+    // Box-filtered down to fit 256 by 128, never up.
+    let scale = (w as f32 / 256.0).max(h as f32 / 128.0).max(1.0);
+    let (tw, th) = (
+        ((w as f32 / scale).round() as u32).max(1),
+        ((h as f32 / scale).round() as u32).max(1),
+    );
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for ty in 0..th {
+        for tx in 0..tw {
+            let (x0, y0) = ((tx as f32 * scale) as u32, (ty as f32 * scale) as u32);
+            let (x1, y1) = (
+                (((tx + 1) as f32 * scale) as u32).clamp(x0 + 1, w),
+                (((ty + 1) as f32 * scale) as u32).clamp(y0 + 1, h),
+            );
+            let mut sum = [0.0f32; 3];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for (c, s) in sum.iter_mut().enumerate() {
+                        *s += at(x, y, c);
+                    }
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as f32;
+            for s in sum {
+                // Reinhard, then the sRGB curve: the picture, not the numbers.
+                let v = (s / n).max(0.0);
+                out.push((kreate_math::linear_to_srgb(v / (1.0 + v)) * 255.0).round() as u8);
+            }
+            out.push(255);
+        }
+    }
+    Some((tw, th, out))
+}
+
 /// A small picture of an image file: what a local material's tile shows.
 fn thumbnail_of(bytes: &[u8]) -> Option<Picture> {
     let image = image::load_from_memory(bytes)
@@ -724,6 +771,9 @@ impl Library {
                     Source::Local => path.and_then(|p| {
                         let file = if p.is_dir() { local_maps(&p).color? } else { p };
                         let ext = file.extension()?.to_string_lossy().to_lowercase();
+                        if ENVIRONMENTS.contains(&ext.as_str()) {
+                            return environment_thumbnail(&file);
+                        }
                         if !IMAGES.contains(&ext.as_str()) {
                             return None;
                         }
@@ -1124,6 +1174,40 @@ mod tests {
             ]
         );
         assert!(material_from_maps(&mut doc, "None", &Maps::default()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_environment_file_has_a_picture_whose_bright_sky_is_not_white() {
+        let dir = std::env::temp_dir().join(format!("kreate-envthumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        // A sky four times brighter than white on top, a dim ground below.
+        let (w, h) = (64u32, 32u32);
+        let value = |top: f32, bottom: f32| -> Vec<f32> {
+            (0..w * h)
+                .map(|i| if i / w < h / 2 { top } else { bottom })
+                .collect()
+        };
+        let (r, g, b) = (value(4.0, 0.05), value(4.0, 0.05), value(6.0, 0.05));
+        let channels =
+            [("R", &r), ("G", &g), ("B", &b)].map(|(name, values)| kreate_io::exr::Channel {
+                name,
+                values,
+                full_float: false,
+            });
+        let bytes = kreate_io::exr::write(w, h, &channels, &[]);
+        let path = dir.join("sky.exr");
+        std::fs::write(&path, bytes).expect("written");
+        let (tw, th, pixels) = environment_thumbnail(&path).expect("a picture");
+
+        assert!(tw > 0 && th > 0);
+        let top = &pixels[..4];
+        let bottom = &pixels[pixels.len() - 4..];
+        assert!(
+            top[2] < 255 && top[2] > 200,
+            "the sky is bright, not clipped: {top:?}"
+        );
+        assert!(bottom[0] < 80, "the ground is dark: {bottom:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

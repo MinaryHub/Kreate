@@ -18,6 +18,9 @@ use; `scripts/release.sh` turns that section into the next release.
   HDRI lights the world. Downloads are kept in the cache for next time.
 - ambientCG in the Assets editor: its two thousand CC0 materials and its
   HDRIs, beside Poly Haven's.
+- Compressed OpenEXR images open — as a world's light, a texture or an
+  asset — and a folder's HDR and EXR files show their pictures in the
+  Assets editor.
 - A saved document reopens seen from where it was looked at when saved:
   the view's angle, distance, lens and projection go in the file.
 - Cut-out materials: a surface is cut away where its base colour image is
