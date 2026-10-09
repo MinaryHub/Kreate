@@ -65,6 +65,8 @@ pub struct Body {
     pub bounciness: f64,
     pub linear_damping: f64,
     pub angular_damping: f64,
+    /// The fraction of the world's gravity that pulls it.
+    pub gravity: f64,
     /// A ball round the shape, for a quick "can these two touch".
     reach: f64,
 }
@@ -248,6 +250,7 @@ impl Body {
             bounciness: 0.0,
             linear_damping: 0.04,
             angular_damping: 0.1,
+            gravity: 1.0,
             reach,
         }
     }
@@ -531,7 +534,7 @@ impl RigidWorld {
     /// One step of `dt` seconds.
     pub fn step(&mut self, dt: f64) {
         for b in self.bodies.iter_mut().filter(|b| b.is_dynamic()) {
-            b.vel += self.gravity * dt;
+            b.vel += self.gravity * b.gravity * dt;
             b.vel *= (1.0 - b.linear_damping.clamp(0.0, 1.0)).powf(dt);
             b.spin *= (1.0 - b.angular_damping.clamp(0.0, 1.0)).powf(dt);
         }

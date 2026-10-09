@@ -165,6 +165,7 @@ pub fn bake_with(
             body.bounciness = r.bounciness;
             body.linear_damping = r.linear_damping;
             body.angular_damping = r.angular_damping;
+            body.gravity = r.gravity;
             let (centre, rot) = (body.pos, body.rot);
             world.bodies.push(body);
             if r.kind == BodyKind::Active {
@@ -563,6 +564,45 @@ mod tests {
         assert!(
             (at.z - 0.5).abs() < 0.05 && (at.x - 5.0).abs() < 0.05,
             "{at:?}"
+        );
+    }
+
+    #[test]
+    fn a_body_with_no_gravity_floats_and_is_still_knocked_on() {
+        // Two cubes side by side in the air: one falls, one with no gravity
+        // stays — and a third, thrown at the floater, moves it.
+        let mut doc = Document::new();
+        short(&mut doc, 24);
+        let faller = add(
+            &mut doc,
+            "Faller",
+            kreate_mesh::primitives::cube(1.0),
+            DVec3::new(-3.0, 0.0, 3.0),
+        );
+        let floater = add(
+            &mut doc,
+            "Floater",
+            kreate_mesh::primitives::cube(1.0),
+            DVec3::new(3.0, 0.0, 3.0),
+        );
+        for (id, gravity) in [(faller, 1.0), (floater, 0.0)] {
+            doc.object_mut(id).unwrap().physics.rigid = Some(RigidBody {
+                shape: CollisionShape::Box,
+                gravity,
+                ..RigidBody::default()
+            });
+        }
+        let (cache, _) = bake(&doc);
+        doc.physics_cache = Arc::new(cache);
+        doc.animate(24.0);
+        assert!(
+            doc.world_transform(faller).translation.z < 2.0,
+            "the faller did not fall"
+        );
+        let floats = doc.world_transform(floater).translation;
+        assert!(
+            (floats - DVec3::new(3.0, 0.0, 3.0)).length() < 1e-3,
+            "the floater moved by itself: {floats:?}"
         );
     }
 

@@ -112,6 +112,10 @@ pub struct RigidBodyParams {
     /// The fraction of its turning lost each second.
     #[param(min = 0.0, max = 1.0)]
     pub angular_damping: f64,
+    /// How much gravity pulls it, as a fraction of the scene's: 0 floats
+    /// but is still pushed and still in the way.
+    #[param(min = -10.0, max = 10.0, soft_min = 0.0, soft_max = 2.0)]
+    pub gravity: f64,
     /// The active object only, rather than every selected mesh: what the
     /// Physics tab sets, because the tab shows the active object's settings —
     /// applying them to the whole selection turned off the physics of every
@@ -147,6 +151,7 @@ pub fn rigid_params(body: Option<&RigidBody>) -> RigidBodyParams {
         bounciness: b.bounciness,
         linear_damping: b.linear_damping,
         angular_damping: b.angular_damping,
+        gravity: b.gravity,
         active_only: false,
     }
 }
@@ -194,6 +199,7 @@ impl Operator for RigidBodySet {
             bounciness: params.bounciness.clamp(0.0, 1.0),
             linear_damping: params.linear_damping.clamp(0.0, 1.0),
             angular_damping: params.angular_damping.clamp(0.0, 1.0),
+            gravity: params.gravity.clamp(-10.0, 10.0),
         });
         Ok(on_selected(doc, params.active_only, |p| p.rigid = body))
     }

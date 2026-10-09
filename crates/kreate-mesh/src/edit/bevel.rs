@@ -617,12 +617,21 @@ pub fn bevel_edges_segments(
                 out.caps.extend(cap.faces);
                 continue;
             }
-            // Rounded edges around a flat cap read as a cut corner. Poked
-            // instead: a fan to one point pushed out onto the round.
+            // Rounded edges around a flat cap read as a cut corner. Where
+            // three rounds meet with an even count of segments, a grid of
+            // quads on the round; otherwise a fan to one point pushed out
+            // onto it.
             let centre = centres.iter().find(|(w, _)| *w == v).map(|(_, c)| *c);
+            let corners: Vec<VertId> = corner_points
+                .iter()
+                .filter(|p| p.vertex == v)
+                .map(|p| p.created)
+                .collect();
             for face in cap.faces {
-                match centre.and_then(|c| poke_onto_round(mesh, face, c)) {
-                    Some(fan) => out.caps.extend(fan),
+                let patched =
+                    centre.and_then(|c| grid_onto_round(mesh, face, c, &corners, segments));
+                match patched.or_else(|| centre.and_then(|c| poke_onto_round(mesh, face, c))) {
+                    Some(made) => out.caps.extend(made),
                     None => out.caps.push(face),
                 }
             }
@@ -645,6 +654,121 @@ fn corner_edges(mesh: &BMesh, face: FaceId, vertex: VertId) -> Option<(EdgeId, E
         .find(|&l| mesh.loop_vert(l) == Some(vertex))?;
     let previous = mesh.loop_prev(l)?;
     Some((mesh.loop_edge(previous)?, mesh.loop_edge(l)?))
+}
+
+/// Replaces a corner's cap with a grid of quads on the round about `centre`,
+/// when the cap is three rounds of `segments` strips meeting — a cube's
+/// corner bevelled all round — and `segments` is even. `None`, leaving the
+/// face, otherwise.
+///
+/// The cap is cut into three four-sided pieces at the middle of each round
+/// and a point in the middle of the cap; each piece is filled as a Coons
+/// patch of its four sides and every point carried out onto the round. Even
+/// only because the pieces meet at the rounds' middles, which an odd count
+/// does not have a vertex at.
+fn grid_onto_round(
+    mesh: &mut BMesh,
+    face: FaceId,
+    centre: Vec3,
+    corners: &[VertId],
+    segments: u32,
+) -> Option<Vec<FaceId>> {
+    let n = segments as usize;
+    if n < 2 || n % 2 != 0 || corners.len() != 3 {
+        return None;
+    }
+    let ring = mesh.face_verts(face);
+    if ring.len() != 3 * n {
+        return None;
+    }
+    // Where the rounds meet, spaced a round apart round the ring.
+    let first = ring.iter().position(|v| corners.contains(v))?;
+    if !(0..3).all(|k| corners.contains(&ring[(first + k * n) % ring.len()])) {
+        return None;
+    }
+    let at = |i: usize| ring[(first + i) % ring.len()];
+    let position = |mesh: &BMesh, v: VertId| mesh.position(v);
+    let points: Vec<Vec3> = ring.iter().filter_map(|v| position(mesh, *v)).collect();
+    if points.len() != ring.len() {
+        return None;
+    }
+    let radius = points.iter().map(|p| (*p - centre).length()).sum::<f32>() / points.len() as f32;
+    let onto = |p: Vec3| centre + (p - centre).normalize_or_zero() * radius;
+    let middle = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    if (middle - centre).length() < 1e-9 || radius <= 0.0 {
+        return None;
+    }
+
+    let m = n / 2;
+    mesh.remove_face(face);
+    let apex = mesh.add_vert(onto(middle));
+    // The three spokes, from each round's middle to the apex, `m` steps.
+    let mut spokes: Vec<Vec<VertId>> = Vec::with_capacity(3);
+    for k in 0..3 {
+        let from = at(k * n + m);
+        let (a, b) = (position(mesh, from)?, position(mesh, apex)?);
+        let mut spoke = vec![from];
+        for j in 1..m {
+            spoke.push(mesh.add_vert(onto(a.lerp(b, j as f32 / m as f32))));
+        }
+        spoke.push(apex);
+        spokes.push(spoke);
+    }
+
+    let mut made = Vec::new();
+    for k in 0..3 {
+        // Corners (0,0) the round's start, (m,0) its middle, (m,m) the apex,
+        // (0,m) the previous round's middle.
+        let bottom: Vec<VertId> = (0..=m).map(|u| at(k * n + u)).collect();
+        let left: Vec<VertId> = (0..=m).map(|v| at((k * n + 3 * n - v) % (3 * n))).collect();
+        let right = spokes[k].clone();
+        let top = spokes[(k + 2) % 3].clone();
+        let side = |mesh: &BMesh, vs: &[VertId]| -> Option<Vec<Vec3>> {
+            vs.iter().map(|v| position(mesh, *v)).collect()
+        };
+        let (pb, pl, pr, pt) = (
+            side(mesh, &bottom)?,
+            side(mesh, &left)?,
+            side(mesh, &right)?,
+            side(mesh, &top)?,
+        );
+        let mut grid = vec![vec![apex; m + 1]; m + 1];
+        for u in 0..=m {
+            for v in 0..=m {
+                grid[u][v] = if v == 0 {
+                    bottom[u]
+                } else if u == 0 {
+                    left[v]
+                } else if u == m {
+                    right[v]
+                } else if v == m {
+                    top[u]
+                } else {
+                    let (s, t) = (u as f32 / m as f32, v as f32 / m as f32);
+                    let p = pl[v] * (1.0 - s) + pr[v] * s + pb[u] * (1.0 - t) + pt[u] * t
+                        - (pb[0] * (1.0 - s) * (1.0 - t)
+                            + pb[m] * s * (1.0 - t)
+                            + pt[m] * s * t
+                            + pt[0] * (1.0 - s) * t);
+                    mesh.add_vert(onto(p))
+                };
+            }
+        }
+        for u in 0..m {
+            for v in 0..m {
+                made.push(
+                    mesh.add_face(&[
+                        grid[u][v],
+                        grid[u + 1][v],
+                        grid[u + 1][v + 1],
+                        grid[u][v + 1],
+                    ])
+                    .ok()?,
+                );
+            }
+        }
+    }
+    Some(made)
 }
 
 /// Replaces `face` with a fan of triangles to a new point on the round about
@@ -1099,6 +1223,39 @@ mod tests {
         assert!(watertight(&m), "a corner was left open");
         assert_eq!(euler(&m), 2);
         assert!(strips_face_out(&m, &out.faces));
+    }
+
+    #[test]
+    fn an_even_count_of_segments_caps_each_corner_with_a_grid_of_quads() {
+        let mut m = cube();
+        let edges: Vec<EdgeId> = m.edge_ids().collect();
+        let out = bevel_edges_segments(&mut m, &edges, 0.3, 4).unwrap();
+        m.assert_valid();
+        // Three pieces of two by two at each corner.
+        assert_eq!(out.caps.len(), 8 * 12);
+        assert!(
+            out.caps.iter().all(|f| m.face_verts(*f).len() == 4),
+            "the caps are not all quads"
+        );
+        assert!(watertight(&m), "a corner was left open");
+        assert_eq!(euler(&m), 2);
+        for f in &out.caps {
+            let ring: Vec<Vec3> = m
+                .face_verts(*f)
+                .iter()
+                .filter_map(|v| m.position(*v))
+                .collect();
+            for p in &ring {
+                let centre = p.signum() * (1.0 - 0.3);
+                assert!(
+                    ((*p - centre).length() - 0.3).abs() < 0.02,
+                    "{p:?} is off the round"
+                );
+            }
+            // And facing out of the cube.
+            let mid: Vec3 = ring.iter().copied().sum::<Vec3>() / 4.0;
+            assert!(m.face_normal(*f).dot(mid) > 0.0, "a cap quad faces in");
+        }
     }
 
     #[test]

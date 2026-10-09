@@ -19,6 +19,21 @@ use; `scripts/release.sh` turns that section into the next release.
   symmetry, alpha stamps and pen pressure; Voxel Remesh (Ctrl+R) and dynamic
   topology.
 
+### Fixed
+
+- The Physics tab changes the active object only. It used to apply all of its
+  settings to every selected object, so adjusting it with a rigid body
+  selected beside an object without one turned the rigid body off.
+- Bake to Keyframes says on hover that it turns the baked rigid bodies into
+  keys and stops them being rigid bodies.
+- Orthographic view (Numpad 5) and the viewport lens stay as set; both went
+  straight back on the next frame.
+- The camera view (Numpad 0) follows its camera as it moves or plays an
+  animation, and lets go when you move the view yourself.
+- Cmd+V pastes a picture or files into the AI chat on a Mac.
+- A sculpt stroke after changing the mask, hidden parts or face sets, with
+  nothing else changed, used the old ones.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added
