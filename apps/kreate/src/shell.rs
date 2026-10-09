@@ -6908,7 +6908,9 @@ fn graph_view(
     let ty = |s: Socket| match s {
         Socket::Color => SocketType::Color,
         Socket::Scalar => SocketType::Scalar,
-        Socket::Vector => SocketType::Vector,
+        // Blender draws both purple, and so does this: the wire is checked
+        // when it is made, not by its colour.
+        Socket::Vector | Socket::Coordinate => SocketType::Vector,
     };
     let socket_label = |name: &str| t(&format!("node-socket-{}", slug(name)));
     let swatch = |c: kreate_math::SceneRgb| {
@@ -7003,6 +7005,9 @@ fn graph_view(
                                 field: 1,
                                 swatch: swatch(*color2),
                             }),
+                            // A texture's point has no number to show: unwired,
+                            // it is the surface's own position.
+                            _ if *s == Socket::Coordinate => None,
                             // A texture's numbers are its sockets' defaults, in
                             // the order `NodeKind::values` keeps them.
                             (
@@ -7101,6 +7106,69 @@ fn graph_view(
                         .map(|o| t(&format!("node-math-{}", o.tag())))
                         .collect(),
                 }],
+                NodeKind::ColorRamp {
+                    interpolation,
+                    count,
+                    stops,
+                } => {
+                    let mut fields = vec![
+                        FieldView::Choice {
+                            field: 0,
+                            value: interpolation.index(),
+                            options: kreate_scene::shader::RampMode::ALL
+                                .iter()
+                                .map(|m| t(&format!("node-ramp-{}", m.tag())))
+                                .collect(),
+                        },
+                        FieldView::Value {
+                            field: 1,
+                            value: *count as f32,
+                            min: 2.0,
+                            max: kreate_scene::shader::RAMP_STOPS as f32,
+                            label: t("node-ramp-stops"),
+                        },
+                    ];
+                    // Each stop in use: where it is, then its colour.
+                    for (i, (at, colour)) in stops.iter().take(*count as usize).enumerate() {
+                        fields.push(FieldView::Value {
+                            field: 2 + i as u32,
+                            value: *at,
+                            min: 0.0,
+                            max: 1.0,
+                            label: t("node-ramp-position"),
+                        });
+                        fields.push(FieldView::Color {
+                            field: i as u32,
+                            swatch: swatch(*colour),
+                        });
+                    }
+                    fields
+                }
+                NodeKind::Mapping {
+                    location,
+                    rotation,
+                    scale,
+                } => [
+                    ("node-socket-location", location, -100.0, 100.0),
+                    ("node-socket-rotation", rotation, -360.0, 360.0),
+                    ("node-socket-scale", scale, -100.0, 100.0),
+                ]
+                .iter()
+                .enumerate()
+                .flat_map(|(row, (key, values, min, max))| {
+                    let name = t(key);
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(move |(axis, v)| FieldView::Value {
+                            field: (row * 3 + axis) as u32,
+                            value: *v,
+                            min: *min,
+                            max: *max,
+                            label: format!("{name} {}", ["X", "Y", "Z"][axis]),
+                        })
+                })
+                .collect(),
                 NodeKind::Wave { kind, .. } => vec![FieldView::Choice {
                     field: 4,
                     value: kind.index(),
@@ -7116,7 +7184,7 @@ fn graph_view(
                 fields,
                 inputs,
                 family: match kind {
-                    NodeKind::Color(_) | NodeKind::Value(_) => Family::Input,
+                    NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::TexCoord => Family::Input,
                     NodeKind::Image { .. }
                     | NodeKind::Noise { .. }
                     | NodeKind::Voronoi { .. }
@@ -7127,8 +7195,11 @@ fn graph_view(
                     | NodeKind::SeparateRgb
                     | NodeKind::MixColor { .. }
                     | NodeKind::Math { .. }
+                    | NodeKind::ColorRamp { .. }
                     | NodeKind::Invert => Family::Converter,
-                    NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => Family::Vector,
+                    NodeKind::NormalMap { .. }
+                    | NodeKind::Bump { .. }
+                    | NodeKind::Mapping { .. } => Family::Vector,
                     NodeKind::Surface { .. } => Family::Shader,
                 },
             }
@@ -10882,6 +10953,19 @@ node-projection-box = Box (triplanar)
 node-socket-blend = Blend
 node-kind-bump = Bump
 node-socket-height = Height
+node-kind-color-ramp = Color Ramp
+node-kind-tex-coord = Texture Coordinate
+node-kind-mapping = Mapping
+node-socket-vector = Vector
+node-socket-object = Object
+node-socket-uv = UV
+node-socket-location = Location
+node-socket-rotation = Rotation
+node-ramp-linear = Linear
+node-ramp-constant = Constant
+node-ramp-ease = Ease
+node-ramp-stops = Stops
+node-ramp-position = Position
 node-socket-factor = Factor
 node-socket-emission = Emission
 node-math-add = Add
@@ -12009,6 +12093,19 @@ node-projection-box = 박스 (트라이플래너)
 node-socket-blend = 블렌드
 node-kind-bump = 범프
 node-socket-height = 높이
+node-kind-color-ramp = 컬러 램프
+node-kind-tex-coord = 텍스처 좌표
+node-kind-mapping = 매핑
+node-socket-vector = 벡터
+node-socket-object = 오브젝트
+node-socket-uv = UV
+node-socket-location = 위치
+node-socket-rotation = 회전
+node-ramp-linear = 선형
+node-ramp-constant = 계단
+node-ramp-ease = 부드럽게
+node-ramp-stops = 정지점 수
+node-ramp-position = 위치
 node-socket-factor = 비율
 node-socket-emission = 발광
 node-math-add = 더하기

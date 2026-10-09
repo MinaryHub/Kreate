@@ -26,6 +26,9 @@ use; `scripts/release.sh` turns that section into the next release.
   on a mesh with no UVs, without stretching.
 - Bump node: turns a height — a noise, a wave, an image's channel — into a
   tilt of the surface, and can sit on top of a normal map.
+- Color Ramp node (up to eight stops; linear, constant or eased), and
+  Texture Coordinate and Mapping nodes: a texture can be read by UV, by the
+  object's position or its normal, and moved, turned and scaled.
 - The path-traced render runs each material's node graph — the same code
   the viewport draws with — so procedural textures, projected images, normal
   maps and bumps appear in the final render, not only in the viewport.

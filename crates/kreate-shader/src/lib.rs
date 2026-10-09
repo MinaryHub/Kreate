@@ -78,7 +78,7 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{MathOp, NodeKind, Projection, ShaderGraph, Socket, WaveKind};
+use kreate_scene::shader::{MathOp, NodeKind, Projection, RampMode, ShaderGraph, Socket, WaveKind};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -574,7 +574,8 @@ impl Emitter<'_> {
                 self.constants.push([scale, detail, roughness, distortion]);
                 let [s, d, r, w] = self.numbers(node, slot)?;
                 let p = format!("n{node}_p");
-                let _ = writeln!(self.body, "    let {p} = geometry.position * {s};");
+                let at = self.input_expr(node, 4, "geometry.position")?;
+                let _ = writeln!(self.body, "    let {p} = {at} * {s};");
                 let _ = writeln!(
                     self.body,
                     "    let n{node}_q = kr_distort({p}, {w}, {d}, {r});"
@@ -597,9 +598,10 @@ impl Emitter<'_> {
                 self.constants.push([scale, randomness, 0.0, 0.0]);
                 let s = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
                 let j = self.input_expr(node, 1, &format!("material.values[{slot}].y"))?;
+                let at = self.input_expr(node, 2, "geometry.position")?;
                 let _ = writeln!(
                     self.body,
-                    "    let n{node}_v = kr_voronoi(geometry.position * {s}, clamp({j}, 0.0, 1.0));"
+                    "    let n{node}_v = kr_voronoi({at} * {s}, clamp({j}, 0.0, 1.0));"
                 );
                 let _ = writeln!(self.body, "    let n{node}_f = n{node}_v.x;");
                 let _ = writeln!(self.body, "    let n{node}_c = n{node}_v.yzw;");
@@ -616,10 +618,8 @@ impl Emitter<'_> {
                 let a = self.input_expr(node, 0, &format!("material.values[{}].rgb", slot + 1))?;
                 let b = self.input_expr(node, 1, &format!("material.values[{}].rgb", slot + 2))?;
                 let s = self.input_expr(node, 2, &format!("material.values[{slot}].x"))?;
-                let _ = writeln!(
-                    self.body,
-                    "    let n{node}_f = kr_checker(geometry.position * {s});"
-                );
+                let at = self.input_expr(node, 3, "geometry.position")?;
+                let _ = writeln!(self.body, "    let n{node}_f = kr_checker({at} * {s});");
                 let _ = writeln!(self.body, "    let n{node}_c = mix({b}, {a}, n{node}_f);");
             }
             NodeKind::Wave {
@@ -639,11 +639,77 @@ impl Emitter<'_> {
                     WaveKind::Bands => "false",
                     WaveKind::Rings => "true",
                 };
+                let at = self.input_expr(node, 4, "geometry.position")?;
                 let _ = writeln!(
                     self.body,
-                    "    let n{node}_f = kr_wave(geometry.position * {s}, {rings}, {w}, {d}, {ds});"
+                    "    let n{node}_f = kr_wave({at} * {s}, {rings}, {w}, {d}, {ds});"
                 );
                 let _ = writeln!(self.body, "    let n{node}_c = vec3<f32>(n{node}_f);");
+            }
+            NodeKind::ColorRamp {
+                interpolation,
+                count,
+                stops,
+            } => {
+                // One slot a stop, in order along the ramp: the position and
+                // the colour. How many and how they blend are the shape.
+                let count = (count as usize).clamp(2, kreate_scene::shader::RAMP_STOPS);
+                let mut used = stops[..count].to_vec();
+                used.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for (at, c) in &used {
+                    self.constants.push([*at, c.r, c.g, c.b]);
+                }
+                let fac = self.input_expr(node, 0, "0.5")?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_t = clamp({fac}, 0.0, 1.0);\n    var n{node} = material.values[{slot}].yzw;"
+                );
+                for i in 1..count {
+                    let (here, before) = (slot + i, slot + i - 1);
+                    let w = match interpolation {
+                        RampMode::Constant => {
+                            format!("select(0.0, 1.0, n{node}_t >= material.values[{here}].x)")
+                        }
+                        RampMode::Linear | RampMode::Ease => {
+                            let linear = format!(
+                                "clamp((n{node}_t - material.values[{before}].x) / max(material.values[{here}].x - material.values[{before}].x, 1e-6), 0.0, 1.0)"
+                            );
+                            if interpolation == RampMode::Ease {
+                                format!("smoothstep(0.0, 1.0, {linear})")
+                            } else {
+                                linear
+                            }
+                        }
+                    };
+                    let _ = writeln!(
+                        self.body,
+                        "    n{node} = mix(n{node}, material.values[{here}].yzw, {w});"
+                    );
+                }
+            }
+            NodeKind::TexCoord => {
+                // Nothing to compute: each output is a name the function
+                // already has. A slot all the same, for the shape.
+                self.constants.push([0.0; 4]);
+            }
+            NodeKind::Mapping {
+                location,
+                rotation,
+                scale,
+            } => {
+                self.procedural = true;
+                self.constants
+                    .push([location[0], location[1], location[2], 0.0]);
+                self.constants
+                    .push([rotation[0], rotation[1], rotation[2], 0.0]);
+                self.constants.push([scale[0], scale[1], scale[2], 0.0]);
+                let v = self.input_expr(node, 0, "geometry.position")?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node} = kr_rotate({v} * material.values[{}].xyz, radians(material.values[{}].xyz)) + material.values[{slot}].xyz;",
+                    slot + 2,
+                    slot + 1
+                );
             }
             NodeKind::Surface {
                 base_color,
@@ -750,6 +816,11 @@ impl Emitter<'_> {
                 | NodeKind::Wave { .. },
                 _,
             ) => format!("n{}_c", link.from_node),
+            (NodeKind::TexCoord, _) => match link.from_socket {
+                0 => "geometry.position".to_string(),
+                1 => "vec3<f32>(uv, 0.0)".to_string(),
+                _ => "geometry.normal".to_string(),
+            },
             (NodeKind::SeparateRgb, _) => {
                 let channel = ["x", "y", "z"]
                     .get(link.from_socket)
@@ -987,6 +1058,15 @@ fn kr_checker(p: vec3<f32>) -> f32 {
     let c = floor(p * 0.999999 + vec3<f32>(1e-6));
     let s = c.x + c.y + c.z;
     return select(0.0, 1.0, s - 2.0 * floor(s * 0.5) < 0.5);
+}
+
+// Rotated about X, then Y, then Z, by angles in radians: Blender's XYZ Euler.
+fn kr_rotate(p: vec3<f32>, r: vec3<f32>) -> vec3<f32> {
+    let c = cos(r);
+    let s = sin(r);
+    let x = vec3<f32>(p.x, c.x * p.y - s.x * p.z, s.x * p.y + c.x * p.z);
+    let y = vec3<f32>(c.y * x.x + s.y * x.z, x.y, -s.y * x.x + c.y * x.z);
+    return vec3<f32>(c.z * y.x - s.z * y.y, s.z * y.x + c.z * y.y, y.z);
 }
 
 // Blender's sine profile, along the diagonal or out from the origin.
@@ -1320,6 +1400,98 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+
+    #[test]
+    fn a_ramp_and_a_mapped_coordinate_compile_and_type_check() {
+        // UV through a mapping into a wave, the wave's number through a
+        // ramp into the base colour — each ramp mode — and the object's
+        // normal straight into a checker.
+        for mode in RampMode::ALL {
+            let mut g = flat();
+            let add = |g: &mut ShaderGraph, kind| g.add_node(Node::new("n", kind)).expect("added");
+            let coords = add(&mut g, NodeKind::TexCoord);
+            let mapping = add(&mut g, NodeKind::new_of("mapping").expect("a kind"));
+            let wave = add(&mut g, NodeKind::new_of("wave").expect("a kind"));
+            let ramp = add(
+                &mut g,
+                NodeKind::ColorRamp {
+                    interpolation: mode,
+                    count: 3,
+                    stops: [(0.5, SceneRgb::new(1.0, 0.5, 0.0)); kreate_scene::shader::RAMP_STOPS],
+                },
+            );
+            let checker = add(&mut g, NodeKind::new_of("checker").expect("a kind"));
+            for (from, fs, to, ts) in [
+                (coords, 1, mapping, 0),
+                (mapping, 0, wave, 4),
+                (wave, 1, ramp, 0),
+                (ramp, 0, 0, 0),
+                (coords, 2, checker, 3),
+                (checker, 1, 0, 2),
+            ] {
+                g.link(Link {
+                    from_node: from,
+                    from_socket: fs,
+                    to_node: to,
+                    to_socket: ts,
+                })
+                .unwrap_or_else(|e| panic!("{from}->{to}: {e:?}"));
+            }
+            let compiled = compile(&g).expect("compiles");
+            validates(&compiled);
+            assert!(compiled.wgsl.contains("kr_wave(n"), "{}", compiled.wgsl);
+            assert!(compiled.wgsl.contains("vec3<f32>(uv, 0.0)"));
+            assert!(compiled.wgsl.contains("kr_checker(geometry.normal"));
+        }
+        // A normal map's direction is not a place to read a texture at.
+        let mut g = flat();
+        let map = g
+            .add_node(Node::new("m", NodeKind::NormalMap { strength: 1.0 }))
+            .expect("added");
+        let noise = g
+            .add_node(Node::new("n", NodeKind::new_of("noise").expect("a kind")))
+            .expect("added");
+        assert!(g
+            .link(Link {
+                from_node: map,
+                from_socket: 0,
+                to_node: noise,
+                to_socket: 4,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn a_ramps_stops_are_read_in_order_whatever_order_they_were_given() {
+        let mut stops = [(0.0, SceneRgb::new(0.0, 0.0, 0.0)); kreate_scene::shader::RAMP_STOPS];
+        stops[0] = (0.9, SceneRgb::new(1.0, 0.0, 0.0));
+        stops[1] = (0.1, SceneRgb::new(0.0, 0.0, 1.0));
+        let mut g = flat();
+        let ramp = g
+            .add_node(Node::new(
+                "r",
+                NodeKind::ColorRamp {
+                    interpolation: RampMode::Linear,
+                    count: 2,
+                    stops,
+                },
+            ))
+            .expect("added");
+        g.link(Link {
+            from_node: ramp,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 0,
+        })
+        .expect("connects");
+        let compiled = compile(&g).expect("compiles");
+        let slot = compiled
+            .constants
+            .iter()
+            .position(|c| c[0] == 0.1)
+            .expect("the blue stop");
+        assert_eq!(compiled.constants[slot + 1][0], 0.9, "red after blue");
     }
 
     #[test]
