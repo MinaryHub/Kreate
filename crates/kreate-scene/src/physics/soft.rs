@@ -52,6 +52,9 @@ pub struct SoftSim {
     damping: f64,
     shape: f64,
     pressure: f64,
+    /// Self-collision: how far apart its vertices are kept, and which pairs
+    /// are joined by an edge and so are allowed nearer. `None` when off.
+    keep_apart: Option<(f64, std::collections::HashSet<(u32, u32)>)>,
 }
 
 /// The weights of the vertex group `group`, if the mesh has it.
@@ -125,7 +128,17 @@ impl SoftSim {
             damping: settings.damping.clamp(0.0, 1.0),
             shape: if soft { settings.shape_stiffness.clamp(0.0, 1.0) } else { 0.0 },
             pressure: if soft { settings.pressure.clamp(-1.0, 1.0) } else { 0.0 },
+            keep_apart: None,
         };
+        if settings.self_collision && settings.self_distance > 0.0 {
+            let joined = mesh
+                .edges()
+                .iter()
+                .map(|[a, b]| ((*a).min(*b), (*a).max(*b)))
+                .chain(sim.bends.iter().map(|(a, b, _)| ((*a).min(*b), (*a).max(*b))))
+                .collect();
+            sim.keep_apart = Some((settings.self_distance, joined));
+        }
         if soft && closed {
             sim.volume = Some(sim.current_volume());
         }
@@ -194,6 +207,7 @@ impl SoftSim {
         if self.shape > 0.0 {
             self.match_shape();
         }
+        self.repel_self();
         for i in 0..self.x.len() {
             if self.inv_mass[i] == 0.0 {
                 continue;
@@ -212,6 +226,49 @@ impl SoftSim {
         }
         for i in 0..self.x.len() {
             self.v[i] = (self.x[i] - self.prev[i]) / dt;
+        }
+    }
+
+    /// Pushes apart any two vertices nearer than the self-collision
+    /// distance that no edge joins: a spatial hash a cell the distance wide,
+    /// so each vertex looks only at its own cell and the ones round it.
+    fn repel_self(&mut self) {
+        let Some((gap, joined)) = &self.keep_apart else { return };
+        let gap = *gap;
+        let cell = |p: DVec3| ((p.x / gap).floor() as i64, (p.y / gap).floor() as i64, (p.z / gap).floor() as i64);
+        let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = Default::default();
+        for (i, p) in self.x.iter().enumerate() {
+            grid.entry(cell(*p)).or_default().push(i as u32);
+        }
+        for i in 0..self.x.len() {
+            let (cx, cy, cz) = cell(self.x[i]);
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let Some(near) = grid.get(&(cx + dx, cy + dy, cz + dz)) else {
+                            continue;
+                        };
+                        for &j in near {
+                            let j = j as usize;
+                            if j <= i || joined.contains(&(i as u32, j as u32)) {
+                                continue;
+                            }
+                            let (wi, wj) = (self.inv_mass[i], self.inv_mass[j]);
+                            if wi + wj <= 0.0 {
+                                continue;
+                            }
+                            let d = self.x[i] - self.x[j];
+                            let len = d.length();
+                            if len >= gap || len < 1e-12 {
+                                continue;
+                            }
+                            let push = d / len * ((gap - len) / (wi + wj));
+                            self.x[i] += push * wi;
+                            self.x[j] -= push * wj;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -381,6 +438,40 @@ mod tests {
             .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.z), hi.max(p.z)));
         assert!(lo > -0.05, "on the floor: {lo}");
         assert!(hi - lo > 0.7, "still a cube, not a puddle: {}", hi - lo);
+    }
+
+    #[test]
+    fn cloth_folded_onto_itself_keeps_its_layers_apart() {
+        // A long strip dropped across a thin bar: both halves hang, and
+        // where they meet below it they stay apart.
+        let mesh = kreate_mesh::primitives::grid(2.0, 20, 4);
+        let lift = DAffine3::from_translation(DVec3::new(0.0, 0.0, 0.3));
+        let bar = Collider::new(&kreate_mesh::primitives::cube(0.1), DAffine3::IDENTITY, 0.01, 0.8, 0.0);
+        let floor = Collider::new(
+            &kreate_mesh::primitives::plane(6.0),
+            DAffine3::from_translation(DVec3::new(0.0, 0.0, -0.4)),
+            0.01,
+            0.8,
+            0.0,
+        );
+        let settings = SoftBody {
+            self_collision: true,
+            self_distance: 0.03,
+            ..SoftBody::new(SoftKind::Cloth)
+        };
+        let mut sim = SoftSim::new(&mesh, lift, &settings);
+        run(&mut sim, 60, lift, &[&bar, &floor]);
+        // No two vertices that no edge joins are nearer than most of the gap.
+        let mut nearest = f64::MAX;
+        let (_, joined) = sim.keep_apart.as_ref().unwrap();
+        for i in 0..sim.x.len() {
+            for j in i + 1..sim.x.len() {
+                if !joined.contains(&(i as u32, j as u32)) {
+                    nearest = nearest.min(sim.x[i].distance(sim.x[j]));
+                }
+            }
+        }
+        assert!(nearest > 0.015, "layers kept apart: {nearest}");
     }
 
     #[test]

@@ -24,14 +24,16 @@
 //!   in evaluation.
 //!
 //! The record is the document's, behind an `Arc`, so undo keeps it for the
-//! price of a pointer and a bake is one undo step. It is not saved with the
-//! file: it is large, and a bake makes it again.
+//! price of a pointer and a bake is one undo step. It is saved with the file
+//! (`kreate_io::kbake`), so a baked scene opens baked.
 //!
 //! # What touches what
 //!
 //! As in Blender: rigid bodies collide with one another; cloth, soft bodies
-//! and particles collide with objects that have [`Collision`]. A passive
-//! rigid body does not move.
+//! and particles collide with objects that have [`Collision`] — where the
+//! simulation has them, if they are rigid bodies too. A passive rigid body
+//! is not moved by the simulation but follows its object's animation, and
+//! carries what it touches.
 
 pub mod bake;
 pub mod collide;
@@ -150,6 +152,11 @@ pub struct SoftBody {
     /// The vertex group whose vertices are pinned — held where the object
     /// puts them, as a curtain on its rail. `None` pins nothing.
     pub pin_group: Option<String>,
+    /// It collides with itself: a fold does not pass through the cloth
+    /// under it.
+    pub self_collision: bool,
+    /// How far apart its own surfaces are kept, metres.
+    pub self_distance: f64,
 }
 
 impl SoftBody {
@@ -165,6 +172,8 @@ impl SoftBody {
                 shape_stiffness: 0.0,
                 pressure: 0.0,
                 pin_group: None,
+                self_collision: false,
+                self_distance: 0.015,
             },
             SoftKind::Soft => Self {
                 kind,
@@ -175,6 +184,8 @@ impl SoftBody {
                 shape_stiffness: 0.3,
                 pressure: 0.0,
                 pin_group: None,
+                self_collision: false,
+                self_distance: 0.015,
             },
         }
     }

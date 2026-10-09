@@ -41,6 +41,19 @@ struct Tracked {
     turn: DQuat,
     world: DAffine3,
     frames: Vec<DTransform>,
+    /// Where the simulation has the object now, for what follows it.
+    now: DAffine3,
+}
+
+/// A passive rigid body that follows its object's animation: a door that
+/// swings, a paddle that sweeps. Where it was when the bake began, to move
+/// it by as much as the object has moved since.
+struct Kinematic {
+    object: ObjectId,
+    body: usize,
+    pos: DVec3,
+    rot: DQuat,
+    world: DAffine3,
 }
 
 /// Baked frames of vertices, and of particles.
@@ -97,6 +110,7 @@ pub fn bake_with(
     // Rigid bodies.
     let mut world = RigidWorld::new(settings.gravity, settings.iterations);
     let mut tracked: Vec<Tracked> = Vec::new();
+    let mut kinematic: Vec<Kinematic> = Vec::new();
     let mut softs: Vec<Baking> = Vec::new();
     let mut emitters: Vec<Emitting<ParticleSim>> = Vec::new();
     let mut hairs: Vec<Emitting<HairSim>> = Vec::new();
@@ -159,6 +173,15 @@ pub fn bake_with(
                     turn: rot,
                     world: w,
                     frames: vec![o.transform],
+                    now: w,
+                });
+            } else {
+                kinematic.push(Kinematic {
+                    object: id,
+                    body: world.bodies.len() - 1,
+                    pos: centre,
+                    rot,
+                    world: w,
                 });
             }
         }
@@ -192,10 +215,24 @@ pub fn bake_with(
             return None;
         }
         scene.animate(frame as f64);
-        for (id, c) in colliders.iter_mut() {
-            c.place(scene.world_transform(*id));
+        // Passive bodies where their objects' keys put them, moving at the
+        // speed that took them there, so what they push is pushed.
+        for k in &kinematic {
+            let w = scene.world_transform(k.object);
+            let moved = w * k.world.inverse();
+            let (_, turn, _) = moved.to_scale_rotation_translation();
+            let b = &mut world.bodies[k.body];
+            let (pos, rot) = (moved.transform_point3(k.pos), (turn * k.rot).normalize());
+            b.vel = (pos - b.pos) / dt;
+            let (axis, angle) = (rot * b.rot.inverse()).to_axis_angle();
+            let angle = if angle > std::f64::consts::PI { angle - std::f64::consts::TAU } else { angle };
+            b.spin = axis * (angle / dt);
+            b.pos = pos;
+            b.rot = rot;
+            if let super::rigid::Shape::Mesh(c) = &mut b.shape {
+                c.place(w);
+            }
         }
-        let near: Vec<&Collider> = colliders.iter().map(|(_, c)| c).collect();
         if !tracked.is_empty() {
             world.advance(dt, substeps);
             for t in tracked.iter_mut() {
@@ -203,9 +240,21 @@ pub fn bake_with(
                 let moved = DAffine3::from_rotation_translation(b.rot * t.turn.inverse(), b.pos)
                     * DAffine3::from_translation(-t.centre)
                     * t.world;
+                t.now = moved;
                 t.frames.push(local_for(&scene, t.object, moved));
             }
         }
+        // Colliders where they are this frame: a collider that is also a
+        // simulated rigid body where the simulation has it, so cloth lands
+        // on a box that is still falling.
+        for (id, c) in colliders.iter_mut() {
+            let w = tracked
+                .iter()
+                .find(|t| t.object == *id)
+                .map_or_else(|| scene.world_transform(*id), |t| t.now);
+            c.place(w);
+        }
+        let near: Vec<&Collider> = colliders.iter().map(|(_, c)| c).collect();
         for (id, _, sim, frames) in softs.iter_mut() {
             // Each collider but itself: a cloth that is also a collider does
             // not collide with its own rest shape.
@@ -323,6 +372,74 @@ mod tests {
         assert!((doc.object(cube).unwrap().transform.translation.z - 0.5).abs() < 0.05);
         doc.animate(1.0);
         assert_eq!(doc.object(cube).unwrap().transform.translation.z, 3.0, "and back");
+    }
+
+    #[test]
+    fn an_animated_passive_body_moves_and_carries_what_sits_on_it() {
+        let mut doc = Document::new();
+        short(&mut doc, 48);
+        // A slab that slides along X under a box resting on it.
+        let slab = add(&mut doc, "Slab", kreate_mesh::primitives::cube(1.0), DVec3::new(0.0, 0.0, 0.5));
+        {
+            let o = doc.object_mut(slab).unwrap();
+            o.physics.rigid = Some(RigidBody {
+                kind: BodyKind::Passive,
+                shape: CollisionShape::Box,
+                friction: 1.0,
+                ..RigidBody::default()
+            });
+            o.transform.scale = DVec3::new(4.0, 2.0, 1.0);
+        }
+        let mut action = crate::animation::Action::new("Slide");
+        for (frame, x) in [(1.0, 0.0), (48.0, 2.0)] {
+            action.curve_mut("location", 0).insert(frame, x, crate::animation::Interpolation::Linear);
+            action.curve_mut("location", 2).insert(frame, 0.5, crate::animation::Interpolation::Linear);
+        }
+        let a = doc.add_action(action);
+        doc.object_mut(slab).unwrap().action = Some(a);
+        let rider = add(&mut doc, "Rider", kreate_mesh::primitives::cube(0.5), DVec3::new(0.0, 0.0, 1.26));
+        doc.object_mut(rider).unwrap().physics.rigid = Some(RigidBody {
+            shape: CollisionShape::Box,
+            friction: 1.0,
+            ..RigidBody::default()
+        });
+        let (cache, _) = bake(&doc);
+        let x = cache.rigid[0].frames.last().unwrap().translation.x;
+        assert!(x > 1.0, "carried along by the slab: {x}");
+    }
+
+    #[test]
+    fn cloth_lands_on_a_box_that_is_still_falling() {
+        let mut doc = Document::new();
+        short(&mut doc, 36);
+        let floor = add(&mut doc, "Floor", kreate_mesh::primitives::plane(10.0), DVec3::ZERO);
+        {
+            let o = doc.object_mut(floor).unwrap();
+            o.physics.rigid = Some(RigidBody {
+                kind: BodyKind::Passive,
+                shape: CollisionShape::Mesh,
+                ..RigidBody::default()
+            });
+            o.physics.collision = Some(Collision::default());
+        }
+        let block = add(&mut doc, "Block", kreate_mesh::primitives::cube(1.0), DVec3::new(0.0, 0.0, 2.0));
+        {
+            let o = doc.object_mut(block).unwrap();
+            o.physics.rigid = Some(RigidBody { shape: CollisionShape::Box, ..RigidBody::default() });
+            o.physics.collision = Some(Collision::default());
+        }
+        let cloth = add(&mut doc, "Cloth", kreate_mesh::primitives::grid(2.0, 12, 12), DVec3::new(0.0, 0.0, 2.8));
+        doc.object_mut(cloth).unwrap().physics.soft = Some(SoftBody::new(SoftKind::Cloth));
+        let (cache, _) = bake(&doc);
+        let block_z = cache.rigid[0].frames.last().unwrap().translation.z;
+        assert!((block_z - 0.5).abs() < 0.1, "{block_z}");
+        let last = cache.soft[0].frames.last().unwrap();
+        let middle = last
+            .iter()
+            .filter(|p| p.x.abs() < 0.2 && p.y.abs() < 0.2)
+            .map(|p| p.z + 2.8)
+            .fold(f32::MAX, f32::min);
+        assert!(middle > 0.95, "on the lid where the block came to rest: {middle}");
     }
 
     #[test]

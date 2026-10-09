@@ -254,6 +254,11 @@ pub struct SoftParams {
     /// The vertex group whose vertices stay where the object puts them.
     /// Empty pins nothing.
     pub pin_group: String,
+    /// It collides with itself.
+    pub self_collision: bool,
+    /// How far apart its own surfaces are kept, metres.
+    #[param(min = 0.0, soft_max = 0.1, unit = "length")]
+    pub self_distance: f64,
 }
 
 impl Default for SoftParams {
@@ -277,6 +282,8 @@ pub fn soft_params(s: Option<&SoftBody>) -> SoftParams {
         shape_stiffness: d.shape_stiffness,
         pressure: d.pressure,
         pin_group: d.pin_group.unwrap_or_default(),
+        self_collision: d.self_collision,
+        self_distance: d.self_distance,
     }
 }
 
@@ -322,6 +329,8 @@ impl Operator for SoftSet {
             shape_stiffness: params.shape_stiffness.clamp(0.0, 1.0),
             pressure: params.pressure.clamp(-1.0, 1.0),
             pin_group: pin.clone(),
+            self_collision: params.self_collision,
+            self_distance: params.self_distance.max(0.0),
         };
         Ok(on_selected(doc, |p| {
             p.soft = match kind {

@@ -15,6 +15,7 @@ pub mod gltf_export;
 pub mod gltf_import;
 pub mod image_import;
 pub mod ir;
+pub mod kbake;
 pub mod kmesh;
 pub mod ktile;
 pub mod library;

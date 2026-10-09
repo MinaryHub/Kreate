@@ -43,6 +43,14 @@ pub struct SoftRecord {
     pub pressure: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_group: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub self_collision: bool,
+    #[serde(default = "default_self_distance")]
+    pub self_distance: f64,
+}
+
+fn default_self_distance() -> f64 {
+    0.015
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +142,8 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
             shape_stiffness: s.shape_stiffness,
             pressure: s.pressure,
             pin_group: s.pin_group.clone(),
+            self_collision: s.self_collision,
+            self_distance: s.self_distance,
         }),
         particles: p
             .particles
@@ -196,6 +206,8 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
             shape_stiffness: s.shape_stiffness.clamp(0.0, 1.0),
             pressure: s.pressure.clamp(-1.0, 1.0),
             pin_group: s.pin_group.clone(),
+            self_collision: s.self_collision,
+            self_distance: s.self_distance.max(0.0),
         }),
         particles: r
             .particles
@@ -275,6 +287,8 @@ mod tests {
                 shape_stiffness: 0.9,
                 pressure: 0.5,
                 pin_group: Some("Top".into()),
+                self_collision: true,
+                self_distance: 0.04,
             }),
             particles: vec![ParticleSettings {
                 instance: Some(kreate_scene::Uid::from_raw(42)),

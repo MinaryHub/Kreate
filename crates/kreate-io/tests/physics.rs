@@ -39,6 +39,30 @@ fn an_objects_physics_and_the_world_are_saved() {
 }
 
 #[test]
+fn a_baked_scene_opens_baked() {
+    use kreate_scene::physics::{BodyKind, CollisionShape};
+    let mut doc = Document::new();
+    doc.physics.frame_end = 30;
+    let floor = doc.add_mesh(kreate_mesh::primitives::plane(10.0));
+    let mut o = Object::new("Floor", ObjectData::Mesh(floor));
+    o.physics.rigid = Some(RigidBody { kind: BodyKind::Passive, shape: CollisionShape::Mesh, ..RigidBody::default() });
+    doc.add_object(o);
+    let cube = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let mut o = Object::new("Cube", ObjectData::Mesh(cube));
+    o.transform.translation.z = 3.0;
+    o.physics.rigid = Some(RigidBody::default());
+    doc.add_object(o);
+    let (cache, _) = kreate_scene::physics::bake::bake(&doc);
+    doc.physics_cache = std::sync::Arc::new(cache);
+
+    let mut back = round_trip(&doc);
+    assert_eq!(back.physics_cache.rigid, doc.physics_cache.rigid);
+    back.animate(30.0);
+    let (_, cube) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
+    assert!((cube.transform.translation.z - 0.5).abs() < 0.05, "plays from the file");
+}
+
+#[test]
 fn a_scene_without_physics_writes_nothing_of_it() {
     let bytes = container::write(&Document::new(), &Manifest::default(), &[]).expect("writes");
     assert!(!String::from_utf8_lossy(&bytes).contains("\"physics\""));

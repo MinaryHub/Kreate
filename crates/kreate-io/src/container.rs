@@ -83,6 +83,8 @@ const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
 const MESH_DIR: &str = "meshes/";
 const IMAGE_DIR: &str = "images/";
+/// The physics bake, when there is one. See `kbake`.
+const PHYSICS_BAKE: &str = "physics/bake.kbake";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContainerError {
@@ -1833,6 +1835,13 @@ pub fn write(
             zip.write_all(&crate::ktile::write(image))?;
         }
 
+        // The bake, so a baked scene opens baked. STORED: it is mostly floats
+        // that do not compress, and it is read whole.
+        if !document.physics_cache.is_empty() {
+            zip.start_file(PHYSICS_BAKE, binary)?;
+            zip.write_all(&crate::kbake::write(&document.physics_cache))?;
+        }
+
         // Last, and in the order they arrived, so their presence does not
         // disturb the position of anything else.
         for entry in unknown {
@@ -1888,6 +1897,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     let mut meshes: BTreeMap<String, MeshData> = BTreeMap::new();
     let mut image_tiles: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut unknown = Vec::new();
+    let mut bake = None;
     for name in names {
         if name == MANIFEST || name == SCENE {
             continue;
@@ -1912,6 +1922,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             // Kept as bytes and decoded beside its record, because the record
             // is what says whose pixels these are.
             image_tiles.insert(key.to_string(), bytes);
+        } else if name == PHYSICS_BAKE {
+            // A bake this build cannot read is dropped, not carried: it would
+            // be a record of a simulation the scene may no longer match.
+            bake = crate::kbake::read(&bytes);
         } else if !name.ends_with('/') {
             // A directory entry carries nothing and is recreated by the writer;
             // anything else is content this build cannot interpret and must not
@@ -2457,6 +2471,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         if let Some(object) = document.object_mut(*id) {
             object.parent_inverse = affine_from_array(&record.parent_inverse);
         }
+    }
+
+    if let Some(bake) = bake {
+        document.physics_cache = std::sync::Arc::new(bake);
     }
 
     Ok(Loaded {
