@@ -422,7 +422,7 @@ fn write_nodes(
     }
 
     for (index, node) in scene.nodes.iter().enumerate() {
-        let out = ImportTransform::from_kreate(node.transform.to_affine(), &target);
+        let out = placed_out(scene, index, node.transform.to_affine(), &target);
         let mut json_node = json::Node {
             name: Some(node.name.clone()),
             translation: Some(out.translation.to_array()),
@@ -618,6 +618,26 @@ fn vertex_skin(
 /// sample, so a moving node and a still one cannot come out in two different
 /// conventions. glTF's node indices are the scene's own, because `write_nodes`
 /// writes every node in order.
+/// A node's placement in the file: a camera or a light with nothing under it
+/// by the axis it looks along, as the reader places it (see
+/// `ImportTransform::to_kreate_facing`), anything else as a mesh is.
+fn placed_out(
+    scene: &ExportScene<'_>,
+    index: usize,
+    affine: kreate_math::DAffine3,
+    target: &SourceMetadata,
+) -> ImportTransform {
+    let faces =
+        scene.nodes.get(index).is_some_and(|n| {
+            matches!(n.data, ImportNodeData::Camera(_) | ImportNodeData::Light(_))
+        }) && !scene.nodes.iter().any(|n| n.parent == Some(index));
+    if faces {
+        ImportTransform::from_kreate_facing(affine, target)
+    } else {
+        ImportTransform::from_kreate(affine, target)
+    }
+}
+
 fn write_animations(
     scene: &ExportScene<'_>,
     root: &mut json::Root,
@@ -651,7 +671,7 @@ fn write_animations(
             let times = &track.times[..count];
             let placed: Vec<ImportTransform> = track.transforms[..count]
                 .iter()
-                .map(|t| ImportTransform::from_kreate(t.to_affine(), &target))
+                .map(|t| placed_out(scene, track.node, t.to_affine(), &target))
                 .collect();
             let input_view = push_view(root, bin, bytemuck::cast_slice(times), None);
             let (first, last) = (times[0], times[count - 1]);

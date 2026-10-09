@@ -478,6 +478,42 @@ impl ImportTransform {
         kreate_math::DAffine3::from_mat3_translation(linear.as_dmat3(), translation.as_dvec3())
     }
 
+    /// The same placement for a camera or a light, in Kreate space.
+    ///
+    /// **Not the conjugation a mesh takes.** A mesh's points are turned into
+    /// Kreate's axes too, so its placement is turned on both sides; a camera
+    /// or a light has no points, only the axis it looks along — -Z of its own
+    /// space, in glTF and here alike — and that axis has to be carried into
+    /// Kreate's axes with the rest. So the axis change goes on the left only:
+    /// a glTF camera at rest, looking along the file's -Z, looks along
+    /// Kreate's +Y, which is where it was looking, and not down at the floor.
+    pub fn to_kreate_facing(&self, source: &SourceMetadata) -> kreate_math::DAffine3 {
+        let axis = source.axis.to_kreate();
+        let linear = axis * Mat3::from_quat(self.rotation) * Mat3::from_diagonal(self.scale);
+        let translation = axis * (self.translation * source.unit_scale);
+        kreate_math::DAffine3::from_mat3_translation(linear.as_dmat3(), translation.as_dvec3())
+    }
+
+    /// The inverse of [`ImportTransform::to_kreate_facing`], for writing a
+    /// camera or a light.
+    pub fn from_kreate_facing(affine: kreate_math::DAffine3, source: &SourceMetadata) -> Self {
+        let axis = source.axis.to_kreate();
+        let linear = axis.transpose() * affine.matrix3.as_mat3();
+        let unit = if source.unit_scale.is_normal() {
+            source.unit_scale
+        } else {
+            1.0
+        };
+        let translation = (axis.transpose() * affine.translation.as_vec3()) / unit;
+        let (scale, rotation, _) =
+            glam::Affine3A::from_mat3(linear).to_scale_rotation_translation();
+        Self {
+            translation,
+            rotation,
+            scale,
+        }
+    }
+
     /// The same placement, back in the file's space.
     ///
     /// Written as the *inverse* of [`ImportTransform::to_kreate`] rather than as
@@ -1033,6 +1069,27 @@ pub struct ImportMorphChannel {
 }
 
 impl ImportScene {
+    /// Whether a node's placement turns the axis it looks along — a camera
+    /// or a light with nothing under it — rather than its points. See
+    /// [`ImportTransform::to_kreate_facing`]. One with children is placed as
+    /// any node is, so what hangs from it stays where the file put it.
+    pub fn faces(&self, node: usize) -> bool {
+        self.nodes
+            .get(node)
+            .is_some_and(|n| matches!(n.data, ImportNodeData::Camera(_) | ImportNodeData::Light(_)))
+            && !self.nodes.iter().any(|n| n.parent == Some(node))
+    }
+
+    /// A node's placement in Kreate space, as a camera or a light takes it
+    /// or as anything else does.
+    pub fn place(&self, node: usize, t: &ImportTransform) -> kreate_math::DAffine3 {
+        if self.faces(node) {
+            t.to_kreate_facing(&self.source)
+        } else {
+            t.to_kreate(&self.source)
+        }
+    }
+
     pub fn new(source: SourceMetadata) -> Self {
         Self {
             meshes: Vec::new(),

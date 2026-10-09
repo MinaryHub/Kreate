@@ -554,3 +554,58 @@ fn a_gltf_on_disk_reads_the_buffer_beside_it_and_nothing_further() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A glTF camera at rest looks along its -Z, which in a Y-up file is level
+/// with the floor: here, along +Y. And a light the file turns to shine down
+/// shines down here. Both were tipped a quarter turn while their placements
+/// were converted as a mesh's are.
+#[test]
+fn cameras_and_lights_look_where_the_file_says() {
+    let root = json!({
+        "asset": { "version": "2.0" },
+        "extensionsUsed": ["KHR_lights_punctual"],
+        "extensions": { "KHR_lights_punctual": { "lights": [ { "type": "directional", "intensity": 3.0 } ] } },
+        "cameras": [ { "type": "perspective", "perspective": { "yfov": 0.8, "znear": 0.1 } } ],
+        "scene": 0,
+        "scenes": [ { "nodes": [0, 1] } ],
+        "nodes": [
+            { "name": "Cam", "camera": 0 },
+            { "name": "Sun", "rotation": [-std::f64::consts::FRAC_1_SQRT_2, 0.0, 0.0, std::f64::consts::FRAC_1_SQRT_2],
+              "extensions": { "KHR_lights_punctual": { "light": 0 } } }
+        ]
+    });
+    let bytes = serde_json::to_vec(&root).unwrap();
+    let scene = gltf_import::parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    let mut doc = kreate_scene::Document::new();
+    kreate_io::build_into(&scene, &mut doc);
+    let facing = |name: &str| {
+        let (id, _) = doc.objects().find(|(_, o)| o.name == name).expect("there");
+        doc.world_transform(id).matrix3 * glam::DVec3::NEG_Z
+    };
+    let cam = facing("Cam");
+    assert!(
+        (cam - glam::DVec3::Y).length() < 1e-5,
+        "the camera looks {cam}"
+    );
+    let sun = facing("Sun");
+    assert!(
+        (sun - glam::DVec3::NEG_Z).length() < 1e-5,
+        "the sun shines {sun}"
+    );
+
+    // And written out again, they read back the same way round.
+    let (export, _) = kreate_io::scene_from_document(&doc);
+    let (written, _) = kreate_io::write_gltf_scene(&export, &Default::default());
+    let again = gltf_import::parse_gltf(&written, &GltfOptions::default()).expect("parses");
+    let mut back = kreate_scene::Document::new();
+    kreate_io::build_into(&again, &mut back);
+    let (id, _) = back
+        .objects()
+        .find(|(_, o)| o.name == "Cam")
+        .expect("there");
+    let cam = back.world_transform(id).matrix3 * glam::DVec3::NEG_Z;
+    assert!(
+        (cam - glam::DVec3::Y).length() < 1e-5,
+        "after a round trip it looks {cam}"
+    );
+}

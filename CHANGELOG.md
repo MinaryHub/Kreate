@@ -24,6 +24,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - Link a `.kreate` from the Assets editor rather than copy it: its objects
   are read-only here and read again from the file each time the document
   opens, so fixing a prop in its library fixes it in every scene.
+- FBX cameras (lens and film back) and lights (point, sun, spot) are
+  imported; FBX gives lights no unit, so the brightness taken is noted.
 - The AI chat can find and add assets: `search_assets` looks through
   Poly Haven, ambientCG or your folders, and `add_asset` brings one in.
 - A saved document reopens seen from where it was looked at when saved:
@@ -44,6 +46,10 @@ use; `scripts/release.sh` turns that section into the next release.
   and autosaves stay small.
 
 ### Fixed
+
+- Cameras and lights from glTF files look and shine where the file says:
+  each was tipped a quarter turn, a level camera looking at the floor and a
+  sun shining sideways. Written out again, they stay the right way round.
 
 - A `.gltf` whose buffers and textures are files beside it opens and
   imports; it needed everything embedded. References that leave the file's

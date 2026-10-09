@@ -310,7 +310,7 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
             continue;
         }
         if let Some(object) = doc.object_mut(*id) {
-            object.transform = to_transform(node.transform.to_kreate(&scene.source));
+            object.transform = to_transform(scene.place(index, &node.transform));
         }
     }
 
@@ -663,7 +663,7 @@ fn rig_pose(
                 }
             }
         }
-        placed.to_kreate(&scene.source)
+        scene.place(node, &placed)
     };
     let world = |node: usize| -> DAffine3 {
         let mut out = DAffine3::IDENTITY;
@@ -891,7 +891,7 @@ fn build_animations(
                         }
                     }
                 }
-                let local = to_transform(placed.to_kreate(&scene.source));
+                let local = to_transform(scene.place(node, &placed));
                 if moves_t {
                     for i in 0..3u8 {
                         action.curve_mut("location", i).insert(

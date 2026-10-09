@@ -628,6 +628,67 @@ impl Layer {
     }
 }
 
+/// A camera attribute as the IR has it: its vertical angle from the lens and
+/// film when the file gives them, its field of view otherwise.
+fn camera_of(attribute: &Node, name: String) -> crate::ir::ImportCamera {
+    let focal = attribute.property_f64("FocalLength");
+    // Inches, as FBX keeps film backs.
+    let film = attribute.property_f64("FilmHeight");
+    let fov_y = match (focal, film) {
+        (Some(f), Some(h)) if f > 0.0 && h > 0.0 => 2.0 * ((h * 25.4 / 2.0) / f).atan(),
+        _ => attribute
+            .property_f64("FieldOfViewY")
+            .or_else(|| attribute.property_f64("FieldOfView"))
+            .unwrap_or(40.0)
+            .to_radians(),
+    };
+    let ortho = attribute.property_f64("CameraProjectionType") == Some(1.0);
+    crate::ir::ImportCamera {
+        name,
+        fov_y: (!ortho).then_some(fov_y as f32),
+        ortho_width: ortho.then(|| attribute.property_f64("OrthoZoom").unwrap_or(1.0) as f32),
+        clip_near: attribute.property_f64("NearPlane").unwrap_or(10.0) as f32,
+        clip_far: attribute.property_f64("FarPlane").map(|f| f as f32),
+    }
+}
+
+/// A light attribute as the IR has it: point, sun or spot, its colour, and
+/// an amount read from FBX's unitless intensity.
+fn light_of(attribute: &Node, name: String) -> Option<crate::ir::ImportLight> {
+    use crate::ir::ImportLightKind;
+    let colour = attribute.property_vec3("Color").unwrap_or(Vec3::ONE);
+    let amount = attribute.property_f64("Intensity").unwrap_or(100.0) as f32;
+    let kind = match attribute.property_f64("LightType").unwrap_or(0.0) as i64 {
+        1 => ImportLightKind::Directional,
+        2 => {
+            let outer = attribute
+                .property_f64("OuterAngle")
+                .or_else(|| attribute.property_f64("Cone angle"))
+                .unwrap_or(45.0)
+                .to_radians() as f32
+                * 0.5;
+            let inner = attribute
+                .property_f64("InnerAngle")
+                .map_or(outer * 0.8, |a| a.to_radians() as f32 * 0.5)
+                .min(outer);
+            ImportLightKind::Spot { inner, outer }
+        }
+        // A point, and an area light that a point stands in for.
+        _ => ImportLightKind::Point,
+    };
+    let intensity = match kind {
+        ImportLightKind::Directional => amount * 10.0,
+        _ => amount,
+    };
+    Some(crate::ir::ImportLight {
+        name,
+        kind,
+        color: [colour.x, colour.y, colour.z],
+        intensity,
+        range: None,
+    })
+}
+
 /// Reads an FBX file into the IR.
 ///
 /// `file` finds a texture the file names but does not carry: its path as the
@@ -694,8 +755,6 @@ pub fn parse_fbx(
             ("AnimationCurve" | "AnimationCurveNode" | "AnimationStack", _) => "animation",
             ("Deformer", Some("Skin")) => "skinning",
             ("Deformer", Some("BlendShape")) => "blend shapes",
-            ("NodeAttribute", Some("Camera")) => "cameras",
-            ("NodeAttribute", Some("Light")) => "lights",
             _ => continue,
         };
         if !unsupported.contains(&what) {
@@ -914,6 +973,7 @@ pub fn parse_fbx(
     // Models, placed, their parents found afterwards: a parent may come
     // after its child.
     let models: Vec<&Node> = objects.children_named("Model").collect();
+    let mut lights_assumed = false;
     // The meshes as the file has them, for a second model wearing one: the
     // first may have moved its points by a geometric offset.
     let pristine = scene.meshes.clone();
@@ -994,6 +1054,34 @@ pub fn parse_fbx(
                 (None, true) => {}
             }
             node.data = ImportNodeData::Mesh(mesh);
+        } else if let Some(attribute) = children_of(id).filter(|l| l.2.is_none()).find_map(|l| {
+            objects
+                .children
+                .iter()
+                .find(|o| id_of(o) == Some(l.0) && o.name == "NodeAttribute")
+        }) {
+            // A camera or a light: FBX's look along +X and shine along -Y
+            // in their own space, where the IR's, as glTF's, face -Z. Turned
+            // here, after the model's own rotation, so the rest is the same
+            // placement every format arrives with.
+            let name = node.name.clone();
+            match attribute.value(2).and_then(Value::as_str) {
+                Some("Camera") => {
+                    scene.cameras.push(camera_of(attribute, name));
+                    node.data = ImportNodeData::Camera(scene.cameras.len() - 1);
+                    node.transform.rotation *= Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+                }
+                Some("Light") => {
+                    if let Some(light) = light_of(attribute, name) {
+                        scene.lights.push(light);
+                        node.data = ImportNodeData::Light(scene.lights.len() - 1);
+                        node.transform.rotation *=
+                            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+                        lights_assumed = true;
+                    }
+                }
+                _ => {}
+            }
         }
         scene.nodes.push(node);
         node_of.push((id, scene.nodes.len() - 1));
@@ -1001,6 +1089,13 @@ pub fn parse_fbx(
     for (id, node) in &node_of {
         scene.nodes[*node].parent =
             parents_of(*id).find_map(|p| node_of.iter().find(|(m, _)| *m == p).map(|(_, n)| *n));
+    }
+    if lights_assumed {
+        scene.source.notes.push(LossyNote::Unsupported {
+            what: "FBX lights have no physical unit: an intensity of 100 was taken as \
+                   100 candela (a bright bulb), and a directional one's as 1000 lux"
+                .into(),
+        });
     }
     Ok(scene)
 }
@@ -1160,6 +1255,67 @@ Connections:  {
             .map(|(id, _)| id)
             .expect("the shape");
         assert_eq!(doc.object(shape).and_then(|o| o.parent), Some(root));
+    }
+
+    #[test]
+    fn a_camera_and_a_light_arrive_facing_where_fbx_faced_them() {
+        // FBX's camera looks along its +X and its light shines along -Y; at
+        // rest, in a Y-up file, that is along +X and straight down.
+        let text = ASCII.replace(
+            "\tAnimationStack: 600",
+            r#"	NodeAttribute: 700, "NodeAttribute::Cam", "Camera" {
+		Properties70:  {
+			P: "FocalLength", "Number", "", "A",50
+			P: "FilmHeight", "Number", "", "A",0.945
+		}
+	}
+	Model: 710, "Model::Cam", "Camera" {
+	}
+	NodeAttribute: 800, "NodeAttribute::Sun", "Light" {
+		Properties70:  {
+			P: "LightType", "enum", "", "",1
+			P: "Intensity", "Number", "", "A",50
+		}
+	}
+	Model: 810, "Model::Sun", "Light" {
+	}
+	AnimationStack: 600"#,
+        )
+        .replace(
+            "\tC: \"OO\",500,300\n",
+            "\tC: \"OO\",500,300\n\tC: \"OO\",700,710\n\tC: \"OO\",710,0\n\tC: \"OO\",800,810\n\tC: \"OO\",810,0\n",
+        );
+        let scene = parse_fbx(text.as_bytes(), &none).expect("reads");
+        assert_eq!(scene.cameras.len(), 1);
+        let fov = scene.cameras[0].fov_y.expect("perspective");
+        // A 50 mm lens on a 24 mm film back: about 27 degrees.
+        assert!(
+            (fov.to_degrees() - 27.0).abs() < 1.0,
+            "{}",
+            fov.to_degrees()
+        );
+        assert_eq!(scene.lights.len(), 1);
+        assert!(matches!(
+            scene.lights[0].kind,
+            crate::ir::ImportLightKind::Directional
+        ));
+        assert_eq!(scene.lights[0].intensity, 500.0);
+        let mut doc = kreate_scene::Document::new();
+        crate::build_into(&scene, &mut doc);
+        let facing = |name: &str| {
+            let (id, _) = doc.objects().find(|(_, o)| o.name == name).expect("there");
+            doc.world_transform(id).matrix3 * kreate_math::DVec3::NEG_Z
+        };
+        let cam = facing("Cam");
+        assert!(
+            (cam - kreate_math::DVec3::X).length() < 1e-4,
+            "the camera looks {cam}"
+        );
+        let sun = facing("Sun");
+        assert!(
+            (sun - kreate_math::DVec3::NEG_Z).length() < 1e-4,
+            "the sun shines {sun}"
+        );
     }
 
     /// Writes a record tree as binary FBX, as a writer of the given version
