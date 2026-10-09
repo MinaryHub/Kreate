@@ -499,9 +499,18 @@ pub(crate) fn topology_group(
             usage: wgpu::BufferUsages::STORAGE,
         })
     };
-    let face_offsets = init("deform face offsets", bytemuck::cast_slice(&cpu.face_offsets));
-    let corner_render = init("deform corner render", bytemuck::cast_slice(&cpu.corner_render));
-    let group_offsets = init("deform group offsets", bytemuck::cast_slice(&cpu.group_offsets));
+    let face_offsets = init(
+        "deform face offsets",
+        bytemuck::cast_slice(&cpu.face_offsets),
+    );
+    let corner_render = init(
+        "deform corner render",
+        bytemuck::cast_slice(&cpu.corner_render),
+    );
+    let group_offsets = init(
+        "deform group offsets",
+        bytemuck::cast_slice(&cpu.group_offsets),
+    );
     // A mesh of one face has no group entries at all, and a zero-sized
     // storage buffer is not a thing wgpu will bind.
     let group_faces = init(

@@ -29,8 +29,8 @@ pub mod sculptview;
 pub mod shell;
 pub mod snap;
 pub mod startup;
-pub mod uvmodal;
 pub mod update;
+pub mod uvmodal;
 pub mod uvview;
 pub mod version;
 

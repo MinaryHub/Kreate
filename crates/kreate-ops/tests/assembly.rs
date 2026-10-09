@@ -30,12 +30,20 @@ fn a_mated_part_sits_on_the_other_and_moves_with_it() {
     p.set("to", PropertyValue::Vec3([0.0, 0.0, 0.5]));
     p.set("to_normal", PropertyValue::Vec3([0.0, 0.0, 1.0]));
     p.set("target", PropertyValue::Text(uid(&doc, base)));
-    history.dispatch(&registry, &mut doc, &Context::default(), "object.mate", &p).unwrap();
+    history
+        .dispatch(&registry, &mut doc, &Context::default(), "object.mate", &p)
+        .unwrap();
     let at = doc.world_transform(lid).translation;
-    assert!(at.distance(DVec3::new(0.0, 0.0, 1.0)) < 1e-9, "on top: {at:?}");
+    assert!(
+        at.distance(DVec3::new(0.0, 0.0, 1.0)) < 1e-9,
+        "on top: {at:?}"
+    );
     assert_eq!(doc.object(lid).unwrap().parent, Some(base), "attached");
     // The base moves; the lid comes with it.
     doc.object_mut(base).unwrap().transform.translation = DVec3::new(2.0, 3.0, 0.0);
     let at = doc.world_transform(lid).translation;
-    assert!(at.distance(DVec3::new(2.0, 3.0, 1.0)) < 1e-9, "held: {at:?}");
+    assert!(
+        at.distance(DVec3::new(2.0, 3.0, 1.0)) < 1e-9,
+        "held: {at:?}"
+    );
 }

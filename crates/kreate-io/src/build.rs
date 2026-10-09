@@ -260,7 +260,9 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         .collect();
 
     for (index, node) in scene.nodes.iter().enumerate() {
-        let Some(Some(child_id)) = made.get(index) else { continue };
+        let Some(Some(child_id)) = made.get(index) else {
+            continue;
+        };
         // A skinned mesh hangs from its armature, placed where its node is
         // in the world — the space its armature's bones were built in.
         if let Some(rig) = node.skin.and_then(|s| rigs.iter().find(|r| r.skin == s)) {
@@ -297,9 +299,12 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 
     // And now the placements, with every parent link already in place.
     for (index, node) in scene.nodes.iter().enumerate() {
-        let Some(Some(id)) = made.get(index) else { continue };
+        let Some(Some(id)) = made.get(index) else {
+            continue;
+        };
         if node.skin.is_some_and(|s| rigs.iter().any(|r| r.skin == s)) {
-            if let (Some(world), Some(object)) = (scene.world_transform(index), doc.object_mut(*id)) {
+            if let (Some(world), Some(object)) = (scene.world_transform(index), doc.object_mut(*id))
+            {
                 object.transform = to_transform(world);
             }
             continue;
@@ -389,20 +394,35 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 fn build_shape_animations(scene: &ImportScene, made: &[Option<ObjectId>], doc: &mut Document) {
     use crate::ir::ChannelInterpolation as I;
     use kreate_scene::animation::{shape_path, Action, Interpolation};
-    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let fps = if doc.playback.fps > 0.0 {
+        doc.playback.fps
+    } else {
+        24.0
+    };
     let start = doc.playback.start as f64;
     let mut last = f64::NEG_INFINITY;
     for channel in &scene.morph_channels {
-        let (Some(Some(id)), Some(node)) = (made.get(channel.node), scene.nodes.get(channel.node)) else {
+        let (Some(Some(id)), Some(node)) = (made.get(channel.node), scene.nodes.get(channel.node))
+        else {
             continue;
         };
-        let ImportNodeData::Mesh(m) = node.data else { continue };
+        let ImportNodeData::Mesh(m) = node.data else {
+            continue;
+        };
         let Some(targets) = scene.vertex_morphs.get(m).filter(|t| !t.is_empty()) else {
             continue;
         };
         let per = targets.len();
-        let stride = if channel.interpolation == I::CubicSpline { 3 * per } else { per };
-        let offset = if channel.interpolation == I::CubicSpline { per } else { 0 };
+        let stride = if channel.interpolation == I::CubicSpline {
+            3 * per
+        } else {
+            per
+        };
+        let offset = if channel.interpolation == I::CubicSpline {
+            per
+        } else {
+            0
+        };
         let interpolation = if channel.interpolation == I::Step {
             Interpolation::Constant
         } else {
@@ -420,13 +440,17 @@ fn build_shape_animations(scene: &ImportScene, made: &[Option<ObjectId>], doc: &
                 a
             }
         };
-        let Some(action) = doc.action_mut(action_id) else { continue };
+        let Some(action) = doc.action_mut(action_id) else {
+            continue;
+        };
         for (k, t) in channel.times.iter().enumerate() {
             let frame = start + *t as f64 * fps;
             last = last.max(frame);
             for (i, (name, _)) in targets.iter().enumerate() {
                 if let Some(v) = channel.values.get(k * stride + offset + i) {
-                    action.curve_mut(&shape_path(name), 0).insert(frame, *v as f64, interpolation);
+                    action
+                        .curve_mut(&shape_path(name), 0)
+                        .insert(frame, *v as f64, interpolation);
                 }
             }
         }
@@ -488,12 +512,12 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         let bind: Vec<DAffine3> = joints
             .iter()
             .enumerate()
-            .map(|(k, node)| {
-                match skin.inverse_bind.as_ref().and_then(|m| m.get(k)) {
+            .map(
+                |(k, node)| match skin.inverse_bind.as_ref().and_then(|m| m.get(k)) {
                     Some(m) => mesh_world * scene.matrix_to_kreate(m.inverse()),
                     None => scene.world_transform(*node).unwrap_or(DAffine3::IDENTITY),
-                }
-            })
+                },
+            )
             .collect();
         // A bone's frame has no scale.
         let frames: Vec<(DQuat, DVec3)> = bind
@@ -546,7 +570,10 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
             let length = if reach > 1e-4 {
                 reach
             } else {
-                parents[k].map(|p| lengths[p]).filter(|l| *l > 0.0).unwrap_or(0.1)
+                parents[k]
+                    .map(|p| lengths[p])
+                    .filter(|l| *l > 0.0)
+                    .unwrap_or(0.1)
             };
             lengths[k] = length;
             // The roll that turns the shortest-arc frame onto the joint's.
@@ -617,7 +644,11 @@ fn rig_pose(
         let mut placed = n.transform;
         if let Some(t) = t {
             for animation in &scene.animations {
-                for c in animation.channels.iter().filter(|c| c.node == node && c.key_count() > 0) {
+                for c in animation
+                    .channels
+                    .iter()
+                    .filter(|c| c.node == node && c.key_count() > 0)
+                {
                     match c.values {
                         crate::ir::ChannelValues::Translation(_) => {
                             placed.translation = c.vec3_at(t).unwrap_or(placed.translation)
@@ -684,7 +715,11 @@ fn build_bone_animation(scene: &ImportScene, rig: &Rig, doc: &mut Document) {
     ) else {
         return;
     };
-    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let fps = if doc.playback.fps > 0.0 {
+        doc.playback.fps
+    } else {
+        24.0
+    };
     let start = doc.playback.start as f64;
     let frame_of = |t: f32| start + t as f64 * fps;
     let (a, b) = (frame_of(first), frame_of(last));
@@ -697,7 +732,10 @@ fn build_bone_animation(scene: &ImportScene, rig: &Rig, doc: &mut Document) {
     if b > a {
         frames.push(b);
     }
-    let name = doc.object(rig.object).map(|o| o.name.clone()).unwrap_or_default();
+    let name = doc
+        .object(rig.object)
+        .map(|o| o.name.clone())
+        .unwrap_or_default();
     let mut action = Action::new(format!("{name}Action"));
     let mut previous: std::collections::HashMap<String, kreate_math::DQuat> =
         std::collections::HashMap::new();
@@ -1118,7 +1156,11 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             // multiplier — the datablock's strength, unchanged, so it comes
             // back the same number.
             emissive: if material.emission_strength > 0.0 {
-                glam::Vec3::new(material.emission.r, material.emission.g, material.emission.b)
+                glam::Vec3::new(
+                    material.emission.r,
+                    material.emission.g,
+                    material.emission.b,
+                )
             } else {
                 glam::Vec3::ZERO
             },
@@ -1396,16 +1438,34 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
 /// Only where the shape keeps the cage's point count — what a modifier stack
 /// adds or takes away has no point to sample against.
 fn export_point_samples(doc: &Document, nodes: &[ExportNode]) -> Vec<crate::ir::PointSamples> {
-    let fps = if doc.playback.fps > 0.0 { doc.playback.fps } else { 24.0 };
+    let fps = if doc.playback.fps > 0.0 {
+        doc.playback.fps
+    } else {
+        24.0
+    };
     let start = doc.playback.start as f64;
     let mut out = Vec::new();
-    let mesh_node = |index: usize| matches!(nodes.get(index).map(|n| &n.data), Some(ImportNodeData::Mesh(_)));
+    let mesh_node = |index: usize| {
+        matches!(
+            nodes.get(index).map(|n| &n.data),
+            Some(ImportNodeData::Mesh(_))
+        )
+    };
     // Baked cloth and soft bodies: the bake holds the points.
     let cache = &doc.physics_cache;
     for (index, (_, object)) in doc.objects().enumerate() {
-        let Some(track) = cache.soft_of(object.uid) else { continue };
-        let Some(cage) = object.mesh().and_then(|m| doc.mesh(m)) else { continue };
-        if !mesh_node(index) || track.frames.iter().any(|f| f.len() != cage.num_verts() as usize) {
+        let Some(track) = cache.soft_of(object.uid) else {
+            continue;
+        };
+        let Some(cage) = object.mesh().and_then(|m| doc.mesh(m)) else {
+            continue;
+        };
+        if !mesh_node(index)
+            || track
+                .frames
+                .iter()
+                .any(|f| f.len() != cage.num_verts() as usize)
+        {
             continue;
         }
         out.push(crate::ir::PointSamples {
@@ -1425,9 +1485,9 @@ fn export_point_samples(doc: &Document, nodes: &[ExportNode]) -> Vec<crate::ir::
                 && cache.soft_of(o.uid).is_none()
                 && (o.skin.is_some()
                     || o.action.and_then(|a| doc.action(a)).is_some_and(|a| {
-                        a.curves
-                            .iter()
-                            .any(|c| kreate_scene::animation::parse_shape_path(&c.path.property).is_some())
+                        a.curves.iter().any(|c| {
+                            kreate_scene::animation::parse_shape_path(&c.path.property).is_some()
+                        })
                     }))
         })
         .map(|(index, (id, _))| (index, id))
@@ -1438,26 +1498,41 @@ fn export_point_samples(doc: &Document, nodes: &[ExportNode]) -> Vec<crate::ir::
     let mut scene = doc.clone();
     let mut eval = kreate_scene::ModifierCache::new();
     let ctx = kreate_scene::modifier::EvalCtx::still();
-    let frames: Vec<i32> = (doc.playback.start..=doc.playback.end.max(doc.playback.start)).collect();
+    let frames: Vec<i32> =
+        (doc.playback.start..=doc.playback.end.max(doc.playback.start)).collect();
     let mut samples: Vec<crate::ir::PointSamples> = moving
         .iter()
-        .map(|(index, _)| crate::ir::PointSamples { node: *index, ..Default::default() })
+        .map(|(index, _)| crate::ir::PointSamples {
+            node: *index,
+            ..Default::default()
+        })
         .collect();
     for f in &frames {
         scene.animate(*f as f64);
         for ((_, id), s) in moving.iter().zip(samples.iter_mut()) {
-            let Some(cage) = scene.object(*id).and_then(|o| o.mesh()).and_then(|m| scene.mesh(m)) else {
+            let Some(cage) = scene
+                .object(*id)
+                .and_then(|o| o.mesh())
+                .and_then(|m| scene.mesh(m))
+            else {
                 continue;
             };
             let count = cage.num_verts();
-            if let Some(m) = eval.evaluated_base(&scene, *id, &ctx).filter(|m| m.num_verts() == count) {
+            if let Some(m) = eval
+                .evaluated_base(&scene, *id, &ctx)
+                .filter(|m| m.num_verts() == count)
+            {
                 s.times.push(((*f as f64 - start) / fps) as f32);
                 s.points.push(m.positions().to_vec());
             }
         }
         eval.sweep();
     }
-    out.extend(samples.into_iter().filter(|s| s.times.len() == frames.len()));
+    out.extend(
+        samples
+            .into_iter()
+            .filter(|s| s.times.len() == frames.len()),
+    );
     out
 }
 

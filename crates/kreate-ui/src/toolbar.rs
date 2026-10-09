@@ -270,12 +270,21 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
         Tool::SculptClayStrips => {
             for (k, y) in [0.78f32, 0.6, 0.42].iter().enumerate() {
                 let inset = k as f32 * 0.1;
-                p.line_segment([at(0.12 + inset, *y), at(0.88 - inset, *y)], Stroke::new(2.4, ink));
+                p.line_segment(
+                    [at(0.12 + inset, *y), at(0.88 - inset, *y)],
+                    Stroke::new(2.4, ink),
+                );
             }
         }
         // A sharp groove.
         Tool::SculptCrease => {
-            let v = [at(0.08, 0.35), at(0.42, 0.35), at(0.5, 0.8), at(0.58, 0.35), at(0.92, 0.35)];
+            let v = [
+                at(0.08, 0.35),
+                at(0.42, 0.35),
+                at(0.5, 0.8),
+                at(0.58, 0.35),
+                at(0.92, 0.35),
+            ];
             p.add(egui::Shape::line(v.to_vec(), line));
         }
         // A bump pressed flat by a bar above it.
@@ -283,7 +292,13 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
             p.line_segment([at(0.08, 0.7), at(0.92, 0.7)], line);
             p.line_segment([at(0.2, 0.4), at(0.8, 0.4)], Stroke::new(2.4, ink));
             p.line_segment([at(0.5, 0.12), at(0.5, 0.32)], thin);
-            arrow_head(ui, at(0.5, 0.36), Vec2::new(0.0, 1.0), area.width() * 0.14, ink);
+            arrow_head(
+                ui,
+                at(0.5, 0.36),
+                Vec2::new(0.0, 1.0),
+                area.width() * 0.14,
+                ink,
+            );
         }
         // A blade across a bump.
         Tool::SculptScrape => {
@@ -312,13 +327,32 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
         // Two arrows meeting.
         Tool::SculptPinch => {
             p.line_segment([at(0.08, 0.5), at(0.36, 0.5)], line);
-            arrow_head(ui, at(0.42, 0.5), Vec2::new(1.0, 0.0), area.width() * 0.16, ink);
+            arrow_head(
+                ui,
+                at(0.42, 0.5),
+                Vec2::new(1.0, 0.0),
+                area.width() * 0.16,
+                ink,
+            );
             p.line_segment([at(0.92, 0.5), at(0.64, 0.5)], line);
-            arrow_head(ui, at(0.58, 0.5), Vec2::new(-1.0, 0.0), area.width() * 0.16, ink);
+            arrow_head(
+                ui,
+                at(0.58, 0.5),
+                Vec2::new(-1.0, 0.0),
+                area.width() * 0.16,
+                ink,
+            );
         }
         // A flat-topped plateau.
         Tool::SculptLayer => {
-            let v = [at(0.08, 0.78), at(0.28, 0.78), at(0.34, 0.45), at(0.66, 0.45), at(0.72, 0.78), at(0.92, 0.78)];
+            let v = [
+                at(0.08, 0.78),
+                at(0.28, 0.78),
+                at(0.34, 0.45),
+                at(0.66, 0.45),
+                at(0.72, 0.78),
+                at(0.92, 0.78),
+            ];
             p.add(egui::Shape::line(v.to_vec(), line));
         }
         // A surface pulled up into a hook.
@@ -330,7 +364,13 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
                 })
                 .collect();
             p.add(egui::Shape::line(hook, line));
-            arrow_head(ui, at(0.84, 0.2), Vec2::new(0.4, -1.0).normalized(), area.width() * 0.16, ink);
+            arrow_head(
+                ui,
+                at(0.84, 0.2),
+                Vec2::new(0.4, -1.0).normalized(),
+                area.width() * 0.16,
+                ink,
+            );
         }
         // A circle, half of it dark: what is held back.
         Tool::SculptMask => {
@@ -343,7 +383,11 @@ fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
                     Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
                 })
                 .collect();
-            p.add(egui::Shape::convex_polygon(half, ink.gamma_multiply(0.7), Stroke::NONE));
+            p.add(egui::Shape::convex_polygon(
+                half,
+                ink.gamma_multiply(0.7),
+                Stroke::NONE,
+            ));
         }
         // Four cells, one filled: faces in groups.
         Tool::SculptFaceSet => {

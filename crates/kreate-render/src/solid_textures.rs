@@ -49,7 +49,10 @@ fn resample(pixels: &[u8], width: u32, height: u32, size: u32) -> Vec<u8> {
             let fy = (y as f32 + 0.5) / size as f32 * h as f32 - 0.5;
             let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
             let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-            let (tx, ty) = ((fx - x0 as f32).clamp(0.0, 1.0), (fy - y0 as f32).clamp(0.0, 1.0));
+            let (tx, ty) = (
+                (fx - x0 as f32).clamp(0.0, 1.0),
+                (fy - y0 as f32).clamp(0.0, 1.0),
+            );
             for c in 0..4 {
                 let at = |px: usize, py: usize| pixels[(py * w + px) * 4 + c] as f32;
                 let top = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
@@ -122,7 +125,8 @@ impl SolidTextures {
     /// [`MAX_LAYERS`] of them.
     pub fn set(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[SolidImage<'_>]) {
         let images = &images[..images.len().min(MAX_LAYERS)];
-        let (texture, bind) = Self::upload(device, Some(queue), &self.layout, &self.sampler, images);
+        let (texture, bind) =
+            Self::upload(device, Some(queue), &self.layout, &self.sampler, images);
         self._texture = texture;
         self.bind = bind;
         self.layers = images.len();
@@ -137,7 +141,11 @@ impl SolidTextures {
     ) -> (wgpu::Texture, wgpu::BindGroup) {
         // As large as the largest image needs, a power of two, no more than
         // the cap.
-        let largest = images.iter().map(|i| i.width.max(i.height)).max().unwrap_or(1);
+        let largest = images
+            .iter()
+            .map(|i| i.width.max(i.height))
+            .max()
+            .unwrap_or(1);
         let size = largest.next_power_of_two().clamp(1, MAX_SIZE);
         let levels = 32 - size.leading_zeros();
         let layers = images.len().max(1) as u32;
@@ -162,7 +170,10 @@ impl SolidTextures {
                 .get(layer as usize)
                 .map(|i| resample(i.pixels, i.width, i.height, size))
                 .unwrap_or_else(|| white.clone());
-            for (level, (bytes, w, h)) in mip_chain(&level0, size, size, TextureKind::Color).into_iter().enumerate() {
+            for (level, (bytes, w, h)) in mip_chain(&level0, size, size, TextureKind::Color)
+                .into_iter()
+                .enumerate()
+            {
                 if level as u32 >= levels {
                     break;
                 }
@@ -170,7 +181,11 @@ impl SolidTextures {
                     wgpu::TexelCopyTextureInfo {
                         texture: &texture,
                         mip_level: level as u32,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     &bytes,

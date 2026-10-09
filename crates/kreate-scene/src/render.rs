@@ -72,13 +72,15 @@ impl RenderSettings {
         if self.output.is_empty() {
             return folder.join(format!("{number}.{ext}"));
         }
-        let looks_like_folder = self.output.ends_with(['/', '\\'])
-            || output.is_dir()
-            || output.extension().is_none();
+        let looks_like_folder =
+            self.output.ends_with(['/', '\\']) || output.is_dir() || output.extension().is_none();
         if looks_like_folder {
             output.join(format!("{number}.{ext}"))
         } else {
-            let stem = output.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let stem = output
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             output.with_file_name(format!("{stem}_{number}.{ext}"))
         }
     }
@@ -106,20 +108,39 @@ mod tests {
 
     #[test]
     fn frames_are_numbered_beside_a_file_name_or_inside_a_folder() {
-        let mut s = RenderSettings { output: "C:/out/shot.png".into(), ..Default::default() };
-        assert_eq!(s.frame_path(Path::new("x"), 7), Path::new("C:/out/shot_0007.png"));
+        let mut s = RenderSettings {
+            output: "C:/out/shot.png".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.frame_path(Path::new("x"), 7),
+            Path::new("C:/out/shot_0007.png")
+        );
         s.output = "C:/out/frames/".into();
         s.format = OutputFormat::Exr;
-        assert_eq!(s.frame_path(Path::new("x"), 12), Path::new("C:/out/frames/").join("0012.exr"));
+        assert_eq!(
+            s.frame_path(Path::new("x"), 12),
+            Path::new("C:/out/frames/").join("0012.exr")
+        );
         s.output.clear();
-        assert_eq!(s.frame_path(Path::new("pics"), 3), Path::new("pics").join("0003.exr"));
+        assert_eq!(
+            s.frame_path(Path::new("pics"), 3),
+            Path::new("pics").join("0003.exr")
+        );
     }
 
     #[test]
     fn a_still_takes_the_formats_extension() {
-        let s = RenderSettings { output: "C:/out/shot.png".into(), format: OutputFormat::Exr, ..Default::default() };
+        let s = RenderSettings {
+            output: "C:/out/shot.png".into(),
+            format: OutputFormat::Exr,
+            ..Default::default()
+        };
         assert_eq!(s.still_path(Path::new("x")), Path::new("C:/out/shot.exr"));
         let s = RenderSettings::default();
-        assert_eq!(s.still_path(Path::new("pics")), Path::new("pics").join("render.png"));
+        assert_eq!(
+            s.still_path(Path::new("pics")),
+            Path::new("pics").join("render.png")
+        );
     }
 }

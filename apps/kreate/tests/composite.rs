@@ -335,7 +335,9 @@ fn composite_with(
                     group.as_deref(),
                 ))
             } else if sculpting {
-                kreate::sculptview::SculptDisplay::default().show(&mesh).unwrap_or(mesh)
+                kreate::sculptview::SculptDisplay::default()
+                    .show(&mesh)
+                    .unwrap_or(mesh)
             } else {
                 mesh
             };
@@ -375,12 +377,22 @@ fn composite_with(
     let pixels: Vec<(u32, u32, Vec<u8>)> = images
         .iter()
         .filter_map(|i| doc.image(*i))
-        .map(|img| (img.width(), img.height(), kreate::materials::encoded_rgba(img, img.color_space)))
+        .map(|img| {
+            (
+                img.width(),
+                img.height(),
+                kreate::materials::encoded_rgba(img, img.color_space),
+            )
+        })
         .collect();
     if !pixels.is_empty() {
         let sources: Vec<_> = pixels
             .iter()
-            .map(|(w, h, p)| kreate_render::solid_textures::SolidImage { width: *w, height: *h, pixels: p })
+            .map(|(w, h, p)| kreate_render::solid_textures::SolidImage {
+                width: *w,
+                height: *h,
+                pixels: p,
+            })
             .collect();
         viewport.set_solid_images(&gpu.device, &gpu.queue, &sources);
     }
@@ -2072,20 +2084,46 @@ fn shot_sculpt_mask_and_face_sets() {
     use kreate_mesh::{AttrData, Domain};
     let mut doc = Document::new();
     let mut ball = kreate_mesh::primitives::uv_sphere(1.0, 48, 24);
-    let mask: Vec<f32> = ball.positions().iter().map(|p| if p.x > 0.3 { 1.0 } else { 0.0 }).collect();
-    ball.attributes_mut().insert(kreate_mesh::sculpt::MASK, Domain::Point, AttrData::F32(std::sync::Arc::new(mask)));
+    let mask: Vec<f32> = ball
+        .positions()
+        .iter()
+        .map(|p| if p.x > 0.3 { 1.0 } else { 0.0 })
+        .collect();
+    ball.attributes_mut().insert(
+        kreate_mesh::sculpt::MASK,
+        Domain::Point,
+        AttrData::F32(std::sync::Arc::new(mask)),
+    );
     let sets: Vec<i32> = (0..ball.num_faces())
         .map(|f| {
-            let z = ball.face_verts(f).iter().map(|v| ball.positions()[*v as usize].z).sum::<f32>();
-            if z > 1.0 { 1 } else if z < -1.0 { 2 } else { 0 }
+            let z = ball
+                .face_verts(f)
+                .iter()
+                .map(|v| ball.positions()[*v as usize].z)
+                .sum::<f32>();
+            if z > 1.0 {
+                1
+            } else if z < -1.0 {
+                2
+            } else {
+                0
+            }
         })
         .collect();
-    ball.attributes_mut().insert(kreate_mesh::sculpt::FACE_SET, Domain::Face, AttrData::I32(std::sync::Arc::new(sets)));
+    ball.attributes_mut().insert(
+        kreate_mesh::sculpt::FACE_SET,
+        Domain::Face,
+        AttrData::I32(std::sync::Arc::new(sets)),
+    );
     let m = doc.add_mesh(ball);
-    let id = doc.add_object(kreate_scene::document::Object::new("Ball", kreate_scene::document::ObjectData::Mesh(m)));
+    let id = doc.add_object(kreate_scene::document::Object::new(
+        "Ball",
+        kreate_scene::document::ObjectData::Mesh(m),
+    ));
     doc.selection.add(id);
     doc.selection.active = Some(id);
-    let Some(shot) = composite_in_mode(&doc, "en", kreate_ops::operator::Mode::Sculpt, |_| {}) else {
+    let Some(shot) = composite_in_mode(&doc, "en", kreate_ops::operator::Mode::Sculpt, |_| {})
+    else {
         eprintln!("no GPU; skipping");
         return;
     };
@@ -2696,7 +2734,11 @@ fn the_sidebar_has_blenders_three_tabs_and_keeps_the_gizmo_in_view() {
     let item = gpu_or_skip!(shot(SidebarTab::Item));
     let tool = gpu_or_skip!(shot(SidebarTab::Tool));
     let view = gpu_or_skip!(shot(SidebarTab::View));
-    for (name, c) in [("sidebar-item", &item), ("sidebar-tool", &tool), ("sidebar-view", &view)] {
+    for (name, c) in [
+        ("sidebar-item", &item),
+        ("sidebar-tool", &tool),
+        ("sidebar-view", &view),
+    ] {
         c.dump(name);
     }
 
@@ -2771,7 +2813,6 @@ fn shot_outliner_search() {
     shot.dump("outliner-search");
 }
 
-
 /// Studio mode showing a cube's checker texture across its UVs.
 #[test]
 fn shot_solid_texture() {
@@ -2785,7 +2826,11 @@ fn shot_solid_texture() {
             let tile = kreate_scene::TILE;
             let t = image.tile_mut(x / tile, y / tile).unwrap();
             let at = (((y % tile) * tile + (x % tile)) * 4) as usize;
-            let c = if on { [230u8, 60, 40, 255] } else { [240, 240, 240, 255] };
+            let c = if on {
+                [230u8, 60, 40, 255]
+            } else {
+                [240, 240, 240, 255]
+            };
             t.bytes_mut()[at..at + 4].copy_from_slice(&c);
         }
     }

@@ -26,7 +26,10 @@ fn scene() -> Document {
         scale: DVec3::ONE,
     };
     let cube = doc.add_object(cube);
-    let lamp = doc.add_light(kreate_scene::Light::of_kind("Lamp", kreate_scene::LightKind::BULB));
+    let lamp = doc.add_light(kreate_scene::Light::of_kind(
+        "Lamp",
+        kreate_scene::LightKind::BULB,
+    ));
     let lamp = doc.add_object(Object::new("Lamp", ObjectData::Light(lamp)));
     doc.set_parent(lamp, Some(cube)).unwrap();
     let camera = doc.add_camera(kreate_scene::Camera::new("Camera"));
@@ -77,12 +80,18 @@ fn a_mesh_s_arrays_add_up() {
             .map(str::to_string)
             .collect()
     };
-    let counts: Vec<usize> = array("faceVertexCounts").iter().map(|c| c.parse().unwrap()).collect();
+    let counts: Vec<usize> = array("faceVertexCounts")
+        .iter()
+        .map(|c| c.parse().unwrap())
+        .collect();
     let indices = array("faceVertexIndices");
     assert_eq!(counts, vec![4; 6]);
     assert_eq!(indices.len(), counts.iter().sum::<usize>());
     // Normals and texture coordinates are per corner.
-    let line = text[text.find("normal3f[] normals").unwrap()..].lines().next().unwrap();
+    let line = text[text.find("normal3f[] normals").unwrap()..]
+        .lines()
+        .next()
+        .unwrap();
     let open = line.find("= [").unwrap();
     let normals = line[open..open + line[open..].find(']').unwrap()]
         .matches('(')
@@ -110,14 +119,20 @@ fn keyed_motion_and_a_baked_body_go_out_as_time_samples() {
     let cube = doc.objects().find(|(_, o)| o.name == "Cube.001").unwrap().0;
     let mut action = Action::new("Slide");
     for (frame, x) in [(1.0, 0.0), (24.0, 5.0)] {
-        action.curve_mut("location", 0).insert(frame, x, Interpolation::Linear);
+        action
+            .curve_mut("location", 0)
+            .insert(frame, x, Interpolation::Linear);
     }
     let a = doc.add_action(action);
     doc.object_mut(cube).unwrap().action = Some(a);
     let text = usda(&doc);
     assert!(text.contains("timeCodesPerSecond = 24"), "{text}");
     assert!(text.contains("xformOp:transform.timeSamples"));
-    assert_eq!(text.matches('{').count(), text.matches('}').count(), "balanced");
+    assert_eq!(
+        text.matches('{').count(),
+        text.matches('}').count(),
+        "balanced"
+    );
 
     // A rigid body, baked: its fall, sampled every frame.
     let mut doc = Document::new();
@@ -130,8 +145,15 @@ fn keyed_motion_and_a_baked_body_go_out_as_time_samples() {
     let (cache, _) = kreate_scene::physics::bake::bake(&doc);
     doc.physics_cache = std::sync::Arc::new(cache);
     let text = usda(&doc);
-    let samples = text.split("xformOp:transform.timeSamples").nth(1).expect("sampled");
-    assert_eq!(samples.split('}').next().unwrap().matches("( (").count(), 12, "one a frame");
+    let samples = text
+        .split("xformOp:transform.timeSamples")
+        .nth(1)
+        .expect("sampled");
+    assert_eq!(
+        samples.split('}').next().unwrap().matches("( (").count(),
+        12,
+        "one a frame"
+    );
 }
 
 #[test]
@@ -148,5 +170,13 @@ fn baked_cloth_goes_out_as_moving_points() {
     let text = usda(&doc);
     assert!(text.contains("points.timeSamples"), "{text}");
     let samples = text.split("points.timeSamples").nth(1).unwrap();
-    assert_eq!(samples.split("\n        }").next().unwrap().matches(": [").count(), 10);
+    assert_eq!(
+        samples
+            .split("\n        }")
+            .next()
+            .unwrap()
+            .matches(": [")
+            .count(),
+        10
+    );
 }

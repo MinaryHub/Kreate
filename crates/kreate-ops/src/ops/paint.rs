@@ -83,7 +83,9 @@ impl Operator for TextureStroke {
         };
         let image = doc.document().image(id).expect("found");
         if image.format != kreate_scene::PixelFormat::Rgba8 {
-            return Err(OpError::Failed("only eight-bit colour images can be painted".into()));
+            return Err(OpError::Failed(
+                "only eight-bit colour images can be painted".into(),
+            ));
         }
         let (w, h) = (image.width(), image.height());
         let dabs: Vec<[f64; 4]> = params
@@ -100,7 +102,10 @@ impl Operator for TextureStroke {
         // Every tile any dab reaches, once.
         let mut tiles: Vec<(u32, u32)> = Vec::new();
         for d in &dabs {
-            let (cx, cy) = (d[0].rem_euclid(1.0) * w as f64, d[1].rem_euclid(1.0) * h as f64);
+            let (cx, cy) = (
+                d[0].rem_euclid(1.0) * w as f64,
+                d[1].rem_euclid(1.0) * h as f64,
+            );
             let r = d[2] * w.max(h) as f64;
             let x0 = (cx - r).floor().max(0.0) as u32;
             let y0 = (cy - r).floor().max(0.0) as u32;
@@ -120,7 +125,10 @@ impl Operator for TextureStroke {
             img.source = kreate_scene::image::Source::Painted;
             let tile = kreate_scene::image::TILE;
             for d in &dabs {
-                let (cx, cy) = (d[0].rem_euclid(1.0) * w as f64, d[1].rem_euclid(1.0) * h as f64);
+                let (cx, cy) = (
+                    d[0].rem_euclid(1.0) * w as f64,
+                    d[1].rem_euclid(1.0) * h as f64,
+                );
                 let r = (d[2] * w.max(h) as f64).max(0.5);
                 let strength = d[3].clamp(0.0, 1.0);
                 let x0 = (cx - r).floor().max(0.0) as u32;
@@ -145,7 +153,8 @@ impl Operator for TextureStroke {
                         let bytes = &mut px.bytes_mut()[at..at + 4];
                         for c in 0..3 {
                             let old = bytes[c] as f32;
-                            bytes[c] = (old + (target[c] - old) * a).round().clamp(0.0, 255.0) as u8;
+                            bytes[c] =
+                                (old + (target[c] - old) * a).round().clamp(0.0, 255.0) as u8;
                         }
                         let old = bytes[3] as f32;
                         bytes[3] = (old + (255.0 - old) * a).round().clamp(0.0, 255.0) as u8;
@@ -216,12 +225,18 @@ impl Operator for NewTexture {
         let Some(mesh) = d.object(object).and_then(|o| o.mesh()) else {
             return Ok(OpResult::Cancelled);
         };
-        let name = format!("{} Paint", d.object(object).map(|o| o.name.clone()).unwrap_or_default());
+        let name = format!(
+            "{} Paint",
+            d.object(object).map(|o| o.name.clone()).unwrap_or_default()
+        );
         let (w, h) = (params.width.clamp(16, 8192), params.height.clamp(16, 8192));
-        let mut image = kreate_scene::Image::new(name.clone(), w, h, kreate_scene::PixelFormat::Rgba8);
+        let mut image =
+            kreate_scene::Image::new(name.clone(), w, h, kreate_scene::PixelFormat::Rgba8);
         image.color_space = kreate_scene::ColorSpace::Srgb;
         image.source = kreate_scene::image::Source::Painted;
-        let fill = params.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let fill = params
+            .color
+            .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
         let (across, down) = image.tile_counts();
         for ty in 0..down {
             for tx in 0..across {

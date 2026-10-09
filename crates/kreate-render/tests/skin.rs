@@ -51,11 +51,15 @@ fn read_back(gpu: &Gpu, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     gpu.queue.submit([encoder.finish()]);
     staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = staging.slice(..).get_mapped_range().to_vec();
     staging.unmap();
     data
@@ -112,7 +116,12 @@ fn bent() -> Pose {
 
 /// Skins on the GPU, once per pose in turn, and reads back the positions and
 /// normals after the last one.
-fn on_gpu(gpu: &Gpu, mesh: &MeshData, a: &Armature, poses: &[Vec<DAffine3>]) -> (Vec<glam::Vec3>, Vec<u32>) {
+fn on_gpu(
+    gpu: &Gpu,
+    mesh: &MeshData,
+    a: &Armature,
+    poses: &[Vec<DAffine3>],
+) -> (Vec<glam::Vec3>, Vec<u32>) {
     on_gpu_with(gpu, mesh, a, poses, false)
 }
 
@@ -124,13 +133,26 @@ fn on_gpu_with(
     preserve_volume: bool,
 ) -> (Vec<glam::Vec3>, Vec<u32>) {
     let cpu = RenderMeshCpu::extract(mesh);
-    let viewport = kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
-    let gpu_mesh = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
+    let viewport =
+        kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+    let gpu_mesh =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
     let deformer = Deformer::new(&gpu.device);
     let (offsets, bones, weights) = influences(mesh, a).expect("weighted");
-    let table = Influences { offsets, bones, weights };
-    let skinner = Skin::new(&gpu.device, &deformer, &gpu_mesh, &cpu, &table, a.bones.len() as u32)
-        .expect("a weighted mesh");
+    let table = Influences {
+        offsets,
+        bones,
+        weights,
+    };
+    let skinner = Skin::new(
+        &gpu.device,
+        &deformer,
+        &gpu_mesh,
+        &cpu,
+        &table,
+        a.bones.len() as u32,
+    )
+    .expect("a weighted mesh");
     skinner.set_preserve_volume(&gpu.queue, preserve_volume);
     for matrices in poses {
         let rows: Vec<_> = matrices
@@ -138,7 +160,9 @@ fn on_gpu_with(
             .map(|m| bone_rows(glam::Affine3A::from_mat4(glam::DMat4::from(*m).as_mat4())))
             .collect();
         assert!(skinner.set_bones(&gpu.queue, &rows));
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         skinner.dispatch(&mut encoder, &deformer);
         gpu.queue.submit([encoder.finish()]);
     }
@@ -189,7 +213,10 @@ fn the_gpu_skins_every_vertex_where_the_cpu_does() {
             moved += 1;
         }
     }
-    assert!(moved > got.len() / 3, "the pose has to move most of the mesh: {moved}");
+    assert!(
+        moved > got.len() / 3,
+        "the pose has to move most of the mesh: {moved}"
+    );
     assert!(worst < 1e-4, "GPU and CPU disagree by {worst}");
 }
 
@@ -285,8 +312,10 @@ fn a_pose_of_the_wrong_size_is_refused() {
     let a = arm();
     let m = column(&a, DAffine3::IDENTITY);
     let cpu = RenderMeshCpu::extract(&m);
-    let viewport = kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
-    let gpu_mesh = kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
+    let viewport =
+        kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+    let gpu_mesh =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cpu, glam::Vec4::ONE);
     let deformer = Deformer::new(&gpu.device);
     let (offsets, bones, weights) = influences(&m, &a).unwrap();
     let skinner = Skin::new(
@@ -294,7 +323,11 @@ fn a_pose_of_the_wrong_size_is_refused() {
         &deformer,
         &gpu_mesh,
         &cpu,
-        &Influences { offsets, bones, weights },
+        &Influences {
+            offsets,
+            bones,
+            weights,
+        },
         3,
     )
     .unwrap();

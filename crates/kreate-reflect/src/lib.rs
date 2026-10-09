@@ -634,7 +634,10 @@ mod tests {
         assert_eq!(format_length_in(0.0125, LengthUnit::Millimetres), "12.5 mm");
         assert_eq!(format_length_in(2.0, LengthUnit::Metres), "2 m");
         assert_eq!(format_length_in(0.0254, LengthUnit::Inches), "1 in");
-        assert_eq!(format_length_in(-0.0000001, LengthUnit::Millimetres), "0 mm");
+        assert_eq!(
+            format_length_in(-0.0000001, LengthUnit::Millimetres),
+            "0 mm"
+        );
         for u in LengthUnit::ALL {
             assert_eq!(LengthUnit::from_tag(u.tag()), Some(u));
             assert_eq!(LengthUnit::from_index(u.index()), u);

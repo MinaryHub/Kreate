@@ -19,8 +19,14 @@ fn an_objects_physics_and_the_world_are_saved() {
     let bead_uid = doc.object(bead).unwrap().uid;
     let m = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 4, 4));
     let mut o = Object::new("Sheet", ObjectData::Mesh(m));
-    o.physics.rigid = Some(RigidBody { mass: 4.0, ..RigidBody::default() });
-    o.physics.soft = Some(SoftBody { pin_group: Some("Top".into()), ..SoftBody::new(SoftKind::Soft) });
+    o.physics.rigid = Some(RigidBody {
+        mass: 4.0,
+        ..RigidBody::default()
+    });
+    o.physics.soft = Some(SoftBody {
+        pin_group: Some("Top".into()),
+        ..SoftBody::new(SoftKind::Soft)
+    });
     o.physics.particles = vec![ParticleSettings {
         instance: Some(bead_uid),
         ..ParticleSettings::new("Spray", ParticleKind::Emitter)
@@ -33,8 +39,14 @@ fn an_objects_physics_and_the_world_are_saved() {
     let (_, sheet) = back.objects().find(|(_, o)| o.name == "Sheet").unwrap();
     let (_, original) = doc.objects().find(|(_, o)| o.name == "Sheet").unwrap();
     assert_eq!(sheet.physics, original.physics);
-    let instance = back.object_by_uid(sheet.physics.particles[0].instance.unwrap()).unwrap();
-    assert_eq!(back.object(instance).unwrap().name, "Bead", "the instance by identity");
+    let instance = back
+        .object_by_uid(sheet.physics.particles[0].instance.unwrap())
+        .unwrap();
+    assert_eq!(
+        back.object(instance).unwrap().name,
+        "Bead",
+        "the instance by identity"
+    );
     assert_eq!(back.physics, doc.physics);
 }
 
@@ -45,7 +57,11 @@ fn a_baked_scene_opens_baked() {
     doc.physics.frame_end = 30;
     let floor = doc.add_mesh(kreate_mesh::primitives::plane(10.0));
     let mut o = Object::new("Floor", ObjectData::Mesh(floor));
-    o.physics.rigid = Some(RigidBody { kind: BodyKind::Passive, shape: CollisionShape::Mesh, ..RigidBody::default() });
+    o.physics.rigid = Some(RigidBody {
+        kind: BodyKind::Passive,
+        shape: CollisionShape::Mesh,
+        ..RigidBody::default()
+    });
     doc.add_object(o);
     let cube = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
     let mut o = Object::new("Cube", ObjectData::Mesh(cube));
@@ -59,7 +75,10 @@ fn a_baked_scene_opens_baked() {
     assert_eq!(back.physics_cache.rigid, doc.physics_cache.rigid);
     back.animate(30.0);
     let (_, cube) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
-    assert!((cube.transform.translation.z - 0.5).abs() < 0.05, "plays from the file");
+    assert!(
+        (cube.transform.translation.z - 0.5).abs() < 0.05,
+        "plays from the file"
+    );
 }
 
 #[test]

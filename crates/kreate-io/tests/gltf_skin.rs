@@ -124,10 +124,15 @@ fn a_skinned_mesh_comes_back_where_it_was_at_rest_and_posed() {
         .find(|id| back.object(**id).is_some_and(|o| o.name == "Body"))
         .expect("the mesh came back");
     assert!(back.object(body_back).unwrap().skin.is_some(), "and bound");
-    let rig_back = back.object_by_uid(back.object(body_back).unwrap().skin.unwrap()).unwrap();
+    let rig_back = back
+        .object_by_uid(back.object(body_back).unwrap().skin.unwrap())
+        .unwrap();
     let (_, arm) = back.armature_of(rig_back).expect("an armature");
     assert_eq!(
-        arm.bones.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+        arm.bones
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
         ["Upper", "Lower", "Hand"]
     );
     for frame in [1.0, 5.5, 10.0] {
@@ -170,11 +175,22 @@ fn the_file_says_skin_joints_and_weights() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|j| json["nodes"][j.as_u64().unwrap() as usize]["name"].as_str().unwrap())
+        .map(|j| {
+            json["nodes"][j.as_u64().unwrap() as usize]["name"]
+                .as_str()
+                .unwrap()
+        })
         .collect();
     assert_eq!(names, ["Upper", "Lower", "Hand"]);
     // The bones move in the clip.
     let channels = json["animations"][0]["channels"].as_array().unwrap();
-    let joint_nodes: Vec<u64> = skins[0]["joints"].as_array().unwrap().iter().map(|j| j.as_u64().unwrap()).collect();
-    assert!(channels.iter().any(|c| joint_nodes.contains(&c["target"]["node"].as_u64().unwrap())));
+    let joint_nodes: Vec<u64> = skins[0]["joints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j.as_u64().unwrap())
+        .collect();
+    assert!(channels
+        .iter()
+        .any(|c| joint_nodes.contains(&c["target"]["node"].as_u64().unwrap())));
 }

@@ -172,7 +172,12 @@ fn common() -> Vec<Binding> {
         key("file.new", "N", Context::Global, Action::new("file.new"))
             .with_modifiers(Modifiers::ctrl()),
         // Blender's render keys: the still, and the frames.
-        key("render.image", "F12", Context::Global, Action::new("render.image")),
+        key(
+            "render.image",
+            "F12",
+            Context::Global,
+            Action::new("render.image"),
+        ),
         key(
             "render.animation",
             "F12",
@@ -620,39 +625,139 @@ fn common() -> Vec<Binding> {
         .with_modifiers(Modifiers::alt()),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
-        key("sculpt.brush_radius", "F", Context::Sculpt, Action::new("brush.radius_adjust")),
-        key("sculpt.brush_strength", "F", Context::Sculpt, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
-        key("weight_paint.brush_radius", "F", Context::WeightPaint, Action::new("brush.radius_adjust")),
-        key("weight_paint.brush_strength", "F", Context::WeightPaint, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
-        key("texture_paint.brush_radius", "F", Context::TexturePaint, Action::new("brush.radius_adjust")),
-        key("texture_paint.brush_strength", "F", Context::TexturePaint, Action::new("brush.strength_adjust"))
-            .with_modifiers(Modifiers::shift()),
+        key(
+            "sculpt.brush_radius",
+            "F",
+            Context::Sculpt,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "sculpt.brush_strength",
+            "F",
+            Context::Sculpt,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "weight_paint.brush_radius",
+            "F",
+            Context::WeightPaint,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "weight_paint.brush_strength",
+            "F",
+            Context::WeightPaint,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "texture_paint.brush_radius",
+            "F",
+            Context::TexturePaint,
+            Action::new("brush.radius_adjust"),
+        ),
+        key(
+            "texture_paint.brush_strength",
+            "F",
+            Context::TexturePaint,
+            Action::new("brush.strength_adjust"),
+        )
+        .with_modifiers(Modifiers::shift()),
         // Blender's sculpt brushes on their letters.
-        key("sculpt.clay_strips", "C", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(4))),
-        key("sculpt.crease", "C", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(5)))
-            .with_modifiers(Modifiers::shift()),
-        key("sculpt.flatten", "T", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(6)))
-            .with_modifiers(Modifiers::shift()),
-        key("sculpt.pinch", "P", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(9))),
-        key("sculpt.layer", "L", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(10))),
-        key("sculpt.snake_hook", "K", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(11))),
-        key("sculpt.mask_brush", "M", Context::Sculpt, Action::new("sculpt.brush").with("brush", PropertyValue::Enum(12))),
+        key(
+            "sculpt.clay_strips",
+            "C",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(4)),
+        ),
+        key(
+            "sculpt.crease",
+            "C",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(5)),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "sculpt.flatten",
+            "T",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(6)),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "sculpt.pinch",
+            "P",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(9)),
+        ),
+        key(
+            "sculpt.layer",
+            "L",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(10)),
+        ),
+        key(
+            "sculpt.snake_hook",
+            "K",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(11)),
+        ),
+        key(
+            "sculpt.mask_brush",
+            "M",
+            Context::Sculpt,
+            Action::new("sculpt.brush").with("brush", PropertyValue::Enum(12)),
+        ),
         // The mask and face sets, on Blender's keys.
-        key("sculpt.mask_clear", "M", Context::Sculpt, enum_param(Action::new("sculpt.mask"), "action", 0))
-            .with_modifiers(Modifiers::alt()),
-        key("sculpt.mask_invert", "I", Context::Sculpt, enum_param(Action::new("sculpt.mask"), "action", 1))
-            .with_modifiers(Modifiers::ctrl()),
-        key("sculpt.face_set_from_mask", "W", Context::Sculpt, Action::new("sculpt.face_set_from_mask"))
-            .with_modifiers(Modifiers::ctrl()),
-        key("sculpt.face_set_hide", "H", Context::Sculpt, Action::new("sculpt.face_set_hide")),
-        key("sculpt.face_set_isolate", "H", Context::Sculpt, Action::new("sculpt.face_set_isolate"))
-            .with_modifiers(Modifiers::shift()),
-        key("sculpt.face_set_show", "H", Context::Sculpt, enum_param(Action::new("sculpt.face_set_visibility"), "action", 2))
-            .with_modifiers(Modifiers::alt()),
-        key("sculpt.voxel_remesh", "R", Context::Sculpt, Action::new("sculpt.remesh"))
-            .with_modifiers(Modifiers::ctrl()),
+        key(
+            "sculpt.mask_clear",
+            "M",
+            Context::Sculpt,
+            enum_param(Action::new("sculpt.mask"), "action", 0),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "sculpt.mask_invert",
+            "I",
+            Context::Sculpt,
+            enum_param(Action::new("sculpt.mask"), "action", 1),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "sculpt.face_set_from_mask",
+            "W",
+            Context::Sculpt,
+            Action::new("sculpt.face_set_from_mask"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "sculpt.face_set_hide",
+            "H",
+            Context::Sculpt,
+            Action::new("sculpt.face_set_hide"),
+        ),
+        key(
+            "sculpt.face_set_isolate",
+            "H",
+            Context::Sculpt,
+            Action::new("sculpt.face_set_isolate"),
+        )
+        .with_modifiers(Modifiers::shift()),
+        key(
+            "sculpt.face_set_show",
+            "H",
+            Context::Sculpt,
+            enum_param(Action::new("sculpt.face_set_visibility"), "action", 2),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key(
+            "sculpt.voxel_remesh",
+            "R",
+            Context::Sculpt,
+            Action::new("sculpt.remesh"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         key(
             "sculpt.draw",
             "X",

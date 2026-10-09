@@ -179,7 +179,11 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
 pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
     ObjectPhysics {
         rigid: r.rigid.as_ref().map(|b| RigidBody {
-            kind: if b.kind == "passive" { BodyKind::Passive } else { BodyKind::Active },
+            kind: if b.kind == "passive" {
+                BodyKind::Passive
+            } else {
+                BodyKind::Active
+            },
             shape: match b.shape.as_str() {
                 "box" => CollisionShape::Box,
                 "sphere" => CollisionShape::Sphere,
@@ -198,7 +202,11 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
             bounciness: c.bounciness.clamp(0.0, 1.0),
         }),
         soft: r.soft.as_ref().map(|s| SoftBody {
-            kind: if s.kind == "soft_body" { SoftKind::Soft } else { SoftKind::Cloth },
+            kind: if s.kind == "soft_body" {
+                SoftKind::Soft
+            } else {
+                SoftKind::Cloth
+            },
             mass: s.mass.max(0.001),
             stiffness: s.stiffness.clamp(0.0, 1.0),
             bending: s.bending.clamp(0.0, 1.0),
@@ -214,7 +222,11 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
             .iter()
             .map(|p| ParticleSettings {
                 name: p.name.clone(),
-                kind: if p.kind == "hair" { ParticleKind::Hair } else { ParticleKind::Emitter },
+                kind: if p.kind == "hair" {
+                    ParticleKind::Hair
+                } else {
+                    ParticleKind::Emitter
+                },
                 // A count a file can make absurd is brought into range.
                 count: p.count.min(1_000_000),
                 seed: p.seed,

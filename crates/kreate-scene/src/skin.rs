@@ -321,9 +321,11 @@ mod tests {
         let a = arm();
         let mut weighted = m.clone();
         for (name, w) in automatic_weights(&m, &a, DAffine3::IDENTITY) {
-            weighted
-                .attributes_mut()
-                .insert(&name, Domain::Point, AttrData::F32(std::sync::Arc::new(w)));
+            weighted.attributes_mut().insert(
+                &name,
+                Domain::Point,
+                AttrData::F32(std::sync::Arc::new(w)),
+            );
         }
         // A twist and a scale on the lower bone: one bone alone is the same
         // matrix either way.
@@ -350,8 +352,17 @@ mod tests {
             near.iter().sum::<f32>() / near.len() as f32
         };
         let rest = spread(&weighted);
-        assert!(spread(&linear) < rest * 0.8, "the linear blend should pinch: {} of {rest}", spread(&linear));
-        assert!(spread(&dual) > spread(&linear) * 1.15, "{} vs {}", spread(&dual), spread(&linear));
+        assert!(
+            spread(&linear) < rest * 0.8,
+            "the linear blend should pinch: {} of {rest}",
+            spread(&linear)
+        );
+        assert!(
+            spread(&dual) > spread(&linear) * 1.15,
+            "{} vs {}",
+            spread(&dual),
+            spread(&linear)
+        );
     }
 
     #[test]

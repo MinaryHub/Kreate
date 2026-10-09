@@ -2403,8 +2403,12 @@ fn physics_node(l: &Labels) -> MenuNode {
     };
     let soft = |label: &str, kind: u32| {
         MenuNode::Entry(
-            MenuEntry::new("physics.soft_set", label, op("physics.soft_set", &[("kind", V::Enum(kind))]))
-                .variant("kind", V::Enum(kind)),
+            MenuEntry::new(
+                "physics.soft_set",
+                label,
+                op("physics.soft_set", &[("kind", V::Enum(kind))]),
+            )
+            .variant("kind", V::Enum(kind)),
         )
     };
     MenuNode::Sub(
@@ -2425,8 +2429,16 @@ fn physics_node(l: &Labels) -> MenuNode {
                 op("physics.particles_add", &[]),
             )),
             MenuNode::Separator,
-            MenuNode::Entry(MenuEntry::new("physics.bake_start", &l.physics_bake_menu, dispatch("physics.bake_start"))),
-            MenuNode::Entry(MenuEntry::new("physics.free_bake", &l.physics_free_menu, op("physics.free_bake", &[]))),
+            MenuNode::Entry(MenuEntry::new(
+                "physics.bake_start",
+                &l.physics_bake_menu,
+                dispatch("physics.bake_start"),
+            )),
+            MenuNode::Entry(MenuEntry::new(
+                "physics.free_bake",
+                &l.physics_free_menu,
+                op("physics.free_bake", &[]),
+            )),
         ],
     )
 }
@@ -2625,7 +2637,11 @@ fn draw_area(
                     if let (Some(radius), Some(adjust)) = (brush, state.brush_adjust) {
                         let theme = kreate_ui::theme::from_ui(ui);
                         let painter = ui.painter().with_clip_rect(inner);
-                        painter.circle_stroke(adjust.center, radius, egui::Stroke::new(1.2, theme.text));
+                        painter.circle_stroke(
+                            adjust.center,
+                            radius,
+                            egui::Stroke::new(1.2, theme.text),
+                        );
                         if adjust.strength {
                             let strength = match mode.acts_on() {
                                 kreate_ops::mode::ActsOn::Weights => state.paint.strength,
@@ -2804,18 +2820,22 @@ fn draw_area(
                     // wider row widens the tree under it and cuts off its
                     // eyes.
                     let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-                    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let hint = state.catalog.get("outliner-search");
-                        // i18n-exempt: a close mark
-                        if !state.outliner_search.is_empty() && ui.small_button("x").clicked() {
-                            state.outliner_search.clear();
-                        }
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.outliner_search)
-                                .hint_text(hint)
-                                .desired_width(ui.available_width()),
-                        );
-                    });
+                    ui.allocate_ui_with_layout(
+                        row,
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let hint = state.catalog.get("outliner-search");
+                            // i18n-exempt: a close mark
+                            if !state.outliner_search.is_empty() && ui.small_button("x").clicked() {
+                                state.outliner_search.clear();
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.outliner_search)
+                                    .hint_text(hint)
+                                    .desired_width(ui.available_width()),
+                            );
+                        },
+                    );
                     let query = state.outliner_search.trim().to_lowercase();
                     if query.is_empty() {
                         kreate_ui::outliner(
@@ -2835,7 +2855,9 @@ fn draw_area(
                         // found without opening its parents.
                         let fresh = match &state.outliner_found {
                             Some((q, version, len, _)) => {
-                                *q != query || *version != doc.version() || *len != order.ids().len()
+                                *q != query
+                                    || *version != doc.version()
+                                    || *len != order.ids().len()
                             }
                             None => true,
                         };
@@ -3202,7 +3224,10 @@ fn draw_brush_settings(
         // The size and strength without their names — the box under the
         // brush column names them — so the four drop-downs and the mode's
         // own menus still fit the header.
-        let (radius, strength) = (state.catalog.get("paint-radius"), state.catalog.get("paint-strength"));
+        let (radius, strength) = (
+            state.catalog.get("paint-radius"),
+            state.catalog.get("paint-strength"),
+        );
         ui.add(
             egui::DragValue::new(&mut state.sculpt.radius)
                 .range(4.0..=400.0)
@@ -3550,8 +3575,12 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                         let mut p = PropertyMap::new();
                         p.set("view", kreate_reflect::PropertyValue::Enum(view));
                         MenuNode::Entry(
-                            MenuEntry::new("file.export_drawing", label, Run::Dispatch("file.export_drawing", p))
-                                .variant("view", kreate_reflect::PropertyValue::Enum(view)),
+                            MenuEntry::new(
+                                "file.export_drawing",
+                                label,
+                                Run::Dispatch("file.export_drawing", p),
+                            )
+                            .variant("view", kreate_reflect::PropertyValue::Enum(view)),
                         )
                     })
                     .collect(),
@@ -3631,7 +3660,11 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
         MenuNode::Separator,
         entry("view.measure", &l.view_measure, dispatch("view.measure")),
-        entry("object.align_faces", &l.align_faces, dispatch("object.align_faces")),
+        entry(
+            "object.align_faces",
+            &l.align_faces,
+            dispatch("object.align_faces"),
+        ),
         MenuNode::Separator,
         entry(
             "view.toggle_projection",
@@ -3721,10 +3754,16 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         })
                         .collect();
                     nodes.push(MenuNode::Separator);
-                    for (label, action) in [(&l.sculpt_mask_clear, 0u32), (&l.sculpt_mask_invert, 1)] {
+                    for (label, action) in
+                        [(&l.sculpt_mask_clear, 0u32), (&l.sculpt_mask_invert, 1)]
+                    {
                         nodes.push(MenuNode::Entry(
-                            MenuEntry::new("sculpt.mask", label, op("sculpt.mask", &[("action", V::Enum(action))]))
-                                .variant("action", V::Enum(action)),
+                            MenuEntry::new(
+                                "sculpt.mask",
+                                label,
+                                op("sculpt.mask", &[("action", V::Enum(action))]),
+                            )
+                            .variant("action", V::Enum(action)),
                         ));
                     }
                     nodes.push(MenuNode::Entry(MenuEntry::new(
@@ -3738,7 +3777,11 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         op("sculpt.face_set_visibility", &[("action", V::Enum(2))]),
                     )));
                     nodes.push(MenuNode::Separator);
-                    nodes.push(entry("sculpt.remesh", &l.sculpt_remesh, dispatch("sculpt.remesh")));
+                    nodes.push(entry(
+                        "sculpt.remesh",
+                        &l.sculpt_remesh,
+                        dispatch("sculpt.remesh"),
+                    ));
                     nodes
                 },
             }),
@@ -4778,11 +4821,28 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
         c("sculpt-menu-topology"),
     );
     let labels: Vec<String> = [
-        "sculpt-mirror-x", "sculpt-mirror-y", "sculpt-mirror-z", "sculpt-radial", "sculpt-falloff",
-        "sculpt-spacing", "sculpt-lazy", "sculpt-front-only", "sculpt-auto-smooth", "sculpt-alpha",
-        "sculpt-pressure-strength", "sculpt-pressure-size", "sculpt-mask-clear", "sculpt-mask-invert",
-        "sculpt-mask-fill", "sculpt-face-set-from-mask", "sculpt-show-all", "sculpt-show-overlay",
-        "sculpt-dyntopo", "sculpt-detail", "sculpt-voxel-size", "sculpt-remesh",
+        "sculpt-mirror-x",
+        "sculpt-mirror-y",
+        "sculpt-mirror-z",
+        "sculpt-radial",
+        "sculpt-falloff",
+        "sculpt-spacing",
+        "sculpt-lazy",
+        "sculpt-front-only",
+        "sculpt-auto-smooth",
+        "sculpt-alpha",
+        "sculpt-pressure-strength",
+        "sculpt-pressure-size",
+        "sculpt-mask-clear",
+        "sculpt-mask-invert",
+        "sculpt-mask-fill",
+        "sculpt-face-set-from-mask",
+        "sculpt-show-all",
+        "sculpt-show-overlay",
+        "sculpt-dyntopo",
+        "sculpt-detail",
+        "sculpt-voxel-size",
+        "sculpt-remesh",
     ]
     .iter()
     .map(|k| c(k))
@@ -4809,37 +4869,55 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
             ui.add(egui::DragValue::new(&mut s.radial).range(1..=64));
         });
         ui.separator();
-        egui::Grid::new("sculpt-stroke").num_columns(2).show(ui, |ui| {
-            ui.label(&labels[4]);
-            egui::ComboBox::from_id_salt("sculpt-falloff")
-                .selected_text(falloffs[s.falloff.min(5) as usize].as_str())
-                .show_ui(ui, |ui| {
-                    for (i, f) in falloffs.iter().enumerate() {
-                        ui.selectable_value(&mut s.falloff, i as u32, f.as_str());
-                    }
-                });
-            ui.end_row();
-            ui.label(&labels[5]);
-            ui.add(egui::DragValue::new(&mut s.spacing).range(0.02..=2.0).speed(0.01));
-            ui.end_row();
-            ui.label(&labels[6]);
-            ui.add(egui::DragValue::new(&mut s.lazy).range(0.0..=0.95).speed(0.01));
-            ui.end_row();
-            ui.label(&labels[8]);
-            ui.add(egui::DragValue::new(&mut s.auto_smooth).range(0.0..=1.0).speed(0.01));
-            ui.end_row();
-            ui.label(&labels[9]);
-            egui::ComboBox::from_id_salt("sculpt-alpha")
-                .selected_text(if s.alpha.is_empty() { "—" } else { s.alpha.as_str() })
-                .show_ui(ui, |ui| {
-                    // i18n-exempt: the built-in alphas' names, which scripts use too
-                    for name in ["", "noise", "stripes", "dots"] {
-                        let shown = if name.is_empty() { "—" } else { name };
-                        ui.selectable_value(&mut s.alpha, name.to_string(), shown);
-                    }
-                });
-            ui.end_row();
-        });
+        egui::Grid::new("sculpt-stroke")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label(&labels[4]);
+                egui::ComboBox::from_id_salt("sculpt-falloff")
+                    .selected_text(falloffs[s.falloff.min(5) as usize].as_str())
+                    .show_ui(ui, |ui| {
+                        for (i, f) in falloffs.iter().enumerate() {
+                            ui.selectable_value(&mut s.falloff, i as u32, f.as_str());
+                        }
+                    });
+                ui.end_row();
+                ui.label(&labels[5]);
+                ui.add(
+                    egui::DragValue::new(&mut s.spacing)
+                        .range(0.02..=2.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label(&labels[6]);
+                ui.add(
+                    egui::DragValue::new(&mut s.lazy)
+                        .range(0.0..=0.95)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label(&labels[8]);
+                ui.add(
+                    egui::DragValue::new(&mut s.auto_smooth)
+                        .range(0.0..=1.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label(&labels[9]);
+                egui::ComboBox::from_id_salt("sculpt-alpha")
+                    .selected_text(if s.alpha.is_empty() {
+                        "—"
+                    } else {
+                        s.alpha.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        // i18n-exempt: the built-in alphas' names, which scripts use too
+                        for name in ["", "noise", "stripes", "dots"] {
+                            let shown = if name.is_empty() { "—" } else { name };
+                            ui.selectable_value(&mut s.alpha, name.to_string(), shown);
+                        }
+                    });
+                ui.end_row();
+            });
         ui.checkbox(&mut s.front_only, &labels[7]);
         ui.checkbox(&mut s.pressure_strength, &labels[10]);
         ui.checkbox(&mut s.pressure_size, &labels[11]);
@@ -4870,12 +4948,20 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
         ui.checkbox(&mut s.dyntopo, &labels[18]);
         ui.horizontal(|ui| {
             ui.label(&labels[19]);
-            ui.add(egui::DragValue::new(&mut s.detail).range(0.02..=1.0).speed(0.005));
+            ui.add(
+                egui::DragValue::new(&mut s.detail)
+                    .range(0.02..=1.0)
+                    .speed(0.005),
+            );
         });
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(&labels[20]);
-            ui.add(egui::DragValue::new(&mut s.voxel_size).range(0.001..=10.0).speed(0.001));
+            ui.add(
+                egui::DragValue::new(&mut s.voxel_size)
+                    .range(0.001..=10.0)
+                    .speed(0.001),
+            );
         });
         if ui.button(&labels[21]).clicked() {
             let mut p = PropertyMap::new();
@@ -5047,7 +5133,10 @@ fn draw_physical_panel(
     kreate_ui::panel::section(ui, &title, true, |ui| {
         if let Some(info) = registry.get("scene.density_set") {
             let mut params = PropertyMap::new();
-            params.set("density", kreate_reflect::PropertyValue::Float(doc.design.density));
+            params.set(
+                "density",
+                kreate_reflect::PropertyValue::Float(doc.design.density),
+            );
             if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
                 let dragging = ui.ctx().input(|i| i.pointer.any_down());
                 send_edit(state, "scene.density_set", params, dragging);
@@ -5056,7 +5145,10 @@ fn draw_physical_panel(
         egui::Grid::new("physical").num_columns(2).show(ui, |ui| {
             let c = mass.centroid;
             let rows = [
-                ("physical-volume", kreate_reflect::format_volume(mass.volume.abs())),
+                (
+                    "physical-volume",
+                    kreate_reflect::format_volume(mass.volume.abs()),
+                ),
                 ("physical-area", kreate_reflect::format_area(mass.area)),
                 (
                     "physical-mass",
@@ -5182,11 +5274,31 @@ fn draw_work_plane(
         if i == 0 {
             continue;
         }
-        line(at + x * offset - y * reach, at + x * offset + y * reach, theme_line, 1.0);
-        line(at + y * offset - x * reach, at + y * offset + x * reach, theme_line, 1.0);
+        line(
+            at + x * offset - y * reach,
+            at + x * offset + y * reach,
+            theme_line,
+            1.0,
+        );
+        line(
+            at + y * offset - x * reach,
+            at + y * offset + x * reach,
+            theme_line,
+            1.0,
+        );
     }
-    line(at - x * reach, at + x * reach, egui::Color32::from_rgb(220, 80, 80), 1.5);
-    line(at - y * reach, at + y * reach, egui::Color32::from_rgb(110, 200, 90), 1.5);
+    line(
+        at - x * reach,
+        at + x * reach,
+        egui::Color32::from_rgb(220, 80, 80),
+        1.5,
+    );
+    line(
+        at - y * reach,
+        at + y * reach,
+        egui::Color32::from_rgb(110, 200, 90),
+        1.5,
+    );
 }
 
 /// Each sketch's distance and angle constraints, drawn as dimensions on its
@@ -5247,7 +5359,10 @@ fn draw_measurement(
     } else {
         egui::Color32::from_rgb(235, 170, 50)
     };
-    let screen: Vec<egui::Pos2> = points.iter().filter_map(|p| projector.project(*p)).collect();
+    let screen: Vec<egui::Pos2> = points
+        .iter()
+        .filter_map(|p| projector.project(*p))
+        .collect();
     if screen.len() != points.len() || screen.is_empty() {
         return;
     }
@@ -5283,7 +5398,11 @@ fn draw_measurement(
         galley.size() + egui::vec2(8.0, 4.0),
     );
     painter.rect_filled(rect, 3.0, colour);
-    painter.galley(rect.min + egui::vec2(4.0, 2.0), galley, egui::Color32::BLACK);
+    painter.galley(
+        rect.min + egui::vec2(4.0, 2.0),
+        galley,
+        egui::Color32::BLACK,
+    );
 }
 
 /// Blender's Statistics overlay: how many objects, and how many vertices,
@@ -5312,7 +5431,11 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
             let Some(mesh) = doc.mesh(target.mesh) else {
                 continue;
             };
-            let at = |v: u32| target.to_world.transform_point3(mesh.positions()[v as usize].as_dvec3());
+            let at = |v: u32| {
+                target
+                    .to_world
+                    .transform_point3(mesh.positions()[v as usize].as_dvec3())
+            };
             if let Some(sel) = mesh.attributes().get_bool(names::SELECT_EDGE) {
                 for (edge, on) in mesh.edges().iter().zip(sel) {
                     if *on {
@@ -5325,7 +5448,11 @@ fn statistics(doc: &Document, mode: kreate_ops::operator::Mode, l: &Labels) -> V
                     if !*on {
                         continue;
                     }
-                    let ring: Vec<_> = mesh.face_verts(face as u32).iter().map(|v| at(*v)).collect();
+                    let ring: Vec<_> = mesh
+                        .face_verts(face as u32)
+                        .iter()
+                        .map(|v| at(*v))
+                        .collect();
                     let mut n = kreate_math::DVec3::ZERO;
                     for i in 0..ring.len() {
                         n += ring[i].cross(ring[(i + 1) % ring.len()]);
@@ -5460,7 +5587,9 @@ pub struct RenderResultView {
 }
 
 fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
-    let Some(result) = &state.render_result else { return };
+    let Some(result) = &state.render_result else {
+        return;
+    };
     let mut open = true;
     let screen = ctx.content_rect();
     // As big as fits in most of the window, never bigger than the picture.
@@ -5502,7 +5631,21 @@ fn physics_panel(
     // drop-down by its label.
     ui.push_id(op, |ui| {
         kreate_ui::panel::section(ui, title, true, |ui| {
-            if kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut params, keep) {
+            if kreate_ui::property_editor::property_editor_where(
+                ui,
+                &state.catalog,
+                info.id,
+                info.schema,
+                &mut params,
+                keep,
+            ) {
+                // The tab shows the active object, so it sets the active
+                // object: the same values sent to the whole selection would
+                // overwrite every other object's own — and switch off the
+                // physics of those the active one had none of.
+                if info.schema.iter().any(|d| d.name == "active_only") {
+                    params.set("active_only", kreate_reflect::PropertyValue::Bool(true));
+                }
                 let dragging = ui.ctx().input(|i| i.pointer.any_down());
                 send_edit(state, op, params, dragging);
             }
@@ -5513,7 +5656,12 @@ fn physics_panel(
 /// Blender's Physics tab: what the active object is to the simulation —
 /// rigid body, collider, cloth or soft body, particle systems — and the
 /// scene's gravity, range and bake.
-fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry) {
+fn draw_physics_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+) {
     use kreate_ops::ops::physics as ph;
     use kreate_reflect::OpParams as _;
     use kreate_reflect::PropertyValue as V;
@@ -5531,21 +5679,45 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
             let p = &o.physics;
             let on = p.rigid.is_some();
             let title = state.catalog.get("physics-rigid");
-            physics_panel(ui, state, registry, &title, "physics.rigid_body_set",
-                ph::rigid_params(p.rigid.as_ref()).to_map(), |n| on || n == "enabled");
+            physics_panel(
+                ui,
+                state,
+                registry,
+                &title,
+                "physics.rigid_body_set",
+                ph::rigid_params(p.rigid.as_ref()).to_map(),
+                |n| on || n == "enabled",
+            );
             let on = p.collision.is_some();
             let title = state.catalog.get("physics-collision");
-            physics_panel(ui, state, registry, &title, "physics.collision_set",
-                ph::collision_params(p.collision.as_ref()).to_map(), |n| on || n == "enabled");
+            physics_panel(
+                ui,
+                state,
+                registry,
+                &title,
+                "physics.collision_set",
+                ph::collision_params(p.collision.as_ref()).to_map(),
+                |n| on || n == "enabled",
+            );
             let soft = ph::soft_params(p.soft.as_ref());
             let kind = soft.kind;
             let title = state.catalog.get("physics-soft");
-            physics_panel(ui, state, registry, &title, "physics.soft_set", soft.to_map(),
-                |n| ph::soft_param_applies(kind, n));
+            physics_panel(
+                ui,
+                state,
+                registry,
+                &title,
+                "physics.soft_set",
+                soft.to_map(),
+                |n| ph::soft_param_applies(kind, n),
+            );
             let title = state.catalog.get("physics-particles");
             kreate_ui::panel::section(ui, &title, true, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(state.catalog.get("physics-add-emitter")).clicked() {
+                    if ui
+                        .button(state.catalog.get("physics-add-emitter"))
+                        .clicked()
+                    {
                         state.queue.run("physics.particles_add", PropertyMap::new());
                     }
                     if ui.button(state.catalog.get("physics-add-hair")).clicked() {
@@ -5574,9 +5746,14 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
                         let kind = params.kind;
                         if let Some(info) = registry.get("physics.particles_set") {
                             let mut map = params.to_map();
-                            if kreate_ui::property_editor::property_editor_where(ui, &state.catalog, info.id, info.schema, &mut map,
-                                |n| ph::particle_param_applies(kind, n))
-                            {
+                            if kreate_ui::property_editor::property_editor_where(
+                                ui,
+                                &state.catalog,
+                                info.id,
+                                info.schema,
+                                &mut map,
+                                |n| ph::particle_param_applies(kind, n),
+                            ) {
                                 let dragging = ui.ctx().input(|i| i.pointer.any_down());
                                 send_edit(state, "physics.particles_set", map, dragging);
                             }
@@ -5588,8 +5765,15 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
     }
     ui.separator();
     let title = state.catalog.get("physics-world");
-    physics_panel(ui, state, registry, &title, "physics.world_set",
-        ph::world_params(&doc.physics).to_map(), |_| true);
+    physics_panel(
+        ui,
+        state,
+        registry,
+        &title,
+        "physics.world_set",
+        ph::world_params(&doc.physics).to_map(),
+        |_| true,
+    );
     let cache = &doc.physics_cache;
     ui.horizontal(|ui| {
         if let Some((done, total)) = state.bake_progress {
@@ -5599,22 +5783,38 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
                     .desired_width(140.0)
                     .text(format!("{done} / {total}")),
             );
-            if ui.button(state.catalog.get("physics-bake-cancel")).clicked() {
-                state.queue.dispatch("physics.bake_cancel", PropertyMap::new());
+            if ui
+                .button(state.catalog.get("physics-bake-cancel"))
+                .clicked()
+            {
+                state
+                    .queue
+                    .dispatch("physics.bake_cancel", PropertyMap::new());
             }
             return;
         }
         if ui.button(state.catalog.get("physics-bake")).clicked() {
-            state.queue.dispatch("physics.bake_start", PropertyMap::new());
+            state
+                .queue
+                .dispatch("physics.bake_start", PropertyMap::new());
         }
         if ui
-            .add_enabled(!cache.is_empty(), egui::Button::new(state.catalog.get("physics-free-bake")))
+            .add_enabled(
+                !cache.is_empty(),
+                egui::Button::new(state.catalog.get("physics-free-bake")),
+            )
             .clicked()
         {
             state.queue.run("physics.free_bake", PropertyMap::new());
         }
+        // Said before the click: the rigid bodies stop being rigid bodies,
+        // which otherwise looks like the settings going missing.
         if ui
-            .add_enabled(!cache.rigid.is_empty(), egui::Button::new(state.catalog.get("physics-bake-to-keys")))
+            .add_enabled(
+                !cache.rigid.is_empty(),
+                egui::Button::new(state.catalog.get("physics-bake-to-keys")),
+            )
+            .on_hover_text(state.catalog.get("op-physics-bake-to-keys-desc"))
             .clicked()
         {
             state.queue.run("physics.bake_to_keys", PropertyMap::new());
@@ -5630,12 +5830,24 @@ fn draw_physics_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registr
             .or(cache.soft.first().map(|t| t.frames.len()))
             .or(cache.particles.first().map(|t| t.frames.len()))
             .unwrap_or(1);
-        let (start, end) = (cache.start.to_string(), (cache.start + frames as i32 - 1).to_string());
-        ui.weak(state.catalog.get_args("physics-baked", &[("start", start.as_str()), ("end", end.as_str())]));
+        let (start, end) = (
+            cache.start.to_string(),
+            (cache.start + frames as i32 - 1).to_string(),
+        );
+        ui.weak(state.catalog.get_args(
+            "physics-baked",
+            &[("start", start.as_str()), ("end", end.as_str())],
+        ));
     }
 }
 
-fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry: &OperatorRegistry, l: &Labels) {
+fn draw_render_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+) {
     // The scene's units, first: they are the scene's as much as how it
     // renders, and a design is set up in them before anything is drawn.
     ui.heading(&l.design_units);
@@ -5703,7 +5915,9 @@ fn draw_render_tab(ui: &mut Ui, state: &mut ShellState, doc: &Document, registry
     });
     ui.weak(&l.render_hint);
     ui.separator();
-    let Some(info) = registry.get("render.set_settings") else { return };
+    let Some(info) = registry.get("render.set_settings") else {
+        return;
+    };
     let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::render::render_params(doc));
     if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
@@ -6974,7 +7188,10 @@ fn draw_item_sidebar(
                     (SidebarTab::Tool, &l.sidebar_tool),
                     (SidebarTab::View, &l.sidebar_view),
                 ] {
-                    if ui.selectable_label(state.sidebar_tab == tab, label.as_str()).clicked() {
+                    if ui
+                        .selectable_label(state.sidebar_tab == tab, label.as_str())
+                        .clicked()
+                    {
                         state.sidebar_tab = tab;
                     }
                 }
@@ -7012,13 +7229,23 @@ fn draw_item_sidebar(
                     registry.get("mesh.median_set"),
                 ) {
                     (Some((median, count)), Some(info)) => {
-                        ui.strong(if count == 1 { &l.sidebar_vertex } else { &l.sidebar_median });
+                        ui.strong(if count == 1 {
+                            &l.sidebar_vertex
+                        } else {
+                            &l.sidebar_median
+                        });
                         let mut params = kreate_reflect::PropertyMap::new();
                         params.set(
                             "location",
                             kreate_reflect::PropertyValue::Vec3(median.to_array()),
                         );
-                        if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut params) {
+                        if kreate_ui::property_editor(
+                            ui,
+                            &state.catalog,
+                            info.id,
+                            info.schema,
+                            &mut params,
+                        ) {
                             let dragging = ui.ctx().input(|i| i.pointer.any_down());
                             send_edit(state, "mesh.median_set", params, dragging);
                         }
@@ -7117,7 +7344,11 @@ fn object_dimensions(doc: &Document, object: ObjectId) -> Option<[f64; 3]> {
     if bounds.min.x > bounds.max.x {
         return None;
     }
-    Some(((bounds.max - bounds.min).as_dvec3() * o.transform.scale).abs().to_array())
+    Some(
+        ((bounds.max - bounds.min).as_dvec3() * o.transform.scale)
+            .abs()
+            .to_array(),
+    )
 }
 
 /// Dimensions, under the transform: typing a size sets the scale that gives it.
@@ -7129,14 +7360,23 @@ fn draw_dimensions(
     object: ObjectId,
     l: &Labels,
 ) {
-    let (Some(size), Some(info)) = (object_dimensions(doc, object), registry.get("object.set_dimensions")) else {
+    let (Some(size), Some(info)) = (
+        object_dimensions(doc, object),
+        registry.get("object.set_dimensions"),
+    ) else {
         return;
     };
     ui.separator();
     ui.strong(&l.sidebar_dimensions);
     let mut params = PropertyMap::new();
     params.set("dimensions", kreate_reflect::PropertyValue::Vec3(size));
-    if kreate_ui::property_editor(ui, &state.catalog, "sidebar.dimensions", info.schema, &mut params) {
+    if kreate_ui::property_editor(
+        ui,
+        &state.catalog,
+        "sidebar.dimensions",
+        info.schema,
+        &mut params,
+    ) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "object.set_dimensions", params, dragging);
     }
@@ -7153,7 +7393,12 @@ fn draw_view_sidebar(
     ui.strong(&l.sidebar_lens);
     let mut lens = state.view_lens_mm;
     if ui
-        .add(egui::DragValue::new(&mut lens).range(1.0..=1000.0).speed(0.5).max_decimals(1))
+        .add(
+            egui::DragValue::new(&mut lens)
+                .range(1.0..=1000.0)
+                .speed(0.5)
+                .max_decimals(1),
+        )
         .changed()
     {
         state.view_lens_mm = lens;
@@ -7163,10 +7408,21 @@ fn draw_view_sidebar(
     }
     ui.separator();
     ui.strong(&l.sidebar_cursor);
-    let Some(info) = registry.get("scene.cursor_set") else { return };
+    let Some(info) = registry.get("scene.cursor_set") else {
+        return;
+    };
     let mut params = PropertyMap::new();
-    params.set("location", kreate_reflect::PropertyValue::Vec3(doc.cursor.to_array()));
-    if kreate_ui::property_editor(ui, &state.catalog, "sidebar.cursor", info.schema, &mut params) {
+    params.set(
+        "location",
+        kreate_reflect::PropertyValue::Vec3(doc.cursor.to_array()),
+    );
+    if kreate_ui::property_editor(
+        ui,
+        &state.catalog,
+        "sidebar.cursor",
+        info.schema,
+        &mut params,
+    ) {
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "scene.cursor_set", params, dragging);
     }
@@ -8379,8 +8635,9 @@ fn draw_nla_panel(
                     state.queue.run("anim.nla_strip_remove", p);
                 }
             });
-            let mut map =
-                kreate_reflect::OpParams::to_map(&kreate_ops::ops::anim::nla_strip_params(index, strip));
+            let mut map = kreate_reflect::OpParams::to_map(
+                &kreate_ops::ops::anim::nla_strip_params(index, strip),
+            );
             if kreate_ui::property_editor(ui, &state.catalog, info.id, info.schema, &mut map) {
                 state.queue.run("anim.nla_strip_set", map);
             }
@@ -9015,9 +9272,8 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
                     }
                     kreate_scene::sketch::Constraint::Angle { value, .. } => {
                         let mut degrees = value.to_degrees();
-                        let response = ui.add(
-                            egui::DragValue::new(&mut degrees).speed(0.5).suffix("°"),
-                        );
+                        let response =
+                            ui.add(egui::DragValue::new(&mut degrees).speed(0.5).suffix("°"));
                         if response.changed() {
                             let mut p = PropertyMap::new();
                             p.set("index", V::Int(i as i64));
@@ -12474,7 +12730,10 @@ mod tests {
         // show something: the last operation, and the render settings, which
         // are the scene's and need no selection.
         let doc = Document::new();
-        assert_eq!(available_tabs(&doc), vec![PropertiesTab::Tool, PropertiesTab::Render]);
+        assert_eq!(
+            available_tabs(&doc),
+            vec![PropertiesTab::Tool, PropertiesTab::Render]
+        );
     }
 
     #[test]

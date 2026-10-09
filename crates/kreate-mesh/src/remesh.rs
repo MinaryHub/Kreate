@@ -230,10 +230,28 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
     let mut vertex_of = vec![u32::MAX; cells.iter().product()];
     let mut positions: Vec<Vec3> = Vec::new();
     const CORNERS: [[usize; 3]; 8] = [
-        [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+        [1, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [0, 1, 1],
+        [1, 1, 1],
     ];
     const EDGES: [(usize, usize); 12] = [
-        (0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7),
+        (0, 2),
+        (1, 3),
+        (4, 6),
+        (5, 7),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
     ];
     for k in 0..cells[2] {
         for j in 0..cells[1] {
@@ -248,8 +266,10 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
                 for (a, b) in EDGES {
                     if (v[a] < 0.0) != (v[b] < 0.0) {
                         let t = v[a] / (v[a] - v[b]);
-                        let pa = field.point(i + CORNERS[a][0], j + CORNERS[a][1], k + CORNERS[a][2]);
-                        let pb = field.point(i + CORNERS[b][0], j + CORNERS[b][1], k + CORNERS[b][2]);
+                        let pa =
+                            field.point(i + CORNERS[a][0], j + CORNERS[a][1], k + CORNERS[a][2]);
+                        let pb =
+                            field.point(i + CORNERS[b][0], j + CORNERS[b][1], k + CORNERS[b][2]);
                         sum += pa.lerp(pb, t);
                         n += 1.0;
                     }
@@ -261,11 +281,18 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
     }
     let mut faces: Vec<Vec<u32>> = Vec::new();
     let mut quad = |cs: [[usize; 3]; 4], flip: bool| {
-        let ids: Vec<u32> = cs.iter().map(|c| vertex_of[cell_index(c[0], c[1], c[2])]).collect();
+        let ids: Vec<u32> = cs
+            .iter()
+            .map(|c| vertex_of[cell_index(c[0], c[1], c[2])])
+            .collect();
         if ids.contains(&u32::MAX) {
             return;
         }
-        faces.push(if flip { ids.into_iter().rev().collect() } else { ids });
+        faces.push(if flip {
+            ids.into_iter().rev().collect()
+        } else {
+            ids
+        });
     };
     for k in 1..cells[2] {
         for j in 1..cells[1] {
@@ -273,7 +300,10 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
                 // The edge from (i, j, k) along X.
                 let (a, b) = (field.at(i, j, k), field.at(i + 1, j, k));
                 if (a < 0.0) != (b < 0.0) {
-                    quad([[i, j - 1, k - 1], [i, j, k - 1], [i, j, k], [i, j - 1, k]], b < 0.0);
+                    quad(
+                        [[i, j - 1, k - 1], [i, j, k - 1], [i, j, k], [i, j - 1, k]],
+                        b < 0.0,
+                    );
                 }
             }
         }
@@ -283,7 +313,10 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
             for i in 1..cells[0] {
                 let (a, b) = (field.at(i, j, k), field.at(i, j + 1, k));
                 if (a < 0.0) != (b < 0.0) {
-                    quad([[i - 1, j, k - 1], [i - 1, j, k], [i, j, k], [i, j, k - 1]], b < 0.0);
+                    quad(
+                        [[i - 1, j, k - 1], [i - 1, j, k], [i, j, k], [i, j, k - 1]],
+                        b < 0.0,
+                    );
                 }
             }
         }
@@ -293,7 +326,10 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
             for i in 1..cells[0] {
                 let (a, b) = (field.at(i, j, k), field.at(i, j, k + 1));
                 if (a < 0.0) != (b < 0.0) {
-                    quad([[i - 1, j - 1, k], [i, j - 1, k], [i, j, k], [i - 1, j, k]], b < 0.0);
+                    quad(
+                        [[i - 1, j - 1, k], [i, j - 1, k], [i, j, k], [i - 1, j, k]],
+                        b < 0.0,
+                    );
                 }
             }
         }
@@ -315,7 +351,11 @@ mod tests {
         for f in 0..m.num_faces() {
             let ring = m.face_verts(f);
             for k in 1..ring.len() - 1 {
-                let (a, b, c) = (p[ring[0] as usize], p[ring[k] as usize], p[ring[k + 1] as usize]);
+                let (a, b, c) = (
+                    p[ring[0] as usize],
+                    p[ring[k] as usize],
+                    p[ring[k + 1] as usize],
+                );
                 v += a.dot(b.cross(c)) / 6.0;
             }
         }
@@ -339,7 +379,10 @@ mod tests {
     fn a_cube_comes_back_closed_in_squares_and_the_same_size() {
         let cube = primitives::cube(2.0);
         let m = voxel_remesh(&cube, 0.1).unwrap();
-        assert!((0..m.num_faces()).all(|f| m.face_verts(f).len() == 4), "squares");
+        assert!(
+            (0..m.num_faces()).all(|f| m.face_verts(f).len() == 4),
+            "squares"
+        );
         assert!(closed(&m));
         let v = volume(&m);
         assert!((v - 8.0).abs() < 0.4, "volume {v} near 8, facing out");
@@ -363,8 +406,14 @@ mod tests {
             p.x += 0.5;
         }
         let (both, _) = crate::edit::join(&[
-            crate::edit::Part { mesh: &a, transform: kreate_math::DAffine3::IDENTITY },
-            crate::edit::Part { mesh: &b, transform: kreate_math::DAffine3::IDENTITY },
+            crate::edit::Part {
+                mesh: &a,
+                transform: kreate_math::DAffine3::IDENTITY,
+            },
+            crate::edit::Part {
+                mesh: &b,
+                transform: kreate_math::DAffine3::IDENTITY,
+            },
         ]);
         let m = voxel_remesh(&both, 0.05).unwrap();
         assert!(closed(&m));
@@ -375,7 +424,13 @@ mod tests {
     #[test]
     fn too_fine_and_nothing_are_said() {
         let cube = primitives::cube(2.0);
-        assert!(matches!(voxel_remesh(&cube, 0.0001), Err(RemeshError::TooFine(_))));
-        assert!(matches!(voxel_remesh(&MeshData::empty(), 0.1), Err(RemeshError::Empty)));
+        assert!(matches!(
+            voxel_remesh(&cube, 0.0001),
+            Err(RemeshError::TooFine(_))
+        ));
+        assert!(matches!(
+            voxel_remesh(&MeshData::empty(), 0.1),
+            Err(RemeshError::Empty)
+        ));
     }
 }

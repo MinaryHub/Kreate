@@ -788,7 +788,11 @@ impl Operator for SmoothKeys {
                 changed |= a.smooth_selected();
             }
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 
@@ -820,7 +824,11 @@ impl Operator for BakeKeys {
                 changed |= a.bake_selected();
             }
         }
-        Ok(if changed { OpResult::Finished } else { OpResult::Cancelled })
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 

@@ -61,7 +61,8 @@ impl SculptDisplay {
             }
         };
         let mut out = (**mesh).clone();
-        out.attributes_mut().insert(names::UV, Domain::Corner, coords);
+        out.attributes_mut()
+            .insert(names::UV, Domain::Corner, coords);
         let out = Arc::new(out);
         self.last = Some((mesh.clone(), out.clone()));
         Some(out)
@@ -76,9 +77,11 @@ mod tests {
     fn the_mask_and_face_sets_ride_in_the_coordinates_and_are_kept() {
         let mut m = kreate_mesh::primitives::grid(2.0, 2, 2);
         let n = m.num_verts() as usize;
-        m.attributes_mut().insert(MASK, Domain::Point, AttrData::F32(Arc::new(vec![1.0; n])));
+        m.attributes_mut()
+            .insert(MASK, Domain::Point, AttrData::F32(Arc::new(vec![1.0; n])));
         let nf = m.num_faces() as usize;
-        m.attributes_mut().insert(FACE_SET, Domain::Face, AttrData::I32(Arc::new(vec![3; nf])));
+        m.attributes_mut()
+            .insert(FACE_SET, Domain::Face, AttrData::I32(Arc::new(vec![3; nf])));
         let m = Arc::new(m);
         let mut d = SculptDisplay::default();
         let shown = d.show(&m).unwrap();

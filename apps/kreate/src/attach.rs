@@ -172,7 +172,10 @@ impl Attachment {
         }
         let mut jpeg = Vec::new();
         image::DynamicImage::ImageRgb8(image.to_rgb8())
-            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
             .map_err(|e| format!("{name}: {e}"))?;
         Ok(Self {
             name: with_extension(&name, "jpg"),
@@ -191,7 +194,9 @@ impl Attachment {
         // i18n-exempt: sizes and format names
         match &self.kind {
             Kind::Image { width, height, .. } if *width > 0 => format!("{width} × {height}"),
-            Kind::Image { media_type, .. } => media_type.trim_start_matches("image/").to_uppercase(),
+            Kind::Image { media_type, .. } => {
+                media_type.trim_start_matches("image/").to_uppercase()
+            }
             Kind::Pdf => format!("PDF, {}", size(self.data.len())),
             Kind::Text => format!("text, {}", size(self.data.len())),
         }
@@ -239,7 +244,10 @@ pub fn prompt_with_text(text: &str, attachments: &[Attachment]) -> String {
     let mut out = text.to_string();
     for a in attachments.iter().filter(|a| a.kind == Kind::Text) {
         let body = String::from_utf8_lossy(&a.data);
-        out.push_str(&format!("\n\n<file name=\"{}\">\n{}\n</file>", a.name, body));
+        out.push_str(&format!(
+            "\n\n<file name=\"{}\">\n{}\n</file>",
+            a.name, body
+        ));
     }
     out
 }
@@ -324,7 +332,8 @@ mod tests {
     fn pdfs_and_text_are_told_apart_from_other_files() {
         let pdf = Attachment::from_bytes("a.pdf".into(), b"%PDF-1.7 ...".to_vec()).unwrap();
         assert_eq!(pdf.kind, Kind::Pdf);
-        let text = Attachment::from_bytes("notes.md".into(), "# 메모\nhi".as_bytes().to_vec()).unwrap();
+        let text =
+            Attachment::from_bytes("notes.md".into(), "# 메모\nhi".as_bytes().to_vec()).unwrap();
         assert_eq!(text.kind, Kind::Text);
         assert!(Attachment::from_bytes("a.bin".into(), vec![0, 159, 146, 150]).is_err());
     }

@@ -34,7 +34,18 @@ pub fn write(cache: &PhysicsCache) -> Vec<u8> {
         u32_(&mut out, t.frames.len());
         for f in &t.frames {
             let r = f.rotation;
-            for v in [f.translation.x, f.translation.y, f.translation.z, r.x, r.y, r.z, r.w, f.scale.x, f.scale.y, f.scale.z] {
+            for v in [
+                f.translation.x,
+                f.translation.y,
+                f.translation.z,
+                r.x,
+                r.y,
+                r.z,
+                r.w,
+                f.scale.x,
+                f.scale.y,
+                f.scale.z,
+            ] {
                 out.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -192,14 +203,20 @@ mod tests {
             }],
             soft: vec![SoftTrack {
                 object: Uid::from_raw(9),
-                frames: vec![Arc::from(vec![Vec3::X, Vec3::Y]), Arc::from(vec![Vec3::Z, Vec3::ONE])],
+                frames: vec![
+                    Arc::from(vec![Vec3::X, Vec3::Y]),
+                    Arc::from(vec![Vec3::Z, Vec3::ONE]),
+                ],
             }],
             particles: vec![ParticleTrack {
                 object: Uid::from_raw(9),
                 system: 1,
                 frames: vec![
                     Arc::from(Vec::<Particle>::new()),
-                    Arc::from(vec![Particle { position: Vec3::ONE, heading: Vec3::Z }]),
+                    Arc::from(vec![Particle {
+                        position: Vec3::ONE,
+                        heading: Vec3::Z,
+                    }]),
                 ],
             }],
         }
@@ -214,7 +231,10 @@ mod tests {
         assert_eq!(back.soft[0].object, cache.soft[0].object);
         assert_eq!(&*back.soft[0].frames[1], &*cache.soft[0].frames[1]);
         assert_eq!(back.particles[0].system, 1);
-        assert_eq!(&*back.particles[0].frames[1], &*cache.particles[0].frames[1]);
+        assert_eq!(
+            &*back.particles[0].frames[1],
+            &*cache.particles[0].frames[1]
+        );
     }
 
     #[test]

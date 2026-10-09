@@ -215,7 +215,8 @@ fn nla_strips_are_saved_with_their_object() {
     use kreate_scene::nla::{NlaExtend, NlaStrip};
     let mut doc = Document::new();
     let mut walk = Action::new("Walk");
-    walk.curve_mut("location", 0).insert(1.0, 2.0, Interpolation::Linear);
+    walk.curve_mut("location", 0)
+        .insert(1.0, 2.0, Interpolation::Linear);
     let walk = doc.add_action(walk);
     let id = doc.add_object(Object::new("Mover", ObjectData::Empty));
     // Nothing at its default.
@@ -238,7 +239,10 @@ fn nla_strips_are_saved_with_their_object() {
     let got = &o.nla[0];
     assert_eq!(back.action(got.action).unwrap().name, "Walk");
     assert_eq!(
-        NlaStrip { action: walk, ..got.clone() },
+        NlaStrip {
+            action: walk,
+            ..got.clone()
+        },
         strip
     );
 }

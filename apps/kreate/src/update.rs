@@ -226,17 +226,19 @@ pub fn check_in_background(wake: impl FnOnce() + Send + 'static) -> Arc<Mutex<Op
     let out = ready.clone();
     std::thread::Builder::new()
         .name("update".into())
-        .spawn(move || match fetch_and_stage(&root, &repo(), crate::version::VERSION) {
-            Ok(Some(version)) => {
-                tracing::info!(%version, "update downloaded; used at the next start");
-                if let Ok(mut slot) = out.lock() {
-                    *slot = Some(version);
+        .spawn(
+            move || match fetch_and_stage(&root, &repo(), crate::version::VERSION) {
+                Ok(Some(version)) => {
+                    tracing::info!(%version, "update downloaded; used at the next start");
+                    if let Ok(mut slot) = out.lock() {
+                        *slot = Some(version);
+                    }
+                    wake();
                 }
-                wake();
-            }
-            Ok(None) => tracing::debug!("no newer release"),
-            Err(e) => tracing::info!(error = %e, "update check failed"),
-        })
+                Ok(None) => tracing::debug!("no newer release"),
+                Err(e) => tracing::info!(error = %e, "update check failed"),
+            },
+        )
         .ok();
     ready
 }
@@ -282,7 +284,8 @@ pub fn install(files: &Path, dir: &Path) -> Result<(), String> {
                     aside = dir.join(format!("{}.old.{n}", name.to_string_lossy()));
                     n += 1;
                 }
-                std::fs::rename(&target, &aside).map_err(|e| format!("{}: {e}", target.display()))?;
+                std::fs::rename(&target, &aside)
+                    .map_err(|e| format!("{}: {e}", target.display()))?;
                 moved.push((target.clone(), aside));
             }
             std::fs::copy(source, &target).map_err(|e| format!("{}: {e}", target.display()))?;
@@ -354,7 +357,11 @@ mod tests {
         let (v, files) = super::staged(&root).expect("staged");
         assert_eq!(v, version);
         assert!(files.join(exe_file_name()).is_file());
-        assert_eq!(fetch_and_stage(&root, DEFAULT_REPO, "0.0.1"), Ok(None), "not twice");
+        assert_eq!(
+            fetch_and_stage(&root, DEFAULT_REPO, "0.0.1"),
+            Ok(None),
+            "not twice"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -384,17 +391,30 @@ mod tests {
         });
         assert_eq!(
             pick_release(&json, &asset),
-            Some(Release { version: "0.3.0".into(), url: "https://x/mine".into() })
+            Some(Release {
+                version: "0.3.0".into(),
+                url: "https://x/mine".into()
+            })
         );
         let mut pre = json.clone();
         pre["prerelease"] = true.into();
-        assert_eq!(pick_release(&pre, &asset), None, "a prerelease is not offered");
-        assert_eq!(pick_release(&json, "kreate-nowhere.zip"), None, "no zip for this platform");
+        assert_eq!(
+            pick_release(&pre, &asset),
+            None,
+            "a prerelease is not offered"
+        );
+        assert_eq!(
+            pick_release(&json, "kreate-nowhere.zip"),
+            None,
+            "no zip for this platform"
+        );
     }
 
     #[test]
     fn a_developers_build_does_not_update_itself() {
-        if std::env::var_os("KREATE_UPDATE").is_some() || std::env::var_os("KREATE_NO_UPDATE").is_some() {
+        if std::env::var_os("KREATE_UPDATE").is_some()
+            || std::env::var_os("KREATE_NO_UPDATE").is_some()
+        {
             return;
         }
         assert!(!enabled(Path::new("C:/src/Kreate/target/debug/kreate.exe")));
@@ -422,10 +442,22 @@ mod tests {
         std::fs::write(app.join("notes.txt"), "mine").unwrap();
 
         install(&files, &app).unwrap();
-        assert_eq!(std::fs::read_to_string(app.join("kreate.exe")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(app.join("kreate-mcp.exe")).unwrap(), "new mcp");
-        assert_eq!(std::fs::read_to_string(app.join("kreate.exe.old")).unwrap(), "old");
-        assert_eq!(std::fs::read_to_string(app.join("notes.txt")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(app.join("kreate.exe")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("kreate-mcp.exe")).unwrap(),
+            "new mcp"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("kreate.exe.old")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("notes.txt")).unwrap(),
+            "mine"
+        );
 
         remove_old(&app);
         assert!(!app.join("kreate.exe.old").exists());
@@ -448,7 +480,10 @@ mod tests {
         std::fs::create_dir_all(app.join("z-kreate.exe")).unwrap();
 
         assert!(install(&files, &app).is_err());
-        assert_eq!(std::fs::read_to_string(app.join("a-kreate.exe")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(app.join("a-kreate.exe")).unwrap(),
+            "old"
+        );
         assert!(!app.join("a-kreate.exe.old").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -459,17 +494,22 @@ mod tests {
         let good = root.join("good.zip");
         {
             let mut w = zip::ZipWriter::new(std::fs::File::create(&good).unwrap());
-            w.start_file("kreate.exe", zip::write::SimpleFileOptions::default()).unwrap();
+            w.start_file("kreate.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
             w.write_all(b"binary").unwrap();
             w.finish().unwrap();
         }
         extract(&good, &root.join("out")).unwrap();
-        assert_eq!(std::fs::read(root.join("out/kreate.exe")).unwrap(), b"binary");
+        assert_eq!(
+            std::fs::read(root.join("out/kreate.exe")).unwrap(),
+            b"binary"
+        );
 
         let bad = root.join("bad.zip");
         {
             let mut w = zip::ZipWriter::new(std::fs::File::create(&bad).unwrap());
-            w.start_file("../escape.exe", zip::write::SimpleFileOptions::default()).unwrap();
+            w.start_file("../escape.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
             w.write_all(b"x").unwrap();
             w.finish().unwrap();
         }

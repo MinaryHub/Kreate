@@ -152,7 +152,11 @@ impl ImportanceMap {
             let mut running = 0.0f64;
             for column in 0..columns {
                 let i = (row * columns + column) as usize;
-                let mean = if count[i] > 0 { sum[i] / count[i] as f64 } else { 0.0 };
+                let mean = if count[i] > 0 {
+                    sum[i] / count[i] as f64
+                } else {
+                    0.0
+                };
                 running += mean * theta.sin();
                 cdf[(rows + row * columns + column) as usize] = running as f32;
             }
@@ -1152,10 +1156,19 @@ mod importance_tests {
         let row = 60 * rows / h as usize;
         let col = 300 * cols / w as usize;
         let row_share = map.cdf[row] - if row > 0 { map.cdf[row - 1] } else { 0.0 };
-        assert!(row_share > 0.9, "the sun's row has {row_share} of the distribution");
+        assert!(
+            row_share > 0.9,
+            "the sun's row has {row_share} of the distribution"
+        );
         let at = rows + row * cols + col;
         let cell_share = map.cdf[at] - map.cdf[at - 1];
-        assert!(cell_share > 0.9, "the sun's cell has {cell_share} of its row");
-        assert!((map.cdf[rows - 1] - 1.0).abs() < 1e-5, "the rows sum to one");
+        assert!(
+            cell_share > 0.9,
+            "the sun's cell has {cell_share} of its row"
+        );
+        assert!(
+            (map.cdf[rows - 1] - 1.0).abs() < 1e-5,
+            "the rows sum to one"
+        );
     }
 }

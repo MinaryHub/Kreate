@@ -316,7 +316,11 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
 /// what shipped since; one of the user's own layouts alone is left alone.
 fn add_new_shipped(spaces: &mut Workspaces, known: Option<&[String]>) {
     let defaults = Workspaces::default();
-    if known.is_none() && !spaces.iter().any(|s| defaults.iter().any(|d| d.name == s.name)) {
+    if known.is_none()
+        && !spaces
+            .iter()
+            .any(|s| defaults.iter().any(|d| d.name == s.name))
+    {
         return;
     }
     let active = spaces.active_index();
@@ -430,7 +434,11 @@ node = \"area viewport\"
         assert!(problems.is_empty(), "{problems:?}");
         let got = names(&spaces);
         assert!(got.contains(&"Scripting".to_string()), "{got:?}");
-        assert_eq!(&got[..2], ["Layout", "Modeling"], "the file's own come first, in its order");
+        assert_eq!(
+            &got[..2],
+            ["Layout", "Modeling"],
+            "the file's own come first, in its order"
+        );
         assert_eq!(spaces.active().name, "Modeling");
     }
 
@@ -449,7 +457,10 @@ node = \"area viewport\"
     #[test]
     fn a_shipped_workspace_the_user_deleted_stays_deleted() {
         let mut spaces = Workspaces::default();
-        let scripting = names(&spaces).iter().position(|n| n == "Scripting").expect("shipped");
+        let scripting = names(&spaces)
+            .iter()
+            .position(|n| n == "Scripting")
+            .expect("shipped");
         assert!(spaces.remove(scripting));
         let (back, problems) = parse(&write(&spaces));
         assert!(problems.is_empty(), "{problems:?}");

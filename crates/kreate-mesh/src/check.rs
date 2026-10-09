@@ -97,7 +97,11 @@ pub fn check(
         (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
         |(lo, hi), p| (lo.min(*p), hi.max(*p)),
     );
-    let size = if points.is_empty() { 1.0 } else { (hi - lo).length().max(1e-12) };
+    let size = if points.is_empty() {
+        1.0
+    } else {
+        (hi - lo).length().max(1e-12)
+    };
     let tiny_area = (size * 1e-7) * (size * 1e-7);
 
     // Triangles, for the area, the intersections and the walls. Fan per face.
@@ -165,10 +169,12 @@ pub fn check(
                 continue;
             }
             let ring = mesh.face_verts(f);
-            let centre = ring.iter().map(|v| points[*v as usize]).sum::<DVec3>() / ring.len() as f64;
+            let centre =
+                ring.iter().map(|v| points[*v as usize]).sum::<DVec3>() / ring.len() as f64;
             let mut normal = DVec3::ZERO;
             for i in 0..ring.len() {
-                normal += points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
+                normal +=
+                    points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
             }
             let normal = normal.normalize_or_zero();
             if normal == DVec3::ZERO {
@@ -183,7 +189,9 @@ pub fn check(
                 }
             }
         }
-        report.thin_faces = (0..thin.len() as u32).filter(|f| thin[*f as usize]).collect();
+        report.thin_faces = (0..thin.len() as u32)
+            .filter(|f| thin[*f as usize])
+            .collect();
     }
     report
 }
@@ -262,7 +270,10 @@ mod tests {
         let r = check(&slab, same, 0.05, true);
         assert!(r.thin_faces.len() >= 2, "{r:?}");
         let r = check(&slab, same, 0.01, true);
-        assert!(r.thin_faces.is_empty(), "thicker than asked is not thin: {r:?}");
+        assert!(
+            r.thin_faces.is_empty(),
+            "thicker than asked is not thin: {r:?}"
+        );
     }
 
     #[test]

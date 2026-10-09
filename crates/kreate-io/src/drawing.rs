@@ -64,15 +64,21 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
     // tree's single precision is spent where the parts are.
     let mut world: Vec<Vec<DVec3>> = Vec::new();
     for (mesh, place) in parts {
-        world.push(mesh.positions().iter().map(|p| place.transform_point3(p.as_dvec3())).collect());
+        world.push(
+            mesh.positions()
+                .iter()
+                .map(|p| place.transform_point3(p.as_dvec3()))
+                .collect(),
+        );
     }
     let all: Vec<DVec3> = world.iter().flatten().copied().collect();
     if all.is_empty() {
         return Vec::new();
     }
-    let (lo, hi) = all.iter().fold((DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)), |(lo, hi), p| {
-        (lo.min(*p), hi.max(*p))
-    });
+    let (lo, hi) = all.iter().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
     let middle = (lo + hi) * 0.5;
     let size = (hi - lo).length().max(1e-9);
     let mut local: Vec<Vec3> = Vec::new();
@@ -81,14 +87,21 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
         let base = local.len() as u32;
         local.extend(points.iter().map(|p| (*p - middle).as_vec3()));
         let t = mesh.triangulate();
-        tris.extend(t.indices.as_chunks::<3>().0.iter().map(|t| t.map(|v| v + base)));
+        tris.extend(
+            t.indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| t.map(|v| v + base)),
+        );
     }
     let bvh = Bvh::build(&local, &tris);
     let toward = view.toward();
     let lift = size * 1e-5;
     let hidden_at = |p: DVec3| -> bool {
         let start = (p - middle + toward * lift).as_vec3();
-        bvh.raycast(&local, &tris, &Ray::new(start, toward.as_vec3()), f32::MAX).is_some()
+        bvh.raycast(&local, &tris, &Ray::new(start, toward.as_vec3()), f32::MAX)
+            .is_some()
     };
 
     let mut lines = Vec::new();
@@ -99,10 +112,15 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
                 let ring = mesh.face_verts(f);
                 let mut n = DVec3::ZERO;
                 for i in 0..ring.len() {
-                    n += points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
+                    n +=
+                        points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
                 }
                 let n = n.normalize_or_zero();
-                if flip { -n } else { n }
+                if flip {
+                    -n
+                } else {
+                    n
+                }
             })
             .collect();
         let mut faces_of: Vec<Vec<usize>> = vec![Vec::new(); mesh.num_edges() as usize];
@@ -163,7 +181,11 @@ fn tidy(lines: Vec<Line2>, tolerance: f64) -> Vec<Line2> {
     let key = |l: &Line2| {
         let q = |v: f64| (v / tolerance).round() as i64;
         let (a, b) = ([q(l.a[0]), q(l.a[1])], [q(l.b[0]), q(l.b[1])]);
-        if a <= b { (a, b) } else { (b, a) }
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
     };
     let mut seen: std::collections::HashMap<([i64; 2], [i64; 2]), usize> = Default::default();
     let mut out: Vec<Line2> = Vec::new();
@@ -235,7 +257,10 @@ pub fn overall_dimensions(lines: &[Line2], format: impl Fn(f64) -> String) -> Ve
 /// A dimension as lines — two extension lines, the dimension line, a tick at
 /// each end — and where its text goes, which way, and how tall.
 fn dimension_lines(d: &Dimension2) -> (Vec<[[f64; 2]; 2]>, [f64; 2], f64, f64) {
-    let (a, b) = (DVec3::new(d.a[0], d.a[1], 0.0), DVec3::new(d.b[0], d.b[1], 0.0));
+    let (a, b) = (
+        DVec3::new(d.a[0], d.a[1], 0.0),
+        DVec3::new(d.b[0], d.b[1], 0.0),
+    );
     let run = b - a;
     let len = run.length().max(1e-12);
     let along = run / len;
@@ -246,8 +271,14 @@ fn dimension_lines(d: &Dimension2) -> (Vec<[[f64; 2]; 2]>, [f64; 2], f64, f64) {
     let tick = (along + left).normalize() * (d.offset.abs() * 0.12);
     let two = |p: DVec3| [p.x, p.y];
     let lines = vec![
-        [two(a + left * d.offset.signum() * d.offset.abs() * 0.1), two(pa + beyond)],
-        [two(b + left * d.offset.signum() * d.offset.abs() * 0.1), two(pb + beyond)],
+        [
+            two(a + left * d.offset.signum() * d.offset.abs() * 0.1),
+            two(pa + beyond),
+        ],
+        [
+            two(b + left * d.offset.signum() * d.offset.abs() * 0.1),
+            two(pb + beyond),
+        ],
         [two(pa), two(pb)],
         [two(pa - tick), two(pa + tick)],
         [two(pb - tick), two(pb + tick)],
@@ -295,7 +326,11 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
     pair(&mut out, 70, "2");
     for (name, text, elements) in [
         ("CONTINUOUS", "Solid line", Vec::<f64>::new()),
-        ("DASHED", "Dashed __ __", vec![0.5 * s * 0.01, -0.25 * s * 0.01]),
+        (
+            "DASHED",
+            "Dashed __ __",
+            vec![0.5 * s * 0.01, -0.25 * s * 0.01],
+        ),
     ] {
         pair(&mut out, 0, "LTYPE");
         pair(&mut out, 2, name);
@@ -303,7 +338,11 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
         pair(&mut out, 3, text);
         pair(&mut out, 72, "65");
         pair(&mut out, 73, &elements.len().to_string());
-        pair(&mut out, 40, &format!("{}", elements.iter().map(|e| e.abs()).sum::<f64>()));
+        pair(
+            &mut out,
+            40,
+            &format!("{}", elements.iter().map(|e| e.abs()).sum::<f64>()),
+        );
         for e in elements {
             pair(&mut out, 49, &format!("{e}"));
         }
@@ -312,7 +351,11 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
     pair(&mut out, 0, "TABLE");
     pair(&mut out, 2, "LAYER");
     pair(&mut out, 70, "3");
-    for (name, colour, ltype) in [("VISIBLE", "7", "CONTINUOUS"), ("HIDDEN", "8", "DASHED"), ("DIM", "3", "CONTINUOUS")] {
+    for (name, colour, ltype) in [
+        ("VISIBLE", "7", "CONTINUOUS"),
+        ("HIDDEN", "8", "DASHED"),
+        ("DIM", "3", "CONTINUOUS"),
+    ] {
         pair(&mut out, 0, "LAYER");
         pair(&mut out, 2, name);
         pair(&mut out, 70, "0");
@@ -326,7 +369,14 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
     for l in lines {
         pair(&mut out, 0, "LINE");
         pair(&mut out, 8, if l.hidden { "HIDDEN" } else { "VISIBLE" });
-        for (code, v) in [(10, l.a[0]), (20, l.a[1]), (30, 0.0), (11, l.b[0]), (21, l.b[1]), (31, 0.0)] {
+        for (code, v) in [
+            (10, l.a[0]),
+            (20, l.a[1]),
+            (30, 0.0),
+            (11, l.b[0]),
+            (21, l.b[1]),
+            (31, 0.0),
+        ] {
             pair(&mut out, code, &format!("{:.6}", v * s));
         }
     }
@@ -335,7 +385,14 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
         for [p, q] in segments {
             pair(&mut out, 0, "LINE");
             pair(&mut out, 8, "DIM");
-            for (code, v) in [(10, p[0]), (20, p[1]), (30, 0.0), (11, q[0]), (21, q[1]), (31, 0.0)] {
+            for (code, v) in [
+                (10, p[0]),
+                (20, p[1]),
+                (30, 0.0),
+                (11, q[0]),
+                (21, q[1]),
+                (31, 0.0),
+            ] {
                 pair(&mut out, code, &format!("{:.6}", v * s));
             }
         }
@@ -343,7 +400,14 @@ pub fn write_dxf_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
         pair(&mut out, 8, "DIM");
         // Centred on its point: horizontal justification 1, alignment point
         // 11/21 the same as the insertion point.
-        for (code, v) in [(10, at[0]), (20, at[1]), (30, 0.0), (11, at[0]), (21, at[1]), (31, 0.0)] {
+        for (code, v) in [
+            (10, at[0]),
+            (20, at[1]),
+            (30, 0.0),
+            (11, at[0]),
+            (21, at[1]),
+            (31, 0.0),
+        ] {
             pair(&mut out, code, &format!("{:.6}", v * s));
         }
         pair(&mut out, 40, &format!("{:.6}", height * s));
@@ -363,11 +427,20 @@ pub fn write_svg(lines: &[Line2], metres_per_unit: f64, unit: &str) -> String {
 }
 
 /// The same, with dimensions in green.
-pub fn write_svg_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64, unit: &str) -> String {
+pub fn write_svg_with(
+    lines: &[Line2],
+    dims: &[Dimension2],
+    metres_per_unit: f64,
+    unit: &str,
+) -> String {
     let s = 1.0 / metres_per_unit;
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
     let drawn: Vec<[[f64; 2]; 2]> = dims.iter().flat_map(|d| dimension_lines(d).0).collect();
-    for p in lines.iter().flat_map(|l| [l.a, l.b]).chain(drawn.iter().flatten().copied()) {
+    for p in lines
+        .iter()
+        .flat_map(|l| [l.a, l.b])
+        .chain(drawn.iter().flatten().copied())
+    {
         lo = [lo[0].min(p[0] * s), lo[1].min(p[1] * s)];
         hi = [hi[0].max(p[0] * s), hi[1].max(p[1] * s)];
     }
@@ -386,10 +459,20 @@ pub fn write_svg_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
         -hi[1] - margin
     );
     for (hidden, style) in [
-        (true, format!("stroke=\"#888\" stroke-dasharray=\"{:.6} {:.6}\"", stroke * 6.0, stroke * 3.0)),
+        (
+            true,
+            format!(
+                "stroke=\"#888\" stroke-dasharray=\"{:.6} {:.6}\"",
+                stroke * 6.0,
+                stroke * 3.0
+            ),
+        ),
         (false, "stroke=\"#000\"".to_string()),
     ] {
-        let _ = writeln!(out, " <g fill=\"none\" stroke-width=\"{stroke:.6}\" {style}>");
+        let _ = writeln!(
+            out,
+            " <g fill=\"none\" stroke-width=\"{stroke:.6}\" {style}>"
+        );
         for l in lines.iter().filter(|l| l.hidden == hidden) {
             let _ = writeln!(
                 out,
@@ -403,7 +486,10 @@ pub fn write_svg_with(lines: &[Line2], dims: &[Dimension2], metres_per_unit: f64
         out.push_str(" </g>\n");
     }
     if !dims.is_empty() {
-        let _ = writeln!(out, " <g fill=\"none\" stroke-width=\"{stroke:.6}\" stroke=\"#1a7f37\">");
+        let _ = writeln!(
+            out,
+            " <g fill=\"none\" stroke-width=\"{stroke:.6}\" stroke=\"#1a7f37\">"
+        );
         for [p, q] in &drawn {
             let _ = writeln!(
                 out,
@@ -457,7 +543,10 @@ mod tests {
         let (w, h) = (&dimension_lines(&dims[0]), &dimension_lines(&dims[1]));
         assert!(w.1[1] < -1.0, "under: {:?}", w.1);
         assert!(h.1[0] > 1.0, "beside: {:?}", h.1);
-        assert!(w.2.abs() < 1e-9 && (h.2 - 90.0).abs() < 1e-9, "read along their lines");
+        assert!(
+            w.2.abs() < 1e-9 && (h.2 - 90.0).abs() < 1e-9,
+            "read along their lines"
+        );
         let dxf = write_dxf_with(&lines, &dims, 1.0);
         assert!(dxf.contains("DIM") && dxf.matches("\nTEXT\n").count() == 2);
         let svg = write_svg_with(&lines, &dims, 1.0, "");
@@ -483,7 +572,10 @@ mod tests {
         let small = kreate_mesh::primitives::cube(1.0);
         let parts = [
             (&big, DAffine3::IDENTITY),
-            (&small, DAffine3::from_translation(DVec3::new(0.0, 3.0, 0.0))),
+            (
+                &small,
+                DAffine3::from_translation(DVec3::new(0.0, 3.0, 0.0)),
+            ),
         ];
         let lines = project_drawing(&parts, View::Front, 0.5);
         assert!((total(&lines, false) - 8.0).abs() < 1e-6, "{lines:?}");
@@ -493,8 +585,16 @@ mod tests {
     #[test]
     fn dxf_and_svg_carry_the_lines_in_the_unit() {
         let lines = [
-            Line2 { a: [0.0, 0.0], b: [0.01, 0.0], hidden: false },
-            Line2 { a: [0.0, 0.0], b: [0.0, 0.02], hidden: true },
+            Line2 {
+                a: [0.0, 0.0],
+                b: [0.01, 0.0],
+                hidden: false,
+            },
+            Line2 {
+                a: [0.0, 0.0],
+                b: [0.0, 0.02],
+                hidden: true,
+            },
         ];
         let dxf = write_dxf(&lines, 1e-3);
         assert!(dxf.contains("$INSUNITS\n70\n4\n"));

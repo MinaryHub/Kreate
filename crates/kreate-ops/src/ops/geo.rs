@@ -29,10 +29,7 @@ fn graph(doc: &Document) -> Option<&GeoGraph> {
 
 fn graph_mut<'d>(doc: &'d mut DocMut<'_>) -> Option<&'d mut GeoGraph> {
     let id = doc.document().selection.active?;
-    doc.document_mut()
-        .object_mut(id)?
-        .geometry_nodes
-        .as_mut()
+    doc.document_mut().object_mut(id)?.geometry_nodes.as_mut()
 }
 
 fn has_graph(doc: &Document) -> bool {

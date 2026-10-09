@@ -63,7 +63,10 @@ pub fn limited_dissolve(mesh: &mut BMesh, angle: f32) -> Result<usize, BmError> 
     }
     let mut groups: std::collections::BTreeMap<usize, Vec<FaceId>> = Default::default();
     for f in &faces {
-        groups.entry(root(&mut parent, slot(*f))).or_default().push(*f);
+        groups
+            .entry(root(&mut parent, slot(*f)))
+            .or_default()
+            .push(*f);
     }
     let before = mesh.num_faces();
     for group in groups.into_values().filter(|g| g.len() > 1) {

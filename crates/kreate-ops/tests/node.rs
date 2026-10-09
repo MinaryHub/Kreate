@@ -503,7 +503,14 @@ fn every_graph_edit_replays_from_the_history() {
 fn duplicating_copies_the_nodes_and_their_own_wires_and_never_the_surface() {
     let (registry, mut history, mut doc, ctx) = wired();
     let (material, _) = textured_cube(&mut doc);
-    run(&registry, &mut history, &mut doc, &ctx, "material.use_nodes", &[]);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
     let before = graph(&doc, material);
     // Every node, surface included: the surface is left out, and of the
     // wires only those between two copied nodes are made again.
@@ -524,7 +531,11 @@ fn duplicating_copies_the_nodes_and_their_own_wires_and_never_the_surface() {
     let copied = before.nodes.len() - 1;
     assert_eq!(after.nodes.len(), before.nodes.len() + copied);
     assert_eq!(
-        after.nodes.iter().filter(|n| matches!(n.kind, NodeKind::Surface { .. })).count(),
+        after
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Surface { .. }))
+            .count(),
         1
     );
     let surface = before.output().unwrap();
@@ -535,11 +546,18 @@ fn duplicating_copies_the_nodes_and_their_own_wires_and_never_the_surface() {
         .count();
     assert_eq!(after.links.len(), before.links.len() + internal);
     // Moved by the offset.
-    let first = before.nodes.iter().position(|n| !matches!(n.kind, NodeKind::Surface { .. })).unwrap();
+    let first = before
+        .nodes
+        .iter()
+        .position(|n| !matches!(n.kind, NodeKind::Surface { .. }))
+        .unwrap();
     let copy = &after.nodes[before.nodes.len()];
     assert_eq!(
         copy.position,
-        [before.nodes[first].position[0] + 30.0, before.nodes[first].position[1] + 10.0]
+        [
+            before.nodes[first].position[0] + 30.0,
+            before.nodes[first].position[1] + 10.0
+        ]
     );
     // From another material, by name: a paste.
     let other = doc.add_material(Material {

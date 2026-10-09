@@ -291,7 +291,9 @@ pub fn area_panels(doc: &Document) -> Vec<AreaPanel> {
                     )
                 }
                 AreaShape::Disc { radius } => ellipse(radius as f32, radius as f32),
-                AreaShape::Ellipse { width, height } => ellipse((width * 0.5) as f32, (height * 0.5) as f32),
+                AreaShape::Ellipse { width, height } => {
+                    ellipse((width * 0.5) as f32, (height * 0.5) as f32)
+                }
             };
             let normals = vec![kreate_math::Vec3::NEG_Z; positions.len()];
             Some(AreaPanel {
@@ -343,10 +345,16 @@ mod tests {
     fn an_area_light_is_a_panel_to_the_path_tracer_and_not_a_lamp() {
         use kreate_scene::AreaShape;
         let (doc, placed) = one(LightKind::Area {
-            shape: AreaShape::Rect { width: 2.0, height: 1.0 },
+            shape: AreaShape::Rect {
+                width: 2.0,
+                height: 1.0,
+            },
             spread: std::f64::consts::PI,
         });
-        assert!(placed.traced_as_geometry, "the lamp sampling would count it twice");
+        assert!(
+            placed.traced_as_geometry,
+            "the lamp sampling would count it twice"
+        );
         let panels = area_panels(&doc);
         assert_eq!(panels.len(), 1);
         let p = &panels[0];

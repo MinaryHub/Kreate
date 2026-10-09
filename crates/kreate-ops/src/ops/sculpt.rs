@@ -42,7 +42,10 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 }
 
 fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
-    doc.selection.active.and_then(|a| doc.object(a)).and_then(|o| o.mesh())
+    doc.selection
+        .active
+        .and_then(|a| doc.object(a))
+        .and_then(|o| o.mesh())
 }
 
 fn has_mesh(_ctx: &Context, doc: &Document) -> bool {
@@ -52,8 +55,20 @@ fn has_mesh(_ctx: &Context, doc: &Document) -> bool {
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct StrokeParams {
     #[param(variants(
-        "draw", "smooth", "grab", "inflate", "clay_strips", "crease", "flatten", "scrape", "fill",
-        "pinch", "layer", "snake_hook", "mask", "face_set"
+        "draw",
+        "smooth",
+        "grab",
+        "inflate",
+        "clay_strips",
+        "crease",
+        "flatten",
+        "scrape",
+        "fill",
+        "pinch",
+        "layer",
+        "snake_hook",
+        "mask",
+        "face_set"
     ))]
     pub brush: u32,
     /// Where the brush touched: x, y, z and radius per dab, in the mesh's space.
@@ -152,9 +167,13 @@ fn builtin_alpha(name: &str) -> Option<Alpha> {
                 let bottom = g(ix, iy + 1) + (g(ix + 1, iy + 1) - g(ix, iy + 1)) * s(fx);
                 top + (bottom - top) * s(fy)
             };
-            Some(at(&|u, v| 0.65 * octave(u, v, 4.0) + 0.35 * octave(u, v, 8.0)))
+            Some(at(&|u, v| {
+                0.65 * octave(u, v, 4.0) + 0.35 * octave(u, v, 8.0)
+            }))
         }
-        "stripes" => Some(at(&|u, _| 0.5 + 0.5 * (u * std::f32::consts::TAU * 6.0).sin())),
+        "stripes" => Some(at(&|u, _| {
+            0.5 + 0.5 * (u * std::f32::consts::TAU * 6.0).sin()
+        })),
         "dots" => Some(at(&|u, v| {
             let (x, y) = ((u * 6.0).fract() - 0.5, (v * 6.0).fract() - 0.5);
             1.0 - ((x * x + y * y).sqrt() * 3.0).min(1.0)
@@ -168,7 +187,10 @@ fn image_alpha(image: &kreate_scene::Image) -> Alpha {
     use kreate_scene::PixelFormat;
     let (w, h) = (image.width().max(1), image.height().max(1));
     let step = (w.max(h) as f32 / 256.0).max(1.0);
-    let (aw, ah) = (((w as f32 / step) as u32).max(1), ((h as f32 / step) as u32).max(1));
+    let (aw, ah) = (
+        ((w as f32 / step) as u32).max(1),
+        ((h as f32 / step) as u32).max(1),
+    );
     let tile = kreate_scene::TILE;
     let bpp = image.format.bytes_per_pixel();
     let half = |b: [u8; 2]| -> f32 {
@@ -196,7 +218,10 @@ fn image_alpha(image: &kreate_scene::Image) -> Alpha {
                     match image.format {
                         PixelFormat::R8 => b[at] as f32 / 255.0,
                         PixelFormat::Rgba8 => {
-                            (0.2126 * b[at] as f32 + 0.7152 * b[at + 1] as f32 + 0.0722 * b[at + 2] as f32) / 255.0
+                            (0.2126 * b[at] as f32
+                                + 0.7152 * b[at + 1] as f32
+                                + 0.0722 * b[at + 2] as f32)
+                                / 255.0
                         }
                         PixelFormat::Rgba16F => {
                             let c = |k: usize| half([b[at + 2 * k], b[at + 2 * k + 1]]);
@@ -222,7 +247,10 @@ fn alpha_for(doc: &Document, name: &str) -> Result<Option<Arc<Alpha>>, OpError> 
         return Ok(None);
     }
     let image = doc.images().find(|(id, img)| {
-        img.name == name || doc.image_uid(*id).is_some_and(|u| u.raw().to_string() == name)
+        img.name == name
+            || doc
+                .image_uid(*id)
+                .is_some_and(|u| u.raw().to_string() == name)
     });
     let revision = image.map_or(0, |(_, img)| img.revision());
     let mut held = ALPHAS.lock().unwrap_or_else(|e| e.into_inner());
@@ -256,7 +284,12 @@ pub fn stroke_of(doc: &Document, params: &StrokeParams) -> Result<(Stroke, Vec<D
         .map(|(k, c)| Dab {
             centre: Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32),
             radius: c[3] as f32,
-            pressure: params.pressures.get(k).copied().unwrap_or(1.0).clamp(0.0, 1.0) as f32,
+            pressure: params
+                .pressures
+                .get(k)
+                .copied()
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0) as f32,
         })
         .filter(|d| d.centre.is_finite() && d.radius.is_finite() && d.radius > 0.0)
         .collect();
@@ -360,7 +393,11 @@ impl Operator for SculptMask {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };
@@ -397,7 +434,11 @@ impl Operator for FaceSetFromMask {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(_params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };
@@ -409,7 +450,10 @@ impl Operator for FaceSetFromMask {
         let next = sets.iter().copied().max().unwrap_or(0) + 1;
         let mut any = false;
         for (f, set) in sets.iter_mut().enumerate() {
-            if m.face_verts(f as u32).iter().all(|v| mask[*v as usize] > 0.5) {
+            if m.face_verts(f as u32)
+                .iter()
+                .all(|v| mask[*v as usize] > 0.5)
+            {
                 *set = next;
                 any = true;
             }
@@ -453,7 +497,11 @@ impl Operator for FaceSetVisibility {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         use kreate_mesh::selection;
         use kreate_mesh::SelectMode;
         let Some(mesh) = active_mesh(doc.document()) else {
@@ -525,7 +573,11 @@ impl Operator for VoxelRemesh {
     fn poll(ctx: &Context, doc: &Document) -> bool {
         has_mesh(ctx, doc)
     }
-    fn execute(params: &Self::Params, doc: &mut DocMut<'_>, _ctx: &Context) -> Result<OpResult, OpError> {
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };

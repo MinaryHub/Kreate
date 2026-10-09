@@ -626,8 +626,11 @@ impl StrokeCache {
             mesh.positions_mut().copy_from_slice(&self.current);
         }
         if self.masked {
-            mesh.attributes_mut()
-                .insert(MASK, Domain::Point, AttrData::F32(Arc::new(self.mask.clone())));
+            mesh.attributes_mut().insert(
+                MASK,
+                Domain::Point,
+                AttrData::F32(Arc::new(self.mask.clone())),
+            );
         }
         if self.painted_sets {
             mesh.attributes_mut().insert(
@@ -657,7 +660,11 @@ impl StrokeCache {
             }
         }
         if let Some(alpha) = &stroke.alpha {
-            let view = if stroke.view == Vec3::ZERO { Vec3::Z } else { turn * (stroke.view * sign) };
+            let view = if stroke.view == Vec3::ZERO {
+                Vec3::Z
+            } else {
+                turn * (stroke.view * sign)
+            };
             let (u, v) = basis(view);
             let d = self.original[i] - dab.centre;
             let size = 2.0 * dab.radius.max(1e-6);
@@ -678,9 +685,18 @@ impl StrokeCache {
             let delta = turn * (stroke.grab * sign);
             let mut under = Vec::new();
             self.grid
-                .within(&self.original, dab.centre, dab.radius, |i, d| under.push((i, d)));
+                .within(&self.original, dab.centre, dab.radius, |i, d| {
+                    under.push((i, d))
+                });
             for (i, d) in under {
-                let w = self.reach(i, stroke.falloff.weight(d, dab.radius), &dab, stroke, sign, turn);
+                let w = self.reach(
+                    i,
+                    stroke.falloff.weight(d, dab.radius),
+                    &dab,
+                    stroke,
+                    sign,
+                    turn,
+                );
                 if w > 0.0 {
                     self.current[i] += delta * w;
                     self.moved = true;
@@ -707,7 +723,9 @@ impl StrokeCache {
         } else {
             let mut found = Vec::new();
             self.grid
-                .within(&self.original, dab.centre, dab.radius, |i, d| found.push((i, d)));
+                .within(&self.original, dab.centre, dab.radius, |i, d| {
+                    found.push((i, d))
+                });
             for (i, d) in found {
                 let w = stroke.falloff.weight(d, dab.radius);
                 if w > 0.0 {
@@ -788,7 +806,10 @@ pub(crate) fn displace<'n>(
         .fold(Vec3::ZERO, |s, (i, w)| s + normal[*i] * *w)
         .normalize_or_zero();
     let total: f32 = under.iter().map(|(_, w)| w).sum();
-    let middle = under.iter().fold(Vec3::ZERO, |s, (i, w)| s + current[*i] * *w) / total.max(1e-12);
+    let middle = under
+        .iter()
+        .fold(Vec3::ZERO, |s, (i, w)| s + current[*i] * *w)
+        / total.max(1e-12);
     let r = dab.radius;
     let mut moved = false;
     match stroke.brush {
@@ -811,7 +832,11 @@ pub(crate) fn displace<'n>(
         Brush::ClayStrips | Brush::Flatten | Brush::Scrape | Brush::Fill => {
             // The plane: through the surface for flatten, scrape and fill;
             // a little above it for clay, which is what builds up.
-            let lift = if stroke.brush == Brush::ClayStrips { r * 0.15 * strength * invert } else { 0.0 };
+            let lift = if stroke.brush == Brush::ClayStrips {
+                r * 0.15 * strength * invert
+            } else {
+                0.0
+            };
             let plane = middle + area_normal * lift;
             for (i, w) in under {
                 let p = current[*i];
@@ -833,7 +858,12 @@ pub(crate) fn displace<'n>(
             moved = true;
         }
         Brush::Pinch | Brush::Crease => {
-            let pinch = if stroke.brush == Brush::Crease { 0.5 } else { 1.0 } * strength * invert;
+            let pinch = if stroke.brush == Brush::Crease {
+                0.5
+            } else {
+                1.0
+            } * strength
+                * invert;
             for (i, w) in under {
                 let p = current[*i];
                 let to = dab.centre - p;
@@ -855,7 +885,11 @@ pub(crate) fn displace<'n>(
                 let n = normal[*i];
                 let have = (current[*i] - original[*i]).dot(n);
                 let want = height * *w;
-                let more = if invert > 0.0 { (want - have).max(0.0) } else { (want - have).min(0.0) };
+                let more = if invert > 0.0 {
+                    (want - have).max(0.0)
+                } else {
+                    (want - have).min(0.0)
+                };
                 current[*i] += n * more;
             }
             moved = true;
@@ -870,7 +904,9 @@ pub(crate) fn displace<'n>(
             }
         }
     }
-    if stroke.auto_smooth > 0.0 && !matches!(stroke.brush, Brush::Smooth | Brush::Mask | Brush::FaceSet) {
+    if stroke.auto_smooth > 0.0
+        && !matches!(stroke.brush, Brush::Smooth | Brush::Mask | Brush::FaceSet)
+    {
         moved |= smooth(under, stroke.auto_smooth.clamp(0.0, 1.0), current, &near);
     }
     moved
@@ -893,7 +929,8 @@ fn smooth<'n>(
             if w <= 0.0 || n.is_empty() {
                 return None;
             }
-            let average = n.iter().fold(Vec3::ZERO, |s, k| s + current[*k as usize]) / n.len() as f32;
+            let average =
+                n.iter().fold(Vec3::ZERO, |s, k| s + current[*k as usize]) / n.len() as f32;
             Some((*i, current[*i].lerp(average, w)))
         })
         .collect();
@@ -1014,7 +1051,14 @@ mod tests {
             .filter(|p| p.x.abs() > 1.1 || p.y.abs() > 1.1)
             .all(|p| p.z == 0.0));
         let mut m = grid();
-        apply(&mut m, &[dab(0.0, 0.0, 1.0)], &Stroke { invert: true, ..stroke(Brush::Draw) });
+        apply(
+            &mut m,
+            &[dab(0.0, 0.0, 1.0)],
+            &Stroke {
+                invert: true,
+                ..stroke(Brush::Draw)
+            },
+        );
         assert!(bottom(&m) < -0.1);
     }
 
@@ -1030,7 +1074,10 @@ mod tests {
     #[test]
     fn grab_carries_what_was_under_the_first_dab() {
         let mut m = grid();
-        let s = Stroke { grab: Vec3::new(0.0, 0.0, 2.0), ..stroke(Brush::Grab) };
+        let s = Stroke {
+            grab: Vec3::new(0.0, 0.0, 2.0),
+            ..stroke(Brush::Grab)
+        };
         apply(&mut m, &[dab(0.0, 0.0, 1.0)], &s);
         assert!((top(&m) - 2.0).abs() < 0.05, "{}", top(&m));
     }
@@ -1038,7 +1085,10 @@ mod tests {
     #[test]
     fn symmetry_does_the_same_on_each_mirrored_side_and_round_the_axis() {
         let mut m = grid();
-        let s = Stroke { mirror: [true, true, false], ..stroke(Brush::Draw) };
+        let s = Stroke {
+            mirror: [true, true, false],
+            ..stroke(Brush::Draw)
+        };
         apply(&mut m, &[dab(1.0, 0.75, 0.5)], &s);
         let z = at(&m, 1.0, 0.75).z;
         assert!(z > 0.0);
@@ -1046,11 +1096,18 @@ mod tests {
             assert!((at(&m, x, y).z - z).abs() < 1e-5, "({x}, {y})");
         }
         let mut m = grid();
-        let s = Stroke { radial: 4, ..stroke(Brush::Draw) };
+        let s = Stroke {
+            radial: 4,
+            ..stroke(Brush::Draw)
+        };
         apply(&mut m, &[dab(1.0, 0.0, 0.4)], &s);
         let z = at(&m, 1.0, 0.0).z;
         for (x, y) in [(0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)] {
-            assert!((at(&m, x, y).z - z).abs() < 1e-4, "({x}, {y}): {} vs {z}", at(&m, x, y).z);
+            assert!(
+                (at(&m, x, y).z - z).abs() < 1e-4,
+                "({x}, {y}): {} vs {z}",
+                at(&m, x, y).z
+            );
         }
     }
 
@@ -1062,10 +1119,20 @@ mod tests {
         assert!(mask.iter().any(|v| *v > 0.9), "painted");
         assert!(top(&m) == 0.0, "the mask brush moves nothing");
         apply(&mut m, &[dab(0.0, 0.0, 3.0)], &stroke(Brush::Draw));
-        assert!(at(&m, 1.0, 0.0).z < at(&m, -1.0, 0.0).z * 0.2, "masked side barely moved");
+        assert!(
+            at(&m, 1.0, 0.0).z < at(&m, -1.0, 0.0).z * 0.2,
+            "masked side barely moved"
+        );
         // Inverted, it clears — wider, since the draw lifted the mask's edge
         // away from where it was painted.
-        apply(&mut m, &[dab(1.0, 0.0, 1.5); 3], &Stroke { invert: true, ..stroke(Brush::Mask) });
+        apply(
+            &mut m,
+            &[dab(1.0, 0.0, 1.5); 3],
+            &Stroke {
+                invert: true,
+                ..stroke(Brush::Mask)
+            },
+        );
         assert!(mask_of(&m).iter().all(|v| *v < 0.01));
     }
 
@@ -1086,9 +1153,17 @@ mod tests {
     fn hidden_vertices_are_never_moved() {
         let mut m = grid();
         let hide: Vec<bool> = m.positions().iter().map(|p| p.x > 0.0).collect();
-        m.attributes_mut().insert(names::HIDE_VERT, Domain::Point, AttrData::Bool(Arc::new(hide)));
+        m.attributes_mut().insert(
+            names::HIDE_VERT,
+            Domain::Point,
+            AttrData::Bool(Arc::new(hide)),
+        );
         apply(&mut m, &[dab(0.0, 0.0, 2.0)], &stroke(Brush::Draw));
-        assert!(m.positions().iter().filter(|p| p.x > 0.0).all(|p| p.z == 0.0));
+        assert!(m
+            .positions()
+            .iter()
+            .filter(|p| p.x > 0.0)
+            .all(|p| p.z == 0.0));
         assert!(top(&m) > 0.0);
     }
 
@@ -1096,11 +1171,23 @@ mod tests {
     fn flatten_presses_a_bump_down_and_scrape_only_cuts_what_stands_up() {
         let mut bumpy = grid();
         apply(&mut bumpy, &[dab(0.0, 0.0, 0.5)], &stroke(Brush::Draw));
-        apply(&mut bumpy, &[dab(1.0, 0.0, 0.5)], &Stroke { invert: true, ..stroke(Brush::Draw) });
+        apply(
+            &mut bumpy,
+            &[dab(1.0, 0.0, 0.5)],
+            &Stroke {
+                invert: true,
+                ..stroke(Brush::Draw)
+            },
+        );
         let (hill, pit) = (top(&bumpy), bottom(&bumpy));
         let mut m = bumpy.clone();
         apply(&mut m, &[dab(0.5, 0.0, 1.5); 6], &stroke(Brush::Flatten));
-        assert!(top(&m) < hill * 0.5 && bottom(&m) > pit * 0.5, "{} {}", top(&m), bottom(&m));
+        assert!(
+            top(&m) < hill * 0.5 && bottom(&m) > pit * 0.5,
+            "{} {}",
+            top(&m),
+            bottom(&m)
+        );
         let mut m = bumpy.clone();
         apply(&mut m, &[dab(0.5, 0.0, 1.5); 6], &stroke(Brush::Scrape));
         assert!(top(&m) < hill * 0.7, "cut down: {}", top(&m));
@@ -1117,7 +1204,12 @@ mod tests {
         let mut many = grid();
         apply(&mut many, &[dab(0.0, 0.0, 1.0); 10], &stroke(Brush::Layer));
         assert!(top(&once) > 0.0);
-        assert!((top(&many) - top(&once)).abs() < 1e-5, "one height: {} vs {}", top(&many), top(&once));
+        assert!(
+            (top(&many) - top(&once)).abs() < 1e-5,
+            "one height: {} vs {}",
+            top(&many),
+            top(&once)
+        );
     }
 
     #[test]
@@ -1125,7 +1217,11 @@ mod tests {
         let mut m = grid();
         let before = at(&m, 0.75, 0.0);
         apply(&mut m, &[dab(0.0, 0.0, 1.2)], &stroke(Brush::Pinch));
-        let moved = m.positions().iter().find(|p| (p.y - before.y).abs() < 1e-4 && p.x > 0.5 && p.x < 0.8).copied();
+        let moved = m
+            .positions()
+            .iter()
+            .find(|p| (p.y - before.y).abs() < 1e-4 && p.x > 0.5 && p.x < 0.8)
+            .copied();
         assert!(moved.unwrap().x < before.x, "toward the middle");
         let mut m = grid();
         apply(&mut m, &[dab(0.0, 0.0, 1.0)], &stroke(Brush::Crease));
@@ -1135,7 +1231,9 @@ mod tests {
     #[test]
     fn snake_hook_pulls_the_surface_out_along_the_stroke() {
         let mut m = grid();
-        let dabs: Vec<Dab> = (0..8).map(|k| Dab::new(Vec3::new(0.0, 0.0, k as f32 * 0.1), 0.5)).collect();
+        let dabs: Vec<Dab> = (0..8)
+            .map(|k| Dab::new(Vec3::new(0.0, 0.0, k as f32 * 0.1), 0.5))
+            .collect();
         apply(&mut m, &dabs, &stroke(Brush::SnakeHook));
         assert!(top(&m) > 0.4, "pulled up with the stroke: {}", top(&m));
     }
@@ -1143,7 +1241,14 @@ mod tests {
     #[test]
     fn the_face_set_brush_paints_the_faces_under_it() {
         let mut m = grid();
-        apply(&mut m, &[dab(0.0, 0.0, 0.6)], &Stroke { face_set: 7, ..stroke(Brush::FaceSet) });
+        apply(
+            &mut m,
+            &[dab(0.0, 0.0, 0.6)],
+            &Stroke {
+                face_set: 7,
+                ..stroke(Brush::FaceSet)
+            },
+        );
         let sets = face_sets_of(&m);
         assert!(sets.contains(&7) && sets.contains(&0));
         assert_eq!(top(&m), 0.0, "and moves nothing");
@@ -1151,30 +1256,64 @@ mod tests {
 
     #[test]
     fn pressure_and_falloff_and_alpha_change_how_much() {
-        let full = { let mut m = grid(); apply(&mut m, &[dab(0.0, 0.0, 1.0)], &stroke(Brush::Draw)); top(&m) };
+        let full = {
+            let mut m = grid();
+            apply(&mut m, &[dab(0.0, 0.0, 1.0)], &stroke(Brush::Draw));
+            top(&m)
+        };
         let light = {
             let mut m = grid();
-            apply(&mut m, &[Dab { pressure: 0.25, ..dab(0.0, 0.0, 1.0) }], &stroke(Brush::Draw));
+            apply(
+                &mut m,
+                &[Dab {
+                    pressure: 0.25,
+                    ..dab(0.0, 0.0, 1.0)
+                }],
+                &stroke(Brush::Draw),
+            );
             top(&m)
         };
         assert!((light - full * 0.25).abs() < 1e-4, "{light} vs {full}");
         // Constant reaches the rim at full strength; smooth has nothing there.
         let rim = |falloff| {
             let mut m = grid();
-            apply(&mut m, &[dab(0.0, 0.0, 1.0)], &Stroke { falloff, ..stroke(Brush::Inflate) });
+            apply(
+                &mut m,
+                &[dab(0.0, 0.0, 1.0)],
+                &Stroke {
+                    falloff,
+                    ..stroke(Brush::Inflate)
+                },
+            );
             at(&m, 0.75, 0.0).z
         };
         assert!(rim(Falloff::Constant) > rim(Falloff::Smooth) * 2.0);
         // A black alpha stops it altogether.
-        let black = Arc::new(Alpha { width: 2, height: 2, values: vec![0.0; 4] });
+        let black = Arc::new(Alpha {
+            width: 2,
+            height: 2,
+            values: vec![0.0; 4],
+        });
         let mut m = grid();
-        assert!(!apply(&mut m, &[dab(0.0, 0.0, 1.0)], &Stroke { alpha: Some(black), view: -Vec3::Z, ..stroke(Brush::Draw) }));
+        assert!(!apply(
+            &mut m,
+            &[dab(0.0, 0.0, 1.0)],
+            &Stroke {
+                alpha: Some(black),
+                view: -Vec3::Z,
+                ..stroke(Brush::Draw)
+            }
+        ));
     }
 
     #[test]
     fn front_faces_only_leaves_the_back_of_a_sphere() {
         let mut m = primitives::uv_sphere(1.0, 24, 12);
-        let s = Stroke { front_only: true, view: -Vec3::Z, ..stroke(Brush::Inflate) };
+        let s = Stroke {
+            front_only: true,
+            view: -Vec3::Z,
+            ..stroke(Brush::Inflate)
+        };
         apply(&mut m, &[Dab::new(Vec3::ZERO, 3.0)], &s);
         let base = primitives::uv_sphere(1.0, 24, 12);
         for (p, q) in m.positions().iter().zip(base.positions()) {
@@ -1187,10 +1326,21 @@ mod tests {
 
     #[test]
     fn auto_smooth_softens_a_draw() {
-        let sharp = { let mut m = grid(); apply(&mut m, &[dab(0.0, 0.0, 0.4); 3], &stroke(Brush::Draw)); top(&m) };
+        let sharp = {
+            let mut m = grid();
+            apply(&mut m, &[dab(0.0, 0.0, 0.4); 3], &stroke(Brush::Draw));
+            top(&m)
+        };
         let soft = {
             let mut m = grid();
-            apply(&mut m, &[dab(0.0, 0.0, 0.4); 3], &Stroke { auto_smooth: 0.8, ..stroke(Brush::Draw) });
+            apply(
+                &mut m,
+                &[dab(0.0, 0.0, 0.4); 3],
+                &Stroke {
+                    auto_smooth: 0.8,
+                    ..stroke(Brush::Draw)
+                },
+            );
             top(&m)
         };
         assert!(soft < sharp, "{soft} < {sharp}");
@@ -1203,7 +1353,12 @@ mod tests {
     fn a_stroke_continued_from_its_cache_matches_one_run_from_scratch() {
         let base = primitives::uv_sphere(1.0, 48, 24);
         let dabs: Vec<Dab> = (0..9)
-            .map(|i| Dab::new(Vec3::new((i as f32 * 0.3).cos(), (i as f32 * 0.3).sin(), 0.2), 0.35))
+            .map(|i| {
+                Dab::new(
+                    Vec3::new((i as f32 * 0.3).cos(), (i as f32 * 0.3).sin(), 0.2),
+                    0.35,
+                )
+            })
             .collect();
         for brush in Brush::ALL {
             for mirror_x in [false, true] {
@@ -1223,7 +1378,11 @@ mod tests {
                     cache.run(&mut m, &dabs[..n], &s);
                     last = m;
                 }
-                assert_eq!(last.positions(), whole.positions(), "{brush:?} mirror {mirror_x}");
+                assert_eq!(
+                    last.positions(),
+                    whole.positions(),
+                    "{brush:?} mirror {mirror_x}"
+                );
                 assert_eq!(mask_of(&last), mask_of(&whole), "{brush:?}");
                 assert_eq!(face_sets_of(&last), face_sets_of(&whole), "{brush:?}");
             }
@@ -1240,7 +1399,10 @@ mod tests {
         cache.run(&mut m, &dabs, &s);
         assert!(!cache.fits(&m, &s, &dabs), "the mesh it already changed");
         assert!(!cache.fits(&base, &s, &dabs[..1]), "fewer dabs");
-        let harder = Stroke { strength: 0.5, ..s.clone() };
+        let harder = Stroke {
+            strength: 0.5,
+            ..s.clone()
+        };
         assert!(!cache.fits(&base, &harder, &dabs));
         assert!(cache.fits(&base, &s, &dabs));
     }
@@ -1278,9 +1440,16 @@ mod tests {
 
     #[test]
     fn an_alpha_samples_bilinear_and_wraps() {
-        let a = Alpha { width: 2, height: 1, values: vec![0.0, 1.0] };
+        let a = Alpha {
+            width: 2,
+            height: 1,
+            values: vec![0.0, 1.0],
+        };
         assert!((a.sample(0.25, 0.5) - 0.0).abs() < 1e-6);
         assert!((a.sample(0.5, 0.5) - 0.5).abs() < 1e-6);
-        assert!((a.sample(1.25, 0.5) - a.sample(0.25, 0.5)).abs() < 1e-6, "wraps");
+        assert!(
+            (a.sample(1.25, 0.5) - a.sample(0.25, 0.5)).abs() < 1e-6,
+            "wraps"
+        );
     }
 }

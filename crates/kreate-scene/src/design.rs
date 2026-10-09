@@ -128,6 +128,9 @@ mod tests {
             points: vec![DVec3::X, DVec3::ZERO, DVec3::Y],
         };
         assert!((a.angle().unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
-        assert!(!Measurement { points: vec![DVec3::ZERO] }.is_valid());
+        assert!(!Measurement {
+            points: vec![DVec3::ZERO]
+        }
+        .is_valid());
     }
 }

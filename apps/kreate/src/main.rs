@@ -603,12 +603,10 @@ impl Gfx {
 ///
 /// The face's fan of triangles, and the one `p` falls in — or, for a point
 /// just off every one of them, the nearest. `None` for a mesh with no UVs.
-fn uv_on_face(
-    mesh: &kreate_mesh::MeshData,
-    face: u32,
-    p: glam::Vec3,
-) -> Option<(glam::Vec2, f64)> {
-    let uvs = mesh.attributes().get_f32x2(kreate_mesh::attribute::names::UV)?;
+fn uv_on_face(mesh: &kreate_mesh::MeshData, face: u32, p: glam::Vec3) -> Option<(glam::Vec2, f64)> {
+    let uvs = mesh
+        .attributes()
+        .get_f32x2(kreate_mesh::attribute::names::UV)?;
     if face >= mesh.num_faces() {
         return None;
     }
@@ -2831,7 +2829,9 @@ impl App {
             .filter_map(|(id, mesh)| {
                 let p = mesh.positions();
                 let first = *p.first()?;
-                let (lo, hi) = p.iter().fold((first, first), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
+                let (lo, hi) = p
+                    .iter()
+                    .fold((first, first), |(lo, hi), q| (lo.min(*q), hi.max(*q)));
                 let to = self.doc.world_transform(*id);
                 let mut wlo = DVec3::splat(f64::MAX);
                 let mut whi = DVec3::splat(f64::MIN);
@@ -3357,8 +3357,14 @@ impl App {
     /// (what selecting will select), in the world, and keeps the counts for
     /// the Object tab.
     fn run_mesh_check(&mut self, thickness: f64) {
-        let Some(id) = self.doc.selection.active else { return };
-        let Some(mesh) = self.doc.object(id).and_then(|o| o.mesh()).and_then(|m| self.doc.mesh(m))
+        let Some(id) = self.doc.selection.active else {
+            return;
+        };
+        let Some(mesh) = self
+            .doc
+            .object(id)
+            .and_then(|o| o.mesh())
+            .and_then(|m| self.doc.mesh(m))
         else {
             return;
         };
@@ -3397,16 +3403,29 @@ impl App {
                 rows[*row].1 += 1;
                 continue;
             }
-            let points: Vec<DVec3> =
-                mesh.positions().iter().map(|p| world.transform_point3(p.as_dvec3())).collect();
+            let points: Vec<DVec3> = mesh
+                .positions()
+                .iter()
+                .map(|p| world.transform_point3(p.as_dvec3()))
+                .collect();
             let (lo, hi) = points.iter().fold(
                 (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
                 |(lo, hi), p| (lo.min(*p), hi.max(*p)),
             );
-            let size = if points.is_empty() { DVec3::ZERO } else { hi - lo };
+            let size = if points.is_empty() {
+                DVec3::ZERO
+            } else {
+                hi - lo
+            };
             let mass = kreate_mesh::measure::mass_properties(&mesh, |p| world.transform_point3(p));
             by_mesh.push((key, rows.len()));
-            rows.push((name, 1, size.to_array(), mass.volume.abs(), mesh.num_faces() as usize));
+            rows.push((
+                name,
+                1,
+                size.to_array(),
+                mass.volume.abs(),
+                mesh.num_faces() as usize,
+            ));
         }
         let per = unit.metres();
         let mut out = format!(
@@ -3453,10 +3472,16 @@ impl App {
         let _ = self.write_drawing(&path, view);
     }
 
-    fn write_drawing(&mut self, path: &std::path::Path, view: kreate_io::drawing::View) -> Result<(), String> {
+    fn write_drawing(
+        &mut self,
+        path: &std::path::Path,
+        view: kreate_io::drawing::View,
+    ) -> Result<(), String> {
         let parts = self.printable_parts();
-        let refs: Vec<(&MeshData, glam::DAffine3)> =
-            parts.iter().map(|(_, mesh, world)| (&**mesh, *world)).collect();
+        let refs: Vec<(&MeshData, glam::DAffine3)> = parts
+            .iter()
+            .map(|(_, mesh, world)| (&**mesh, *world))
+            .collect();
         let lines = kreate_io::drawing::project_drawing(&refs, view, 30f64.to_radians());
         let unit = self.doc.design.length_unit;
         // The overall width and height, written as the scene writes lengths.
@@ -3598,8 +3623,15 @@ impl App {
     fn face_under_pointer(&mut self) -> Option<(ObjectId, DVec3, DVec3)> {
         let ndc = self.cursor_ndc()?;
         let aspect = self.viewport_aspect();
-        let hit = self.pick.raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
-        let mesh = self.evaluated.iter().find(|(id, _)| *id == hit.object)?.1.clone();
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let mesh = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == hit.object)?
+            .1
+            .clone();
         let world = self.doc.world_transform(hit.object);
         let ring = mesh.face_verts(hit.face);
         let points: Vec<DVec3> = ring
@@ -3631,7 +3663,9 @@ impl App {
                     self.status("Align Faces: pick a face of another part");
                     return;
                 }
-                let Some(uid) = self.doc.object_uid(moving) else { return };
+                let Some(uid) = self.doc.object_uid(moving) else {
+                    return;
+                };
                 let mut p = PropertyMap::new();
                 p.set("uid", PropertyValue::Text(uid.raw().to_string()));
                 p.set("from", PropertyValue::Vec3(from.to_array()));
@@ -3695,7 +3729,10 @@ impl App {
         tool.hover = caught.or_else(|| {
             let ndc = self.cursor_ndc()?;
             let eye = self.camera.eye();
-            let dir = self.camera.ray_direction(ndc, self.viewport_aspect()).as_dvec3();
+            let dir = self
+                .camera
+                .ray_direction(ndc, self.viewport_aspect())
+                .as_dvec3();
             let n = self.camera.forward();
             let through = tool.points.last().copied().unwrap_or(self.doc.cursor);
             let denom = dir.dot(n);
@@ -3712,7 +3749,9 @@ impl App {
     /// on the scene once it has its two points — or three, for an angle.
     fn measure_click(&mut self) {
         let ctrl = self.input.ctrl_down;
-        let Some(tool) = &mut self.measure else { return };
+        let Some(tool) = &mut self.measure else {
+            return;
+        };
         let Some(at) = tool.hover else { return };
         tool.points.push(at);
         if tool.points.len() == 2 && ctrl {
@@ -4303,7 +4342,10 @@ impl App {
         let Some(paths) = rfd::FileDialog::new()
             .add_filter(
                 "Pictures, PDFs and text",
-                &["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "json", "csv", "obj", "gltf", "usda"],
+                &[
+                    "png", "jpg", "jpeg", "gif", "webp", "pdf", "txt", "md", "json", "csv", "obj",
+                    "gltf", "usda",
+                ],
             )
             .add_filter("All files", &["*"])
             .set_title("Attach")
@@ -4335,7 +4377,12 @@ impl App {
             }
         }
         if let Ok(image) = clipboard.get_image() {
-            let n = self.chat_attachments.iter().filter(|a| a.is_image()).count() + 1;
+            let n = self
+                .chat_attachments
+                .iter()
+                .filter(|a| a.is_image())
+                .count()
+                + 1;
             let pasted = kreate::attach::Attachment::from_rgba(
                 format!("pasted-{n}"),
                 image.width as u32,
@@ -4556,7 +4603,10 @@ impl App {
             // starts it and `render_status` follows it.
             "action" => {
                 let id = text("id").ok_or("`id` is required")?;
-                self.dispatch(&Action { op_id: id, params: PropertyMap::new() });
+                self.dispatch(&Action {
+                    op_id: id,
+                    params: PropertyMap::new(),
+                });
                 Ok(json!({ "message": self.ui.status.clone().unwrap_or_default() }))
             }
             "render_status" => Ok(match &self.render_job {
@@ -4850,7 +4900,12 @@ impl App {
                 gfx.viewport.sample_cap = Some((samples / Blur::STEPS).max(1));
             }
             if let Some(job) = self.render_job.as_mut() {
-                job.blur = Some(Blur { step: 0, shutter, base, sum: Vec::new() });
+                job.blur = Some(Blur {
+                    step: 0,
+                    shutter,
+                    base,
+                    sum: Vec::new(),
+                });
             }
             self.set_frame(Blur::time(base, shutter, 0));
         }
@@ -4887,9 +4942,15 @@ impl App {
     /// One step of the render under way, after each drawn frame: counts the
     /// samples, and when the picture is done writes it and moves on.
     fn advance_render_job(&mut self) {
-        let Some(job) = self.render_job.as_mut() else { return };
+        let Some(job) = self.render_job.as_mut() else {
+            return;
+        };
         job.drawn += 1;
-        let (drawn, size, started) = (job.drawn, (job.settings.width, job.settings.height), job.started);
+        let (drawn, size, started) = (
+            job.drawn,
+            (job.settings.width, job.settings.height),
+            job.started,
+        );
         let frames = job.frames;
         let total = job.settings.samples;
         // The first frames of a picture still carry the last one's state —
@@ -4899,7 +4960,9 @@ impl App {
             self.aim_render_camera();
         }
         self.redraw.set(RedrawReason::ACCUMULATE);
-        let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else { return };
+        let Some(v) = self.gfx.as_ref().map(|g| &g.viewport) else {
+            return;
+        };
         let samples = v.path_trace_samples();
         let traced = v.path_tracing();
         let settled = drawn > 3
@@ -4907,22 +4970,33 @@ impl App {
             && ((traced && samples > 0) || (!traced && started.elapsed().as_secs() >= 5));
         if !settled {
             let progress = match frames {
-                Some((f, end)) => format!("rendering frame {f} of {end}: {samples}/{total} samples"),
+                Some((f, end)) => {
+                    format!("rendering frame {f} of {end}: {samples}/{total} samples")
+                }
                 None => format!("rendering: {samples}/{total} samples"),
             };
-            self.status(&format!("{progress}, {:.0} s (Esc stops)", started.elapsed().as_secs_f32()));
+            self.status(&format!(
+                "{progress}, {:.0} s (Esc stops)",
+                started.elapsed().as_secs_f32()
+            ));
             return;
         }
         // Motion blur: this was one moment of the shutter. Added to the
         // mean, and the next moment drawn, until the shutter has closed.
         if self.render_job.as_ref().is_some_and(|j| j.blur.is_some()) {
-            let forward = (self.camera.pivot - self.camera.eye()).normalize_or_zero().as_vec3();
-            let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
+            let forward = (self.camera.pivot - self.camera.eye())
+                .normalize_or_zero()
+                .as_vec3();
+            let exposure =
+                scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
             let passes = self
                 .gfx
                 .as_ref()
                 .ok_or("the window closed".to_string())
-                .and_then(|g| g.viewport.read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward));
+                .and_then(|g| {
+                    g.viewport
+                        .read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward)
+                });
             let Ok(passes) = passes else {
                 self.finish_render_job("motion blur: the picture could not be read back");
                 return;
@@ -4987,37 +5061,59 @@ impl App {
             }
         }
         let shown = match frames {
-            Some(_) => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            Some(_) => path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             None => path.display().to_string(),
         };
-        let message = self
-            .ui
-            .catalog
-            .format("render-saved", kreate_i18n::TextKind::Ui, &[("path", &shown)]);
+        let message = self.ui.catalog.format(
+            "render-saved",
+            kreate_i18n::TextKind::Ui,
+            &[("path", &shown)],
+        );
         self.finish_render_job(&message);
     }
 
     /// Writes the picture on screen to `path`: the display's PNG, or an EXR
     /// of the scene-linear picture with its depth and normal passes.
-    fn write_render(&mut self, path: &std::path::Path, format: kreate_scene::render::OutputFormat) -> Result<(), String> {
+    fn write_render(
+        &mut self,
+        path: &std::path::Path,
+        format: kreate_scene::render::OutputFormat,
+    ) -> Result<(), String> {
         // A motion-blurred picture is the mean of the shutter's moments,
         // shown through the same view transform on the CPU; any other is the
         // one on screen.
-        let blurred: Option<Vec<[f32; 4]>> = self.render_job.as_ref().and_then(|j| j.blur.as_ref()).map(|b| {
-            let n = Blur::STEPS as f32;
-            b.sum.iter().map(|c| [c[0] / n, c[1] / n, c[2] / n, 1.0]).collect()
-        });
+        let blurred: Option<Vec<[f32; 4]>> = self
+            .render_job
+            .as_ref()
+            .and_then(|j| j.blur.as_ref())
+            .map(|b| {
+                let n = Blur::STEPS as f32;
+                b.sum
+                    .iter()
+                    .map(|c| [c[0] / n, c[1] / n, c[2] / n, 1.0])
+                    .collect()
+            });
         let (w, h, png) = match &blurred {
             Some(mean) => {
-                let (w, h) = self.gfx.as_ref().map(|g| g.viewport.render_size()).ok_or("the window closed")?;
+                let (w, h) = self
+                    .gfx
+                    .as_ref()
+                    .map(|g| g.viewport.render_size())
+                    .ok_or("the window closed")?;
                 let view = kreate_math::DisplayTransform::agx(0.0);
                 let mut rgba = Vec::with_capacity(mean.len() * 4);
                 for c in mean {
-                    let s = view.apply(kreate_math::SceneRgb::new(c[0], c[1], c[2])).encode();
+                    let s = view
+                        .apply(kreate_math::SceneRgb::new(c[0], c[1], c[2]))
+                        .encode();
                     rgba.extend([s.r, s.g, s.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
                     rgba.push(255);
                 }
-                let image = image::RgbaImage::from_raw(w, h, rgba).ok_or("the blurred picture has the wrong size")?;
+                let image = image::RgbaImage::from_raw(w, h, rgba)
+                    .ok_or("the blurred picture has the wrong size")?;
                 let mut png = Vec::new();
                 image
                     .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -5032,27 +5128,34 @@ impl App {
         let bytes = match format {
             kreate_scene::render::OutputFormat::Png => png.clone(),
             kreate_scene::render::OutputFormat::Exr => {
-                let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
-                let forward = (self.camera.pivot - self.camera.eye()).normalize_or_zero().as_vec3();
+                let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot)
+                    .exposure as f32;
+                let forward = (self.camera.pivot - self.camera.eye())
+                    .normalize_or_zero()
+                    .as_vec3();
                 let gfx = self.gfx.as_ref().ok_or("the window closed")?;
-                let mut passes = gfx
-                    .viewport
-                    .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
+                let mut passes =
+                    gfx.viewport
+                        .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
                 if let Some(mean) = blurred {
                     passes.combined = mean;
                 }
-                let crypto = self.render_job.as_ref().and_then(|j| j.ids.as_ref()).map(|ids| {
-                    let names: Vec<Option<String>> = ids
-                        .iter()
-                        .map(|&key| {
-                            key.checked_sub(1)
-                                .and_then(|k| kreate::shell::object_from_key(&self.doc, k))
-                                .and_then(|id| self.doc.object(id))
-                                .map(|o| o.name.clone())
-                        })
-                        .collect();
-                    names
-                });
+                let crypto = self
+                    .render_job
+                    .as_ref()
+                    .and_then(|j| j.ids.as_ref())
+                    .map(|ids| {
+                        let names: Vec<Option<String>> = ids
+                            .iter()
+                            .map(|&key| {
+                                key.checked_sub(1)
+                                    .and_then(|k| kreate::shell::object_from_key(&self.doc, k))
+                                    .and_then(|id| self.doc.object(id))
+                                    .map(|o| o.name.clone())
+                            })
+                            .collect();
+                        names
+                    });
                 exr_of(&passes, crypto.as_deref())
             }
         };
@@ -5068,7 +5171,9 @@ impl App {
     /// Ends the render, done or stopped: the view goes back as it was and the
     /// last picture is shown.
     fn finish_render_job(&mut self, message: &str) {
-        let Some(job) = self.render_job.take() else { return };
+        let Some(job) = self.render_job.take() else {
+            return;
+        };
         let saved = job.saved;
         self.rendering_still = false;
         self.capturing = false;
@@ -5117,9 +5222,9 @@ impl App {
             return;
         };
         let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
-        let texture = self
-            .egui_ctx
-            .load_texture("render-result", image, egui::TextureOptions::LINEAR);
+        let texture =
+            self.egui_ctx
+                .load_texture("render-result", image, egui::TextureOptions::LINEAR);
         self.ui.render_result = Some(kreate::shell::RenderResultView {
             texture,
             size: (*w, *h),
@@ -5774,7 +5879,8 @@ impl App {
                 }
                 Command::SetSelectMode(mode) => self.set_select_mode(mode),
                 Command::SetSculptBrush(brush) => {
-                    self.ui.sculpt.brush = brush.min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
+                    self.ui.sculpt.brush =
+                        brush.min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
                     self.redraw.set(RedrawReason::UI);
                 }
                 Command::SnapToAxis(axis) => {
@@ -6368,14 +6474,22 @@ impl App {
     /// Like the drivers, not a step of its own — the edit's undo puts back a
     /// sketch that was solved, and the solve is the same every time.
     fn solve_active_sketch(&mut self) -> bool {
-        let Some(id) = self.doc.selection.active else { return false };
-        let Some(object) = self.doc.object(id) else { return false };
+        let Some(id) = self.doc.selection.active else {
+            return false;
+        };
+        let Some(object) = self.doc.object(id) else {
+            return false;
+        };
         if object.sketch.is_empty() {
             return false;
         }
-        let Some(mesh_id) = object.mesh() else { return false };
+        let Some(mesh_id) = object.mesh() else {
+            return false;
+        };
         let constraints = object.sketch.clone();
-        let Some(mesh) = self.doc.mesh(mesh_id) else { return false };
+        let Some(mesh) = self.doc.mesh(mesh_id) else {
+            return false;
+        };
         let before: Vec<glam::DVec2> = mesh
             .positions()
             .iter()
@@ -6383,10 +6497,16 @@ impl App {
             .collect();
         let mut points = before.clone();
         kreate_scene::sketch::solve(&mut points, &constraints);
-        if points.iter().zip(&before).all(|(a, b)| a.distance(*b) < 1e-7) {
+        if points
+            .iter()
+            .zip(&before)
+            .all(|(a, b)| a.distance(*b) < 1e-7)
+        {
             return false;
         }
-        let Some(mesh) = self.doc.mesh_mut(mesh_id) else { return false };
+        let Some(mesh) = self.doc.mesh_mut(mesh_id) else {
+            return false;
+        };
         for (p, q) in mesh.positions_mut().iter_mut().zip(&points) {
             p.x = q.x as f32;
             p.y = q.y as f32;
@@ -6784,9 +6904,15 @@ impl App {
             self.weight_display = None;
         }
         // In sculpt mode the mask and face sets are shown on the surface.
-        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt && self.ui.sculpt.show_overlay {
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt
+            && self.ui.sculpt.show_overlay
+        {
             let active = self.doc.selection.active;
-            if let Some((_, mesh)) = self.evaluated.iter_mut().find(|(id, _)| Some(*id) == active) {
+            if let Some((_, mesh)) = self
+                .evaluated
+                .iter_mut()
+                .find(|(id, _)| Some(*id) == active)
+            {
                 if let Some(shown) = self.sculpt_display.show(mesh) {
                     *mesh = shown;
                 }
@@ -6820,7 +6946,8 @@ impl App {
         // sculpted — a crease the stroke made shaded as one.
         if !sculpting {
             if let Some(view) = gfx.sculpt_view.take() {
-                gfx.meshes.retain(|(held, _)| !Arc::ptr_eq(held, &view.held));
+                gfx.meshes
+                    .retain(|(held, _)| !Arc::ptr_eq(held, &view.held));
             }
         }
         // Skinned objects first. Each is drawn from a GPU mesh of its rest
@@ -6842,7 +6969,10 @@ impl App {
                 .map(|i| gfx.skinned.swap_remove(i));
             let fresh = reused.is_none();
             let entry = reused.or_else(|| {
-                let armature = self.doc.skin_matrices(*id).and_then(|(a, _)| self.doc.armature(a))?;
+                let armature = self
+                    .doc
+                    .skin_matrices(*id)
+                    .and_then(|(a, _)| self.doc.armature(a))?;
                 let (offsets, bones, weights) = kreate_scene::skin::influences(rest, armature)?;
                 let cpu = RenderMeshCpu::extract(rest);
                 let mesh = GpuMesh::upload(
@@ -6856,16 +6986,30 @@ impl App {
                     &gfx.deformer,
                     &mesh,
                     &cpu,
-                    &kreate_render::Influences { offsets, bones, weights },
+                    &kreate_render::Influences {
+                        offsets,
+                        bones,
+                        weights,
+                    },
                     matrices.len() as u32,
                 )?;
-                Some(SkinnedGpu { object: *id, rest: rest.clone(), shown: shown.clone(), mesh, skin })
+                Some(SkinnedGpu {
+                    object: *id,
+                    rest: rest.clone(),
+                    shown: shown.clone(),
+                    mesh,
+                    skin,
+                })
             });
             let Some(mut entry) = entry else { continue };
             if fresh || !Arc::ptr_eq(&entry.shown, shown) {
                 let rows: Vec<kreate_render::BoneRows> = matrices
                     .iter()
-                    .map(|m| kreate_render::bone_rows(glam::Affine3A::from_mat4(glam::DMat4::from(*m).as_mat4())))
+                    .map(|m| {
+                        kreate_render::bone_rows(glam::Affine3A::from_mat4(
+                            glam::DMat4::from(*m).as_mat4(),
+                        ))
+                    })
                     .collect();
                 if !entry.skin.set_bones(&gfx.gpu.queue, &rows) {
                     // The armature gained or lost a bone: made again next
@@ -6873,11 +7017,15 @@ impl App {
                     continue;
                 }
                 let encoder = encoder.get_or_insert_with(|| {
-                    gfx.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("skin"),
-                    })
+                    gfx.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("skin"),
+                        })
                 });
-                entry.skin.set_preserve_volume(&gfx.gpu.queue, preserve_volume);
+                entry
+                    .skin
+                    .set_preserve_volume(&gfx.gpu.queue, preserve_volume);
                 entry.skin.dispatch(encoder, &gfx.deformer);
                 entry.shown = shown.clone();
             }
@@ -6891,7 +7039,9 @@ impl App {
             .evaluated
             .iter()
             .filter(|(id, mesh)| {
-                !gfx.skinned.iter().any(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
+                !gfx.skinned
+                    .iter()
+                    .any(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
             })
             .cloned()
             .collect();
@@ -6974,11 +7124,16 @@ impl App {
                     .as_mut()
                     .filter(|v| Arc::ptr_eq(&v.held, held))
                 {
-                    if view.reshape.write(&gfx.gpu.queue, gpu_mesh, mesh.positions()) {
+                    if view
+                        .reshape
+                        .write(&gfx.gpu.queue, gpu_mesh, mesh.positions())
+                    {
                         let encoder = reshaped.get_or_insert_with(|| {
-                            gfx.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("reshape"),
-                            })
+                            gfx.gpu
+                                .device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("reshape"),
+                                })
                         });
                         view.reshape.dispatch(encoder, &gfx.deformer);
                         view.held = mesh.clone();
@@ -6993,16 +7148,12 @@ impl App {
                 *held = mesh.clone();
                 // The stroke's first frame: what the rest of it reshapes.
                 if sculpting && gfx.sculpt_view.is_none() {
-                    gfx.sculpt_view = kreate_render::Reshape::new(
-                        &gfx.gpu.device,
-                        &gfx.deformer,
-                        gpu_mesh,
-                        &cpu,
-                    )
-                    .map(|reshape| SculptView {
-                        held: mesh.clone(),
-                        reshape,
-                    });
+                    gfx.sculpt_view =
+                        kreate_render::Reshape::new(&gfx.gpu.device, &gfx.deformer, gpu_mesh, &cpu)
+                            .map(|reshape| SculptView {
+                                held: mesh.clone(),
+                                reshape,
+                            });
                 }
             } else {
                 old[*slot] = None;
@@ -7173,7 +7324,9 @@ impl App {
         let mut groups = Vec::new();
         let mut base = 0u32;
         for t in &targets {
-            let Some(mesh) = self.doc.mesh(t.mesh) else { continue };
+            let Some(mesh) = self.doc.mesh(t.mesh) else {
+                continue;
+            };
             let count = match domain {
                 kreate_render::PickDomain::Vert => mesh.num_verts(),
                 kreate_render::PickDomain::Edge => mesh.num_edges(),
@@ -7474,7 +7627,9 @@ impl App {
             return;
         }
         if !self.doc.objects().any(|(_, o)| !o.physics.is_empty()) {
-            self.status("nothing has physics: give an object a rigid body, cloth or particles first");
+            self.status(
+                "nothing has physics: give an object a rigid body, cloth or particles first",
+            );
             return;
         }
         self.bake_tokens = self.bake_tokens.wrapping_add(1).max(1);
@@ -7485,16 +7640,19 @@ impl App {
             result: Arc::new(std::sync::Mutex::new(None)),
         };
         let doc = self.doc.clone();
-        let (progress, cancel, result) = (job.progress.clone(), job.cancel.clone(), job.result.clone());
-        let spawned = std::thread::Builder::new().name("bake".into()).spawn(move || {
-            let out = kreate_scene::physics::bake::bake_with(&doc, |done, total| {
-                progress.store(((done as u64) << 32) | total as u64, Ordering::Relaxed);
-                !cancel.load(Ordering::Relaxed)
+        let (progress, cancel, result) =
+            (job.progress.clone(), job.cancel.clone(), job.result.clone());
+        let spawned = std::thread::Builder::new()
+            .name("bake".into())
+            .spawn(move || {
+                let out = kreate_scene::physics::bake::bake_with(&doc, |done, total| {
+                    progress.store(((done as u64) << 32) | total as u64, Ordering::Relaxed);
+                    !cancel.load(Ordering::Relaxed)
+                });
+                if let Ok(mut slot) = result.lock() {
+                    *slot = Some(out);
+                }
             });
-            if let Ok(mut slot) = result.lock() {
-                *slot = Some(out);
-            }
-        });
         if spawned.is_ok() {
             self.bake_job = Some(job);
             self.redraw.set(RedrawReason::UI);
@@ -7534,7 +7692,9 @@ impl App {
     /// H and Shift+H in sculpt: the face set under the pointer hidden, or
     /// shown alone.
     fn face_set_visibility(&mut self, action: u32) {
-        let Some(object) = self.doc.selection.active else { return };
+        let Some(object) = self.doc.selection.active else {
+            return;
+        };
         let Some(ndc) = self.cursor_ndc() else { return };
         let aspect = self.viewport_aspect();
         let Some(hit) = self
@@ -7577,10 +7737,15 @@ impl App {
     /// `F` (radius) or `Shift+F` (strength): the ring holds still and the
     /// pointer's distance from its middle is the new value — Blender's way.
     fn begin_brush_adjust(&mut self, strength: bool) {
-        if self.paint_stroke.is_some() || self.sculpt_stroke.is_some() || self.texture_stroke.is_some() {
+        if self.paint_stroke.is_some()
+            || self.sculpt_stroke.is_some()
+            || self.texture_stroke.is_some()
+        {
             return;
         }
-        let Some(pointer) = self.cursor_points() else { return };
+        let Some(pointer) = self.cursor_points() else {
+            return;
+        };
         let Some((radius, value)) = self.brush_values().map(|(r, s)| (*r, *s)) else {
             return;
         };
@@ -7616,7 +7781,9 @@ impl App {
 
     /// Ends `F`: kept, or put back as it was.
     fn end_brush_adjust(&mut self, keep: bool) {
-        let Some(adjust) = self.ui.brush_adjust.take() else { return };
+        let Some(adjust) = self.ui.brush_adjust.take() else {
+            return;
+        };
         if !keep {
             if let Some((radius, strength)) = self.brush_values() {
                 if adjust.strength {
@@ -7649,10 +7816,15 @@ impl App {
         let object = self.doc.selection.active?;
         let ndc = self.cursor_ndc()?;
         let aspect = self.viewport_aspect();
-        let hit = match self.sculpt_stroke.as_ref().and_then(|s| s.pick_scene.as_ref()) {
-            Some(scene) => self
-                .stroke_pick
-                .raycast_ndc(&self.doc, scene, &self.camera, ndc, aspect)?,
+        let hit = match self
+            .sculpt_stroke
+            .as_ref()
+            .and_then(|s| s.pick_scene.as_ref())
+        {
+            Some(scene) => {
+                self.stroke_pick
+                    .raycast_ndc(&self.doc, scene, &self.camera, ndc, aspect)?
+            }
             None => self
                 .pick
                 .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?,
@@ -7683,7 +7855,13 @@ impl App {
             .object(object)
             .and_then(|o| o.mesh())
             .and_then(|m| self.doc.mesh(m))
-            .map(|m| kreate_mesh::sculpt::face_sets_of(m).into_iter().max().unwrap_or(0) + 1)
+            .map(|m| {
+                kreate_mesh::sculpt::face_sets_of(m)
+                    .into_iter()
+                    .max()
+                    .unwrap_or(0)
+                    + 1
+            })
             .unwrap_or(1);
         // The brush's screen radius as a world length at the depth it touched.
         let height = self
@@ -7733,7 +7911,9 @@ impl App {
             .transform_vector3(DVec3::X * stroke.radius_world * size)
             .length();
         stroke.dabs.extend([local.x, local.y, local.z, radius]);
-        stroke.pressures.push(if by_strength { pressure } else { 1.0 });
+        stroke
+            .pressures
+            .push(if by_strength { pressure } else { 1.0 });
         stroke.last = at;
     }
 
@@ -7821,7 +8001,10 @@ impl App {
         params.set("falloff", PropertyValue::Enum(settings.falloff));
         params.set("view", PropertyValue::Vec3(view.to_array()));
         params.set("front_only", PropertyValue::Bool(settings.front_only));
-        params.set("auto_smooth", PropertyValue::Float(settings.auto_smooth as f64));
+        params.set(
+            "auto_smooth",
+            PropertyValue::Float(settings.auto_smooth as f64),
+        );
         params.set("alpha", PropertyValue::Text(settings.alpha.clone()));
         params.set("face_set", PropertyValue::Int(stroke.face_set as i64));
         if stroke.pressures.iter().any(|p| *p != 1.0) {
@@ -7944,12 +8127,9 @@ impl App {
         let radius_local = to_local
             .transform_vector3(DVec3::X * stroke.radius_world)
             .length();
-        stroke.dabs.extend([
-            uv.x as f64,
-            uv.y as f64,
-            radius_local * scale,
-            strength,
-        ]);
+        stroke
+            .dabs
+            .extend([uv.x as f64, uv.y as f64, radius_local * scale, strength]);
         stroke.last = at;
     }
 
@@ -8157,7 +8337,11 @@ impl App {
             self.drive_strokes();
         }
         if slot == 0 {
-            if self.sculpt_stroke.as_ref().is_some_and(|s| s.pick_scene.is_some()) {
+            if self
+                .sculpt_stroke
+                .as_ref()
+                .is_some_and(|s| s.pick_scene.is_some())
+            {
                 self.stroke_pick = kreate::pick::PickCache::new();
             }
             if let Some(SculptStroke {
@@ -8654,7 +8838,9 @@ impl App {
             });
         }
         if errors > 0 {
-            self.status(&format!("script: a line failed; {skipped} after it not run"));
+            self.status(&format!(
+                "script: a line failed; {skipped} after it not run"
+            ));
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
         report
@@ -9130,14 +9316,21 @@ impl App {
         // At the preference's fraction of the panel's pixels, stretched to
         // fit: the cursor is mapped through the drawn size, so picking keeps
         // working at any scale.
-        let scale = self.ui.resolution_scale.clamp(kreate::prefs::MIN_RESOLUTION_SCALE, 1.0);
+        let scale = self
+            .ui
+            .resolution_scale
+            .clamp(kreate::prefs::MIN_RESOLUTION_SCALE, 1.0);
         let wanted = (
             (viewport_rect.width().max(0.0) * pixels_per_point * scale) as u32,
             (viewport_rect.height().max(0.0) * pixels_per_point * scale) as u32,
         );
         // Not while a render runs: the picture is the render's size, not the
         // panel's, and following the panel restarted its samples every frame.
-        if self.render_job.is_none() && wanted != self.wanted_viewport && wanted.0 > 0 && wanted.1 > 0 {
+        if self.render_job.is_none()
+            && wanted != self.wanted_viewport
+            && wanted.0 > 0
+            && wanted.1 > 0
+        {
             self.wanted_viewport = wanted;
             self.redraw.set(RedrawReason::RESIZE);
         }
@@ -9284,7 +9477,8 @@ impl App {
         // The image each slot shows in the studio and flat modes, as a layer
         // of the viewport's solid textures; -1 for its colour. The images
         // go up only when the set, or one of them, changes.
-        let textured = self.solid_textures && gfx.viewport.shading != kreate_render::ShadingMode::Rendered;
+        let textured =
+            self.solid_textures && gfx.viewport.shading != kreate_render::ShadingMode::Rendered;
         let mut images: Vec<kreate_scene::document::ImageId> = Vec::new();
         let slot_layers: Vec<Vec<i32>> = self
             .evaluated
@@ -9331,13 +9525,24 @@ impl App {
             let pixels: Vec<(u32, u32, Vec<u8>)> = images
                 .iter()
                 .filter_map(|i| self.doc.image(*i))
-                .map(|img| (img.width(), img.height(), kreate::materials::encoded_rgba(img, img.color_space)))
+                .map(|img| {
+                    (
+                        img.width(),
+                        img.height(),
+                        kreate::materials::encoded_rgba(img, img.color_space),
+                    )
+                })
                 .collect();
             let sources: Vec<kreate_render::solid_textures::SolidImage<'_>> = pixels
                 .iter()
-                .map(|(w, h, p)| kreate_render::solid_textures::SolidImage { width: *w, height: *h, pixels: p })
+                .map(|(w, h, p)| kreate_render::solid_textures::SolidImage {
+                    width: *w,
+                    height: *h,
+                    pixels: p,
+                })
                 .collect();
-            gfx.viewport.set_solid_images(&gfx.gpu.device, &gfx.gpu.queue, &sources);
+            gfx.viewport
+                .set_solid_images(&gfx.gpu.device, &gfx.gpu.queue, &sources);
             self.solid_images = want;
         }
         // A boolean's cutter is drawn as edges, or it would cover the very
@@ -9860,8 +10065,16 @@ impl App {
         // picking pass over this frame's depth, read back. Once a picture,
         // because what is where does not change while the samples add up.
         if let Some(job) = self.render_job.as_mut() {
-            if job.settings.format == kreate_scene::render::OutputFormat::Exr && job.drawn >= 3 && job.ids.is_none() {
-                match gfx.viewport.read_object_ids(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &draws) {
+            if job.settings.format == kreate_scene::render::OutputFormat::Exr
+                && job.drawn >= 3
+                && job.ids.is_none()
+            {
+                match gfx.viewport.read_object_ids(
+                    &gfx.gpu.device,
+                    &gfx.gpu.queue,
+                    &self.camera,
+                    &draws,
+                ) {
                     Ok(ids) => job.ids = Some(ids),
                     Err(e) => tracing::warn!(error = %e, "no object ids for the render"),
                 }
@@ -10360,14 +10573,18 @@ impl App {
             "sculpt.face_set_isolate" => self.face_set_visibility(1),
             "sculpt.remesh" => {
                 let mut p = PropertyMap::new();
-                p.set("voxel_size", PropertyValue::Float(self.ui.sculpt.voxel_size as f64));
+                p.set(
+                    "voxel_size",
+                    PropertyValue::Float(self.ui.sculpt.voxel_size as f64),
+                );
                 self.run_op("sculpt.voxel_remesh", p);
             }
             "brush.radius_adjust" => self.begin_brush_adjust(false),
             "brush.strength_adjust" => self.begin_brush_adjust(true),
             "sculpt.brush" => {
                 if let Some(PropertyValue::Enum(b)) = action.params.get("brush") {
-                    self.ui.sculpt.brush = (*b).min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
+                    self.ui.sculpt.brush =
+                        (*b).min(kreate_mesh::sculpt::Brush::ALL.len() as u32 - 1);
                 }
             }
             "view.local_view" => self.toggle_local_view(),
@@ -10379,7 +10596,11 @@ impl App {
                 self.status("Align Faces: click the face of the part that moves, then the face it goes against (Esc stops)");
             }
             "file.export_drawing" => {
-                let view = action.params.get("view").and_then(|v| v.as_int()).unwrap_or(0);
+                let view = action
+                    .params
+                    .get("view")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
                 self.export_drawing(view as u32);
             }
             // The Object tab's Mesh Check: what is wrong with the active
@@ -10397,14 +10618,25 @@ impl App {
                     self.set_mode(OpMode::RESTING.toggled(kreate_ops::mode::Has::of(&self.doc)));
                 }
                 self.run_op("mesh.check_select", action.params.clone());
-                if self.history.last().is_some_and(|e| e.op_id == "mesh.check_select") {
-                    self.set_select_mode(if action.params.get("issue").and_then(|v| v.as_int()).is_some_and(|i| matches!(i, 3 | 5 | 6)) {
-                        2
-                    } else if action.params.get("issue").and_then(|v| v.as_int()) == Some(4) {
-                        0
-                    } else {
-                        1
-                    });
+                if self
+                    .history
+                    .last()
+                    .is_some_and(|e| e.op_id == "mesh.check_select")
+                {
+                    self.set_select_mode(
+                        if action
+                            .params
+                            .get("issue")
+                            .and_then(|v| v.as_int())
+                            .is_some_and(|i| matches!(i, 3 | 5 | 6))
+                        {
+                            2
+                        } else if action.params.get("issue").and_then(|v| v.as_int()) == Some(4) {
+                            0
+                        } else {
+                            1
+                        },
+                    );
                 }
             }
             "view.frame_selected" => self.frame_selected(),
@@ -10986,11 +11218,28 @@ impl ApplicationHandler for App {
         // What follows — every pipeline compiled, the shaders warmed — is the
         // bulk of the start-up, and without this the window sits blank for it.
         let mut splash = Splash::new(&self.egui_ctx, &self.ui.catalog);
-        let show = |message: &str, splash: &mut Splash, egui_state: &mut egui_winit::State, renderer: &mut egui_wgpu::Renderer| {
-            splash.draw(&self.egui_ctx, egui_state, &window, &gpu, &surface, &config, renderer, message);
+        let show = |message: &str,
+                    splash: &mut Splash,
+                    egui_state: &mut egui_winit::State,
+                    renderer: &mut egui_wgpu::Renderer| {
+            splash.draw(
+                &self.egui_ctx,
+                egui_state,
+                &window,
+                &gpu,
+                &surface,
+                &config,
+                renderer,
+                message,
+            );
         };
         let egui_state = self.egui_state.as_mut().expect("made just above");
-        show(&self.ui.catalog.get("splash-shaders"), &mut splash, egui_state, &mut egui_renderer);
+        show(
+            &self.ui.catalog.get("splash-shaders"),
+            &mut splash,
+            egui_state,
+            &mut egui_renderer,
+        );
         window.set_visible(true);
 
         let target = ViewportTarget::new(&gpu.device, &mut egui_renderer, size.width, size.height);
@@ -11007,9 +11256,19 @@ impl ApplicationHandler for App {
         // overlay and picking pipelines are not touched by an ordinary first
         // frame. Measured cold, that first touch costs around ten milliseconds —
         // a dropped frame, landing exactly when the user starts interacting.
-        show(&self.ui.catalog.get("splash-warming"), &mut splash, egui_state, &mut egui_renderer);
+        show(
+            &self.ui.catalog.get("splash-warming"),
+            &mut splash,
+            egui_state,
+            &mut egui_renderer,
+        );
         viewport.warm_up(&gpu.device, &gpu.queue);
-        show(&self.ui.catalog.get("splash-opening"), &mut splash, egui_state, &mut egui_renderer);
+        show(
+            &self.ui.catalog.get("splash-opening"),
+            &mut splash,
+            egui_state,
+            &mut egui_renderer,
+        );
         drop(splash);
 
         let pick_target = kreate_render::PickTarget::new(&gpu.device, target.size.0, target.size.1);
@@ -11490,7 +11749,10 @@ impl ApplicationHandler for App {
 
 /// A render's EXR: the picture as R, G, B and A, its depth as Z and its
 /// normals as N.X, N.Y and N.Z — the names compositors look for first.
-fn exr_of(p: &kreate_render::viewport::RenderPasses, objects: Option<&[Option<String>]>) -> Vec<u8> {
+fn exr_of(
+    p: &kreate_render::viewport::RenderPasses,
+    objects: Option<&[Option<String>]>,
+) -> Vec<u8> {
     use kreate_io::exr::Channel;
     let pick = |f: &dyn Fn(usize) -> f32| -> Vec<f32> { (0..p.combined.len()).map(f).collect() };
     let r = pick(&|i| p.combined[i][0]);
@@ -11501,17 +11763,29 @@ fn exr_of(p: &kreate_render::viewport::RenderPasses, objects: Option<&[Option<St
     let ny = pick(&|i| p.normal[i][1]);
     let nz = pick(&|i| p.normal[i][2]);
     fn channel<'a>(name: &'a str, values: &'a [f32], full_float: bool) -> Channel<'a> {
-        Channel { name, values, full_float }
+        Channel {
+            name,
+            values,
+            full_float,
+        }
     }
     // Cryptomatte, rank zero only: each pixel's object and full coverage.
     // The picking pass gives one object a pixel, so an edge is the object at
     // the pixel's centre; the next rank is left empty, which every reader
     // takes as nothing behind.
     let ids: Vec<f32> = objects
-        .map(|o| o.iter().map(|n| n.as_deref().map_or(0.0, kreate_io::exr::cryptomatte_id)).collect())
+        .map(|o| {
+            o.iter()
+                .map(|n| n.as_deref().map_or(0.0, kreate_io::exr::cryptomatte_id))
+                .collect()
+        })
         .unwrap_or_default();
     let coverage: Vec<f32> = objects
-        .map(|o| o.iter().map(|n| if n.is_some() { 1.0 } else { 0.0 }).collect())
+        .map(|o| {
+            o.iter()
+                .map(|n| if n.is_some() { 1.0 } else { 0.0 })
+                .collect()
+        })
         .unwrap_or_default();
     let nothing = vec![0.0f32; ids.len()];
     let mut names: Vec<&str> = objects
@@ -11524,7 +11798,10 @@ fn exr_of(p: &kreate_render::viewport::RenderPasses, objects: Option<&[Option<St
     } else {
         Vec::new()
     };
-    let strings: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let strings: Vec<(&str, &str)> = attributes
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let mut extra = Vec::new();
     if objects.is_some() && ids.len() == p.combined.len() {
         extra.extend([
@@ -11535,15 +11812,15 @@ fn exr_of(p: &kreate_render::viewport::RenderPasses, objects: Option<&[Option<St
         ]);
     }
     let mut channels = vec![
-            channel("R", &r, false),
-            channel("G", &g, false),
-            channel("B", &b, false),
-            channel("A", &a, false),
-            // Full floats: a depth in halves loses centimetres at a few metres.
-            channel("Z", &p.depth, true),
-            channel("N.X", &nx, false),
-            channel("N.Y", &ny, false),
-            channel("N.Z", &nz, false),
+        channel("R", &r, false),
+        channel("G", &g, false),
+        channel("B", &b, false),
+        channel("A", &a, false),
+        // Full floats: a depth in halves loses centimetres at a few metres.
+        channel("Z", &p.depth, true),
+        channel("N.X", &nx, false),
+        channel("N.Y", &ny, false),
+        channel("N.Z", &nz, false),
     ];
     channels.extend(extra);
     kreate_io::exr::write(p.width, p.height, &channels, &strings)
@@ -11605,7 +11882,17 @@ struct SavedView {
     camera_view: Option<kreate_render::Camera>,
     camera_view_object: Option<kreate_scene::document::ObjectId>,
     wanted_viewport: (u32, u32),
-    look: (kreate_render::ShadingMode, bool, bool, bool, bool, bool, bool, Option<u32>, bool),
+    look: (
+        kreate_render::ShadingMode,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        Option<u32>,
+        bool,
+    ),
     frame: f64,
 }
 
@@ -11667,7 +11954,9 @@ impl Splash {
                     ui.vertical_centered(|ui| {
                         ui.add_space((ui.available_height() * 0.5 - 130.0).max(0.0));
                         if let Some(logo) = &self.logo {
-                            ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(128.0, 128.0)));
+                            ui.add(
+                                egui::Image::new(logo).fit_to_exact_size(egui::vec2(128.0, 128.0)),
+                            );
                         }
                         ui.add_space(12.0);
                         ui.heading(&self.title);
@@ -11682,11 +11971,14 @@ impl Splash {
             renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
         }
         let frame = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             // No frame to draw into yet; the next step will try again.
             _ => return,
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [config.width, config.height],
@@ -11694,7 +11986,9 @@ impl Splash {
         };
         let mut encoder = gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("splash") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("splash"),
+            });
         let extra = renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -11715,7 +12009,8 @@ impl Splash {
             });
             renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
         }
-        gpu.queue.submit(extra.into_iter().chain(Some(encoder.finish())));
+        gpu.queue
+            .submit(extra.into_iter().chain(Some(encoder.finish())));
         window.pre_present_notify();
         frame.present();
         for id in &output.textures_delta.free {
@@ -11994,7 +12289,11 @@ struct AppParams {
 fn work_plane_turn(normal: DVec3) -> kreate_math::DQuat {
     let z = normal.normalize_or(DVec3::Z);
     let x = DVec3::Z.cross(z);
-    let x = if x.length() < 1e-6 { DVec3::X } else { x.normalize() };
+    let x = if x.length() < 1e-6 {
+        DVec3::X
+    } else {
+        x.normalize()
+    };
     let y = z.cross(x);
     kreate_math::DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z)).normalize()
 }
@@ -12095,11 +12394,17 @@ mod tests {
         let cube = (DVec3::splat(-1.0), DVec3::splat(1.0));
         let next = (DVec3::new(1.5, -1.0, -1.0), DVec3::new(3.5, 1.0, 1.0));
         // Free: where the cursor is.
-        assert_eq!(spot_beside(DVec3::new(10.0, 0.0, 0.0), &[cube]), DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(
+            spot_beside(DVec3::new(10.0, 0.0, 0.0), &[cube]),
+            DVec3::new(10.0, 0.0, 0.0)
+        );
         // Inside the cube: past it.
         assert_eq!(spot_beside(DVec3::ZERO, &[cube]), DVec3::new(2.5, 0.0, 0.0));
         // And past the one beside it too.
-        assert_eq!(spot_beside(DVec3::ZERO, &[cube, next]), DVec3::new(5.0, 0.0, 0.0));
+        assert_eq!(
+            spot_beside(DVec3::ZERO, &[cube, next]),
+            DVec3::new(5.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -12232,7 +12537,10 @@ mod tests {
         let mut app = app();
         app.viewport_px = Some((0.0, 0.0, 800.0, 600.0));
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
             ..Default::default()
         };
         let ctx = app.egui_ctx.clone();
@@ -12311,21 +12619,28 @@ kreate.ops.object.add_primitive()",
             let _ = std::fs::remove_file(&path);
             text
         };
-        app.export_to(&dir.join(format!("kreate-test-{pid}-a.step"))).unwrap();
+        app.export_to(&dir.join(format!("kreate-test-{pid}-a.step")))
+            .unwrap();
         let step = read("a.step");
         assert!(step.contains("SI_UNIT(.MILLI.,.METRE.)"));
         assert_eq!(step.matches("FACETED_BREP(").count(), 2);
-        app.export_to(&dir.join(format!("kreate-test-{pid}-b.csv"))).unwrap();
+        app.export_to(&dir.join(format!("kreate-test-{pid}-b.csv")))
+            .unwrap();
         let csv = read("b.csv");
         let row = csv.lines().nth(1).expect("one part");
         assert!(row.contains(",2,2000.0000,2000.0000,2000.0000,"), "{csv}");
         assert_eq!(csv.lines().count(), 2, "{csv}");
-        app.write_drawing(&dir.join(format!("kreate-test-{pid}-c.dxf")), kreate_io::drawing::View::Top)
-            .unwrap();
-        assert!(read("c.dxf").contains("$INSUNITS
+        app.write_drawing(
+            &dir.join(format!("kreate-test-{pid}-c.dxf")),
+            kreate_io::drawing::View::Top,
+        )
+        .unwrap();
+        assert!(read("c.dxf").contains(
+            "$INSUNITS
 70
 4
-"));
+"
+        ));
     }
 
     /// File > Export to .3mf writes each shown part where it stands, in the
@@ -12347,7 +12662,10 @@ kreate.ops.object.add_primitive()",
         std::io::Read::read_to_string(&mut zip.by_name("3D/3dmodel.model").unwrap(), &mut model)
             .unwrap();
         assert!(model.contains("unit=\"millimeter\""));
-        assert!(model.contains("x=\"1000\"") && model.contains("x=\"-1000\""), "{model}");
+        assert!(
+            model.contains("x=\"1000\"") && model.contains("x=\"-1000\""),
+            "{model}"
+        );
     }
 
     /// The section view cuts what is drawn and picked, half a cube for a
@@ -12392,7 +12710,10 @@ kreate.ops.object.add_primitive()",
         });
         assert!(app.op_ctx.mode.edits_elements());
         let id = app.doc.selection.active.unwrap();
-        let mesh = app.doc.mesh(app.doc.object(id).unwrap().mesh().unwrap()).unwrap();
+        let mesh = app
+            .doc
+            .mesh(app.doc.object(id).unwrap().mesh().unwrap())
+            .unwrap();
         let edges = kreate_mesh::selection::selected(mesh, kreate_mesh::attribute::Domain::Edge);
         assert_eq!(edges.len(), 4);
     }
@@ -12421,7 +12742,10 @@ kreate.ops.object.add_primitive()",
         assert!((q * DVec3::Z - wall).length() < 1e-12, "Z is the normal");
         assert!((q * DVec3::X).z.abs() < 1e-12, "X is level");
         let up = work_plane_turn(DVec3::Z);
-        assert!(up.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12), "the ground is no turn");
+        assert!(
+            up.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12),
+            "the ground is no turn"
+        );
 
         let mut app = app();
         app.place_cursor_turned(DVec3::new(0.0, 0.0, 1.0), q);
@@ -12430,7 +12754,10 @@ kreate.ops.object.add_primitive()",
         app.run_op("object.add_primitive", PropertyMap::new());
         let added = app.doc.selection.active.unwrap();
         let turn = app.doc.object(added).unwrap().transform.rotation;
-        assert!((turn * DVec3::Z - wall).length() < 1e-9, "square to the plane");
+        assert!(
+            (turn * DVec3::Z - wall).length() < 1e-9,
+            "square to the plane"
+        );
         app.ui.tools.orientation = 0;
         app.run_op("object.add_primitive", PropertyMap::new());
         let added = app.doc.selection.active.unwrap();
@@ -12540,7 +12867,11 @@ kreate.ops.object.add_primitive()",
         app.begin_brush_adjust(false);
         app.input.cursor = at(430.0);
         app.update_brush_adjust();
-        assert!((app.ui.sculpt.radius - 80.0).abs() < 1e-3, "{}", app.ui.sculpt.radius);
+        assert!(
+            (app.ui.sculpt.radius - 80.0).abs() < 1e-3,
+            "{}",
+            app.ui.sculpt.radius
+        );
         app.end_brush_adjust(true);
         assert!(app.ui.brush_adjust.is_none());
         assert!((app.ui.sculpt.radius - 80.0).abs() < 1e-3, "kept");
@@ -12549,9 +12880,16 @@ kreate.ops.object.add_primitive()",
         app.begin_brush_adjust(true);
         app.input.cursor = at(420.0);
         app.update_brush_adjust();
-        assert!((app.ui.sculpt.strength - 0.375).abs() < 1e-3, "{}", app.ui.sculpt.strength);
+        assert!(
+            (app.ui.sculpt.strength - 0.375).abs() < 1e-3,
+            "{}",
+            app.ui.sculpt.strength
+        );
         app.end_brush_adjust(false);
-        assert!((app.ui.sculpt.strength - 0.5).abs() < 1e-6, "Esc puts it back");
+        assert!(
+            (app.ui.sculpt.strength - 0.5).abs() < 1e-6,
+            "Esc puts it back"
+        );
     }
 
     /// A bake on its own thread: the bar moves, the result goes in as one
@@ -12560,7 +12898,10 @@ kreate.ops.object.add_primitive()",
     fn a_background_bake_lands_as_one_step_and_a_cancelled_one_does_not() {
         let mut app = app();
         let mesh = app.doc.add_mesh(kreate_mesh::primitives::cube(1.0));
-        let mut o = kreate_scene::document::Object::new("Box", kreate_scene::document::ObjectData::Mesh(mesh));
+        let mut o = kreate_scene::document::Object::new(
+            "Box",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        );
         o.transform.translation = DVec3::new(0.0, 0.0, 3.0);
         o.physics.rigid = Some(kreate_scene::physics::RigidBody::default());
         app.doc.add_object(o);
@@ -12581,12 +12922,25 @@ kreate.ops.object.add_primitive()",
         wait(&mut app);
         assert!(!app.doc.physics_cache.is_empty());
         assert_eq!(app.history.entries().len(), steps + 1);
-        assert!(app.history.last().unwrap().to_script_call().contains("physics.bake"));
+        assert!(app
+            .history
+            .last()
+            .unwrap()
+            .to_script_call()
+            .contains("physics.bake"));
 
         app.start_bake();
-        app.bake_job.as_ref().unwrap().cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        app.bake_job
+            .as_ref()
+            .unwrap()
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         wait(&mut app);
-        assert_eq!(app.history.entries().len(), steps + 1, "cancelled: nothing new");
+        assert_eq!(
+            app.history.entries().len(),
+            steps + 1,
+            "cancelled: nothing new"
+        );
     }
 
     /// What a frame of a dynamic-topology stroke costs, piece by piece.
@@ -12595,7 +12949,9 @@ kreate.ops.object.add_primitive()",
     fn dyntopo_frame_cost() {
         use std::time::Instant;
         let mut app = app();
-        let mesh = app.doc.add_mesh(kreate_mesh::primitives::uv_sphere(1.0, 128, 64));
+        let mesh = app
+            .doc
+            .add_mesh(kreate_mesh::primitives::uv_sphere(1.0, 128, 64));
         let id = app.doc.add_object(kreate_scene::document::Object::new(
             "Ball",
             kreate_scene::document::ObjectData::Mesh(mesh),
@@ -12607,7 +12963,13 @@ kreate.ops.object.add_primitive()",
         // as it began, whose tree is built once.
         let start: Vec<_> = app.evaluated.clone();
         let mut stroke_pick = kreate::pick::PickCache::new();
-        let _ = stroke_pick.raycast(&app.doc, &start, DVec3::new(0.0, -5.0, 0.0), DVec3::Y, f64::INFINITY);
+        let _ = stroke_pick.raycast(
+            &app.doc,
+            &start,
+            DVec3::new(0.0, -5.0, 0.0),
+            DVec3::Y,
+            f64::INFINITY,
+        );
         let mut dabs: Vec<f64> = Vec::new();
         let mut session: Option<kreate_ops::ModalSession> = None;
         let (mut op, mut eval, mut pick) = (0.0, 0.0, 0.0);
@@ -12629,7 +12991,14 @@ kreate.ops.object.add_primitive()",
                 None => {
                     session = app
                         .history
-                        .begin_modal(&app.registry, &mut app.doc, None, &app.op_ctx, "sculpt.stroke", &params)
+                        .begin_modal(
+                            &app.registry,
+                            &mut app.doc,
+                            None,
+                            &app.op_ctx,
+                            "sculpt.stroke",
+                            &params,
+                        )
                         .unwrap();
                 }
             }
@@ -12638,12 +13007,23 @@ kreate.ops.object.add_primitive()",
             app.evaluate_scene();
             eval += t.elapsed().as_secs_f64();
             let t = Instant::now();
-            let _ = stroke_pick.raycast(&app.doc, &start, DVec3::new(0.0, -5.0, 0.0), DVec3::Y, f64::INFINITY);
+            let _ = stroke_pick.raycast(
+                &app.doc,
+                &start,
+                DVec3::new(0.0, -5.0, 0.0),
+                DVec3::Y,
+                f64::INFINITY,
+            );
             pick += t.elapsed().as_secs_f64();
         }
         let ms = |s: f64| s * 1000.0 / frames as f64;
         let faces = app.doc.mesh(mesh).unwrap().num_faces();
-        eprintln!("faces {faces}; per frame: operator {:.2} ms, evaluate {:.2} ms, pick {:.2} ms", ms(op), ms(eval), ms(pick));
+        eprintln!(
+            "faces {faces}; per frame: operator {:.2} ms, evaluate {:.2} ms, pick {:.2} ms",
+            ms(op),
+            ms(eval),
+            ms(pick)
+        );
     }
 
     /// A sketch point dragged by hand settles back where the constraints
@@ -12652,13 +13032,27 @@ kreate.ops.object.add_primitive()",
     fn a_sketch_solves_itself_after_an_edit() {
         let mut app = app();
         let mesh = app.doc.add_mesh(kreate_mesh::MeshData::from_faces(
-            vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::new(1.0, 1.0, 0.0)],
+            vec![
+                glam::Vec3::ZERO,
+                glam::Vec3::X,
+                glam::Vec3::new(1.0, 1.0, 0.0),
+            ],
             &[vec![0, 1, 2]],
         ));
-        let mut o = kreate_scene::document::Object::new("Sketch", kreate_scene::document::ObjectData::Mesh(mesh));
+        let mut o = kreate_scene::document::Object::new(
+            "Sketch",
+            kreate_scene::document::ObjectData::Mesh(mesh),
+        );
         o.sketch = vec![
-            kreate_scene::sketch::Constraint::Fixed { a: 0, at: [0.0, 0.0] },
-            kreate_scene::sketch::Constraint::Distance { a: 0, b: 1, value: 1.0 },
+            kreate_scene::sketch::Constraint::Fixed {
+                a: 0,
+                at: [0.0, 0.0],
+            },
+            kreate_scene::sketch::Constraint::Distance {
+                a: 0,
+                b: 1,
+                value: 1.0,
+            },
             kreate_scene::sketch::Constraint::Horizontal { a: 0, b: 1 },
         ];
         let id = app.doc.add_object(o);
@@ -12670,7 +13064,10 @@ kreate.ops.object.add_primitive()",
         let steps = app.history.entries().len();
         app.run_drivers();
         let p = app.doc.mesh(mesh).unwrap().positions()[1];
-        assert!((p.length() - 1.0).abs() < 1e-4 && p.y.abs() < 1e-4, "back on its constraints: {p:?}");
+        assert!(
+            (p.length() - 1.0).abs() < 1e-4 && p.y.abs() < 1e-4,
+            "back on its constraints: {p:?}"
+        );
         assert_eq!(app.history.entries().len(), steps);
     }
 
@@ -12692,7 +13089,11 @@ kreate.ops.object.add_primitive()",
 
         click(&mut app, DVec3::X, false);
         click(&mut app, DVec3::ZERO, true);
-        assert_eq!(app.doc.design.measurements.len(), 1, "an angle wants a third point");
+        assert_eq!(
+            app.doc.design.measurements.len(),
+            1,
+            "an angle wants a third point"
+        );
         click(&mut app, DVec3::Y, false);
         let angle = app.doc.design.measurements[1].angle().unwrap();
         assert!((angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);

@@ -92,7 +92,10 @@ impl DynCache {
             let before = k.checked_sub(1).map(|p| dabs[p]);
             for (sign, turn) in &copies {
                 let place = |p: Vec3| *turn * (p * *sign);
-                let dab = Dab { centre: place(d.centre), ..*d };
+                let dab = Dab {
+                    centre: place(d.centre),
+                    ..*d
+                };
                 let from = before.map(|b| place(b.centre));
                 any |= self.dab(dab, from, stroke, detail.max(1e-5));
             }
@@ -118,8 +121,10 @@ impl DynCache {
             return false;
         }
         let m = self.pos.len() as u32;
-        self.pos.push((self.pos[a as usize] + self.pos[b as usize]) * 0.5);
-        self.born.push((self.born[a as usize] + self.born[b as usize]) * 0.5);
+        self.pos
+            .push((self.pos[a as usize] + self.pos[b as usize]) * 0.5);
+        self.born
+            .push((self.born[a as usize] + self.born[b as usize]) * 0.5);
         self.vtris.push(Vec::new());
         for t in shared {
             let tri = self.tris[t as usize];
@@ -151,7 +156,9 @@ impl DynCache {
     }
 
     fn on_border(&self, v: u32) -> bool {
-        self.neighbours(v).iter().any(|w| self.edge_tris(v, *w).len() != 2)
+        self.neighbours(v)
+            .iter()
+            .any(|w| self.edge_tris(v, *w).len() != 2)
     }
 
     fn normal_of(&self, t: [u32; 3]) -> Vec3 {
@@ -180,8 +187,15 @@ impl DynCache {
                     continue;
                 }
                 let before = self.normal_of(self.tris[*t as usize]);
-                let after_tri = self.tris[*t as usize].map(|x| if x == a || x == b { u32::MAX } else { x });
-                let [p, q, r] = after_tri.map(|x| if x == u32::MAX { mid } else { self.pos[x as usize] });
+                let after_tri =
+                    self.tris[*t as usize].map(|x| if x == a || x == b { u32::MAX } else { x });
+                let [p, q, r] = after_tri.map(|x| {
+                    if x == u32::MAX {
+                        mid
+                    } else {
+                        self.pos[x as usize]
+                    }
+                });
                 let after = (q - p).cross(r - p);
                 if before.dot(after) <= 0.0 {
                     return false;
@@ -232,7 +246,10 @@ impl DynCache {
 
     fn within(&self, centre: Vec3, radius: f32) -> Vec<u32> {
         (0..self.pos.len() as u32)
-            .filter(|v| !self.vtris[*v as usize].is_empty() && self.pos[*v as usize].distance(centre) < radius)
+            .filter(|v| {
+                !self.vtris[*v as usize].is_empty()
+                    && self.pos[*v as usize].distance(centre) < radius
+            })
             .collect()
     }
 
@@ -249,7 +266,8 @@ impl DynCache {
                 .filter_map(|(a, b)| {
                     let (pa, pb) = (self.pos[a as usize], self.pos[b as usize]);
                     let len = pa.distance(pb);
-                    (len > detail && ((pa + pb) * 0.5).distance(dab.centre) < reach).then_some((len, a, b))
+                    (len > detail && ((pa + pb) * 0.5).distance(dab.centre) < reach)
+                        .then_some((len, a, b))
                 })
                 .collect();
             if long.is_empty() || self.pos.len() - made > MAX_NEW {
@@ -287,7 +305,10 @@ impl DynCache {
             .iter()
             .map(|v| {
                 let d = self.pos[*v as usize].distance(dab.centre);
-                (*v as usize, falloff_weight(stroke, d, dab.radius) * dab.pressure.clamp(0.0, 1.0))
+                (
+                    *v as usize,
+                    falloff_weight(stroke, d, dab.radius) * dab.pressure.clamp(0.0, 1.0),
+                )
             })
             .filter(|(_, w)| *w > 0.0)
             .collect();
@@ -299,16 +320,20 @@ impl DynCache {
             let n = self.vtris[*v]
                 .iter()
                 .filter(|t| self.alive[**t as usize])
-                .fold(Vec3::ZERO, |s, t| s + self.normal_of(self.tris[*t as usize]));
+                .fold(Vec3::ZERO, |s, t| {
+                    s + self.normal_of(self.tris[*t as usize])
+                });
             normal[*v] = n.normalize_or_zero();
         }
-        let neighbours: std::collections::HashMap<usize, Vec<u32>> = if matches!(stroke.brush, Brush::Smooth)
-            || stroke.auto_smooth > 0.0
-        {
-            under.iter().map(|(v, _)| (*v, self.neighbours(*v as u32))).collect()
-        } else {
-            Default::default()
-        };
+        let neighbours: std::collections::HashMap<usize, Vec<u32>> =
+            if matches!(stroke.brush, Brush::Smooth) || stroke.auto_smooth > 0.0 {
+                under
+                    .iter()
+                    .map(|(v, _)| (*v, self.neighbours(*v as u32)))
+                    .collect()
+            } else {
+                Default::default()
+            };
         let empty: &[u32] = &[];
         displace(
             stroke,
@@ -385,8 +410,17 @@ mod tests {
         let base = primitives::grid(2.0, 4, 4);
         let mut m = base.clone();
         let mut cache = DynCache::new(&m, &stroke(Brush::Draw), 0.1);
-        assert!(cache.run(&mut m, &[Dab::new(Vec3::ZERO, 0.5)], &stroke(Brush::Draw), 0.1));
-        assert!(m.num_faces() > base.num_faces() * 4, "{} faces", m.num_faces());
+        assert!(cache.run(
+            &mut m,
+            &[Dab::new(Vec3::ZERO, 0.5)],
+            &stroke(Brush::Draw),
+            0.1
+        ));
+        assert!(
+            m.num_faces() > base.num_faces() * 4,
+            "{} faces",
+            m.num_faces()
+        );
         // Under the brush the edges are near the detail size; far away the
         // grid is as it was.
         let fine = m
@@ -399,8 +433,14 @@ mod tests {
             .map(|[a, b]| m.positions()[*a as usize].distance(m.positions()[*b as usize]))
             .fold(0.0f32, f32::max);
         assert!(fine <= 0.15, "the longest edge under the brush: {fine}");
-        assert!(edges(&m).iter().any(|l| *l > 0.45), "the far grid untouched");
-        assert!(m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max) > 0.02, "and drawn");
+        assert!(
+            edges(&m).iter().any(|l| *l > 0.45),
+            "the far grid untouched"
+        );
+        assert!(
+            m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max) > 0.02,
+            "and drawn"
+        );
     }
 
     #[test]
@@ -419,7 +459,10 @@ mod tests {
             let copies = stroke_copies(&s);
             for d in &dabs[start..] {
                 for (sign, turn) in &copies {
-                    let dab = Dab { centre: *turn * (d.centre * *sign), ..*d };
+                    let dab = Dab {
+                        centre: *turn * (d.centre * *sign),
+                        ..*d
+                    };
                     cache.dab(dab, None, &s, 0.03);
                 }
             }
@@ -429,7 +472,11 @@ mod tests {
             let _ = cache.to_mesh();
             out += t.elapsed().as_secs_f64();
         }
-        eprintln!("per frame: dabs {:.2} ms, to_mesh {:.2} ms", run * 25.0, out * 25.0);
+        eprintln!(
+            "per frame: dabs {:.2} ms, to_mesh {:.2} ms",
+            run * 25.0,
+            out * 25.0
+        );
     }
 
     #[test]
@@ -462,7 +509,9 @@ mod tests {
     fn a_continued_stroke_matches_one_run_whole() {
         let base = primitives::uv_sphere(1.0, 16, 8);
         let s = stroke(Brush::Inflate);
-        let dabs: Vec<Dab> = (0..6).map(|i| Dab::new(Vec3::new(0.0, (i as f32 * 0.3).sin(), 1.0), 0.4)).collect();
+        let dabs: Vec<Dab> = (0..6)
+            .map(|i| Dab::new(Vec3::new(0.0, (i as f32 * 0.3).sin(), 1.0), 0.4))
+            .collect();
         let mut whole = base.clone();
         DynCache::new(&base, &s, 0.1).run(&mut whole, &dabs, &s, 0.1);
         let mut cache = DynCache::new(&base, &s, 0.1);
@@ -474,6 +523,9 @@ mod tests {
             last = m;
         }
         assert_eq!(last.positions(), whole.positions());
-        assert!(!cache.fits(&base, &s, 0.2, &dabs), "another detail size is another stroke");
+        assert!(
+            !cache.fits(&base, &s, 0.2, &dabs),
+            "another detail size is another stroke"
+        );
     }
 }

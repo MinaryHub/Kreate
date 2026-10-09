@@ -11,7 +11,9 @@
 
 use kreate_math::{DAffine3, DQuat, DVec3, Vec3};
 use kreate_mesh::edit::join::{join, Part};
-use kreate_mesh::modifiers::{array, mirror, subdivide, ArrayParams, MirrorParams, SubdivideParams};
+use kreate_mesh::modifiers::{
+    array, mirror, subdivide, ArrayParams, MirrorParams, SubdivideParams,
+};
 use kreate_mesh::MeshData;
 
 /// What a node does.
@@ -145,7 +147,11 @@ fn instance_on_points(
         .iter()
         .zip(&normals)
         .map(|(p, n)| {
-            let up = if align { n.as_dvec3().normalize_or(DVec3::Z) } else { DVec3::Z };
+            let up = if align {
+                n.as_dvec3().normalize_or(DVec3::Z)
+            } else {
+                DVec3::Z
+            };
             let stand = DQuat::from_rotation_arc(DVec3::Z, up);
             let spin = if random_rotation {
                 DQuat::from_axis_angle(DVec3::Z, rng.unit() * std::f64::consts::TAU)
@@ -158,7 +164,10 @@ fn instance_on_points(
         .collect();
     let parts: Vec<Part<'_>> = transforms
         .into_iter()
-        .map(|transform| Part { mesh: shape, transform })
+        .map(|transform| Part {
+            mesh: shape,
+            transform,
+        })
         .collect();
     join(&parts).0
 }
@@ -183,8 +192,16 @@ fn noise3(p: Vec3, seed: u32) -> f32 {
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let c = |dx: i32, dy: i32, dz: i32| hash(x + dx, y + dy, z + dz);
     lerp(
-        lerp(lerp(c(0, 0, 0), c(1, 0, 0), s.x), lerp(c(0, 1, 0), c(1, 1, 0), s.x), s.y),
-        lerp(lerp(c(0, 0, 1), c(1, 0, 1), s.x), lerp(c(0, 1, 1), c(1, 1, 1), s.x), s.y),
+        lerp(
+            lerp(c(0, 0, 0), c(1, 0, 0), s.x),
+            lerp(c(0, 1, 0), c(1, 1, 0), s.x),
+            s.y,
+        ),
+        lerp(
+            lerp(c(0, 0, 1), c(1, 0, 1), s.x),
+            lerp(c(0, 1, 1), c(1, 1, 1), s.x),
+            s.y,
+        ),
         s.z,
     )
 }
@@ -193,13 +210,24 @@ fn noise3(p: Vec3, seed: u32) -> f32 {
 fn set_position(m: &mut MeshData, offset: Vec3, noise: f32, scale: f32, seed: u32) {
     let normals = vertex_normals(m);
     for (p, n) in m.positions_mut().iter_mut().zip(&normals) {
-        let along = if noise != 0.0 { noise * noise3(*p * scale, seed) } else { 0.0 };
+        let along = if noise != 0.0 {
+            noise * noise3(*p * scale, seed)
+        } else {
+            0.0
+        };
         *p += offset + *n * along;
     }
 }
 
 /// The primitive shapes, in [`GeoNodeKind::Primitive`]'s order.
-pub const PRIMITIVES: [&str; 6] = ["cube", "uv_sphere", "cylinder", "cone", "torus", "ico_sphere"];
+pub const PRIMITIVES: [&str; 6] = [
+    "cube",
+    "uv_sphere",
+    "cylinder",
+    "cone",
+    "torus",
+    "ico_sphere",
+];
 
 impl GeoNodeKind {
     /// How many geometry inputs it has.
@@ -259,7 +287,12 @@ impl GeoNodeKind {
                 translate,
                 rotate,
                 scale,
-            } => translate.iter().chain(rotate).chain(scale).copied().collect(),
+            } => translate
+                .iter()
+                .chain(rotate)
+                .chain(scale)
+                .copied()
+                .collect(),
             GeoNodeKind::Array { count, offset } => {
                 vec![*count as f32, offset[0], offset[1], offset[2]]
             }
@@ -289,14 +322,27 @@ impl GeoNodeKind {
                 noise,
                 noise_scale,
                 seed,
-            } => vec![offset[0], offset[1], offset[2], *noise, *noise_scale, *seed as f32],
+            } => vec![
+                offset[0],
+                offset[1],
+                offset[2],
+                *noise,
+                *noise_scale,
+                *seed as f32,
+            ],
         }
     }
 
     /// A kind from its tag and numbers; missing numbers take the defaults.
     /// `None` for a tag this build does not know.
     pub fn from_parts(tag: &str, values: &[f32]) -> Option<Self> {
-        let at = |i: usize, d: f32| values.get(i).copied().filter(|v| v.is_finite()).unwrap_or(d);
+        let at = |i: usize, d: f32| {
+            values
+                .get(i)
+                .copied()
+                .filter(|v| v.is_finite())
+                .unwrap_or(d)
+        };
         Some(match tag {
             "input" => GeoNodeKind::Input,
             "output" => GeoNodeKind::Output,
@@ -306,7 +352,8 @@ impl GeoNodeKind {
                 scale: [at(6, 1.0), at(7, 1.0), at(8, 1.0)],
             },
             "array" => GeoNodeKind::Array {
-                count: at(0, 3.0).clamp(1.0, kreate_mesh::modifiers::array::MAX_COUNT as f32) as u32,
+                count: at(0, 3.0).clamp(1.0, kreate_mesh::modifiers::array::MAX_COUNT as f32)
+                    as u32,
                 offset: [at(1, 2.5), at(2, 0.0), at(3, 0.0)],
             },
             "subdivide" => GeoNodeKind::Subdivide {
@@ -321,9 +368,7 @@ impl GeoNodeKind {
                 shape: at(0, 0.0).clamp(0.0, (PRIMITIVES.len() - 1) as f32) as u32,
                 size: at(1, 1.0).max(0.001),
             },
-            "extrude_profile" => GeoNodeKind::ExtrudeProfile {
-                height: at(0, 1.0),
-            },
+            "extrude_profile" => GeoNodeKind::ExtrudeProfile { height: at(0, 1.0) },
             "revolve_profile" => GeoNodeKind::RevolveProfile {
                 segments: at(0, 32.0).clamp(3.0, 512.0) as u32,
             },
@@ -545,7 +590,12 @@ impl GeoGraph {
             if std::mem::replace(&mut seen[n], true) {
                 continue;
             }
-            stack.extend(self.links.iter().filter(|l| l.from_node == n).map(|l| l.to_node));
+            stack.extend(
+                self.links
+                    .iter()
+                    .filter(|l| l.from_node == n)
+                    .map(|l| l.to_node),
+            );
         }
         false
     }
@@ -557,9 +607,9 @@ impl GeoGraph {
             .iter()
             .copied()
             .filter(|n| {
-                self.nodes
-                    .get(*n)
-                    .is_some_and(|node| !matches!(node.kind, GeoNodeKind::Input | GeoNodeKind::Output))
+                self.nodes.get(*n).is_some_and(|node| {
+                    !matches!(node.kind, GeoNodeKind::Input | GeoNodeKind::Output)
+                })
             })
             .collect();
         if doomed.is_empty() {
@@ -638,7 +688,15 @@ impl GeoGraph {
             } => {
                 let points = self.socket(n, 0, input, memo, depth);
                 let shape = self.socket(n, 1, input, memo, depth);
-                instance_on_points(&points, &shape, *scale, *random_scale, *random_rotation, *align, *seed)
+                instance_on_points(
+                    &points,
+                    &shape,
+                    *scale,
+                    *random_scale,
+                    *random_rotation,
+                    *align,
+                    *seed,
+                )
             }
             GeoNodeKind::SetPosition {
                 offset,
@@ -647,7 +705,13 @@ impl GeoGraph {
                 seed,
             } => {
                 let mut m = self.socket(n, 0, input, memo, depth);
-                set_position(&mut m, Vec3::from_array(*offset), *noise, *noise_scale, *seed);
+                set_position(
+                    &mut m,
+                    Vec3::from_array(*offset),
+                    *noise,
+                    *noise_scale,
+                    *seed,
+                );
                 m
             }
             GeoNodeKind::Input => input.clone(),
@@ -778,8 +842,20 @@ mod tests {
                 scale: [1.0, 1.0, 2.0],
             },
         );
-        let a = add(&mut g, GeoNodeKind::Array { count: 3, offset: [2.0, 0.0, 0.0] });
-        let p = add(&mut g, GeoNodeKind::Primitive { shape: 0, size: 1.0 });
+        let a = add(
+            &mut g,
+            GeoNodeKind::Array {
+                count: 3,
+                offset: [2.0, 0.0, 0.0],
+            },
+        );
+        let p = add(
+            &mut g,
+            GeoNodeKind::Primitive {
+                shape: 0,
+                size: 1.0,
+            },
+        );
         let j = add(&mut g, GeoNodeKind::Join);
         g.link(0, t, 0).unwrap();
         g.link(t, a, 0).unwrap();
@@ -798,7 +874,13 @@ mod tests {
     fn a_wire_that_would_loop_is_refused_and_removing_keeps_the_group_ends() {
         let mut g = GeoGraph::passthrough();
         let t = add(&mut g, GeoNodeKind::Mirror { axis: 0 });
-        let u = add(&mut g, GeoNodeKind::Subdivide { levels: 1, smooth: false });
+        let u = add(
+            &mut g,
+            GeoNodeKind::Subdivide {
+                levels: 1,
+                smooth: false,
+            },
+        );
         g.link(t, u, 0).unwrap();
         assert_eq!(g.link(u, t, 0), Err(GeoLinkError::Cycle));
         assert_eq!(g.link(1, t, 0), Err(GeoLinkError::NoSuchSocket));
@@ -812,8 +894,20 @@ mod tests {
     fn points_scattered_over_a_plane_each_carry_an_instance() {
         let plane = kreate_mesh::primitives::plane(2.0);
         let mut g = GeoGraph::passthrough();
-        let d = add(&mut g, GeoNodeKind::DistributePoints { density: 10.0, seed: 3 });
-        let p = add(&mut g, GeoNodeKind::Primitive { shape: 0, size: 0.1 });
+        let d = add(
+            &mut g,
+            GeoNodeKind::DistributePoints {
+                density: 10.0,
+                seed: 3,
+            },
+        );
+        let p = add(
+            &mut g,
+            GeoNodeKind::Primitive {
+                shape: 0,
+                size: 0.1,
+            },
+        );
         let i = add(
             &mut g,
             GeoNodeKind::InstanceOnPoints {
@@ -832,7 +926,10 @@ mod tests {
         // Four square units at ten a unit: forty cubes, six faces each.
         assert_eq!(out.num_faces(), 40 * 6);
         // On the plane, within it.
-        assert!(out.positions().iter().all(|q| q.x.abs() < 1.1 && q.y.abs() < 1.1 && q.z.abs() < 0.15));
+        assert!(out
+            .positions()
+            .iter()
+            .all(|q| q.x.abs() < 1.1 && q.y.abs() < 1.1 && q.z.abs() < 0.15));
         // The same seed scatters the same.
         assert_eq!(g.evaluate(&plane).unwrap().positions(), out.positions());
     }
@@ -846,13 +943,20 @@ mod tests {
         }
         let points = distribute_points(&wall, 5.0, 0);
         let pin = kreate_mesh::MeshData::from_faces(
-            vec![Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.01, 0.0, 0.0)],
+            vec![
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.01, 0.0, 0.0),
+            ],
             &[vec![0, 1, 2]],
         );
         let out = instance_on_points(&points, &pin, 1.0, 0.0, false, true, 0);
         let n = points.attributes().get_f32x3(POINT_NORMAL).unwrap()[0];
         let tip = out.positions()[1] - out.positions()[0];
-        assert!(tip.normalize().dot(n) > 0.999, "standing on the wall: {tip:?} vs {n:?}");
+        assert!(
+            tip.normalize().dot(n) > 0.999,
+            "standing on the wall: {tip:?} vs {n:?}"
+        );
     }
 
     #[test]
@@ -861,18 +965,31 @@ mod tests {
         let mut lumpy = ball.clone();
         set_position(&mut lumpy, Vec3::ZERO, 0.2, 3.0, 4);
         let radii: Vec<f32> = lumpy.positions().iter().map(|q| q.length()).collect();
-        assert!(radii.iter().any(|r| *r > 1.02) && radii.iter().any(|r| *r < 0.98), "in and out");
-        assert!(radii.iter().all(|r| (r - 1.0).abs() <= 0.2001), "no further than the noise");
+        assert!(
+            radii.iter().any(|r| *r > 1.02) && radii.iter().any(|r| *r < 0.98),
+            "in and out"
+        );
+        assert!(
+            radii.iter().all(|r| (r - 1.0).abs() <= 0.2001),
+            "no further than the noise"
+        );
         let mut moved = ball.clone();
         set_position(&mut moved, Vec3::new(0.0, 0.0, 2.0), 0.0, 1.0, 0);
-        assert!(moved.positions().iter().zip(ball.positions()).all(|(a, b)| (a.z - b.z - 2.0).abs() < 1e-6));
+        assert!(moved
+            .positions()
+            .iter()
+            .zip(ball.positions())
+            .all(|(a, b)| (a.z - b.z - 2.0).abs() < 1e-6));
     }
 
     #[test]
     fn every_kind_round_trips_through_its_numbers() {
         for tag in GeoNodeKind::ADDABLE.iter().chain(&["input", "output"]) {
             let kind = GeoNodeKind::from_parts(tag, &[]).unwrap();
-            assert_eq!(GeoNodeKind::from_parts(kind.tag(), &kind.values()), Some(kind.clone()));
+            assert_eq!(
+                GeoNodeKind::from_parts(kind.tag(), &kind.values()),
+                Some(kind.clone())
+            );
             for f in kind.fields() {
                 assert!(kind.with_value(f.index, f.value).is_some());
             }

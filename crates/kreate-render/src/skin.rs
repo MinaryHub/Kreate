@@ -82,7 +82,12 @@ impl Skin {
         bone_count: u32,
     ) -> Option<Self> {
         let render_verts = cpu.positions.len() as u32;
-        let mesh_verts = cpu.render_to_vert.iter().copied().max().map_or(0, |v| v + 1);
+        let mesh_verts = cpu
+            .render_to_vert
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |v| v + 1);
         if render_verts == 0
             || bone_count == 0
             || (influences.offsets.len() as u32) < mesh_verts + 1
@@ -98,18 +103,43 @@ impl Skin {
             })
         };
         let storage = wgpu::BufferUsages::STORAGE;
-        let rest_positions = init("skin rest positions", bytemuck::cast_slice(&cpu.positions), storage);
-        let rest_normals = init("skin rest normals", bytemuck::cast_slice(&cpu.normals), storage);
-        let render_to_vert = init("skin render to vert", bytemuck::cast_slice(&cpu.render_to_vert), storage);
-        let offsets = init("skin offsets", bytemuck::cast_slice(&influences.offsets), storage);
+        let rest_positions = init(
+            "skin rest positions",
+            bytemuck::cast_slice(&cpu.positions),
+            storage,
+        );
+        let rest_normals = init(
+            "skin rest normals",
+            bytemuck::cast_slice(&cpu.normals),
+            storage,
+        );
+        let render_to_vert = init(
+            "skin render to vert",
+            bytemuck::cast_slice(&cpu.render_to_vert),
+            storage,
+        );
+        let offsets = init(
+            "skin offsets",
+            bytemuck::cast_slice(&influences.offsets),
+            storage,
+        );
         let bones_of = init(
             "skin influence bones",
             bytemuck::cast_slice(pad_if_empty(&influences.bones)),
             storage,
         );
-        let weights: &[f32] = if influences.weights.is_empty() { &[0.0] } else { &influences.weights };
-        let weights_of = init("skin influence weights", bytemuck::cast_slice(weights), storage);
-        let identity: Vec<BoneRows> = vec![bone_rows(glam::Affine3A::IDENTITY); bone_count as usize];
+        let weights: &[f32] = if influences.weights.is_empty() {
+            &[0.0]
+        } else {
+            &influences.weights
+        };
+        let weights_of = init(
+            "skin influence weights",
+            bytemuck::cast_slice(weights),
+            storage,
+        );
+        let identity: Vec<BoneRows> =
+            vec![bone_rows(glam::Affine3A::IDENTITY); bone_count as usize];
         let bones = init(
             "skin bones",
             bytemuck::cast_slice(&identity),
@@ -123,7 +153,11 @@ impl Skin {
         // The normal passes' own inputs: every vertex fully "weighted", which
         // is what their bounds check reads the vertex count from, and a
         // gesture they never look at.
-        let ones = init("skin normal weights", bytemuck::cast_slice(&vec![1.0f32; render_verts as usize]), storage);
+        let ones = init(
+            "skin normal weights",
+            bytemuck::cast_slice(&vec![1.0f32; render_verts as usize]),
+            storage,
+        );
         let gesture = init(
             "skin gesture",
             bytemuck::bytes_of(&Gesture::IDENTITY),
@@ -203,7 +237,11 @@ impl Skin {
         }
         for (label, pipeline, items) in [
             ("skin face normals", &deformer.face_normals, self.faces),
-            ("skin vertex normals", &deformer.vertex_normals, self.render_verts),
+            (
+                "skin vertex normals",
+                &deformer.vertex_normals,
+                self.render_verts,
+            ),
         ] {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
