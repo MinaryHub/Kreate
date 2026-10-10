@@ -178,6 +178,18 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "check_rig",
+            "description": "Tries a rig: bends each bone of an armature in turn (by `angle` degrees about its own X, default 45) and measures the meshes bound to it, without changing the document. Returns the bones worst first, each with how many vertices it moved, its worst edge's stretch as a ratio of its rest length (1 is perfect; past 1.5 counts as torn — a vertex left behind by a misplaced weight), how many edges tore and where the worst one is (world, at rest), and how many were pinched under a third (the inside of a bend folding: normal in a few, a too-hard joint if many); bones that move nothing; and vertices no bone holds, with a few of their positions. Use it after binding and after each weight fix: fix the worst bone with object.vertex_weights_set (exclusive, by box) and object.vertex_weights_smooth, then check again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rig": { "type": "string", "description": "The armature object's name; default the active armature, or the first." },
+                    "angle": { "type": "number", "description": "How far to bend each bone, in degrees. Default 45." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "generate_model",
             "description": "Makes a 3D model with AI on Hugging Face's free GPUs and adds it to the scene beside what is there: from `prompt`, words describing one object (they become a picture with Z-Image Turbo, then a model with TRELLIS), or from `image`, the path of a picture of one object on a plain background. Takes a minute or two and runs in the background; check get_scene for it. Without a Hugging Face token in the Assets panel the free GPU time may not be enough, and the panel says so. Kept under Assets ▸ Made by AI.",
             "inputSchema": {

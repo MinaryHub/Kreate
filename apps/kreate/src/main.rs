@@ -5029,6 +5029,71 @@ impl App {
                 self.capture_views(params)
             }
             "context" => Ok(self.context_json()),
+            // Every bone bent in turn and the skin measured: what is torn,
+            // where, and what no bone holds.
+            "rig_check" => {
+                let rig = match text("rig") {
+                    Some(name) => self
+                        .doc
+                        .objects()
+                        .find(|(_, o)| o.name == name)
+                        .map(|(id, _)| id)
+                        .ok_or_else(|| format!("no object called `{name}`"))?,
+                    None => self
+                        .doc
+                        .selection
+                        .active
+                        .filter(|id| {
+                            matches!(
+                                self.doc.object(*id).map(|o| &o.data),
+                                Some(kreate_scene::document::ObjectData::Armature(_))
+                            )
+                        })
+                        .or_else(|| {
+                            self.doc
+                                .objects()
+                                .find(|(_, o)| {
+                                    matches!(
+                                        o.data,
+                                        kreate_scene::document::ObjectData::Armature(_)
+                                    )
+                                })
+                                .map(|(id, _)| id)
+                        })
+                        .ok_or("the scene has no armature")?,
+                };
+                let degrees = params.get("angle").and_then(|v| v.as_f64()).unwrap_or(45.0);
+                let report = kreate::rigcheck::check(&self.doc, rig, degrees)?;
+                let bones: Vec<serde_json::Value> = report
+                    .bones
+                    .iter()
+                    .map(|b| {
+                        json!({
+                            "bone": b.bone,
+                            "moved_vertices": b.moved,
+                            "worst_edge_ratio": (b.worst_ratio * 1000.0).round() / 1000.0,
+                            "torn_edges": b.torn,
+                            "pinched_edges": b.pinched,
+                            "worst_at": b.worst_at,
+                        })
+                    })
+                    .collect();
+                let idle: Vec<&str> = report
+                    .bones
+                    .iter()
+                    .filter(|b| b.moved == 0)
+                    .map(|b| b.bone.as_str())
+                    .collect();
+                Ok(json!({
+                    "rig": report.rig,
+                    "meshes": report.meshes,
+                    "bent_by_degrees": degrees,
+                    "bones_worst_first": bones,
+                    "bones_moving_nothing": idle,
+                    "unweighted_vertices": report.unweighted,
+                    "unweighted_sample": report.unweighted_sample,
+                }))
+            }
             // A model made by AI, added when it arrives — as an asset is.
             "generate" => {
                 let request = match (text("prompt"), text("image")) {

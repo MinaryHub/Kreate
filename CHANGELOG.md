@@ -21,6 +21,10 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector's `check_rig` bends every bone of a rig in turn and
+  measures the skin: which bones tear it and where, which pinch, which move
+  nothing, and which vertices no bone holds — so an assistant can fix the
+  worst and check again. A 67-bone character takes a tenth of a second.
 - Vertex weights set exactly — `object.vertex_weights_set`, by vertex
   numbers, by a box, or the selection; replace, add or subtract; alone, so
   those vertices leave every other bone — and smoothed along the edges with
