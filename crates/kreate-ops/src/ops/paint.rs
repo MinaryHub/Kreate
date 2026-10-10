@@ -26,6 +26,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetActiveGroup>();
     registry.register::<Stroke>();
     registry.register::<Normalize>();
+    registry.register::<SetWeights>();
+    registry.register::<SmoothWeights>();
     registry.register::<TextureStroke>();
     registry.register::<NewTexture>();
 }
@@ -614,6 +616,248 @@ impl Operator for Normalize {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetWeightsParams {
+    /// The group — a bone's name, for a mesh an armature moves. Made if the
+    /// mesh has none by that name.
+    pub group: String,
+    /// Which vertices, by index. Empty: those inside `from`..`to` when a box
+    /// is given, else the selected ones.
+    pub vertices: Vec<u32>,
+    /// A box in the mesh's own coordinates, low corner and high: every vertex
+    /// inside. Unused while the two corners are the same.
+    #[param(unit = "length")]
+    pub from: [f64; 3],
+    #[param(unit = "length")]
+    pub to: [f64; 3],
+    #[param(min = 0.0, max = 1.0)]
+    pub weight: f64,
+    /// Put it there, add it, or take it away.
+    #[param(variants("replace", "add", "subtract"))]
+    pub mode: u32,
+    /// These vertices follow this group alone: their weight in every other
+    /// group is taken away — a hand's vertices off the forearm.
+    pub exclusive: bool,
+}
+
+impl Default for SetWeightsParams {
+    fn default() -> Self {
+        Self {
+            group: String::new(),
+            vertices: Vec::new(),
+            from: [0.0; 3],
+            to: [0.0; 3],
+            weight: 1.0,
+            mode: 0,
+            exclusive: false,
+        }
+    }
+}
+
+/// Sets how much chosen vertices follow a group, exactly: by their numbers,
+/// by a box around them, or as selected. What a brush cannot say — "these
+/// two hundred vertices belong to the left hand" — said in one step.
+pub struct SetWeights;
+
+impl Operator for SetWeights {
+    type Params = SetWeightsParams;
+    fn id() -> &'static str {
+        "object.vertex_weights_set"
+    }
+    fn label() -> &'static str {
+        "Set Vertex Weights"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let group = params.group.trim();
+        if group.is_empty() {
+            return Err(OpError::Failed("name the group, or the bone".into()));
+        }
+        let Some((object, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let n = m.num_verts() as usize;
+        let chosen: Vec<usize> = if !params.vertices.is_empty() {
+            params
+                .vertices
+                .iter()
+                .map(|v| *v as usize)
+                .filter(|v| *v < n)
+                .collect()
+        } else if params.from != params.to {
+            let lo = glam::DVec3::from_array(params.from).min(glam::DVec3::from_array(params.to));
+            let hi = glam::DVec3::from_array(params.from).max(glam::DVec3::from_array(params.to));
+            m.positions()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    let p = p.as_dvec3();
+                    p.cmpge(lo).all() && p.cmple(hi).all()
+                })
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            crate::ops::mesh::selection_vertices(m)
+                .into_iter()
+                .map(|v| v as usize)
+                .collect()
+        };
+        if chosen.is_empty() {
+            return Err(OpError::Failed("no vertices chosen".into()));
+        }
+        let weight = params.weight.clamp(0.0, 1.0) as f32;
+        let mut mine = weights(doc.document(), mesh, group);
+        for &v in &chosen {
+            mine[v] = match params.mode {
+                1 => (mine[v] + weight).min(1.0),
+                2 => (mine[v] - weight).max(0.0),
+                _ => weight,
+            };
+        }
+        let others: Vec<(String, Vec<f32>)> = if params.exclusive {
+            groups(doc.document(), mesh)
+                .into_iter()
+                .filter(|g| g != group)
+                .map(|g| {
+                    let mut w = weights(doc.document(), mesh, &g);
+                    for &v in &chosen {
+                        w[v] = 0.0;
+                    }
+                    (g, w)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let d = doc.document_mut();
+        let Some(m) = d.mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        m.attributes_mut().insert(
+            &weight_layer(group),
+            Domain::Point,
+            AttrData::F32(std::sync::Arc::new(mine)),
+        );
+        for (g, w) in others {
+            m.attributes_mut().insert(
+                &weight_layer(&g),
+                Domain::Point,
+                AttrData::F32(std::sync::Arc::new(w)),
+            );
+        }
+        if let Some(o) = d.object_mut(object) {
+            o.active_group = Some(group.to_string());
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SmoothWeightsParams {
+    /// One group; empty for every group.
+    pub group: String,
+    /// How many passes.
+    #[param(min = 1, max = 100, unit = "count")]
+    pub iterations: u32,
+    /// How far each pass moves a weight toward its neighbours' mean.
+    #[param(min = 0.0, max = 1.0)]
+    pub factor: f64,
+}
+
+impl Default for SmoothWeightsParams {
+    fn default() -> Self {
+        Self {
+            group: String::new(),
+            iterations: 3,
+            factor: 0.5,
+        }
+    }
+}
+
+/// Blurs weights along the edges — Blender's Smooth Vertex Weights — so a
+/// joint bends as a sleeve does, not as a hinge.
+pub struct SmoothWeights;
+
+impl Operator for SmoothWeights {
+    type Params = SmoothWeightsParams;
+    fn id() -> &'static str {
+        "object.vertex_weights_smooth"
+    }
+    fn label() -> &'static str {
+        "Smooth Vertex Weights"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let names: Vec<String> = if params.group.trim().is_empty() {
+            groups(doc.document(), mesh)
+        } else {
+            vec![params.group.trim().to_string()]
+        };
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if names.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let n = m.num_verts() as usize;
+        let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for e in m.edges() {
+            let (a, b) = (e[0] as usize, e[1] as usize);
+            if a < n && b < n {
+                neighbours[a].push(b);
+                neighbours[b].push(a);
+            }
+        }
+        let factor = params.factor.clamp(0.0, 1.0) as f32;
+        let smoothed: Vec<(String, Vec<f32>)> = names
+            .into_iter()
+            .map(|g| {
+                let mut w = weights(doc.document(), mesh, &g);
+                for _ in 0..params.iterations.clamp(1, 100) {
+                    let before = w.clone();
+                    for (v, near) in neighbours.iter().enumerate() {
+                        if near.is_empty() {
+                            continue;
+                        }
+                        let mean = near.iter().map(|u| before[*u]).sum::<f32>() / near.len() as f32;
+                        w[v] = before[v] + (mean - before[v]) * factor;
+                    }
+                }
+                (g, w)
+            })
+            .collect();
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        for (g, w) in smoothed {
+            m.attributes_mut().insert(
+                &weight_layer(&g),
+                Domain::Point,
+                AttrData::F32(std::sync::Arc::new(w)),
+            );
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 /// A copy of `mesh` for the screen, with `group`'s weights where the
 /// renderer's weight ramp reads them: the first surface coordinate of every
 /// corner. The document's mesh is not touched — its real UVs are its own.
@@ -638,4 +882,112 @@ pub fn weight_display(mesh: &kreate_mesh::MeshData, group: Option<&str>) -> krea
         AttrData::F32x2(std::sync::Arc::new(uv)),
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strip_doc() -> (kreate_scene::Document, ObjectId, MeshId) {
+        // A column of points up Z, one per unit, joined by edges.
+        let mut d = kreate_scene::Document::new();
+        let id = d.add_mesh_object("Arm", kreate_mesh::primitives::grid(1.0, 1, 4));
+        d.selection.clear();
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        let mesh = d.object(id).and_then(|o| o.mesh()).expect("a mesh");
+        (d, id, mesh)
+    }
+
+    fn run<O: Operator>(d: &mut kreate_scene::Document, params: &O::Params) -> OpResult {
+        let mut edit = DocMut::new(d);
+        O::execute(params, &mut edit, &Context::default()).expect("ran")
+    }
+
+    #[test]
+    fn weights_are_set_by_number_by_box_and_alone() {
+        let (mut d, _, mesh) = strip_doc();
+        let n = d.mesh(mesh).expect("mesh").num_verts() as usize;
+        run::<SetWeights>(
+            &mut d,
+            &SetWeightsParams {
+                group: "Upper".into(),
+                vertices: (0..n as u32).collect(),
+                ..Default::default()
+            },
+        );
+        assert!(weights(&d, mesh, "Upper").iter().all(|w| *w == 1.0));
+        // The far half by a box, to a second bone, alone.
+        let ys: Vec<f32> = d
+            .mesh(mesh)
+            .expect("mesh")
+            .positions()
+            .iter()
+            .map(|p| p.y)
+            .collect();
+        let top = ys.iter().copied().fold(f32::MIN, f32::max) as f64;
+        run::<SetWeights>(
+            &mut d,
+            &SetWeightsParams {
+                group: "Lower".into(),
+                from: [-10.0, 0.01, -10.0],
+                to: [10.0, top + 1.0, 10.0],
+                exclusive: true,
+                ..Default::default()
+            },
+        );
+        let (upper, lower) = (weights(&d, mesh, "Upper"), weights(&d, mesh, "Lower"));
+        for (v, y) in ys.iter().enumerate() {
+            if *y > 0.01 {
+                assert_eq!((upper[v], lower[v]), (0.0, 1.0), "vertex {v} at {y}");
+            } else {
+                assert_eq!((upper[v], lower[v]), (1.0, 0.0), "vertex {v} at {y}");
+            }
+        }
+        // Subtracting half.
+        run::<SetWeights>(
+            &mut d,
+            &SetWeightsParams {
+                group: "Lower".into(),
+                vertices: vec![n as u32 - 1],
+                weight: 0.5,
+                mode: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(weights(&d, mesh, "Lower")[n - 1], 0.5);
+    }
+
+    #[test]
+    fn smoothing_softens_a_hard_edge_between_bones() {
+        let (mut d, _, mesh) = strip_doc();
+        let ys: Vec<f32> = d
+            .mesh(mesh)
+            .expect("mesh")
+            .positions()
+            .iter()
+            .map(|p| p.y)
+            .collect();
+        run::<SetWeights>(
+            &mut d,
+            &SetWeightsParams {
+                group: "Lower".into(),
+                from: [-10.0, 0.01, -10.0],
+                to: [10.0, 10.0, 10.0],
+                ..Default::default()
+            },
+        );
+        let hard = weights(&d, mesh, "Lower");
+        run::<SmoothWeights>(&mut d, &SmoothWeightsParams::default());
+        let soft = weights(&d, mesh, "Lower");
+        // Next to the step, a vertex that had none now has some.
+        let (v, _) = ys
+            .iter()
+            .enumerate()
+            .filter(|(_, y)| **y <= 0.01)
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .expect("one below");
+        assert_eq!(hard[v], 0.0);
+        assert!(soft[v] > 0.05 && soft[v] < 0.95, "{}", soft[v]);
+    }
 }
