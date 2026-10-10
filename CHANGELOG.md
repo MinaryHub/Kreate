@@ -21,6 +21,11 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector teaches its ways of working: its instructions now say when
+  to reach for assets, AI generation, the sculpting loop (compare, shape,
+  measure again), the rigging loop and the timeline; and it offers them as
+  prompts — rig a character, sculpt to a reference, dress a scene from
+  assets, make a model — for a client to start from.
 - The connector's `check_proportions` measures a standing figure against a
   realistic adult — heads tall, leg length, arm span, chest and hip width —
   each with the usual range and whether it is below, within or above.

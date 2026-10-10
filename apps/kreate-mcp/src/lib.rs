@@ -70,7 +70,72 @@ rounded (0.2 to 0.8), and edges marked with mesh.mark_sharp stay sharp. object.s
 object. Placement: object.place_on(target=...) stands the active object on another; \
 object.align lines up sides of bounding boxes; check_overlaps finds parts that run into \
 each other. mesh.select_where selects elements by a world-space box, a face direction or a \
-material slot instead of by index. data.purge removes unused meshes, materials and images.";
+material slot instead of by index. data.purge removes unused meshes, materials and images.\n\
+Looking: get_context says what the user has selected and where they look — read it when they \
+say \"this\" or \"here\". capture_viewport(views=[\"front\",\"right\",\"top\"]) shows a shape \
+from three sides at once; only=[...] shows some objects alone.\n\
+Assets before modelling by hand: search_assets finds models, materials and HDRIs (Poly Haven, \
+ambientCG, Poly Pizza for low-poly and animated models, the user's folders) and add_asset adds \
+one beside what is there; get_scene shows it when it has arrived. When nothing fits, \
+generate_model makes one from words or a picture (a minute or two).\n\
+Organic shapes — a character, a creature, a face: work in a loop and measure each turn. \
+compare_silhouette(reference=..., view=\"front\" then \"right\") against the user's picture says \
+where the model has too much or too little; check_proportions says how a figure departs from \
+an adult's proportions; analyze_mesh says where the surface is bumpy, open or lopsided. Fix \
+with sculpt.deform_region (push, inflate, move, scale, flatten or smooth a ball- or egg-shaped \
+region by metres; mirror_x=true for both sides) and sculpt.crease_path (grooves and ridges \
+along points), then measure again; stop when the agreement stops rising.\n\
+Rigging a standing figure: select the mesh and run object.add_humanoid_rig (it fits and binds \
+a skeleton). Then check_rig: fix the worst bone's torn edges with \
+object.vertex_weights_set(group=bone, from=..., to=..., exclusive=true) and \
+object.vertex_weights_smooth, and check again until no bone tears. Build one side and copy it \
+with armature.symmetrize and object.vertex_weights_mirror.\n\
+Animation: timeline reads and moves the clock and switches a file's takes (NLA strips) on and \
+off; key poses with anim.keyframe_insert in pose mode, then timeline(frame=...) and \
+capture_viewport to look at a pose. A chat answer's changes can be undone together by the \
+user, so make each request one coherent set of changes.";
+
+/// Ways of working, as `prompts/list` offers them: a name, what it is for,
+/// the one thing it asks, and the request it makes, `{}` where that goes.
+const PROMPTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "rig_character",
+        "Rig a standing character so it bends cleanly",
+        "character",
+        "Rig {} in Kreate. Select its mesh and run object.add_humanoid_rig. Then loop: \
+         check_rig; for the bone that tears most, fix its weights with \
+         object.vertex_weights_set (a box round the wrong vertices, exclusive=true) and \
+         object.vertex_weights_smooth; check_rig again. Stop when no bone tears. Finally pose \
+         an arm and a leg and capture_viewport from the front to show me.",
+    ),
+    (
+        "sculpt_to_reference",
+        "Shape a model toward a reference picture",
+        "picture",
+        "Shape the selected model in Kreate toward the picture at {}. Loop: \
+         compare_silhouette with it (front, and right if it shows the side); for the biggest \
+         difference, use sculpt.deform_region (mirror_x for a symmetric figure) to add or \
+         take away there; analyze_mesh and smooth what got bumpy; compare again. Report the \
+         agreement each round and stop when it stops rising.",
+    ),
+    (
+        "dress_scene",
+        "Build a scene from free assets",
+        "scene",
+        "Build {} in Kreate from assets: search_assets for each thing it needs (models, then \
+         a floor material, then an HDRI for light), add_asset each, wait for get_scene to show \
+         them, size and place them with object.set_dimensions and object.place_on, \
+         check_overlaps, and capture_viewport to show me.",
+    ),
+    (
+        "make_model",
+        "Make a model from a description, with AI",
+        "description",
+        "Make {} in Kreate. First search_assets for something close; if nothing fits, \
+         generate_model from the description. When it arrives, size it sensibly, \
+         analyze_mesh it, and capture_viewport from three sides to show me.",
+    ),
+];
 
 /// The tools, as `tools/list` describes them.
 pub fn tools() -> Value {
@@ -349,12 +414,47 @@ pub fn handle(message: &Value, app: &mut dyn App) -> Option<Value> {
             };
             Ok(json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false }
+                },
                 "serverInfo": { "name": "kreate", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
             }))
         }
         "ping" => Ok(json!({})),
+        "prompts/list" => Ok(json!({
+            "prompts": PROMPTS
+                .iter()
+                .map(|(name, description, argument, _)| json!({
+                    "name": name,
+                    "description": description,
+                    "arguments": [{ "name": argument, "required": true }],
+                }))
+                .collect::<Vec<_>>()
+        })),
+        "prompts/get" => {
+            let name = message
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match PROMPTS.iter().find(|p| p.0 == name) {
+                None => Err((-32602, format!("no prompt called `{name}`"))),
+                Some((_, description, argument, text)) => {
+                    let given = message
+                        .pointer(&format!("/params/arguments/{argument}"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Ok(json!({
+                        "description": description,
+                        "messages": [{
+                            "role": "user",
+                            "content": { "type": "text", "text": text.replace("{}", given) }
+                        }]
+                    }))
+                }
+            }
+        }
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => {
             let name = message
@@ -753,5 +853,33 @@ mod tests {
         .unwrap();
         assert_eq!(method["error"]["code"], -32601);
         assert!(app.asked.is_empty());
+    }
+
+    #[test]
+    fn workflows_are_offered_as_prompts_with_the_argument_filled_in() {
+        let mut app = fake(Ok(json!({})));
+        let list = handle(
+            &json!({"jsonrpc":"2.0","id":1,"method":"prompts/list"}),
+            &mut app,
+        )
+        .unwrap();
+        let names: Vec<&str> = list["result"]["prompts"]
+            .as_array()
+            .expect("prompts")
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(names.contains(&"rig_character") && names.contains(&"sculpt_to_reference"));
+        let got = handle(
+            &json!({"jsonrpc":"2.0","id":2,"method":"prompts/get",
+                    "params":{"name":"rig_character","arguments":{"character":"the knight"}}}),
+            &mut app,
+        )
+        .unwrap();
+        let text = got["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.starts_with("Rig the knight"), "{text}");
+        assert!(app.asked.is_empty(), "nothing asked of Kreate");
     }
 }
