@@ -390,3 +390,39 @@ fn a_liquid_is_set_up_baked_and_undone_by_operators() {
     );
     assert!(doc.object(water).unwrap().physics.fluid.is_none());
 }
+
+#[test]
+fn smoke_and_fire_are_set_up_and_baked_by_operators() {
+    let (registry, mut history, mut doc) = wired();
+    doc.physics.frame_end = 8;
+    let room = add(&mut doc, "Room", kreate_mesh::primitives::cube(2.0), 1.0);
+    let torch = add(&mut doc, "Torch", kreate_mesh::primitives::cube(0.4), 0.3);
+    select(&mut doc, room);
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.fluid_set",
+        &[
+            ("role", PropertyValue::Enum(1)),
+            ("domain", PropertyValue::Enum(1)),
+            ("resolution", PropertyValue::Int(12)),
+        ]
+    ));
+    select(&mut doc, torch);
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.fluid_set",
+        &[
+            ("role", PropertyValue::Enum(2)),
+            ("substance", PropertyValue::Enum(3)),
+            ("flow", PropertyValue::Enum(1)),
+        ]
+    ));
+    assert!(run(&registry, &mut history, &mut doc, "physics.bake", &[]));
+    assert!(doc.physics_cache.fluid.is_empty());
+    assert_eq!(doc.physics_cache.gas.len(), 1);
+    assert_eq!(doc.physics_cache.gas[0].frames.len(), 8);
+}

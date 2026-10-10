@@ -6023,13 +6023,18 @@ impl App {
             gfx.gpu.queue.submit([encoder.finish()]);
         }
         gfx.skinned = skinned;
+        // Nothing to draw is not uploaded: a baked gas domain, or a liquid's
+        // domain on a frame it has run dry, is a mesh of no faces, and a GPU
+        // buffer of no bytes cannot be bound.
         let ordinary: Vec<(ObjectId, Arc<MeshData>)> = self
             .evaluated
             .iter()
             .filter(|(id, mesh)| {
-                !gfx.skinned
-                    .iter()
-                    .any(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
+                mesh.num_faces() > 0
+                    && !gfx
+                        .skinned
+                        .iter()
+                        .any(|e| e.object == *id && Arc::ptr_eq(&e.shown, mesh))
             })
             .cloned()
             .collect();
@@ -9011,6 +9016,31 @@ impl App {
         // 3D into the offscreen target...
         gfx.viewport
             .prepare(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &mut draws);
+        // Baked smoke and fire at this frame: each shown gas domain's grid.
+        // After `prepare`, which settles the size and depth they march to.
+        let now = self.doc.playback.frame;
+        let volumes: Vec<kreate_render::volume::VolumeData<'_>> = self
+            .doc
+            .objects()
+            .filter(|(id, _)| self.doc.is_shown(*id))
+            .filter_map(|(_, o)| {
+                let Some(kreate_scene::physics::Fluid::Domain(d)) = o.physics.fluid else {
+                    return None;
+                };
+                let (track, at) = self.doc.physics_cache.gas_at(o.uid, now)?;
+                Some(kreate_render::volume::VolumeData {
+                    cells: track.cells.map(|c| c as u32),
+                    smoke: &at.smoke,
+                    flame: &at.flame,
+                    min: track.bounds.min.as_dvec3(),
+                    max: track.bounds.max.as_dvec3(),
+                    smoke_color: d.smoke_color.as_vec3().to_array(),
+                    key: std::sync::Arc::as_ptr(&at.smoke) as *const u8 as usize,
+                })
+            })
+            .collect();
+        gfx.viewport
+            .set_volumes(&gfx.gpu.device, &gfx.gpu.queue, &self.camera, &volumes);
         gfx.viewport.render(&mut encoder, &gfx.target.view, &draws);
 
         // The id pass runs every frame, not on the click. The naive flow — click,

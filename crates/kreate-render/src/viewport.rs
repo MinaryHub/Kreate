@@ -1457,6 +1457,10 @@ pub struct Viewport {
     aa: crate::fxaa::Fxaa,
     /// The orange line around selected objects.
     outline: crate::outline::Outline,
+    /// Baked smoke and fire, marched over the picture.
+    volumes: crate::volume::Volumes,
+    /// What the volumes were last frame, so a change starts the mean again.
+    volume_signature: u64,
     /// The path tracer, for the rendered view when it is asked for.
     pathtracer: crate::pathtrace::PathTracer,
     /// Whether the rendered view is path traced rather than rasterised.
@@ -2199,6 +2203,8 @@ impl Viewport {
         });
 
         let depth_0 = gpu::create_depth_texture(device, width, height);
+        let volumes_0 =
+            crate::volume::Volumes::new(device, color_format, crate::display::HDR_FORMAT);
         let outline_0 = crate::outline::Outline::new(
             device,
             color_format,
@@ -2547,6 +2553,8 @@ impl Viewport {
             depth: depth_0,
             aa: crate::fxaa::Fxaa::new(device, color_format, width.max(1), height.max(1)),
             outline: outline_0,
+            volumes: volumes_0,
+            volume_signature: 0,
             accum: crate::accum::Accum::new(device, color_format, width.max(1), height.max(1)),
             accumulate: true,
             pathtracer: pathtracer_0,
@@ -2649,6 +2657,43 @@ impl Viewport {
     }
 
     /// Aspect ratio of the drawn region, which is what the projection needs.
+    /// Baked smoke and fire to draw, seen by `camera`. Called each frame
+    /// before [`Viewport::prepare`]; an empty list draws none.
+    pub fn set_volumes(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        volumes: &[crate::volume::VolumeData<'_>],
+    ) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for v in volumes {
+            (v.key, v.cells).hash(&mut h);
+            v.smoke_color.map(f32::to_bits).hash(&mut h);
+        }
+        let signature = h.finish();
+        if signature != self.volume_signature {
+            self.volume_signature = signature;
+            self.restart_accumulation();
+        }
+        if volumes.is_empty() && self.volumes.is_empty() {
+            return;
+        }
+        let aspect = self.aspect();
+        let hdr = self.shading == ShadingMode::Rendered;
+        self.volumes.set(
+            device,
+            queue,
+            camera,
+            aspect,
+            &self.depth,
+            self.render_size,
+            hdr,
+            volumes,
+        );
+    }
+
     pub fn aspect(&self) -> f64 {
         self.render_size.0 as f64 / self.render_size.1 as f64
     }
@@ -4466,6 +4511,9 @@ impl Viewport {
             // Opaque geometry first, so the grid can be depth-tested against it.
             self.encode_solid(&mut pass, draws, Pass::First);
         }
+        // Smoke over the surfaces, ended by their depth; not into the mean,
+        // so a still view's smoke is as sharp as its frame.
+        self.volumes.draw(encoder, target, false);
         self.draw_outline(encoder, target, draws);
         let mut pass = self.begin_pass(encoder, target, false);
         self.encode_overlays(&mut pass, draws);
@@ -4983,6 +5031,9 @@ impl Viewport {
                 self.encode_lit_scene(encoder, draws);
                 self.pathtracer
                     .render(encoder, &self.shading_bind, self.hdr.view());
+                // Over the traced picture, by the raster depth: the tracer
+                // itself does not see the smoke.
+                self.volumes.draw(encoder, self.hdr.view(), true);
                 if self.path_trace_denoise {
                     self.denoise.apply(
                         encoder,
@@ -5001,6 +5052,7 @@ impl Viewport {
             self.accum.present(encoder, target, self.render_size);
         } else {
             self.encode_lit_scene(encoder, draws);
+            self.volumes.draw(encoder, self.hdr.view(), true);
             // Reflections first, from the picture as lit; then corners and
             // contact darkened, then the glow on top: occlusion shades light,
             // it does not shade a lens's flare.

@@ -13,12 +13,13 @@ use kreate_reflect::Uid;
 
 use super::collide::Collider;
 use super::fluid::{world_triangles, LiquidSim};
+use super::gas::{Emission, GasSettings, GasSim};
 use super::particles::{HairSim, ParticleSim};
 use super::rigid::{Body, RigidWorld};
 use super::soft::SoftSim;
 use super::{
-    BodyKind, CollisionShape, FluidTrack, ParticleKind, ParticleTrack, PhysicsCache, RigidTrack,
-    SoftTrack,
+    BodyKind, CollisionShape, FluidTrack, GasFrame, GasTrack, ParticleKind, ParticleTrack,
+    PhysicsCache, RigidTrack, SoftTrack, Substance,
 };
 use crate::document::{Document, ObjectId};
 use crate::modifier::{EvalCtx, ModifierCache};
@@ -65,6 +66,14 @@ type Frames<T> = Vec<Arc<[T]>>;
 type Baking = (ObjectId, Uid, SoftSim, Frames<kreate_math::Vec3>);
 /// A particle system being baked: its object, which system, the sim.
 type Emitting<S> = (ObjectId, Uid, usize, S, Frames<super::Particle>);
+
+/// A gas domain being baked.
+struct Gas {
+    object: ObjectId,
+    uid: Uid,
+    sim: GasSim,
+    frames: Vec<GasFrame>,
+}
 
 /// A liquid domain being baked.
 struct Liquid {
@@ -259,6 +268,7 @@ pub fn bake_with(
         }
     }
     let mut liquids: Vec<Liquid> = Vec::new();
+    let mut gases: Vec<Gas> = Vec::new();
     for &id in &ids {
         let Some(o) = scene.object(id) else { continue };
         let Some(super::Fluid::Domain(domain)) = o.physics.fluid else {
@@ -276,14 +286,74 @@ pub fn bake_with(
         if bounds.is_empty() {
             continue;
         }
-        let mut sim = LiquidSim::new(bounds, domain.resolution, domain.flip, o.uid.raw());
         let walls: Vec<Vec<[kreate_math::Vec3; 3]>> = obstacles
             .iter()
             .filter(|(o, _)| *o != id)
             .map(|(o, m)| world_triangles(m, scene.world_transform(*o)))
             .collect();
+        if domain.kind == super::DomainKind::Gas {
+            let mut sim = GasSim::new(
+                bounds,
+                domain.resolution,
+                GasSettings {
+                    buoyancy: domain.buoyancy as f32,
+                    vorticity: domain.vorticity as f32,
+                    dissipation: domain.dissipation as f32,
+                    ..GasSettings::default()
+                },
+            );
+            sim.set_obstacles(&walls);
+            for (flow, tris) in flows
+                .iter()
+                .filter(|(f, _)| f.substance != Substance::Liquid)
+            {
+                let heat = flow.temperature.clamp(0.0, 2.0) as f32;
+                let emission = match flow.substance {
+                    Substance::Smoke => Emission {
+                        smoke: 1.0,
+                        heat,
+                        fuel: 0.0,
+                        velocity: flow.velocity.as_vec3(),
+                    },
+                    Substance::Fire => Emission {
+                        smoke: 0.0,
+                        heat,
+                        fuel: 1.0,
+                        velocity: flow.velocity.as_vec3(),
+                    },
+                    // Fire that smokes: a little smoke of its own, so the
+                    // flame shows through it; its burning makes the rest.
+                    _ => Emission {
+                        smoke: 0.25,
+                        heat,
+                        fuel: 1.0,
+                        velocity: flow.velocity.as_vec3(),
+                    },
+                };
+                match flow.kind {
+                    super::FlowKind::Geometry => sim.puff(tris, emission),
+                    super::FlowKind::Inflow => sim.add_source(tris, emission),
+                    super::FlowKind::Outflow => sim.add_sink(tris),
+                }
+            }
+            let (smoke, flame) = sim.snapshot();
+            gases.push(Gas {
+                object: id,
+                uid: o.uid,
+                frames: vec![GasFrame {
+                    smoke: smoke.into(),
+                    flame: flame.into(),
+                }],
+                sim,
+            });
+            continue;
+        }
+        let mut sim = LiquidSim::new(bounds, domain.resolution, domain.flip, o.uid.raw());
         sim.set_obstacles(&walls);
-        for (flow, tris) in &flows {
+        for (flow, tris) in flows
+            .iter()
+            .filter(|(f, _)| f.substance == Substance::Liquid)
+        {
             let speed = flow.velocity.as_vec3();
             match flow.kind {
                 super::FlowKind::Geometry => sim.fill(tris, speed),
@@ -399,6 +469,28 @@ pub fn bake_with(
             let w = scene.world_transform(liquid.object);
             liquid.frames.push(surface_of(&liquid.sim, w));
         }
+        for gas in gases.iter_mut() {
+            let walls: Vec<Vec<[kreate_math::Vec3; 3]>> = obstacles
+                .iter()
+                .filter(|(o, _)| *o != gas.object)
+                .map(|(o, m)| {
+                    let w = tracked
+                        .iter()
+                        .find(|t| t.object == *o)
+                        .map_or_else(|| scene.world_transform(*o), |t| t.now);
+                    world_triangles(m, w)
+                })
+                .collect();
+            if !walls.is_empty() {
+                gas.sim.set_obstacles(&walls);
+            }
+            gas.sim.advance(dt as f32, settings.gravity.as_vec3());
+            let (smoke, flame) = gas.sim.snapshot();
+            gas.frames.push(GasFrame {
+                smoke: smoke.into(),
+                flame: flame.into(),
+            });
+        }
     }
 
     let summary = BakeSummary {
@@ -406,7 +498,7 @@ pub fn bake_with(
         rigid: tracked.len(),
         soft: softs.len(),
         particles: emitters.len() + hairs.len(),
-        fluid: liquids.len(),
+        fluid: liquids.len() + gases.len(),
     };
     let cache = PhysicsCache {
         start,
@@ -443,6 +535,15 @@ pub fn bake_with(
             .map(|l| FluidTrack {
                 object: l.uid,
                 frames: l.frames,
+            })
+            .collect(),
+        gas: gases
+            .into_iter()
+            .map(|g| GasTrack {
+                object: g.uid,
+                cells: g.sim.cells(),
+                bounds: g.sim.bounds(),
+                frames: g.frames,
             })
             .collect(),
     };
@@ -845,5 +946,58 @@ mod tests {
             &shown,
             doc.physics_cache.fluid_at(uid, 24.0).unwrap()
         ));
+    }
+
+    #[test]
+    fn smoke_rises_in_its_domain_and_the_box_is_not_drawn() {
+        use crate::physics::{DomainKind, FlowKind, Fluid, FluidDomain, FluidFlow, Substance};
+        let mut doc = Document::new();
+        short(&mut doc, 24);
+        let domain = add(
+            &mut doc,
+            "Domain",
+            kreate_mesh::primitives::cube(2.0),
+            DVec3::new(0.0, 0.0, 1.0),
+        );
+        let fire = add(
+            &mut doc,
+            "Fire",
+            kreate_mesh::primitives::cube(0.4),
+            DVec3::new(0.0, 0.0, 0.3),
+        );
+        doc.object_mut(domain).unwrap().physics.fluid = Some(Fluid::Domain(FluidDomain {
+            kind: DomainKind::Gas,
+            resolution: 16,
+            ..Default::default()
+        }));
+        doc.object_mut(fire).unwrap().physics.fluid = Some(Fluid::Flow(FluidFlow {
+            kind: FlowKind::Inflow,
+            substance: Substance::SmokeAndFire,
+            ..Default::default()
+        }));
+        let (cache, summary) = bake(&doc);
+        assert_eq!(summary.fluid, 1);
+        assert!(cache.fluid.is_empty(), "a gas is not a liquid surface");
+        let track = &cache.gas[0];
+        assert_eq!(track.frames.len(), 24);
+        let cells = track.cells.iter().product::<usize>();
+        let last = &track.frames[23];
+        assert_eq!(last.smoke.len(), cells);
+        assert!(last.flame.iter().any(|f| *f > 64), "it burns");
+        // Smoke in the upper half by the end.
+        let [nx, ny, nz] = track.cells;
+        let high = (nz / 2 * ny * nx..cells)
+            .filter(|c| last.smoke[*c] > 10)
+            .count();
+        assert!(high > 0, "nothing rose");
+
+        let uid = doc.object(domain).unwrap().uid;
+        doc.physics_cache = Arc::new(cache);
+        doc.animate(12.0);
+        assert!(doc.physics_cache.gas_at(uid, 12.0).is_some());
+        let shown = ModifierCache::new()
+            .evaluated(&doc, domain, &EvalCtx::still())
+            .unwrap();
+        assert_eq!(shown.num_faces(), 0, "the box is not drawn");
     }
 }

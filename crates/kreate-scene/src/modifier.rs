@@ -538,10 +538,17 @@ impl ModifierCache {
             return input;
         };
         let physics = &object.physics;
-        // A baked liquid domain is its surface, not its box.
+        // A baked liquid domain is its surface, not its box; a baked gas
+        // domain is drawn as a volume, and its box not at all.
         if let Some(crate::physics::Fluid::Domain(_)) = physics.fluid {
             if let Some(surface) = doc.physics_cache.fluid_at(object.uid, doc.playback.frame) {
                 return surface.clone();
+            }
+            if doc.physics_cache.gas_of(object.uid).is_some() {
+                static NOTHING: std::sync::OnceLock<Arc<MeshData>> = std::sync::OnceLock::new();
+                return NOTHING
+                    .get_or_init(|| Arc::new(MeshData::from_faces(Vec::new(), &[])))
+                    .clone();
             }
         }
         if physics.soft.is_none() && physics.particles.is_empty() {

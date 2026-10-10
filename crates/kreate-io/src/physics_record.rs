@@ -9,8 +9,9 @@
 //! The bake is not here: it is large and a bake makes it again.
 
 use kreate_scene::physics::{
-    BodyKind, Collision, CollisionShape, FlowKind, Fluid, FluidDomain, FluidFlow, ObjectPhysics,
-    ParticleKind, ParticleSettings, PhysicsWorld, RigidBody, SoftBody, SoftKind,
+    BodyKind, Collision, CollisionShape, DomainKind, FlowKind, Fluid, FluidDomain, FluidFlow,
+    ObjectPhysics, ParticleKind, ParticleSettings, PhysicsWorld, RigidBody, SoftBody, SoftKind,
+    Substance,
 };
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +103,24 @@ pub struct FluidRecord {
     pub flow: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity: Option<[f64; 3]>,
+    /// A domain's: `liquid` or `gas`. Absent is a liquid, as every domain
+    /// was before gases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buoyancy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vorticity: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dissipation: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke_color: Option<[f64; 3]>,
+    /// A flow's: `liquid`, `smoke`, `fire` or `smoke_and_fire`. Absent is
+    /// liquid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 /// An object's physics; absent from the file when it has none.
@@ -210,6 +229,19 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 flip: Some(d.flip),
                 flow: None,
                 velocity: None,
+                domain: Some(
+                    match d.kind {
+                        DomainKind::Liquid => "liquid",
+                        DomainKind::Gas => "gas",
+                    }
+                    .into(),
+                ),
+                buoyancy: Some(d.buoyancy),
+                vorticity: Some(d.vorticity),
+                dissipation: Some(d.dissipation),
+                smoke_color: Some(d.smoke_color.to_array()),
+                substance: None,
+                temperature: None,
             },
             Fluid::Flow(f) => FluidRecord {
                 role: "flow".into(),
@@ -224,6 +256,21 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                     .into(),
                 ),
                 velocity: Some(f.velocity.to_array()),
+                domain: None,
+                buoyancy: None,
+                vorticity: None,
+                dissipation: None,
+                smoke_color: None,
+                substance: Some(
+                    match f.substance {
+                        Substance::Liquid => "liquid",
+                        Substance::Smoke => "smoke",
+                        Substance::Fire => "fire",
+                        Substance::SmokeAndFire => "smoke_and_fire",
+                    }
+                    .into(),
+                ),
+                temperature: Some(f.temperature),
             },
         }),
     })
@@ -307,16 +354,27 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
         fluid: r.fluid.as_ref().map(|f| {
             if f.role == "domain" {
                 let d = FluidDomain::default();
+                let finite = |v: Option<f64>, or: f64| v.filter(|v| v.is_finite()).unwrap_or(or);
                 Fluid::Domain(FluidDomain {
+                    kind: if f.domain.as_deref() == Some("gas") {
+                        DomainKind::Gas
+                    } else {
+                        DomainKind::Liquid
+                    },
                     resolution: f
                         .resolution
                         .unwrap_or(d.resolution)
                         .clamp(4, kreate_scene::physics::fluid::MAX_RESOLUTION),
-                    flip: f
-                        .flip
-                        .filter(|v| v.is_finite())
-                        .unwrap_or(d.flip)
-                        .clamp(0.0, 1.0),
+                    flip: finite(f.flip, d.flip).clamp(0.0, 1.0),
+                    buoyancy: finite(f.buoyancy, d.buoyancy).clamp(-50.0, 50.0),
+                    vorticity: finite(f.vorticity, d.vorticity).clamp(0.0, 10.0),
+                    dissipation: finite(f.dissipation, d.dissipation).clamp(0.0, 10.0),
+                    smoke_color: f
+                        .smoke_color
+                        .map(kreate_math::DVec3::from_array)
+                        .filter(|c| c.is_finite())
+                        .unwrap_or(d.smoke_color)
+                        .clamp(kreate_math::DVec3::ZERO, kreate_math::DVec3::ONE),
                 })
             } else {
                 Fluid::Flow(FluidFlow {
@@ -330,6 +388,17 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
                         .map(kreate_math::DVec3::from_array)
                         .filter(|v| v.is_finite())
                         .unwrap_or_default(),
+                    substance: match f.substance.as_deref() {
+                        Some("smoke") => Substance::Smoke,
+                        Some("fire") => Substance::Fire,
+                        Some("smoke_and_fire") => Substance::SmokeAndFire,
+                        _ => Substance::Liquid,
+                    },
+                    temperature: f
+                        .temperature
+                        .filter(|t| t.is_finite())
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 2.0),
                 })
             }
         }),
@@ -400,13 +469,20 @@ mod tests {
             }],
             fluid: Some(Fluid::Flow(FluidFlow {
                 kind: FlowKind::Inflow,
+                substance: Substance::SmokeAndFire,
                 velocity: kreate_math::DVec3::new(0.5, 0.0, -2.0),
+                temperature: 1.5,
             })),
         };
         let domain = ObjectPhysics {
             fluid: Some(Fluid::Domain(FluidDomain {
+                kind: DomainKind::Gas,
                 resolution: 48,
                 flip: 0.8,
+                buoyancy: 3.5,
+                vorticity: 0.75,
+                dissipation: 0.25,
+                smoke_color: kreate_math::DVec3::new(0.25, 0.5, 0.75),
             })),
             ..Default::default()
         };

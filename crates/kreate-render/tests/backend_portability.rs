@@ -79,6 +79,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("fxaa", kreate_render::fxaa::source().into()),
         ("ao", kreate_render::ao::source().into()),
         ("outline", kreate_render::outline::source().into()),
+        ("volume", kreate_render::volume::source().into()),
         ("accum", kreate_render::accum::source().into()),
         ("bloom", kreate_render::bloom::source().into()),
         ("ssr", kreate_render::ssr::source().into()),

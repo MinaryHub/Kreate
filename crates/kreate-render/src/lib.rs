@@ -38,6 +38,7 @@ pub mod shadow;
 pub mod ssr;
 pub mod tiles;
 pub mod viewport;
+pub mod volume;
 
 pub use camera::{Camera, OrbitStyle, Projection, ViewAxis};
 pub use capability::{Capabilities, Tier};

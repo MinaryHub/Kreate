@@ -13,21 +13,25 @@
 //! u32 systems { u64 uid  u32 system  u32 frames  frames × (u32 n  n × 6 f32) }
 //! u32 liquids { u64 uid  u32 frames  frames × (u32 verts  verts × 3 f32
 //!                                              u32 faces  faces × (u32 n  n × u32)) }
+//! u32 gases   { u64 uid  3 u32 cells  6 f32 box  u32 frames
+//!               frames × (smoke, flame) }   each cells bytes, zeros run-length:
+//!                                           0 then u16 how many
 //! ```
 //!
-//! The liquids came in version 2; a version 1 bake has none and still reads.
+//! The liquids came in version 2 and the gases in 3; an older bake has none
+//! and still reads.
 
 use std::sync::Arc;
 
 use kreate_math::{DQuat, DTransform, DVec3, Vec3};
 use kreate_mesh::MeshData;
 use kreate_scene::physics::{
-    FluidTrack, Particle, ParticleTrack, PhysicsCache, RigidTrack, SoftTrack,
+    FluidTrack, GasFrame, GasTrack, Particle, ParticleTrack, PhysicsCache, RigidTrack, SoftTrack,
 };
 use kreate_scene::Uid;
 
 const MAGIC: &[u8; 6] = b"KBAKE\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 pub fn write(cache: &PhysicsCache) -> Vec<u8> {
     let mut out = Vec::new();
@@ -105,7 +109,42 @@ pub fn write(cache: &PhysicsCache) -> Vec<u8> {
             }
         }
     }
+    u32_(&mut out, cache.gas.len());
+    for t in &cache.gas {
+        out.extend_from_slice(&t.object.raw().to_le_bytes());
+        for c in t.cells {
+            u32_(&mut out, c);
+        }
+        for v in [t.bounds.min.to_array(), t.bounds.max.to_array()].concat() {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        u32_(&mut out, t.frames.len());
+        for f in &t.frames {
+            pack(&mut out, &f.smoke);
+            pack(&mut out, &f.flame);
+        }
+    }
     out
+}
+
+/// Bytes with each run of zeros as a zero and how many, up to 65535: a
+/// gas is mostly clear air.
+fn pack(out: &mut Vec<u8>, bytes: &[u8]) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0 {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let mut run = 0usize;
+        while i < bytes.len() && bytes[i] == 0 && run < u16::MAX as usize {
+            run += 1;
+            i += 1;
+        }
+        out.push(0);
+        out.extend_from_slice(&(run as u16).to_le_bytes());
+    }
 }
 
 struct Reader<'a> {
@@ -135,6 +174,24 @@ impl Reader<'_> {
     fn f32(&mut self) -> Option<f32> {
         Some(f32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
+    /// `count` bytes packed by [`pack`].
+    fn unpack(&mut self, count: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            let b = self.take(1)?[0];
+            if b != 0 {
+                out.push(b);
+                continue;
+            }
+            let run = u16::from_le_bytes(self.take(2)?.try_into().ok()?) as usize;
+            if run == 0 || out.len() + run > count {
+                return None;
+            }
+            out.resize(out.len() + run, 0);
+        }
+        Some(out)
+    }
+
     /// A count, refused if what it counts could not fit in what is left.
     fn count(&mut self, each: usize) -> Option<usize> {
         let n = self.u32()? as usize;
@@ -245,6 +302,34 @@ pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
             cache.fluid.push(FluidTrack { object, frames });
         }
     }
+    if version >= 3 {
+        for _ in 0..r.count(44)? {
+            let object = Uid::from_raw(r.u64()?);
+            let cells = [r.u32()? as usize, r.u32()? as usize, r.u32()? as usize];
+            let count = cells
+                .iter()
+                .try_fold(1usize, |a, c| a.checked_mul(*c))
+                .filter(|n| *n <= 1 << 24)?;
+            let min = Vec3::new(r.f32()?, r.f32()?, r.f32()?);
+            let max = Vec3::new(r.f32()?, r.f32()?, r.f32()?);
+            let n = r.count(2)?;
+            let mut frames = Vec::with_capacity(n);
+            for _ in 0..n {
+                let smoke = r.unpack(count)?;
+                let flame = r.unpack(count)?;
+                frames.push(GasFrame {
+                    smoke: smoke.into(),
+                    flame: flame.into(),
+                });
+            }
+            cache.gas.push(GasTrack {
+                object,
+                cells,
+                bounds: kreate_math::Aabb { min, max },
+                frames,
+            });
+        }
+    }
     Some(cache)
 }
 
@@ -291,6 +376,18 @@ mod tests {
                     Arc::new(kreate_mesh::primitives::cube(1.0)),
                 ],
             }],
+            gas: vec![GasTrack {
+                object: Uid::from_raw(5),
+                cells: [3, 2, 2],
+                bounds: kreate_math::Aabb {
+                    min: Vec3::new(-1.0, 0.0, 0.5),
+                    max: Vec3::new(2.0, 2.0, 2.5),
+                },
+                frames: vec![GasFrame {
+                    smoke: vec![0, 0, 7, 255, 0, 0, 0, 0, 0, 1, 0, 0].into(),
+                    flame: vec![0; 12].into(),
+                }],
+            }],
         }
     }
 
@@ -322,13 +419,27 @@ mod tests {
     }
 
     #[test]
+    fn a_gas_comes_back_byte_for_byte() {
+        let back = read(&write(&sample())).expect("read");
+        let (a, b) = (&back.gas[0], &sample().gas[0]);
+        assert_eq!((a.object, a.cells, a.bounds), (b.object, b.cells, b.bounds));
+        assert_eq!(&*a.frames[0].smoke, &*b.frames[0].smoke);
+        assert_eq!(&*a.frames[0].flame, &*b.frames[0].flame);
+        // A long clear stretch packs small.
+        let mut out = Vec::new();
+        pack(&mut out, &[0u8; 100_000]);
+        assert_eq!(out.len(), 6);
+    }
+
+    #[test]
     fn a_bake_from_before_liquids_still_reads() {
         let mut bytes = write(&PhysicsCache {
             fluid: Vec::new(),
+            gas: Vec::new(),
             ..sample()
         });
         // Version 1 ended where the liquids' count begins.
-        bytes.truncate(bytes.len() - 4);
+        bytes.truncate(bytes.len() - 8);
         bytes[6..10].copy_from_slice(&1u32.to_le_bytes());
         let back = read(&bytes).expect("a version 1 bake");
         assert_eq!(back.rigid, sample().rigid);

@@ -713,7 +713,7 @@ impl LiquidSim {
 }
 
 /// The dimensions of the faces across `axis` of a grid of `n` cells.
-fn face_dims(n: [usize; 3], axis: usize) -> [usize; 3] {
+pub(super) fn face_dims(n: [usize; 3], axis: usize) -> [usize; 3] {
     let mut d = n;
     d[axis] += 1;
     d
@@ -722,7 +722,7 @@ fn face_dims(n: [usize; 3], axis: usize) -> [usize; 3] {
 /// Calls `f` with each of the eight points around `q` (in grid points, of
 /// a grid `dims` points along each axis) and its trilinear weight; points
 /// past the edge are left out.
-fn for_trilinear(q: Vec3, dims: [usize; 3], mut f: impl FnMut(usize, f32)) {
+pub(super) fn for_trilinear(q: Vec3, dims: [usize; 3], mut f: impl FnMut(usize, f32)) {
     let max = Vec3::new(
         dims[0] as f32 - 1.0,
         dims[1] as f32 - 1.0,
@@ -749,7 +749,7 @@ fn for_trilinear(q: Vec3, dims: [usize; 3], mut f: impl FnMut(usize, f32)) {
 
 /// Solves `A x = b` for a symmetric positive (semi)definite `A`, given as
 /// `apply`, by conjugate gradients preconditioned by its diagonal.
-fn conjugate_gradient(
+pub(super) fn conjugate_gradient(
     apply: &impl Fn(&[f32], &mut [f32]),
     diag: &[f32],
     b: &[f32],

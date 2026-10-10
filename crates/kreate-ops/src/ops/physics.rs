@@ -10,8 +10,9 @@ use std::sync::Arc;
 use kreate_math::DVec3;
 use kreate_scene::animation::{self, Interpolation};
 use kreate_scene::physics::{
-    BodyKind, Collision, CollisionShape, FlowKind, Fluid, FluidDomain, FluidFlow, ObjectPhysics,
-    ParticleKind, ParticleSettings, PhysicsCache, PhysicsWorld, RigidBody, SoftBody, SoftKind,
+    BodyKind, Collision, CollisionShape, DomainKind, FlowKind, Fluid, FluidDomain, FluidFlow,
+    ObjectPhysics, ParticleKind, ParticleSettings, PhysicsCache, PhysicsWorld, RigidBody, SoftBody,
+    SoftKind, Substance,
 };
 use kreate_scene::{DocMut, Document, ObjectId};
 
@@ -430,17 +431,37 @@ pub struct FluidParams {
     /// or goes. Obstacles are objects with Collision.
     #[param(variants("none", "domain", "flow"))]
     pub role: u32,
+    /// A domain: whether it simulates a liquid, or smoke and fire.
+    #[param(variants("liquid", "gas"))]
+    pub domain: u32,
     /// A domain: cells along its longest side. More is finer and slower.
     #[param(min = 4.0, max = 128.0)]
     pub resolution: u32,
     /// A domain: how lively the liquid is — high splashes, low is calm.
     #[param(min = 0.0, max = 1.0)]
     pub flip: f64,
-    /// A flow: liquid there at the start, liquid that keeps pouring out, or
-    /// a drain.
+    /// A gas domain: how strongly heat lifts the smoke.
+    #[param(soft_min = -10.0, soft_max = 10.0)]
+    pub buoyancy: f64,
+    /// A gas domain: how much the smoke curls.
+    #[param(min = 0.0, soft_max = 2.0)]
+    pub vorticity: f64,
+    /// A gas domain: the fraction of the smoke that thins away each second.
+    #[param(min = 0.0, soft_max = 1.0)]
+    pub dissipation: f64,
+    /// A gas domain: the smoke's colour.
+    #[param(color)]
+    pub smoke_color: [f64; 3],
+    /// A flow: what it gives — liquid, smoke, fire, or fire that smokes.
+    #[param(variants("liquid", "smoke", "fire", "smoke_and_fire"))]
+    pub substance: u32,
+    /// A flow: there at the start, keeps coming out, or a drain.
     #[param(variants("geometry", "inflow", "outflow"))]
     pub flow: u32,
-    /// A flow: the speed the liquid starts with, metres a second.
+    /// A smoke flow: how hot it is; hot smoke rises.
+    #[param(min = 0.0, max = 2.0)]
+    pub temperature: f64,
+    /// A flow: the speed what it gives starts with, metres a second.
     #[param(soft_min = -20.0, soft_max = 20.0)]
     pub velocity: [f64; 3],
     /// The active object only: what the Physics tab sets.
@@ -458,9 +479,16 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
     let d = FluidDomain::default();
     let mut p = FluidParams {
         role: 0,
+        domain: 0,
         resolution: d.resolution,
         flip: d.flip,
+        buoyancy: d.buoyancy,
+        vorticity: d.vorticity,
+        dissipation: d.dissipation,
+        smoke_color: d.smoke_color.to_array(),
+        substance: 0,
         flow: 0,
+        temperature: FluidFlow::default().temperature,
         velocity: [0.0; 3],
         active_only: false,
     };
@@ -468,30 +496,60 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
         None => {}
         Some(Fluid::Domain(d)) => {
             p.role = 1;
+            p.domain = match d.kind {
+                DomainKind::Liquid => 0,
+                DomainKind::Gas => 1,
+            };
             p.resolution = d.resolution;
             p.flip = d.flip;
+            p.buoyancy = d.buoyancy;
+            p.vorticity = d.vorticity;
+            p.dissipation = d.dissipation;
+            p.smoke_color = d.smoke_color.to_array();
         }
         Some(Fluid::Flow(f)) => {
             p.role = 2;
+            p.substance = match f.substance {
+                Substance::Liquid => 0,
+                Substance::Smoke => 1,
+                Substance::Fire => 2,
+                Substance::SmokeAndFire => 3,
+            };
             p.flow = match f.kind {
                 FlowKind::Geometry => 0,
                 FlowKind::Inflow => 1,
                 FlowKind::Outflow => 2,
             };
+            p.temperature = f.temperature;
             p.velocity = f.velocity.to_array();
         }
     }
     p
 }
 
-/// Which of the liquid parameters a role has: the panel shows only these.
-pub fn fluid_param_applies(role: u32, flow: u32, name: &str) -> bool {
+/// Which of the fluid parameters an object's settings have: the panel
+/// shows only these.
+pub fn fluid_param_applies(p: &FluidParams, name: &str) -> bool {
+    let (domain, flow) = (p.role == 1, p.role == 2);
+    let gas = p.domain == 1;
+    let drain = p.flow == 2;
     match name {
         "role" => true,
-        "resolution" | "flip" => role == 1,
-        "flow" => role == 2,
-        "velocity" => role == 2 && flow != 2,
+        "domain" | "resolution" => domain,
+        "flip" => domain && !gas,
+        "buoyancy" | "vorticity" | "dissipation" | "smoke_color" => domain && gas,
+        "substance" | "flow" => flow,
+        "temperature" => flow && p.substance != 0 && !drain,
+        "velocity" => flow && !drain,
         _ => false,
+    }
+}
+
+fn finite_or(v: f64, or: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        or
     }
 }
 
@@ -524,10 +582,19 @@ impl Operator for FluidSet {
         let velocity = DVec3::from_array(params.velocity);
         let fluid = match params.role {
             1 => Some(Fluid::Domain(FluidDomain {
+                kind: if params.domain == 1 {
+                    DomainKind::Gas
+                } else {
+                    DomainKind::Liquid
+                },
                 resolution: params
                     .resolution
                     .clamp(4, kreate_scene::physics::fluid::MAX_RESOLUTION),
                 flip: params.flip.clamp(0.0, 1.0),
+                buoyancy: finite_or(params.buoyancy, 2.0).clamp(-50.0, 50.0),
+                vorticity: finite_or(params.vorticity, 0.3).clamp(0.0, 10.0),
+                dissipation: finite_or(params.dissipation, 0.05).clamp(0.0, 10.0),
+                smoke_color: DVec3::from_array(params.smoke_color).clamp(DVec3::ZERO, DVec3::ONE),
             })),
             2 => Some(Fluid::Flow(FluidFlow {
                 kind: match params.flow {
@@ -535,6 +602,13 @@ impl Operator for FluidSet {
                     2 => FlowKind::Outflow,
                     _ => FlowKind::Geometry,
                 },
+                substance: match params.substance {
+                    1 => Substance::Smoke,
+                    2 => Substance::Fire,
+                    3 => Substance::SmokeAndFire,
+                    _ => Substance::Liquid,
+                },
+                temperature: finite_or(params.temperature, 1.0).clamp(0.0, 2.0),
                 velocity: if velocity.is_finite() {
                     velocity
                 } else {

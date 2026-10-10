@@ -1570,6 +1570,9 @@ struct Labels {
     physics_liquid_domain: String,
     physics_liquid: String,
     physics_liquid_inflow: String,
+    physics_smoke_domain: String,
+    physics_smoke: String,
+    physics_fire: String,
     physics_collision: String,
     physics_particles: String,
     physics_bake_menu: String,
@@ -1916,6 +1919,9 @@ impl Labels {
             physics_liquid_domain: t("menu-physics-liquid-domain"),
             physics_liquid: t("menu-physics-liquid"),
             physics_liquid_inflow: t("menu-physics-liquid-inflow"),
+            physics_smoke_domain: t("menu-physics-smoke-domain"),
+            physics_smoke: t("menu-physics-smoke"),
+            physics_fire: t("menu-physics-fire"),
             physics_collision: t("menu-physics-collision"),
             physics_particles: t("physics-add-emitter"),
             physics_bake_menu: t("menu-physics-bake"),
@@ -2482,19 +2488,19 @@ fn physics_node(l: &Labels) -> MenuNode {
     };
     // A liquid's domain, the liquid itself, or a tap: Blender's Quick Liquid
     // made of its parts, since the parts are what the user arranges.
-    let liquid = |label: &str, role: u32, flow: u32| {
-        MenuNode::Entry(
-            MenuEntry::new(
-                "physics.fluid_set",
-                label,
-                op(
-                    "physics.fluid_set",
-                    &[("role", V::Enum(role)), ("flow", V::Enum(flow))],
-                ),
-            )
-            .variant("role", V::Enum(role))
-            .variant("flow", V::Enum(flow)),
-        )
+    // role, domain kind, substance, flow kind
+    let liquid = |label: &str, [role, domain, substance, flow]: [u32; 4]| {
+        let given = [
+            ("role", V::Enum(role)),
+            ("domain", V::Enum(domain)),
+            ("substance", V::Enum(substance)),
+            ("flow", V::Enum(flow)),
+        ];
+        let mut entry = MenuEntry::new("physics.fluid_set", label, op("physics.fluid_set", &given));
+        for (name, value) in given {
+            entry = entry.variant(name, value);
+        }
+        MenuNode::Entry(entry)
     };
     MenuNode::Sub(
         l.menu_physics.clone(),
@@ -2503,9 +2509,12 @@ fn physics_node(l: &Labels) -> MenuNode {
             rigid(&l.physics_passive, 1),
             soft(&l.physics_cloth, 1),
             soft(&l.physics_soft, 2),
-            liquid(&l.physics_liquid_domain, 1, 0),
-            liquid(&l.physics_liquid, 2, 0),
-            liquid(&l.physics_liquid_inflow, 2, 1),
+            liquid(&l.physics_liquid_domain, [1, 0, 0, 0]),
+            liquid(&l.physics_liquid, [2, 0, 0, 0]),
+            liquid(&l.physics_liquid_inflow, [2, 0, 0, 1]),
+            liquid(&l.physics_smoke_domain, [1, 1, 0, 0]),
+            liquid(&l.physics_smoke, [2, 0, 1, 1]),
+            liquid(&l.physics_fire, [2, 0, 3, 1]),
             MenuNode::Entry(MenuEntry::new(
                 "physics.collision_set",
                 &l.physics_collision,
@@ -5830,7 +5839,6 @@ fn draw_physics_tab(
                 |n| ph::soft_param_applies(kind, n),
             );
             let fluid = ph::fluid_params(p.fluid.as_ref());
-            let (role, flow) = (fluid.role, fluid.flow);
             let title = state.catalog.get("physics-liquid");
             physics_panel(
                 ui,
@@ -5839,7 +5847,7 @@ fn draw_physics_tab(
                 &title,
                 "physics.fluid_set",
                 fluid.to_map(),
-                |n| ph::fluid_param_applies(role, flow, n),
+                |n| ph::fluid_param_applies(&fluid, n),
             );
             let title = state.catalog.get("physics-particles");
             kreate_ui::panel::section(ui, &title, true, |ui| {

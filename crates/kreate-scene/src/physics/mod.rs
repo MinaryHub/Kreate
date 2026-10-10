@@ -40,6 +40,7 @@
 pub mod bake;
 pub mod collide;
 pub mod fluid;
+pub mod gas;
 pub mod particles;
 pub mod rigid;
 pub mod soft;
@@ -299,31 +300,80 @@ pub enum FlowKind {
     Outflow,
 }
 
-/// The box a liquid is simulated in: Blender's fluid Domain.
+/// What a domain simulates: Blender's Domain Type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DomainKind {
+    #[default]
+    Liquid,
+    /// Smoke and fire.
+    Gas,
+}
+
+/// The box a liquid or a gas is simulated in: Blender's fluid Domain.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidDomain {
+    pub kind: DomainKind,
     /// Cells along the box's longest side. More is finer and slower.
     pub resolution: u32,
-    /// 0 to 1: how much of its own motion the liquid keeps from step to
-    /// step. High is lively and splashy, low is calm and smooth.
+    /// Liquid, 0 to 1: how much of its own motion the liquid keeps from
+    /// step to step. High is lively and splashy, low is calm and smooth.
     pub flip: f64,
+    /// Gas: how strongly heat lifts it, metres a second squared.
+    pub buoyancy: f64,
+    /// Gas: how much it curls. 0 is smooth.
+    pub vorticity: f64,
+    /// Gas: the fraction of the smoke that thins away each second.
+    pub dissipation: f64,
+    /// Gas: the smoke's colour, linear.
+    pub smoke_color: DVec3,
 }
 
 impl Default for FluidDomain {
     fn default() -> Self {
+        let gas = gas::GasSettings::default();
         Self {
+            kind: DomainKind::Liquid,
             resolution: 32,
             flip: 0.95,
+            buoyancy: gas.buoyancy as f64,
+            vorticity: gas.vorticity as f64,
+            dissipation: gas.dissipation as f64,
+            smoke_color: DVec3::splat(0.6),
         }
     }
 }
 
-/// Where liquid comes from or goes.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// What a flow gives: Blender's Flow Type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Substance {
+    #[default]
+    Liquid,
+    Smoke,
+    Fire,
+    /// Fire that smokes as well as the smoke its burning makes.
+    SmokeAndFire,
+}
+
+/// Where liquid, smoke or fire comes from, or where it goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidFlow {
     pub kind: FlowKind,
+    pub substance: Substance,
     /// The speed it starts with, metres a second, in the world.
     pub velocity: DVec3,
+    /// Smoke: how hot it is, 0 to 2; hot smoke rises.
+    pub temperature: f64,
+}
+
+impl Default for FluidFlow {
+    fn default() -> Self {
+        Self {
+            kind: FlowKind::Geometry,
+            substance: Substance::Liquid,
+            velocity: DVec3::ZERO,
+            temperature: 1.0,
+        }
+    }
 }
 
 /// An object's part in a liquid simulation. Obstacles are objects with
@@ -419,6 +469,23 @@ pub struct FluidTrack {
     pub frames: Vec<Arc<kreate_mesh::MeshData>>,
 }
 
+/// One frame of a baked gas: a byte a cell, X fastest.
+#[derive(Clone, Debug)]
+pub struct GasFrame {
+    pub smoke: Arc<[u8]>,
+    pub flame: Arc<[u8]>,
+}
+
+/// A gas domain's baked frames, and the box of cells they fill in the
+/// world.
+#[derive(Clone, Debug)]
+pub struct GasTrack {
+    pub object: Uid,
+    pub cells: [usize; 3],
+    pub bounds: kreate_math::Aabb,
+    pub frames: Vec<GasFrame>,
+}
+
 /// The baked result: see the module notes.
 #[derive(Clone, Debug, Default)]
 pub struct PhysicsCache {
@@ -428,6 +495,7 @@ pub struct PhysicsCache {
     pub soft: Vec<SoftTrack>,
     pub particles: Vec<ParticleTrack>,
     pub fluid: Vec<FluidTrack>,
+    pub gas: Vec<GasTrack>,
 }
 
 impl PhysicsCache {
@@ -436,6 +504,20 @@ impl PhysicsCache {
             && self.soft.is_empty()
             && self.particles.is_empty()
             && self.fluid.is_empty()
+            && self.gas.is_empty()
+    }
+
+    pub fn gas_of(&self, object: Uid) -> Option<&GasTrack> {
+        self.gas.iter().find(|t| t.object == object)
+    }
+
+    /// A gas domain's frame at `frame`.
+    pub fn gas_at(&self, object: Uid, frame: f64) -> Option<(&GasTrack, &GasFrame)> {
+        let track = self.gas_of(object)?;
+        Some((
+            track,
+            track.frames.get(self.index(frame, track.frames.len())?)?,
+        ))
     }
 
     /// The liquid surface a domain has at `frame`.
