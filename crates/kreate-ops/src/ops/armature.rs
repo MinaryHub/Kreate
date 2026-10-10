@@ -33,6 +33,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddBone>();
     registry.register::<SetDisplay>();
     registry.register::<SetBone>();
+    registry.register::<Symmetrize>();
     registry.register::<Bind>();
     registry.register::<Unbind>();
     registry.register::<SetPreserveVolume>();
@@ -708,6 +709,109 @@ impl Operator for SetBone {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SymmetrizeParams {
+    /// Which side is copied: the bones on +X (Blender's left, `.L`) or on -X.
+    #[param(variants("positive_x", "negative_x"))]
+    pub from: u32,
+}
+
+/// Copies every sided bone — `.L`, `_l`, `Left…` — across X to the other
+/// side's name, making it or moving it there: Blender's Symmetrize. A
+/// mirrored bone's parent is its parent's mirror when there is one, the
+/// same parent otherwise; its roll turns the other way.
+pub struct Symmetrize;
+
+impl Operator for Symmetrize {
+    type Params = SymmetrizeParams;
+    fn id() -> &'static str {
+        "armature.symmetrize"
+    }
+    fn label() -> &'static str {
+        "Symmetrize Bones"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_armature(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_scene::armature::mirrored_name;
+        let Some((_, id)) = active_armature(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(original) = doc.document().armature(id).cloned() else {
+            return Ok(OpResult::Cancelled);
+        };
+        let sign = if params.from == 1 { -1.0 } else { 1.0 };
+        let flip = |p: DVec3| DVec3::new(-p.x, p.y, p.z);
+        let mut edited = original.clone();
+        let mut changed = 0;
+        // Parents first, so a mirrored parent is there for its child.
+        for i in 0..original.bones.len() {
+            let bone = original.bones[i].clone();
+            let Some(other) = mirrored_name(&bone.name) else {
+                continue;
+            };
+            if (bone.head.x + bone.tail.x) * sign <= 0.0 {
+                continue;
+            }
+            let parent = bone.parent.map(|p| {
+                let name = &edited.bones[p].name;
+                mirrored_name(name)
+                    .and_then(|m| edited.bone_index(&m))
+                    .unwrap_or(p)
+            });
+            let mirrored = Bone {
+                name: other.clone(),
+                parent,
+                head: flip(bone.head),
+                tail: flip(bone.tail),
+                roll: -bone.roll,
+                connected: bone.connected && parent.is_some(),
+                ..Default::default()
+            };
+            match edited.bone_index(&other) {
+                Some(j) => {
+                    // Its parent may not be an earlier bone after all.
+                    let keep = edited.bones[j].parent;
+                    let b = &mut edited.bones[j];
+                    b.head = mirrored.head;
+                    b.tail = mirrored.tail;
+                    b.roll = mirrored.roll;
+                    b.parent = match mirrored.parent {
+                        Some(p) if p < j => Some(p),
+                        _ => keep,
+                    };
+                    b.connected = mirrored.connected && b.parent.is_some();
+                }
+                None => {
+                    edited.add_bone(mirrored);
+                }
+            }
+            changed += 1;
+        }
+        if changed == 0 {
+            return Err(OpError::Failed(
+                "no bone on that side has a sided name (.L, _l, Left…)".into(),
+            ));
+        }
+        if edited.sort_parents_first().is_none() {
+            return Ok(OpResult::Cancelled);
+        }
+        edited.reconnect();
+        if edited == original {
+            return Ok(OpResult::Cancelled);
+        }
+        if let Some(a) = doc.document_mut().armature_mut(id) {
+            *a = edited;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 // --- binding a mesh to the skeleton -------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -905,5 +1009,53 @@ impl Operator for Unbind {
             }
         }
         Ok(OpResult::Finished)
+    }
+}
+
+#[cfg(test)]
+mod symmetry_tests {
+    use super::*;
+
+    #[test]
+    fn left_bones_are_mirrored_to_the_right_with_their_parents() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut doc = Document::new();
+        let mut arm = Armature::new("Rig");
+        arm.bones[0].name = "Spine".into();
+        let upper = arm.add_bone(Bone {
+            name: "Upper.L".into(),
+            parent: Some(0),
+            head: DVec3::new(0.2, 0.0, 1.0),
+            tail: DVec3::new(0.6, 0.0, 1.0),
+            roll: 0.3,
+            ..Default::default()
+        });
+        arm.add_bone(Bone {
+            name: "Lower.L".into(),
+            parent: Some(upper),
+            head: DVec3::new(0.6, 0.0, 1.0),
+            tail: DVec3::new(0.9, 0.0, 1.0),
+            connected: true,
+            ..Default::default()
+        });
+        let armature = doc.add_armature(arm);
+        let rig = doc.add_object(Object::new("Rig", ObjectData::Armature(armature)));
+        doc.selection.add(rig);
+        doc.selection.active = Some(rig);
+        let mut edit = DocMut::new(&mut doc);
+        Symmetrize::execute(&SymmetrizeParams::default(), &mut edit, &Context::default())
+            .expect("ran");
+        let a = doc.armature(armature).expect("armature");
+        let upper_r = a.bone_index("Upper.R").expect("made");
+        let lower_r = a.bone_index("Lower.R").expect("made");
+        assert_eq!(a.bones[upper_r].head, DVec3::new(-0.2, 0.0, 1.0));
+        assert_eq!(a.bones[upper_r].roll, -0.3);
+        assert_eq!(a.bones[upper_r].parent, a.bone_index("Spine"));
+        assert_eq!(
+            a.bones[lower_r].parent,
+            Some(upper_r),
+            "its parent's mirror"
+        );
+        assert_eq!(a.bones.len(), 5);
     }
 }

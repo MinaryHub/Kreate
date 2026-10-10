@@ -21,6 +21,11 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- Symmetry for rigs: `armature.symmetrize` copies every left bone (`.L`,
+  `_l`, `Left…`) to the right across X, parents and roll mirrored, and
+  `object.vertex_weights_mirror` copies one half's weights to the other, a
+  left bone's to the right one's — half a character rigged, the other half
+  made from it.
 - The connector's `check_rig` bends every bone of a rig in turn and
   measures the skin: which bones tear it and where, which pinch, which move
   nothing, and which vertices no bone holds — so an assistant can fix the

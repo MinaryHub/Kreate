@@ -26,6 +26,44 @@ use kreate_reflect::Uid;
 
 use crate::document::Linkage;
 
+/// The other side's name for a sided one — `Arm.L` → `Arm.R`, `hand_l` →
+/// `hand_r`, `L_foot` → `R_foot`, `mixamorig:LeftArm` → `mixamorig:RightArm`
+/// — and `None` for a name that says no side: a spine is its own mirror.
+pub fn mirrored_name(name: &str) -> Option<String> {
+    for (a, b) in [
+        (".L", ".R"),
+        ("_L", "_R"),
+        ("-L", "-R"),
+        (".l", ".r"),
+        ("_l", "_r"),
+        ("-l", "-r"),
+    ] {
+        if let Some(stem) = name.strip_suffix(a) {
+            return Some(format!("{stem}{b}"));
+        }
+        if let Some(stem) = name.strip_suffix(b) {
+            return Some(format!("{stem}{a}"));
+        }
+    }
+    for (a, b) in [("L_", "R_"), ("L.", "R."), ("l_", "r_")] {
+        if let Some(rest) = name.strip_prefix(a) {
+            return Some(format!("{b}{rest}"));
+        }
+        if let Some(rest) = name.strip_prefix(b) {
+            return Some(format!("{a}{rest}"));
+        }
+    }
+    for (a, b) in [("Left", "Right"), ("left", "right"), ("LEFT", "RIGHT")] {
+        if name.contains(a) {
+            return Some(name.replacen(a, b, 1));
+        }
+        if name.contains(b) {
+            return Some(name.replacen(b, a, 1));
+        }
+    }
+    None
+}
+
 /// One bone at rest.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bone {
@@ -1094,5 +1132,21 @@ mod tests {
                 "the pole pulled the tip off the target: {tip:?}"
             );
         }
+    }
+
+    #[test]
+    fn sided_names_mirror_and_middle_ones_do_not() {
+        for (a, b) in [
+            ("Arm.L", "Arm.R"),
+            ("hand_l", "hand_r"),
+            ("L_foot", "R_foot"),
+            ("mixamorig:LeftArm", "mixamorig:RightArm"),
+            ("thigh.R", "thigh.L"),
+        ] {
+            assert_eq!(mirrored_name(a).as_deref(), Some(b), "{a}");
+            assert_eq!(mirrored_name(b).as_deref(), Some(a), "{b}");
+        }
+        assert_eq!(mirrored_name("Spine"), None);
+        assert_eq!(mirrored_name("Head"), None);
     }
 }

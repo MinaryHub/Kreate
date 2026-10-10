@@ -28,6 +28,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Normalize>();
     registry.register::<SetWeights>();
     registry.register::<SmoothWeights>();
+    registry.register::<MirrorWeights>();
     registry.register::<TextureStroke>();
     registry.register::<NewTexture>();
 }
@@ -858,6 +859,121 @@ impl Operator for SmoothWeights {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MirrorWeightsParams {
+    /// Which half is copied, in the mesh's own X.
+    #[param(variants("positive_x", "negative_x"))]
+    pub from: u32,
+}
+
+/// Copies one half's weights onto the other: each vertex across X takes its
+/// mirror's weights, a sided group's going to the other side's name
+/// (`Arm.L` → `Arm.R`, made if missing). The middle is left alone, and a
+/// vertex with no mirror within a ten-thousandth of the mesh's size too.
+pub struct MirrorWeights;
+
+impl Operator for MirrorWeights {
+    type Params = MirrorWeightsParams;
+    fn id() -> &'static str {
+        "object.vertex_weights_mirror"
+    }
+    fn label() -> &'static str {
+        "Mirror Vertex Weights"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_scene::armature::mirrored_name;
+        let Some((_, mesh)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let names = groups(doc.document(), mesh);
+        if names.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let points: Vec<glam::Vec3> = m.positions().to_vec();
+        let (lo, hi) = points.iter().fold(
+            (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        let tolerance = ((hi - lo).length() * 1e-4).max(1e-6);
+        // Points by grid cell, to find a mirror without looking at all.
+        let cell = |p: glam::Vec3| (p / tolerance).floor().as_ivec3();
+        let mut grid: std::collections::HashMap<glam::IVec3, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, p) in points.iter().enumerate() {
+            grid.entry(cell(*p)).or_default().push(i);
+        }
+        let sign = if params.from == 1 { -1.0 } else { 1.0 };
+        let mirror_of = |target: glam::Vec3| -> Option<usize> {
+            let want = glam::Vec3::new(-target.x, target.y, target.z);
+            let c = cell(want);
+            let mut best: Option<(f32, usize)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(near) = grid.get(&(c + glam::IVec3::new(dx, dy, dz))) else {
+                            continue;
+                        };
+                        for &i in near {
+                            let d = points[i].distance(want);
+                            if d <= tolerance && best.is_none_or(|(b, _)| d < b) {
+                                best = Some((d, i));
+                            }
+                        }
+                    }
+                }
+            }
+            best.map(|(_, i)| i)
+        };
+        let old: Vec<(String, Vec<f32>)> = names
+            .iter()
+            .map(|g| (g.clone(), weights(doc.document(), mesh, g)))
+            .collect();
+        let mut new: std::collections::BTreeMap<String, Vec<f32>> = old.iter().cloned().collect();
+        let mut copied = 0;
+        for (t, p) in points.iter().enumerate() {
+            if p.x * sign >= -tolerance {
+                continue;
+            }
+            let Some(s) = mirror_of(*p) else { continue };
+            copied += 1;
+            // The target's own weights go: it takes its mirror's whole.
+            for w in new.values_mut() {
+                w[t] = 0.0;
+            }
+            for (g, w) in &old {
+                let to = mirrored_name(g).unwrap_or_else(|| g.clone());
+                new.entry(to).or_insert_with(|| vec![0.0; points.len()])[t] = w[s];
+            }
+        }
+        if copied == 0 {
+            return Err(OpError::Failed(
+                "no vertex on that side has a mirror: is the mesh symmetric in its own X?".into(),
+            ));
+        }
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        for (g, w) in new {
+            m.attributes_mut().insert(
+                &weight_layer(&g),
+                Domain::Point,
+                AttrData::F32(std::sync::Arc::new(w)),
+            );
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 /// A copy of `mesh` for the screen, with `group`'s weights where the
 /// renderer's weight ramp reads them: the first surface coordinate of every
 /// corner. The document's mesh is not touched — its real UVs are its own.
@@ -989,5 +1105,39 @@ mod tests {
             .expect("one below");
         assert_eq!(hard[v], 0.0);
         assert!(soft[v] > 0.05 && soft[v] < 0.95, "{}", soft[v]);
+    }
+
+    #[test]
+    fn one_half_s_weights_go_to_the_other_under_the_other_name() {
+        // A grid across X, its +X half on Arm.L and the middle on Spine.
+        let (mut d, _, mesh) = strip_doc();
+        let xs: Vec<f32> = d
+            .mesh(mesh)
+            .expect("mesh")
+            .positions()
+            .iter()
+            .map(|p| p.x)
+            .collect();
+        let left: Vec<u32> = (0..xs.len() as u32)
+            .filter(|v| xs[*v as usize] > 0.01)
+            .collect();
+        run::<SetWeights>(
+            &mut d,
+            &SetWeightsParams {
+                group: "Arm.L".into(),
+                vertices: left.clone(),
+                ..Default::default()
+            },
+        );
+        run::<MirrorWeights>(&mut d, &MirrorWeightsParams::default());
+        let right = weights(&d, mesh, "Arm.R");
+        let left_after = weights(&d, mesh, "Arm.L");
+        for (v, x) in xs.iter().enumerate() {
+            if *x < -0.01 {
+                assert_eq!((right[v], left_after[v]), (1.0, 0.0), "vertex {v} at {x}");
+            } else if *x > 0.01 {
+                assert_eq!((right[v], left_after[v]), (0.0, 1.0), "vertex {v} at {x}");
+            }
+        }
     }
 }
