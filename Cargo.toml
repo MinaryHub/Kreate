@@ -142,9 +142,13 @@ criterion = "0.5"
 # our own code lightly; this keeps debug builds interactive without wrecking step-debugging.
 [profile.dev]
 opt-level = 1
+# Line numbers for backtraces and nothing more: full debug info made the
+# debug build tens of gigabytes and filled the disk twice.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 debug = 1          # keep line tables for profiling (tracy/puffin) and crash minidumps
