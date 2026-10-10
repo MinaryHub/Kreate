@@ -329,3 +329,102 @@ fn a_mesh_hung_from_a_joint_follows_its_bone() {
         "it followed the hand"
     );
 }
+
+/// Joints whose axes do not run to their children — Sketchfab's, from FBX
+/// with the turns baked in — still make bones that run joint to joint, and
+/// the skin moves as the file says. A tip joint nothing is bound to, given
+/// an identity for its matrix, stays at the tip rather than the origin.
+#[test]
+fn bones_run_to_the_next_joint_whatever_the_joints_axes_say() {
+    use glam::{Mat4, Quat};
+    let (mut doc, body) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let mut read = parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    let joints = read.skins[0].joints.clone();
+    // Every joint's frame turned a quarter about its own X: the same
+    // skeleton, the same motion, its axes pointing sideways.
+    let q = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    let is_joint = |n: Option<usize>| n.is_some_and(|p| joints.contains(&p));
+    for &j in &joints {
+        let under_joint = is_joint(read.nodes[j].parent);
+        let turn = |r: Quat| {
+            if under_joint {
+                q.inverse() * r * q
+            } else {
+                r * q
+            }
+        };
+        let t = &mut read.nodes[j].transform;
+        t.rotation = turn(t.rotation);
+        if under_joint {
+            t.translation = q.inverse() * t.translation;
+        }
+        for a in &mut read.animations {
+            for c in a.channels.iter_mut().filter(|c| c.node == j) {
+                match &mut c.values {
+                    kreate_io::ir::ChannelValues::Rotation(v) => {
+                        v.iter_mut().for_each(|r| *r = turn(*r))
+                    }
+                    kreate_io::ir::ChannelValues::Translation(v) if under_joint => {
+                        v.iter_mut().for_each(|p| *p = q.inverse() * *p)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let ibm = read.skins[0].inverse_bind.as_mut().expect("matrices");
+    for m in ibm.iter_mut() {
+        *m = Mat4::from_quat(q.inverse()) * *m;
+    }
+    // A tip past the hand, bound to nothing, its matrix left blank.
+    let hand = *joints.last().expect("a hand");
+    let mut tip = kreate_io::ir::ImportNode::new("Tip");
+    tip.parent = Some(hand);
+    tip.transform.translation = glam::Vec3::new(0.0, 0.0, 0.5);
+    read.nodes.push(tip);
+    read.skins[0].joints.push(read.nodes.len() - 1);
+    read.skins[0]
+        .inverse_bind
+        .as_mut()
+        .unwrap()
+        .push(Mat4::IDENTITY);
+
+    let mut back = Document::new();
+    let (made, _) = build_into(&read, &mut back);
+    let body_back = *made
+        .iter()
+        .find(|id| back.object(**id).is_some_and(|o| o.name == "Body"))
+        .expect("the body");
+    for frame in [1.0, 10.0] {
+        let d = apart(
+            &surface(&mut doc, body, frame),
+            &surface(&mut back, body_back, frame),
+        );
+        assert!(d < 1e-3, "frame {frame}: {d}");
+    }
+    let rig = *made
+        .iter()
+        .find(|id| back.armature_of(**id).is_some())
+        .expect("the rig");
+    let (_, armature) = back.armature_of(rig).unwrap();
+    for (i, bone) in armature.bones.iter().enumerate() {
+        let way = (bone.tail - bone.head).normalize();
+        for child in armature.bones.iter().filter(|b| b.parent == Some(i)) {
+            let to = (child.head - bone.head).normalize();
+            assert!(
+                way.dot(to) > 0.99,
+                "{} points away from {}",
+                bone.name,
+                child.name
+            );
+        }
+        assert!(
+            (bone.tail - bone.head).length() < 2.0,
+            "{} is {} long",
+            bone.name,
+            (bone.tail - bone.head).length()
+        );
+    }
+}

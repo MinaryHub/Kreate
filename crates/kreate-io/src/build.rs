@@ -552,6 +552,11 @@ struct Rig {
     /// pose is the joint's placement with it taken out, so a joint scaled
     /// as it was bound poses at one and its children inherit nothing extra.
     bind_scale: Vec<kreate_math::DVec3>,
+    /// The turn from each joint's frame to its bone's: none where the
+    /// joint's own axis runs to its child, and otherwise what stands the
+    /// bone towards it. A pose is the joint's placement turned the same way,
+    /// so what the bones do to the skin is unchanged.
+    turn: Vec<kreate_math::DQuat>,
 }
 
 /// Every skin as an armature object at the world origin: a bone per joint,
@@ -588,6 +593,43 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
             .position(|n| n.skin == Some(s))
             .and_then(|n| scene.world_transform(n))
             .unwrap_or(DAffine3::IDENTITY);
+        // A joint no vertex follows — a finger's tip, the top of the head —
+        // has an identity for its matrix in some files. It says nothing of
+        // the bind: it is left out of how the binds are read, and stood
+        // where its node stands from its parent joint's, below.
+        let mut followed = vec![false; joints.len()];
+        for node in scene.nodes.iter().filter(|n| n.skin == Some(s)) {
+            let crate::ir::ImportNodeData::Mesh(m) = node.data else {
+                continue;
+            };
+            let Some(Some(vs)) = scene.vertex_skins.get(m) else {
+                continue;
+            };
+            for (js, ws) in vs.joints.iter().zip(&vs.weights) {
+                for (j, w) in js.iter().zip(ws) {
+                    if *w > 0.0 {
+                        if let Some(f) = followed.get_mut(*j as usize) {
+                            *f = true;
+                        }
+                    }
+                }
+            }
+        }
+        let blank: Vec<bool> = (0..joints.len())
+            .map(|k| {
+                !followed[k]
+                    && skin
+                        .inverse_bind
+                        .as_ref()
+                        .and_then(|m| m.get(k))
+                        .is_some_and(|m| m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-6))
+            })
+            .collect();
+        let blank = if blank.iter().all(|b| *b) {
+            vec![false; joints.len()]
+        } else {
+            blank
+        };
         let binds_at = |mesh: DAffine3| -> Vec<DAffine3> {
             joints
                 .iter()
@@ -604,7 +646,9 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         let untidy = |binds: &[DAffine3]| -> f64 {
             binds
                 .iter()
-                .map(|m| {
+                .zip(&blank)
+                .filter(|(_, b)| !**b)
+                .map(|(m, _)| {
                     let (scale, turn, place) = m.to_scale_rotation_translation();
                     let even = (scale.x + scale.y + scale.z) / 3.0;
                     let tidy =
@@ -635,6 +679,9 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         let mut ratios: Vec<f64> = joints
             .iter()
             .zip(&bind)
+            .zip(&blank)
+            .filter(|(_, b)| !**b)
+            .map(|(pair, _)| pair)
             .filter_map(|(node, b)| {
                 let held = scene
                     .world_transform(*node)?
@@ -653,7 +700,48 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
             DAffine3::from_scale(DVec3::splat(typical))
         };
         let mesh_place = resize * chosen;
-        let bind: Vec<DAffine3> = bind.iter().map(|m| resize * *m).collect();
+        let mut bind: Vec<DAffine3> = bind.iter().map(|m| resize * *m).collect();
+        // The blank joints, stood where their nodes stand from their parent
+        // joints' binds, parents first.
+        {
+            let blank = |k: usize| blank[k];
+            let joint_parent = |k: usize| -> Option<usize> {
+                let mut at = scene.nodes[joints[k]].parent;
+                for _ in 0..=scene.nodes.len() {
+                    let p = at?;
+                    if let Some(pk) = joints.iter().position(|j| *j == p) {
+                        return Some(pk);
+                    }
+                    at = scene.nodes.get(p)?.parent;
+                }
+                None
+            };
+            let mut fixed = vec![false; joints.len()];
+            for _ in 0..joints.len() {
+                let mut progress = false;
+                for k in 0..joints.len() {
+                    if fixed[k] || !blank(k) {
+                        continue;
+                    }
+                    let Some(p) = joint_parent(k) else { continue };
+                    if blank(p) && !fixed[p] {
+                        continue;
+                    }
+                    let (Some(from), Some(to)) = (
+                        scene.world_transform(joints[p]),
+                        scene.world_transform(joints[k]),
+                    ) else {
+                        continue;
+                    };
+                    bind[k] = bind[p] * from.inverse() * to;
+                    fixed[k] = true;
+                    progress = true;
+                }
+                if !progress {
+                    break;
+                }
+            }
+        }
         // A bone's frame has no scale.
         let frames: Vec<(DQuat, DVec3)> = bind
             .iter()
@@ -693,14 +781,86 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         armature.bones.clear();
         let mut bone_of_joint = vec![0usize; joints.len()];
         let mut lengths = vec![0.0f64; joints.len()];
+        let mut turns = vec![DQuat::IDENTITY; joints.len()];
+        // Which way each bone points, in the world, once settled.
+        let mut directions = vec![DVec3::ZERO; joints.len()];
+        let children = |k: usize| -> Vec<usize> {
+            (0..joints.len())
+                .filter(|c| parents[*c] == Some(k))
+                .collect()
+        };
+        let descendants = |k: usize| -> usize {
+            (0..joints.len())
+                .filter(|c| {
+                    let mut at = parents[*c];
+                    for _ in 0..joints.len() {
+                        match at {
+                            Some(p) if p == k => return true,
+                            Some(p) => at = parents[p],
+                            None => return false,
+                        }
+                    }
+                    false
+                })
+                .count()
+        };
         for &k in &order {
-            let (rotation, head) = frames[k];
+            let (joint_rotation, head) = frames[k];
+            let own = joint_rotation * DVec3::Y;
+            let kids = children(k);
+            // A joint whose own axis runs to a child is a bone already, as
+            // Blender's and Mixamo's are. One whose axes say nothing of
+            // where its children are — Sketchfab's, converted from FBX with
+            // the turns baked in — is stood towards them: the middle of its
+            // children, or, where they surround it as a hip's legs and spine
+            // do, the one most of the skeleton hangs from. A tip carries on
+            // the way its parent went.
+            let follows = kids.iter().any(|c| {
+                let to = frames[*c].1 - head;
+                to.length() > 1e-9 && to.normalize().dot(own) > 0.9
+            });
+            let target: Option<DVec3> = if follows || kids.is_empty() {
+                None
+            } else {
+                let middle = kids.iter().map(|c| frames[*c].1).sum::<DVec3>() / kids.len() as f64;
+                let spread = kids
+                    .iter()
+                    .map(|c| (frames[*c].1 - head).length())
+                    .sum::<f64>()
+                    / kids.len() as f64;
+                if (middle - head).length() > 0.25 * spread {
+                    Some(middle)
+                } else {
+                    kids.iter()
+                        .copied()
+                        .max_by_key(|c| descendants(*c))
+                        .map(|c| frames[c].1)
+                }
+            };
+            let tip_way = parents[k]
+                .filter(|p| kids.is_empty() && turns[*p] != DQuat::IDENTITY)
+                .map(|p| directions[p]);
+            let way = match (target, tip_way) {
+                (Some(t), _) if (t - head).length() > 1e-9 => Some((t - head).normalize()),
+                (None, Some(d)) => Some(d),
+                _ => None,
+            };
+            if let Some(way) = way {
+                let local = joint_rotation.inverse() * way;
+                turns[k] = if local.dot(DVec3::Y) < -1.0 + 1e-9 {
+                    DQuat::from_rotation_z(std::f64::consts::PI)
+                } else {
+                    DQuat::from_rotation_arc(DVec3::Y, local)
+                };
+            }
+            let rotation = joint_rotation * turns[k];
             let along = rotation * DVec3::Y;
+            directions[k] = along;
             // As long as the farthest child joint lies along it; otherwise
             // its parent's length, or a tenth of a unit.
-            let reach = (0..joints.len())
-                .filter(|c| parents[*c] == Some(k))
-                .map(|c| (frames[c].1 - head).dot(along))
+            let reach = kids
+                .iter()
+                .map(|c| (frames[*c].1 - head).dot(along))
                 .fold(0.0f64, f64::max);
             let length = if reach > 1e-4 {
                 reach
@@ -751,6 +911,7 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
                 .iter()
                 .map(|m| m.to_scale_rotation_translation().0)
                 .collect(),
+            turn: turns,
         };
         // Standing as the file's nodes stand, which need not be the bind.
         let pose = rig_pose(scene, &rig, doc, None);
@@ -836,7 +997,13 @@ fn rig_pose(
             .copied()
             .filter(|s| s.min_element() > 1e-9)
             .unwrap_or(kreate_math::DVec3::ONE);
-        let at = world(rig.joints[k]) * DAffine3::from_scale(held.recip());
+        let turn = rig
+            .turn
+            .get(k)
+            .copied()
+            .unwrap_or(kreate_math::DQuat::IDENTITY);
+        let at =
+            world(rig.joints[k]) * DAffine3::from_scale(held.recip()) * DAffine3::from_quat(turn);
         let base = match bone.parent {
             Some(p) => posed[p] * armature.bones[p].rest().inverse() * bone.rest(),
             None => bone.rest(),
