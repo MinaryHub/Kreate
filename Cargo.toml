@@ -76,7 +76,7 @@ slotmap  = "1.0"
 # and it is the whole reason to take the dependency. It pulls in `image` with
 # only png and jpeg, which are the two formats glTF actually embeds and which a
 # texture pipeline will want regardless.
-gltf = { version = "1", default-features = false, features = ["import", "utils", "names", "extras", "extensions", "KHR_lights_punctual", "KHR_materials_emissive_strength", "KHR_materials_transmission", "KHR_materials_ior"] }
+gltf = { version = "1", default-features = false, features = ["import", "utils", "names", "extras", "extensions", "KHR_lights_punctual", "KHR_materials_emissive_strength", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_pbrSpecularGlossiness", "KHR_materials_unlit", "KHR_texture_transform"] }
 
 # The document container. `zip` because the format is a zip: universal tooling,
 # streaming, random access to one mesh, and recoverable with `unzip` at 2am.

@@ -215,7 +215,15 @@ fn from_imported(
 
     for material in document.materials() {
         let pbr = material.pbr_metallic_roughness();
-        let base = pbr.base_color_factor();
+        // An older file's specular-glossiness material — Sketchfab's of a
+        // few years ago — gives its colour as diffuse; read as the base
+        // colour, a fair stand-in, where the metallic-roughness one is the
+        // default it would otherwise be.
+        let gloss = material.pbr_specular_glossiness();
+        let base = match &gloss {
+            Some(g) => g.diffuse_factor(),
+            None => pbr.base_color_factor(),
+        };
         let material_name = material.name().unwrap_or("material").to_string();
         // Only the first coordinate set is read, so a texture that asks for
         // another would land on the wrong coordinates. Kept — the image is
@@ -231,9 +239,14 @@ fn from_imported(
             }
             Some(source)
         };
-        let base_color_texture = pbr
-            .base_color_texture()
-            .and_then(|t| texture("base colour", t.tex_coord(), t.texture().source().index()));
+        let base_color_texture = match &gloss {
+            Some(g) => g
+                .diffuse_texture()
+                .and_then(|t| texture("diffuse", t.tex_coord(), t.texture().source().index())),
+            None => pbr
+                .base_color_texture()
+                .and_then(|t| texture("base colour", t.tex_coord(), t.texture().source().index())),
+        };
         let metallic_roughness_texture = pbr.metallic_roughness_texture().and_then(|t| {
             texture(
                 "metallic-roughness",
@@ -257,8 +270,15 @@ fn from_imported(
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("material{}", scene.materials.len())),
             base_color: [base[0], base[1], base[2], base[3]],
-            metallic: pbr.metallic_factor(),
-            roughness: pbr.roughness_factor(),
+            metallic: if gloss.is_some() {
+                0.0
+            } else {
+                pbr.metallic_factor()
+            },
+            roughness: match &gloss {
+                Some(g) => 1.0 - g.glossiness_factor(),
+                None => pbr.roughness_factor(),
+            },
             emissive: Vec3::from_array(material.emissive_factor()),
             base_color_texture,
             metallic_roughness_texture,

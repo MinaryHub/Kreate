@@ -52,6 +52,11 @@ impl Transform {
     #[inline]
     pub fn from_affine(m: Affine3A) -> Self {
         let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        let rotation = if rotation.is_finite() {
+            rotation
+        } else {
+            Quat::IDENTITY
+        };
         Self {
             translation,
             rotation,
@@ -212,6 +217,14 @@ impl DTransform {
     #[inline]
     pub fn from_affine(m: DAffine3) -> Self {
         let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        // A matrix scaled to nothing — a particle before it appears — has no
+        // turn to recover, and a NaN one spread through every child, every
+        // bound and every frame. Nothing is turned, then.
+        let rotation = if rotation.is_finite() {
+            rotation
+        } else {
+            DQuat::IDENTITY
+        };
         Self {
             translation,
             rotation,
@@ -298,5 +311,17 @@ mod dtransform_tests {
         assert!(!DTransform::IDENTITY.is_mirrored());
         assert!(DTransform::from_scale(DVec3::new(-1.0, 1.0, 1.0)).is_mirrored());
         assert!(!DTransform::from_scale(DVec3::new(-1.0, -1.0, 1.0)).is_mirrored());
+    }
+
+    #[test]
+    fn a_matrix_scaled_to_nothing_comes_apart_without_nan() {
+        let m = DAffine3::from_scale_rotation_translation(
+            DVec3::ZERO,
+            DQuat::from_rotation_z(0.7),
+            DVec3::new(1.0, 2.0, 3.0),
+        );
+        let t = DTransform::from_affine(m);
+        assert!(t.rotation.is_finite() && t.scale == DVec3::ZERO);
+        assert_eq!(t.translation, DVec3::new(1.0, 2.0, 3.0));
     }
 }

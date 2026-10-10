@@ -351,15 +351,10 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
                 );
             }
         }
-        // At the origin, as glTF draws a skin — its joints place it — unless
-        // the binds were read against its node.
-        if !rig.mesh_at_node {
-            let _ = doc.set_parent(*id, None);
-            if let Some(object) = doc.object_mut(*id) {
-                object.transform = kreate_math::DTransform::IDENTITY;
-            }
-        }
+        // Where the binds were read against: its joints place it.
+        let _ = doc.set_parent(*id, None);
         if let Some(object) = doc.object_mut(*id) {
+            object.transform = to_transform(rig.mesh_place);
             object.skin = rig_uid;
         }
     }
@@ -549,9 +544,10 @@ struct Rig {
     bone_names: Vec<String>,
     /// The bone each joint became, by index into the armature's bones.
     bone_of_joint: Vec<usize>,
-    /// Whether its skinned meshes stand where their nodes put them, rather
-    /// than at the origin — whichever made the binds come apart cleanly.
-    mesh_at_node: bool,
+    /// Where its skinned meshes stand: at the origin or at their node,
+    /// whichever made the binds come apart cleanly, and at the size that
+    /// makes their scale one.
+    mesh_place: kreate_math::DAffine3,
     /// Each joint's scale at the bind, which a bone's frame cannot hold: a
     /// pose is the joint's placement with it taken out, so a joint scaled
     /// as it was bound poses at one and its children inherit nothing extra.
@@ -625,7 +621,39 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         let at_origin = binds_at(DAffine3::IDENTITY);
         let at_node = binds_at(mesh_world);
         let mesh_at_node = untidy(&at_node) + 1e-6 < untidy(&at_origin);
-        let bind = if mesh_at_node { at_node } else { at_origin };
+        let (chosen, bind) = if mesh_at_node {
+            (mesh_world, at_node)
+        } else {
+            (DAffine3::IDENTITY, at_origin)
+        };
+        // And at the size of the joints themselves: a file whose matrices
+        // are in centimetres under joints scaled to metres — Sketchfab's,
+        // from Mixamo — otherwise stood its bones at rest forty times the
+        // height of the body they move, and drew them so. The typical ratio
+        // of a joint's scale in the file to its scale at the bind; an even
+        // scale on the mesh is as free a choice as where it stands.
+        let mut ratios: Vec<f64> = joints
+            .iter()
+            .zip(&bind)
+            .filter_map(|(node, b)| {
+                let held = scene
+                    .world_transform(*node)?
+                    .to_scale_rotation_translation()
+                    .0;
+                let bound = b.to_scale_rotation_translation().0;
+                let r = (held.element_sum() / 3.0) / (bound.element_sum() / 3.0);
+                (r.is_finite() && r > 1e-12).then_some(r)
+            })
+            .collect();
+        ratios.sort_by(f64::total_cmp);
+        let typical = ratios.get(ratios.len() / 2).copied().unwrap_or(1.0);
+        let resize = if (0.98..=1.02).contains(&typical) {
+            DAffine3::IDENTITY
+        } else {
+            DAffine3::from_scale(DVec3::splat(typical))
+        };
+        let mesh_place = resize * chosen;
+        let bind: Vec<DAffine3> = bind.iter().map(|m| resize * *m).collect();
         // A bone's frame has no scale.
         let frames: Vec<(DQuat, DVec3)> = bind
             .iter()
@@ -718,7 +746,7 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
             joints,
             bone_names,
             bone_of_joint,
-            mesh_at_node,
+            mesh_place,
             bind_scale: bind
                 .iter()
                 .map(|m| m.to_scale_rotation_translation().0)
@@ -1224,12 +1252,7 @@ fn build_materials(
 
 /// A transform in the shape the document stores.
 fn to_transform(affine: kreate_math::DAffine3) -> kreate_math::DTransform {
-    let (scale, rotation, translation) = affine.to_scale_rotation_translation();
-    kreate_math::DTransform {
-        translation,
-        rotation,
-        scale,
-    }
+    kreate_math::DTransform::from_affine(affine)
 }
 
 /// Turns a document into a scene an exporter can write.

@@ -154,7 +154,11 @@ use; `scripts/release.sh` turns that section into the next release.
   bones, or stood still beside them; joints scaled as they were bound grew
   their children; and a mesh hung from a joint (a robot's plate, a
   skeleton's bone, a sword in a hand) stayed behind. Each now matches what
-  glTF says, frame by frame.
+  glTF says, frame by frame. A rig whose matrices are in centimetres under
+  joints scaled to metres stands its bones at the body's size, not forty
+  times it; a node scaled to nothing (a particle before it appears) no
+  longer turns everything to NaN; and files using the older
+  specular-glossiness, unlit or texture-transform extensions open.
 - Tests keep to a temporary folder: a test that saved, failed or remembered
   a recent file no longer writes into your settings, caches or autosaves,
   where a hundred stale test sessions had piled up as recovery offers.
