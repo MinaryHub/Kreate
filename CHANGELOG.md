@@ -54,6 +54,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- `B` during a move picks the snap base, as in Blender: the selection holds
+  still, the pointer finds a vertex, edge or face of what is moving, a
+  click takes it, and from then on that point lands on whatever the
+  pointer snaps to — this corner onto that one. Rotate and scale keep `B`
+  as the snapping toggle.
 - A glTF character with several takes — idle, walk, run — keeps them all.
   The first plays; each other is a muted strip on the rig, to switch on.
   They were read as one, the last take over the rest.

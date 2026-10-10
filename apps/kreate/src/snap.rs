@@ -163,6 +163,44 @@ impl SnapWorld {
     }
 }
 
+impl SnapWorld {
+    /// Adds only the part of a mesh that `only` names — its vertices, and the
+    /// edges and faces made of nothing else — in world space. What a snap
+    /// base is picked from: the points of what is about to move.
+    pub fn add_mesh_only(
+        &mut self,
+        mesh: &kreate_mesh::MeshData,
+        to_world: &glam::DAffine3,
+        only: &[u32],
+    ) {
+        let listed = |v: u32| only.binary_search(&v).is_ok();
+        let world = |v: u32| -> DVec3 {
+            let p = mesh.positions()[v as usize];
+            to_world.transform_point3(DVec3::new(p.x as f64, p.y as f64, p.z as f64))
+        };
+        for &v in only {
+            if v < mesh.num_verts() {
+                self.verts.push(world(v));
+            }
+        }
+        for edge in mesh.edges() {
+            if listed(edge[0]) && listed(edge[1]) {
+                self.edges.push([world(edge[0]), world(edge[1])]);
+            }
+        }
+        for face in 0..mesh.num_faces() {
+            let ring = mesh.face_verts(face);
+            if ring.len() < 3 || !ring.iter().all(|v| listed(*v)) {
+                continue;
+            }
+            for i in 1..ring.len() - 1 {
+                self.tris
+                    .push([world(ring[0]), world(ring[i]), world(ring[i + 1])]);
+            }
+        }
+    }
+}
+
 /// What kind of thing a snap caught, for drawing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Element {

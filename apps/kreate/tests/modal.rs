@@ -1788,3 +1788,82 @@ fn an_extrude_along_normals_on_a_closed_solid_grows_as_the_pointer_leaves_the_mi
     assert!(amount(at(&mut g, (550.0, 300.0))) > 0.1);
     assert!(amount(at(&mut g, (420.0, 300.0))) < -0.01);
 }
+
+/// A cube a metre across, its middle at `at`, as snap candidates.
+fn cube_at(at: DVec3) -> SnapWorld {
+    let mut world = SnapWorld::default();
+    world.add_mesh(
+        &kreate_mesh::primitives::cube(1.0),
+        &glam::DAffine3::from_translation(at),
+        &[],
+    );
+    world
+}
+
+#[test]
+fn b_picks_the_point_of_what_moves_that_lands_on_the_target() {
+    // Blender's snap base: B during a move, a click on a corner of the cube
+    // being moved, and then that corner — not the one nearest, not the
+    // middle — goes onto the corner the pointer finds on the other cube.
+    let camera = camera();
+    let screen = |p: DVec3| kreate::snap::project(p, &camera, VIEWPORT).expect("in view");
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap {
+            mode: kreate::snap::Mode::Vertex,
+            ..Snap::default()
+        },
+        cube_at(DVec3::new(3.0, 0.0, 0.0)),
+    );
+    // Picking: the moved cube holds still while the pointer looks for a
+    // point of it, and the marker is on that point.
+    let base = DVec3::new(0.5, -0.5, 0.5);
+    g.begin_base_pick(cube_at(DVec3::ZERO));
+    assert!(g.picking_base());
+    assert_eq!(translation(&at(&mut g, screen(base))), [0.0, 0.0, 0.0]);
+    let marked = g
+        .snap_point()
+        .map(|(p, _)| p)
+        .expect("a point under the pointer");
+    assert!(marked.distance(base) < 1e-6, "{marked}");
+    assert!(g.finish_base_pick(), "the corner was taken");
+    assert!(!g.picking_base());
+
+    // Moving on, snapping is on: the picked corner lands on the corner of
+    // the other cube that the pointer is at — its bottom left, not the top
+    // right the picked one is.
+    let target = DVec3::new(2.5, -0.5, -0.5);
+    let t = translation(&at(&mut g, screen(target)));
+    let moved = base + DVec3::from_array(t);
+    assert!(
+        moved.distance(target) < 1e-6,
+        "{t:?} put the corner at {moved}"
+    );
+}
+
+#[test]
+fn picking_nothing_keeps_the_nearest_point_landing() {
+    let camera = camera();
+    let mut g = Gesture::begin(
+        Kind::Move,
+        (400.0, 300.0),
+        DVec3::ZERO,
+        &camera,
+        VIEWPORT,
+        WORLD_AXES,
+        Snap::default(),
+        SnapWorld::default(),
+    );
+    g.begin_base_pick(cube_at(DVec3::ZERO));
+    at(&mut g, (20.0, 20.0));
+    assert!(
+        !g.finish_base_pick(),
+        "nothing of the cube is in the corner"
+    );
+    assert!(g.status().contains("snap"), "{}", g.status());
+}

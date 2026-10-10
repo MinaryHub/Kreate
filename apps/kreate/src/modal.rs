@@ -304,6 +304,13 @@ pub struct Gesture {
     /// drag began — Blender's snap base "Closest": the one nearest the target
     /// is what lands on it. Empty means the pivot does.
     sources: Vec<DVec3>,
+    /// The point of what moves that lands on the target, when the user has
+    /// picked one — Blender's `B` during a move: this corner onto that one.
+    /// It replaces the nearest of `sources`.
+    base: Option<DVec3>,
+    /// While the base is being picked: what moves, where it was, as the
+    /// candidates. The selection holds still meanwhile.
+    picking: Option<crate::snap::SnapWorld>,
     /// The camera and viewport, for resolving a snap in screen space.
     ///
     /// Held rather than passed, so that `params` stays a function of the
@@ -405,6 +412,8 @@ impl Gesture {
             snap_inverted: false,
             world,
             sources: Vec::new(),
+            base: None,
+            picking: None,
             camera: *camera,
             viewport,
             proportional: None,
@@ -622,12 +631,66 @@ impl Gesture {
         )
     }
 
-    /// What a snap caught, for drawing a marker on it.
+    /// What a snap caught, for drawing a marker on it — or, while a base is
+    /// being picked, the point of what moves the pointer is on.
     pub fn snap_point(&self) -> Option<(DVec3, crate::snap::Element)> {
+        if self.picking.is_some() {
+            return self.base_hit().map(|hit| (hit.point, hit.element));
+        }
         if self.typed().is_some() {
             return None;
         }
         self.snap_hit().map(|hit| (hit.point, hit.element))
+    }
+
+    /// Whether this gesture can have its snap base picked: a move.
+    pub fn takes_base(&self) -> bool {
+        matches!(self.kind, Kind::Move | Kind::ExtrudeFree)
+    }
+
+    /// Whether the user is picking the snap base now.
+    pub fn picking_base(&self) -> bool {
+        self.picking.is_some()
+    }
+
+    /// Starts picking the snap base among `own` — the geometry that moves,
+    /// where it was. The selection goes back to where it started and waits.
+    pub fn begin_base_pick(&mut self, own: crate::snap::SnapWorld) {
+        self.picking = Some(own);
+    }
+
+    /// The point of what moves under the pointer, by the element snap set
+    /// (or any element, when the setting is increment).
+    fn base_hit(&self) -> Option<crate::snap::Hit> {
+        let own = self.picking.as_ref()?;
+        let mode = if self.snap.mode.needs_geometry() {
+            self.snap.mode
+        } else {
+            crate::snap::Mode::Element
+        };
+        crate::snap::resolve(own, mode, self.cursor, &self.camera, self.viewport)
+    }
+
+    /// Takes the point under the pointer as the snap base and goes on
+    /// moving, snapping on: from here the base lands on what the pointer
+    /// catches. Pointing at nothing keeps the base there was. The move starts
+    /// again from where the pointer is, so nothing jumps.
+    pub fn finish_base_pick(&mut self) -> bool {
+        let hit = self.base_hit();
+        self.picking = None;
+        if let Some(hit) = &hit {
+            self.base = Some(hit.point);
+        }
+        if self.snap.mode == crate::snap::Mode::Increment {
+            self.snap.mode = crate::snap::Mode::Element;
+        }
+        if !self.snapping() {
+            self.snap.enabled = !self.snap.enabled;
+        }
+        self.start = self.cursor;
+        self.precise_from = None;
+        self.coarse = (0.0, 0.0);
+        hit.is_some()
     }
 
     /// Whether snapping wants geometry it has not been given yet — `B` in a
@@ -649,6 +712,9 @@ impl Gesture {
     /// The point of the selection that lands on `target`: the moving point
     /// nearest it as the pointer has carried things so far, or the pivot.
     fn snap_source(&self, target: DVec3, free: DVec3) -> DVec3 {
+        if let Some(base) = self.base {
+            return base;
+        }
         self.sources
             .iter()
             .copied()
@@ -924,6 +990,11 @@ impl Gesture {
     /// 0.17499999701976776, which is a rounding error the user can see in the
     /// header and in the saved file.
     fn offset(&self, dx: f32, dy: f32) -> DVec3 {
+        // Held where it started while the base is picked: the points to pick
+        // from are where they were.
+        if self.picking.is_some() {
+            return DVec3::ZERO;
+        }
         // Only in increment mode. The element modes have already had their say
         // above, and rounding *their* answer would move the selection off the
         // vertex it was just snapped to.
@@ -1122,6 +1193,16 @@ impl Gesture {
     }
 
     pub fn status(&self) -> String {
+        if self.picking.is_some() {
+            let on = match self.base_hit() {
+                Some(hit) => format!("  on {}", hit.element.label()),
+                None => String::new(),
+            };
+            return format!(
+                "{}  snap base: point at what moves and click (B or Enter){on}",
+                self.kind.label()
+            );
+        }
         let len = kreate_reflect::format_length;
         let axis = match (self.axis, self.orientation) {
             _ if self.kind == Kind::Extrude && self.along_normals => " along normals".to_string(),

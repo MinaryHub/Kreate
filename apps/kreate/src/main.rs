@@ -2260,6 +2260,56 @@ impl App {
         world
     }
 
+    /// What a drag is about to move, as snap candidates: the selected
+    /// objects whole in object mode, the selected part of the edited mesh in
+    /// edit mode — where a move's snap base is picked from.
+    fn build_own_snap_world(&self) -> kreate::snap::SnapWorld {
+        let mut world = kreate::snap::SnapWorld::default();
+        let edited = self
+            .op_ctx
+            .mode
+            .edits_elements()
+            .then(|| kreate_ops::ops::mesh::target_mesh(&self.doc))
+            .flatten();
+        for (id, mesh) in &self.evaluated {
+            let Some(object) = self.doc.object(*id) else {
+                continue;
+            };
+            if !self.doc.is_shown(*id) {
+                continue;
+            }
+            let to_world = self.doc.world_transform(*id);
+            if self.op_ctx.mode.edits_elements() {
+                if edited.is_some() && object.mesh() == edited {
+                    let selected = kreate_ops::ops::mesh::selection_vertices(mesh);
+                    world.add_mesh_only(mesh, &to_world, &selected);
+                }
+            } else if self.doc.selection.objects.contains(id) {
+                world.add_mesh(mesh, &to_world, &[]);
+            }
+        }
+        world
+    }
+
+    /// Takes the snap base under the pointer and goes on moving, with what
+    /// the base may land on gathered if the drag had nothing yet.
+    fn finish_base_pick(&mut self) {
+        let picked = self
+            .gesture
+            .as_mut()
+            .is_some_and(|(gesture, _)| gesture.finish_base_pick());
+        if self.gesture.as_ref().is_some_and(|(g, _)| g.wants_world()) {
+            let world = self.build_snap_world(kreate::snap::Mode::Element);
+            if let Some((gesture, _)) = &mut self.gesture {
+                gesture.set_world(world);
+            }
+        }
+        if !picked {
+            self.status("no point of the selection there; snapping by the nearest");
+        }
+        self.drive_gesture();
+    }
+
     /// The points of what a drag is about to move, in the world: the
     /// selected vertices in edit mode, the selected objects' vertices (or
     /// origins) in object mode. A snap lands the one nearest its target.
@@ -4210,15 +4260,35 @@ impl App {
         }
         match code {
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                self.confirm_gesture();
+                if self.gesture.as_ref().is_some_and(|(g, _)| g.picking_base()) {
+                    self.finish_base_pick();
+                } else {
+                    self.confirm_gesture();
+                }
                 true
             }
             KeyCode::Escape => {
                 self.cancel_gesture();
                 true
             }
-            // Snapping for the rest of this drag, Blender's `B`. The header
-            // says `snap` while it is on, so the toggle is readable.
+            // A move's snap base, Blender's `B`: the drag holds still, the
+            // pointer picks a point of what moves, and from then on that
+            // point is what lands on the target. Pressed again while picking,
+            // it takes the point under the pointer.
+            KeyCode::KeyB if self.gesture.as_ref().is_some_and(|(g, _)| g.takes_base()) => {
+                if self.gesture.as_ref().is_some_and(|(g, _)| g.picking_base()) {
+                    self.finish_base_pick();
+                } else {
+                    let own = self.build_own_snap_world();
+                    if let Some((gesture, _)) = &mut self.gesture {
+                        gesture.begin_base_pick(own);
+                    }
+                    self.drive_gesture();
+                }
+                true
+            }
+            // Snapping for the rest of any other drag. The header says
+            // `snap` while it is on, so the toggle is readable.
             KeyCode::KeyB => {
                 if let Some((gesture, _)) = &mut self.gesture {
                     gesture.toggle_snap();
@@ -11960,6 +12030,13 @@ impl ApplicationHandler for App {
                 }
                 if self.gesture.is_some() && pressed {
                     match button {
+                        // While a snap base is picked, the click picks it.
+                        MouseButton::Left
+                            if self.gesture.as_ref().is_some_and(|(g, _)| g.picking_base()) =>
+                        {
+                            self.finish_base_pick();
+                            return;
+                        }
                         MouseButton::Left => {
                             self.confirm_gesture();
                             return;
