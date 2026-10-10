@@ -1901,6 +1901,11 @@ impl Operator for Paste {
 pub struct ImportParams {
     /// The scene file: glTF, FBX, OBJ, STL, PLY, 3MF, OFF or a `.kreate`.
     pub path: String,
+    /// How far the whole model is moved from where its file puts it. The
+    /// application sets it so a model lands beside what is already there
+    /// rather than inside it — every asset is made at the origin, and a
+    /// bottle imported after a barrel otherwise disappears into it.
+    pub offset: [f64; 3],
 }
 
 /// Adds a scene file's contents beside what is there: File ▸ Import, a
@@ -1943,6 +1948,15 @@ impl Operator for Import {
         let added = d.merge_from(&fragment);
         if added.is_empty() {
             return Ok(OpResult::Cancelled);
+        }
+        // The roots only: a child rides on its parent.
+        let offset = DVec3::from_array(params.offset);
+        if offset != DVec3::ZERO {
+            for id in &added {
+                if let Some(object) = d.object_mut(*id).filter(|o| o.parent.is_none()) {
+                    object.transform.translation += offset;
+                }
+            }
         }
         d.selection.clear();
         for id in &added {

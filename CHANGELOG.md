@@ -45,6 +45,9 @@ use; `scripts/release.sh` turns that section into the next release.
 - Hiding an object in the outliner hides its children with it. Each child
   keeps its own eye, drawn faint while its parent is hidden, and comes back
   when the parent does.
+- An imported model or asset lands beside what is already there instead of
+  inside it. Every asset is made at the origin, so a small one added after
+  a large one was hidden inside it — in the outliner and nowhere to be seen.
 - Pictures show in the Flat view and not the Studio one. Studio is lit to
   read shape and shows each material's colour; Flat shows its texture. A
   cut-out leaf is still cut in both.

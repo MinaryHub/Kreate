@@ -2838,8 +2838,12 @@ impl App {
     /// `at`, or the first place along +X from it that is not inside a
     /// visible object — where a new object can be seen.
     fn free_spot(&self, at: DVec3) -> DVec3 {
-        let boxes: Vec<(DVec3, DVec3)> = self
-            .evaluated
+        spot_beside(at, &self.mesh_boxes())
+    }
+
+    /// Every shown mesh's world box, low and high corner.
+    fn mesh_boxes(&self) -> Vec<(DVec3, DVec3)> {
+        self.evaluated
             .iter()
             .filter_map(|(id, mesh)| {
                 let p = mesh.positions();
@@ -2862,8 +2866,7 @@ impl App {
                 }
                 Some((wlo, whi))
             })
-            .collect();
-        spot_beside(at, &boxes)
+            .collect()
     }
 
     fn app_params(&self) -> AppParams {
@@ -6724,8 +6727,9 @@ impl App {
         std::thread::spawn(move || {
             let result = match kreate_io::scene_file::read_scene_file(&path) {
                 Ok((document, _)) => {
+                    let bounds = document.world_bounds();
                     kreate_io::scene_file::prepare(&path, document);
-                    Ok(path)
+                    Ok((path, bounds))
                 }
                 Err(why) => Err(format!("cannot import {}: {why}", path.display())),
             };
@@ -6751,9 +6755,16 @@ impl App {
         }
         for result in ready {
             match result {
-                Ok(path) => {
+                Ok((path, bounds)) => {
                     let mut params = PropertyMap::new();
                     params.set("path", PropertyValue::Text(path.display().to_string()));
+                    if !bounds.is_empty() {
+                        let offset = clear_offset(
+                            (bounds.min.as_dvec3(), bounds.max.as_dvec3()),
+                            &self.mesh_boxes(),
+                        );
+                        params.set("offset", PropertyValue::Vec3(offset.to_array()));
+                    }
                     self.run_op("object.import", params);
                     self.status(&format!("added {}", path.display()));
                 }
@@ -11556,7 +11567,9 @@ fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
 const SCULPT_DENSE_ENOUGH: u32 = 1000;
 
 /// A scene file read for importing: its path, ready to add, or why not.
-type ImportReady = Result<std::path::PathBuf, String>;
+/// A file read by an import thread: where it is and how much room the
+/// model takes, or why it could not be read.
+type ImportReady = Result<(std::path::PathBuf, kreate_math::Aabb), String>;
 
 /// What became of one line of a script.
 struct ScriptLine {
@@ -12657,6 +12670,28 @@ fn install_panic_hook() {
     }));
 }
 
+/// How far to move a model whose box is `model` so it overlaps none of
+/// `boxes`: nothing when it is clear already, else along +X past whatever it
+/// meets, with a tenth of its width between. Every asset is made at the
+/// origin, so without this the second lands inside the first — a bottle
+/// imported after a barrel was in the outliner and nowhere to be seen.
+fn clear_offset(model: (DVec3, DVec3), boxes: &[(DVec3, DVec3)]) -> DVec3 {
+    let (lo, hi) = model;
+    let gap = ((hi.x - lo.x) * 0.1).max(0.05);
+    let mut offset = DVec3::ZERO;
+    for _ in 0..256 {
+        let (a, b) = (lo + offset, hi + offset);
+        let Some((_, other)) = boxes
+            .iter()
+            .find(|(c, d)| a.cmplt(*d).all() && b.cmpgt(*c).all())
+        else {
+            break;
+        };
+        offset.x = other.x + gap - lo.x;
+    }
+    offset
+}
+
 /// `params` with the auto-key parameters set, when auto-keying is on and the
 /// operator transforms objects.
 ///
@@ -12813,6 +12848,26 @@ mod tests {
             spot_beside(DVec3::ZERO, &[cube, next]),
             DVec3::new(5.0, 0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn an_imported_model_lands_clear_of_what_is_there() {
+        use super::*;
+        // A barrel at the origin, and a bottle made at the origin too.
+        let barrel = (DVec3::new(-0.3, -0.3, 0.0), DVec3::new(0.3, 0.3, 0.9));
+        let bottle = (DVec3::new(-0.05, -0.05, 0.0), DVec3::new(0.05, 0.05, 0.3));
+        // An empty scene, or one clear of it: where the file puts it.
+        assert_eq!(clear_offset(bottle, &[]), DVec3::ZERO);
+        let far = (DVec3::splat(5.0), DVec3::splat(6.0));
+        assert_eq!(clear_offset(bottle, &[far]), DVec3::ZERO);
+        // Inside the barrel: moved along X until it touches nothing.
+        let offset = clear_offset(bottle, &[barrel]);
+        assert!(offset.y == 0.0 && offset.z == 0.0, "{offset}");
+        assert!(bottle.0.x + offset.x > barrel.1.x, "{offset}");
+        // Past a second one standing beside the first, too.
+        let crate_ = (DVec3::new(0.35, -0.2, 0.0), DVec3::new(1.0, 0.2, 0.5));
+        let offset = clear_offset(bottle, &[barrel, crate_]);
+        assert!(bottle.0.x + offset.x > crate_.1.x, "{offset}");
     }
 
     #[test]
@@ -12980,6 +13035,43 @@ mod tests {
         // And undoing it takes both away.
         assert!(app.history.undo(&mut app.doc), "undone");
         assert_eq!(app.doc.objects().count(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model imported twice, both times made at the origin, lands in two
+    /// places: the second is not hidden inside the first.
+    #[test]
+    fn imports_land_beside_each_other_not_inside() {
+        let dir = std::env::temp_dir().join(format!("kreate-import-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("box.obj");
+        let mesh = kreate_mesh::primitives::cube(1.0);
+        std::fs::write(
+            &path,
+            kreate_io::write_obj(&[("Box".to_string(), &mesh)], Default::default()),
+        )
+        .expect("written");
+        let mut app = app();
+        for _ in 0..2 {
+            let before = app.doc.objects().count();
+            app.import_into(&path);
+            let start = std::time::Instant::now();
+            while app.doc.objects().count() == before && start.elapsed().as_secs() < 10 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                app.serve_imports();
+            }
+            app.evaluate_scene();
+        }
+        let boxes = app.mesh_boxes();
+        assert!(boxes.len() >= 2, "{} meshes", boxes.len());
+        for (i, (a, b)) in boxes.iter().enumerate() {
+            for (c, d) in &boxes[i + 1..] {
+                assert!(
+                    !(a.cmplt(*d).all() && b.cmpgt(*c).all()),
+                    "{a}..{b} overlaps {c}..{d}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
