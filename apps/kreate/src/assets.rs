@@ -930,12 +930,150 @@ pub fn thumbnail_now(
             if ENVIRONMENTS.contains(&ext.as_str()) {
                 return environment_thumbnail(&file);
             }
+            if SCENES.contains(&ext.as_str()) {
+                return model_thumbnail(&file);
+            }
             if !IMAGES.contains(&ext.as_str()) {
                 return None;
             }
             thumbnail_of(&std::fs::read(file).ok()?)
         }),
     }
+}
+
+/// A model file's picture: read, drawn, and kept in the cache by the file's
+/// path, size and time, so it is drawn once.
+fn model_thumbnail(file: &Path) -> Option<Picture> {
+    let meta = std::fs::metadata(file).ok()?;
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        file.hash(&mut h);
+        meta.len().hash(&mut h);
+        meta.modified().ok().hash(&mut h);
+        h.finish()
+    };
+    let kept = cache_root().map(|r| r.join("local-thumbs").join(format!("{key:016x}.png")));
+    if let Some(bytes) = kept.as_ref().and_then(|k| std::fs::read(k).ok()) {
+        if let Some(picture) = thumbnail_of(&bytes) {
+            return Some(picture);
+        }
+    }
+    let (doc, _) = kreate_io::scene_file::read_scene_file(file).ok()?;
+    let mut triangles = Vec::new();
+    for (id, object) in doc.objects() {
+        let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
+            continue;
+        };
+        let world = doc.world_transform(id);
+        let p: Vec<glam::DVec3> = mesh
+            .positions()
+            .iter()
+            .map(|q| world.transform_point3(q.as_dvec3()))
+            .collect();
+        for f in 0..mesh.num_faces() {
+            let ring = mesh.face_verts(f);
+            for i in 1..ring.len().saturating_sub(1) {
+                triangles.push([
+                    p[ring[0] as usize],
+                    p[ring[i] as usize],
+                    p[ring[i + 1] as usize],
+                ]);
+            }
+        }
+    }
+    let picture = draw_triangles(&triangles, 256)?;
+    if let (Some(path), Some(png)) = (kept, picture_png(&picture)) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, png);
+    }
+    Some(picture)
+}
+
+/// Triangles drawn as a model's tile: from the front right and a little
+/// above, filling the square, lit from over the viewer's shoulder, on
+/// nothing.
+pub fn draw_triangles(triangles: &[[glam::DVec3; 3]], size: u32) -> Option<Picture> {
+    use glam::DVec3;
+    if triangles.is_empty() {
+        return None;
+    }
+    // Looking from (+X, -Y, +Z) toward the middle.
+    let toward = DVec3::new(-1.0, 1.0, -0.7).normalize();
+    let right = toward.cross(DVec3::Z).normalize();
+    let up = right.cross(toward);
+    let light = (-toward + up * 0.6 - right * 0.4).normalize();
+    let flat: Vec<[(f64, f64, f64); 3]> = triangles
+        .iter()
+        .map(|t| t.map(|p| (p.dot(right), p.dot(up), p.dot(toward))))
+        .collect();
+    let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+    for t in &flat {
+        for (u, v, _) in t {
+            lo = (lo.0.min(*u), lo.1.min(*v));
+            hi = (hi.0.max(*u), hi.1.max(*v));
+        }
+    }
+    let extent = (hi.0 - lo.0).max(hi.1 - lo.1);
+    if extent <= 0.0 {
+        return None;
+    }
+    let n = size as usize;
+    let margin = 0.06;
+    let scale = n as f64 * (1.0 - 2.0 * margin) / extent;
+    let (cu, cv) = ((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0);
+    let to_px = |(u, v, d): (f64, f64, f64)| {
+        (
+            n as f64 / 2.0 + (u - cu) * scale,
+            n as f64 / 2.0 - (v - cv) * scale,
+            d,
+        )
+    };
+    let mut depth = vec![f64::MAX; n * n];
+    let mut pixels = vec![0u8; n * n * 4];
+    for (t, world) in flat.iter().zip(triangles) {
+        let normal = (world[1] - world[0])
+            .cross(world[2] - world[0])
+            .normalize_or_zero();
+        // Either side faces the light: a file's winding is not to be trusted.
+        let lit = 0.25 + 0.75 * normal.dot(light).abs();
+        let shade = (lit.clamp(0.0, 1.0) * 255.0) as u8;
+        let [a, b, c] = t.map(to_px);
+        let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+        if area.abs() < 1e-12 {
+            continue;
+        }
+        let x0 = a.0.min(b.0).min(c.0).floor().max(0.0) as usize;
+        let x1 = (a.0.max(b.0).max(c.0).ceil() as usize).min(n);
+        let y0 = a.1.min(b.1).min(c.1).floor().max(0.0) as usize;
+        let y1 = (a.1.max(b.1).max(c.1).ceil() as usize).min(n);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                let w0 = ((b.0 - px) * (c.1 - py) - (c.0 - px) * (b.1 - py)) / area;
+                let w1 = ((c.0 - px) * (a.1 - py) - (a.0 - px) * (c.1 - py)) / area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+                let d = w0 * a.2 + w1 * b.2 + w2 * c.2;
+                let at = y * n + x;
+                if d < depth[at] {
+                    depth[at] = d;
+                    // A cool grey, the viewport's own.
+                    pixels[at * 4..at * 4 + 4].copy_from_slice(&[
+                        (shade as f32 * 0.86) as u8,
+                        (shade as f32 * 0.9) as u8,
+                        shade,
+                        255,
+                    ]);
+                }
+            }
+        }
+    }
+    Some((size, size, pixels))
 }
 
 /// A picture as a PNG.
@@ -1872,6 +2010,39 @@ mod tests {
         assert!(listed
             .iter()
             .all(|e| e.source == Source::Generated && e.kind == Kind::Model));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_file_gets_a_drawn_picture() {
+        let dir = std::env::temp_dir().join(format!("kreate-model-thumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("block.obj");
+        std::fs::write(
+            &path,
+            kreate_io::write_obj(
+                &[("Block".to_string(), &kreate_mesh::primitives::cube(1.0))],
+                Default::default(),
+            ),
+        )
+        .expect("written");
+        let (w, h, pixels) =
+            thumbnail_now("block", Source::Local, Some(path), None).expect("drawn");
+        assert_eq!((w, h), (256, 256));
+        let covered = pixels.chunks(4).filter(|p| p[3] == 255).count();
+        assert!(
+            covered > 256 * 256 / 5,
+            "the block fills the tile: {covered}"
+        );
+        // Three faces seen, three shades.
+        let mut shades: Vec<u8> = pixels
+            .chunks(4)
+            .filter(|p| p[3] == 255)
+            .map(|p| p[2])
+            .collect();
+        shades.sort();
+        shades.dedup();
+        assert!(shades.len() >= 3, "{shades:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

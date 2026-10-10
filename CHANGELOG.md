@@ -106,6 +106,9 @@ use; `scripts/release.sh` turns that section into the next release.
 - Under each answer in the chat panel, what it did — how many steps, how
   many objects added and removed — and a button that undoes all of it at
   once, as long as you have not changed the document since.
+- Your own model files have pictures in the Assets editor: each is read and
+  drawn once, from the front right and a little above, and the picture kept
+  for next time.
 - Poly Pizza in the Assets editor: thousands of low-poly models, many of
   them animated characters, CC0 or CC-BY. Enter searches it; "Animated
   only" lists what moves. It wants a free API key of your own, pasted into
