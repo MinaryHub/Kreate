@@ -6170,7 +6170,7 @@ impl App {
                     }
                 }
                 Command::OpenPath(path) => {
-                    if self.confirm_discarding_changes("open another document") {
+                    if self.confirm_discarding_changes("unsaved-what-open") {
                         self.load_from(&path);
                     }
                 }
@@ -6445,7 +6445,7 @@ impl App {
 
     /// Replaces the document with an empty one.
     fn new_document(&mut self) {
-        if !self.confirm_discarding_changes("start a new document") {
+        if !self.confirm_discarding_changes("unsaved-what-new") {
             return;
         }
         // The view a fresh start shows: Kreate's own camera, out of any
@@ -6462,7 +6462,7 @@ impl App {
     }
 
     fn open_document(&mut self) {
-        if !self.confirm_discarding_changes("open another document") {
+        if !self.confirm_discarding_changes("unsaved-what-open") {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
@@ -6542,29 +6542,56 @@ impl App {
 
     fn save_document(&mut self, ask: bool) {
         let existing = self.file.path().map(|p| p.to_path_buf());
-        let path = match (&existing, ask) {
-            (Some(path), false) => path.clone(),
-            _ => {
-                let mut dialog = rfd::FileDialog::new()
-                    .add_filter("Kreate document", &["kreate"])
-                    .set_title(if ask { "Save As" } else { "Save" });
-                if let Some(current) = &existing {
-                    if let Some(parent) = current.parent() {
-                        dialog = dialog.set_directory(parent);
+        let path =
+            match (&existing, ask) {
+                (Some(path), false) => path.clone(),
+                _ => {
+                    let mut dialog = rfd::FileDialog::new()
+                        .add_filter("Kreate document", &["kreate"])
+                        .set_title(if ask { "Save As" } else { "Save" });
+                    if let Some(current) = &existing {
+                        if let Some(parent) = current.parent() {
+                            dialog = dialog.set_directory(parent);
+                        }
+                        if let Some(name) = current.file_name() {
+                            dialog = dialog.set_file_name(name.to_string_lossy().to_string());
+                        }
+                    } else {
+                        // Never saved: the user chooses where it lives, starting
+                        // from where they last kept one rather than wherever the
+                        // system's dialog last was.
+                        dialog = dialog.set_file_name("untitled.kreate").set_title(
+                            self.ui
+                                .catalog
+                                .format("save-where", kreate_i18n::TextKind::Ui, &[]),
+                        );
+                        if let Some(folder) = self.first_save_folder() {
+                            dialog = dialog.set_directory(folder);
+                        }
                     }
-                    if let Some(name) = current.file_name() {
-                        dialog = dialog.set_file_name(name.to_string_lossy().to_string());
+                    match dialog.save_file() {
+                        Some(path) => path,
+                        None => return,
                     }
-                } else {
-                    dialog = dialog.set_file_name("untitled.kreate");
                 }
-                match dialog.save_file() {
-                    Some(path) => path,
-                    None => return,
-                }
-            }
-        };
+            };
         let _ = self.save_to(path);
+    }
+
+    /// Where a document never saved is offered to go: the folder of the
+    /// document most recently opened or saved, or the user's Documents.
+    fn first_save_folder(&self) -> Option<std::path::PathBuf> {
+        self.ui
+            .recent_files
+            .iter()
+            .filter_map(|p| p.parent())
+            .find(|d| d.is_dir())
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| {
+                let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+                let documents = std::path::Path::new(&home).join("Documents");
+                documents.is_dir().then_some(documents)
+            })
     }
 
     /// Saves to `path`, which becomes the document's file. Says what happened.
@@ -6807,7 +6834,7 @@ impl App {
             .unwrap_or_default();
         match ext.as_str() {
             "kreate" => {
-                if self.confirm_discarding_changes("open the dropped document") {
+                if self.confirm_discarding_changes("unsaved-what-open") {
                     self.load_from(path);
                 }
             }
@@ -7114,30 +7141,66 @@ impl App {
         self.run_op("world.set_image", params);
     }
 
-    /// Asks before throwing away unsaved work. `true` to proceed.
+    /// Asks before throwing away unsaved work: save it, discard it, or stay.
+    /// `true` to proceed. `what` names the step, as a catalog key.
     ///
     /// A modal dialog, and deliberately: this is the one moment where carrying
     /// on regardless destroys something the user cannot get back, and a
     /// non-blocking notification they can miss is not consent.
-    fn confirm_discarding_changes(&self, what: &str) -> bool {
+    fn confirm_discarding_changes(&mut self, what: &str) -> bool {
         if !self.file.is_modified(&self.doc) {
             return true;
         }
+        let t = |key: &str, args: &[(&str, &str)]| {
+            self.ui.catalog.format(key, kreate_i18n::TextKind::Ui, args)
+        };
         let name = self
             .file
             .path()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "This document".to_string());
-        rfd::MessageDialog::new()
+            .unwrap_or_else(|| t("unsaved-untitled", &[]));
+        let (save, discard, cancel) = (
+            t("unsaved-save", &[]),
+            t("unsaved-discard", &[]),
+            t("unsaved-cancel", &[]),
+        );
+        let what = t(what, &[]);
+        let mut description = t(
+            "unsaved-body",
+            &[("name", name.as_str()), ("what", what.as_str())],
+        );
+        // Windows draws its own Yes, No and Cancel unless the program says
+        // it may use newer controls, which Kreate does not; the line says
+        // which is which there.
+        let buttons = if cfg!(windows) {
+            description.push_str("\n\n");
+            description.push_str(&t("unsaved-windows", &[]));
+            rfd::MessageButtons::YesNoCancel
+        } else {
+            rfd::MessageButtons::YesNoCancelCustom(save.clone(), discard.clone(), cancel)
+        };
+        let answer = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description(format!(
-                "{name} has changes that have not been saved.\n\nDiscard them and {what}?"
-            ))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show()
-            == rfd::MessageDialogResult::Yes
+            .set_title(t("unsaved-title", &[]))
+            .set_description(description)
+            .set_buttons(buttons)
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Yes => self.save_then_go_on(),
+            rfd::MessageDialogResult::Custom(label) if label == save => self.save_then_go_on(),
+            rfd::MessageDialogResult::No => true,
+            rfd::MessageDialogResult::Custom(label) if label == discard => true,
+            _ => false,
+        }
+    }
+
+    /// Saves before leaving the document — asking where, for one never
+    /// saved — and says whether it was: a save dialog closed without
+    /// choosing, or a save that failed, leaves the user where they were.
+    fn save_then_go_on(&mut self) -> bool {
+        self.save_document(false);
+        !self.file.is_modified(&self.doc)
     }
 
     /// Replaces the document and everything derived from it.

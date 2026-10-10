@@ -54,6 +54,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- New, Open and a dropped document ask Save, Don't Save or Cancel when the
+  open one has unsaved changes; Save saves first (asking where, if it has
+  never been saved) and a save dialog closed leaves you where you were.
+- The first save of a document opens in the folder you last kept one in,
+  or Documents, titled to say you are choosing the folder and the name.
 - `B` during a move picks the snap base, as in Blender: the selection holds
   still, the pointer finds a vertex, edge or face of what is moving, a
   click takes it, and from then on that point lands on whatever the
