@@ -178,6 +178,15 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "check_proportions",
+            "description": "Measures a figure standing up Z (every visible mesh, or `objects`) against a realistic adult's proportions: how many heads tall (the chin found where the neck stops being thin), the legs' share of the height (to the crotch), the arm span over the height when the arms are out, and the chest's and hips' width over the height — each with the usual range and whether it is below, within or above. A stylised character departs on purpose; use it to make the departure a choice, and with analyze_mesh's asymmetry for left against right.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "objects": { "type": "array", "items": { "type": "string" }, "description": "Only these objects; default every visible mesh." } }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "compare_silhouette",
             "description": "Compares the model's outline from one side with a reference picture's — concept art, a photo, a turnaround sheet's view — both scaled to the same height and set where they overlap most, so framing does not matter but proportions do. Returns the agreement (shared over either, 0 to 1), each one's width over height, the biggest differences (where the model has more than the picture or less, in the world on a plane through the model, and how big), and a picture of the two: shared grey, the model's extra red, its shortfall blue. The picture should show one figure on a plain background, or with a transparent one. Use it after each change to steer the shape toward the reference.",
             "inputSchema": {

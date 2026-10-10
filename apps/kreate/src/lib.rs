@@ -28,6 +28,7 @@ pub mod modal;
 pub mod mode;
 pub mod pick;
 pub mod prefs;
+pub mod proportions;
 pub mod rigcheck;
 pub mod scenelights;
 pub mod sculptview;

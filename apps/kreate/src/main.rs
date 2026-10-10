@@ -5100,6 +5100,49 @@ impl App {
                     "png_base64": kreate::bridge::base64(&c.png),
                 }))
             }
+            // A standing figure against a realistic adult's proportions.
+            "proportions" => {
+                let names: Option<Vec<String>> =
+                    params.get("objects").and_then(|v| v.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_str().map(str::to_string))
+                            .collect()
+                    });
+                self.evaluate_scene();
+                let mut points = Vec::new();
+                for (id, mesh) in &self.evaluated {
+                    let Some(o) = self.doc.object(*id) else {
+                        continue;
+                    };
+                    if names.as_ref().is_some_and(|n| !n.contains(&o.name)) {
+                        continue;
+                    }
+                    let world = self.doc.world_transform(*id);
+                    points.extend(
+                        mesh.positions()
+                            .iter()
+                            .map(|p| world.transform_point3(p.as_dvec3())),
+                    );
+                }
+                let measures = kreate::proportions::measure(&points);
+                if measures.is_empty() {
+                    return Err("no figure to measure".into());
+                }
+                let round = |v: f64| (v * 1000.0).round() / 1000.0;
+                Ok(json!({
+                    "standard": "a realistic adult; a stylised figure departs on purpose",
+                    "measures": measures
+                        .iter()
+                        .map(|m| json!({
+                            "name": m.name,
+                            "value": round(m.value),
+                            "usual": [m.usual.0, m.usual.1],
+                            "verdict": m.verdict(),
+                            "how": m.how,
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+            }
             // A mesh read for what a sculptor looks for, each with where.
             "analyze_mesh" => {
                 let id = match text("object") {
