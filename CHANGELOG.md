@@ -51,6 +51,11 @@ use; `scripts/release.sh` turns that section into the next release.
 - The connector's `analyze_mesh` reads a mesh as a sculptor would — holes,
   broken surface, slivers, bumpy places, and where its halves differ —
   each with where it is, so an assistant knows where to work next.
+- `object.add_humanoid_rig(fingers=True)` adds a thumb and four fingers a
+  hand, three bones each, spread across the hand as measured. Off by
+  default: on a Mixamo hand the template's fingers sit between the real
+  ones and tear the middle finger's first joint, so it suits simple open
+  hands, and `check_rig` says when it does not.
 - Automatic weights can look before they warm: with `visibility`, a vertex
   takes heat only from bones it can see, not through skin — so a body's
   side stays off an arm hanging beside it. The humanoid rig turns it on when

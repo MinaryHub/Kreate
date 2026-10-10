@@ -1023,14 +1023,92 @@ impl Operator for Unbind {
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct HumanoidParams {
-    /// Bind the mesh to it at once, with weights from distance.
+    /// Bind the mesh to it at once, with automatic weights.
     pub bind: bool,
+    /// Fingers too: a thumb and four fingers a hand, three bones each,
+    /// spread across the hand as it is measured. For a figure with open
+    /// hands; a mitten or a fist is better left one bone.
+    pub fingers: bool,
 }
 
 impl Default for HumanoidParams {
     fn default() -> Self {
-        Self { bind: true }
+        Self {
+            bind: true,
+            fingers: false,
+        }
     }
+}
+
+/// A left hand's fingers, as [`humanoid_bones`] lays bones out: from where
+/// the hand's points are past the wrist — its length along the arm and its
+/// width across, the thumb on the front (-Y) side, as a figure stands with
+/// its palms down.
+pub fn finger_bones(points: &[DVec3], l: &Landmarks) -> Vec<(String, DVec3, DVec3, String, bool)> {
+    let along = (l.fingertip - l.wrist).normalize_or(DVec3::X);
+    let length = (l.fingertip - l.wrist).length();
+    // Across the hand, level: the front of the figure is -Y.
+    let mut across = along.cross(DVec3::Z).normalize_or(DVec3::NEG_Y);
+    if across.y > 0.0 {
+        across = -across;
+    }
+    let hand: Vec<&DVec3> = points
+        .iter()
+        .filter(|p| {
+            let t = (**p - l.wrist).dot(along);
+            t > 0.0 && t <= length * 1.02 && p.x > 0.0
+        })
+        .collect();
+    let spread: Vec<f64> = hand.iter().map(|p| (**p - l.wrist).dot(across)).collect();
+    let (lo, hi) = (
+        spread.iter().copied().fold(f64::MAX, f64::min),
+        spread.iter().copied().fold(f64::MIN, f64::max),
+    );
+    let (lo, hi) = if lo < hi {
+        (lo, hi)
+    } else {
+        (-length * 0.25, length * 0.25)
+    };
+    let width = hi - lo;
+    let middle = (lo + hi) / 2.0;
+    let knuckle = l.wrist + along * length * 0.45;
+    let mut out = Vec::new();
+    let mut chain = |name: &str, start: DVec3, end: DVec3, parent: &str| {
+        let joints = [0.0, 0.45, 0.75, 1.0].map(|t| start + (end - start) * t);
+        for k in 0..3 {
+            out.push((
+                format!("{name}{}", k + 1),
+                joints[k],
+                joints[k + 1],
+                if k == 0 {
+                    parent.to_string()
+                } else {
+                    format!("{name}{k}")
+                },
+                k > 0,
+            ));
+        }
+    };
+    // Index nearest the thumb, at the front; pinky at the back.
+    for (i, (name, reach)) in [
+        ("Index", 0.92),
+        ("Middle", 1.0),
+        ("Ring", 0.95),
+        ("Pinky", 0.8),
+    ]
+    .iter()
+    .enumerate()
+    {
+        // `across` points to the front: the index furthest along it.
+        let offset = across * (middle + width * (1.5 - i as f64) * 0.22 - width * 0.1);
+        let start = knuckle + offset;
+        let end = start + along * length * 0.55 * reach;
+        chain(name, start, end, "Hand");
+    }
+    let thumb_root = l.wrist + along * length * 0.1 + across * (middle + width * 0.3);
+    let thumb_tip = knuckle + along * length * 0.2 + across * (middle + width * 0.75);
+    chain("Thumb", thumb_root, thumb_tip, "Hand");
+    out
 }
 
 /// Where a standing figure's joints are, in the world: measured where a
@@ -1216,9 +1294,40 @@ impl Operator for AddHumanoid {
             .collect();
         let landmarks = humanoid_landmarks(&points)
             .ok_or_else(|| OpError::Failed("the mesh is too small to read a figure from".into()))?;
+        let mut bones = humanoid_bones(&landmarks);
+        if params.fingers {
+            // The hand ends at the knuckles, and the fingers go on from there,
+            // each side's from its own side's points.
+            let knuckle = landmarks.wrist + (landmarks.fingertip - landmarks.wrist) * 0.45;
+            let flip = |p: DVec3| DVec3::new(-p.x, p.y, p.z);
+            for bone in bones.iter_mut() {
+                match bone.0.as_str() {
+                    "Hand.L" => bone.2 = knuckle,
+                    "Hand.R" => bone.2 = flip(knuckle),
+                    _ => {}
+                }
+            }
+            for (suffix, mirror) in [(".L", false), (".R", true)] {
+                let side: Vec<DVec3> = if mirror {
+                    points.iter().map(|p| flip(*p)).collect()
+                } else {
+                    points.clone()
+                };
+                for (name, head, tail, parent, connected) in finger_bones(&side, &landmarks) {
+                    let place = |p: DVec3| if mirror { flip(p) } else { p };
+                    bones.push((
+                        format!("{name}{suffix}"),
+                        place(head),
+                        place(tail),
+                        Some(format!("{parent}{suffix}")),
+                        connected,
+                    ));
+                }
+            }
+        }
         let mut armature = Armature::new("Armature");
         armature.bones.clear();
-        for (name, head, tail, parent, connected) in humanoid_bones(&landmarks) {
+        for (name, head, tail, parent, connected) in bones {
             let parent = parent.and_then(|p| armature.bone_index(&p));
             armature.add_bone(Bone {
                 name,
@@ -1393,5 +1502,46 @@ mod symmetry_tests {
             .attributes()
             .get_f32(&kreate_scene::skin::weight_layer("ForeArm.L"))
             .is_some_and(|w| w.iter().any(|x| *x > 0.5)));
+    }
+
+    #[test]
+    fn fingers_spread_across_each_hand_when_asked() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(figure());
+        let body = doc.add_object(Object::new("Body", ObjectData::Mesh(mesh)));
+        doc.selection.add(body);
+        doc.selection.active = Some(body);
+        let mut edit = DocMut::new(&mut doc);
+        AddHumanoid::execute(
+            &HumanoidParams {
+                bind: false,
+                fingers: true,
+            },
+            &mut edit,
+            &Context::default(),
+        )
+        .expect("ran");
+        let a = doc
+            .armatures()
+            .next()
+            .map(|(_, a)| a.clone())
+            .expect("an armature");
+        assert_eq!(a.bones.len(), 19 + 30, "five fingers of three a hand");
+        let bone = |n: &str| a.bones[a.bone_index(n).unwrap_or_else(|| panic!("{n}"))].clone();
+        let (index, pinky) = (bone("Index1.L"), bone("Pinky1.L"));
+        assert!(
+            index.head.y < pinky.head.y,
+            "index at the front: {index:?} {pinky:?}"
+        );
+        assert!(bone("Middle3.L").tail.x <= 0.86 && bone("Middle3.L").tail.x > 0.75);
+        assert_eq!(
+            a.bones[bone("Index1.L").parent.expect("parent")].name,
+            "Hand.L"
+        );
+        assert!(
+            (bone("Index1.R").head.x + index.head.x).abs() < 1e-9,
+            "mirrored"
+        );
     }
 }
