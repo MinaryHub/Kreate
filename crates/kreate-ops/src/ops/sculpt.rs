@@ -888,7 +888,9 @@ impl Operator for CreasePath {
         };
         let path: Vec<Vec3> = params
             .points
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32))
             .collect();
         if path.is_empty() || params.radius <= 0.0 {
