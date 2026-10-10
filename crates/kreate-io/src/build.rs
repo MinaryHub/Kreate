@@ -351,9 +351,83 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
                 );
             }
         }
+        // At the origin, as glTF draws a skin — its joints place it — unless
+        // the binds were read against its node.
+        if !rig.mesh_at_node {
+            let _ = doc.set_parent(*id, None);
+            if let Some(object) = doc.object_mut(*id) {
+                object.transform = kreate_math::DTransform::IDENTITY;
+            }
+        }
         if let Some(object) = doc.object_mut(*id) {
             object.skin = rig_uid;
         }
+    }
+
+    // A mesh hung from a joint — a robot's plates, a skeleton's bones, a
+    // sword in a hand — follows that joint. Kreate hangs nothing from a
+    // bone, so it becomes a skin of one bone: every vertex wholly on it,
+    // moved to where the bone's rest puts it so that the bone's pose brings
+    // it back where the file has it. Left hanging from the armature, it
+    // stood still while the bones walked off.
+    for (index, node) in scene.nodes.iter().enumerate() {
+        let (Some(Some(id)), ImportNodeData::Mesh(_)) = (made.get(index), node.data) else {
+            continue;
+        };
+        if node.skin.is_some() {
+            continue;
+        }
+        // The nearest joint above it, through any plain nodes between.
+        let mut at = node.parent;
+        let mut found = None;
+        for _ in 0..=scene.nodes.len() {
+            let Some(p) = at else { break };
+            if let Some(rig) = rigs.iter().find(|r| r.joints.contains(&p)) {
+                found = Some((rig, p));
+                break;
+            }
+            at = scene.nodes[p].parent;
+        }
+        let Some((rig, joint)) = found else { continue };
+        let Some(k) = rig.joints.iter().position(|j| *j == joint) else {
+            continue;
+        };
+        let bone = rig.bone_of_joint[k];
+        let (Some(posed), Some(rest), Some(world), Some(mesh_id)) = (
+            doc.posed_bones(rig.object).get(bone).copied(),
+            doc.armature_of(rig.object)
+                .and_then(|(_, a)| a.bones.get(bone).map(|b| b.rest())),
+            scene.world_transform(index),
+            doc.object(*id).and_then(|o| o.mesh()),
+        ) else {
+            continue;
+        };
+        let Some(mut data) = doc.mesh(mesh_id).cloned() else {
+            continue;
+        };
+        let into = rest * posed.inverse() * world;
+        for p in data.positions_mut() {
+            *p = into.transform_point3(p.as_dvec3()).as_vec3();
+        }
+        let n = data.num_verts() as usize;
+        let name = rig.bone_names[k].clone();
+        data.attributes_mut().insert(
+            &kreate_scene::skin::weight_layer(&name),
+            kreate_mesh::attribute::Domain::Point,
+            kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(vec![1.0; n])),
+        );
+        // Its own copy: another object may wear the same mesh elsewhere.
+        let mesh = doc.add_mesh(data);
+        let rig_uid = doc.object(rig.object).map(|o| o.uid);
+        let _ = doc.set_parent(*id, None);
+        if let Some(object) = doc.object_mut(*id) {
+            object.data = ObjectData::Mesh(mesh);
+            object.transform = kreate_math::DTransform::IDENTITY;
+            object.skin = rig_uid;
+        }
+        notes.retain(
+            |n| !matches!(n, BuildNote::HungFromJoint { node: hung } if *hung == node.name),
+        );
     }
 
     // The objects' shape keys: their mesh's targets, turned up as the node
@@ -475,6 +549,13 @@ struct Rig {
     bone_names: Vec<String>,
     /// The bone each joint became, by index into the armature's bones.
     bone_of_joint: Vec<usize>,
+    /// Whether its skinned meshes stand where their nodes put them, rather
+    /// than at the origin — whichever made the binds come apart cleanly.
+    mesh_at_node: bool,
+    /// Each joint's scale at the bind, which a bone's frame cannot hold: a
+    /// pose is the joint's placement with it taken out, so a joint scaled
+    /// as it was bound poses at one and its children inherit nothing extra.
+    bind_scale: Vec<kreate_math::DVec3>,
 }
 
 /// Every skin as an armature object at the world origin: a bone per joint,
@@ -497,28 +578,54 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         }
         claimed.extend(joints.iter().copied());
         // Where each joint stood at the bind, in Kreate's space. An inverse
-        // bind matrix takes the mesh's own coordinates into the joint's, so
-        // its inverse is the joint in the mesh's space — and the mesh is
-        // where its node puts it. glTF ignores that placement when it draws a
-        // skin; it is still the space the matrices were written against, by
-        // every exporter that writes one, ours included. When the file has no
-        // matrices the joints' nodes are the bind.
+        // bind matrix takes a vertex to its joint; where the mesh itself
+        // stands is the one freedom left — at the origin, as glTF draws a
+        // skin and Sketchfab's files expect, its node ignored; or where its
+        // node puts it, which Kreate's own files fold into the matrices.
+        // Either draws the same, provided each joint's bind comes apart into
+        // a bone's turn and place and an even scale; so the one that comes
+        // apart cleanly is taken, the origin when both do. When the file
+        // has no matrices the joints' nodes are the bind.
         let mesh_world = scene
             .nodes
             .iter()
             .position(|n| n.skin == Some(s))
             .and_then(|n| scene.world_transform(n))
             .unwrap_or(DAffine3::IDENTITY);
-        let bind: Vec<DAffine3> = joints
-            .iter()
-            .enumerate()
-            .map(
-                |(k, node)| match skin.inverse_bind.as_ref().and_then(|m| m.get(k)) {
-                    Some(m) => mesh_world * scene.matrix_to_kreate(m.inverse()),
-                    None => scene.world_transform(*node).unwrap_or(DAffine3::IDENTITY),
-                },
-            )
-            .collect();
+        let binds_at = |mesh: DAffine3| -> Vec<DAffine3> {
+            joints
+                .iter()
+                .enumerate()
+                .map(
+                    |(k, node)| match skin.inverse_bind.as_ref().and_then(|m| m.get(k)) {
+                        Some(m) => mesh * scene.matrix_to_kreate(m.inverse()),
+                        None => scene.world_transform(*node).unwrap_or(DAffine3::IDENTITY),
+                    },
+                )
+                .collect()
+        };
+        // How far a bind is from a turn, a place and an even scale.
+        let untidy = |binds: &[DAffine3]| -> f64 {
+            binds
+                .iter()
+                .map(|m| {
+                    let (scale, turn, place) = m.to_scale_rotation_translation();
+                    let even = (scale.x + scale.y + scale.z) / 3.0;
+                    let tidy =
+                        DAffine3::from_scale_rotation_translation(DVec3::splat(even), turn, place);
+                    let size = m.matrix3.x_axis.length().max(1e-9);
+                    (m.matrix3.x_axis - tidy.matrix3.x_axis)
+                        .length()
+                        .max((m.matrix3.y_axis - tidy.matrix3.y_axis).length())
+                        .max((m.matrix3.z_axis - tidy.matrix3.z_axis).length())
+                        / size
+                })
+                .fold(0.0, f64::max)
+        };
+        let at_origin = binds_at(DAffine3::IDENTITY);
+        let at_node = binds_at(mesh_world);
+        let mesh_at_node = untidy(&at_node) + 1e-6 < untidy(&at_origin);
+        let bind = if mesh_at_node { at_node } else { at_origin };
         // A bone's frame has no scale.
         let frames: Vec<(DQuat, DVec3)> = bind
             .iter()
@@ -611,6 +718,11 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
             joints,
             bone_names,
             bone_of_joint,
+            mesh_at_node,
+            bind_scale: bind
+                .iter()
+                .map(|m| m.to_scale_rotation_translation().0)
+                .collect(),
         };
         // Standing as the file's nodes stand, which need not be the bind.
         let pose = rig_pose(scene, &rig, doc, None);
@@ -690,7 +802,13 @@ fn rig_pose(
         let Some(&k) = joint_of_bone.get(i).filter(|k| **k != usize::MAX) else {
             continue;
         };
-        let at = world(rig.joints[k]);
+        let held = rig
+            .bind_scale
+            .get(k)
+            .copied()
+            .filter(|s| s.min_element() > 1e-9)
+            .unwrap_or(kreate_math::DVec3::ONE);
+        let at = world(rig.joints[k]) * DAffine3::from_scale(held.recip());
         let base = match bone.parent {
             Some(p) => posed[p] * armature.bones[p].rest().inverse() * bone.rest(),
             None => bone.rest(),

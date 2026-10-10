@@ -148,6 +148,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Animated glTF characters from Sketchfab (and so Objaverse) move as they
+  should. Their skins hang under nodes scaled to a hundredth or a fifth,
+  which glTF does not count and Kreate did — the body walked off from its
+  bones, or stood still beside them; joints scaled as they were bound grew
+  their children; and a mesh hung from a joint (a robot's plate, a
+  skeleton's bone, a sword in a hand) stayed behind. Each now matches what
+  glTF says, frame by frame.
 - Tests keep to a temporary folder: a test that saved, failed or remembered
   a recent file no longer writes into your settings, caches or autosaves,
   where a hundred stale test sessions had piled up as recovery offers.

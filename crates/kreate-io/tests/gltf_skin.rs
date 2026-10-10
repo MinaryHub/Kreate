@@ -243,3 +243,89 @@ fn every_take_on_a_rig_is_kept_as_its_own_action() {
     let (fast, long) = (span(playing), span(slow));
     assert!((long / fast - 2.0).abs() < 0.2, "{fast} and {long} frames");
 }
+
+/// A skin's own node scaled to a hundredth, as Sketchfab's files hang
+/// them: glTF draws a skin by its joints alone, so the surface is where it
+/// was. Read against that node, the body stood a hundredth the size of its
+/// bones.
+#[test]
+fn a_skins_own_node_does_not_place_it() {
+    let (mut doc, body) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let mut read = parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    let skinned = read
+        .nodes
+        .iter()
+        .position(|n| n.skin.is_some())
+        .expect("a skinned node");
+    read.nodes[skinned].transform.scale *= 0.01;
+    let mut back = Document::new();
+    let (made, _) = build_into(&read, &mut back);
+    let body_back = *made
+        .iter()
+        .find(|id| back.object(**id).is_some_and(|o| o.name == "Body"))
+        .expect("the body");
+    for frame in [1.0, 10.0] {
+        let d = apart(
+            &surface(&mut doc, body, frame),
+            &surface(&mut back, body_back, frame),
+        );
+        assert!(d < 1e-3, "frame {frame}: {d}");
+    }
+}
+
+/// A cube hung from the hand's joint, not skinned: it goes where the hand
+/// goes, not staying behind while the arm bends.
+#[test]
+fn a_mesh_hung_from_a_joint_follows_its_bone() {
+    let (doc, _) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let mut read = parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    let hand = read
+        .nodes
+        .iter()
+        .position(|n| n.name == "Hand")
+        .expect("the hand joint");
+    read.meshes.push(kreate_io::ir::ImportMesh {
+        name: "Glove".into(),
+        positions: vec![
+            glam::Vec3::new(0.0, 0.0, 0.0),
+            glam::Vec3::new(0.1, 0.0, 0.0),
+            glam::Vec3::new(0.0, 0.1, 0.0),
+        ],
+        faces: vec![vec![0, 1, 2]],
+        corner_uvs: None,
+        corner_normals: None,
+        face_materials: None,
+        smoothing_groups: None,
+    });
+    let mut glove = kreate_io::ir::ImportNode::new("Glove");
+    glove.parent = Some(hand);
+    glove.data = kreate_io::ir::ImportNodeData::Mesh(read.meshes.len() - 1);
+    read.nodes.push(glove);
+    let glove_node = read.nodes.len() - 1;
+    let mut back = Document::new();
+    let (made, notes) = build_into(&read, &mut back);
+    assert!(
+        !notes
+            .iter()
+            .any(|n| format!("{n:?}").contains("HungFromJoint")),
+        "{notes:?}"
+    );
+    let glove_id = *made
+        .iter()
+        .find(|id| back.object(**id).is_some_and(|o| o.name == "Glove"))
+        .expect("the glove");
+    // Where the file puts it at rest, and that it moves with the bend.
+    let rest_world = read.world_transform(glove_node).expect("placed");
+    let at = |back: &mut Document, frame: f64| surface(back, glove_id, frame)[0];
+    let first = at(&mut back, 1.0);
+    let want = rest_world.transform_point3(DVec3::ZERO);
+    assert!(first.distance(want) < 1e-3, "{first} against {want}");
+    assert!(
+        at(&mut back, 10.0).distance(first) > 0.1,
+        "it followed the hand"
+    );
+}
