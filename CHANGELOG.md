@@ -21,6 +21,10 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector's `compare_silhouette` sets the model's outline from a side
+  against a reference picture's — concept art, a photo — at one height and
+  where they overlap most, and says how much they agree, their proportions,
+  where the model has too much or too little, and shows it in red and blue.
 - Sculpting by number: `sculpt.deform_region` pushes, swells, moves,
   scales, flattens or smooths a ball- or egg-shaped region by so many
   millimetres, fading to its rim, mirrored across X if asked and held by the

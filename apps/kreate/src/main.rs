@@ -5029,6 +5029,77 @@ impl App {
                 self.capture_views(params)
             }
             "context" => Ok(self.context_json()),
+            // The model's outline against a picture's, and where they differ.
+            "silhouette" => {
+                use kreate::silhouette::{compare, outline, picture_outline, Side};
+                let path = text("reference").ok_or("`reference` is the picture's path")?;
+                let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let view = text("view").unwrap_or_else(|| "front".into());
+                let side = Side::from_name(&view)
+                    .ok_or("`view` is front, back, left, right (or side) or top")?;
+                let names: Option<Vec<String>> =
+                    params.get("objects").and_then(|v| v.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_str().map(str::to_string))
+                            .collect()
+                    });
+                self.evaluate_scene();
+                let mut triangles = Vec::new();
+                for (id, mesh) in &self.evaluated {
+                    let Some(o) = self.doc.object(*id) else {
+                        continue;
+                    };
+                    if names.as_ref().is_some_and(|n| !n.contains(&o.name)) {
+                        continue;
+                    }
+                    let world = self.doc.world_transform(*id);
+                    let p: Vec<DVec3> = mesh
+                        .positions()
+                        .iter()
+                        .map(|q| world.transform_point3(q.as_dvec3()))
+                        .collect();
+                    for f in 0..mesh.num_faces() {
+                        let ring = mesh.face_verts(f);
+                        for i in 1..ring.len().saturating_sub(1) {
+                            triangles.push([
+                                p[ring[0] as usize],
+                                p[ring[i] as usize],
+                                p[ring[i + 1] as usize],
+                            ]);
+                        }
+                    }
+                }
+                if triangles.is_empty() {
+                    return Err("no mesh to outline".into());
+                }
+                let (model, plane) = outline(&triangles, side).ok_or("the model has no extent")?;
+                // A difference is put at the model's middle depth.
+                let (lo, hi) = triangles.iter().flatten().fold(
+                    (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+                    |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+                );
+                let depth = ((lo + hi) * 0.5).dot(side.depth_axis());
+                let c = compare(&model, plane, &picture_outline(&bytes)?, side, depth)?;
+                let differences: Vec<serde_json::Value> = c
+                    .differences
+                    .iter()
+                    .map(|d| {
+                        json!({
+                            "model_has": if d.model_has_more { "more" } else { "less" },
+                            "at": d.at.map(|v| (v * 1000.0).round() / 1000.0),
+                            "share": (d.share * 1000.0).round() / 1000.0,
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "view": view,
+                    "agreement": (c.agreement * 1000.0).round() / 1000.0,
+                    "model_width_over_height": (c.model_aspect * 1000.0).round() / 1000.0,
+                    "picture_width_over_height": (c.picture_aspect * 1000.0).round() / 1000.0,
+                    "differences": differences,
+                    "png_base64": kreate::bridge::base64(&c.png),
+                }))
+            }
             // A mesh read for what a sculptor looks for, each with where.
             "analyze_mesh" => {
                 let id = match text("object") {
@@ -13880,6 +13951,49 @@ mod tests {
             .sum::<f64>()
             .sqrt();
         assert!((length - 1.0).abs() < 1e-6, "a direction: {looking}");
+    }
+
+    /// A box seen from the side against a picture of a taller one: they
+    /// disagree, and where is put at the box's own depth.
+    #[test]
+    fn a_silhouette_is_compared_and_its_differences_placed_on_the_model() {
+        let mut app = app();
+        let ids: Vec<_> = app.doc.objects().map(|(id, _)| id).collect();
+        for id in ids {
+            app.doc.remove_object(id);
+        }
+        let id = app
+            .doc
+            .add_mesh_object("Block", kreate_mesh::primitives::cube(1.0));
+        app.doc.object_mut(id).expect("block").transform.translation = DVec3::new(3.0, 0.0, 0.5);
+        let dir = std::env::temp_dir().join(format!("kreate-outline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("tall.png");
+        // A shape twice as tall as wide, on white: a block with a tower.
+        let mut img = image::RgbImage::from_pixel(100, 200, image::Rgb([255, 255, 255]));
+        for y in 20..180 {
+            for x in 30..70 {
+                img.put_pixel(x, y, image::Rgb([20, 20, 20]));
+            }
+        }
+        img.save(&path).expect("saved");
+        let answer = app
+            .bridge_call(
+                "silhouette",
+                &serde_json::json!({ "reference": path.display().to_string(), "view": "right" }),
+            )
+            .expect("compared");
+        // A square against a shape four times as tall as wide, at one height:
+        // a quarter of it shared.
+        let agreement = answer["agreement"].as_f64().expect("a number");
+        assert!((agreement - 0.25).abs() < 0.03, "{agreement}");
+        let first = &answer["differences"][0];
+        assert!(
+            (first["at"][0].as_f64().expect("x") - 3.0).abs() < 0.01,
+            "on the box's middle across X: {first}"
+        );
+        assert!(answer["png_base64"].as_str().is_some_and(|p| !p.is_empty()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

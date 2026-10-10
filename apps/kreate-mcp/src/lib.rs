@@ -178,6 +178,20 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "compare_silhouette",
+            "description": "Compares the model's outline from one side with a reference picture's — concept art, a photo, a turnaround sheet's view — both scaled to the same height and set where they overlap most, so framing does not matter but proportions do. Returns the agreement (shared over either, 0 to 1), each one's width over height, the biggest differences (where the model has more than the picture or less, in the world on a plane through the model, and how big), and a picture of the two: shared grey, the model's extra red, its shortfall blue. The picture should show one figure on a plain background, or with a transparent one. Use it after each change to steer the shape toward the reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reference": { "type": "string", "description": "An absolute path to the picture (PNG, JPEG or WebP)." },
+                    "view": { "type": "string", "enum": ["front", "back", "left", "right", "side", "top"], "description": "Which side the picture shows. Default front." },
+                    "objects": { "type": "array", "items": { "type": "string" }, "description": "Only these objects; default every visible mesh." }
+                },
+                "required": ["reference"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "analyze_mesh",
             "description": "Reads a mesh (the active object, or `object`) for what a sculptor looks for, each finding with where it is in the world: face kinds and the typical edge length (the unit the other measures use); open edges (holes) and non-manifold edges; degenerate faces and the share of sliver triangles; bumpy places — vertices that stand off their neighbours differently from how the neighbours stand off theirs, in edge lengths, worst first; and, for a mesh across X = 0, how far each vertex's mirror is from the surface (mean, worst, and where). Use it to find where to smooth, fill or even out, and again after.",
             "inputSchema": {
@@ -402,6 +416,23 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
     let answer = app.call(method, params);
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
+        // The outlines' picture, and what was measured.
+        Ok(mut value) if method == "silhouette" => {
+            let data = value
+                .get("png_base64")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(map) = value.as_object_mut() {
+                map.remove("png_base64");
+            }
+            json!({
+                "content": [
+                    { "type": "image", "data": data, "mimeType": "image/png" },
+                    { "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }
+                ]
+            })
+        }
         // Several pictures: each, then what it is of.
         Ok(value) if method == "capture" && value.get("shots").is_some() => {
             let mut content = Vec::new();

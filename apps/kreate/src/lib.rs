@@ -32,6 +32,7 @@ pub mod rigcheck;
 pub mod scenelights;
 pub mod sculptview;
 pub mod shell;
+pub mod silhouette;
 pub mod snap;
 pub mod startup;
 pub mod update;
