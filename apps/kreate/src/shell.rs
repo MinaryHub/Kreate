@@ -138,6 +138,8 @@ pub struct ShellState {
     /// Whether the source has the key it wants: checked when the panel
     /// lists, and when the source refuses one.
     pub asset_key_held: bool,
+    /// A model is being made by AI.
+    pub asset_generating: bool,
     /// What goes with the next message. The application holds the files;
     /// this is what the panel shows of them.
     pub chat_attachments: Vec<kreate_ui::chat::ChatAttachment>,
@@ -647,6 +649,7 @@ impl Default for ShellState {
             asset_fetching: std::collections::HashSet::new(),
             asset_query: crate::assets::Query::default(),
             asset_key_held: false,
+            asset_generating: false,
             chat_attachments: Vec::new(),
             chat_focused: false,
             chat_busy: false,
@@ -6019,6 +6022,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             t("asset-source-polyhaven"),
             t("asset-source-ambientcg"),
             t("asset-source-polypizza"),
+            t("asset-source-generated"),
         ],
         kinds: vec![
             t("asset-kind-models"),
@@ -6053,6 +6057,10 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 t("asset-credit-polypizza"),
                 "https://poly.pizza".to_string(),
             )),
+            crate::assets::Source::Generated => Some((
+                t("asset-credit-generated"),
+                "https://huggingface.co/microsoft/TRELLIS-image-large".to_string(),
+            )),
             crate::assets::Source::Local => None,
         },
         add: t("asset-add"),
@@ -6068,6 +6076,18 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         key_hint: t("asset-key-hint"),
         key_save: t("asset-key-save"),
         key_change: t("asset-key-change"),
+        gen_hint: t("asset-gen-hint"),
+        gen_text: t("asset-gen-text"),
+        gen_image: t("asset-gen-image"),
+        gen_note: t("asset-gen-note"),
+        gen_token: t("asset-gen-token"),
+        gen_token_prompt: t("asset-gen-token-prompt"),
+        gen_token_where: (
+            t("asset-gen-token-where"),
+            "https://huggingface.co/settings/tokens".to_string(),
+        ),
+        gen_token_saved: t("asset-gen-token-saved"),
+        gen_token_forget: t("asset-gen-token-forget"),
         add_hint: t(match state.asset_kind {
             1 => "asset-add-hint-material",
             2 => "asset-add-hint-hdri",
@@ -6151,6 +6171,12 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             && (!state.asset_key_held
                 || state.asset_error.as_deref() == Some(crate::assets::KEY_REFUSED)),
         key_held: state.asset_key_held,
+        generator: (source == crate::assets::Source::Generated).then(|| {
+            kreate_ui::assets::GeneratorView {
+                busy: state.asset_generating,
+                token_held: crate::generate::token().is_some(),
+            }
+        }),
     };
     let mut search = std::mem::take(&mut state.asset_search);
     let seen = kreate_ui::assets::asset_browser(ui, &text, &view, &mut search, &mut state.queue);
@@ -11168,6 +11194,21 @@ asset-key-hint = API key
 asset-key-save = Save key
 asset-key-change = Change key
 asset-badge-animated = ▶ Animated
+asset-source-generated = Made by AI
+asset-credit-generated = Made by AI with TRELLIS (MIT) and Z-Image Turbo (Apache-2.0) on Hugging Face's free GPUs.
+asset-gen-hint = Describe one object: "a red fire hydrant", "a low wooden stool"…
+asset-gen-text = Make from words
+asset-gen-image = Make from a picture…
+asset-gen-note = Takes a minute or two. Words become a picture first, then the picture a model; a picture of one object on a plain background works best. What you send goes to Hugging Face.
+asset-gen-token = Hugging Face token (optional)
+asset-gen-token-prompt = Without a token Hugging Face lends little GPU time, and making a model usually needs more. A free account's token (read access) raises the limit. It is kept in Kreate's settings folder on this computer only.
+asset-gen-token-where = Make a token at huggingface.co/settings/tokens
+asset-gen-token-saved = A token is saved.
+asset-gen-token-forget = Forget it
+asset-gen-drawing = Drawing the picture…
+asset-gen-cutting = Cutting out the background…
+asset-gen-shaping = Shaping the model — about a minute…
+asset-gen-queue = Waiting in Hugging Face's queue: { $count } ahead…
 asset-credit-owed = Added. Its licence asks for this credit: { $credit }
 asset-add = Add
 asset-link = Link
@@ -12366,6 +12407,21 @@ asset-key-hint = API 키
 asset-key-save = 키 저장
 asset-key-change = 키 변경
 asset-badge-animated = ▶ 애니메이션
+asset-source-generated = AI 생성
+asset-credit-generated = Hugging Face 무료 GPU에서 TRELLIS(MIT)와 Z-Image Turbo(Apache-2.0)로 만듭니다.
+asset-gen-hint = 물체 하나를 설명하세요: "빨간 소화전", "낮은 나무 의자"…
+asset-gen-text = 글로 만들기
+asset-gen-image = 이미지로 만들기…
+asset-gen-note = 1~2분 걸립니다. 글은 먼저 그림이 되고 그 그림이 모델이 됩니다. 배경이 단순한 물체 하나의 사진이 가장 잘 됩니다. 보낸 내용은 Hugging Face로 전송됩니다.
+asset-gen-token = Hugging Face 토큰 (선택)
+asset-gen-token-prompt = 토큰 없이는 Hugging Face가 GPU 시간을 조금만 빌려주는데, 모델을 만들려면 대개 그보다 많이 필요합니다. 무료 계정의 토큰(읽기 권한)을 넣으면 한도가 늘어납니다. 토큰은 이 컴퓨터의 Kreate 설정 폴더에만 저장됩니다.
+asset-gen-token-where = huggingface.co/settings/tokens 에서 토큰 만들기
+asset-gen-token-saved = 토큰이 저장되어 있습니다.
+asset-gen-token-forget = 지우기
+asset-gen-drawing = 그림을 그리는 중…
+asset-gen-cutting = 배경을 지우는 중…
+asset-gen-shaping = 모델을 만드는 중 — 1분쯤 걸립니다…
+asset-gen-queue = Hugging Face 대기열에서 기다리는 중: 앞에 { $count }개…
 asset-credit-owed = 추가했습니다. 이 모델의 라이선스는 다음 표기를 요구합니다: { $credit }
 asset-add = 추가
 asset-link = 링크

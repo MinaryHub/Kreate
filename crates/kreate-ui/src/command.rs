@@ -275,6 +275,16 @@ pub enum Command {
     AssetAnimatedOnly {
         on: bool,
     },
+    /// From the asset browser: make a model with AI, from these words — or,
+    /// with none, from a picture the user is asked for.
+    AssetGenerate {
+        text: Option<String>,
+    },
+    /// From the asset browser: keep this Hugging Face token (empty to forget
+    /// it).
+    AssetHfToken {
+        token: String,
+    },
     /// From the asset browser: keep this key for the source that wants one
     /// (empty to forget it).
     AssetKey {

@@ -57,6 +57,24 @@ pub struct AssetText {
     pub key_hint: String,
     pub key_save: String,
     pub key_change: String,
+    /// The AI source's box, its two buttons, the line under them, and its
+    /// optional token: what it is for, where to get one, save and forget.
+    pub gen_hint: String,
+    pub gen_text: String,
+    pub gen_image: String,
+    pub gen_note: String,
+    pub gen_token: String,
+    pub gen_token_prompt: String,
+    pub gen_token_where: (String, String),
+    pub gen_token_saved: String,
+    pub gen_token_forget: String,
+}
+
+/// The AI source's state, for its controls.
+pub struct GeneratorView {
+    /// A model is being made: one at a time.
+    pub busy: bool,
+    pub token_held: bool,
 }
 
 /// What the panel shows.
@@ -84,6 +102,8 @@ pub struct AssetView<'a> {
     pub key_needed: bool,
     /// The source has a key, which may be changed.
     pub key_held: bool,
+    /// For the AI source: what makes a model.
+    pub generator: Option<GeneratorView>,
 }
 
 /// Draws the panel. Returns the tiles that were on screen, by
@@ -161,6 +181,9 @@ pub fn asset_browser(
     }
     if view.key_needed {
         key_prompt(ui, text, queue);
+    }
+    if let Some(generator) = &view.generator {
+        generator_controls(ui, text, generator, queue);
     }
     if let Some(folders) = view.folders {
         ui.horizontal_wrapped(|ui| {
@@ -385,4 +408,92 @@ fn key_prompt(ui: &mut Ui, text: &AssetText, queue: &mut CommandQueue) {
             });
         });
     ui.data_mut(|d| d.insert_temp(id, key));
+}
+
+/// Words or a picture, and the buttons that make a model of them. The words
+/// are held in egui's memory, so they survive the panel being redrawn.
+fn generator_controls(
+    ui: &mut Ui,
+    text: &AssetText,
+    generator: &GeneratorView,
+    queue: &mut CommandQueue,
+) {
+    let theme = crate::theme::from_ui(ui);
+    let id = ui.id().with("asset-generate");
+    let mut words: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+    egui::Frame::new()
+        .fill(theme.accent_wash)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut words)
+                    .hint_text(&text.gen_hint)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.horizontal_wrapped(|ui| {
+                let idle = !generator.busy;
+                if ui
+                    .add_enabled(
+                        idle && !words.trim().is_empty(),
+                        egui::Button::new(&text.gen_text),
+                    )
+                    .clicked()
+                {
+                    queue.push(Command::AssetGenerate {
+                        text: Some(words.trim().to_string()),
+                    });
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new(&text.gen_image))
+                    .clicked()
+                {
+                    queue.push(Command::AssetGenerate { text: None });
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&text.gen_note)
+                        .small()
+                        .color(theme.text_dim),
+                )
+                .wrap(),
+            );
+            egui::CollapsingHeader::new(&text.gen_token)
+                .id_salt("asset-hf-token")
+                .show(ui, |ui| {
+                    if generator.token_held {
+                        ui.horizontal(|ui| {
+                            ui.label(&text.gen_token_saved);
+                            if ui.small_button(&text.gen_token_forget).clicked() {
+                                queue.push(Command::AssetHfToken {
+                                    token: String::new(),
+                                });
+                            }
+                        });
+                        return;
+                    }
+                    ui.add(egui::Label::new(&text.gen_token_prompt).wrap());
+                    ui.hyperlink_to(&text.gen_token_where.0, &text.gen_token_where.1);
+                    let token_id = ui.id().with("asset-hf-token-text");
+                    let mut token: String =
+                        ui.data_mut(|d| d.get_temp(token_id).unwrap_or_default());
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut token)
+                                .password(true)
+                                .hint_text("hf_…")
+                                .desired_width(220.0),
+                        );
+                        if ui.button(&text.key_save).clicked() && !token.trim().is_empty() {
+                            queue.push(Command::AssetHfToken {
+                                token: std::mem::take(&mut token),
+                            });
+                        }
+                    });
+                    ui.data_mut(|d| d.insert_temp(token_id, token));
+                });
+        });
+    ui.data_mut(|d| d.insert_temp(id, words));
 }

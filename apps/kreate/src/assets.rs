@@ -61,19 +61,23 @@ pub enum Source {
     /// Poly Pizza: low-poly models, CC0 and CC-BY, many of them animated.
     /// Its API wants a key of the user's own; see [`polypizza_key`].
     PolyPizza,
+    /// Models made by AI from words or a picture — see `crate::generate` —
+    /// and kept to be added again.
+    Generated,
 }
 
 impl Source {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Local,
         Self::PolyHaven,
         Self::AmbientCg,
         Self::PolyPizza,
+        Self::Generated,
     ];
 
     /// Whether assets come over the network.
     pub fn online(self) -> bool {
-        self != Source::Local
+        !matches!(self, Source::Local | Source::Generated)
     }
 
     /// Whether the source offers sizes to choose from. Poly Pizza's models
@@ -203,6 +207,8 @@ pub enum Event {
     },
     /// A thumbnail, as eight-bit RGBA rows; `None` when there is none.
     Thumbnail { id: String, image: Option<Picture> },
+    /// How a long job — a model being made — is going.
+    Progress(String),
     /// Boxed: an entry and a set of paths are several times the size of the
     /// other events, and every event would pay for them.
     Fetched {
@@ -834,6 +840,10 @@ impl Library {
                         }
                         thumbnail_of(&std::fs::read(dest).ok()?)
                     }),
+                    // The picture a made model was made from, beside it.
+                    Source::Generated => path.and_then(|p| {
+                        thumbnail_of(&std::fs::read(p.with_extension("png")).ok()?)
+                    }),
                     Source::PolyPizza => cache_root().and_then(|root| {
                         let url = url?;
                         if !safe_id(&id) {
@@ -874,6 +884,43 @@ impl Library {
         });
     }
 
+    /// Makes a model, telling how it goes; it arrives as an
+    /// [`Event::Fetched`] of a made model, to be added as any other is.
+    pub fn generate(&self, request: crate::generate::Request) {
+        let (tx, wake) = (self.tx.clone(), Arc::clone(&self.wake));
+        std::thread::spawn(move || {
+            let say = {
+                let (tx, wake) = (tx.clone(), Arc::clone(&wake));
+                move |text: String| {
+                    let _ = tx.send(Event::Progress(text));
+                    wake();
+                }
+            };
+            let result = crate::generate::make(&request, &say);
+            let name = match &request {
+                crate::generate::Request::Text(words) => words.clone(),
+                crate::generate::Request::Image(p) => p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            };
+            let entry = Entry {
+                id: format!("generated:{name}"),
+                name,
+                kind: Kind::Model,
+                source: Source::Generated,
+                authors: "TRELLIS".into(),
+                path: result.as_ref().ok().cloned(),
+                ..Entry::blank()
+            };
+            let _ = tx.send(Event::Fetched {
+                entry: Box::new(entry),
+                result: Box::new(result.map(Ready::Model)),
+            });
+            wake();
+        });
+    }
+
     pub fn poll(&self) -> Vec<Event> {
         self.rx.try_iter().collect()
     }
@@ -905,7 +952,57 @@ pub fn list_now(
             .and_then(|json| parse_polyhaven_list(&json, kind)),
         Source::AmbientCg => ambientcg_list(kind),
         Source::PolyPizza => polypizza_list(kind, query),
+        Source::Generated => Ok(if kind == Kind::Model {
+            generated_list()
+        } else {
+            Vec::new()
+        }),
     }
+}
+
+/// The models made so far, newest first, each named by what it was made of.
+fn generated_list() -> Vec<Entry> {
+    crate::generate::folder()
+        .map(|dir| generated_in(&dir))
+        .unwrap_or_default()
+}
+
+fn generated_in(dir: &Path) -> Vec<Entry> {
+    let mut found: Vec<(std::time::SystemTime, Entry)> = std::fs::read_dir(dir)
+        .map(|r| r.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "glb"))
+        .map(|path| {
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // `words-1791600000000`: the words, without the time.
+            let words = stem
+                .rsplit_once('-')
+                .filter(|(_, t)| t.chars().all(|c| c.is_ascii_digit()))
+                .map_or(stem.as_str(), |(w, _)| w)
+                .replace('-', " ");
+            let when = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (
+                when,
+                Entry {
+                    id: path.display().to_string(),
+                    name: words,
+                    kind: Kind::Model,
+                    source: Source::Generated,
+                    authors: "TRELLIS".into(),
+                    path: Some(path),
+                    ..Entry::blank()
+                },
+            )
+        })
+        .collect();
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
+    found.into_iter().map(|(_, e)| e).collect()
 }
 
 impl Source {
@@ -916,6 +1013,7 @@ impl Source {
             Source::PolyHaven => "polyhaven",
             Source::AmbientCg => "ambientcg",
             Source::PolyPizza => "polypizza",
+            Source::Generated => "generated",
         }
     }
 
@@ -983,6 +1081,11 @@ fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
         }
         Source::AmbientCg => ambientcg_fetch(entry, resolution),
         Source::PolyPizza => polypizza_fetch(entry),
+        Source::Generated => entry
+            .path
+            .clone()
+            .map(Ready::Model)
+            .ok_or_else(|| "the model has no file".to_string()),
     }
 }
 
@@ -1726,6 +1829,23 @@ mod tests {
         let listed = scan_folders(std::slice::from_ref(&dir));
         let walk = listed.iter().find(|e| e.name == "walk").expect("listed");
         assert!(walk.animated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn made_models_are_listed_by_their_words_newest_first() {
+        let dir = std::env::temp_dir().join(format!("kreate-made-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        std::fs::write(dir.join("a-red-hydrant-1791600000000.glb"), b"glTF").expect("written");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("stool-1791600000001.glb"), b"glTF").expect("written");
+        std::fs::write(dir.join("stool-1791600000001.png"), b"png").expect("written");
+        let listed = generated_in(&dir);
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["stool", "a red hydrant"]);
+        assert!(listed
+            .iter()
+            .all(|e| e.source == Source::Generated && e.kind == Kind::Model));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

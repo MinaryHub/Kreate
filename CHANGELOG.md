@@ -21,6 +21,12 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- Assets ▸ Made by AI makes a model from words or a picture, on Hugging
+  Face's free GPUs: words become a picture with Z-Image Turbo, the picture a
+  model with TRELLIS, and the model lands in the scene and stays in the list
+  to add again. A free Hugging Face token, kept in the settings folder,
+  raises how much GPU time Hugging Face lends. The connector has it too:
+  `generate_model`.
 - Help ▸ Connect to AI Apps adds Kreate's tools to Claude Desktop, Claude
   Code, Cursor, VS Code, the Gemini CLI or Codex in one click — their other
   settings kept, a copy of the file as it was left beside it, a file that

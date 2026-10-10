@@ -178,6 +178,17 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "generate_model",
+            "description": "Makes a 3D model with AI on Hugging Face's free GPUs and adds it to the scene beside what is there: from `prompt`, words describing one object (they become a picture with Z-Image Turbo, then a model with TRELLIS), or from `image`, the path of a picture of one object on a plain background. Takes a minute or two and runs in the background; check get_scene for it. Without a Hugging Face token in the Assets panel the free GPU time may not be enough, and the panel says so. Kept under Assets ▸ Made by AI.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "One object, e.g. \"a red fire hydrant\"." },
+                    "image": { "type": "string", "description": "An absolute path to a PNG or JPEG of one object." }
+                }
+            }
+        },
+        {
             "name": "timeline",
             "description": "The clock and what moves. With no arguments, reads it: the current frame, the range, frames per second, whether it is playing, and every animated object with the action it plays (its first and last key) and its NLA strips — a file's other takes, each with an index, a name, where it starts and whether it is muted. `frame` moves the clock there (nothing to undo, as in Blender); `play` starts or stops playback. `object` with `strip` and `mute` switches one strip on (mute false) or off, keeping its other settings — one undo step. Use it with capture_viewport to look at a pose at a given frame.",
             "inputSchema": {

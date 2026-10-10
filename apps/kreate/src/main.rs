@@ -4417,9 +4417,24 @@ impl App {
                         self.ui.asset_incoming.push((id, image));
                     }
                 }
+                Event::Progress(said) => {
+                    let (key, count) = said.split_once('|').unwrap_or((said.as_str(), ""));
+                    self.ui.asset_busy = Some(self.ui.catalog.format(
+                        key,
+                        kreate_i18n::TextKind::Ui,
+                        &[("count", count)],
+                    ));
+                }
                 Event::Fetched { entry, result } => {
                     self.ui.asset_fetching.remove(&entry.id);
                     self.ui.asset_busy = None;
+                    // A made model joins the list it will be found in again.
+                    if entry.source == Source::Generated {
+                        self.ui.asset_generating = false;
+                        if source == Source::Generated {
+                            self.ui.asset_list_wanted = true;
+                        }
+                    }
                     match *result {
                         Ok(r) => ready.push((*entry, r)),
                         Err(why) => self.ui.asset_error = Some(why),
@@ -5014,6 +5029,34 @@ impl App {
                 self.capture_views(params)
             }
             "context" => Ok(self.context_json()),
+            // A model made by AI, added when it arrives — as an asset is.
+            "generate" => {
+                let request = match (text("prompt"), text("image")) {
+                    (Some(words), _) if !words.trim().is_empty() => {
+                        kreate::generate::Request::Text(words)
+                    }
+                    (_, Some(path)) => {
+                        let path = std::path::PathBuf::from(path);
+                        if !path.is_file() {
+                            return Err(format!("no picture at {}", path.display()));
+                        }
+                        kreate::generate::Request::Image(path)
+                    }
+                    _ => return Err("give `prompt` (words) or `image` (a picture's path)".into()),
+                };
+                if self.ui.asset_generating {
+                    return Err("a model is being made already; one at a time".into());
+                }
+                let library = self
+                    .assets
+                    .as_ref()
+                    .ok_or("the asset library is not running")?;
+                library.generate(request);
+                self.ui.asset_generating = true;
+                Ok(json!({
+                    "message": "making it on Hugging Face: a minute or two; it is added to the scene when it arrives — check with get_scene"
+                }))
+            }
             "capture" => {
                 let camera = match params.get("camera") {
                     Some(serde_json::Value::String(name)) if !name.is_empty() => {
@@ -6770,6 +6813,27 @@ impl App {
                 Command::AssetAnimatedOnly { on } => {
                     self.ui.asset_query.animated = on;
                     self.reset_asset_list();
+                }
+                Command::AssetGenerate { text } => {
+                    let request = match text {
+                        Some(words) => Some(kreate::generate::Request::Text(words)),
+                        None => rfd::FileDialog::new()
+                            .add_filter("Picture", &["png", "jpg", "jpeg", "webp"])
+                            .set_title("A picture of one object")
+                            .pick_file()
+                            .map(kreate::generate::Request::Image),
+                    };
+                    if let (Some(request), Some(library)) = (request, &self.assets) {
+                        library.generate(request);
+                        self.ui.asset_generating = true;
+                        self.ui.asset_error = None;
+                        self.ui.asset_busy = Some(self.ui.catalog.get("asset-gen-text"));
+                    }
+                }
+                Command::AssetHfToken { token } => {
+                    if let Err(why) = kreate::generate::save_token(&token) {
+                        self.ui.asset_error = Some(why);
+                    }
                 }
                 Command::AssetKey { key } => match kreate::assets::save_polypizza_key(&key) {
                     Ok(()) => {
@@ -13706,6 +13770,18 @@ mod tests {
             .sum::<f64>()
             .sqrt();
         assert!((length - 1.0).abs() < 1e-6, "a direction: {looking}");
+    }
+
+    #[test]
+    fn making_a_model_wants_words_or_a_picture_that_is_there() {
+        let mut app = app();
+        let none = app.bridge_call("generate", &serde_json::json!({}));
+        assert!(none.is_err_and(|e| e.contains("prompt")));
+        let missing = app.bridge_call(
+            "generate",
+            &serde_json::json!({ "image": "/nowhere/at/all.png" }),
+        );
+        assert!(missing.is_err_and(|e| e.contains("no picture")));
     }
 
     /// The connector's clock: read, moved, and a take switched on with its
