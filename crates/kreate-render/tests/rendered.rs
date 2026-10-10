@@ -3365,14 +3365,15 @@ fn the_path_tracer_tilts_the_light_by_a_bump() {
     );
 }
 
-/// Studio mode shows a texture the right way up, as the rendered view does:
+/// Flat mode shows a texture the right way up, as the rendered view does:
 /// a picture red in its top half lands red at the plane's +Y edge, which the
-/// default view puts at the top of the screen.
+/// default view puts at the top of the screen. Studio shows the material's
+/// own colour instead — white here — with no trace of the picture.
 #[test]
-fn a_studio_texture_is_the_right_way_up() {
+fn a_flat_texture_is_the_right_way_up_and_studio_shows_none() {
     let gpu = gpu_or_skip!(gpu());
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-    viewport.shading = ShadingMode::Studio;
+    viewport.shading = ShadingMode::Flat;
     viewport.show_grid = false;
     viewport.show_wireframe = false;
     let side = 64usize;
@@ -3411,7 +3412,7 @@ fn a_studio_texture_is_the_right_way_up() {
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
     let frame = read_frame(&gpu, &mut viewport, &draws);
     let w = SIZE as usize;
-    let count = |top: bool, red: bool| {
+    let count = |frame: &[[f32; 4]], top: bool, red: bool| {
         let rows = if top { 0..w / 2 } else { w / 2..w };
         rows.flat_map(|y| (0..w).map(move |x| y * w + x))
             .filter(|i| {
@@ -3424,19 +3425,29 @@ fn a_studio_texture_is_the_right_way_up() {
             })
             .count()
     };
-    let (red_top, red_bottom) = (count(true, true), count(false, true));
-    let (blue_top, blue_bottom) = (count(true, false), count(false, false));
+    let (red_top, red_bottom) = (count(&frame, true, true), count(&frame, false, true));
+    let (blue_top, blue_bottom) = (count(&frame, true, false), count(&frame, false, false));
     assert!(
         red_top > red_bottom && blue_bottom > blue_top,
         "red {red_top} up and {red_bottom} down, blue {blue_top} up and {blue_bottom} down"
     );
+
+    viewport.shading = ShadingMode::Studio;
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+    let studio = read_frame(&gpu, &mut viewport, &draws);
+    let tinted = count(&studio, true, true) + count(&studio, false, false);
+    assert!(
+        tinted < red_top / 10,
+        "studio shows {tinted} pixels of the picture against flat's {red_top}"
+    );
 }
 
-/// Studio mode cuts a cut-out as the rendered view does: a picture clear on
-/// its left half shows the background there with a threshold, and the
-/// picture's colour without one.
+/// Studio and flat cut a cut-out as the rendered view does: a picture clear
+/// on its left half shows the background there with a threshold, and the
+/// surface without one — the picture's red in flat, the material's (red
+/// too, here) in studio, which shows no pictures but still cuts by them.
 #[test]
-fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
+fn a_solid_cut_out_is_cut_where_its_picture_is_clear() {
     let gpu = gpu_or_skip!(gpu());
     let side = 64usize;
     let mut pixels = vec![0u8; side * side * 4];
@@ -3447,9 +3458,9 @@ fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
             pixels[at..at + 4].copy_from_slice(&[230, 20, 20, alpha]);
         }
     }
-    let shoot = |clip: f32| {
+    let shoot = |shading: ShadingMode, clip: f32| {
         let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-        viewport.shading = ShadingMode::Studio;
+        viewport.shading = shading;
         viewport.show_grid = false;
         viewport.show_wireframe = false;
         viewport.set_solid_images(
@@ -3466,7 +3477,7 @@ fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
             &gpu.device,
             &viewport.layouts,
             &plane_cpu,
-            glam::Vec4::ONE,
+            glam::Vec4::new(0.9, 0.08, 0.08, 1.0),
         );
         let camera = Camera {
             distance: 4.0,
@@ -3480,11 +3491,14 @@ fn a_studio_cut_out_is_cut_where_its_picture_is_clear() {
         read_frame(&gpu, &mut viewport, &draws)
     };
     let reddish = |f: &[[f32; 4]]| f.iter().filter(|p| p[0] > p[2] + 0.1).count();
-    let (whole, cut) = (reddish(&shoot(0.0)), reddish(&shoot(0.5)));
-    assert!(
-        whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
-        "{whole} red pixels solid, {cut} cut: about half should go"
-    );
+    for shading in [ShadingMode::Flat, ShadingMode::Studio] {
+        let whole = reddish(&shoot(shading, 0.0));
+        let cut = reddish(&shoot(shading, 0.5));
+        assert!(
+            whole > 400 && cut * 3 < whole * 2 && cut > whole / 4,
+            "{shading:?}: {whole} red pixels solid, {cut} cut: about half should go"
+        );
+    }
 }
 
 /// A cut-out casts the shadow of what is left of it. A card clear on its

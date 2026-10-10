@@ -324,7 +324,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let image = texel.rgb;
     let cut = select(0.0, fract(in.layer) * 2.0, in.layer > -0.5);
     var base = in.base_color.rgb;
-    if (in.ramp < 0.5 && in.layer > -0.5) {
+    // The picture shows in Flat only. Studio is lit to read shape, and a
+    // texture over it hides the very shading it is there for; its colour
+    // is the material's. A cut-out is still cut in both: that is shape.
+    if (in.ramp < 0.5 && in.layer > -0.5 && globals.params.x > 0.5) {
         base = image;
     }
     if (in.ramp > 0.5 && in.ramp < 1.5) {

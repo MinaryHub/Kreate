@@ -9827,11 +9827,12 @@ impl App {
                     .collect()
             })
             .collect();
-        // The image each slot shows in the studio and flat modes, as a layer
-        // of the viewport's solid textures; -1 for its colour. The images
-        // go up only when the set, or one of them, changes.
+        // The image each slot shows in the flat mode, as a layer of the
+        // viewport's solid textures; -1 for its colour. Studio shows the
+        // material's colour, to read shape by. The images go up only when
+        // the set, or one of them, changes.
         let textured =
-            self.solid_textures && gfx.viewport.shading != kreate_render::ShadingMode::Rendered;
+            self.solid_textures && gfx.viewport.shading == kreate_render::ShadingMode::Flat;
         let mut images: Vec<kreate_scene::document::ImageId> = Vec::new();
         // A cut-out's picture goes up whatever the mode: the rendered view's
         // shadow pass reads it to cast a leaf's shadow rather than its card's.

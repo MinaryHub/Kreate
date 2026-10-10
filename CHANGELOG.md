@@ -45,6 +45,9 @@ use; `scripts/release.sh` turns that section into the next release.
 - Hiding an object in the outliner hides its children with it. Each child
   keeps its own eye, drawn faint while its parent is hidden, and comes back
   when the parent does.
+- Pictures show in the Flat view and not the Studio one. Studio is lit to
+  read shape and shows each material's colour; Flat shows its texture. A
+  cut-out leaf is still cut in both.
 - Importing a model — File ▸ Import, a dropped file, an asset — reads it in
   the background, so a large one no longer stops the window, and records
   the step as the file's path rather than the whole model: undo history
