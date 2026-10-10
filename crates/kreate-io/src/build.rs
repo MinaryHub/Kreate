@@ -626,13 +626,17 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
     rigs
 }
 
-/// Each bone's pose that puts it where its joint is at time `t` (seconds),
-/// or as the nodes stand when `None`.
+/// Each bone's pose that puts it where its joint is at time `t` (seconds)
+/// of the clip numbered `.0`, or as the nodes stand when `None`.
+///
+/// One clip at a time: a file's takes — idle, walk, run — each key the same
+/// joints over their own seconds, and read together the last one listed
+/// overwrote the rest.
 fn rig_pose(
     scene: &ImportScene,
     rig: &Rig,
     doc: &Document,
-    t: Option<f32>,
+    at: Option<(usize, f32)>,
 ) -> Vec<(String, kreate_math::DTransform)> {
     use kreate_math::DAffine3;
     let Some((_, armature)) = doc.armature_of(rig.object) else {
@@ -642,8 +646,8 @@ fn rig_pose(
     let local = |node: usize| -> DAffine3 {
         let n = &scene.nodes[node];
         let mut placed = n.transform;
-        if let Some(t) = t {
-            for animation in &scene.animations {
+        if let Some((clip, t)) = at {
+            if let Some(animation) = scene.animations.get(clip) {
                 for c in animation
                     .channels
                     .iter()
@@ -698,23 +702,14 @@ fn rig_pose(
     out
 }
 
-/// The clip's movement of a skin's joints, as its armature's action: every
-/// frame of the moving range, each bone's pose keyed.
+/// The clips' movement of a skin's joints, as its armature's actions: every
+/// frame of each clip's range, each bone's pose keyed.
+///
+/// The first clip that moves the rig is what it plays; every later one is a
+/// muted NLA strip beside it — the file's other takes, kept to be switched
+/// on, as an object's later clips are.
 fn build_bone_animation(scene: &ImportScene, rig: &Rig, doc: &mut Document) {
     use kreate_scene::animation::{bone_path, Action, Interpolation};
-    let times: Vec<f32> = scene
-        .animations
-        .iter()
-        .flat_map(|a| a.channels.iter())
-        .filter(|c| rig.joints.contains(&c.node))
-        .flat_map(|c| c.times[..c.key_count()].iter().copied())
-        .collect();
-    let (Some(first), Some(last)) = (
-        times.iter().copied().reduce(f32::min),
-        times.iter().copied().reduce(f32::max),
-    ) else {
-        return;
-    };
     let fps = if doc.playback.fps > 0.0 {
         doc.playback.fps
     } else {
@@ -722,62 +717,99 @@ fn build_bone_animation(scene: &ImportScene, rig: &Rig, doc: &mut Document) {
     };
     let start = doc.playback.start as f64;
     let frame_of = |t: f32| start + t as f64 * fps;
-    let (a, b) = (frame_of(first), frame_of(last));
-    let mut frames = vec![a];
-    let mut f = a.floor() + 1.0;
-    while f < b {
-        frames.push(f);
-        f += 1.0;
-    }
-    if b > a {
-        frames.push(b);
-    }
     let name = doc
         .object(rig.object)
         .map(|o| o.name.clone())
         .unwrap_or_default();
-    let mut action = Action::new(format!("{name}Action"));
-    let mut previous: std::collections::HashMap<String, kreate_math::DQuat> =
-        std::collections::HashMap::new();
-    for frame in &frames {
-        let t = ((frame - start) / fps) as f32;
-        for (bone, pose) in rig_pose(scene, rig, doc, Some(t)) {
-            for i in 0..3u8 {
-                action.curve_mut(&bone_path(&bone, "location"), i).insert(
-                    *frame,
-                    pose.translation[i as usize],
-                    Interpolation::Linear,
-                );
-                action.curve_mut(&bone_path(&bone, "scale"), i).insert(
-                    *frame,
-                    pose.scale[i as usize],
-                    Interpolation::Linear,
-                );
-            }
-            // On the previous key's side: q and -q are one turn, and the
-            // curves draw straight lines between numbers.
-            let mut q = pose.rotation;
-            if previous.get(&bone).is_some_and(|p| p.dot(q) < 0.0) {
-                q = -q;
-            }
-            previous.insert(bone.clone(), q);
-            for (i, v) in [q.w, q.x, q.y, q.z].into_iter().enumerate() {
-                action
-                    .curve_mut(&bone_path(&bone, "rotation_quaternion"), i as u8)
-                    .insert(*frame, v, Interpolation::Linear);
+    let mut playing = false;
+    let mut last_frame = f64::NEG_INFINITY;
+    for (clip, animation) in scene.animations.iter().enumerate() {
+        let times: Vec<f32> = animation
+            .channels
+            .iter()
+            .filter(|c| rig.joints.contains(&c.node))
+            .flat_map(|c| c.times[..c.key_count()].iter().copied())
+            .collect();
+        let (Some(first), Some(last)) = (
+            times.iter().copied().reduce(f32::min),
+            times.iter().copied().reduce(f32::max),
+        ) else {
+            continue;
+        };
+        // Every clip from the scene's start, as the file's seconds are
+        // from its own: a strip switched on plays where it was made to.
+        let (a, b) = (frame_of(first), frame_of(last));
+        let mut frames = vec![a];
+        let mut f = a.floor() + 1.0;
+        while f < b {
+            frames.push(f);
+            f += 1.0;
+        }
+        if b > a {
+            frames.push(b);
+        }
+        let mut action = Action::new(if scene.animations.len() > 1 {
+            format!("{name}|{}", animation.name)
+        } else {
+            format!("{name}Action")
+        });
+        let mut previous: std::collections::HashMap<String, kreate_math::DQuat> =
+            std::collections::HashMap::new();
+        for frame in &frames {
+            let t = ((frame - start) / fps) as f32;
+            for (bone, pose) in rig_pose(scene, rig, doc, Some((clip, t))) {
+                for i in 0..3u8 {
+                    action.curve_mut(&bone_path(&bone, "location"), i).insert(
+                        *frame,
+                        pose.translation[i as usize],
+                        Interpolation::Linear,
+                    );
+                    action.curve_mut(&bone_path(&bone, "scale"), i).insert(
+                        *frame,
+                        pose.scale[i as usize],
+                        Interpolation::Linear,
+                    );
+                }
+                // On the previous key's side: q and -q are one turn, and the
+                // curves draw straight lines between numbers.
+                let mut q = pose.rotation;
+                if previous.get(&bone).is_some_and(|p| p.dot(q) < 0.0) {
+                    q = -q;
+                }
+                previous.insert(bone.clone(), q);
+                for (i, v) in [q.w, q.x, q.y, q.z].into_iter().enumerate() {
+                    action
+                        .curve_mut(&bone_path(&bone, "rotation_quaternion"), i as u8)
+                        .insert(*frame, v, Interpolation::Linear);
+                }
             }
         }
+        action.select_all_with(|_| false);
+        let label = action.name.clone();
+        let id = doc.add_action(action);
+        let Some(o) = doc.object_mut(rig.object) else {
+            return;
+        };
+        if playing {
+            let range = (a, b.max(a));
+            let mut strip = kreate_scene::nla::NlaStrip::new(label, id, range.0, range);
+            strip.mute = true;
+            o.nla.push(strip);
+        } else {
+            o.action = Some(id);
+            playing = true;
+            last_frame = b;
+        }
     }
-    action.select_all_with(|_| false);
-    let id = doc.add_action(action);
-    if let Some(o) = doc.object_mut(rig.object) {
-        o.action = Some(id);
+    // The range grows to hold the clip that plays; the muted ones are the
+    // user's to switch on.
+    if last_frame.is_finite() && last_frame.ceil() as i32 > doc.playback.end {
+        doc.playback.end = last_frame.ceil() as i32;
     }
-    if b.ceil() as i32 > doc.playback.end {
-        doc.playback.end = b.ceil() as i32;
+    if playing {
+        let frame = doc.playback.frame;
+        doc.animate(frame);
     }
-    let frame = doc.playback.frame;
-    doc.animate(frame);
 }
 
 /// The file's clips as actions: one per animated node, keyed on the frames

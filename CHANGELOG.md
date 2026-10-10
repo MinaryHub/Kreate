@@ -42,6 +42,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- A glTF character with several takes — idle, walk, run — keeps them all.
+  The first plays; each other is a muted strip on the rig, to switch on.
+  They were read as one, the last take over the rest.
 - Hiding an object in the outliner hides its children with it. Each child
   keeps its own eye, drawn faint while its parent is hidden, and comes back
   when the parent does.

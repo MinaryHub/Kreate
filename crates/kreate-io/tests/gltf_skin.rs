@@ -194,3 +194,52 @@ fn the_file_says_skin_joints_and_weights() {
         .iter()
         .any(|c| joint_nodes.contains(&c["target"]["node"].as_u64().unwrap())));
 }
+
+/// A file with two takes on one rig — an idle and a walk, say — keeps both:
+/// the first plays, the second is a muted strip beside it with its own
+/// keys. Read together they were one action, the last take over the first.
+#[test]
+fn every_take_on_a_rig_is_kept_as_its_own_action() {
+    let (doc, _) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let mut read = parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    assert_eq!(read.animations.len(), 1, "the rig exports one take");
+    // A second take: the same joints, twice as long.
+    let mut second = read.animations[0].clone();
+    second.name = "Slow".into();
+    for channel in &mut second.channels {
+        for t in &mut channel.times {
+            *t *= 2.0;
+        }
+    }
+    read.animations[0].name = "Bend".into();
+    read.animations.push(second);
+    let mut out = Document::new();
+    build_into(&read, &mut out);
+
+    let rig = out
+        .objects()
+        .find(|(_, o)| matches!(o.data, ObjectData::Armature(_)))
+        .map(|(_, o)| o)
+        .expect("a rig");
+    let playing = out.action(rig.action.expect("an action")).expect("it");
+    assert!(playing.name.ends_with("|Bend"), "{}", playing.name);
+    assert_eq!(rig.nla.len(), 1, "the second take as a strip");
+    let strip = &rig.nla[0];
+    assert!(strip.mute, "the strip waits to be switched on");
+    let slow = out.action(strip.action).expect("the strip's action");
+    assert!(slow.name.ends_with("|Slow"), "{}", slow.name);
+    // Its own keys: twice the frames of the first.
+    let span = |a: &kreate_scene::animation::Action| {
+        let frames: Vec<f64> = a
+            .curves
+            .iter()
+            .flat_map(|c| c.keys.iter().map(|k| k.frame))
+            .collect();
+        frames.iter().copied().fold(f64::MIN, f64::max)
+            - frames.iter().copied().fold(f64::MAX, f64::min)
+    };
+    let (fast, long) = (span(playing), span(slow));
+    assert!((long / fast - 2.0).abs() < 0.2, "{fast} and {long} frames");
+}
