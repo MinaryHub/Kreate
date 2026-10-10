@@ -186,6 +186,22 @@ impl Camera {
         self.rotation = self.rotation.normalize();
     }
 
+    /// Turns the head, the eye staying where it is: walking's look, where
+    /// orbiting turns about the pivot. Yaw about the world's up, pitch about
+    /// the view's right, in radians; positive pitch looks up. A pitch that
+    /// would tip the view over the top is not taken.
+    pub fn look(&mut self, yaw: f64, pitch: f64) {
+        let eye = self.eye();
+        let turned = (DQuat::from_rotation_z(yaw) * self.rotation).normalize();
+        let tilted = (turned * DQuat::from_rotation_x(pitch)).normalize();
+        self.rotation = if (tilted * DVec3::Y).z > 0.01 {
+            tilted
+        } else {
+            turned
+        };
+        self.pivot = eye - self.rotation * (DVec3::Z * self.distance);
+    }
+
     /// Translates the pivot in the view plane.
     ///
     /// Deltas are a fraction of viewport height. Scaling by distance (and by the

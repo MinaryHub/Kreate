@@ -47,6 +47,7 @@ use winit::window::{Window, WindowId};
 mod connector;
 mod panels;
 mod render_jobs;
+mod walking;
 
 /// Vendor hints telling a hybrid-GPU laptop to hand us the discrete adapter.
 ///
@@ -946,6 +947,10 @@ struct App {
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
     /// The Measure tool, while it is out. See `begin_measure`.
     measure: Option<MeasureTool>,
+    /// Walk Navigation, while it runs, and when it last moved the view.
+    /// See `walking.rs`.
+    walk: Option<kreate::walk::Walk>,
+    walk_clock: Option<Instant>,
     /// Align Faces, while it is out: the first face clicked, once it has
     /// been — the part that moves, its face's middle and normal.
     mate: Option<Option<(ObjectId, DVec3, DVec3)>>,
@@ -1113,6 +1118,8 @@ impl App {
             loop_cut_seed: None,
             knife: None,
             measure: None,
+            walk: None,
+            walk_clock: None,
             mate: None,
             mass_cache: None,
             sectioned: Vec::new(),
@@ -2084,6 +2091,7 @@ impl App {
             ("edit.copy", &[]),
             ("edit.paste", &[]),
             ("view.frame_all", &[]),
+            ("view.walk", &[]),
             ("view.toggle_projection", &[]),
             ("view.toggle_sidebar", &[]),
             ("view.toggle_grid", &[]),
@@ -9622,6 +9630,7 @@ impl App {
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
             "view.measure" => self.begin_measure(),
+            "view.walk" => self.begin_walk(),
             "object.align_faces" => {
                 self.end_loop_cut_hover();
                 self.mate = Some(None);
@@ -10292,6 +10301,19 @@ struct ScriptLine {
 }
 
 impl ApplicationHandler for App {
+    /// The mouse's own movement, which Walk Navigation turns the head by:
+    /// the pointer is held still meanwhile and reports nothing.
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            self.walk_look(delta.0, delta.1);
+        }
+    }
+
     /// A connector request is waiting. See `kreate::bridge`.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         self.serve_bridge();
@@ -10469,6 +10491,10 @@ impl ApplicationHandler for App {
             if response.repaint {
                 self.redraw.set(RedrawReason::UI);
             }
+        }
+        // A walk owns the keys, the buttons and the wheel while it runs.
+        if self.walk_event(&event) {
+            return;
         }
 
         match event {
@@ -10855,6 +10881,7 @@ impl ApplicationHandler for App {
                     self.drive_strokes();
                 }
                 self.advance_playback();
+                self.advance_walk();
                 self.sync_timeline();
                 self.apply_input();
                 self.run_drivers();

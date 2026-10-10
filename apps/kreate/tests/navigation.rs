@@ -321,6 +321,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_dimensions",
     // Design tools, the application's until they hand an operator its points.
     "view.measure",
+    "view.walk",
     "object.align_faces",
     "app.extrude",
     "app.mesh_check",

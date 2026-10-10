@@ -275,6 +275,14 @@ fn common() -> Vec<Binding> {
             Context::Viewport,
             Action::new("app.pie").with("menu", PropertyValue::Text("view".into())),
         ),
+        // Blender's Walk Navigation, on Blender's key.
+        key(
+            "view.walk",
+            "Backquote",
+            Context::Viewport,
+            Action::new("view.walk"),
+        )
+        .with_modifiers(Modifiers::shift()),
         key(
             "view.mode_pie",
             "Tab",

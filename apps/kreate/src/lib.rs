@@ -41,6 +41,7 @@ pub mod update;
 pub mod uvmodal;
 pub mod uvview;
 pub mod version;
+pub mod walk;
 
 /// The recently run operator ids, for the crash report.
 ///

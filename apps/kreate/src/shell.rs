@@ -1519,6 +1519,7 @@ struct Labels {
     view_frame_selected: String,
     view_camera: String,
     view_measure: String,
+    view_walk: String,
     design_dimensions: String,
     design_clear: String,
     view_perspective: String,
@@ -1861,6 +1862,7 @@ impl Labels {
             view_frame_selected: t("view-frame-selected"),
             view_camera: t("view-camera"),
             view_measure: t("view-measure"),
+            view_walk: t("view-walk"),
             design_dimensions: t("design-dimensions"),
             design_clear: t("design-clear"),
             view_perspective: t("view-perspective"),
@@ -3733,6 +3735,7 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         // Numpad 0 is the key, and a keyboard without a numpad has no other
         // way through the camera.
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
+        entry("view.walk", &l.view_walk, dispatch("view.walk")),
         MenuNode::Separator,
         entry("view.measure", &l.view_measure, dispatch("view.measure")),
         entry(
