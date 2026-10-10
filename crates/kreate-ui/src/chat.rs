@@ -35,6 +35,10 @@ pub enum ChatRole {
     Error,
     /// A note that is neither: "stopped".
     Note,
+    /// What one answer changed in the document, with a button that takes
+    /// the whole of it back. The number is the answer's, for
+    /// [`Command::ChatRevertTurn`].
+    Turn(usize),
 }
 
 /// Who the panel talks to Claude as, for the line at its top.
@@ -90,6 +94,9 @@ pub struct ChatText {
     pub code_hint: String,
     pub code_submit: String,
     pub cancel: String,
+    /// The button under an answer's changes, and its hover.
+    pub revert: String,
+    pub revert_hint: String,
 }
 
 /// Draws the panel. `input` is what is being typed; Enter sends it and
@@ -172,7 +179,7 @@ pub fn chat(
                 ui.weak(&text.empty);
             }
             for message in messages {
-                draw_message(ui, &theme, message);
+                draw_message(ui, &theme, text, message, queue);
             }
         });
 
@@ -336,8 +343,30 @@ fn draw_account(
     }
 }
 
-fn draw_message(ui: &mut Ui, theme: &crate::Theme, message: &ChatMessage) {
+fn draw_message(
+    ui: &mut Ui,
+    theme: &crate::Theme,
+    text: &ChatText,
+    message: &ChatMessage,
+    queue: &mut CommandQueue,
+) {
     match message.role {
+        ChatRole::Turn(turn) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(&message.text)
+                        .small()
+                        .color(theme.text_dim),
+                );
+                if ui
+                    .small_button(&text.revert)
+                    .on_hover_text(&text.revert_hint)
+                    .clicked()
+                {
+                    queue.push(Command::ChatRevertTurn { turn });
+                }
+            });
+        }
         ChatRole::User => {
             ui.add_space(6.0);
             egui::Frame::new()

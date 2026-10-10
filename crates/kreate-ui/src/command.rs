@@ -180,6 +180,10 @@ pub enum Command {
     ChatStop,
     /// From the Claude panel: forget the conversation and start another.
     ChatNew,
+    /// From the chat panel: undo everything one answer did to the document.
+    ChatRevertTurn {
+        turn: usize,
+    },
     /// From the chat panel: talk to another assistant — an index into the
     /// list the panel was given.
     ChatProvider {

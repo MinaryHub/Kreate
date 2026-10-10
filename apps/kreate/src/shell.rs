@@ -6180,6 +6180,12 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         code_hint: l.chat_code_hint.clone(),
         code_submit: l.chat_code_submit.clone(),
         cancel: l.chat_cancel.clone(),
+        revert: state
+            .catalog
+            .format("chat-revert", kreate_i18n::TextKind::Ui, &[]),
+        revert_hint: state
+            .catalog
+            .format("chat-revert-hint", kreate_i18n::TextKind::Tooltip, &[]),
     };
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
@@ -11292,6 +11298,11 @@ chat-stop = Stop
 chat-new = New Chat
 chat-working = Working…
 chat-stopped = Stopped.
+chat-revert = Undo this answer
+chat-revert-hint = Undo every change this answer made to the document, as one step.
+chat-turn = This answer: { $steps } steps · { $added } added · { $removed } removed
+chat-turn-reverted = Undone: this answer's { $steps } steps.
+chat-turn-later = Not undone: you have changed the document since. Use Undo to step back.
 chat-checking = Checking the account…
 chat-signed-out = Not signed in.
 chat-sign-in = Sign In
@@ -12480,6 +12491,11 @@ chat-stop = 중지
 chat-new = 새 대화
 chat-working = 작업 중…
 chat-stopped = 중지했습니다.
+chat-revert = 이 응답 되돌리기
+chat-revert-hint = 이 응답이 문서에 한 변경을 한 번에 모두 되돌립니다.
+chat-turn = 이번 응답: 작업 { $steps }개 · 추가 { $added } · 삭제 { $removed }
+chat-turn-reverted = 되돌렸습니다: 이 응답의 작업 { $steps }개.
+chat-turn-later = 되돌리지 않았습니다: 그 뒤에 문서를 바꾸셨습니다. 실행 취소로 한 단계씩 되돌려 주세요.
 chat-checking = 계정 확인 중…
 chat-signed-out = 로그인되어 있지 않습니다.
 chat-sign-in = 로그인

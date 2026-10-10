@@ -698,6 +698,9 @@ struct App {
     chat: Option<kreate::claude::Chat>,
     /// Whether the last chat entry is a reply still streaming in.
     chat_streaming: bool,
+    /// Each answer's changes, by the history it began and ended at — what
+    /// the chat panel's "undo this answer" takes back.
+    chat_turns: Vec<ChatTurn>,
     /// What goes with the next chat message: files picked or pasted. The
     /// panel shows `ui.chat_attachments`, made from this.
     chat_attachments: Vec<kreate::attach::Attachment>,
@@ -1019,6 +1022,7 @@ impl App {
             update_ready: None,
             chat: None,
             chat_streaming: false,
+            chat_turns: Vec::new(),
             chat_attachments: Vec::new(),
             outbox: None,
             imports: std::sync::mpsc::channel(),
@@ -4524,7 +4528,14 @@ impl App {
             text: shown,
         });
         match chat.send(&text, &self.chat_attachments) {
-            Ok(()) => self.chat_attachments.clear(),
+            Ok(()) => {
+                self.chat_attachments.clear();
+                self.chat_turns.push(ChatTurn {
+                    start: self.history.cursor(),
+                    end: None,
+                    objects: self.doc.objects().map(|(_, o)| o.uid.raw()).collect(),
+                });
+            }
             // Kept, so a message that could not go can be sent another way.
             Err(e) => self.ui.chat_log.push(ChatMessage {
                 role: ChatRole::Error,
@@ -4625,7 +4636,9 @@ impl App {
         use kreate::claude::Event;
         use kreate_ui::chat::{ChatMessage, ChatRole};
         let Some(chat) = &mut self.chat else { return };
+        let mut answered = false;
         for event in chat.poll() {
+            answered |= matches!(event, Event::Done(_));
             let (role, text) = match event {
                 Event::Session(_) | Event::Done(None) => {
                     self.chat_streaming = false;
@@ -4703,9 +4716,91 @@ impl App {
             self.chat_streaming = false;
         }
         self.ui.chat_busy = chat.busy();
+        if answered {
+            self.finish_chat_turn();
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// An answer has ended: what it did to the document, said under it with
+    /// a button that takes it all back. Nothing is said for an answer that
+    /// changed nothing.
+    fn finish_chat_turn(&mut self) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let end = self.history.cursor();
+        let Some((index, turn)) = self
+            .chat_turns
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, t)| t.end.is_none())
+        else {
+            return;
+        };
+        turn.end = Some(end);
+        if end <= turn.start {
+            return;
+        }
+        let now: std::collections::HashSet<u64> =
+            self.doc.objects().map(|(_, o)| o.uid.raw()).collect();
+        let added = now.difference(&turn.objects).count().to_string();
+        let removed = turn.objects.difference(&now).count().to_string();
+        let steps = (end - turn.start).to_string();
+        let text = self.ui.catalog.format(
+            "chat-turn",
+            kreate_i18n::TextKind::Ui,
+            &[
+                ("steps", steps.as_str()),
+                ("added", added.as_str()),
+                ("removed", removed.as_str()),
+            ],
+        );
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::Turn(index),
+            text,
+        });
+    }
+
+    /// Takes back everything one answer did, if nothing has been done since:
+    /// undoing past later edits of the user's would take those too.
+    fn revert_chat_turn(&mut self, index: usize) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let Some(turn) = self.chat_turns.get(index) else {
+            return;
+        };
+        let (start, end) = (turn.start, turn.end.unwrap_or(turn.start));
+        let message = if self.history.cursor() != end || self.history.entries().len() < end {
+            self.ui.catalog.get("chat-turn-later")
+        } else {
+            while self.history.cursor() > start {
+                if !self.history.undo(&mut self.doc) {
+                    break;
+                }
+            }
+            self.edit.clear();
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+            // Done once: the button goes, and the line says what happened.
+            for m in &mut self.ui.chat_log {
+                if m.role == ChatRole::Turn(index) {
+                    m.role = ChatRole::Note;
+                }
+            }
+            if let Some(turn) = self.chat_turns.get_mut(index) {
+                turn.end = Some(start);
+            }
+            let steps = (end - start).to_string();
+            self.ui.catalog.format(
+                "chat-turn-reverted",
+                kreate_i18n::TextKind::Ui,
+                &[("steps", steps.as_str())],
+            )
+        };
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::Note,
+            text: message,
+        });
     }
 
     /// Answers every request waiting since the last wake.
@@ -6143,7 +6238,9 @@ impl App {
                         chat.reset();
                     }
                     self.ui.chat_log.clear();
+                    self.chat_turns.clear();
                 }
+                Command::ChatRevertTurn { turn } => self.revert_chat_turn(turn),
                 // The outliner's key resolved against the *current* document,
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.
@@ -11744,6 +11841,17 @@ fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
 const SCULPT_DENSE_ENOUGH: u32 = 1000;
 
 /// A scene file read for importing: its path, ready to add, or why not.
+/// One answer in the chat panel, by the undo history around it.
+struct ChatTurn {
+    /// The history's cursor when the message was sent.
+    start: usize,
+    /// And when the answer ended; `None` while it is still answering.
+    end: Option<usize>,
+    /// The objects there were before, by uid, to say what it added and took
+    /// away.
+    objects: std::collections::HashSet<u64>,
+}
+
 /// A file read by an import thread: where it is and how much room the
 /// model takes, or why it could not be read.
 type ImportReady = Result<(std::path::PathBuf, kreate_math::Aabb), String>;
@@ -13220,6 +13328,48 @@ mod tests {
         assert!(app.history.undo(&mut app.doc), "undone");
         assert_eq!(app.doc.objects().count(), before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One answer that added two shapes: said under it, and taken back in
+    /// one step — but not over an edit the user made afterwards.
+    #[test]
+    fn an_answer_is_summed_up_and_undone_whole() {
+        use kreate_ui::chat::ChatRole;
+        let mut app = app();
+        let add = |app: &mut App| {
+            let mut params = PropertyMap::new();
+            params.set("location", PropertyValue::Vec3([5.0, 0.0, 0.0]));
+            app.run_op("object.add_primitive", params);
+        };
+        let before = app.doc.objects().count();
+        let begin = |app: &mut App| {
+            app.chat_turns.push(ChatTurn {
+                start: app.history.cursor(),
+                end: None,
+                objects: app.doc.objects().map(|(_, o)| o.uid.raw()).collect(),
+            })
+        };
+        begin(&mut app);
+        add(&mut app);
+        add(&mut app);
+        app.finish_chat_turn();
+        let summary = app.ui.chat_log.last().expect("a summary");
+        assert_eq!(summary.role, ChatRole::Turn(0));
+        assert!(summary.text.contains('2'), "{}", summary.text);
+        app.revert_chat_turn(0);
+        assert_eq!(app.doc.objects().count(), before, "both shapes gone");
+        assert!(
+            !app.ui.chat_log.iter().any(|m| m.role == ChatRole::Turn(0)),
+            "the button goes once used"
+        );
+
+        // A second answer, then an edit of the user's: not undone.
+        begin(&mut app);
+        add(&mut app);
+        app.finish_chat_turn();
+        add(&mut app);
+        app.revert_chat_turn(1);
+        assert_eq!(app.doc.objects().count(), before + 2, "nothing taken back");
     }
 
     /// A model imported twice, both times made at the origin, lands in two
