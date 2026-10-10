@@ -88,25 +88,89 @@ fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     a + ab * (vb * denom) + ac * (vc * denom)
 }
 
-struct Field {
-    origin: Vec3,
-    h: f32,
-    dims: [usize; 3],
-    values: Vec<f32>,
+/// Values on the points of a grid: `dims` points along each axis, `h`
+/// apart, the first at `origin`, X fastest. Negative is inside.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub origin: Vec3,
+    pub h: f32,
+    pub dims: [usize; 3],
+    pub values: Vec<f32>,
 }
 
 impl Field {
-    fn index(&self, i: usize, j: usize, k: usize) -> usize {
+    pub fn index(&self, i: usize, j: usize, k: usize) -> usize {
         (k * self.dims[1] + j) * self.dims[0] + i
     }
 
-    fn point(&self, i: usize, j: usize, k: usize) -> Vec3 {
+    pub fn point(&self, i: usize, j: usize, k: usize) -> Vec3 {
         self.origin + Vec3::new(i as f32, j as f32, k as f32) * self.h
     }
 
-    fn at(&self, i: usize, j: usize, k: usize) -> f32 {
+    pub fn at(&self, i: usize, j: usize, k: usize) -> f32 {
         self.values[self.index(i, j, k)]
     }
+}
+
+/// Which points of a grid — `dims` points `h` apart from `origin`, X
+/// fastest — are inside the closed surface `tris`: wound into, counted along
+/// rows in X, so overlapping parts are inside both and inward-facing faces
+/// still make a solid.
+pub fn winding(tris: &[[Vec3; 3]], origin: Vec3, h: f32, dims: [usize; 3]) -> Vec<bool> {
+    let cell_of = |v: f32, axis: usize| (v - origin[axis]) / h;
+    // The row is nudged off the grid's exact lines, so it does not run along
+    // an edge it would count twice.
+    let nudge = Vec3::new(0.0, 0.000_37 * h, 0.000_71 * h);
+    // Each crossing and whether the ray goes in (+1) or out (−1) there, by
+    // which way the triangle faces.
+    let mut rows: Vec<Vec<(f32, i32)>> = vec![Vec::new(); dims[1] * dims[2]];
+    for t in tris {
+        let (tlo, thi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+        if cell_of(thi.y, 1) < 0.0 || cell_of(thi.z, 2) < 0.0 {
+            continue;
+        }
+        let j0 = cell_of(tlo.y, 1).floor().max(0.0) as usize;
+        let j1 = (cell_of(thi.y, 1).ceil().max(0.0) as usize).min(dims[1] - 1);
+        let k0 = cell_of(tlo.z, 2).floor().max(0.0) as usize;
+        let k1 = (cell_of(thi.z, 2).ceil().max(0.0) as usize).min(dims[2] - 1);
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                let q = origin + Vec3::new(0.0, j as f32, k as f32) * h + nudge;
+                // Where the line along X at (q.y, q.z) meets the triangle, if
+                // it does: barycentric coordinates in the YZ plane.
+                let (a, b, c) = (t[0], t[1], t[2]);
+                let d = (b.y - a.y) * (c.z - a.z) - (c.y - a.y) * (b.z - a.z);
+                if d.abs() < 1e-20 {
+                    continue;
+                }
+                let u = ((q.y - a.y) * (c.z - a.z) - (c.y - a.y) * (q.z - a.z)) / d;
+                let v = ((b.y - a.y) * (q.z - a.z) - (q.y - a.y) * (b.z - a.z)) / d;
+                if u < 0.0 || v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let x = a.x + (b.x - a.x) * u + (c.x - a.x) * v;
+                let facing = (b - a).cross(c - a).x;
+                rows[k * dims[1] + j].push((x, if facing < 0.0 { 1 } else { -1 }));
+            }
+        }
+    }
+    let mut inside = vec![false; dims.iter().product()];
+    for k in 0..dims[2] {
+        for j in 0..dims[1] {
+            let row = &mut rows[k * dims[1] + j];
+            row.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (mut crossed, mut winding) = (0, 0);
+            for i in 0..dims[0] {
+                let x = origin.x + i as f32 * h;
+                while crossed < row.len() && row[crossed].0 < x {
+                    winding += row[crossed].1;
+                    crossed += 1;
+                }
+                inside[(k * dims[1] + j) * dims[0] + i] = winding != 0;
+            }
+        }
+    }
+    inside
 }
 
 /// The mesh rebuilt as squares at `voxel` spacing.
@@ -168,61 +232,26 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
             }
         }
     }
-    // 2. Inside or out: crossings along each row in X. The row is nudged off
-    // the grid's exact lines, so it does not run along an edge it would count
-    // twice.
-    let nudge = Vec3::new(0.0, 0.000_37 * h, 0.000_71 * h);
-    // Each crossing and whether the ray goes in (+1) or out (−1) there, by
-    // which way the triangle faces.
-    let mut rows: Vec<Vec<(f32, i32)>> = vec![Vec::new(); dims[1] * dims[2]];
-    for t in &tris {
-        let (tlo, thi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
-        let j0 = cell_of(tlo.y, 1).floor().max(0.0) as usize;
-        let j1 = (cell_of(thi.y, 1).ceil() as usize).min(dims[1] - 1);
-        let k0 = cell_of(tlo.z, 2).floor().max(0.0) as usize;
-        let k1 = (cell_of(thi.z, 2).ceil() as usize).min(dims[2] - 1);
-        for k in k0..=k1 {
-            for j in j0..=j1 {
-                let q = field.point(0, j, k) + nudge;
-                // Where the line along X at (q.y, q.z) meets the triangle, if
-                // it does: barycentric coordinates in the YZ plane.
-                let (a, b, c) = (t[0], t[1], t[2]);
-                let d = (b.y - a.y) * (c.z - a.z) - (c.y - a.y) * (b.z - a.z);
-                if d.abs() < 1e-20 {
-                    continue;
-                }
-                let u = ((q.y - a.y) * (c.z - a.z) - (c.y - a.y) * (q.z - a.z)) / d;
-                let v = ((b.y - a.y) * (q.z - a.z) - (q.y - a.y) * (b.z - a.z)) / d;
-                if u < 0.0 || v < 0.0 || u + v > 1.0 {
-                    continue;
-                }
-                let x = a.x + (b.x - a.x) * u + (c.x - a.x) * v;
-                let facing = (b - a).cross(c - a).x;
-                rows[k * dims[1] + j].push((x, if facing < 0.0 { 1 } else { -1 }));
-            }
-        }
+    // 2. Inside or out, by winding. That is the sign of the distance.
+    let inside = winding(&tris, origin, h, dims);
+    for (value, inside) in field.values.iter_mut().zip(inside) {
+        // Never exactly zero: a point on the surface takes its side from the
+        // count like any other, rather than being a `-0` that reads as
+        // outside.
+        let d = value.clamp(1e-5 * h, 3.0 * h);
+        *value = if inside { -d } else { d };
     }
-    for k in 0..dims[2] {
-        for j in 0..dims[1] {
-            let row = &mut rows[k * dims[1] + j];
-            row.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let (mut crossed, mut winding) = (0, 0);
-            for i in 0..dims[0] {
-                let x = origin.x + i as f32 * h;
-                while crossed < row.len() && row[crossed].0 < x {
-                    winding += row[crossed].1;
-                    crossed += 1;
-                }
-                let at = field.index(i, j, k);
-                // Never exactly zero: a point on the surface takes its side
-                // from the count like any other, rather than being a `-0`
-                // that reads as outside.
-                let d = field.values[at].clamp(1e-5 * h, 3.0 * h);
-                // Wound in either way: a mesh whose faces point inward is
-                // still a solid.
-                field.values[at] = if winding != 0 { -d } else { d };
-            }
-        }
+    surface_nets(&field).ok_or(RemeshError::Empty)
+}
+
+/// The surface where `field` crosses zero, by surface nets: one vertex in
+/// each voxel the surface passes through, at the middle of where it crosses
+/// the voxel's edges, and one square across every grid edge it crosses.
+/// Facing out, from negative to positive. `None` when it crosses nowhere.
+pub fn surface_nets(field: &Field) -> Option<MeshData> {
+    let dims = field.dims;
+    if dims.iter().any(|d| *d < 2) {
+        return None;
     }
     // 3. Surface nets.
     let cells = [dims[0] - 1, dims[1] - 1, dims[2] - 1];
@@ -335,9 +364,9 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
         }
     }
     if faces.is_empty() {
-        return Err(RemeshError::Empty);
+        return None;
     }
-    Ok(MeshData::from_faces(positions, &faces))
+    Some(MeshData::from_faces(positions, &faces))
 }
 
 #[cfg(test)]

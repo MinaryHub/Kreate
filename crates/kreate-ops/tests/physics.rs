@@ -343,3 +343,50 @@ fn the_world_takes_its_settings() {
     assert_eq!(doc.physics.gravity.z, -1.62);
     assert_eq!(doc.physics.frame_end, 100);
 }
+
+#[test]
+fn a_liquid_is_set_up_baked_and_undone_by_operators() {
+    let (registry, mut history, mut doc) = wired();
+    doc.physics.frame_end = 12;
+    let tank = add(&mut doc, "Tank", kreate_mesh::primitives::cube(2.0), 1.0);
+    let water = add(&mut doc, "Water", kreate_mesh::primitives::cube(0.8), 1.4);
+    select(&mut doc, tank);
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.fluid_set",
+        &[
+            ("role", PropertyValue::Enum(1)),
+            ("resolution", PropertyValue::Int(12)),
+        ]
+    ));
+    select(&mut doc, water);
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.fluid_set",
+        &[("role", PropertyValue::Enum(2))]
+    ));
+    assert!(matches!(
+        doc.object(tank).unwrap().physics.fluid,
+        Some(kreate_scene::physics::Fluid::Domain(d)) if d.resolution == 12
+    ));
+    assert!(run(&registry, &mut history, &mut doc, "physics.bake", &[]));
+    assert_eq!(doc.physics_cache.fluid.len(), 1);
+    assert_eq!(doc.physics_cache.fluid[0].frames.len(), 12);
+    assert!(history.undo(&mut doc));
+    assert!(doc.physics_cache.is_empty(), "the bake is undone");
+    // And the water is nothing again. (After an undo the new step takes the
+    // redo's place, so ask the document rather than the history.)
+    select(&mut doc, water);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.fluid_set",
+        &[("role", PropertyValue::Enum(0))],
+    );
+    assert!(doc.object(water).unwrap().physics.fluid.is_none());
+}

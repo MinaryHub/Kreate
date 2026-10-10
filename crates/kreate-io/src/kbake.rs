@@ -11,16 +11,23 @@
 //! u32 rigid   { u64 uid  u32 frames  frames × (3 f64 translation, 4 f64 rotation, 3 f64 scale) }
 //! u32 soft    { u64 uid  u32 frames  u32 verts  frames × verts × 3 f32 }
 //! u32 systems { u64 uid  u32 system  u32 frames  frames × (u32 n  n × 6 f32) }
+//! u32 liquids { u64 uid  u32 frames  frames × (u32 verts  verts × 3 f32
+//!                                              u32 faces  faces × (u32 n  n × u32)) }
 //! ```
+//!
+//! The liquids came in version 2; a version 1 bake has none and still reads.
 
 use std::sync::Arc;
 
 use kreate_math::{DQuat, DTransform, DVec3, Vec3};
-use kreate_scene::physics::{Particle, ParticleTrack, PhysicsCache, RigidTrack, SoftTrack};
+use kreate_mesh::MeshData;
+use kreate_scene::physics::{
+    FluidTrack, Particle, ParticleTrack, PhysicsCache, RigidTrack, SoftTrack,
+};
 use kreate_scene::Uid;
 
 const MAGIC: &[u8; 6] = b"KBAKE\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 pub fn write(cache: &PhysicsCache) -> Vec<u8> {
     let mut out = Vec::new();
@@ -77,6 +84,27 @@ pub fn write(cache: &PhysicsCache) -> Vec<u8> {
             }
         }
     }
+    u32_(&mut out, cache.fluid.len());
+    for t in &cache.fluid {
+        out.extend_from_slice(&t.object.raw().to_le_bytes());
+        u32_(&mut out, t.frames.len());
+        for m in &t.frames {
+            u32_(&mut out, m.num_verts() as usize);
+            for p in m.positions() {
+                for v in p.to_array() {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            u32_(&mut out, m.num_faces() as usize);
+            for f in 0..m.num_faces() {
+                let ring = m.face_verts(f);
+                u32_(&mut out, ring.len());
+                for v in ring {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+    }
     out
 }
 
@@ -117,7 +145,11 @@ impl Reader<'_> {
 /// The bake in `bytes`, or `None` when it is not one this build can read.
 pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
     let mut r = Reader { bytes, at: 0 };
-    if r.take(6)? != MAGIC || r.u32()? != VERSION {
+    if r.take(6)? != MAGIC {
+        return None;
+    }
+    let version = r.u32()?;
+    if !(1..=VERSION).contains(&version) {
         return None;
     }
     let start = r.i32()?;
@@ -180,6 +212,39 @@ pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
             frames,
         });
     }
+    if version >= 2 {
+        for _ in 0..r.count(12)? {
+            let object = Uid::from_raw(r.u64()?);
+            let n = r.count(8)?;
+            let mut frames = Vec::with_capacity(n);
+            for _ in 0..n {
+                let verts = r.count(12)?;
+                let mut positions = Vec::with_capacity(verts);
+                for _ in 0..verts {
+                    positions.push(Vec3::new(r.f32()?, r.f32()?, r.f32()?));
+                }
+                let faces = r.count(4)?;
+                let mut rings = Vec::with_capacity(faces);
+                for _ in 0..faces {
+                    let len = r.count(4)?;
+                    let mut ring = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        let v = r.u32()?;
+                        if v as usize >= verts {
+                            return None;
+                        }
+                        ring.push(v);
+                    }
+                    if len < 3 {
+                        return None;
+                    }
+                    rings.push(ring);
+                }
+                frames.push(Arc::new(MeshData::from_faces(positions, &rings)));
+            }
+            cache.fluid.push(FluidTrack { object, frames });
+        }
+    }
     Some(cache)
 }
 
@@ -219,6 +284,13 @@ mod tests {
                     }]),
                 ],
             }],
+            fluid: vec![FluidTrack {
+                object: Uid::from_raw(4),
+                frames: vec![
+                    Arc::new(MeshData::from_faces(Vec::new(), &[])),
+                    Arc::new(kreate_mesh::primitives::cube(1.0)),
+                ],
+            }],
         }
     }
 
@@ -235,6 +307,32 @@ mod tests {
             &*back.particles[0].frames[1],
             &*cache.particles[0].frames[1]
         );
+        let (a, b) = (&back.fluid[0].frames[1], &cache.fluid[0].frames[1]);
+        assert_eq!(back.fluid[0].object, Uid::from_raw(4));
+        assert_eq!(back.fluid[0].frames[0].num_verts(), 0);
+        assert_eq!(a.positions(), b.positions());
+        assert_eq!(
+            (0..a.num_faces())
+                .map(|f| a.face_verts(f).to_vec())
+                .collect::<Vec<_>>(),
+            (0..b.num_faces())
+                .map(|f| b.face_verts(f).to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_bake_from_before_liquids_still_reads() {
+        let mut bytes = write(&PhysicsCache {
+            fluid: Vec::new(),
+            ..sample()
+        });
+        // Version 1 ended where the liquids' count begins.
+        bytes.truncate(bytes.len() - 4);
+        bytes[6..10].copy_from_slice(&1u32.to_le_bytes());
+        let back = read(&bytes).expect("a version 1 bake");
+        assert_eq!(back.rigid, sample().rigid);
+        assert!(back.fluid.is_empty());
     }
 
     #[test]

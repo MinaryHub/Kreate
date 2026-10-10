@@ -12,11 +12,13 @@ use kreate_math::{DAffine3, DQuat, DTransform, DVec3};
 use kreate_reflect::Uid;
 
 use super::collide::Collider;
+use super::fluid::{world_triangles, LiquidSim};
 use super::particles::{HairSim, ParticleSim};
 use super::rigid::{Body, RigidWorld};
 use super::soft::SoftSim;
 use super::{
-    BodyKind, CollisionShape, ParticleKind, ParticleTrack, PhysicsCache, RigidTrack, SoftTrack,
+    BodyKind, CollisionShape, FluidTrack, ParticleKind, ParticleTrack, PhysicsCache, RigidTrack,
+    SoftTrack,
 };
 use crate::document::{Document, ObjectId};
 use crate::modifier::{EvalCtx, ModifierCache};
@@ -28,6 +30,7 @@ pub struct BakeSummary {
     pub rigid: usize,
     pub soft: usize,
     pub particles: usize,
+    pub fluid: usize,
 }
 
 /// A rigid body being baked, and how to turn where it is into its object's
@@ -62,6 +65,27 @@ type Frames<T> = Vec<Arc<[T]>>;
 type Baking = (ObjectId, Uid, SoftSim, Frames<kreate_math::Vec3>);
 /// A particle system being baked: its object, which system, the sim.
 type Emitting<S> = (ObjectId, Uid, usize, S, Frames<super::Particle>);
+
+/// A liquid domain being baked.
+struct Liquid {
+    object: ObjectId,
+    uid: Uid,
+    sim: LiquidSim,
+    frames: Vec<Arc<kreate_mesh::MeshData>>,
+}
+
+/// The liquid's surface in the domain object's own space: empty when there
+/// is no liquid, so an emptied domain shows nothing rather than its box.
+fn surface_of(sim: &LiquidSim, world: DAffine3) -> Arc<kreate_mesh::MeshData> {
+    let mut mesh = sim
+        .surface()
+        .unwrap_or_else(|| kreate_mesh::MeshData::from_faces(Vec::new(), &[]));
+    let back = world.inverse();
+    for p in mesh.positions_mut() {
+        *p = back.transform_point3(p.as_dvec3()).as_vec3();
+    }
+    Arc::new(mesh)
+}
 
 /// The object's transform that puts it at `world`, given its parent.
 fn local_for(doc: &Document, id: ObjectId, world: DAffine3) -> DTransform {
@@ -99,9 +123,14 @@ pub fn bake_with(
     let mut eval = ModifierCache::new();
     let ctx = EvalCtx::still();
 
+    // Liquid flows count hidden too: a tap is usually kept out of sight.
     let ids: Vec<ObjectId> = scene
         .objects()
-        .filter(|(id, o)| o.mesh().is_some() && !o.physics.is_empty() && scene.is_shown(*id))
+        .filter(|(id, o)| {
+            o.mesh().is_some()
+                && !o.physics.is_empty()
+                && (scene.is_shown(*id) || o.physics.fluid.is_some())
+        })
         .map(|(id, _)| id)
         .collect();
 
@@ -213,6 +242,64 @@ pub fn bake_with(
         }
     }
 
+    // Liquids: each domain with every flow in the scene, and every collision
+    // object but itself for its obstacles.
+    let mut obstacles: Vec<(ObjectId, Arc<kreate_mesh::MeshData>)> = Vec::new();
+    let mut flows: Vec<(super::FluidFlow, Vec<[kreate_math::Vec3; 3]>)> = Vec::new();
+    for &id in &ids {
+        let Some(o) = scene.object(id) else { continue };
+        let Some(mesh) = eval.evaluated_base(&scene, id, &ctx) else {
+            continue;
+        };
+        if o.physics.collision.is_some() {
+            obstacles.push((id, mesh.clone()));
+        }
+        if let Some(super::Fluid::Flow(flow)) = o.physics.fluid {
+            flows.push((flow, world_triangles(&mesh, scene.world_transform(id))));
+        }
+    }
+    let mut liquids: Vec<Liquid> = Vec::new();
+    for &id in &ids {
+        let Some(o) = scene.object(id) else { continue };
+        let Some(super::Fluid::Domain(domain)) = o.physics.fluid else {
+            continue;
+        };
+        let Some(mesh) = eval.evaluated_base(&scene, id, &ctx) else {
+            continue;
+        };
+        let w = scene.world_transform(id);
+        let bounds = kreate_math::Aabb::from_points(
+            mesh.positions()
+                .iter()
+                .map(|p| w.transform_point3(p.as_dvec3()).as_vec3()),
+        );
+        if bounds.is_empty() {
+            continue;
+        }
+        let mut sim = LiquidSim::new(bounds, domain.resolution, domain.flip, o.uid.raw());
+        let walls: Vec<Vec<[kreate_math::Vec3; 3]>> = obstacles
+            .iter()
+            .filter(|(o, _)| *o != id)
+            .map(|(o, m)| world_triangles(m, scene.world_transform(*o)))
+            .collect();
+        sim.set_obstacles(&walls);
+        for (flow, tris) in &flows {
+            let speed = flow.velocity.as_vec3();
+            match flow.kind {
+                super::FlowKind::Geometry => sim.fill(tris, speed),
+                super::FlowKind::Inflow => sim.add_inflow(tris, speed),
+                super::FlowKind::Outflow => sim.add_outflow(tris),
+            }
+        }
+        let first = surface_of(&sim, w);
+        liquids.push(Liquid {
+            object: id,
+            uid: o.uid,
+            sim,
+            frames: vec![first],
+        });
+    }
+
     let total = (end - start) as usize;
     for frame in start + 1..=end {
         if !progress((frame - start - 1) as usize, total) {
@@ -292,6 +379,26 @@ pub fn bake_with(
             sim.advance(dt, substeps, settings.gravity, w, &near);
             frames.push(sim.snapshot(w).into());
         }
+        for liquid in liquids.iter_mut() {
+            // Obstacles where they are this frame: a paddle sweeps.
+            let walls: Vec<Vec<[kreate_math::Vec3; 3]>> = obstacles
+                .iter()
+                .filter(|(o, _)| *o != liquid.object)
+                .map(|(o, m)| {
+                    let w = tracked
+                        .iter()
+                        .find(|t| t.object == *o)
+                        .map_or_else(|| scene.world_transform(*o), |t| t.now);
+                    world_triangles(m, w)
+                })
+                .collect();
+            if !walls.is_empty() {
+                liquid.sim.set_obstacles(&walls);
+            }
+            liquid.sim.advance(dt as f32, settings.gravity.as_vec3());
+            let w = scene.world_transform(liquid.object);
+            liquid.frames.push(surface_of(&liquid.sim, w));
+        }
     }
 
     let summary = BakeSummary {
@@ -299,6 +406,7 @@ pub fn bake_with(
         rigid: tracked.len(),
         soft: softs.len(),
         particles: emitters.len() + hairs.len(),
+        fluid: liquids.len(),
     };
     let cache = PhysicsCache {
         start,
@@ -328,6 +436,13 @@ pub fn bake_with(
                 object,
                 system,
                 frames,
+            })
+            .collect(),
+        fluid: liquids
+            .into_iter()
+            .map(|l| FluidTrack {
+                object: l.uid,
+                frames: l.frames,
             })
             .collect(),
     };
@@ -681,5 +796,54 @@ mod tests {
             before.num_faces() + 50 * 8,
             "fifty diamonds"
         );
+    }
+
+    #[test]
+    fn a_liquid_falls_in_its_domain_and_the_domain_shows_it() {
+        use crate::physics::{Fluid, FluidDomain, FluidFlow};
+        let mut doc = Document::new();
+        short(&mut doc, 24);
+        let domain = add(
+            &mut doc,
+            "Domain",
+            kreate_mesh::primitives::cube(2.0),
+            DVec3::new(0.0, 0.0, 1.0),
+        );
+        let water = add(
+            &mut doc,
+            "Water",
+            kreate_mesh::primitives::cube(0.8),
+            DVec3::new(-0.5, 0.0, 1.4),
+        );
+        doc.object_mut(domain).unwrap().physics.fluid = Some(Fluid::Domain(FluidDomain {
+            resolution: 16,
+            ..Default::default()
+        }));
+        doc.object_mut(water).unwrap().physics.fluid = Some(Fluid::Flow(FluidFlow::default()));
+        let (cache, summary) = bake(&doc);
+        assert_eq!(summary.fluid, 1);
+        assert_eq!(cache.fluid[0].frames.len(), 24);
+        let top =
+            |m: &kreate_mesh::MeshData| m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        // In the domain's own space, which sits a metre up.
+        let (first, last) = (&cache.fluid[0].frames[0], &cache.fluid[0].frames[23]);
+        assert!(first.num_faces() > 0 && last.num_faces() > 0);
+        assert!(
+            top(last) < top(first) - 0.2,
+            "{} from {}",
+            top(last),
+            top(first)
+        );
+
+        let uid = doc.object(domain).unwrap().uid;
+        doc.physics_cache = Arc::new(cache);
+        doc.animate(24.0);
+        let shown = ModifierCache::new()
+            .evaluated(&doc, domain, &EvalCtx::still())
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &shown,
+            doc.physics_cache.fluid_at(uid, 24.0).unwrap()
+        ));
     }
 }

@@ -1567,6 +1567,9 @@ struct Labels {
     physics_passive: String,
     physics_cloth: String,
     physics_soft: String,
+    physics_liquid_domain: String,
+    physics_liquid: String,
+    physics_liquid_inflow: String,
     physics_collision: String,
     physics_particles: String,
     physics_bake_menu: String,
@@ -1910,6 +1913,9 @@ impl Labels {
             physics_passive: t("menu-physics-passive"),
             physics_cloth: t("menu-physics-cloth"),
             physics_soft: t("menu-physics-soft"),
+            physics_liquid_domain: t("menu-physics-liquid-domain"),
+            physics_liquid: t("menu-physics-liquid"),
+            physics_liquid_inflow: t("menu-physics-liquid-inflow"),
             physics_collision: t("menu-physics-collision"),
             physics_particles: t("physics-add-emitter"),
             physics_bake_menu: t("menu-physics-bake"),
@@ -2474,6 +2480,22 @@ fn physics_node(l: &Labels) -> MenuNode {
             .variant("kind", V::Enum(kind)),
         )
     };
+    // A liquid's domain, the liquid itself, or a tap: Blender's Quick Liquid
+    // made of its parts, since the parts are what the user arranges.
+    let liquid = |label: &str, role: u32, flow: u32| {
+        MenuNode::Entry(
+            MenuEntry::new(
+                "physics.fluid_set",
+                label,
+                op(
+                    "physics.fluid_set",
+                    &[("role", V::Enum(role)), ("flow", V::Enum(flow))],
+                ),
+            )
+            .variant("role", V::Enum(role))
+            .variant("flow", V::Enum(flow)),
+        )
+    };
     MenuNode::Sub(
         l.menu_physics.clone(),
         vec![
@@ -2481,6 +2503,9 @@ fn physics_node(l: &Labels) -> MenuNode {
             rigid(&l.physics_passive, 1),
             soft(&l.physics_cloth, 1),
             soft(&l.physics_soft, 2),
+            liquid(&l.physics_liquid_domain, 1, 0),
+            liquid(&l.physics_liquid, 2, 0),
+            liquid(&l.physics_liquid_inflow, 2, 1),
             MenuNode::Entry(MenuEntry::new(
                 "physics.collision_set",
                 &l.physics_collision,
@@ -5803,6 +5828,18 @@ fn draw_physics_tab(
                 "physics.soft_set",
                 soft.to_map(),
                 |n| ph::soft_param_applies(kind, n),
+            );
+            let fluid = ph::fluid_params(p.fluid.as_ref());
+            let (role, flow) = (fluid.role, fluid.flow);
+            let title = state.catalog.get("physics-liquid");
+            physics_panel(
+                ui,
+                state,
+                registry,
+                &title,
+                "physics.fluid_set",
+                fluid.to_map(),
+                |n| ph::fluid_param_applies(role, flow, n),
             );
             let title = state.catalog.get("physics-particles");
             kreate_ui::panel::section(ui, &title, true, |ui| {

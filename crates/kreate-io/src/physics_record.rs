@@ -9,8 +9,8 @@
 //! The bake is not here: it is large and a bake makes it again.
 
 use kreate_scene::physics::{
-    BodyKind, Collision, CollisionShape, ObjectPhysics, ParticleKind, ParticleSettings,
-    PhysicsWorld, RigidBody, SoftBody, SoftKind,
+    BodyKind, Collision, CollisionShape, FlowKind, Fluid, FluidDomain, FluidFlow, ObjectPhysics,
+    ParticleKind, ParticleSettings, PhysicsWorld, RigidBody, SoftBody, SoftKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +88,22 @@ pub struct ParticleRecord {
     pub show_emitter: bool,
 }
 
+/// An object's part in a liquid: a domain's settings, or a flow's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FluidRecord {
+    /// `domain` or `flow`.
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip: Option<f64>,
+    /// A flow's: `geometry`, `inflow` or `outflow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<[f64; 3]>,
+}
+
 /// An object's physics; absent from the file when it has none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhysicsRecord {
@@ -99,6 +115,8 @@ pub struct PhysicsRecord {
     pub soft: Option<SoftRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub particles: Vec<ParticleRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fluid: Option<FluidRecord>,
 }
 
 /// The scene's physics world; absent when it is the default.
@@ -185,6 +203,29 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 show_emitter: s.show_emitter,
             })
             .collect(),
+        fluid: p.fluid.map(|f| match f {
+            Fluid::Domain(d) => FluidRecord {
+                role: "domain".into(),
+                resolution: Some(d.resolution),
+                flip: Some(d.flip),
+                flow: None,
+                velocity: None,
+            },
+            Fluid::Flow(f) => FluidRecord {
+                role: "flow".into(),
+                resolution: None,
+                flip: None,
+                flow: Some(
+                    match f.kind {
+                        FlowKind::Geometry => "geometry",
+                        FlowKind::Inflow => "inflow",
+                        FlowKind::Outflow => "outflow",
+                    }
+                    .into(),
+                ),
+                velocity: Some(f.velocity.to_array()),
+            },
+        }),
     })
 }
 
@@ -263,6 +304,35 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
                 show_emitter: p.show_emitter,
             })
             .collect(),
+        fluid: r.fluid.as_ref().map(|f| {
+            if f.role == "domain" {
+                let d = FluidDomain::default();
+                Fluid::Domain(FluidDomain {
+                    resolution: f
+                        .resolution
+                        .unwrap_or(d.resolution)
+                        .clamp(4, kreate_scene::physics::fluid::MAX_RESOLUTION),
+                    flip: f
+                        .flip
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(d.flip)
+                        .clamp(0.0, 1.0),
+                })
+            } else {
+                Fluid::Flow(FluidFlow {
+                    kind: match f.flow.as_deref() {
+                        Some("inflow") => FlowKind::Inflow,
+                        Some("outflow") => FlowKind::Outflow,
+                        _ => FlowKind::Geometry,
+                    },
+                    velocity: f
+                        .velocity
+                        .map(kreate_math::DVec3::from_array)
+                        .filter(|v| v.is_finite())
+                        .unwrap_or_default(),
+                })
+            }
+        }),
     }
 }
 
@@ -328,7 +398,19 @@ mod tests {
                 show_emitter: false,
                 ..ParticleSettings::new("Fur", ParticleKind::Hair)
             }],
+            fluid: Some(Fluid::Flow(FluidFlow {
+                kind: FlowKind::Inflow,
+                velocity: kreate_math::DVec3::new(0.5, 0.0, -2.0),
+            })),
         };
+        let domain = ObjectPhysics {
+            fluid: Some(Fluid::Domain(FluidDomain {
+                resolution: 48,
+                flip: 0.8,
+            })),
+            ..Default::default()
+        };
+        assert_eq!(read(&write(&domain).unwrap()), domain);
         let r = write(&p).unwrap();
         let json = serde_json::to_string(&r).unwrap();
         let back: PhysicsRecord = serde_json::from_str(&json).unwrap();

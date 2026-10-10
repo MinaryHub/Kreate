@@ -22,6 +22,8 @@
 //!   [`crate::modifier::ModifierCache`].
 //! - **Particles** and **hair** are geometry the emitter grows, also laid on
 //!   in evaluation.
+//! - A **liquid**'s record is its surface, a mesh per frame, which its
+//!   domain shows in place of its own box — see [`fluid`].
 //!
 //! The record is the document's, behind an `Arc`, so undo keeps it for the
 //! price of a pointer and a bake is one undo step. It is saved with the file
@@ -37,6 +39,7 @@
 
 pub mod bake;
 pub mod collide;
+pub mod fluid;
 pub mod particles;
 pub mod rigid;
 pub mod soft;
@@ -284,6 +287,53 @@ impl ParticleSettings {
     }
 }
 
+/// What a liquid's flow object does: Blender's Flow Behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlowKind {
+    /// Liquid where the mesh is, when the simulation starts.
+    #[default]
+    Geometry,
+    /// Liquid keeps pouring out of where the mesh is: a tap, a hose.
+    Inflow,
+    /// Liquid that runs into where the mesh is drains away.
+    Outflow,
+}
+
+/// The box a liquid is simulated in: Blender's fluid Domain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluidDomain {
+    /// Cells along the box's longest side. More is finer and slower.
+    pub resolution: u32,
+    /// 0 to 1: how much of its own motion the liquid keeps from step to
+    /// step. High is lively and splashy, low is calm and smooth.
+    pub flip: f64,
+}
+
+impl Default for FluidDomain {
+    fn default() -> Self {
+        Self {
+            resolution: 32,
+            flip: 0.95,
+        }
+    }
+}
+
+/// Where liquid comes from or goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FluidFlow {
+    pub kind: FlowKind,
+    /// The speed it starts with, metres a second, in the world.
+    pub velocity: DVec3,
+}
+
+/// An object's part in a liquid simulation. Obstacles are objects with
+/// [`Collision`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fluid {
+    Domain(FluidDomain),
+    Flow(FluidFlow),
+}
+
 /// Everything physical about one object. Empty for nearly all of them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObjectPhysics {
@@ -291,6 +341,7 @@ pub struct ObjectPhysics {
     pub collision: Option<Collision>,
     pub soft: Option<SoftBody>,
     pub particles: Vec<ParticleSettings>,
+    pub fluid: Option<Fluid>,
 }
 
 impl ObjectPhysics {
@@ -299,6 +350,7 @@ impl ObjectPhysics {
             && self.collision.is_none()
             && self.soft.is_none()
             && self.particles.is_empty()
+            && self.fluid.is_none()
     }
 }
 
@@ -359,6 +411,14 @@ pub struct ParticleTrack {
     pub frames: Vec<Arc<[Particle]>>,
 }
 
+/// A liquid domain's baked surface: a mesh a frame, in the domain object's
+/// own space, which is what the domain shows in place of its box.
+#[derive(Clone, Debug)]
+pub struct FluidTrack {
+    pub object: Uid,
+    pub frames: Vec<Arc<kreate_mesh::MeshData>>,
+}
+
 /// The baked result: see the module notes.
 #[derive(Clone, Debug, Default)]
 pub struct PhysicsCache {
@@ -367,11 +427,21 @@ pub struct PhysicsCache {
     pub rigid: Vec<RigidTrack>,
     pub soft: Vec<SoftTrack>,
     pub particles: Vec<ParticleTrack>,
+    pub fluid: Vec<FluidTrack>,
 }
 
 impl PhysicsCache {
     pub fn is_empty(&self) -> bool {
-        self.rigid.is_empty() && self.soft.is_empty() && self.particles.is_empty()
+        self.rigid.is_empty()
+            && self.soft.is_empty()
+            && self.particles.is_empty()
+            && self.fluid.is_empty()
+    }
+
+    /// The liquid surface a domain has at `frame`.
+    pub fn fluid_at(&self, object: Uid, frame: f64) -> Option<&Arc<kreate_mesh::MeshData>> {
+        let track = self.fluid.iter().find(|t| t.object == object)?;
+        track.frames.get(self.index(frame, track.frames.len())?)
     }
 
     /// Which entry of a track of `len` frames plays at `frame`: held at the

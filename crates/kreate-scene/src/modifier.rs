@@ -538,6 +538,12 @@ impl ModifierCache {
             return input;
         };
         let physics = &object.physics;
+        // A baked liquid domain is its surface, not its box.
+        if let Some(crate::physics::Fluid::Domain(_)) = physics.fluid {
+            if let Some(surface) = doc.physics_cache.fluid_at(object.uid, doc.playback.frame) {
+                return surface.clone();
+            }
+        }
         if physics.soft.is_none() && physics.particles.is_empty() {
             return input;
         }
