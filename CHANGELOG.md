@@ -21,6 +21,11 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- Sculpting by number: `sculpt.deform_region` pushes, swells, moves,
+  scales, flattens or smooths a ball- or egg-shaped region by so many
+  millimetres, fading to its rim, mirrored across X if asked and held by the
+  mask; `sculpt.crease_path` carves a groove or raises a ridge along a path
+  of points. What an assistant sculpts with.
 - The connector's `analyze_mesh` reads a mesh as a sculptor would — holes,
   broken surface, slivers, bumpy places, and where its halves differ —
   each with where it is, so an assistant knows where to work next.

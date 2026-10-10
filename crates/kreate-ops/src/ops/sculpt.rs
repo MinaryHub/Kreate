@@ -39,6 +39,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<FaceSetFromMask>();
     registry.register::<FaceSetVisibility>();
     registry.register::<VoxelRemesh>();
+    registry.register::<DeformRegion>();
+    registry.register::<CreasePath>();
 }
 
 fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
@@ -590,5 +592,465 @@ impl Operator for VoxelRemesh {
             *target = out;
         }
         Ok(OpResult::Finished)
+    }
+}
+// --- shaping by number ---------------------------------------------------------
+
+/// How much of a change a vertex `t` of the way out from the middle takes.
+fn fade(t: f64, curve: u32) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    match curve {
+        1 => 1.0 - t,
+        2 => 1.0,
+        3 => (1.0 - t).powi(3),
+        _ => {
+            let s = 1.0 - t;
+            s * s * (3.0 - 2.0 * s)
+        }
+    }
+}
+
+/// Each vertex's normal, from the faces round it, weighted by their area.
+fn vertex_normals(mesh: &kreate_mesh::MeshData) -> Vec<Vec3> {
+    let p = mesh.positions();
+    let mut out = vec![Vec3::ZERO; p.len()];
+    for f in 0..mesh.num_faces() {
+        let ring = mesh.face_verts(f);
+        for i in 1..ring.len().saturating_sub(1) {
+            let (a, b, c) = (ring[0] as usize, ring[i] as usize, ring[i + 1] as usize);
+            let n = (p[b] - p[a]).cross(p[c] - p[a]);
+            for v in [a, b, c] {
+                out[v] += n;
+            }
+        }
+    }
+    out.iter().map(|n| n.normalize_or_zero()).collect()
+}
+
+/// Each vertex's neighbours along the edges.
+fn neighbours(mesh: &kreate_mesh::MeshData) -> Vec<Vec<usize>> {
+    let n = mesh.num_verts() as usize;
+    let mut out = vec![Vec::new(); n];
+    for e in mesh.edges() {
+        let (a, b) = (e[0] as usize, e[1] as usize);
+        if a < n && b < n && a != b {
+            out[a].push(b);
+            out[b].push(a);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DeformRegionParams {
+    #[param(variants("push", "inflate", "move", "scale", "flatten", "smooth"))]
+    pub action: u32,
+    /// The region's middle, in the mesh's own coordinates.
+    #[param(unit = "length")]
+    pub center: [f64; 3],
+    #[param(unit = "length", min = 0.0)]
+    pub radius: f64,
+    /// The region stretched along each axis: (1, 1, 1) is a ball, (1, 1, 3)
+    /// a tall egg — a limb, a jaw line.
+    pub stretch: [f64; 3],
+    /// Push and inflate: metres along the normal, out positive. Scale: the
+    /// factor. Flatten and smooth: how much, 0 to 1.
+    pub amount: f64,
+    /// Move: how far, in the mesh's coordinates.
+    #[param(unit = "length")]
+    pub offset: [f64; 3],
+    #[param(variants("smooth", "linear", "constant", "sharp"))]
+    pub falloff: u32,
+    /// The same on the other side of X.
+    pub mirror_x: bool,
+}
+
+impl Default for DeformRegionParams {
+    fn default() -> Self {
+        Self {
+            action: 0,
+            center: [0.0; 3],
+            radius: 0.1,
+            stretch: [1.0; 3],
+            amount: 0.01,
+            offset: [0.0; 3],
+            falloff: 0,
+            mirror_x: false,
+        }
+    }
+}
+
+/// Shapes a region of the active mesh by number: pushes it out or in by so
+/// many millimetres, swells it, moves it, scales it, flattens or smooths it,
+/// fading to nothing at the region's rim. The sculpt mask holds what it
+/// covers. What an assistant sculpts with, where a brush is a gesture.
+pub struct DeformRegion;
+
+impl Operator for DeformRegion {
+    type Params = DeformRegionParams;
+    fn id() -> &'static str {
+        "sculpt.deform_region"
+    }
+    fn label() -> &'static str {
+        "Deform Region"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if params.radius <= 0.0 || !params.radius.is_finite() {
+            return Err(OpError::Failed("the region needs a radius".into()));
+        }
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let stretch = Vec3::new(
+            params.stretch[0].max(1e-6) as f32,
+            params.stretch[1].max(1e-6) as f32,
+            params.stretch[2].max(1e-6) as f32,
+        );
+        let mask = sculpt::mask_of(m);
+        let normals = vertex_normals(m);
+        let near = neighbours(m);
+        let before = m.positions().to_vec();
+        let mut after = before.clone();
+        let centers: Vec<Vec3> = {
+            let c = Vec3::new(
+                params.center[0] as f32,
+                params.center[1] as f32,
+                params.center[2] as f32,
+            );
+            if params.mirror_x && c.x.abs() > 1e-6 {
+                vec![c, Vec3::new(-c.x, c.y, c.z)]
+            } else {
+                vec![c]
+            }
+        };
+        let radius = params.radius as f32;
+        let mut touched = 0;
+        for (side, center) in centers.iter().enumerate() {
+            let mirrored = side == 1;
+            // How much of the change each vertex takes.
+            let share: Vec<f32> = before
+                .iter()
+                .zip(&mask)
+                .map(|(p, held)| {
+                    let t = ((*p - *center) / stretch).length() / radius;
+                    if t >= 1.0 {
+                        0.0
+                    } else {
+                        fade(t as f64, params.falloff) as f32 * (1.0 - held.clamp(0.0, 1.0))
+                    }
+                })
+                .collect();
+            let inside: Vec<usize> = (0..before.len()).filter(|v| share[*v] > 0.0).collect();
+            if inside.is_empty() {
+                continue;
+            }
+            touched += inside.len();
+            let amount = params.amount as f32;
+            match params.action {
+                // Out along the region's own facing, as a lump rises.
+                0 => {
+                    let facing = inside
+                        .iter()
+                        .map(|v| normals[*v] * share[*v])
+                        .sum::<Vec3>()
+                        .normalize_or_zero();
+                    for &v in &inside {
+                        after[v] += facing * amount * share[v];
+                    }
+                }
+                1 => {
+                    for &v in &inside {
+                        after[v] += normals[v] * amount * share[v];
+                    }
+                }
+                2 => {
+                    let mut o = Vec3::new(
+                        params.offset[0] as f32,
+                        params.offset[1] as f32,
+                        params.offset[2] as f32,
+                    );
+                    if mirrored {
+                        o.x = -o.x;
+                    }
+                    for &v in &inside {
+                        after[v] += o * share[v];
+                    }
+                }
+                3 => {
+                    for &v in &inside {
+                        let scaled = *center + (before[v] - *center) * amount;
+                        after[v] += (scaled - before[v]) * share[v];
+                    }
+                }
+                // Onto the plane through the region's weighted middle, square
+                // to its facing.
+                4 => {
+                    let total: f32 = inside.iter().map(|v| share[*v]).sum();
+                    let middle = inside.iter().map(|v| before[*v] * share[*v]).sum::<Vec3>()
+                        / total.max(1e-9);
+                    let facing = inside
+                        .iter()
+                        .map(|v| normals[*v] * share[*v])
+                        .sum::<Vec3>()
+                        .normalize_or_zero();
+                    for &v in &inside {
+                        let lift = (before[v] - middle).dot(facing);
+                        after[v] -= facing * lift * amount.clamp(0.0, 1.0) * share[v];
+                    }
+                }
+                _ => {
+                    let strength = amount.clamp(0.0, 1.0);
+                    for _ in 0..4 {
+                        let now = after.clone();
+                        for &v in &inside {
+                            if near[v].is_empty() {
+                                continue;
+                            }
+                            let mean = near[v].iter().map(|u| now[*u]).sum::<Vec3>()
+                                / near[v].len() as f32;
+                            after[v] += (mean - now[v]) * strength * share[v];
+                        }
+                    }
+                }
+            }
+        }
+        if touched == 0 {
+            return Err(OpError::Failed("no vertex is inside the region".into()));
+        }
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        m.positions_mut().copy_from_slice(&after);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct CreasePathParams {
+    /// The path, three numbers a point, in the mesh's own coordinates.
+    pub points: Vec<f64>,
+    /// How far either side of the path the crease reaches.
+    #[param(unit = "length", min = 0.0)]
+    pub radius: f64,
+    /// Metres into the surface along the path; negative raises a ridge.
+    #[param(unit = "length")]
+    pub depth: f64,
+    /// How sharp the bottom of the groove is, 0 (round) to 1 (a cut).
+    #[param(min = 0.0, max = 1.0)]
+    pub sharpness: f64,
+    pub mirror_x: bool,
+}
+
+impl Default for CreasePathParams {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            radius: 0.01,
+            depth: 0.003,
+            sharpness: 0.5,
+            mirror_x: false,
+        }
+    }
+}
+
+/// A groove or a ridge along a path of points — a lip line, a brow, the
+/// edge of a muscle — so many millimetres deep, fading out to `radius`.
+pub struct CreasePath;
+
+impl Operator for CreasePath {
+    type Params = CreasePathParams;
+    fn id() -> &'static str {
+        "sculpt.crease_path"
+    }
+    fn label() -> &'static str {
+        "Crease Along a Path"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let path: Vec<Vec3> = params
+            .points
+            .chunks_exact(3)
+            .map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32))
+            .collect();
+        if path.is_empty() || params.radius <= 0.0 {
+            return Err(OpError::Failed(
+                "a path of points and a radius are needed".into(),
+            ));
+        }
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mask = sculpt::mask_of(m);
+        let normals = vertex_normals(m);
+        let before = m.positions().to_vec();
+        let mut after = before.clone();
+        let radius = params.radius as f32;
+        // Sharper means the depth stays near the path and falls off fast.
+        let power = 1.0 + params.sharpness.clamp(0.0, 1.0) as f32 * 4.0;
+        let mut paths = vec![path.clone()];
+        if params.mirror_x {
+            paths.push(path.iter().map(|p| Vec3::new(-p.x, p.y, p.z)).collect());
+        }
+        let mut touched = 0;
+        for path in &paths {
+            for (v, p) in before.iter().enumerate() {
+                let d = if path.len() == 1 {
+                    p.distance(path[0])
+                } else {
+                    path.windows(2)
+                        .map(|w| {
+                            let (a, b) = (w[0], w[1]);
+                            let ab = b - a;
+                            let t = if ab.length_squared() > 0.0 {
+                                ((*p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            p.distance(a + ab * t)
+                        })
+                        .fold(f32::MAX, f32::min)
+                };
+                if d >= radius {
+                    continue;
+                }
+                let share = (1.0 - d / radius).powf(power) * (1.0 - mask[v].clamp(0.0, 1.0));
+                after[v] -= normals[v] * params.depth as f32 * share;
+                touched += 1;
+            }
+        }
+        if touched == 0 {
+            return Err(OpError::Failed(
+                "the path does not pass near the surface".into(),
+            ));
+        }
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        m.positions_mut().copy_from_slice(&after);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ball() -> (kreate_scene::Document, kreate_scene::MeshId) {
+        let mut d = kreate_scene::Document::new();
+        let id = d.add_mesh_object("Ball", kreate_mesh::primitives::uv_sphere(1.0, 48, 24));
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        let mesh = d.object(id).and_then(|o| o.mesh()).expect("mesh");
+        (d, mesh)
+    }
+
+    fn nearest(d: &kreate_scene::Document, mesh: kreate_scene::MeshId, to: Vec3) -> Vec3 {
+        let p = d.mesh(mesh).expect("mesh").positions();
+        *p.iter()
+            .min_by(|a, b| a.distance(to).total_cmp(&b.distance(to)))
+            .expect("one")
+    }
+
+    #[test]
+    fn a_region_is_pushed_out_by_so_much_and_its_mirror_with_it() {
+        let (mut d, mesh) = ball();
+        let mut edit = DocMut::new(&mut d);
+        DeformRegion::execute(
+            &DeformRegionParams {
+                center: [1.0, 0.0, 0.0],
+                radius: 0.4,
+                amount: 0.1,
+                mirror_x: true,
+                ..Default::default()
+            },
+            &mut edit,
+            &Context::default(),
+        )
+        .expect("ran");
+        let out = nearest(&d, mesh, Vec3::new(1.2, 0.0, 0.0));
+        assert!((out.x - 1.1).abs() < 0.01, "pushed out a tenth: {out}");
+        let mirrored = nearest(&d, mesh, Vec3::new(-1.2, 0.0, 0.0));
+        assert!(
+            (mirrored.x + 1.1).abs() < 0.01,
+            "and its mirror: {mirrored}"
+        );
+        let top = nearest(&d, mesh, Vec3::new(0.0, 0.0, 1.2));
+        assert!(
+            (top.z - 1.0).abs() < 1e-5,
+            "outside the region, untouched: {top}"
+        );
+    }
+
+    #[test]
+    fn a_crease_carves_along_its_path_and_the_mask_holds() {
+        let (mut d, mesh) = ball();
+        // The +Y half masked.
+        {
+            let m = d.mesh_mut(mesh).expect("mesh");
+            let held: Vec<f32> = m
+                .positions()
+                .iter()
+                .map(|p| if p.y > 0.0 { 1.0 } else { 0.0 })
+                .collect();
+            m.attributes_mut().insert(
+                kreate_mesh::sculpt::MASK,
+                kreate_mesh::attribute::Domain::Point,
+                kreate_mesh::attribute::AttrData::F32(Arc::new(held)),
+            );
+        }
+        // Along the surface, up and down through the vertex nearest -Y.
+        let start = nearest(&d, mesh, Vec3::new(0.0, -1.2, 0.0));
+        let points: Vec<f64> = [-0.4f32, 0.0, 0.4]
+            .iter()
+            .flat_map(|t| {
+                let p = (start + Vec3::new(0.0, 0.0, *t)).normalize();
+                [p.x as f64, p.y as f64, p.z as f64]
+            })
+            .collect();
+        let mut edit = DocMut::new(&mut d);
+        CreasePath::execute(
+            &CreasePathParams {
+                points,
+                radius: 0.15,
+                depth: 0.05,
+                sharpness: 1.0,
+                mirror_x: false,
+            },
+            &mut edit,
+            &Context::default(),
+        )
+        .expect("ran");
+        let carved = d.mesh(mesh).expect("mesh").positions()[d
+            .mesh(mesh)
+            .expect("mesh")
+            .positions()
+            .iter()
+            .position(|p| p.distance(start) < 0.06)
+            .expect("near")];
+        assert!(
+            carved.length() < 0.97,
+            "carved in on the open side: {carved}"
+        );
+        let held = nearest(&d, mesh, Vec3::new(0.0, 1.2, 0.0));
+        assert!((held.y - 1.0).abs() < 1e-5, "held by the mask: {held}");
     }
 }
