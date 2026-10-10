@@ -31,7 +31,39 @@ use kreate_input::keyfile::{self, KeyFile};
 /// elsewhere. Resolved from the environment rather than through a crate: the
 /// rule is three lines, and a dependency here would be the one place a config
 /// path could disagree with what the installer expects.
+/// Where a test keeps what the application would keep in the user's
+/// folders. Set once, by the tests, before anything is written: a test that
+/// saved a document, failed, or remembered a recent file wrote into the
+/// real settings and caches, and a hundred and forty stale sessions piled up
+/// in the autosave folder.
+static TEST_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Sends every settings and cache folder of this process under a temporary
+/// one. For tests; the first call decides.
+pub fn keep_to_a_test_folder() {
+    let _ = TEST_HOME.get_or_init(|| std::env::temp_dir().join("kreate-tests"));
+}
+
+/// The test folder, when this process is a test's: this crate's own tests,
+/// a test that asked, or any program Cargo built as a test — they all live
+/// in a `deps` folder, where the application never does.
+pub fn test_home() -> Option<PathBuf> {
+    let built_as_test = || {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.ends_with("deps")))
+            .unwrap_or(false)
+    };
+    if cfg!(test) || built_as_test() {
+        keep_to_a_test_folder();
+    }
+    TEST_HOME.get().cloned()
+}
+
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(home) = test_home() {
+        return Some(home.join("config"));
+    }
     if cfg!(windows) {
         std::env::var_os("APPDATA").map(|base| Path::new(&base).join("Kreate"))
     } else {

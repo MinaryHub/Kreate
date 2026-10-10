@@ -120,6 +120,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Tests keep to a temporary folder: a test that saved, failed or remembered
+  a recent file no longer writes into your settings, caches or autosaves,
+  where a hundred stale test sessions had piled up as recovery offers.
 - New, Open and a dropped document ask Save, Don't Save or Cancel when the
   open one has unsaved changes; Save saves first (asking where, if it has
   never been saved) and a save dialog closed leaves you where you were.

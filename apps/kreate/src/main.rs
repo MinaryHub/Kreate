@@ -13845,6 +13845,8 @@ mod tests {
 
     /// An application with no window, which is all the input state machine needs.
     fn app() -> App {
+        // Nothing a test does lands in the user's own folders.
+        kreate::prefs::keep_to_a_test_folder();
         let mut registry = OperatorRegistry::new();
         kreate_ops::register_builtin(&mut registry);
         let mut app = App::empty(Document::new(), "en-US", registry);

@@ -429,6 +429,9 @@ pub fn view_from_record(v: &serde_json::Value) -> Option<kreate_render::Camera> 
 }
 
 pub fn autosave_root() -> Option<PathBuf> {
+    if let Some(home) = crate::prefs::test_home() {
+        return Some(home.join("cache").join("autosave"));
+    }
     #[cfg(windows)]
     {
         std::env::var_os("LOCALAPPDATA")
