@@ -815,58 +815,7 @@ impl Library {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     continue;
                 };
-                let image = match source {
-                    Source::PolyHaven => cache_root().and_then(|root| {
-                        let dest = root.join("polyhaven").join("thumbs").join(format!("{id}_256.png"));
-                        if !dest.exists() {
-                            download(
-                                &format!(
-                                    "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=256&height=256"
-                                ),
-                                &dest,
-                            )
-                            .ok()?;
-                        }
-                        thumbnail_of(&std::fs::read(dest).ok()?)
-                    }),
-                    Source::AmbientCg => cache_root().and_then(|root| {
-                        let dest = root.join("ambientcg").join("thumbs").join(format!("{id}.png"));
-                        if !dest.exists() {
-                            download(
-                                &format!("https://acg-media.struffelproductions.com/file/ambientCG-Web/media/thumbnail/256-PNG/{id}.png"),
-                                &dest,
-                            )
-                            .ok()?;
-                        }
-                        thumbnail_of(&std::fs::read(dest).ok()?)
-                    }),
-                    // The picture a made model was made from, beside it.
-                    Source::Generated => path.and_then(|p| {
-                        thumbnail_of(&std::fs::read(p.with_extension("png")).ok()?)
-                    }),
-                    Source::PolyPizza => cache_root().and_then(|root| {
-                        let url = url?;
-                        if !safe_id(&id) {
-                            return None;
-                        }
-                        let dest = root.join("polypizza").join("thumbs").join(&id);
-                        if !dest.exists() {
-                            download(&url, &dest).ok()?;
-                        }
-                        thumbnail_of(&std::fs::read(dest).ok()?)
-                    }),
-                    Source::Local => path.and_then(|p| {
-                        let file = if p.is_dir() { local_maps(&p).color? } else { p };
-                        let ext = file.extension()?.to_string_lossy().to_lowercase();
-                        if ENVIRONMENTS.contains(&ext.as_str()) {
-                            return environment_thumbnail(&file);
-                        }
-                        if !IMAGES.contains(&ext.as_str()) {
-                            return None;
-                        }
-                        thumbnail_of(&std::fs::read(file).ok()?)
-                    }),
-                };
+                let image = thumbnail_now(&id, source, path, url);
                 let _ = tx.send(Event::Thumbnail { id, image });
                 wake();
             });
@@ -924,6 +873,83 @@ impl Library {
     pub fn poll(&self) -> Vec<Event> {
         self.rx.try_iter().collect()
     }
+}
+
+/// An asset's picture, here and now: fetched once and kept, or read from
+/// beside it. What the browser's workers ask, and the connector's search.
+pub fn thumbnail_now(
+    id: &str,
+    source: Source,
+    path: Option<PathBuf>,
+    url: Option<String>,
+) -> Option<Picture> {
+    let id = id.to_string();
+    match source {
+        Source::PolyHaven => cache_root().and_then(|root| {
+            let dest = root.join("polyhaven").join("thumbs").join(format!("{id}_256.png"));
+            if !dest.exists() {
+                download(
+                    &format!(
+                        "https://cdn.polyhaven.com/asset_img/thumbs/{id}.png?width=256&height=256"
+                    ),
+                    &dest,
+                )
+                .ok()?;
+            }
+            thumbnail_of(&std::fs::read(dest).ok()?)
+        }),
+        Source::AmbientCg => cache_root().and_then(|root| {
+            let dest = root.join("ambientcg").join("thumbs").join(format!("{id}.png"));
+            if !dest.exists() {
+                download(
+                    &format!("https://acg-media.struffelproductions.com/file/ambientCG-Web/media/thumbnail/256-PNG/{id}.png"),
+                    &dest,
+                )
+                .ok()?;
+            }
+            thumbnail_of(&std::fs::read(dest).ok()?)
+        }),
+        // The picture a made model was made from, beside it.
+        Source::Generated => path.and_then(|p| {
+            thumbnail_of(&std::fs::read(p.with_extension("png")).ok()?)
+        }),
+        Source::PolyPizza => cache_root().and_then(|root| {
+            let url = url?;
+            if !safe_id(&id) {
+                return None;
+            }
+            let dest = root.join("polypizza").join("thumbs").join(&id);
+            if !dest.exists() {
+                download(&url, &dest).ok()?;
+            }
+            thumbnail_of(&std::fs::read(dest).ok()?)
+        }),
+        Source::Local => path.and_then(|p| {
+            let file = if p.is_dir() { local_maps(&p).color? } else { p };
+            let ext = file.extension()?.to_string_lossy().to_lowercase();
+            if ENVIRONMENTS.contains(&ext.as_str()) {
+                return environment_thumbnail(&file);
+            }
+            if !IMAGES.contains(&ext.as_str()) {
+                return None;
+            }
+            thumbnail_of(&std::fs::read(file).ok()?)
+        }),
+    }
+}
+
+/// A picture as a PNG.
+pub fn picture_png(picture: &Picture) -> Option<Vec<u8>> {
+    let (w, h, pixels) = picture;
+    let image = image::RgbaImage::from_raw(*w, *h, pixels.clone())?;
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .ok()?;
+    Some(bytes)
 }
 
 /// One kind from one source, here and now: what [`Library::list`] does on a

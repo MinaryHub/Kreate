@@ -356,6 +356,7 @@ pub fn tools() -> Value {
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
                     "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
                     "animated": { "type": "boolean", "description": "Only models that move. Default false." },
+                    "thumbnails": { "type": "boolean", "description": "Also the pictures of the first six, to choose by looking. Default false." },
                     "limit": { "type": "integer", "description": "Default 20." }
                 },
                 "required": ["kind"]
@@ -370,7 +371,10 @@ pub fn tools() -> Value {
                     "id": { "type": "string" },
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
                     "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
-                    "resolution": { "type": "string", "enum": ["1k", "2k", "4k"], "description": "Texture size. Default 1k." }
+                    "resolution": { "type": "string", "enum": ["1k", "2k", "4k"], "description": "Texture size. Default 1k." },
+                    "location": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "A model: where the middle of its base goes, in metres. Default beside what is there." },
+                    "height": { "type": "number", "description": "A model: how tall to make it, in metres. Default the file's size." },
+                    "wait": { "type": "boolean", "description": "Answer when it has arrived (up to two minutes), with what was added — names, where each starts and its size. Default false: answer at once." }
                 },
                 "required": ["id", "kind"]
             }
@@ -515,9 +519,20 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "import_file" => ("import", pick(&["path"])),
         "search_assets" => (
             "assets",
-            pick(&["query", "kind", "source", "animated", "limit"]),
+            pick(&["query", "kind", "source", "animated", "thumbnails", "limit"]),
         ),
-        "add_asset" => ("add_asset", pick(&["id", "kind", "source", "resolution"])),
+        "add_asset" => (
+            "add_asset",
+            pick(&[
+                "id",
+                "kind",
+                "source",
+                "resolution",
+                "location",
+                "height",
+                "wait",
+            ]),
+        ),
         "save_file" => ("save", pick(&["path"])),
         "export_file" => ("export", pick(&["path"])),
         other => return Err((-32602, format!("no tool called `{other}`"))),
@@ -525,6 +540,24 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
     let answer = app.call(method, params);
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
+        // A search with pictures: each found one's picture before the list.
+        Ok(mut value) if method == "assets" && value.to_string().contains("png_base64") => {
+            let mut content = Vec::new();
+            if let Some(found) = value.get_mut("found").and_then(Value::as_array_mut) {
+                for item in found.iter_mut() {
+                    if let Some(png) = item.as_object_mut().and_then(|o| o.remove("png_base64")) {
+                        content
+                            .push(json!({ "type": "image", "data": png, "mimeType": "image/png" }));
+                        content.push(json!({
+                            "type": "text",
+                            "text": format!("above: {}", item.get("id").and_then(Value::as_str).unwrap_or("?")),
+                        }));
+                    }
+                }
+            }
+            content.push(json!({ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }));
+            json!({ "content": content })
+        }
         // The outlines' picture, and what was measured.
         Ok(mut value) if method == "silhouette" => {
             let data = value

@@ -701,6 +701,11 @@ struct App {
     /// Each answer's changes, by the history it began and ended at — what
     /// the chat panel's "undo this answer" takes back.
     chat_turns: Vec<ChatTurn>,
+    /// Where and how big an asset on its way is to land, and the connector
+    /// waiting to hear it has — by the asset's id while it downloads, then
+    /// by its file while it is read.
+    asset_wishes: std::collections::HashMap<String, ImportWish>,
+    import_wishes: std::collections::HashMap<std::path::PathBuf, ImportWish>,
     /// What goes with the next chat message: files picked or pasted. The
     /// panel shows `ui.chat_attachments`, made from this.
     chat_attachments: Vec<kreate::attach::Attachment>,
@@ -1023,6 +1028,8 @@ impl App {
             chat: None,
             chat_streaming: false,
             chat_turns: Vec::new(),
+            asset_wishes: std::collections::HashMap::new(),
+            import_wishes: std::collections::HashMap::new(),
             chat_attachments: Vec::new(),
             outbox: None,
             imports: std::sync::mpsc::channel(),
@@ -2897,6 +2904,14 @@ impl App {
 
     /// Every shown mesh's world box, low and high corner.
     fn mesh_boxes(&self) -> Vec<(DVec3, DVec3)> {
+        self.mesh_boxes_by_object()
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect()
+    }
+
+    /// The same, each with its object.
+    fn mesh_boxes_by_object(&self) -> Vec<(kreate_scene::ObjectId, (DVec3, DVec3))> {
         self.evaluated
             .iter()
             .filter_map(|(id, mesh)| {
@@ -2918,7 +2933,7 @@ impl App {
                     wlo = wlo.min(w);
                     whi = whi.max(w);
                 }
-                Some((wlo, whi))
+                Some((*id, (wlo, whi)))
             })
             .collect()
     }
@@ -4437,7 +4452,12 @@ impl App {
                     }
                     match *result {
                         Ok(r) => ready.push((*entry, r)),
-                        Err(why) => self.ui.asset_error = Some(why),
+                        Err(why) => {
+                            if let Some(mut wish) = self.asset_wishes.remove(&entry.id) {
+                                wish.answer(Err(why.clone()));
+                            }
+                            self.ui.asset_error = Some(why);
+                        }
                     }
                 }
             }
@@ -4455,8 +4475,12 @@ impl App {
     /// An asset's files are on the disk: add it as its kind says.
     fn add_asset(&mut self, entry: &kreate::assets::Entry, ready: kreate::assets::Ready) {
         use kreate::assets::Ready;
+        let mut wish = self.asset_wishes.remove(&entry.id);
         match ready {
             Ready::Model(path) => {
+                if let Some(wish) = wish.take() {
+                    self.import_wishes.insert(path.clone(), wish);
+                }
                 self.import_into(&path);
                 // Said where the user will see it, and in the console, which
                 // keeps it: a CC-BY model is theirs to use if they credit it.
@@ -4475,6 +4499,11 @@ impl App {
             }
             Ready::Hdri(path) => self.set_world_image_from(&path),
             Ready::Material(maps) => self.add_material_asset(&entry.name, &maps),
+        }
+        // A material or a light is done now; a model when it is read.
+        if let Some(mut wish) = wish {
+            let said = self.ui.status.clone().unwrap_or_default();
+            wish.answer(Ok(serde_json::json!({ "message": said })));
         }
     }
 
@@ -4824,8 +4853,30 @@ impl App {
             return;
         };
         for request in bridge.pending() {
+            // A search may wait on a slow source and on pictures: answered
+            // from a thread of its own, the window going on meanwhile.
+            if request.method == "assets" {
+                let folders = self.ui.asset_folders.clone();
+                std::thread::spawn(move || {
+                    let result = assets_search(&request.params, &folders);
+                    request.answer(result);
+                });
+                continue;
+            }
             let result = self.bridge_call(&request.method, &request.params);
-            request.answer(result);
+            // An asset asked for with `wait` is answered when it has landed.
+            let waiting = request.method == "add_asset"
+                && request.params.get("wait").and_then(|v| v.as_bool()) == Some(true);
+            match (&result, waiting) {
+                (Ok(value), true) => {
+                    let id = value["id"].as_str().unwrap_or_default().to_string();
+                    match self.asset_wishes.get_mut(&id) {
+                        Some(wish) => wish.reply = Some(request),
+                        None => request.answer(result),
+                    }
+                }
+                _ => request.answer(result),
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -5339,43 +5390,7 @@ impl App {
                     Ok(json!({ "message": said }))
                 }
             }
-            "assets" => {
-                use kreate::assets::{Kind, Source};
-                let kind = text("kind")
-                    .and_then(|k| Kind::from_tag(&k))
-                    .ok_or("`kind` is model, material or hdri")?;
-                let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-                    .ok_or("`source` is polyhaven, ambientcg, polypizza or local")?;
-                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                let query = text("query").unwrap_or_default();
-                let animated = params
-                    .get("animated")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let asked = kreate::assets::Query {
-                    text: query.clone(),
-                    animated,
-                };
-                let entries =
-                    kreate::assets::list_now(source, kind, &self.ui.asset_folders, &asked)?;
-                let found: Vec<serde_json::Value> = entries
-                    .iter()
-                    .filter(|e| source.searched() || e.matches(&query))
-                    .filter(|e| !animated || e.animated)
-                    .take(limit.clamp(1, 200))
-                    .map(|e| {
-                        json!({
-                            "id": e.id,
-                            "name": e.name,
-                            "tags": e.tags,
-                            "authors": e.authors,
-                            "licence": e.licence,
-                            "animated": e.animated,
-                        })
-                    })
-                    .collect();
-                Ok(json!({ "source": source.tag(), "kind": kind.tag(), "found": found }))
-            }
+            "assets" => assets_search(params, &self.ui.asset_folders),
             "add_asset" => {
                 use kreate::assets::{Kind, Source};
                 let kind = text("kind")
@@ -5394,12 +5409,32 @@ impl App {
                     .assets
                     .as_ref()
                     .ok_or("the asset library is not running")?;
+                let point = |key: &str| -> Option<DVec3> {
+                    let a = params.get(key)?.as_array()?;
+                    Some(DVec3::new(
+                        a.first()?.as_f64()?,
+                        a.get(1)?.as_f64()?,
+                        a.get(2)?.as_f64()?,
+                    ))
+                };
+                self.asset_wishes.insert(
+                    entry.id.clone(),
+                    ImportWish {
+                        location: point("location"),
+                        height: params
+                            .get("height")
+                            .and_then(|v| v.as_f64())
+                            .filter(|h| *h > 0.0),
+                        reply: None,
+                    },
+                );
                 if self.ui.asset_fetching.insert(entry.id.clone()) {
                     library.fetch(entry.clone(), resolution);
                 }
-                Ok(
-                    json!({ "message": format!("fetching {}; it is added when it arrives", entry.name) }),
-                )
+                Ok(json!({
+                    "id": entry.id,
+                    "message": format!("fetching {}; it is added when it arrives", entry.name),
+                }))
             }
             "import" => {
                 let path = text("path").ok_or("`path` is required")?;
@@ -7585,7 +7620,10 @@ impl App {
                     kreate_io::scene_file::prepare(&path, document);
                     Ok((path, bounds))
                 }
-                Err(why) => Err(format!("cannot import {}: {why}", path.display())),
+                Err(why) => Err((
+                    path.clone(),
+                    format!("cannot import {}: {why}", path.display()),
+                )),
             };
             let _ = tx.send(result);
             if let Some(wake) = wake {
@@ -7610,21 +7648,74 @@ impl App {
         for result in ready {
             match result {
                 Ok((path, bounds)) => {
+                    let mut wish = self.import_wishes.remove(&path).unwrap_or_default();
                     let mut params = PropertyMap::new();
                     params.set("path", PropertyValue::Text(path.display().to_string()));
                     if !bounds.is_empty() {
-                        let offset = clear_offset(
-                            (bounds.min.as_dvec3(), bounds.max.as_dvec3()),
-                            &self.mesh_boxes(),
-                        );
+                        // Scaled about the origin first, as the operator does.
+                        let (lo, hi) = (bounds.min.as_dvec3(), bounds.max.as_dvec3());
+                        let factor = match wish.height {
+                            Some(h) if hi.z - lo.z > 1e-9 => {
+                                params.set("height", PropertyValue::Float(h));
+                                h / (hi.z - lo.z)
+                            }
+                            _ => 1.0,
+                        };
+                        let (lo, hi) = (lo * factor, hi * factor);
+                        let offset = match wish.location {
+                            // Its base's middle on the spot asked for.
+                            Some(at) => {
+                                at - DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z)
+                            }
+                            None => clear_offset((lo, hi), &self.mesh_boxes()),
+                        };
                         params.set("offset", PropertyValue::Vec3(offset.to_array()));
                     }
+                    let before = self.history.cursor();
                     self.run_op("object.import", params);
+                    if wish.reply.is_some() {
+                        let answer = if self.history.cursor() > before {
+                            self.evaluate_scene();
+                            Ok(self.arrived_json())
+                        } else {
+                            Err(format!("{} could not be added", path.display()))
+                        };
+                        wish.answer(answer);
+                    }
                     self.status(&format!("added {}", path.display()));
                 }
-                Err(why) => self.status(&why),
+                Err((path, why)) => {
+                    if let Some(mut wish) = self.import_wishes.remove(&path) {
+                        wish.answer(Err(why.clone()));
+                    }
+                    self.status(&why);
+                }
             }
         }
+    }
+
+    /// What an import just added — it is the selection — by name, with
+    /// where each stands and how big it is.
+    fn arrived_json(&self) -> serde_json::Value {
+        let boxes: std::collections::HashMap<kreate_scene::ObjectId, (DVec3, DVec3)> =
+            self.mesh_boxes_by_object().into_iter().collect();
+        let objects: Vec<serde_json::Value> = self
+            .doc
+            .selection
+            .objects
+            .iter()
+            .filter_map(|id| {
+                let o = self.doc.object(*id)?;
+                let mut item = serde_json::json!({ "name": o.name });
+                if let Some((lo, hi)) = boxes.get(id) {
+                    let round = |v: DVec3| (v * 1000.0).round() / 1000.0;
+                    item["min"] = serde_json::json!(round(*lo).to_array());
+                    item["size"] = serde_json::json!(round(*hi - *lo).to_array());
+                }
+                Some(item)
+            })
+            .collect();
+        serde_json::json!({ "added": objects })
     }
 
     /// Loads an image and makes it the active material's base colour texture.
@@ -12457,6 +12548,91 @@ fn same_view(a: &kreate_render::Camera, b: &kreate_render::Camera) -> bool {
 const SCULPT_DENSE_ENOUGH: u32 = 1000;
 
 /// A scene file read for importing: its path, ready to add, or why not.
+/// The connector's search: one kind from one source, matched by words, and
+/// with `thumbnails` the first few's pictures — on whichever thread asks,
+/// since a source may be slow to answer and the pictures slower.
+fn assets_search(
+    params: &serde_json::Value,
+    folders: &[std::path::PathBuf],
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    let text = |key: &str| params.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    use kreate::assets::{Kind, Source};
+    let kind = text("kind")
+        .and_then(|k| Kind::from_tag(&k))
+        .ok_or("`kind` is model, material or hdri")?;
+    let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
+        .ok_or("`source` is polyhaven, ambientcg, polypizza or local")?;
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let query = text("query").unwrap_or_default();
+    let animated = params
+        .get("animated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let asked = kreate::assets::Query {
+        text: query.clone(),
+        animated,
+    };
+    let entries = kreate::assets::list_now(source, kind, folders, &asked)?;
+    // Pictures for the first few, when asked: what lets a model choose by
+    // looking rather than by name.
+    let pictures = params
+        .get("thumbnails")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let found: Vec<serde_json::Value> = entries
+        .iter()
+        .filter(|e| source.searched() || e.matches(&query))
+        .filter(|e| !animated || e.animated)
+        .take(limit.clamp(1, 200))
+        .enumerate()
+        .map(|(i, e)| {
+            let mut item = json!({
+                "id": e.id,
+                "name": e.name,
+                "tags": e.tags,
+                "authors": e.authors,
+                "licence": e.licence,
+                "animated": e.animated,
+            });
+            if pictures && i < 6 {
+                if let Some(png) = kreate::assets::thumbnail_now(
+                    &e.id,
+                    e.source,
+                    e.path.clone(),
+                    e.thumbnail_url.clone(),
+                )
+                .and_then(|p| kreate::assets::picture_png(&p))
+                {
+                    item["png_base64"] = json!(kreate::bridge::base64(&png));
+                }
+            }
+            item
+        })
+        .collect();
+    Ok(json!({ "source": source.tag(), "kind": kind.tag(), "found": found }))
+}
+
+/// Where an import is to land and how tall, and who is waiting for it.
+#[derive(Default)]
+struct ImportWish {
+    /// The middle of its base, in the world; beside what is there if none.
+    location: Option<DVec3>,
+    /// Its height in metres; the file's if none.
+    height: Option<f64>,
+    /// A connector call waiting to be told what arrived.
+    reply: Option<kreate::bridge::Request>,
+}
+
+impl ImportWish {
+    /// Tells whoever waits, once.
+    fn answer(&mut self, result: Result<serde_json::Value, String>) {
+        if let Some(reply) = self.reply.take() {
+            reply.answer(result);
+        }
+    }
+}
+
 /// One answer in the chat panel, by the undo history around it.
 struct ChatTurn {
     /// The history's cursor when the message was sent.
@@ -12470,7 +12646,7 @@ struct ChatTurn {
 
 /// A file read by an import thread: where it is and how much room the
 /// model takes, or why it could not be read.
-type ImportReady = Result<(std::path::PathBuf, kreate_math::Aabb), String>;
+type ImportReady = Result<(std::path::PathBuf, kreate_math::Aabb), (std::path::PathBuf, String)>;
 
 /// What became of one line of a script.
 struct ScriptLine {
@@ -13911,6 +14087,32 @@ mod tests {
                 &serde_json::json!({"kind": "model", "source": "local", "id": "nope"})
             )
             .is_err());
+
+        // Again, placed and sized: its base's middle at (3, 1, 0), two
+        // metres tall.
+        let before = app.doc.objects().count();
+        app.bridge_call(
+            "add_asset",
+            &serde_json::json!({"kind": "model", "source": "local", "id": id,
+                                "location": [3.0, 1.0, 0.0], "height": 2.0}),
+        )
+        .expect("asked for");
+        let start = std::time::Instant::now();
+        while app.doc.objects().count() == before && start.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.serve_assets();
+            app.serve_imports();
+        }
+        app.evaluate_scene();
+        let arrived = app.arrived_json();
+        let first = &arrived["added"][0];
+        let size = first["size"].as_array().expect("a size");
+        let min = first["min"].as_array().expect("a corner");
+        let f = |v: &serde_json::Value| v.as_f64().expect("a number");
+        assert!((f(&size[2]) - 2.0).abs() < 1e-3, "two metres tall: {first}");
+        assert!((f(&min[2])).abs() < 1e-3, "standing on the ground: {first}");
+        assert!((f(&min[0]) + f(&size[0]) / 2.0 - 3.0).abs() < 1e-3, "centred on x = 3: {first}");
+        assert!((f(&min[1]) + f(&size[1]) / 2.0 - 1.0).abs() < 1e-3, "and y = 1: {first}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

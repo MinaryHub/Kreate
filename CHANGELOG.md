@@ -21,6 +21,11 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector's asset tools see and place: `search_assets` can return the
+  first six's pictures, to choose by looking, and searches no longer hold
+  up the window; `add_asset` takes where a model's base goes and how tall
+  it should be, and with `wait` answers once it has landed with what was
+  added, where and how big.
 - The connector teaches its ways of working: its instructions now say when
   to reach for assets, AI generation, the sculpting loop (compare, shape,
   measure again), the rigging loop and the timeline; and it offers them as

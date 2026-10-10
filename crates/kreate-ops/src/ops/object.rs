@@ -1906,6 +1906,11 @@ pub struct ImportParams {
     /// rather than inside it — every asset is made at the origin, and a
     /// bottle imported after a barrel otherwise disappears into it.
     pub offset: [f64; 3],
+    /// How tall the model is made, in metres, scaled evenly about the
+    /// origin before it is moved; 0 keeps the file's size. Assets come in
+    /// every scale a maker chose.
+    #[param(unit = "length", min = 0.0)]
+    pub height: f64,
 }
 
 /// Adds a scene file's contents beside what is there: File ▸ Import, a
@@ -1944,6 +1949,16 @@ impl Operator for Import {
         if fragment.object_count() == 0 {
             return Ok(OpResult::Cancelled);
         }
+        // Scaled to the height asked for, measured as the file stands.
+        let factor = {
+            let bounds = fragment.world_bounds();
+            let tall = (bounds.max.z - bounds.min.z) as f64;
+            if params.height > 0.0 && !bounds.is_empty() && tall > 1e-9 {
+                params.height / tall
+            } else {
+                1.0
+            }
+        };
         let d = doc.document_mut();
         let added = d.merge_from(&fragment);
         if added.is_empty() {
@@ -1951,10 +1966,11 @@ impl Operator for Import {
         }
         // The roots only: a child rides on its parent.
         let offset = DVec3::from_array(params.offset);
-        if offset != DVec3::ZERO {
+        if offset != DVec3::ZERO || factor != 1.0 {
             for id in &added {
                 if let Some(object) = d.object_mut(*id).filter(|o| o.parent.is_none()) {
-                    object.transform.translation += offset;
+                    object.transform.translation = object.transform.translation * factor + offset;
+                    object.transform.scale *= factor;
                 }
             }
         }
