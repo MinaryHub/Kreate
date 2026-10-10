@@ -21,6 +21,11 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector's capture takes `views` — front, back, left, right, top,
+  bottom or the user's — and `only`, some objects alone, framed; and
+  `get_context` says in a breath what is selected (and how many vertices,
+  edges and faces in edit mode), where the cursor is and where the view
+  looks from: what "this" and "here" mean to an assistant.
 - The connector has a clock: `timeline` reads the frame, the range and
   every animated object with its takes, moves to a frame, plays or stops,
   and switches a take on or off with its timing kept — so an assistant can

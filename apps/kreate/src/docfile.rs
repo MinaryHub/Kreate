@@ -236,6 +236,16 @@ impl DocumentFile {
     }
 
     /// Records that the document changed, so autosave knows there is work to do.
+    /// Counts the document as unchanged since the last save, after a write
+    /// that was undone before anyone could see it — a capture that hid some
+    /// objects for its pictures and showed them again. The version moved; the
+    /// content did not.
+    pub fn still_saved(&mut self, document: &Document) {
+        self.saved_version = document.version();
+        self.autosaved_version = document.version();
+        self.changed = None;
+    }
+
     pub fn touch(&mut self, document: &Document) {
         let version = document.version();
         if version == self.autosaved_version {

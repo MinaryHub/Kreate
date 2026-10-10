@@ -5008,6 +5008,12 @@ impl App {
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
                 Ok(json!({ "steps": steps, "history_position": self.history.cursor() }))
             }
+            // From several sides at once, or of some objects alone: what an
+            // assistant needs to judge a shape it cannot turn round itself.
+            "capture" if params.get("views").is_some() || params.get("only").is_some() => {
+                self.capture_views(params)
+            }
+            "context" => Ok(self.context_json()),
             "capture" => {
                 let camera = match params.get("camera") {
                     Some(serde_json::Value::String(name)) if !name.is_empty() => {
@@ -5169,6 +5175,217 @@ impl App {
             }
             other => Err(format!("unknown method `{other}`")),
         }
+    }
+
+    /// Pictures from named sides — front, back, left, right, top, bottom,
+    /// or the user's own view — framed on the scene or on the objects named
+    /// in `only`, which are all that shows. The user's view and what they
+    /// had hidden come back afterwards.
+    fn capture_views(&mut self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        use kreate_render::ViewAxis;
+        use serde_json::json;
+        let names: Vec<String> = match params.get("views") {
+            Some(serde_json::Value::Array(v)) => v
+                .iter()
+                .filter_map(|n| n.as_str().map(str::to_lowercase))
+                .collect(),
+            _ => vec!["user".to_string()],
+        };
+        if names.is_empty() || names.len() > 6 {
+            return Err("`views` names one to six sides".into());
+        }
+        let axis_of = |name: &str| -> Result<Option<ViewAxis>, String> {
+            Ok(match name {
+                "front" => Some(ViewAxis::NegY),
+                "back" => Some(ViewAxis::PosY),
+                "right" => Some(ViewAxis::PosX),
+                "left" => Some(ViewAxis::NegX),
+                "top" => Some(ViewAxis::PosZ),
+                "bottom" => Some(ViewAxis::NegZ),
+                "user" => None,
+                other => {
+                    return Err(format!(
+                        "`{other}` is not a side: front, back, left, right, top, bottom or user"
+                    ))
+                }
+            })
+        };
+        let axes = names
+            .iter()
+            .map(|n| axis_of(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        // The others hidden for these pictures only.
+        let only: Option<Vec<String>> = params.get("only").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect()
+        });
+        if let Some(only) = &only {
+            for name in only {
+                if !self.doc.objects().any(|(_, o)| &o.name == name) {
+                    return Err(format!("no object called `{name}`"));
+                }
+            }
+        }
+        let was_saved = !self.file.is_modified(&self.doc);
+        let hidden: Vec<kreate_scene::ObjectId> = match &only {
+            Some(only) => self
+                .doc
+                .objects()
+                .filter(|(_, o)| o.visible && !only.contains(&o.name))
+                .map(|(id, _)| id)
+                .collect(),
+            None => Vec::new(),
+        };
+        for id in &hidden {
+            if let Some(o) = self.doc.object_mut(*id) {
+                o.visible = false;
+            }
+        }
+        let saved = (
+            self.camera,
+            self.motion,
+            self.camera_view,
+            self.camera_view_object,
+        );
+        self.motion.interrupt(&self.camera);
+        self.camera_view = None;
+        self.camera_view_object = None;
+        // Framed on the meshes that show: a lamp or a camera far off is
+        // part of the scene, not of the shape being looked at.
+        self.evaluate_scene();
+        let boxes = self.mesh_boxes();
+        let (center, radius) = match boxes
+            .iter()
+            .copied()
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+        {
+            Some((lo, hi)) => ((lo + hi) * 0.5, ((hi - lo).length() * 0.5).max(1e-3)),
+            None => {
+                let b = self.doc.world_bounds();
+                let c = b.center();
+                (
+                    DVec3::new(c.x as f64, c.y as f64, c.z as f64),
+                    b.bounding_radius().max(1e-3) as f64,
+                )
+            }
+        };
+        let aspect = self
+            .gfx
+            .as_ref()
+            .map(|g| g.viewport.aspect())
+            .unwrap_or(16.0 / 9.0);
+        let mut shots = Vec::new();
+        let mut failed = None;
+        for (name, axis) in names.iter().zip(&axes) {
+            let mut view = match axis {
+                Some(axis) => {
+                    let mut c = saved.0.looking_along(*axis);
+                    c.projection = kreate_render::Projection::Orthographic;
+                    c
+                }
+                None => saved.0,
+            };
+            // Framed on what shows when a side was asked for or the scene was
+            // narrowed; the user's view as it is otherwise.
+            if axis.is_some() || only.is_some() {
+                view.frame_sphere(center, radius, aspect);
+            }
+            self.camera = view;
+            self.motion.target = view;
+            self.redraw.set(RedrawReason::CAMERA_MOVED);
+            match self.capture_png() {
+                Ok((w, h, png)) => shots.push(json!({
+                    "view": name,
+                    "width": w,
+                    "height": h,
+                    "png_base64": kreate::bridge::base64(&png),
+                })),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        (
+            self.camera,
+            self.motion,
+            self.camera_view,
+            self.camera_view_object,
+        ) = saved;
+        for id in &hidden {
+            if let Some(o) = self.doc.object_mut(*id) {
+                o.visible = true;
+            }
+        }
+        if was_saved && !hidden.is_empty() {
+            self.file.still_saved(&self.doc);
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(json!({ "shots": shots })),
+        }
+    }
+
+    /// What the user is working on, in a breath: the mode, the selection
+    /// (and in edit mode how many vertices, edges and faces of it), the 3D
+    /// cursor, where the view looks from, the shading and the frame — what
+    /// "this", "here" and "make it rounder" refer to.
+    fn context_json(&self) -> serde_json::Value {
+        use kreate_mesh::attribute::names;
+        use serde_json::json;
+        let doc = &self.doc;
+        let name = |id: kreate_scene::ObjectId| doc.object(id).map(|o| o.name.clone());
+        let selected: Vec<String> = doc
+            .selection
+            .objects
+            .iter()
+            .filter_map(|id| name(*id))
+            .collect();
+        let elements = self
+            .op_ctx
+            .mode
+            .edits_elements()
+            .then(|| kreate_ops::ops::mesh::target_mesh(doc))
+            .flatten()
+            .and_then(|m| doc.mesh(m))
+            .map(|mesh| {
+                let count = |layer: &str| {
+                    mesh.attributes()
+                        .get_bool(layer)
+                        .map_or(0, |f| f.iter().filter(|b| **b).count())
+                };
+                json!({
+                    "vertices": count(names::SELECT_VERT),
+                    "edges": count(names::SELECT_EDGE),
+                    "faces": count(names::SELECT_FACE),
+                    "of_vertices": mesh.num_verts(),
+                    "of_faces": mesh.num_faces(),
+                })
+            });
+        let eye = self.camera.eye();
+        let looking = (self.camera.pivot - eye).normalize_or_zero();
+        json!({
+            "mode": self.op_ctx.mode.tag(),
+            "active": doc.selection.active.and_then(name),
+            "selected": selected,
+            "selected_elements": elements,
+            "cursor": doc.cursor.to_array(),
+            "view": {
+                "eye": eye.to_array(),
+                "looking": looking.to_array(),
+                "pivot": self.camera.pivot.to_array(),
+                "orthographic": self.camera.projection == kreate_render::Projection::Orthographic,
+                "through_camera": self.camera_view_object.and_then(name),
+                "shading": format!("{:?}", self.ui.view_status.shading),
+            },
+            "frame": doc.playback.frame,
+            "last_operation": self
+                .history
+                .last()
+                .map(|e| e.to_script_preview(kreate::shell::SCRIPT_PREVIEW)),
+        })
     }
 
     /// The clock, and every object that moves with what it plays.
@@ -13419,6 +13636,56 @@ mod tests {
         assert!(app.history.undo(&mut app.doc), "undone");
         assert_eq!(app.doc.objects().count(), before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several sides, or some objects alone: a bad side or name is said, and
+    /// whatever happens the objects hidden for the pictures come back and a
+    /// saved document stays saved.
+    #[test]
+    fn a_capture_of_some_objects_leaves_the_scene_as_it_was() {
+        let mut app = app();
+        app.doc
+            .add_mesh_object("Keep", kreate_mesh::primitives::cube(1.0));
+        let other = app
+            .doc
+            .add_mesh_object("Other", kreate_mesh::primitives::cube(1.0));
+        app.file.still_saved(&app.doc);
+        let ask = |app: &mut App, p: serde_json::Value| app.bridge_call("capture", &p);
+        let bad = ask(&mut app, serde_json::json!({ "views": ["sideways"] }));
+        assert!(bad.is_err_and(|e| e.contains("sideways")));
+        let missing = ask(&mut app, serde_json::json!({ "only": ["Nobody"] }));
+        assert!(missing.is_err_and(|e| e.contains("Nobody")));
+        // No window here, so the picture itself fails — after the hiding.
+        let shot = ask(
+            &mut app,
+            serde_json::json!({ "views": ["front", "top"], "only": ["Keep"] }),
+        );
+        assert!(shot.is_err(), "no window to draw in");
+        assert!(app.doc.object(other).expect("other").visible, "shown again");
+        assert!(!app.file.is_modified(&app.doc), "still saved");
+    }
+
+    #[test]
+    fn the_context_says_what_is_selected_and_where_the_view_looks() {
+        let mut app = app();
+        let id = app
+            .doc
+            .add_mesh_object("Chosen", kreate_mesh::primitives::cube(1.0));
+        app.doc.selection.clear();
+        app.doc.selection.add(id);
+        app.doc.selection.active = Some(id);
+        let context = app
+            .bridge_call("context", &serde_json::json!({}))
+            .expect("context");
+        assert_eq!(context["active"], "Chosen");
+        assert_eq!(context["selected"][0], "Chosen");
+        assert_eq!(context["mode"], "object");
+        let looking = &context["view"]["looking"];
+        let length = (0..3)
+            .map(|i| looking[i].as_f64().unwrap_or(0.0).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!((length - 1.0).abs() < 1e-6, "a direction: {looking}");
     }
 
     /// The connector's clock: read, moved, and a take switched on with its

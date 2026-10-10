@@ -156,9 +156,25 @@ pub fn tools() -> Value {
                         "description": "true for the active camera object or else the first camera, or a camera object's name.",
                         "type": ["boolean", "string"]
                     },
-                    "path": { "type": "string", "description": "Also write the PNG here: an absolute path." }
+                    "path": { "type": "string", "description": "Also write the PNG here: an absolute path." },
+                    "views": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["front", "back", "left", "right", "top", "bottom", "user"] },
+                        "description": "Several pictures at once, from these sides (orthographic, framed on what shows) or the user's view. Use front, right and top together to judge a shape in three dimensions."
+                    },
+                    "only": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Objects' names: show only these, framed, for these pictures. What the user had hidden or shown is left as it was."
+                    }
                 }
             },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "get_context",
+            "description": "What the user is working on now, briefly: the editing mode, the active and selected objects (and in edit mode how many vertices, edges and faces are selected), the 3D cursor, where the view looks from and which way, the shading, the frame and the last operation. Read it first when the user says \"this\", \"here\" or \"the selected one\".",
+            "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
@@ -323,7 +339,8 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "get_scene" => ("scene", json!({})),
         "list_operators" => ("operators", pick(&["filter"])),
         "run_script" => ("run", pick(&["script"])),
-        "capture_viewport" => ("capture", pick(&["camera", "path"])),
+        "capture_viewport" => ("capture", pick(&["camera", "path", "views", "only"])),
+        "get_context" => ("context", json!({})),
         "check_overlaps" => ("overlaps", pick(&["tolerance", "exact"])),
         "get_mesh" => (
             "mesh",
@@ -353,6 +370,27 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
     let answer = app.call(method, params);
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
+        // Several pictures: each, then what it is of.
+        Ok(value) if method == "capture" && value.get("shots").is_some() => {
+            let mut content = Vec::new();
+            for shot in value["shots"].as_array().into_iter().flatten() {
+                content.push(json!({
+                    "type": "image",
+                    "data": shot.get("png_base64").and_then(Value::as_str).unwrap_or(""),
+                    "mimeType": "image/png",
+                }));
+                content.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "{} view, {} x {}",
+                        shot.get("view").and_then(Value::as_str).unwrap_or("?"),
+                        shot.get("width").unwrap_or(&json!(0)),
+                        shot.get("height").unwrap_or(&json!(0)),
+                    ),
+                }));
+            }
+            json!({ "content": content })
+        }
         Ok(value) if method == "capture" || method == "render" => {
             let data = value
                 .get("png_base64")
