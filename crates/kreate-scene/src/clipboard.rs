@@ -137,6 +137,7 @@ impl Document {
                 copy.parent = Some(*new_parent);
             }
         }
+        out.repoint_references(self, &new_ids);
         out
     }
 
@@ -246,7 +247,36 @@ impl Document {
                 }
             }
         }
+        self.repoint_references(other, &new_ids);
         added
+    }
+
+    /// Points the copies' references to other objects — the armature a mesh
+    /// follows, the objects its drivers read — at the copies of those
+    /// objects. A reference is an identity, and every copy was given a new
+    /// one, so left alone it would name whatever happens to hold the old
+    /// number here: a skinned character imported into a scene stood in its
+    /// rest pose while its bones moved. One whose object did not come along
+    /// is let go rather than left to name a stranger.
+    fn repoint_references(&mut self, source: &Document, new_ids: &HashMap<ObjectId, ObjectId>) {
+        let uids: HashMap<crate::Uid, crate::Uid> = new_ids
+            .iter()
+            .filter_map(|(old, new)| Some((source.object(*old)?.uid, self.object(*new)?.uid)))
+            .collect();
+        for new in new_ids.values() {
+            let Some(copy) = self.object_mut(*new) else {
+                continue;
+            };
+            copy.skin = copy.skin.and_then(|u| uids.get(&u).copied());
+            for variable in copy.drivers.iter_mut().flat_map(|d| d.variables.iter_mut()) {
+                if variable.target != crate::Uid::NONE {
+                    variable.target = uids
+                        .get(&variable.target)
+                        .copied()
+                        .unwrap_or(crate::Uid::NONE);
+                }
+            }
+        }
     }
 
     /// Copies one of this document's materials into `into`, once.
@@ -457,5 +487,43 @@ mod tests {
         assert!(doc.object(gone).is_none(), "the fixture's id must be stale");
         let fragment = doc.extract_objects(&[gone, a]);
         assert_eq!(fragment.object_count(), 1);
+    }
+
+    #[test]
+    fn a_skinned_mesh_follows_its_own_rig_into_a_scene() {
+        // The source's uids are small numbers the scene has already handed
+        // out to something else: the case an import into a scene with a cube
+        // in it is.
+        let mut file = Document::new();
+        let armature = file.add_armature(crate::armature::Armature::new("Rig"));
+        let rig = file.add_object(Object::new("Rig", ObjectData::Armature(armature)));
+        let body = cube(&mut file, "Body");
+        let rig_uid = file.object_uid(rig);
+        file.object_mut(body).unwrap().skin = rig_uid;
+        let mut driver = crate::driver::Driver::new("location", 0, "x");
+        let mut x = crate::driver::DriverVariable::new("x");
+        x.target = rig_uid.unwrap();
+        driver.variables.push(x);
+        file.object_mut(body).unwrap().drivers.push(driver);
+
+        let mut scene = Document::new();
+        for name in ["A", "B", "C"] {
+            cube(&mut scene, name);
+        }
+        let added = scene.merge_from(&file);
+        let new_rig = scene.object_uid(added[0]);
+        let new_body = scene.object(added[1]).unwrap();
+        assert_ne!(
+            new_rig, rig_uid,
+            "the fixture must give the rig a new number"
+        );
+        assert_eq!(new_body.skin, new_rig);
+        assert_eq!(Some(new_body.drivers[0].variables[0].target), new_rig);
+
+        // Copied without its rig, it follows nothing rather than a stranger.
+        let alone = file.extract_objects(&[body]);
+        let (_, copy) = alone.objects().next().unwrap();
+        assert_eq!(copy.skin, None);
+        assert_eq!(copy.drivers[0].variables[0].target, crate::Uid::NONE);
     }
 }
