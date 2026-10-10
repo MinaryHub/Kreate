@@ -497,3 +497,104 @@ fn generator_controls(
         });
     ui.data_mut(|d| d.insert_temp(id, words));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text() -> AssetText {
+        let t = |s: &str| s.to_string();
+        AssetText {
+            sources: vec![
+                t("Local"),
+                t("Poly Haven"),
+                t("ambientCG"),
+                t("Poly Pizza"),
+                t("AI"),
+            ],
+            kinds: vec![t("Models"), t("Materials"), t("HDRIs")],
+            search: t("Search"),
+            resolution: t("Size"),
+            refresh: t("Refresh"),
+            empty: t("NOTHING-HERE"),
+            loading: t("Loading"),
+            add_folder: t("Add folder"),
+            remove_folder: t("Remove"),
+            no_folders: t("No folders"),
+            credit: None,
+            add_hint: t("hint"),
+            add: t("Add"),
+            link: t("Link"),
+            link_hint: t("link hint"),
+            animated_only: t("ANIMATED-ONLY"),
+            search_hint: t("SEARCH-HINT"),
+            key_prompt: t("KEY-PROMPT"),
+            key_where: (t("KEY-WHERE"), t("https://poly.pizza/settings/api")),
+            key_hint: t("API key"),
+            key_save: t("Save key"),
+            key_change: t("Change key"),
+            gen_hint: t("gen"),
+            gen_text: t("gen text"),
+            gen_image: t("gen image"),
+            gen_note: t("gen note"),
+            gen_token: t("token"),
+            gen_token_prompt: t("token prompt"),
+            gen_token_where: (t("w"), t("https://huggingface.co")),
+            gen_token_saved: t("saved"),
+            gen_token_forget: t("forget"),
+        }
+    }
+
+    /// Every piece of text one frame of the panel draws.
+    fn drawn(view: &AssetView<'_>) -> String {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut queue = CommandQueue::default();
+        let mut search = String::new();
+        let mut out = String::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    asset_browser(ui, &text(), view, &mut search, &mut queue);
+                });
+            });
+            out.clear();
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Text(t) = &shape.shape {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_source_that_wants_a_key_asks_for_one() {
+        let view = AssetView {
+            source: 3,
+            kind: 0,
+            resolutions: None,
+            folders: None,
+            tiles: &[],
+            selected: None,
+            linkable: false,
+            busy: None,
+            error: None,
+            searched: true,
+            animated_only: Some(false),
+            key_needed: true,
+            key_held: false,
+            generator: None,
+        };
+        let shown = drawn(&view);
+        assert!(shown.contains("KEY-PROMPT"), "{shown}");
+        assert!(shown.contains("KEY-WHERE"), "{shown}");
+    }
+}
