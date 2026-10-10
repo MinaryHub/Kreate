@@ -34,6 +34,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetDisplay>();
     registry.register::<SetBone>();
     registry.register::<Symmetrize>();
+    registry.register::<AddHumanoid>();
     registry.register::<Bind>();
     registry.register::<Unbind>();
     registry.register::<SetPreserveVolume>();
@@ -1012,6 +1013,231 @@ impl Operator for Unbind {
     }
 }
 
+// --- a humanoid rig fitted to a mesh -----------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct HumanoidParams {
+    /// Bind the mesh to it at once, with weights from distance.
+    pub bind: bool,
+}
+
+impl Default for HumanoidParams {
+    fn default() -> Self {
+        Self { bind: true }
+    }
+}
+
+/// Where a standing figure's joints are, in the world: measured where a
+/// measure is sure — its height, where its legs are, how far its arms reach,
+/// which way its feet point — and by a figure's proportions elsewhere.
+///
+/// A start, not an answer: the joints are where most figures have them, and
+/// `check_rig` says where this one differs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Landmarks {
+    pub hips: DVec3,
+    pub spine: DVec3,
+    pub chest: DVec3,
+    pub neck: DVec3,
+    pub head: DVec3,
+    pub top: DVec3,
+    /// The left side's (+X); the right is its mirror.
+    pub clavicle: DVec3,
+    pub shoulder: DVec3,
+    pub elbow: DVec3,
+    pub wrist: DVec3,
+    pub fingertip: DVec3,
+    pub hip: DVec3,
+    pub knee: DVec3,
+    pub ankle: DVec3,
+    pub toe: DVec3,
+}
+
+/// The landmarks of a figure standing up Z, facing -Y, its middle on X = 0.
+pub fn humanoid_landmarks(points: &[DVec3]) -> Option<Landmarks> {
+    let (lo, hi) = points.iter().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
+    let height = hi.z - lo.z;
+    if points.len() < 8 || height <= 0.0 {
+        return None;
+    }
+    let at = |f: f64| lo.z + height * f;
+    // The middle of a spread of numbers: halfway between its ends, which a
+    // limb's outline gives whichever side has more points.
+    let middle = |v: Vec<f64>| -> Option<f64> {
+        let lo = v.iter().copied().reduce(f64::min)?;
+        let hi = v.iter().copied().reduce(f64::max)?;
+        Some((lo + hi) / 2.0)
+    };
+    let band = |from: f64, to: f64| {
+        points
+            .iter()
+            .filter(move |p| p.z >= at(from) && p.z <= at(to))
+    };
+    // The body's front-to-back middle, from the chest.
+    let mid_y = middle(band(0.6, 0.75).map(|p| p.y).collect()).unwrap_or((lo.y + hi.y) / 2.0);
+    // A leg's middle, from just below the knee: where its points are on +X.
+    let leg_x = middle(band(0.2, 0.3).filter(|p| p.x > 0.0).map(|p| p.x).collect())
+        .unwrap_or(height * 0.05)
+        .max(height * 0.02);
+    // The arm's reach: the farthest point on +X above the hips.
+    let tip = band(0.45, 1.0)
+        .filter(|p| p.x > 0.0)
+        .copied()
+        .max_by(|a, b| a.x.total_cmp(&b.x))?;
+    let shoulder = DVec3::new((height * 0.1).min(tip.x * 0.5), mid_y, at(0.81));
+    let toward = (tip - shoulder).normalize_or(DVec3::X);
+    let reach = (tip - shoulder).length();
+    // Toes: the frontmost point low on the left foot.
+    let toe_y = band(0.0, 0.06)
+        .filter(|p| p.x > 0.0)
+        .map(|p| p.y)
+        .fold(f64::MAX, f64::min);
+    let toe_y = if toe_y.is_finite() {
+        toe_y
+    } else {
+        mid_y - height * 0.08
+    };
+    let column = |f: f64| DVec3::new(0.0, mid_y, at(f));
+    Some(Landmarks {
+        hips: column(0.50),
+        spine: column(0.58),
+        chest: column(0.68),
+        neck: column(0.82),
+        head: column(0.87),
+        top: column(1.0),
+        clavicle: DVec3::new(height * 0.02, mid_y, at(0.80)),
+        shoulder,
+        elbow: shoulder + toward * reach * 0.42,
+        wrist: shoulder + toward * reach * 0.80,
+        fingertip: tip,
+        hip: DVec3::new(leg_x, mid_y, at(0.49)),
+        knee: DVec3::new(leg_x, mid_y, at(0.27)),
+        ankle: DVec3::new(leg_x, mid_y, at(0.045)),
+        toe: DVec3::new(leg_x, toe_y, at(0.015)),
+    })
+}
+
+/// The bones of a humanoid on `l`: name, head, tail, parent's name, and
+/// whether its head is its parent's tail. The left side's, then their
+/// mirrors.
+pub fn humanoid_bones(l: &Landmarks) -> Vec<(String, DVec3, DVec3, Option<String>, bool)> {
+    let flip = |p: DVec3| DVec3::new(-p.x, p.y, p.z);
+    let mut bones: Vec<(String, DVec3, DVec3, Option<String>, bool)> = vec![
+        ("Hips".into(), l.hips, l.spine, None, false),
+        ("Spine".into(), l.spine, l.chest, Some("Hips".into()), true),
+        ("Chest".into(), l.chest, l.neck, Some("Spine".into()), true),
+        ("Neck".into(), l.neck, l.head, Some("Chest".into()), true),
+        ("Head".into(), l.head, l.top, Some("Neck".into()), true),
+    ];
+    let side: Vec<(&str, DVec3, DVec3, &str, bool)> = vec![
+        ("Shoulder", l.clavicle, l.shoulder, "Chest", false),
+        ("UpperArm", l.shoulder, l.elbow, "Shoulder", true),
+        ("ForeArm", l.elbow, l.wrist, "UpperArm", true),
+        ("Hand", l.wrist, l.fingertip, "ForeArm", true),
+        ("Thigh", l.hip, l.knee, "Hips", false),
+        ("Shin", l.knee, l.ankle, "Thigh", true),
+        ("Foot", l.ankle, l.toe, "Shin", true),
+    ];
+    for (suffix, mirror) in [(".L", false), (".R", true)] {
+        for (name, head, tail, parent, connected) in &side {
+            let place = |p: DVec3| if mirror { flip(p) } else { p };
+            let parent = if *parent == "Chest" || *parent == "Hips" {
+                parent.to_string()
+            } else {
+                format!("{parent}{suffix}")
+            };
+            bones.push((
+                format!("{name}{suffix}"),
+                place(*head),
+                place(*tail),
+                Some(parent),
+                *connected,
+            ));
+        }
+    }
+    bones
+}
+
+/// An armature fitted to the active mesh, a figure standing up Z and facing
+/// -Y with its arms out or down: Hips to Head up the middle, and on each side
+/// a shoulder, arm and hand, a thigh, shin and foot, named `.L` and `.R`.
+/// Bound at once unless asked not to; one step to undo.
+pub struct AddHumanoid;
+
+impl Operator for AddHumanoid {
+    type Params = HumanoidParams;
+    fn id() -> &'static str {
+        "object.add_humanoid_rig"
+    }
+    fn label() -> &'static str {
+        "Add Humanoid Rig"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| o.mesh().is_some())
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_scene::document::{Object, ObjectData};
+        let d = doc.document();
+        let Some(body) = d
+            .selection
+            .active
+            .filter(|id| d.object(*id).is_some_and(|o| o.mesh().is_some()))
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(mesh) = d
+            .object(body)
+            .and_then(|o| o.mesh())
+            .and_then(|m| d.mesh(m))
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let world = d.world_transform(body);
+        let points: Vec<DVec3> = mesh
+            .positions()
+            .iter()
+            .map(|p| world.transform_point3(p.as_dvec3()))
+            .collect();
+        let landmarks = humanoid_landmarks(&points)
+            .ok_or_else(|| OpError::Failed("the mesh is too small to read a figure from".into()))?;
+        let mut armature = Armature::new("Armature");
+        armature.bones.clear();
+        for (name, head, tail, parent, connected) in humanoid_bones(&landmarks) {
+            let parent = parent.and_then(|p| armature.bone_index(&p));
+            armature.add_bone(Bone {
+                name,
+                parent,
+                head,
+                tail,
+                connected: connected && parent.is_some(),
+                ..Default::default()
+            });
+        }
+        armature.reconnect();
+        let d = doc.document_mut();
+        let armature = d.add_armature(armature);
+        let rig = d.add_object(Object::new("Armature", ObjectData::Armature(armature)));
+        d.selection.clear();
+        d.selection.add(body);
+        d.selection.add(rig);
+        d.selection.active = Some(rig);
+        if params.bind {
+            Bind::execute(&BindParams { weights: 0 }, doc, ctx)?;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 #[cfg(test)]
 mod symmetry_tests {
     use super::*;
@@ -1057,5 +1283,98 @@ mod symmetry_tests {
             "its parent's mirror"
         );
         assert_eq!(a.bones.len(), 5);
+    }
+
+    /// A figure 1.8 m tall of boxes, each cut into rings up Z so every height
+    /// has points: legs apart, arms straight out.
+    fn figure() -> kreate_mesh::MeshData {
+        let mut positions = Vec::new();
+        let mut faces: Vec<Vec<u32>> = Vec::new();
+        let mut boxed = |lo: glam::Vec3, hi: glam::Vec3, along_x: bool| {
+            let rings = 12;
+            let base = positions.len() as u32;
+            for k in 0..=rings {
+                let t = k as f32 / rings as f32;
+                let corners: [glam::Vec3; 4] = if along_x {
+                    let x = lo.x + (hi.x - lo.x) * t;
+                    [
+                        glam::Vec3::new(x, lo.y, lo.z),
+                        glam::Vec3::new(x, hi.y, lo.z),
+                        glam::Vec3::new(x, hi.y, hi.z),
+                        glam::Vec3::new(x, lo.y, hi.z),
+                    ]
+                } else {
+                    let z = lo.z + (hi.z - lo.z) * t;
+                    [
+                        glam::Vec3::new(lo.x, lo.y, z),
+                        glam::Vec3::new(hi.x, lo.y, z),
+                        glam::Vec3::new(hi.x, hi.y, z),
+                        glam::Vec3::new(lo.x, hi.y, z),
+                    ]
+                };
+                positions.extend(corners);
+            }
+            for k in 0..rings {
+                for c in 0..4u32 {
+                    let a = base + k * 4 + c;
+                    let b = base + k * 4 + (c + 1) % 4;
+                    faces.push(vec![a, b, b + 4, a + 4]);
+                }
+            }
+        };
+        let v = glam::Vec3::new;
+        boxed(v(-0.18, -0.1, 0.9), v(0.18, 0.1, 1.45), false); // torso
+        boxed(v(-0.1, -0.1, 1.5), v(0.1, 0.1, 1.8), false); // head
+        boxed(v(0.05, -0.07, 0.0), v(0.17, 0.07, 0.9), false); // left leg
+        boxed(v(-0.17, -0.07, 0.0), v(-0.05, 0.07, 0.9), false); // right leg
+        boxed(v(0.18, -0.05, 1.35), v(0.85, 0.05, 1.45), true); // left arm
+        boxed(v(-0.85, -0.05, 1.35), v(-0.18, 0.05, 1.45), true); // right arm
+        kreate_mesh::MeshData::from_faces(positions, &faces)
+    }
+
+    #[test]
+    fn a_humanoid_rig_is_fitted_to_a_figure_and_bound() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(figure());
+        let body = doc.add_object(Object::new("Body", ObjectData::Mesh(mesh)));
+        doc.selection.add(body);
+        doc.selection.active = Some(body);
+        let mut edit = DocMut::new(&mut doc);
+        AddHumanoid::execute(&HumanoidParams::default(), &mut edit, &Context::default())
+            .expect("ran");
+        let (rig, armature) = doc
+            .objects()
+            .find_map(|(id, o)| match o.data {
+                ObjectData::Armature(a) => Some((id, a)),
+                _ => None,
+            })
+            .expect("a rig");
+        let a = doc.armature(armature).expect("bones");
+        assert_eq!(a.bones.len(), 19, "five up the middle, seven a side");
+        let bone = |n: &str| &a.bones[a.bone_index(n).unwrap_or_else(|| panic!("{n}"))];
+        // The hand ends at the arm's end, the thigh is in the leg, and the
+        // right is the left's mirror.
+        assert!(
+            (bone("Hand.L").tail.x - 0.85).abs() < 0.02,
+            "{:?}",
+            bone("Hand.L").tail
+        );
+        assert!(
+            (bone("Thigh.L").head.x - 0.11).abs() < 0.03,
+            "{:?}",
+            bone("Thigh.L").head
+        );
+        assert!((bone("Hand.R").tail.x + 0.85).abs() < 0.02);
+        assert!(bone("Head").tail.z > 1.75 && bone("Foot.L").tail.z < 0.1);
+        assert_eq!(bone("UpperArm.L").parent, a.bone_index("Shoulder.L"));
+        // And bound: the body follows it, with a weight for every bone.
+        let uid = doc.object(rig).expect("rig").uid;
+        assert_eq!(doc.object(body).expect("body").skin, Some(uid));
+        let m = doc.mesh(mesh).expect("mesh");
+        assert!(m
+            .attributes()
+            .get_f32(&kreate_scene::skin::weight_layer("ForeArm.L"))
+            .is_some_and(|w| w.iter().any(|x| *x > 0.5)));
     }
 }
