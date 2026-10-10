@@ -38,6 +38,11 @@ use; `scripts/release.sh` turns that section into the next release.
   against a reference picture's — concept art, a photo — at one height and
   where they overlap most, and says how much they agree, their proportions,
   where the model has too much or too little, and shows it in red and blue.
+- Detail from a picture: `sculpt.displace_image` raises and lowers the
+  surface by a height map, through its UVs or projected from three sides,
+  so many millimetres, round one place or all over; and the connector's
+  `generate_height_map` draws one — skin, scales, bark — with AI, made
+  level and seamless by Kreate.
 - Sculpting by number: `sculpt.deform_region` pushes, swells, moves,
   scales, flattens or smooths a ball- or egg-shaped region by so many
   millimetres, fading to its rim, mirrored across X if asked and held by the

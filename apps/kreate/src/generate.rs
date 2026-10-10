@@ -129,6 +129,108 @@ pub fn make(request: &Request, progress: &dyn Fn(String)) -> Result<PathBuf, Str
     Ok(glb)
 }
 
+/// A height map of `words` — skin, scales, bark — drawn by Z-Image as a
+/// seamless grey picture, white high and black low; its path.
+pub fn height_map(words: &str, progress: &dyn Fn(String)) -> Result<PathBuf, String> {
+    let dir = folder().ok_or("no cache folder")?.join("height");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let space = Space {
+        url: ZIMAGE,
+        token: token(),
+        session: format!("kreate{stamp}"),
+    };
+    progress("asset-gen-drawing".into());
+    // Asked for as a photograph of the surface itself: a model told
+    // "tileable" draws tiles, and one told "height map" draws a lit relief.
+    // Kreate makes it a height map and makes it repeat.
+    let prompt = format!(
+        "macro photograph of {words}, the surface alone filling the whole frame edge to \
+         edge, seen straight on from above, soft overhead light, evenly lit, uniform pattern, \
+         no objects, no border, no frame"
+    );
+    let answer = space.run(
+        "generate",
+        serde_json::json!([prompt, "1024x1024 ( 1:1 )", 42, 8, 3.0, true, []]),
+        progress,
+    )?;
+    let drawn = dir.join(format!("{}-{stamp}-photo.png", slug(words)));
+    space.download(&answer[0][0]["image"], &drawn)?;
+    let photo = image::open(&drawn).map_err(|e| format!("cannot read the picture: {e}"))?;
+    let path = dir.join(format!("{}-{stamp}.png", slug(words)));
+    as_height(&photo.to_luma32f())
+        .save(&path)
+        .map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&drawn);
+    Ok(path)
+}
+
+/// A photograph's brightness as heights: the light's broad fall across it
+/// taken away, stretched to the full grey range, and its edges blended into
+/// the opposite edges so it repeats without a seam.
+fn as_height(photo: &image::ImageBuffer<image::Luma<f32>, Vec<f32>>) -> image::GrayImage {
+    let (w, h) = photo.dimensions();
+    let at = |x: u32, y: u32| photo.get_pixel(x % w, y % h).0[0];
+    // The broad light: the mean over a block a sixteenth of the size.
+    let block = (w.min(h) / 16).max(1);
+    let (bw, bh) = (w.div_ceil(block), h.div_ceil(block));
+    let mut means = vec![0f32; (bw * bh) as usize];
+    for by in 0..bh {
+        for bx in 0..bw {
+            let (mut sum, mut count) = (0.0f32, 0.0f32);
+            for y in by * block..((by + 1) * block).min(h) {
+                for x in bx * block..((bx + 1) * block).min(w) {
+                    sum += at(x, y);
+                    count += 1.0;
+                }
+            }
+            means[(by * bw + bx) as usize] = sum / count.max(1.0);
+        }
+    }
+    let broad = |x: u32, y: u32| {
+        // Blended between the four nearest blocks' means.
+        let fx = (x as f32 / block as f32 - 0.5).clamp(0.0, (bw - 1) as f32);
+        let fy = (y as f32 / block as f32 - 0.5).clamp(0.0, (bh - 1) as f32);
+        let (x0, y0) = (fx.floor() as u32, fy.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(bw - 1), (y0 + 1).min(bh - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let m = |x: u32, y: u32| means[(y * bw + x) as usize];
+        (m(x0, y0) * (1.0 - tx) + m(x1, y0) * tx) * (1.0 - ty)
+            + (m(x0, y1) * (1.0 - tx) + m(x1, y1) * tx) * ty
+    };
+    let detail: Vec<f32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| at(x, y) - broad(x, y))
+        .collect();
+    // Repeating: each pixel mixed with the one half a picture away, by a
+    // weight that is one in the middle and nothing at the edges — so the
+    // edges are the opposite middle, which runs on into the other side.
+    let d = |x: u32, y: u32| detail[((y % h) * w + (x % w)) as usize];
+    let weight = |t: f32| (std::f32::consts::PI * t).sin().max(0.0);
+    let blended: Vec<f32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let a = weight(x as f32 / w as f32) * weight(y as f32 / h as f32);
+            let b = weight(((x + w / 2) % w) as f32 / w as f32)
+                * weight(((y + h / 2) % h) as f32 / h as f32);
+            (d(x, y) * a + d(x + w / 2, y + h / 2) * b) / (a + b).max(1e-6)
+        })
+        .collect();
+    // Stretched to the grey range, the few extremes clipped.
+    let mut sorted = blended.clone();
+    sorted.sort_by(f32::total_cmp);
+    let lo = sorted[sorted.len() / 100];
+    let hi = sorted[sorted.len() * 99 / 100];
+    let span = (hi - lo).max(1e-6);
+    image::GrayImage::from_fn(w, h, |x, y| {
+        let v = ((blended[(y * w + x) as usize] - lo) / span).clamp(0.0, 1.0);
+        image::Luma([(v * 255.0).round() as u8])
+    })
+}
+
 /// A name for a file, from words.
 fn slug(words: &str) -> String {
     let mut out: String = words
@@ -365,5 +467,57 @@ mod tests {
                 .find(|p| p.extension().is_some_and(|e| e == "png"))
         });
         assert!(picture.is_some(), "the picture was drawn");
+    }
+
+    /// Against the real Space: `cargo test -p kreate --lib height -- --ignored`.
+    #[test]
+    #[ignore = "asks Hugging Face, over the network"]
+    fn words_become_a_height_map() {
+        let path = height_map("reptile scales", &|s| eprintln!("  {s}")).expect("drawn");
+        let image = image::open(&path).expect("a picture");
+        eprintln!("{} {}x{}", path.display(), image.width(), image.height());
+        assert!(image.width() >= 512);
+    }
+
+    /// A photo lit from one side, with a fine pattern: the height keeps the
+    /// pattern, loses the light, and runs on from one edge into the other.
+    #[test]
+    fn a_photo_becomes_a_level_repeating_height() {
+        let photo = image::ImageBuffer::from_fn(256, 256, |x, y| {
+            let light = x as f32 / 256.0 * 0.6;
+            let pattern = if (x / 8 + y / 8) % 2 == 0 { 0.2 } else { 0.0 };
+            image::Luma([light + pattern])
+        });
+        let height = as_height(&photo);
+        let mean = |x0: u32, x1: u32| {
+            let mut sum = 0.0;
+            for y in 0..256 {
+                for x in x0..x1 {
+                    sum += height.get_pixel(x, y).0[0] as f64;
+                }
+            }
+            sum / (256.0 * (x1 - x0) as f64)
+        };
+        // The light's slope is gone: left and right are alike on average.
+        assert!(
+            (mean(0, 64) - mean(192, 256)).abs() < 25.0,
+            "{} {}",
+            mean(0, 64),
+            mean(192, 256)
+        );
+        // It repeats: the last column runs on into the first.
+        let jump: f64 = (0..256)
+            .map(|y| {
+                (height.get_pixel(255, y).0[0] as f64 - height.get_pixel(0, y).0[0] as f64).abs()
+            })
+            .sum::<f64>()
+            / 256.0;
+        let step: f64 = (0..256)
+            .map(|y| {
+                (height.get_pixel(128, y).0[0] as f64 - height.get_pixel(127, y).0[0] as f64).abs()
+            })
+            .sum::<f64>()
+            / 256.0;
+        assert!(jump <= step + 20.0, "edge {jump} against inside {step}");
     }
 }

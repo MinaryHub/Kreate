@@ -41,6 +41,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<VoxelRemesh>();
     registry.register::<DeformRegion>();
     registry.register::<CreasePath>();
+    registry.register::<DisplaceImage>();
 }
 
 fn active_mesh(doc: &Document) -> Option<kreate_scene::MeshId> {
@@ -952,6 +953,219 @@ impl Operator for CreasePath {
     }
 }
 
+/// An image's brightness at a pixel, 0 to 1: the channels' mean, as a
+/// height map is read. A tile not loaded reads as nothing.
+fn brightness(image: &kreate_scene::image::Image, x: u32, y: u32) -> f32 {
+    use kreate_scene::image::{PixelFormat, TILE};
+    let Some(tile) = image.tile(x / TILE, y / TILE) else {
+        return 0.0;
+    };
+    let at = ((y % TILE) * TILE + (x % TILE)) as usize;
+    let bytes = tile.bytes();
+    let half = |i: usize| -> f32 {
+        let Some(pair) = bytes.get(i..i + 2) else {
+            return 0.0;
+        };
+        let bits = u16::from_le_bytes([pair[0], pair[1]]);
+        let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exp = ((bits >> 10) & 0x1f) as i32;
+        let frac = (bits & 0x3ff) as f32;
+        sign * match exp {
+            0 => frac * 2f32.powi(-24),
+            31 => f32::INFINITY,
+            e => (1.0 + frac / 1024.0) * 2f32.powi(e - 15),
+        }
+    };
+    match image.format {
+        PixelFormat::R8 => bytes.get(at).map_or(0.0, |b| *b as f32 / 255.0),
+        PixelFormat::Rgba8 => bytes.get(at * 4..at * 4 + 3).map_or(0.0, |p| {
+            (p[0] as f32 + p[1] as f32 + p[2] as f32) / (3.0 * 255.0)
+        }),
+        PixelFormat::Rgba16F => (half(at * 8) + half(at * 8 + 2) + half(at * 8 + 4)) / 3.0,
+    }
+}
+
+/// The image's brightness at `(u, v)`, repeating, between pixels blended —
+/// V up the picture, as every texture in Kreate reads.
+fn sample(image: &kreate_scene::image::Image, u: f32, v: f32) -> f32 {
+    let (w, h) = (image.width().max(1), image.height().max(1));
+    let x = u.rem_euclid(1.0) * w as f32 - 0.5;
+    let y = (1.0 - v.rem_euclid(1.0)) * h as f32 - 0.5;
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let wrap = |c: f32, n: u32| (c as i64).rem_euclid(n as i64) as u32;
+    let at = |dx: f32, dy: f32| brightness(image, wrap(x0 + dx, w), wrap(y0 + dy, h));
+    let top = at(0.0, 0.0) * (1.0 - fx) + at(1.0, 0.0) * fx;
+    let bottom = at(0.0, 1.0) * (1.0 - fx) + at(1.0, 1.0) * fx;
+    top * (1.0 - fy) + bottom * fy
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DisplaceImageParams {
+    /// The height map, by its identity — image.open(color=False) gives it.
+    pub image: String,
+    /// How far white stands from mid-grey, in metres, along each normal.
+    #[param(unit = "length")]
+    pub strength: f64,
+    /// The grey that stays where it is, 0 to 1.
+    #[param(min = 0.0, max = 1.0)]
+    pub midlevel: f64,
+    /// Through the mesh's UVs, or projected from the three axes and blended
+    /// by which way the surface faces — no UVs needed.
+    #[param(variants("uv", "box"))]
+    pub mapping: u32,
+    /// For box mapping: how many times the picture repeats a metre.
+    #[param(min = 0.0)]
+    pub tiles_per_metre: f64,
+    /// Only round a point, when the radius is above zero: the middle, in the
+    /// mesh's coordinates, and how far, fading to nothing at the rim.
+    #[param(unit = "length")]
+    pub center: [f64; 3],
+    #[param(unit = "length", min = 0.0)]
+    pub radius: f64,
+}
+
+impl Default for DisplaceImageParams {
+    fn default() -> Self {
+        Self {
+            image: String::new(),
+            strength: 0.002,
+            midlevel: 0.5,
+            mapping: 1,
+            tiles_per_metre: 10.0,
+            center: [0.0; 3],
+            radius: 0.0,
+        }
+    }
+}
+
+/// Raises and lowers the surface by a height map — skin's pores and folds,
+/// scales, bark — so many millimetres along each normal. The mesh needs the
+/// vertices to carry it: subdivide or remesh first. The sculpt mask holds
+/// what it covers.
+pub struct DisplaceImage;
+
+impl Operator for DisplaceImage {
+    type Params = DisplaceImageParams;
+    fn id() -> &'static str {
+        "sculpt.displace_image"
+    }
+    fn label() -> &'static str {
+        "Displace by Image"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let raw: u64 = params
+            .image
+            .trim()
+            .parse()
+            .map_err(|_| OpError::Failed("`image` is an image's uid".into()))?;
+        let d = doc.document();
+        let image = d
+            .image_by_uid(kreate_scene::Uid::from_raw(raw))
+            .and_then(|i| d.image(i))
+            .ok_or_else(|| OpError::Failed(format!("no image with uid {raw}")))?;
+        let Some(m) = d.mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let n = m.num_verts() as usize;
+        let mask = sculpt::mask_of(m);
+        let normals = vertex_normals(m);
+        // A vertex's UV: the mean of its corners'.
+        let uvs: Option<Vec<glam::Vec2>> = (params.mapping == 0).then(|| {
+            let corner = m
+                .attributes()
+                .get_f32x2(kreate_mesh::attribute::names::UV)
+                .map(|c| c.to_vec())
+                .unwrap_or_default();
+            let mut sum = vec![glam::Vec2::ZERO; n];
+            let mut count = vec![0u32; n];
+            for (c, v) in m.corner_verts().iter().enumerate() {
+                if let Some(uv) = corner.get(c) {
+                    sum[*v as usize] += *uv;
+                    count[*v as usize] += 1;
+                }
+            }
+            sum.iter()
+                .zip(&count)
+                .map(|(s, c)| {
+                    if *c > 0 {
+                        *s / *c as f32
+                    } else {
+                        glam::Vec2::ZERO
+                    }
+                })
+                .collect()
+        });
+        if params.mapping == 0
+            && uvs
+                .as_ref()
+                .is_some_and(|u| u.iter().all(|v| *v == glam::Vec2::ZERO))
+        {
+            return Err(OpError::Failed(
+                "the mesh has no UVs: unwrap it, or use mapping=\"box\"".into(),
+            ));
+        }
+        let center = Vec3::new(
+            params.center[0] as f32,
+            params.center[1] as f32,
+            params.center[2] as f32,
+        );
+        let radius = params.radius as f32;
+        let scale = params.tiles_per_metre.max(0.0) as f32;
+        let before = m.positions().to_vec();
+        let mut after = before.clone();
+        let mut touched = 0;
+        for v in 0..n {
+            let mut share = 1.0 - mask[v].clamp(0.0, 1.0);
+            if radius > 0.0 {
+                let t = before[v].distance(center) / radius;
+                if t >= 1.0 {
+                    continue;
+                }
+                share *= fade(t as f64, 0) as f32;
+            }
+            if share <= 0.0 {
+                continue;
+            }
+            let height = match &uvs {
+                Some(uvs) => sample(image, uvs[v].x, uvs[v].y),
+                None => {
+                    // Three projections, weighted by how squarely the
+                    // surface faces each axis.
+                    let p = before[v] * scale;
+                    let w = normals[v].abs().powf(4.0);
+                    let total = (w.x + w.y + w.z).max(1e-6);
+                    (sample(image, p.y, p.z) * w.x
+                        + sample(image, p.x, p.z) * w.y
+                        + sample(image, p.x, p.y) * w.z)
+                        / total
+                }
+            };
+            let lift = (height - params.midlevel as f32) * params.strength as f32 * share;
+            after[v] += normals[v] * lift;
+            touched += 1;
+        }
+        if touched == 0 {
+            return Err(OpError::Failed("no vertex was moved".into()));
+        }
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        m.positions_mut().copy_from_slice(&after);
+        Ok(OpResult::Finished)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,5 +1268,54 @@ mod tests {
         );
         let held = nearest(&d, mesh, Vec3::new(0.0, 1.2, 0.0));
         assert!((held.y - 1.0).abs() < 1e-5, "held by the mask: {held}");
+    }
+
+    #[test]
+    fn a_height_map_raises_the_white_and_lowers_the_black() {
+        use kreate_scene::image::{Image, PixelFormat, Tile, TILE};
+        let mut d = kreate_scene::Document::new();
+        let id = d.add_mesh_object("Plane", kreate_mesh::primitives::grid(1.0, 16, 16));
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        let mesh = d.object(id).and_then(|o| o.mesh()).expect("mesh");
+        // Left half white, right half black, one tile.
+        let mut image = Image::new("Height", TILE, TILE, PixelFormat::R8);
+        let mut tile = Tile::blank(PixelFormat::R8);
+        for y in 0..TILE {
+            for x in 0..TILE / 2 {
+                tile.bytes_mut()[(y * TILE + x) as usize] = 255;
+            }
+        }
+        image.set_tile(0, 0, Some(Arc::new(tile)));
+        let image = d.add_image(image);
+        let uid = d.image_uid(image).expect("uid").raw();
+        let mut edit = DocMut::new(&mut d);
+        DisplaceImage::execute(
+            &DisplaceImageParams {
+                image: uid.to_string(),
+                strength: 0.1,
+                tiles_per_metre: 1.0,
+                ..Default::default()
+            },
+            &mut edit,
+            &Context::default(),
+        )
+        .expect("ran");
+        let p = d.mesh(mesh).expect("mesh").positions();
+        let at = |x: f32| {
+            p.iter()
+                .min_by(|a, b| {
+                    (a.x - x)
+                        .abs()
+                        .total_cmp(&(b.x - x).abs())
+                        .then(a.y.abs().total_cmp(&b.y.abs()))
+                })
+                .expect("one")
+                .z
+        };
+        // x = 0.25 reads the picture's left quarter: white, up half the
+        // strength; x = -0.25 its right: black, down.
+        assert!((at(0.25) - 0.05).abs() < 0.01, "{}", at(0.25));
+        assert!((at(-0.25) + 0.05).abs() < 0.01, "{}", at(-0.25));
     }
 }

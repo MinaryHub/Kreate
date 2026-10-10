@@ -84,7 +84,9 @@ where the model has too much or too little; check_proportions says how a figure 
 an adult's proportions; analyze_mesh says where the surface is bumpy, open or lopsided. Fix \
 with sculpt.deform_region (push, inflate, move, scale, flatten or smooth a ball- or egg-shaped \
 region by metres; mirror_x=true for both sides) and sculpt.crease_path (grooves and ridges \
-along points), then measure again; stop when the agreement stops rising.\n\
+along points), then measure again; stop when the agreement stops rising. Fine detail — pores, \
+scales, bark — comes last: generate_height_map, image.open(color=False), then \
+sculpt.displace_image on a mesh dense enough to carry it.\n\
 Rigging a standing figure: select the mesh and run object.add_humanoid_rig (it fits and binds \
 a skeleton). Then check_rig: fix the worst bone's torn edges with \
 object.vertex_weights_set(group=bone, from=..., to=..., exclusive=true) and \
@@ -273,6 +275,15 @@ pub fn tools() -> Value {
                 "properties": { "object": { "type": "string", "description": "The mesh object's name; default the active one." } }
             },
             "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "generate_height_map",
+            "description": "Draws a seamless greyscale height map of a surface — \"pored skin\", \"reptile scales\", \"oak bark\", \"wrinkled leather\" — with Z-Image on Hugging Face's free GPUs (about ten seconds), white high and black low, and returns its file's path. Then open it as data with kreate.ops.image.open(path=..., color=False) and raise the surface with sculpt.displace_image(image=<uid>, strength=metres, mapping=\"box\" or \"uv\", center/radius for one place). The mesh must have the vertices to carry the detail: subdivide or voxel-remesh first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "prompt": { "type": "string", "description": "The surface, in a few words." } },
+                "required": ["prompt"]
+            }
         },
         {
             "name": "check_rig",

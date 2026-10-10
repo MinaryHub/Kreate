@@ -15,6 +15,31 @@ impl App {
         for request in bridge.pending() {
             // A search may wait on a slow source and on pictures: answered
             // from a thread of its own, the window going on meanwhile.
+            // A height map takes Z-Image some seconds: answered from a
+            // thread, with the file's path.
+            if request.method == "height_map" {
+                std::thread::spawn(move || {
+                    let words = request
+                        .params
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let result = if words.is_empty() {
+                        Err("`prompt` says what the surface is: skin, scales, bark…".to_string())
+                    } else {
+                        kreate::generate::height_map(&words, &|_| {}).map(|path| {
+                            serde_json::json!({
+                                "path": path.display().to_string(),
+                                "next": "kreate.ops.image.open(path=..., color=False), then sculpt.displace_image(image=<uid>) on a mesh fine enough to carry it",
+                            })
+                        })
+                    };
+                    request.answer(result);
+                });
+                continue;
+            }
             if request.method == "assets" {
                 let folders = self.ui.asset_folders.clone();
                 std::thread::spawn(move || {
