@@ -198,13 +198,14 @@ pub fn tools() -> Value {
         },
         {
             "name": "search_assets",
-            "description": "Searches free asset libraries for models, materials (texture sets) or HDRIs (environment lights): Poly Haven and ambientCG, both CC0, or the user's own asset folders. Returns up to `limit` matches, each with the id add_asset takes. ambientCG has no models.",
+            "description": "Searches free asset libraries for models, materials (texture sets) or HDRIs (environment lights): Poly Haven and ambientCG, both CC0; Poly Pizza, low-poly models, many animated, CC0 or CC-BY (needs the user's own key, entered in the Assets panel); or the user's own asset folders. Returns up to `limit` matches, each with the id add_asset takes, its licence and whether it is animated. ambientCG has no models; Poly Pizza has only models.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Words to match against names, categories and tags, e.g. \"wooden floor\"." },
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
-                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "local"], "description": "Default polyhaven." },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
+                    "animated": { "type": "boolean", "description": "Only models that move. Default false." },
                     "limit": { "type": "integer", "description": "Default 20." }
                 },
                 "required": ["kind"]
@@ -218,7 +219,7 @@ pub fn tools() -> Value {
                 "properties": {
                     "id": { "type": "string" },
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
-                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "local"], "description": "Default polyhaven." },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
                     "resolution": { "type": "string", "enum": ["1k", "2k", "4k"], "description": "Texture size. Default 1k." }
                 },
                 "required": ["id", "kind"]
@@ -322,7 +323,10 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "redo" => ("redo", pick(&["steps"])),
         "open_file" => ("open", pick(&["path"])),
         "import_file" => ("import", pick(&["path"])),
-        "search_assets" => ("assets", pick(&["query", "kind", "source", "limit"])),
+        "search_assets" => (
+            "assets",
+            pick(&["query", "kind", "source", "animated", "limit"]),
+        ),
         "add_asset" => ("add_asset", pick(&["id", "kind", "source", "resolution"])),
         "save_file" => ("save", pick(&["path"])),
         "export_file" => ("export", pick(&["path"])),

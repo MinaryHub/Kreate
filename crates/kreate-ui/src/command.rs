@@ -257,6 +257,20 @@ pub enum Command {
     },
     /// From the asset browser: read the list again.
     AssetRefresh,
+    /// From the asset browser: ask a source that searches itself for these
+    /// words — Enter in the search box.
+    AssetSearch {
+        text: String,
+    },
+    /// From the asset browser: list only what moves, or everything.
+    AssetAnimatedOnly {
+        on: bool,
+    },
+    /// From the asset browser: keep this key for the source that wants one
+    /// (empty to forget it).
+    AssetKey {
+        key: String,
+    },
     /// From the asset browser: ask for a folder to read.
     AssetAddFolder,
     /// From the asset browser: stop reading this folder.

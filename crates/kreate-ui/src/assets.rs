@@ -20,6 +20,9 @@ pub struct AssetTile {
     pub detail: String,
     /// The picture and its size in pixels, when it has arrived.
     pub texture: Option<(egui::TextureId, [f32; 2])>,
+    /// Short marks over the picture's corner: that it moves, that its
+    /// licence asks for a credit.
+    pub badges: Vec<String>,
 }
 
 /// The panel's translated strings.
@@ -43,6 +46,17 @@ pub struct AssetText {
     /// The button that links it instead, for a `.kreate`, and its hover.
     pub link: String,
     pub link_hint: String,
+    /// The toggle that lists only what moves.
+    pub animated_only: String,
+    /// What a source that searches itself says under its box.
+    pub search_hint: String,
+    /// For a source that wants a key: what to do, where to get one, the
+    /// box's hint and the button.
+    pub key_prompt: String,
+    pub key_where: (String, String),
+    pub key_hint: String,
+    pub key_save: String,
+    pub key_change: String,
 }
 
 /// What the panel shows.
@@ -61,6 +75,15 @@ pub struct AssetView<'a> {
     /// A list or an asset on its way.
     pub busy: Option<String>,
     pub error: Option<String>,
+    /// Whether the search box asks the source (on Enter) rather than
+    /// filtering what is listed.
+    pub searched: bool,
+    /// The only-what-moves toggle and its state, for a source that offers it.
+    pub animated_only: Option<bool>,
+    /// The source wants a key it does not have, or refused the one it has.
+    pub key_needed: bool,
+    /// The source has a key, which may be changed.
+    pub key_held: bool,
 }
 
 /// Draws the panel. Returns the tiles that were on screen, by
@@ -108,11 +131,37 @@ pub fn asset_browser(
             queue.push(Command::AssetRefresh);
         }
     });
-    ui.add(
+    let searched = ui.add(
         egui::TextEdit::singleline(search)
             .hint_text(&text.search)
             .desired_width(f32::INFINITY),
     );
+    if view.searched {
+        if searched.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            queue.push(Command::AssetSearch {
+                text: search.clone(),
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(&text.search_hint)
+                    .small()
+                    .color(theme.text_dim),
+            );
+            if let Some(on) = view.animated_only {
+                let mut checked = on;
+                if ui.checkbox(&mut checked, &text.animated_only).changed() {
+                    queue.push(Command::AssetAnimatedOnly { on: checked });
+                }
+            }
+            if view.key_held && !view.key_needed && ui.small_button(&text.key_change).clicked() {
+                queue.push(Command::AssetKey { key: String::new() });
+            }
+        });
+    }
+    if view.key_needed {
+        key_prompt(ui, text, queue);
+    }
     if let Some(folders) = view.folders {
         ui.horizontal_wrapped(|ui| {
             if folders.is_empty() {
@@ -239,6 +288,29 @@ pub fn asset_browser(
                                     ui.painter().rect_filled(rect, 4.0, theme.accent_wash);
                                 }
                             }
+                            let mut corner = rect.left_top() + egui::vec2(4.0, 4.0);
+                            for badge in &tile.badges {
+                                let galley = ui.painter().layout_no_wrap(
+                                    badge.clone(),
+                                    egui::FontId::proportional(10.0),
+                                    egui::Color32::WHITE,
+                                );
+                                let back = egui::Rect::from_min_size(
+                                    corner,
+                                    galley.size() + egui::vec2(8.0, 2.0),
+                                );
+                                ui.painter().rect_filled(
+                                    back,
+                                    3.0,
+                                    egui::Color32::from_black_alpha(170),
+                                );
+                                ui.painter().galley(
+                                    corner + egui::vec2(4.0, 1.0),
+                                    galley,
+                                    egui::Color32::WHITE,
+                                );
+                                corner.y += back.height() + 2.0;
+                            }
                             let response = response.on_hover_text(format!(
                                 "{}\n{}\n{}",
                                 tile.name, tile.detail, text.add_hint
@@ -282,4 +354,35 @@ fn short(path: &str) -> &str {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
+}
+
+/// A box for the key a source wants, its link and its button. The key typed
+/// is held in egui's memory until it is saved, never in the panel's state.
+fn key_prompt(ui: &mut Ui, text: &AssetText, queue: &mut CommandQueue) {
+    let theme = crate::theme::from_ui(ui);
+    let id = ui.id().with("asset-key");
+    let mut key: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+    egui::Frame::new()
+        .fill(theme.accent_wash)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(&text.key_prompt).wrap());
+            ui.hyperlink_to(&text.key_where.0, &text.key_where.1);
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut key)
+                        .password(true)
+                        .hint_text(&text.key_hint)
+                        .desired_width(220.0),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button(&text.key_save).clicked() || entered) && !key.trim().is_empty() {
+                    queue.push(Command::AssetKey {
+                        key: std::mem::take(&mut key),
+                    });
+                }
+            });
+        });
+    ui.data_mut(|d| d.insert_temp(id, key));
 }

@@ -133,6 +133,11 @@ pub struct ShellState {
     /// Assets on their way, by entry id: a second request for one is not a
     /// second copy.
     pub asset_fetching: std::collections::HashSet<String>,
+    /// What a source that searches itself was last asked for.
+    pub asset_query: crate::assets::Query,
+    /// Whether the source has the key it wants: checked when the panel
+    /// lists, and when the source refuses one.
+    pub asset_key_held: bool,
     /// What goes with the next message. The application holds the files;
     /// this is what the panel shows of them.
     pub chat_attachments: Vec<kreate_ui::chat::ChatAttachment>,
@@ -640,6 +645,8 @@ impl Default for ShellState {
             asset_error: None,
             asset_selected: None,
             asset_fetching: std::collections::HashSet::new(),
+            asset_query: crate::assets::Query::default(),
+            asset_key_held: false,
             chat_attachments: Vec::new(),
             chat_focused: false,
             chat_busy: false,
@@ -6004,6 +6011,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             t("asset-source-local"),
             t("asset-source-polyhaven"),
             t("asset-source-ambientcg"),
+            t("asset-source-polypizza"),
         ],
         kinds: vec![
             t("asset-kind-models"),
@@ -6034,11 +6042,25 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 t("asset-credit-ambientcg"),
                 "https://ambientcg.com".to_string(),
             )),
+            crate::assets::Source::PolyPizza => Some((
+                t("asset-credit-polypizza"),
+                "https://poly.pizza".to_string(),
+            )),
             crate::assets::Source::Local => None,
         },
         add: t("asset-add"),
         link: t("asset-link"),
         link_hint: t("asset-link-hint"),
+        animated_only: t("asset-animated-only"),
+        search_hint: t("asset-search-hint"),
+        key_prompt: t("asset-key-prompt"),
+        key_where: (
+            t("asset-key-where"),
+            "https://poly.pizza/settings/api".to_string(),
+        ),
+        key_hint: t("asset-key-hint"),
+        key_save: t("asset-key-save"),
+        key_change: t("asset-key-change"),
         add_hint: t(match state.asset_kind {
             1 => "asset-add-hint-material",
             2 => "asset-add-hint-hdri",
@@ -6057,13 +6079,27 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         .asset_entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.matches(&state.asset_search))
+        // A source that searches itself has already: what it sent is the
+        // answer, whether or not each word is in a name.
+        .filter(|(_, e)| source.searched() || e.matches(&state.asset_search))
         .map(|(index, e)| kreate_ui::assets::AssetTile {
             index,
             name: e.name.clone(),
-            detail: match &e.path {
-                Some(p) => p.display().to_string(),
-                None => e.authors.clone(),
+            detail: match (&e.path, &e.licence) {
+                (Some(p), _) => p.display().to_string(),
+                (None, Some(licence)) => format!("{} · {licence}", e.authors),
+                (None, None) => e.authors.clone(),
+            },
+            badges: {
+                let mut badges = Vec::new();
+                if e.animated {
+                    badges.push(t("asset-badge-animated"));
+                }
+                if e.credit().is_some() {
+                    // i18n-exempt: a licence's own name
+                    badges.push("CC-BY".to_string());
+                }
+                badges
             },
             texture: state.asset_textures.get(&e.id).map(|h| {
                 let [w, h2] = h.size();
@@ -6080,7 +6116,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         source: state.asset_source,
         kind: state.asset_kind,
         resolutions: source
-            .online()
+            .sized()
             .then_some((&crate::assets::RESOLUTIONS[..], state.asset_resolution)),
         folders: (source == crate::assets::Source::Local).then_some(&folders[..]),
         tiles: &tiles,
@@ -6098,7 +6134,16 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                     .is_some_and(|x| x.eq_ignore_ascii_case("kreate"))
             }),
         busy: state.asset_busy.clone(),
-        error: state.asset_error.clone(),
+        error: state
+            .asset_error
+            .clone()
+            .filter(|e| e != crate::assets::KEY_MISSING),
+        searched: source.searched(),
+        animated_only: source.searched().then_some(state.asset_query.animated),
+        key_needed: source == crate::assets::Source::PolyPizza
+            && (!state.asset_key_held
+                || state.asset_error.as_deref() == Some(crate::assets::KEY_REFUSED)),
+        key_held: state.asset_key_held,
     };
     let mut search = std::mem::take(&mut state.asset_search);
     let seen = kreate_ui::assets::asset_browser(ui, &text, &view, &mut search, &mut state.queue);
@@ -11062,6 +11107,17 @@ asset-no-folders = Add a folder of models, textures or HDRIs to browse it here.
 asset-credit-polyhaven = Assets from Poly Haven (CC0) — polyhaven.com
 asset-source-ambientcg = ambientCG
 asset-credit-ambientcg = Assets from ambientCG (CC0) — ambientcg.com. Materials and HDRIs; no models.
+asset-source-polypizza = Poly Pizza
+asset-credit-polypizza = Models from Poly Pizza — poly.pizza. CC0 or CC-BY: a CC-BY model asks you to credit its maker.
+asset-animated-only = Animated only
+asset-search-hint = Press Enter to search Poly Pizza; empty shows what is popular.
+asset-key-prompt = Poly Pizza wants an API key of your own. Make a free account, copy the key from its settings, and paste it here. It is kept in Kreate's settings folder on this computer only.
+asset-key-where = Get a key at poly.pizza/settings/api
+asset-key-hint = API key
+asset-key-save = Save key
+asset-key-change = Change key
+asset-badge-animated = ▶ Animated
+asset-credit-owed = Added. Its licence asks for this credit: { $credit }
 asset-add = Add
 asset-link = Link
 asset-link-hint = Refer to this file's objects instead of copying them: read-only here, and updated from the file each time this document opens.
@@ -12229,6 +12285,17 @@ asset-no-folders = 모델, 텍스처, HDRI가 있는 폴더를 추가하면 여�
 asset-credit-polyhaven = Poly Haven 에셋 (CC0) — polyhaven.com
 asset-source-ambientcg = ambientCG
 asset-credit-ambientcg = ambientCG 에셋 (CC0) — ambientcg.com. 재질과 HDRI만 있고 모델은 없습니다.
+asset-source-polypizza = Poly Pizza
+asset-credit-polypizza = Poly Pizza 모델 — poly.pizza. CC0 또는 CC-BY이며, CC-BY 모델은 제작자 표기가 필요합니다.
+asset-animated-only = 애니메이션만
+asset-search-hint = Enter를 누르면 Poly Pizza에서 검색합니다. 비워 두면 인기 모델을 보여 줍니다.
+asset-key-prompt = Poly Pizza는 개인 API 키가 필요합니다. 무료 계정을 만든 뒤 설정에서 키를 복사해 여기에 붙여 넣으세요. 키는 이 컴퓨터의 Kreate 설정 폴더에만 저장됩니다.
+asset-key-where = poly.pizza/settings/api 에서 키 받기
+asset-key-hint = API 키
+asset-key-save = 키 저장
+asset-key-change = 키 변경
+asset-badge-animated = ▶ 애니메이션
+asset-credit-owed = 추가했습니다. 이 모델의 라이선스는 다음 표기를 요구합니다: { $credit }
 asset-add = 추가
 asset-link = 링크
 asset-link-hint = 복사하지 않고 이 파일의 오브젝트를 참조합니다. 여기서는 읽기 전용이고, 이 문서를 열 때마다 원본 파일에서 다시 읽습니다.

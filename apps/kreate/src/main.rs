@@ -4301,7 +4301,13 @@ impl App {
                 kreate_i18n::TextKind::Ui,
                 &[],
             ));
-            library.list(source, kind, self.ui.asset_folders.clone());
+            self.ui.asset_key_held = kreate::assets::polypizza_key().is_some();
+            library.list(
+                source,
+                kind,
+                self.ui.asset_folders.clone(),
+                self.ui.asset_query.clone(),
+            );
         }
         for id in std::mem::take(&mut self.ui.asset_wanted) {
             if let Some(entry) = self.ui.asset_entries.iter().find(|e| e.id == id) {
@@ -4361,7 +4367,23 @@ impl App {
     fn add_asset(&mut self, entry: &kreate::assets::Entry, ready: kreate::assets::Ready) {
         use kreate::assets::Ready;
         match ready {
-            Ready::Model(path) => self.import_into(&path),
+            Ready::Model(path) => {
+                self.import_into(&path);
+                // Said where the user will see it, and in the console, which
+                // keeps it: a CC-BY model is theirs to use if they credit it.
+                if let Some(credit) = entry.credit() {
+                    let line = self.ui.catalog.format(
+                        "asset-credit-owed",
+                        kreate_i18n::TextKind::Ui,
+                        &[("credit", credit.as_str())],
+                    );
+                    self.ui.console_log.push(kreate_ui::console::ConsoleLine {
+                        text: line.clone(),
+                        kind: kreate_ui::console::LineKind::Note,
+                    });
+                    self.status(&line);
+                }
+            }
             Ready::Hdri(path) => self.set_world_image_from(&path),
             Ready::Material(maps) => self.add_material_asset(&entry.name, &maps),
         }
@@ -4838,13 +4860,23 @@ impl App {
                     .and_then(|k| Kind::from_tag(&k))
                     .ok_or("`kind` is model, material or hdri")?;
                 let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-                    .ok_or("`source` is polyhaven, ambientcg or local")?;
+                    .ok_or("`source` is polyhaven, ambientcg, polypizza or local")?;
                 let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                 let query = text("query").unwrap_or_default();
-                let entries = kreate::assets::list_now(source, kind, &self.ui.asset_folders)?;
+                let animated = params
+                    .get("animated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let asked = kreate::assets::Query {
+                    text: query.clone(),
+                    animated,
+                };
+                let entries =
+                    kreate::assets::list_now(source, kind, &self.ui.asset_folders, &asked)?;
                 let found: Vec<serde_json::Value> = entries
                     .iter()
-                    .filter(|e| e.matches(&query))
+                    .filter(|e| source.searched() || e.matches(&query))
+                    .filter(|e| !animated || e.animated)
                     .take(limit.clamp(1, 200))
                     .map(|e| {
                         json!({
@@ -4852,6 +4884,8 @@ impl App {
                             "name": e.name,
                             "tags": e.tags,
                             "authors": e.authors,
+                            "licence": e.licence,
+                            "animated": e.animated,
                         })
                     })
                     .collect();
@@ -4863,19 +4897,14 @@ impl App {
                     .and_then(|k| Kind::from_tag(&k))
                     .ok_or("`kind` is model, material or hdri")?;
                 let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-                    .ok_or("`source` is polyhaven, ambientcg or local")?;
+                    .ok_or("`source` is polyhaven, ambientcg, polypizza or local")?;
                 let id = text("id").ok_or("`id` is required")?;
                 let resolution = match text("resolution").as_deref() {
                     Some("2k") => "2k",
                     Some("4k") => "4k",
                     _ => "1k",
                 };
-                let entry = kreate::assets::list_now(source, kind, &self.ui.asset_folders)?
-                    .into_iter()
-                    .find(|e| e.id == id)
-                    .ok_or_else(|| {
-                        format!("no {} called `{id}` in {}", kind.tag(), source.tag())
-                    })?;
+                let entry = kreate::assets::find_now(source, kind, &self.ui.asset_folders, &id)?;
                 let library = self
                     .assets
                     .as_ref()
@@ -6239,6 +6268,21 @@ impl App {
                 }
                 Command::AssetResolution { index } => self.ui.asset_resolution = index,
                 Command::AssetRefresh => self.reset_asset_list(),
+                Command::AssetSearch { text } => {
+                    self.ui.asset_query.text = text;
+                    self.reset_asset_list();
+                }
+                Command::AssetAnimatedOnly { on } => {
+                    self.ui.asset_query.animated = on;
+                    self.reset_asset_list();
+                }
+                Command::AssetKey { key } => match kreate::assets::save_polypizza_key(&key) {
+                    Ok(()) => {
+                        self.ui.asset_key_held = !key.trim().is_empty();
+                        self.reset_asset_list();
+                    }
+                    Err(why) => self.ui.asset_error = Some(why),
+                },
                 Command::AssetLink { index } => {
                     if let Some(path) = self
                         .ui

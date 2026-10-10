@@ -16,6 +16,13 @@ use; `scripts/release.sh` turns that section into the next release.
   from Poly Haven (CC0), searchable, with pictures. A model is added to the
   scene, a material is made of its maps and put on the active object, an
   HDRI lights the world. Downloads are kept in the cache for next time.
+- Poly Pizza in the Assets editor: thousands of low-poly models, many of
+  them animated characters, CC0 or CC-BY. Enter searches it; "Animated
+  only" lists what moves. It wants a free API key of your own, pasted into
+  the panel once and kept in Kreate's settings folder. A CC-BY model says
+  the credit it asks for when it is added.
+- Tiles show "▶ Animated" for a model that moves — Poly Pizza's, and your
+  own glTF and FBX files — and "CC-BY" where a credit is owed.
 - ambientCG in the Assets editor: its two thousand CC0 materials and its
   HDRIs, beside Poly Haven's.
 - Compressed OpenEXR images open — as a world's light, a texture or an

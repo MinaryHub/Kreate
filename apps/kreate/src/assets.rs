@@ -58,15 +58,44 @@ pub enum Source {
     PolyHaven,
     /// ambientCG: CC0 materials and HDRIs, each a zip of its maps.
     AmbientCg,
+    /// Poly Pizza: low-poly models, CC0 and CC-BY, many of them animated.
+    /// Its API wants a key of the user's own; see [`polypizza_key`].
+    PolyPizza,
 }
 
 impl Source {
-    pub const ALL: [Self; 3] = [Self::Local, Self::PolyHaven, Self::AmbientCg];
+    pub const ALL: [Self; 4] = [
+        Self::Local,
+        Self::PolyHaven,
+        Self::AmbientCg,
+        Self::PolyPizza,
+    ];
 
-    /// Whether assets come over the network, and so in a size to choose.
+    /// Whether assets come over the network.
     pub fn online(self) -> bool {
         self != Source::Local
     }
+
+    /// Whether the source offers sizes to choose from. Poly Pizza's models
+    /// come in the one size their maker made.
+    pub fn sized(self) -> bool {
+        matches!(self, Source::PolyHaven | Source::AmbientCg)
+    }
+
+    /// Whether the source searches itself: it holds too many to list, so the
+    /// search box asks it rather than filtering what was listed.
+    pub fn searched(self) -> bool {
+        self == Source::PolyPizza
+    }
+}
+
+/// What a list asks a searched source for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Query {
+    /// The words searched for; empty for what is popular.
+    pub text: String,
+    /// Only what moves.
+    pub animated: bool,
 }
 
 /// One asset, as the browser lists it.
@@ -83,9 +112,53 @@ pub struct Entry {
     pub authors: String,
     /// For a local asset, the file or the folder of maps.
     pub path: Option<PathBuf>,
+    /// Where an online source keeps its picture and its file, when the list
+    /// says so rather than a rule the source follows.
+    pub thumbnail_url: Option<String>,
+    pub download_url: Option<String>,
+    /// The licence, when it is not the source's one for everything: Poly
+    /// Pizza's models are CC0 or CC-BY, and CC-BY asks for a credit.
+    pub licence: Option<String>,
+    /// Whether the model moves: a character with its walk, a door that
+    /// opens.
+    pub animated: bool,
 }
 
 impl Entry {
+    /// Nothing but the fields a list fills in for every source, for the rest
+    /// to be spread over.
+    pub fn blank() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            kind: Kind::Model,
+            source: Source::Local,
+            tags: Vec::new(),
+            authors: String::new(),
+            path: None,
+            thumbnail_url: None,
+            download_url: None,
+            licence: None,
+            animated: false,
+        }
+    }
+
+    /// The line a CC-BY licence asks for, `None` when nothing is owed.
+    pub fn credit(&self) -> Option<String> {
+        let licence = self.licence.as_deref()?;
+        licence.to_ascii_uppercase().contains("BY").then(|| {
+            format!(
+                "\"{}\" by {} ({}) {licence}",
+                self.name,
+                self.authors,
+                match self.source {
+                    Source::PolyPizza => format!("https://poly.pizza/m/{}", self.id),
+                    _ => self.source.tag().to_string(),
+                }
+            )
+        })
+    }
+
     /// Whether every word of `search` is in the name or a tag.
     pub fn matches(&self, search: &str) -> bool {
         let name = self.name.to_lowercase();
@@ -275,6 +348,7 @@ pub fn parse_polyhaven_list(json: &str, kind: Kind) -> Result<Vec<Entry>, String
                 tags,
                 authors,
                 path: None,
+                ..Entry::blank()
             }
         })
         .collect();
@@ -453,6 +527,7 @@ pub fn scan_folders(folders: &[PathBuf]) -> Vec<Entry> {
                 None
             };
             if let Some(kind) = kind {
+                let animated = kind == Kind::Model && moves(&path);
                 out.push(Entry {
                     id: path.display().to_string(),
                     name: stem.replace(['_', '-'], " "),
@@ -460,7 +535,9 @@ pub fn scan_folders(folders: &[PathBuf]) -> Vec<Entry> {
                     source: Source::Local,
                     tags: vec![ext],
                     authors: String::new(),
+                    animated,
                     path: Some(path),
+                    ..Entry::blank()
                 });
             }
         }
@@ -479,6 +556,7 @@ pub fn scan_folders(folders: &[PathBuf]) -> Vec<Entry> {
                 tags: Vec::new(),
                 authors: String::new(),
                 path: Some(dir.to_path_buf()),
+                ..Entry::blank()
             });
         }
         children.sort();
@@ -661,7 +739,7 @@ pub fn material_from_maps(
 // --- the library ----------------------------------------------------------------
 
 /// A thumbnail asked for: the entry's id, its source, and its path if local.
-type Wanted = (String, Source, Option<PathBuf>);
+type Wanted = (String, Source, Option<PathBuf>, Option<String>);
 
 /// Lists, thumbnails and fetches, each on a thread of its own, reporting
 /// through [`Library::poll`].
@@ -695,9 +773,9 @@ impl Library {
     }
 
     /// Lists one kind from one source.
-    pub fn list(&self, source: Source, kind: Kind, folders: Vec<PathBuf>) {
+    pub fn list(&self, source: Source, kind: Kind, folders: Vec<PathBuf>, query: Query) {
         self.spawn(move || {
-            let result = list_now(source, kind, &folders);
+            let result = list_now(source, kind, &folders, &query);
             Event::Listed {
                 source,
                 kind,
@@ -709,7 +787,12 @@ impl Library {
     /// Asks for an entry's thumbnail; it arrives as an [`Event::Thumbnail`].
     pub fn thumbnail(&mut self, entry: &Entry) {
         if let Ok(mut queue) = self.thumbs.lock() {
-            queue.push((entry.id.clone(), entry.source, entry.path.clone()));
+            queue.push((
+                entry.id.clone(),
+                entry.source,
+                entry.path.clone(),
+                entry.thumbnail_url.clone(),
+            ));
         }
         // A few workers between them, newest request first: what is on the
         // screen now, not what scrolled past.
@@ -722,7 +805,7 @@ impl Library {
             );
             std::thread::spawn(move || loop {
                 let next = queue.lock().ok().and_then(|mut q| q.pop());
-                let Some((id, source, path)) = next else {
+                let Some((id, source, path, url)) = next else {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     continue;
                 };
@@ -748,6 +831,17 @@ impl Library {
                                 &dest,
                             )
                             .ok()?;
+                        }
+                        thumbnail_of(&std::fs::read(dest).ok()?)
+                    }),
+                    Source::PolyPizza => cache_root().and_then(|root| {
+                        let url = url?;
+                        if !safe_id(&id) {
+                            return None;
+                        }
+                        let dest = root.join("polypizza").join("thumbs").join(&id);
+                        if !dest.exists() {
+                            download(&url, &dest).ok()?;
                         }
                         thumbnail_of(&std::fs::read(dest).ok()?)
                     }),
@@ -787,7 +881,12 @@ impl Library {
 
 /// One kind from one source, here and now: what [`Library::list`] does on a
 /// thread, for a caller that waits — the connector, answering a search.
-pub fn list_now(source: Source, kind: Kind, folders: &[PathBuf]) -> Result<Vec<Entry>, String> {
+pub fn list_now(
+    source: Source,
+    kind: Kind,
+    folders: &[PathBuf],
+    query: &Query,
+) -> Result<Vec<Entry>, String> {
     match source {
         Source::Local => Ok(scan_folders(folders)
             .into_iter()
@@ -805,6 +904,7 @@ pub fn list_now(source: Source, kind: Kind, folders: &[PathBuf]) -> Result<Vec<E
             })
             .and_then(|json| parse_polyhaven_list(&json, kind)),
         Source::AmbientCg => ambientcg_list(kind),
+        Source::PolyPizza => polypizza_list(kind, query),
     }
 }
 
@@ -815,6 +915,7 @@ impl Source {
             Source::Local => "local",
             Source::PolyHaven => "polyhaven",
             Source::AmbientCg => "ambientcg",
+            Source::PolyPizza => "polypizza",
         }
     }
 
@@ -881,7 +982,280 @@ fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
             Ok(under(&dir, plan.ready))
         }
         Source::AmbientCg => ambientcg_fetch(entry, resolution),
+        Source::PolyPizza => polypizza_fetch(entry),
     }
+}
+
+// --- Poly Pizza -------------------------------------------------------------
+
+const PIZZA_API: &str = "https://api.poly.pizza/v1";
+
+/// Whether `id` is safe to name a file by: an id from a list, still
+/// checked, because it becomes a path.
+fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Where the user's Poly Pizza key is kept: in Kreate's settings folder,
+/// readable by the user alone. Never in a document, never in the
+/// repository: it is theirs, from poly.pizza/settings/api.
+pub fn polypizza_key_path() -> Option<PathBuf> {
+    crate::prefs::config_dir().map(|d| d.join("polypizza-key"))
+}
+
+/// The user's Poly Pizza key, when they have given one.
+pub fn polypizza_key() -> Option<String> {
+    let key = std::fs::read_to_string(polypizza_key_path()?).ok()?;
+    let key = key.trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
+/// Keeps `key` for next time, or forgets it when empty.
+pub fn save_polypizza_key(key: &str) -> Result<(), String> {
+    let path = polypizza_key_path().ok_or("no settings folder")?;
+    let key = key.trim();
+    if key.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    // Something that could only be a header's worth of letters: a key with
+    // a line break in it would add a header of its own.
+    if !key.chars().all(|c| c.is_ascii_graphic()) || key.len() > 200 {
+        return Err("that does not look like a Poly Pizza key".into());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, key).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// The reason a source refused, worded for the panel.
+pub const KEY_REFUSED: &str = "Poly Pizza did not accept the key";
+/// The reason a source was not asked: there is no key to ask with. The
+/// panel shows the box for one instead of this.
+pub const KEY_MISSING: &str = "Poly Pizza needs a key";
+
+/// `url` from Poly Pizza's API, with the key.
+///
+/// The key goes to curl on its standard input, not its command line, where
+/// any process on the machine could read it.
+fn pizza_get(url: &str, key: &str) -> Result<String, String> {
+    use std::io::Write;
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let mut child = crate::claude::quiet_command(curl)
+        .args(["--silent", "--show-error", "--location"])
+        .args(["--max-time", "60", "--max-filesize", "16777216"])
+        .args(["--write-out", "\n%{http_code}"])
+        .arg("--user-agent")
+        .arg(user_agent())
+        .args(["--header", "@-"])
+        .arg(url)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start curl: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "X-Auth-Token: {key}");
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
+    match code.trim() {
+        "200" => Ok(body.to_string()),
+        "401" | "403" => Err(KEY_REFUSED.into()),
+        "429" => Err("Poly Pizza asks to wait a moment; try again shortly".into()),
+        "" => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        other => Err(format!("Poly Pizza answered {other}")),
+    }
+}
+
+/// Poly Pizza's answer — a search, or what is popular — as entries.
+pub fn parse_polypizza(json: &str) -> Result<Vec<Entry>, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let results = value["results"]
+        .as_array()
+        .ok_or("Poly Pizza's answer has no results")?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::to_string);
+    Ok(results
+        .iter()
+        .filter_map(|m| {
+            let id = text(&m["ID"])?;
+            if !safe_id(&id) {
+                return None;
+            }
+            let mut tags: Vec<String> = m["Tags"]
+                .as_array()
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|s| s.as_str())
+                        .map(str::to_lowercase)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(category) = m["Category"].as_str() {
+                tags.push(category.to_lowercase());
+            }
+            Some(Entry {
+                name: text(&m["Title"]).unwrap_or_else(|| id.clone()),
+                kind: Kind::Model,
+                source: Source::PolyPizza,
+                tags,
+                authors: text(&m["Creator"]["Username"]).unwrap_or_default(),
+                thumbnail_url: text(&m["Thumbnail"]).filter(|u| u.starts_with("https://")),
+                download_url: text(&m["Download"]).filter(|u| u.starts_with("https://")),
+                licence: text(&m["Licence"]),
+                animated: m["Animated"].as_bool().unwrap_or(false),
+                id,
+                ..Entry::blank()
+            })
+        })
+        .collect())
+}
+
+/// One asset by its id, here and now: from the list a source keeps, or —
+/// for a source that searches itself — asked for by name.
+pub fn find_now(
+    source: Source,
+    kind: Kind,
+    folders: &[PathBuf],
+    id: &str,
+) -> Result<Entry, String> {
+    if source == Source::PolyPizza {
+        if !safe_id(id) {
+            return Err(format!("`{id}` is not an asset name"));
+        }
+        let key = polypizza_key().ok_or(KEY_MISSING)?;
+        let json = pizza_get(&format!("{PIZZA_API}/model/{id}"), &key)?;
+        // One model, in the shape a search's results hold.
+        let one: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let wrapped = serde_json::json!({ "results": [one] }).to_string();
+        return parse_polypizza(&wrapped)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("no model called `{id}` in polypizza"));
+    }
+    list_now(source, kind, folders, &Query::default())?
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| format!("no {} called `{id}` in {}", kind.tag(), source.tag()))
+}
+
+/// What Poly Pizza has for `query`: models only, it has nothing else.
+fn polypizza_list(kind: Kind, query: &Query) -> Result<Vec<Entry>, String> {
+    if kind != Kind::Model {
+        return Ok(Vec::new());
+    }
+    let key = polypizza_key().ok_or(KEY_MISSING)?;
+    let mut params = vec!["limit=50".to_string()];
+    if query.animated {
+        params.push("animated=true".into());
+    }
+    let words = query.text.trim();
+    let url = if words.is_empty() {
+        format!("{PIZZA_API}/popular?{}", params.join("&"))
+    } else {
+        format!(
+            "{PIZZA_API}/search/{}?{}",
+            percent_encode(words),
+            params.join("&")
+        )
+    };
+    let mut entries = parse_polypizza(&pizza_get(&url, &key)?)?;
+    // Asked for, and checked: a search that ignored the filter still shows
+    // only what moves.
+    if query.animated {
+        entries.retain(|e| e.animated);
+    }
+    Ok(entries)
+}
+
+/// A search's words, safe in a URL's path.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// A Poly Pizza model on the disk, kept for next time.
+fn polypizza_fetch(entry: &Entry) -> Result<Ready, String> {
+    if !safe_id(&entry.id) {
+        return Err(format!("`{}` is not an asset name", entry.id));
+    }
+    let url = entry
+        .download_url
+        .as_deref()
+        .ok_or("Poly Pizza gave no file for this model")?;
+    let dest = cache_root()
+        .ok_or("no cache folder")?
+        .join("polypizza")
+        .join("models")
+        .join(format!("{}.glb", entry.id));
+    if !dest.exists() {
+        download(url, &dest)?;
+    }
+    Ok(Ready::Model(dest))
+}
+
+/// Whether a model file moves: a glTF with animations, an FBX with curves.
+/// Read from the head of the file, so a folder of large models is still
+/// listed in a moment.
+pub fn moves(path: &Path) -> bool {
+    use std::io::Read;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    match ext.as_str() {
+        // The JSON is all a glTF says about itself; a binary one carries it
+        // first, after a twenty-byte header.
+        "gltf" => {
+            let _ = file.take(8 << 20).read_to_end(&mut head);
+        }
+        "glb" => {
+            let mut file = file;
+            let mut header = [0u8; 20];
+            if file.read_exact(&mut header).is_err() || &header[..4] != b"glTF" {
+                return false;
+            }
+            let length = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+            let _ = file
+                .take(u64::from(length.min(8 << 20)))
+                .read_to_end(&mut head);
+        }
+        "fbx" => {
+            let _ = file.take(64 << 20).read_to_end(&mut head);
+            return contains(&head, b"AnimationCurveNode");
+        }
+        _ => return false,
+    }
+    contains(&head, b"\"animations\"")
+        && !contains(&head, b"\"animations\":[]")
+        && !contains(&head, b"\"animations\" : []")
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 // --- ambientCG --------------------------------------------------------------
@@ -927,6 +1301,7 @@ pub fn parse_ambientcg_page(json: &str, kind: Kind) -> Result<(Vec<Entry>, bool)
                 tags,
                 authors: "ambientCG".into(),
                 path: None,
+                ..Entry::blank()
             })
         })
         .collect::<Vec<_>>();
@@ -1278,5 +1653,79 @@ mod tests {
             .is_some_and(|p| p.ends_with("oak_planks_nor_gl_1k.jpg")));
         assert!(maps.roughness.is_some());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_poly_pizza_answer_reads_with_its_licence_and_whether_it_moves() {
+        let json = r#"{"total": 2, "results": [
+            {"ID": "8h3Kq2", "Title": "Fox", "Creator": {"Username": "Quaternius"},
+             "Thumbnail": "https://static.poly.pizza/8h3Kq2.webp",
+             "Download": "https://static.poly.pizza/8h3Kq2.glb",
+             "Licence": "CC0 1.0", "Animated": true, "Tags": ["Animal"], "Category": "Animals"},
+            {"ID": "z9", "Title": "Chair", "Creator": {"Username": "someone"},
+             "Thumbnail": "http://insecure/z9.jpg", "Download": "https://static.poly.pizza/z9.glb",
+             "Licence": "CC-BY 3.0", "Animated": false},
+            {"ID": "../../etc", "Title": "Escape"}
+        ]}"#;
+        let entries = parse_polypizza(json).expect("parses");
+        assert_eq!(entries.len(), 2, "an id that is a path is dropped");
+        let fox = &entries[0];
+        assert_eq!((fox.id.as_str(), fox.name.as_str()), ("8h3Kq2", "Fox"));
+        assert!(fox.animated && fox.kind == Kind::Model && fox.source == Source::PolyPizza);
+        assert!(
+            fox.tags.contains(&"animal".to_string()) && fox.tags.contains(&"animals".to_string())
+        );
+        assert_eq!(fox.credit(), None, "CC0 asks nothing");
+        let chair = &entries[1];
+        assert_eq!(chair.thumbnail_url, None, "only https is fetched");
+        let credit = chair.credit().expect("CC-BY asks for a credit");
+        assert!(
+            credit.contains("\"Chair\" by someone") && credit.contains("CC-BY 3.0"),
+            "{credit}"
+        );
+        assert!(credit.contains("poly.pizza/m/z9"), "{credit}");
+    }
+
+    #[test]
+    fn a_search_is_safe_in_a_url_and_ids_safe_as_names() {
+        assert_eq!(percent_encode("low poly/dog"), "low%20poly%2Fdog");
+        assert_eq!(percent_encode("나무"), "%EB%82%98%EB%AC%B4");
+        assert!(safe_id("8h3Kq2") && safe_id("a_b-c"));
+        assert!(!safe_id("") && !safe_id("../x") && !safe_id("a b"));
+    }
+
+    #[test]
+    fn a_model_file_says_whether_it_moves() {
+        let dir = std::env::temp_dir().join(format!("kreate-moves-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let still = dir.join("still.gltf");
+        std::fs::write(&still, r#"{"asset":{"version":"2.0"},"nodes":[{}]}"#).expect("written");
+        let empty = dir.join("empty.gltf");
+        std::fs::write(&empty, r#"{"asset":{"version":"2.0"},"animations":[]}"#).expect("written");
+        let walking = dir.join("walk.gltf");
+        std::fs::write(
+            &walking,
+            r#"{"asset":{"version":"2.0"},"animations":[{"name":"Walk","channels":[],"samplers":[]}]}"#,
+        )
+        .expect("written");
+        // A binary one: its JSON first, after the header.
+        let json = br#"{"asset":{"version":"2.0"},"animations":[{"name":"Run"}]}  "#;
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((20 + json.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(json);
+        let running = dir.join("run.glb");
+        std::fs::write(&running, glb).expect("written");
+        assert!(!moves(&still) && !moves(&empty));
+        assert!(moves(&walking) && moves(&running));
+        assert!(!moves(&dir.join("missing.glb")));
+        // And the folder's list marks it.
+        let listed = scan_folders(std::slice::from_ref(&dir));
+        let walk = listed.iter().find(|e| e.name == "walk").expect("listed");
+        assert!(walk.animated);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
