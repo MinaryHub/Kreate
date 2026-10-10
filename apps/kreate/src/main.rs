@@ -4831,6 +4831,53 @@ impl App {
         };
         match method {
             "scene" => Ok(self.scene_json()),
+            // The clock and what moves: read it, move it, play or stop it,
+            // and switch a take on or off — a strip changed with its other
+            // settings kept, which a script line naming only `mute` would
+            // reset.
+            "timeline" => {
+                if let (Some(object), Some(strip)) =
+                    (text("object"), params.get("strip").and_then(|v| v.as_u64()))
+                {
+                    let mute = params
+                        .get("mute")
+                        .and_then(|v| v.as_bool())
+                        .ok_or("`mute` says whether the strip is switched off")?;
+                    let id = self
+                        .doc
+                        .objects()
+                        .find(|(_, o)| o.name == object)
+                        .map(|(id, _)| id)
+                        .ok_or_else(|| format!("no object called `{object}`"))?;
+                    let current = self
+                        .doc
+                        .object(id)
+                        .and_then(|o| o.nla.get(strip as usize))
+                        .map(|s| kreate_ops::ops::anim::nla_strip_params(strip as usize, s))
+                        .ok_or_else(|| format!("`{object}` has no strip {strip}"))?;
+                    let mut changed = current;
+                    changed.mute = mute;
+                    self.doc.selection.clear();
+                    self.doc.selection.add(id);
+                    self.doc.selection.active = Some(id);
+                    let before = self.history.cursor();
+                    self.run_op(
+                        "anim.nla_strip_set",
+                        kreate_reflect::OpParams::to_map(&changed),
+                    );
+                    if self.history.cursor() == before {
+                        return Err("the strip did not change".into());
+                    }
+                }
+                if let Some(frame) = params.get("frame").and_then(|v| v.as_f64()) {
+                    self.set_frame(frame);
+                }
+                if let Some(play) = params.get("play").and_then(|v| v.as_bool()) {
+                    self.playing = play.then(std::time::Instant::now);
+                    self.redraw.set(RedrawReason::PLAYING);
+                }
+                Ok(self.timeline_json())
+            }
             "mesh" => {
                 let name = text("object").unwrap_or_default();
                 let world = text("space").as_deref() != Some("local");
@@ -5122,6 +5169,50 @@ impl App {
             }
             other => Err(format!("unknown method `{other}`")),
         }
+    }
+
+    /// The clock, and every object that moves with what it plays.
+    fn timeline_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let p = self.doc.playback;
+        let animated: Vec<serde_json::Value> = self
+            .doc
+            .objects()
+            .filter(|(_, o)| o.action.is_some() || !o.nla.is_empty())
+            .map(|(_, o)| {
+                let action = o.action.and_then(|a| self.doc.action(a)).map(|a| {
+                    let frames = a.key_frames();
+                    json!({
+                        "name": a.name,
+                        "first_key": frames.first(),
+                        "last_key": frames.last(),
+                    })
+                });
+                let strips: Vec<serde_json::Value> = o
+                    .nla
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        json!({
+                            "index": i,
+                            "name": s.name,
+                            "start": s.start,
+                            "frames": s.action_end - s.action_start,
+                            "muted": s.mute,
+                        })
+                    })
+                    .collect();
+                json!({ "object": o.name, "action": action, "strips": strips })
+            })
+            .collect();
+        json!({
+            "frame": p.frame,
+            "start": p.start,
+            "end": p.end,
+            "fps": p.fps,
+            "playing": self.playing.is_some(),
+            "animated": animated,
+        })
     }
 
     /// The document as the connector sees it: what is in it and where.
@@ -13328,6 +13419,55 @@ mod tests {
         assert!(app.history.undo(&mut app.doc), "undone");
         assert_eq!(app.doc.objects().count(), before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The connector's clock: read, moved, and a take switched on with its
+    /// timing kept.
+    #[test]
+    fn the_timeline_tool_reads_moves_and_switches_takes() {
+        use kreate_scene::animation::{Action, Interpolation};
+        let mut app = app();
+        let id = app
+            .doc
+            .add_mesh_object("Walker", kreate_mesh::primitives::cube(1.0));
+        let mut walk = Action::new("Walk");
+        walk.curve_mut("location", 0)
+            .insert(1.0, 0.0, Interpolation::Linear);
+        walk.curve_mut("location", 0)
+            .insert(25.0, 4.0, Interpolation::Linear);
+        let walk = app.doc.add_action(walk);
+        let run = app.doc.add_action(Action::new("Run"));
+        let mut strip = kreate_scene::nla::NlaStrip::new("Run", run, 40.0, (1.0, 13.0));
+        strip.mute = true;
+        strip.scale = 2.0;
+        {
+            let o = app.doc.object_mut(id).expect("walker");
+            o.action = Some(walk);
+            o.nla.push(strip);
+        }
+        let read = app
+            .bridge_call("timeline", &serde_json::json!({}))
+            .expect("read");
+        let walker = &read["animated"][0];
+        assert_eq!(walker["object"], "Walker");
+        assert_eq!(walker["action"]["name"], "Walk");
+        assert_eq!(walker["strips"][0]["muted"], true);
+
+        let moved = app
+            .bridge_call("timeline", &serde_json::json!({ "frame": 13.0 }))
+            .expect("moved");
+        assert_eq!(moved["frame"], 13.0);
+        let x = app.doc.object(id).expect("walker").transform.translation.x;
+        assert!((x - 2.0).abs() < 1e-6, "halfway along: {x}");
+
+        app.bridge_call(
+            "timeline",
+            &serde_json::json!({ "object": "Walker", "strip": 0, "mute": false }),
+        )
+        .expect("switched");
+        let strip = &app.doc.object(id).expect("walker").nla[0];
+        assert!(!strip.mute, "switched on");
+        assert_eq!((strip.start, strip.scale), (40.0, 2.0), "its timing kept");
     }
 
     /// One answer that added two shapes: said under it, and taken back in

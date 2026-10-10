@@ -162,6 +162,20 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "timeline",
+            "description": "The clock and what moves. With no arguments, reads it: the current frame, the range, frames per second, whether it is playing, and every animated object with the action it plays (its first and last key) and its NLA strips — a file's other takes, each with an index, a name, where it starts and whether it is muted. `frame` moves the clock there (nothing to undo, as in Blender); `play` starts or stops playback. `object` with `strip` and `mute` switches one strip on (mute false) or off, keeping its other settings — one undo step. Use it with capture_viewport to look at a pose at a given frame.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "frame": { "type": "number", "description": "Move the clock to this frame." },
+                    "play": { "type": "boolean", "description": "Start (true) or stop (false) playback." },
+                    "object": { "type": "string", "description": "An object's name, to change one of its strips." },
+                    "strip": { "type": "integer", "minimum": 0, "description": "Which strip, by its index." },
+                    "mute": { "type": "boolean", "description": "Switch the strip off (true) or on (false)." }
+                }
+            }
+        },
+        {
             "name": "undo",
             "description": "Undoes the last steps of the document's history.",
             "inputSchema": {
@@ -318,6 +332,10 @@ fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64,
         "render_image" => (
             "render",
             pick(&["path", "camera", "width", "height", "samples", "time_limit"]),
+        ),
+        "timeline" => (
+            "timeline",
+            pick(&["frame", "play", "object", "strip", "mute"]),
         ),
         "undo" => ("undo", pick(&["steps"])),
         "redo" => ("redo", pick(&["steps"])),

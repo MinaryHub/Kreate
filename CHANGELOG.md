@@ -21,6 +21,10 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector has a clock: `timeline` reads the frame, the range and
+  every animated object with its takes, moves to a frame, plays or stops,
+  and switches a take on or off with its timing kept — so an assistant can
+  look at a pose at frame 30, or play the walk instead of the run.
 - Under each answer in the chat panel, what it did — how many steps, how
   many objects added and removed — and a button that undoes all of it at
   once, as long as you have not changed the document since.
