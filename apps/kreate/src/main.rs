@@ -6549,6 +6549,26 @@ impl App {
                     self.chat_turns.clear();
                 }
                 Command::ChatRevertTurn { turn } => self.revert_chat_turn(turn),
+                Command::ConnectApp { index } => {
+                    let said = match (
+                        kreate::connect::App::ALL.get(index),
+                        kreate::claude::find_connector(),
+                    ) {
+                        (Some(app), Some(connector)) => app.connect(&connector),
+                        _ => Err("kreate-mcp is not beside Kreate".to_string()),
+                    };
+                    let (level, text) = match said {
+                        Ok(text) => (rfd::MessageLevel::Info, text),
+                        Err(text) => (rfd::MessageLevel::Warning, text),
+                    };
+                    self.status(&text);
+                    rfd::MessageDialog::new()
+                        .set_level(level)
+                        .set_title(self.ui.catalog.get("connect-menu"))
+                        .set_description(text)
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
+                }
                 // The outliner's key resolved against the *current* document,
                 // then handed to the operator as the identity it wants — so
                 // the eye is one undo step like any other edit.

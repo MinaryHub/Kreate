@@ -1108,7 +1108,7 @@ fn help_lists_skip_trust(help: &str) -> bool {
     help.contains("--skip-trust")
 }
 
-fn find_cli(provider: Provider) -> Option<PathBuf> {
+pub(crate) fn find_cli(provider: Provider) -> Option<PathBuf> {
     let (command, var) = provider.command();
     if let Some(path) = std::env::var_os(var) {
         return Some(PathBuf::from(path));
@@ -1144,7 +1144,7 @@ fn find_cli(provider: Provider) -> Option<PathBuf> {
 }
 
 /// `kreate-mcp`, which ships next to Kreate.
-fn find_connector() -> Option<PathBuf> {
+pub fn find_connector() -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "kreate-mcp.exe"
     } else {

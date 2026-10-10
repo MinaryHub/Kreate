@@ -12,6 +12,7 @@ pub mod attach;
 pub mod breadcrumbs;
 pub mod bridge;
 pub mod claude;
+pub mod connect;
 pub mod contact;
 pub mod crashreport;
 pub mod docfile;

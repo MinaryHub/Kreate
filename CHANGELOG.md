@@ -21,6 +21,10 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- Help ▸ Connect to AI Apps adds Kreate's tools to Claude Desktop, Claude
+  Code, Cursor, VS Code, the Gemini CLI or Codex in one click — their other
+  settings kept, a copy of the file as it was left beside it, a file that
+  does not parse left alone — and shows which are already connected.
 - The connector's capture takes `views` — front, back, left, right, top,
   bottom or the user's — and `only`, some objects alone, framed; and
   `get_context` says in a breath what is selected (and how many vertices,

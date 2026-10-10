@@ -180,6 +180,11 @@ pub enum Command {
     ChatStop,
     /// From the Claude panel: forget the conversation and start another.
     ChatNew,
+    /// Help ▸ Connect to AI Apps: add Kreate's connector to this assistant,
+    /// by its place in `kreate::connect::App::ALL`.
+    ConnectApp {
+        index: usize,
+    },
     /// From the chat panel: undo everything one answer did to the document.
     ChatRevertTurn {
         turn: usize,

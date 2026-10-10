@@ -3553,6 +3553,9 @@ pub enum MenuNode {
     Recover,
     /// File ▸ Open Recent, the documents of late — drawn from the list.
     Recent,
+    /// Help ▸ Connect to AI Apps, each assistant with where it stands —
+    /// drawn as the menu opens, from their settings files.
+    ConnectApps,
 }
 
 /// A menu on a bar.
@@ -3691,6 +3694,8 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
         TopMenu {
             label: l.menu_help.clone(),
             nodes: vec![
+                MenuNode::ConnectApps,
+                Separator,
                 entry(
                     "help.contact",
                     &l.help_contact,
@@ -3929,6 +3934,7 @@ pub fn flatten(menus: &[TopMenu]) -> Vec<(String, MenuEntry)> {
                 MenuNode::Separator
                 | MenuNode::Recover
                 | MenuNode::Recent
+                | MenuNode::ConnectApps
                 | MenuNode::UndoHistory => {}
             }
         }
@@ -3957,6 +3963,7 @@ fn draw_nodes(ui: &mut Ui, state: &mut ShellState, l: &Labels, nodes: &[MenuNode
             }
             MenuNode::Recover => draw_recover_menu(ui, state, l),
             MenuNode::Recent => draw_recent_menu(ui, state, l),
+            MenuNode::ConnectApps => draw_connect_menu(ui, state),
             MenuNode::UndoHistory => draw_undo_history(ui, state, l),
         }
     }
@@ -8390,6 +8397,44 @@ fn recovery_row_height(ui: &Ui) -> f32 {
 /// One row each in a list that scrolls after a few, the count above and a way
 /// to dismiss the lot below. A stale session directory per crashed process is
 /// normal, and a run of interrupted tests left forty-two.
+/// Help ▸ Connect to AI Apps: each assistant, connected or not, and a click
+/// to add Kreate to it. Where each stands is read as the menu opens.
+fn draw_connect_menu(ui: &mut Ui, state: &mut ShellState) {
+    use crate::connect::{App, Status};
+    let t = |key: &str| state.catalog.format(key, kreate_i18n::TextKind::Ui, &[]);
+    let (title, hint, connected, absent, missing) = (
+        t("connect-menu"),
+        state
+            .catalog
+            .format("connect-hint", kreate_i18n::TextKind::Tooltip, &[]),
+        t("connect-connected"),
+        t("connect-absent"),
+        t("connect-no-connector"),
+    );
+    ui.menu_button(&title, |ui| {
+        let Some(connector) = crate::claude::find_connector() else {
+            ui.add_enabled(false, egui::Button::new(&missing));
+            return;
+        };
+        for (index, app) in App::ALL.iter().enumerate() {
+            let status = app.status(&connector);
+            // i18n-exempt: an application's own name
+            let label = match status {
+                Status::Connected => format!("✓ {}  ({connected})", app.name()),
+                Status::Ready => app.name().to_string(),
+                Status::Absent => format!("{}  ({absent})", app.name()),
+            };
+            let response = ui
+                .add_enabled(status != Status::Absent, egui::Button::new(label))
+                .on_hover_text(&hint);
+            if response.clicked() {
+                state.queue.push(Command::ConnectApp { index });
+                ui.close();
+            }
+        }
+    });
+}
+
 /// File ▸ Open Recent: the name, the whole path on hover, and a document that
 /// is no longer there greyed out.
 fn draw_recent_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
@@ -11298,6 +11343,11 @@ chat-stop = Stop
 chat-new = New Chat
 chat-working = Working…
 chat-stopped = Stopped.
+connect-menu = Connect to AI Apps
+connect-hint = Add Kreate's tools to this assistant, so it can work on the open document. Its other settings are kept, with a copy of the file as it was.
+connect-connected = connected
+connect-absent = not installed
+connect-no-connector = kreate-mcp is not beside Kreate
 chat-revert = Undo this answer
 chat-revert-hint = Undo every change this answer made to the document, as one step.
 chat-turn = This answer: { $steps } steps · { $added } added · { $removed } removed
@@ -12491,6 +12541,11 @@ chat-stop = 중지
 chat-new = 새 대화
 chat-working = 작업 중…
 chat-stopped = 중지했습니다.
+connect-menu = AI 앱에 연결
+connect-hint = 이 AI 앱에 Kreate 도구를 추가해, 열린 문서를 다룰 수 있게 합니다. 앱의 다른 설정은 그대로 두고, 원래 파일의 사본을 남깁니다.
+connect-connected = 연결됨
+connect-absent = 설치 안 됨
+connect-no-connector = Kreate 옆에 kreate-mcp가 없습니다
 chat-revert = 이 응답 되돌리기
 chat-revert-hint = 이 응답이 문서에 한 변경을 한 번에 모두 되돌립니다.
 chat-turn = 이번 응답: 작업 { $steps }개 · 추가 { $added } · 삭제 { $removed }
