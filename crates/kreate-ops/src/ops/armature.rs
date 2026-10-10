@@ -817,9 +817,10 @@ impl Operator for Symmetrize {
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct BindParams {
-    /// With weights worked out from distance, or with the mesh's own — empty
-    /// groups made for the bones that have none.
-    #[param(variants("automatic", "empty"))]
+    /// With weights by heat spreading along the surface (Blender's
+    /// automatic), with the mesh's own — empty groups made for the bones
+    /// that have none — or by distance alone, the quicker envelope.
+    #[param(variants("automatic", "empty", "envelope"))]
     pub weights: u32,
 }
 
@@ -873,6 +874,8 @@ impl Operator for Bind {
                 continue;
             };
             let layers: Vec<(String, Vec<f32>)> = if params.weights == 0 {
+                kreate_scene::skin::heat_weights(mesh, &armature, to_armature)
+            } else if params.weights == 2 {
                 kreate_scene::skin::automatic_weights(mesh, &armature, to_armature)
             } else {
                 armature

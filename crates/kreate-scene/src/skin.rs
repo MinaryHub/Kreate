@@ -269,6 +269,194 @@ pub fn automatic_weights(
         .collect()
 }
 
+/// Weights by heat, as Blender's "With Automatic Weights" makes them: each
+/// vertex is warmed by the bone nearest it, and the warmth spreads along the
+/// surface — so a thigh's weight runs down its own leg and does not leap the
+/// gap to the other, as weights by distance through the air do.
+///
+/// For each bone, `(L + H) w = H p`: `L` the surface's Laplacian (edges
+/// weighted by the inverse square of their length, so it measures in the
+/// same units as `H`), `H` each vertex's heat — the inverse square of its
+/// distance to its nearest bone — and `p` one where that bone is the
+/// nearest. The matrix is the same for every bone; each is solved by
+/// conjugate gradients from its own `p`. Then, as [`automatic_weights`]:
+/// the four strongest, normalised.
+pub fn heat_weights(
+    mesh: &MeshData,
+    armature: &Armature,
+    mesh_to_armature: DAffine3,
+) -> Vec<(String, Vec<f32>)> {
+    let n = mesh.num_verts() as usize;
+    let names: Vec<String> = armature
+        .bones
+        .iter()
+        .map(|b| weight_layer(&b.name))
+        .collect();
+    if n == 0 || armature.bones.is_empty() {
+        return names.into_iter().map(|name| (name, vec![0.0; n])).collect();
+    }
+    let points: Vec<DVec3> = mesh
+        .positions()
+        .iter()
+        .map(|p| mesh_to_armature.transform_point3(p.as_dvec3()))
+        .collect();
+    let segments: Vec<(DVec3, DVec3)> = armature.bones.iter().map(|b| (b.head, b.tail)).collect();
+
+    // The edges, weighted, as rows: the Laplacian without its diagonal.
+    let lengths: Vec<f64> = mesh
+        .edges()
+        .iter()
+        .map(|e| points[e[0] as usize].distance(points[e[1] as usize]))
+        .collect();
+    let typical = {
+        let mut l: Vec<f64> = lengths.iter().copied().filter(|l| *l > 0.0).collect();
+        l.sort_by(f64::total_cmp);
+        l.get(l.len() / 2).copied().unwrap_or(1.0)
+    };
+    let floor = (typical * 1e-3).powi(2);
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (e, l) in mesh.edges().iter().zip(&lengths) {
+        let (a, b) = (e[0] as usize, e[1] as usize);
+        if a == b || a >= n || b >= n {
+            continue;
+        }
+        let w = 1.0 / (l * l).max(floor);
+        rows[a].push((b, w));
+        rows[b].push((a, w));
+    }
+    let degree: Vec<f64> = rows
+        .iter()
+        .map(|r| r.iter().map(|(_, w)| w).sum())
+        .collect();
+
+    // Each vertex's nearest bones — all of them, at a tie — and its heat.
+    let near_floor = (typical * 0.1).powi(2);
+    let mut nearest: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut heat: Vec<f64> = Vec::with_capacity(n);
+    for p in &points {
+        let d: Vec<f64> = segments
+            .iter()
+            .map(|(a, b)| distance_to_segment(*p, *a, *b))
+            .collect();
+        let best = d.iter().copied().fold(f64::MAX, f64::min);
+        nearest.push(
+            d.iter()
+                .enumerate()
+                .filter(|(_, x)| **x <= best * 1.0001 + 1e-9)
+                .map(|(i, _)| i)
+                .collect(),
+        );
+        heat.push(1.0 / (best * best).max(near_floor));
+    }
+    let diagonal: Vec<f64> = degree.iter().zip(&heat).map(|(l, h)| l + h).collect();
+    let apply = |x: &[f64], out: &mut [f64]| {
+        for (i, row) in rows.iter().enumerate() {
+            let mut sum = diagonal[i] * x[i];
+            for (j, w) in row {
+                sum -= w * x[*j];
+            }
+            out[i] = sum;
+        }
+    };
+
+    let mut layers: Vec<Vec<f32>> = vec![vec![0.0; n]; segments.len()];
+    for (bone, layer) in layers.iter_mut().enumerate() {
+        let p: Vec<f64> = nearest
+            .iter()
+            .map(|ties| {
+                if ties.contains(&bone) {
+                    1.0 / ties.len() as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        if p.iter().all(|v| *v == 0.0) {
+            continue;
+        }
+        let rhs: Vec<f64> = p.iter().zip(&heat).map(|(p, h)| p * h).collect();
+        let x = conjugate_gradients(&apply, &diagonal, &rhs, p);
+        for (out, v) in layer.iter_mut().zip(x) {
+            *out = v.clamp(0.0, 1.0) as f32;
+        }
+    }
+
+    // The four strongest, normalised; a vertex left with none follows its
+    // nearest bone.
+    for v in 0..n {
+        let mut strongest: Vec<(usize, f32)> = layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (i, l[v]))
+            .filter(|(_, w)| *w > 0.01)
+            .collect();
+        strongest.sort_by(|a, b| b.1.total_cmp(&a.1));
+        strongest.truncate(4);
+        for l in layers.iter_mut() {
+            l[v] = 0.0;
+        }
+        let total: f32 = strongest.iter().map(|(_, w)| w).sum();
+        if total > 0.0 {
+            for (i, w) in strongest {
+                layers[i][v] = w / total;
+            }
+        } else if let Some(&i) = nearest[v].first() {
+            layers[i][v] = 1.0;
+        }
+    }
+    names.into_iter().zip(layers).collect()
+}
+
+/// Solves `A x = b` for a symmetric positive definite `A`, given as a
+/// product, by conjugate gradients with the diagonal as preconditioner,
+/// from `x`.
+fn conjugate_gradients(
+    apply: &dyn Fn(&[f64], &mut [f64]),
+    diagonal: &[f64],
+    b: &[f64],
+    mut x: Vec<f64>,
+) -> Vec<f64> {
+    let n = b.len();
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let mut ax = vec![0.0; n];
+    apply(&x, &mut ax);
+    let mut r: Vec<f64> = b.iter().zip(&ax).map(|(b, a)| b - a).collect();
+    let mut z: Vec<f64> = r
+        .iter()
+        .zip(diagonal)
+        .map(|(r, d)| r / d.max(1e-12))
+        .collect();
+    let mut d = z.clone();
+    let mut rz = dot(&r, &z);
+    let stop = dot(b, b).sqrt() * 1e-5;
+    let mut ad = vec![0.0; n];
+    for _ in 0..2000 {
+        if dot(&r, &r).sqrt() <= stop {
+            break;
+        }
+        apply(&d, &mut ad);
+        let dad = dot(&d, &ad);
+        if dad <= 0.0 {
+            break;
+        }
+        let alpha = rz / dad;
+        for i in 0..n {
+            x[i] += alpha * d[i];
+            r[i] -= alpha * ad[i];
+        }
+        for i in 0..n {
+            z[i] = r[i] / diagonal[i].max(1e-12);
+        }
+        let next = dot(&r, &z);
+        let beta = next / rz.max(1e-300);
+        rz = next;
+        for i in 0..n {
+            d[i] = z[i] + beta * d[i];
+        }
+    }
+    x
+}
+
 fn distance_to_segment(p: DVec3, a: DVec3, b: DVec3) -> f64 {
     let ab = b - a;
     let t = if ab.length_squared() > 0.0 {
@@ -463,6 +651,98 @@ mod tests {
         let turned = skin_matrices(&a, &pose, mesh_to_armature)[0];
         // The bone's head, in the mesh's space, is at x = 1: it stays put.
         assert!((turned.transform_point3(DVec3::X) - DVec3::X).length() < 1e-9);
+    }
+    /// Two legs side by side, each a column on its own bone. By distance,
+    /// each leg's inner side takes some of the other's bone across the gap;
+    /// by heat, which spreads along the surface, none does.
+    #[test]
+    fn heat_keeps_each_leg_on_its_own_bone() {
+        let mut positions = Vec::new();
+        let mut faces: Vec<Vec<u32>> = Vec::new();
+        for x in [-0.12f32, 0.12] {
+            let mut col = kreate_mesh::primitives::uv_sphere(0.5, 12, 16);
+            for p in col.positions_mut() {
+                p.x = p.x * 0.18 + x;
+                p.y *= 0.18;
+                p.z = (p.z + 0.5) * 0.9;
+            }
+            let base = positions.len() as u32;
+            positions.extend(col.positions().iter().copied());
+            for f in 0..col.num_faces() {
+                faces.push(col.face_verts(f).iter().map(|v| v + base).collect());
+            }
+        }
+        let legs = MeshData::from_faces(positions, &faces);
+        let mut rig = Armature::new("Legs");
+        rig.bones[0].name = "Thigh.L".into();
+        rig.bones[0].head = DVec3::new(0.12, 0.0, 0.9);
+        rig.bones[0].tail = DVec3::new(0.12, 0.0, 0.0);
+        rig.add_bone(Bone {
+            name: "Thigh.R".into(),
+            head: DVec3::new(-0.12, 0.0, 0.9),
+            tail: DVec3::new(-0.12, 0.0, 0.0),
+            ..Default::default()
+        });
+        let across = |layers: &[(String, Vec<f32>)]| -> f32 {
+            let right = &layers
+                .iter()
+                .find(|(n, _)| n.ends_with("Thigh.R"))
+                .expect("R")
+                .1;
+            legs.positions()
+                .iter()
+                .zip(right)
+                .filter(|(p, _)| p.x > 0.0)
+                .map(|(_, w)| *w)
+                .fold(0.0, f32::max)
+        };
+        let by_distance = automatic_weights(&legs, &rig, DAffine3::IDENTITY);
+        let by_heat = heat_weights(&legs, &rig, DAffine3::IDENTITY);
+        assert!(
+            across(&by_distance) > 0.01,
+            "distance reaches across the gap"
+        );
+        assert_eq!(across(&by_heat), 0.0, "heat does not");
+        // Every vertex followed fully.
+        for v in 0..legs.num_verts() as usize {
+            let total: f32 = by_heat.iter().map(|(_, w)| w[v]).sum();
+            assert!((total - 1.0).abs() < 1e-4, "vertex {v}: {total}");
+        }
+    }
+
+    /// One column on two bones: the bottom on the first, the top on the
+    /// second, and a blend between rather than a cut.
+    #[test]
+    fn heat_blends_across_a_joint() {
+        let mut m = kreate_mesh::primitives::uv_sphere(0.5, 12, 32);
+        for p in m.positions_mut() {
+            p.x *= 0.3;
+            p.y *= 0.3;
+            p.z = (p.z + 0.5) * 2.0;
+        }
+        let layers = heat_weights(&m, &arm(), DAffine3::IDENTITY);
+        let lower = &layers
+            .iter()
+            .find(|(n, _)| n.ends_with("Lower"))
+            .expect("lower")
+            .1;
+        let mut low = 0.0f32;
+        let mut high = 0.0f32;
+        let mut between = false;
+        for (p, w) in m.positions().iter().zip(lower) {
+            if p.z < 0.6 {
+                low = low.max(*w);
+            }
+            if p.z > 1.6 {
+                high = high.max(*w);
+            }
+            if (0.9..1.1).contains(&p.z) && *w > 0.15 && *w < 0.85 {
+                between = true;
+            }
+        }
+        assert!(low < 0.05, "the bottom stays on the first: {low}");
+        assert!(high > 0.95, "the top goes with the second: {high}");
+        assert!(between, "the joint is a blend");
     }
 }
 

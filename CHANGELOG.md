@@ -21,10 +21,16 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- Binding With Automatic Weights spreads each bone's weight by heat along
+  the surface, as Blender does, rather than by distance through the air: a
+  thigh no longer pulls on the other leg, nor an upper arm on the ribs. On a
+  Mixamo body the edges a 45° bend tore went from hundreds to a handful.
+  The old weights by distance stay, as `weights="envelope"`.
 - `object.add_humanoid_rig` fits a standard skeleton — hips to head, and
   shoulder, arm, hand, thigh, shin and foot a side, `.L` and `.R` — to the
   selected figure standing up Z, arms out or down, measuring its height, its
-  legs, its reach and its feet, and binds it in the same step.
+  legs, its reach and its feet, and binds it in the same step. Object ▸
+  Parent ▸ Add Humanoid Rig.
 - Symmetry for rigs: `armature.symmetrize` copies every left bone (`.L`,
   `_l`, `Left…`) to the right across X, parents and roll mirrored, and
   `object.vertex_weights_mirror` copies one half's weights to the other, a

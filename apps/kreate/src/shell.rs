@@ -1468,6 +1468,7 @@ struct Labels {
     bind_automatic: String,
     bind_empty: String,
     unbind: String,
+    add_humanoid_rig: String,
     menu_armature: String,
     armature_add_bone: String,
     armature_extrude: String,
@@ -1801,6 +1802,7 @@ impl Labels {
             bind_automatic: t("bind-automatic"),
             bind_empty: t("bind-empty"),
             unbind: t("unbind-armature"),
+            add_humanoid_rig: t("op-object-add-humanoid-rig"),
             menu_armature: t("menu-armature"),
             armature_add_bone: t("armature-add-bone"),
             armature_extrude: t("armature-extrude"),
@@ -4334,6 +4336,11 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                     .variant("weights", V::Enum(1)),
                 ),
                 MenuNode::Separator,
+                entry(
+                    "object.add_humanoid_rig",
+                    &l.add_humanoid_rig,
+                    op("object.add_humanoid_rig", &[]),
+                ),
                 entry(
                     "object.unbind_armature",
                     &l.unbind,
