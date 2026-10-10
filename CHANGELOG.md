@@ -16,6 +16,11 @@ use; `scripts/release.sh` turns that section into the next release.
   from Poly Haven (CC0), searchable, with pictures. A model is added to the
   scene, a material is made of its maps and put on the active object, an
   HDRI lights the world. Downloads are kept in the cache for next time.
+- FBX characters come in rigged and moving: a skin's bones and weights
+  become an armature, and each take — Mixamo's dance, a walk — an action,
+  the first playing and the rest as muted strips. Meshes sharing one
+  skeleton share one armature, and the bones nothing is weighted to (a
+  fingertip, an eye) are bones too.
 - Poly Pizza in the Assets editor: thousands of low-poly models, many of
   them animated characters, CC0 or CC-BY. Enter searches it; "Animated
   only" lists what moves. It wants a free API key of your own, pasted into

@@ -22,9 +22,17 @@
 //! - **Conventions:** `GlobalSettings` says which axis is up and how many
 //!   centimetres a unit is, and both are applied.
 //!
-//! Animation, skinning, blend shapes, cameras and lights are named in the
-//! notes and left behind; pivots are ignored, which is right for the many
-//! files whose pivots are zero and an approximation for the rest.
+//! - **Skinning:** a `Skin` deformer's clusters — each a bone, the control
+//!   points it moves and how much, and where bone and mesh stood at the bind
+//!   — as the IR's skin and per-vertex weights, the four strongest a vertex.
+//! - **Animation:** each `AnimationStack` — a take, as Mixamo or Maya write
+//!   them — as a clip: every model's translation, rotation and scale curves,
+//!   keyed where the curves are keyed and read straight between.
+//! - **Cameras and lights**, as the IR has them.
+//!
+//! Blend shapes are named in the notes and left behind; pivots are ignored,
+//! which is right for the many files whose pivots are zero and an
+//! approximation for the rest.
 
 use crate::ir::{
     ImportImage, ImportMaterial, ImportMesh, ImportNode, ImportNodeData, ImportScene,
@@ -752,8 +760,6 @@ pub fn parse_fbx(
     let mut unsupported: Vec<&str> = Vec::new();
     for o in &objects.children {
         let what = match (o.name.as_str(), o.value(2).and_then(Value::as_str)) {
-            ("AnimationCurve" | "AnimationCurveNode" | "AnimationStack", _) => "animation",
-            ("Deformer", Some("Skin")) => "skinning",
             ("Deformer", Some("BlendShape")) => "blend shapes",
             _ => continue,
         };
@@ -1090,6 +1096,8 @@ pub fn parse_fbx(
         scene.nodes[*node].parent =
             parents_of(*id).find_map(|p| node_of.iter().find(|(m, _)| *m == p).map(|(_, n)| *n));
     }
+    read_skins(objects, &links, &node_of, &mesh_of, &mut scene);
+    read_takes(objects, &links, &models, &node_of, &mut scene);
     if lights_assumed {
         scene.source.notes.push(LossyNote::Unsupported {
             what: "FBX lights have no physical unit: an intensity of 100 was taken as \
@@ -1098,6 +1106,469 @@ pub fn parse_fbx(
         });
     }
     Ok(scene)
+}
+
+/// FBX's clock: ticks a second.
+const TICKS: f64 = 46_186_158_000.0;
+
+/// A matrix of sixteen numbers, as FBX writes them: column by column.
+fn matrix(node: &Node, name: &str) -> Option<Mat4> {
+    let v = node.child(name)?.value(0)?.floats();
+    (v.len() == 16).then(|| {
+        let a: [f32; 16] = std::array::from_fn(|i| v[i] as f32);
+        Mat4::from_cols_array(&a)
+    })
+}
+
+/// A node's placement in the file's space: its parents' and its own.
+fn file_world(scene: &ImportScene, node: usize) -> Mat4 {
+    let mut out = Mat4::IDENTITY;
+    let mut at = Some(node);
+    for _ in 0..=scene.nodes.len() {
+        let Some(n) = at.and_then(|i| scene.nodes.get(i)) else {
+            break;
+        };
+        let t = &n.transform;
+        out = Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation) * out;
+        at = n.parent;
+    }
+    out
+}
+
+/// Every `Skin` deformer as the IR's skin of the models that wear its
+/// geometry, and its clusters' weights as their meshes' vertex skins.
+fn read_skins(
+    objects: &Node,
+    links: &[(i64, i64, Option<String>)],
+    node_of: &[(i64, usize)],
+    mesh_of: &[(i64, usize)],
+    scene: &mut ImportScene,
+) {
+    let id_of = |n: &Node| n.value(0).and_then(Value::as_i64);
+    let deformer = |kind: &'static str| {
+        objects
+            .children_named("Deformer")
+            .filter(move |d| d.value(2).and_then(Value::as_str) == Some(kind))
+    };
+    let clusters: Vec<&Node> = deformer("Cluster").collect();
+    for skin in deformer("Skin") {
+        let Some(skin_id) = id_of(skin) else { continue };
+        // The geometry it deforms, and the models wearing it.
+        let Some(geometry) = links
+            .iter()
+            .find(|l| l.0 == skin_id && mesh_of.iter().any(|(g, _)| *g == l.1))
+            .map(|l| l.1)
+        else {
+            continue;
+        };
+        let wearers: Vec<usize> = links
+            .iter()
+            .filter(|l| l.0 == geometry)
+            .filter_map(|l| node_of.iter().find(|(m, _)| *m == l.1).map(|(_, n)| *n))
+            .collect();
+        // Where the mesh is, in the file's space, as its models place it.
+        // A cluster's own `Transform` is meant to say so, but what writers
+        // put there differs — Mixamo writes the bone's bind undone instead —
+        // and the models do not lie.
+        let mesh_world = wearers
+            .first()
+            .map(|n| file_world(scene, *n))
+            .unwrap_or(Mat4::IDENTITY);
+        // Its clusters, each with the bone that moves it.
+        let mut joints = Vec::new();
+        let mut binds = Vec::new();
+        let mut weights: Vec<(Vec<i64>, Vec<f64>)> = Vec::new();
+        for cluster in &clusters {
+            let Some(cluster_id) = id_of(cluster) else {
+                continue;
+            };
+            if !links.iter().any(|l| l.0 == cluster_id && l.1 == skin_id) {
+                continue;
+            }
+            let Some(bone) = links
+                .iter()
+                .filter(|l| l.1 == cluster_id)
+                .find_map(|l| node_of.iter().find(|(m, _)| *m == l.0).map(|(_, n)| *n))
+            else {
+                continue;
+            };
+            joints.push(bone);
+            // From the mesh to the bone, at the bind: the bone's placement
+            // then (`TransformLink`, which every writer agrees on) undone
+            // after the mesh's.
+            binds.push(matrix(cluster, "TransformLink").map(|link| link.inverse() * mesh_world));
+            weights.push((
+                cluster
+                    .child("Indexes")
+                    .and_then(|v| v.value(0))
+                    .map(Value::ints)
+                    .unwrap_or_default(),
+                cluster
+                    .child("Weights")
+                    .and_then(|v| v.value(0))
+                    .map(Value::floats)
+                    .unwrap_or_default(),
+            ));
+        }
+        if joints.is_empty() || joints.len() > usize::from(u16::MAX) {
+            continue;
+        }
+        // One skeleton, one skin: Mixamo binds a body and its joints as two
+        // meshes to one set of bones, and a bone can belong to one armature.
+        // A skin that shares a bone with one read before joins it, its
+        // clusters renumbered into the first's joints.
+        let s = match scene
+            .skins
+            .iter()
+            .position(|k| k.joints.iter().any(|j| joints.contains(j)))
+        {
+            Some(s) => {
+                let first = &mut scene.skins[s];
+                let mut renumbered = Vec::with_capacity(joints.len());
+                for (j, bind) in joints.iter().zip(&binds) {
+                    let at = match first.joints.iter().position(|k| k == j) {
+                        Some(at) => at,
+                        None => {
+                            first.joints.push(*j);
+                            match (&mut first.inverse_bind, bind) {
+                                (Some(list), Some(m)) => list.push(*m),
+                                _ => first.inverse_bind = None,
+                            }
+                            first.joints.len() - 1
+                        }
+                    };
+                    renumbered.push(at);
+                }
+                // The weights now count the first skin's joints.
+                weights = renumbered.iter().zip(weights).fold(
+                    vec![(Vec::new(), Vec::new()); scene.skins[s].joints.len()],
+                    |mut out, (at, (i, w))| {
+                        out[*at].0.extend(i);
+                        out[*at].1.extend(w);
+                        out
+                    },
+                );
+                s
+            }
+            None => {
+                // Named as Blender names it, not after the deformer: a skin
+                // is called after its mesh, and the mesh keeps that name.
+                scene.skins.push(crate::ir::ImportSkin {
+                    name: "Armature".into(),
+                    joints,
+                    inverse_bind: binds.into_iter().collect(),
+                });
+                weights.resize(
+                    scene.skins.last().map_or(0, |k| k.joints.len()),
+                    (Vec::new(), Vec::new()),
+                );
+                scene.skins.len() - 1
+            }
+        };
+        for node in wearers {
+            let ImportNodeData::Mesh(m) = scene.nodes[node].data else {
+                continue;
+            };
+            scene.nodes[node].skin = Some(s);
+            let count = scene.meshes[m].positions.len();
+            let mut each: Vec<Vec<(u16, f32)>> = vec![Vec::new(); count];
+            for (k, (indexes, ws)) in weights.iter().enumerate() {
+                for (i, w) in indexes.iter().zip(ws) {
+                    if let Some(slot) = usize::try_from(*i).ok().and_then(|i| each.get_mut(i)) {
+                        if *w > 0.0 {
+                            slot.push((k as u16, *w as f32));
+                        }
+                    }
+                }
+            }
+            // The four that move it most, summing to one.
+            let mut vertex = crate::ir::VertexSkin::default();
+            for mut slot in each {
+                slot.sort_by(|a, b| b.1.total_cmp(&a.1));
+                slot.truncate(4);
+                let total: f32 = slot.iter().map(|(_, w)| w).sum();
+                let mut j = [0u16; 4];
+                let mut w = [0.0f32; 4];
+                for (i, (joint, weight)) in slot.iter().enumerate() {
+                    j[i] = *joint;
+                    w[i] = if total > 0.0 { weight / total } else { 0.0 };
+                }
+                vertex.joints.push(j);
+                vertex.weights.push(w);
+            }
+            if scene.vertex_skins.len() <= m {
+                scene.vertex_skins.resize(m + 1, None);
+            }
+            scene.vertex_skins[m] = Some(vertex);
+        }
+    }
+    // The bones no vertex follows — a finger's tip, an eye, the top of the
+    // head — are still bones: their parent's bind carried down by their own
+    // placement. Left out, each became an empty hung from a joint.
+    let limbs: Vec<usize> = node_of
+        .iter()
+        .filter(|(id, _)| {
+            objects.children_named("Model").any(|m| {
+                id_of(m) == Some(*id) && m.value(2).and_then(Value::as_str) == Some("LimbNode")
+            })
+        })
+        .map(|(_, n)| *n)
+        .collect();
+    let local = |n: &ImportNode| {
+        Mat4::from_scale_rotation_translation(
+            n.transform.scale,
+            n.transform.rotation,
+            n.transform.translation,
+        )
+    };
+    for skin in &mut scene.skins {
+        loop {
+            let mut grew = false;
+            for &limb in &limbs {
+                if skin.joints.contains(&limb) {
+                    continue;
+                }
+                let Some(parent) = scene.nodes[limb].parent else {
+                    continue;
+                };
+                let Some(k) = skin.joints.iter().position(|j| *j == parent) else {
+                    continue;
+                };
+                skin.joints.push(limb);
+                if let Some(list) = &mut skin.inverse_bind {
+                    // From the mesh to the child: its parent's, then its own
+                    // placement undone.
+                    let bind = local(&scene.nodes[limb]).inverse() * list[k];
+                    list.push(bind);
+                }
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+    }
+}
+
+/// One curve: its keys in seconds and its values.
+struct Curve {
+    times: Vec<f64>,
+    values: Vec<f64>,
+}
+
+impl Curve {
+    /// The value at `t`, straight between keys and held past either end.
+    fn at(&self, t: f64) -> Option<f64> {
+        let n = self.times.len().min(self.values.len());
+        if n == 0 {
+            return None;
+        }
+        let i = self.times[..n].partition_point(|k| *k <= t);
+        Some(match i {
+            0 => self.values[0],
+            i if i >= n => self.values[n - 1],
+            i => {
+                let (t0, t1) = (self.times[i - 1], self.times[i]);
+                let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+                self.values[i - 1] + (self.values[i] - self.values[i - 1]) * f
+            }
+        })
+    }
+}
+
+/// Every `AnimationStack` — a take — as a clip of the IR: each model's
+/// moving parts as channels, keyed where any of its curves is keyed.
+fn read_takes(
+    objects: &Node,
+    links: &[(i64, i64, Option<String>)],
+    models: &[&Node],
+    node_of: &[(i64, usize)],
+    scene: &mut ImportScene,
+) {
+    use crate::ir::{ChannelInterpolation, ChannelValues, ImportAnimation, ImportChannel};
+    let id_of = |n: &Node| n.value(0).and_then(Value::as_i64);
+    let find = |id: i64| objects.children.iter().find(|o| id_of(o) == Some(id));
+    for stack in objects.children_named("AnimationStack") {
+        let Some(stack_id) = id_of(stack) else {
+            continue;
+        };
+        let layers: Vec<i64> = links
+            .iter()
+            .filter(|l| l.1 == stack_id)
+            .filter(|l| find(l.0).is_some_and(|o| o.name == "AnimationLayer"))
+            .map(|l| l.0)
+            .collect();
+        // Model id, then what it animates and its three curves.
+        let mut moving: Vec<(i64, &str, [Option<Curve>; 3], Vec3)> = Vec::new();
+        for link in links.iter().filter(|l| layers.contains(&l.1)) {
+            let Some(node) = find(link.0).filter(|o| o.name == "AnimationCurveNode") else {
+                continue;
+            };
+            let Some((model, part)) = links.iter().find_map(|l| {
+                (l.0 == link.0)
+                    .then_some(())
+                    .and(l.2.as_deref())
+                    .filter(|p| matches!(*p, "Lcl Translation" | "Lcl Rotation" | "Lcl Scaling"))
+                    .map(|p| (l.1, p))
+            }) else {
+                continue;
+            };
+            let defaults = Vec3::new(
+                node.property_f64("d|X").unwrap_or(0.0) as f32,
+                node.property_f64("d|Y").unwrap_or(0.0) as f32,
+                node.property_f64("d|Z").unwrap_or(0.0) as f32,
+            );
+            let mut curves: [Option<Curve>; 3] = [None, None, None];
+            for l in links.iter().filter(|l| l.1 == link.0) {
+                let axis = match l.2.as_deref() {
+                    Some("d|X") => 0,
+                    Some("d|Y") => 1,
+                    Some("d|Z") => 2,
+                    _ => continue,
+                };
+                let Some(curve) = find(l.0).filter(|o| o.name == "AnimationCurve") else {
+                    continue;
+                };
+                let times: Vec<f64> = curve
+                    .child("KeyTime")
+                    .and_then(|v| v.value(0))
+                    .map(Value::ints)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| *t as f64 / TICKS)
+                    .collect();
+                let values = curve
+                    .child("KeyValueFloat")
+                    .and_then(|v| v.value(0))
+                    .map(Value::floats)
+                    .unwrap_or_default();
+                if !times.is_empty() && !values.is_empty() {
+                    curves[axis] = Some(Curve { times, values });
+                }
+            }
+            if curves.iter().any(Option::is_some) {
+                moving.push((model, part, curves, defaults));
+            }
+        }
+        if moving.is_empty() {
+            continue;
+        }
+        // From the take's start, or its first key.
+        let first = moving
+            .iter()
+            .flat_map(|(_, _, c, _)| c.iter().flatten())
+            .filter_map(|c| c.times.first().copied())
+            .fold(f64::INFINITY, f64::min);
+        let start = stack
+            .property_f64("LocalStart")
+            .map(|t| t / TICKS)
+            .filter(|t| *t <= first)
+            .unwrap_or(first);
+        let mut clip = ImportAnimation {
+            name: clean_name(stack.value(1).and_then(Value::as_str).unwrap_or("Take")),
+            channels: Vec::new(),
+        };
+        let mut ids: Vec<i64> = moving.iter().map(|m| m.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for model_id in ids {
+            let (Some(node), Some(model)) = (
+                node_of
+                    .iter()
+                    .find(|(m, _)| *m == model_id)
+                    .map(|(_, n)| *n),
+                models.iter().find(|m| id_of(m) == Some(model_id)),
+            ) else {
+                continue;
+            };
+            let parts: Vec<&(i64, &str, [Option<Curve>; 3], Vec3)> =
+                moving.iter().filter(|m| m.0 == model_id).collect();
+            let mut times: Vec<f64> = parts
+                .iter()
+                .flat_map(|(_, _, c, _)| c.iter().flatten())
+                .flat_map(|c| c.times.iter().copied())
+                .collect();
+            times.sort_by(f64::total_cmp);
+            times.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+            let order = model.property_f64("RotationOrder").unwrap_or(0.0) as i64;
+            let pre = euler(
+                model.property_vec3("PreRotation").unwrap_or(Vec3::ZERO),
+                order,
+            );
+            let post = euler(
+                model.property_vec3("PostRotation").unwrap_or(Vec3::ZERO),
+                order,
+            );
+            // A camera or light was turned to face the IR's way; its
+            // keys are turned the same.
+            let turn = match scene.nodes[node].data {
+                ImportNodeData::Camera(_) => Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+                ImportNodeData::Light(_) => Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                _ => Quat::IDENTITY,
+            };
+            let seconds: Vec<f32> = times.iter().map(|t| (t - start) as f32).collect();
+            for (_, part, curves, defaults) in parts {
+                let value = |t: f64, still: Vec3| {
+                    Vec3::new(
+                        curves[0].as_ref().and_then(|c| c.at(t)).map_or(
+                            if curves[0].is_none() {
+                                still.x
+                            } else {
+                                defaults.x
+                            },
+                            |v| v as f32,
+                        ),
+                        curves[1].as_ref().and_then(|c| c.at(t)).map_or(
+                            if curves[1].is_none() {
+                                still.y
+                            } else {
+                                defaults.y
+                            },
+                            |v| v as f32,
+                        ),
+                        curves[2].as_ref().and_then(|c| c.at(t)).map_or(
+                            if curves[2].is_none() {
+                                still.z
+                            } else {
+                                defaults.z
+                            },
+                            |v| v as f32,
+                        ),
+                    )
+                };
+                let values = match *part {
+                    "Lcl Translation" => {
+                        let still = model.property_vec3("Lcl Translation").unwrap_or(*defaults);
+                        ChannelValues::Translation(times.iter().map(|t| value(*t, still)).collect())
+                    }
+                    "Lcl Rotation" => {
+                        let still = model.property_vec3("Lcl Rotation").unwrap_or(*defaults);
+                        ChannelValues::Rotation(
+                            times
+                                .iter()
+                                .map(|t| {
+                                    pre * euler(value(*t, still), order) * post.inverse() * turn
+                                })
+                                .collect(),
+                        )
+                    }
+                    _ => {
+                        let still = model.property_vec3("Lcl Scaling").unwrap_or(Vec3::ONE);
+                        ChannelValues::Scale(times.iter().map(|t| value(*t, still)).collect())
+                    }
+                };
+                clip.channels.push(ImportChannel {
+                    node,
+                    interpolation: ChannelInterpolation::Linear,
+                    times: seconds.clone(),
+                    values,
+                });
+            }
+        }
+        if !clip.channels.is_empty() {
+            scene.animations.push(clip);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1224,11 +1695,7 @@ Connections:  {
         let turned = scene.nodes[1].transform.rotation * Vec3::X;
         assert!((turned - Vec3::Y).length() < 1e-5, "{turned}");
         assert_eq!(scene.nodes[1].transform.scale, Vec3::splat(2.0));
-        assert!(scene
-            .source
-            .notes
-            .iter()
-            .any(|n| matches!(n, LossyNote::Unsupported { what } if what == "animation")));
+        assert!(scene.animations.is_empty(), "an empty take is no clip");
     }
 
     #[test]
@@ -1407,6 +1874,183 @@ Connections:  {
         }
         out.extend(vec![0u8; if wide { 25 } else { 13 }]);
         out
+    }
+
+    /// Two bones, a strip skinned to them — the bottom to the root, the top
+    /// to the tip — and a take that turns the tip a quarter about Z in a
+    /// second. The clusters' `Transform` is Mixamo's: the bone's bind undone,
+    /// not the mesh's placement.
+    const SKINNED: &str = r#"; FBX 7.4.0 project file
+GlobalSettings:  {
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",100
+	}
+}
+Objects:  {
+	Geometry: 100, "Geometry::Strip", "Mesh" {
+		Vertices: *12 {
+			a: 0,0,0,1,0,0,0,2,0,1,2,0
+		}
+		PolygonVertexIndex: *4 {
+			a: 0,1,3,-3
+		}
+	}
+	Model: 110, "Model::Body", "Mesh" {
+	}
+	Deformer: 120, "Deformer::Skin Body", "Skin" {
+	}
+	Deformer: 130, "SubDeformer::Cluster Root", "Cluster" {
+		Indexes: *2 {
+			a: 0,1
+		}
+		Weights: *2 {
+			a: 1,1
+		}
+		Transform: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+		}
+		TransformLink: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+		}
+	}
+	Deformer: 140, "SubDeformer::Cluster Tip", "Cluster" {
+		Indexes: *2 {
+			a: 2,3
+		}
+		Weights: *2 {
+			a: 1,1
+		}
+		Transform: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,-1,0,1
+		}
+		TransformLink: *16 {
+			a: 1,0,0,0,0,1,0,0,0,0,1,0,0,1,0,1
+		}
+	}
+	Model: 150, "Model::Root", "LimbNode" {
+	}
+	Model: 160, "Model::Tip", "LimbNode" {
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,1,0
+		}
+	}
+	Model: 170, "Model::Tip_End", "LimbNode" {
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,1,0
+		}
+	}
+	AnimationStack: 900, "AnimStack::Wave", "" {
+	}
+	AnimationLayer: 901, "AnimLayer::Base", "" {
+	}
+	AnimationCurveNode: 902, "AnimCurveNode::R", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+	AnimationCurve: 903, "AnimCurve::", "" {
+		KeyTime: *2 {
+			a: 0,46186158000
+		}
+		KeyValueFloat: *2 {
+			a: 0,90
+		}
+	}
+}
+Connections:  {
+	C: "OO",100,110
+	C: "OO",110,0
+	C: "OO",120,100
+	C: "OO",130,120
+	C: "OO",140,120
+	C: "OO",150,130
+	C: "OO",160,140
+	C: "OO",150,0
+	C: "OO",160,150
+	C: "OO",170,160
+	C: "OO",901,900
+	C: "OO",902,901
+	C: "OP",902,160,"Lcl Rotation"
+	C: "OP",903,902,"d|Z"
+}
+"#;
+
+    #[test]
+    fn a_skinned_take_plays_its_bones_and_moves_the_mesh_with_them() {
+        use kreate_scene::document::ObjectData;
+        use kreate_scene::modifier::EvalCtx;
+        let scene = parse_fbx(SKINNED.as_bytes(), &none).expect("reads");
+        assert_eq!(scene.skins.len(), 1);
+        assert_eq!(scene.animations.len(), 1);
+        assert_eq!(scene.animations[0].name, "Wave");
+        let mut doc = kreate_scene::Document::new();
+        crate::build_into(&scene, &mut doc);
+        let (_, rig) = doc
+            .objects()
+            .find(|(_, o)| matches!(o.data, ObjectData::Armature(_)))
+            .expect("a rig");
+        let (_, armature) = doc
+            .armature_of(
+                doc.objects()
+                    .find(|(_, o)| matches!(o.data, ObjectData::Armature(_)))
+                    .map(|(id, _)| id)
+                    .expect("rig"),
+            )
+            .expect("bones");
+        // The tip's end, weighted by nothing, is a bone too, not an empty.
+        assert_eq!(armature.bones.len(), 3, "root, tip and its end");
+        assert!(rig.action.is_some(), "the take plays");
+        assert!(
+            !doc.objects()
+                .any(|(_, o)| matches!(o.data, ObjectData::Empty)),
+            "no joint left over as an empty"
+        );
+        let body = doc
+            .objects()
+            .find(|(_, o)| o.name == "Body")
+            .map(|(id, _)| id)
+            .expect("the body");
+        let top = |doc: &mut kreate_scene::Document, frame: f64| -> Vec<kreate_math::DVec3> {
+            doc.animate(frame);
+            let mesh = kreate_scene::ModifierCache::new()
+                .evaluated(doc, body, &EvalCtx::still())
+                .expect("a mesh");
+            let world = doc.world_transform(body);
+            let mut out: Vec<_> = mesh
+                .positions()
+                .iter()
+                .map(|p| world.transform_point3(p.as_dvec3()))
+                .filter(|p| p.z > 0.5)
+                .collect();
+            // By height, then across: the order the expected points are in.
+            out.sort_by(|a, b| {
+                (a.z * 1e3)
+                    .round()
+                    .total_cmp(&(b.z * 1e3).round())
+                    .then(a.x.total_cmp(&b.x))
+            });
+            out
+        };
+        // Z up here: the file's (x, y, z) is (x, -z, y).
+        let start = doc.playback.start as f64;
+        let near = |a: &[kreate_math::DVec3], b: &[[f64; 3]]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(p, q)| (*p - kreate_math::DVec3::from_array(*q)).length() < 1e-3)
+        };
+        let rest = top(&mut doc, start);
+        assert!(near(&rest, &[[0.0, 0.0, 2.0], [1.0, 0.0, 2.0]]), "{rest:?}");
+        // A second on, the top has swung a quarter about the tip, to its left.
+        let end = start + doc.playback.fps;
+        let swung = top(&mut doc, end);
+        assert!(
+            near(&swung, &[[-1.0, 0.0, 1.0], [-1.0, 0.0, 2.0]]),
+            "{swung:?}"
+        );
     }
 
     #[test]
