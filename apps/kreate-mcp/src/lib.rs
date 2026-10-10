@@ -178,6 +178,15 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "analyze_mesh",
+            "description": "Reads a mesh (the active object, or `object`) for what a sculptor looks for, each finding with where it is in the world: face kinds and the typical edge length (the unit the other measures use); open edges (holes) and non-manifold edges; degenerate faces and the share of sliver triangles; bumpy places — vertices that stand off their neighbours differently from how the neighbours stand off theirs, in edge lengths, worst first; and, for a mesh across X = 0, how far each vertex's mirror is from the surface (mean, worst, and where). Use it to find where to smooth, fill or even out, and again after.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "object": { "type": "string", "description": "The mesh object's name; default the active one." } }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "check_rig",
             "description": "Tries a rig: bends each bone of an armature in turn (by `angle` degrees about its own X, default 45) and measures the meshes bound to it, without changing the document. Returns the bones worst first, each with how many vertices it moved, its worst edge's stretch as a ratio of its rest length (1 is perfect; past 1.5 counts as torn — a vertex left behind by a misplaced weight), how many edges tore and where the worst one is (world, at rest), and how many were pinched under a third (the inside of a bend folding: normal in a few, a too-hard joint if many); bones that move nothing; and vertices no bone holds, with a few of their positions. Use it after binding and after each weight fix: fix the worst bone with object.vertex_weights_set (exclusive, by box) and object.vertex_weights_smooth, then check again.",
             "inputSchema": {

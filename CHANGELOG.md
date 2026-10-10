@@ -21,6 +21,9 @@ use; `scripts/release.sh` turns that section into the next release.
   the first playing and the rest as muted strips. Meshes sharing one
   skeleton share one armature, and the bones nothing is weighted to (a
   fingertip, an eye) are bones too.
+- The connector's `analyze_mesh` reads a mesh as a sculptor would — holes,
+  broken surface, slivers, bumpy places, and where its halves differ —
+  each with where it is, so an assistant knows where to work next.
 - Binding With Automatic Weights spreads each bone's weight by heat along
   the surface, as Blender does, rather than by distance through the air: a
   thigh no longer pulls on the other leg, nor an upper arm on the ribs. On a

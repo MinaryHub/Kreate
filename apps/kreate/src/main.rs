@@ -5029,6 +5029,51 @@ impl App {
                 self.capture_views(params)
             }
             "context" => Ok(self.context_json()),
+            // A mesh read for what a sculptor looks for, each with where.
+            "analyze_mesh" => {
+                let id = match text("object") {
+                    Some(name) => self
+                        .doc
+                        .objects()
+                        .find(|(_, o)| o.name == name)
+                        .map(|(id, _)| id)
+                        .ok_or_else(|| format!("no object called `{name}`"))?,
+                    None => self.doc.selection.active.ok_or("nothing is active")?,
+                };
+                let object = self.doc.object(id).ok_or("no such object")?;
+                let mesh = object
+                    .mesh()
+                    .and_then(|m| self.doc.mesh(m))
+                    .ok_or_else(|| format!("`{}` is not a mesh", object.name))?;
+                let r = kreate::meshcheck::analyze(mesh, &self.doc.world_transform(id));
+                let spots = |list: &[kreate::meshcheck::Spot]| -> Vec<serde_json::Value> {
+                    list.iter()
+                        .map(|s| {
+                            json!({
+                                "at": s.at,
+                                "count": s.count,
+                                "worst": (s.worst * 100.0).round() / 100.0,
+                            })
+                        })
+                        .collect()
+                };
+                Ok(json!({
+                    "object": object.name,
+                    "vertices": r.vertices,
+                    "faces": { "triangles": r.triangles, "quads": r.quads, "ngons": r.ngons },
+                    "typical_edge_m": r.edge_length,
+                    "open_edges": spots(&r.open_edges),
+                    "non_manifold_edges": spots(&r.non_manifold_edges),
+                    "degenerate_faces": r.degenerate_faces,
+                    "sliver_share": (r.sliver_share * 1000.0).round() / 1000.0,
+                    "bumpy_places": spots(&r.bumpy),
+                    "asymmetry": r.asymmetry.as_ref().map(|(mean, worst, places)| json!({
+                        "mean_edges": (mean * 100.0).round() / 100.0,
+                        "worst_edges": (worst * 100.0).round() / 100.0,
+                        "places": spots(places),
+                    })),
+                }))
+            }
             // Every bone bent in turn and the skin measured: what is torn,
             // where, and what no bone holds.
             "rig_check" => {

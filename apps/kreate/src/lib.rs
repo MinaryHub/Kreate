@@ -23,6 +23,7 @@ pub mod generate;
 pub mod glyphs;
 pub mod gpu_sync;
 pub mod materials;
+pub mod meshcheck;
 pub mod modal;
 pub mod mode;
 pub mod pick;
