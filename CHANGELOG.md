@@ -46,6 +46,10 @@ use; `scripts/release.sh` turns that section into the next release.
 - The connector's `analyze_mesh` reads a mesh as a sculptor would — holes,
   broken surface, slivers, bumpy places, and where its halves differ —
   each with where it is, so an assistant knows where to work next.
+- Automatic weights can look before they warm: with `visibility`, a vertex
+  takes heat only from bones it can see, not through skin — so a body's
+  side stays off an arm hanging beside it. The humanoid rig turns it on when
+  the arms hang down; held out, a figure tears less without it.
 - Binding With Automatic Weights spreads each bone's weight by heat along
   the surface, as Blender does, rather than by distance through the air: a
   thigh no longer pulls on the other leg, nor an upper arm on the ribs. On a

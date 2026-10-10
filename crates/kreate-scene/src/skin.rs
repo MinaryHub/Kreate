@@ -285,6 +285,7 @@ pub fn heat_weights(
     mesh: &MeshData,
     armature: &Armature,
     mesh_to_armature: DAffine3,
+    visibility: bool,
 ) -> Vec<(String, Vec<f32>)> {
     let n = mesh.num_verts() as usize;
     let names: Vec<String> = armature
@@ -330,20 +331,60 @@ pub fn heat_weights(
         .collect();
 
     // Each vertex's nearest bones — all of them, at a tie — and its heat.
+    // With `visibility`, the nearest it can see: the line from the bone to
+    // the vertex meets no other surface first. A ribcage's side is nearest
+    // the upper arm hanging beside it, and the skin between says the arm is
+    // not its bone. A vertex that sees none takes the nearest. Off, folds
+    // such as a groin are left alone, which on a figure with its arms out
+    // tears less — measured on a Mixamo body.
+    let triangles: Vec<[u32; 3]> = (0..mesh.num_faces())
+        .flat_map(|f| {
+            let ring = mesh.face_verts(f);
+            (1..ring.len().saturating_sub(1))
+                .map(|i| [ring[0], ring[i], ring[i + 1]])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let flat: Vec<glam::Vec3> = points.iter().map(|p| p.as_vec3()).collect();
+    let tree = kreate_math::Bvh::build(&flat, &triangles);
+    let gap = (typical * 0.05) as f32;
+    let sees = |from: DVec3, to: DVec3| -> bool {
+        let span = (to - from).length() as f32;
+        if span <= gap {
+            return true;
+        }
+        let ray = kreate_math::Ray::new(from.as_vec3(), (to - from).as_vec3());
+        tree.raycast(&flat, &triangles, &ray, span - gap).is_none()
+    };
     let near_floor = (typical * 0.1).powi(2);
     let mut nearest: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut heat: Vec<f64> = Vec::with_capacity(n);
     for p in &points {
-        let d: Vec<f64> = segments
+        let mut d: Vec<(usize, f64, DVec3)> = segments
             .iter()
-            .map(|(a, b)| distance_to_segment(*p, *a, *b))
+            .enumerate()
+            .map(|(i, (a, b))| {
+                let on = closest_on_segment(*p, *a, *b);
+                (i, on.distance(*p), on)
+            })
             .collect();
-        let best = d.iter().copied().fold(f64::MAX, f64::min);
+        d.sort_by(|x, y| x.1.total_cmp(&y.1));
+        // The nearest few, tried in order; most vertices see the first.
+        let seen = if visibility {
+            d.iter()
+                .take(6)
+                .find(|(_, _, on)| sees(*on, *p))
+                .map(|(_, dist, _)| *dist)
+        } else {
+            Some(d[0].1)
+        };
+        let best = seen.unwrap_or(d[0].1);
         nearest.push(
             d.iter()
-                .enumerate()
-                .filter(|(_, x)| **x <= best * 1.0001 + 1e-9)
-                .map(|(i, _)| i)
+                .filter(|(_, x, on)| {
+                    *x <= best * 1.0001 + 1e-9 && (!visibility || seen.is_none() || sees(*on, *p))
+                })
+                .map(|(i, _, _)| *i)
                 .collect(),
         );
         heat.push(1.0 / (best * best).max(near_floor));
@@ -455,6 +496,17 @@ fn conjugate_gradients(
         }
     }
     x
+}
+
+/// The point of segment `ab` nearest `p`.
+fn closest_on_segment(p: DVec3, a: DVec3, b: DVec3) -> DVec3 {
+    let ab = b - a;
+    let t = if ab.length_squared() > 0.0 {
+        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    a + ab * t
 }
 
 fn distance_to_segment(p: DVec3, a: DVec3, b: DVec3) -> f64 {
@@ -697,7 +749,7 @@ mod tests {
                 .fold(0.0, f32::max)
         };
         let by_distance = automatic_weights(&legs, &rig, DAffine3::IDENTITY);
-        let by_heat = heat_weights(&legs, &rig, DAffine3::IDENTITY);
+        let by_heat = heat_weights(&legs, &rig, DAffine3::IDENTITY, false);
         assert!(
             across(&by_distance) > 0.01,
             "distance reaches across the gap"
@@ -710,6 +762,59 @@ mod tests {
         }
     }
 
+    /// An arm hanging close beside a body, each a closed column: the body's
+    /// side is nearer the arm's bone than its own, but sees it only through
+    /// two skins, so it stays on the spine.
+    #[test]
+    fn heat_does_not_reach_through_the_skin_to_a_bone_beside() {
+        let column = |x: f32, radius: f32| {
+            let mut c = kreate_mesh::primitives::uv_sphere(0.5, 16, 16);
+            for p in c.positions_mut() {
+                p.x = p.x * radius * 2.0 + x;
+                p.y *= radius * 2.0;
+                p.z = (p.z + 0.5) * 1.0;
+            }
+            c
+        };
+        let (body, arm) = (column(0.0, 0.2), column(0.3, 0.06));
+        let mut positions: Vec<glam::Vec3> = body.positions().to_vec();
+        let base = positions.len() as u32;
+        positions.extend(arm.positions().iter().copied());
+        let mut faces: Vec<Vec<u32>> = (0..body.num_faces())
+            .map(|f| body.face_verts(f).to_vec())
+            .collect();
+        faces.extend(
+            (0..arm.num_faces()).map(|f| arm.face_verts(f).iter().map(|v| v + base).collect()),
+        );
+        let mesh = MeshData::from_faces(positions, &faces);
+        let mut rig = Armature::new("Rig");
+        rig.bones[0].name = "Spine".into();
+        rig.bones[0].head = DVec3::new(0.0, 0.0, 0.0);
+        rig.bones[0].tail = DVec3::new(0.0, 0.0, 1.0);
+        rig.add_bone(Bone {
+            name: "Arm".into(),
+            head: DVec3::new(0.3, 0.0, 1.0),
+            tail: DVec3::new(0.3, 0.0, 0.0),
+            ..Default::default()
+        });
+        let layers = heat_weights(&mesh, &rig, DAffine3::IDENTITY, true);
+        let arm_weights = &layers
+            .iter()
+            .find(|(n, _)| n.ends_with("Arm"))
+            .expect("arm")
+            .1;
+        // The body's side facing the arm: x near 0.2, between the ends.
+        let side = mesh
+            .positions()
+            .iter()
+            .enumerate()
+            .take(base as usize)
+            .filter(|(_, p)| p.x > 0.18 && p.z > 0.3 && p.z < 0.7)
+            .map(|(v, _)| arm_weights[v])
+            .fold(0.0f32, f32::max);
+        assert!(side < 0.05, "the body's side follows the arm by {side}");
+    }
+
     /// One column on two bones: the bottom on the first, the top on the
     /// second, and a blend between rather than a cut.
     #[test]
@@ -720,7 +825,7 @@ mod tests {
             p.y *= 0.3;
             p.z = (p.z + 0.5) * 2.0;
         }
-        let layers = heat_weights(&m, &arm(), DAffine3::IDENTITY);
+        let layers = heat_weights(&m, &arm(), DAffine3::IDENTITY, false);
         let lower = &layers
             .iter()
             .find(|(n, _)| n.ends_with("Lower"))

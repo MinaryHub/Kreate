@@ -822,6 +822,9 @@ pub struct BindParams {
     /// that have none — or by distance alone, the quicker envelope.
     #[param(variants("automatic", "empty", "envelope"))]
     pub weights: u32,
+    /// Automatic weights only from bones a vertex can see — not through
+    /// skin: for a figure whose arms hang beside its body.
+    pub visibility: bool,
 }
 
 /// Parents the selected meshes to the active armature and makes them follow
@@ -874,7 +877,7 @@ impl Operator for Bind {
                 continue;
             };
             let layers: Vec<(String, Vec<f32>)> = if params.weights == 0 {
-                kreate_scene::skin::heat_weights(mesh, &armature, to_armature)
+                kreate_scene::skin::heat_weights(mesh, &armature, to_armature, params.visibility)
             } else if params.weights == 2 {
                 kreate_scene::skin::automatic_weights(mesh, &armature, to_armature)
             } else {
@@ -1235,7 +1238,18 @@ impl Operator for AddHumanoid {
         d.selection.add(rig);
         d.selection.active = Some(rig);
         if params.bind {
-            Bind::execute(&BindParams { weights: 0 }, doc, ctx)?;
+            // Arms hanging rather than held out: a bone's line to the body's
+            // side then runs through the arm's own skin.
+            let hanging = landmarks.fingertip.z
+                < landmarks.shoulder.z - (landmarks.top.z - landmarks.ankle.z) * 0.15;
+            Bind::execute(
+                &BindParams {
+                    weights: 0,
+                    visibility: hanging,
+                },
+                doc,
+                ctx,
+            )?;
         }
         Ok(OpResult::Finished)
     }
