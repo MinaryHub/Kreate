@@ -64,13 +64,18 @@ pub enum Source {
     /// Models made by AI from words or a picture — see `crate::generate` —
     /// and kept to be added again.
     Generated,
+    /// Objaverse: the Creative Commons models of Sketchfab, kept on Hugging
+    /// Face — found with Sketchfab's own search, fetched from the dataset,
+    /// neither asking for an account.
+    Objaverse,
 }
 
 impl Source {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Local,
         Self::PolyHaven,
         Self::AmbientCg,
+        Self::Objaverse,
         Self::PolyPizza,
         Self::Generated,
     ];
@@ -89,7 +94,7 @@ impl Source {
     /// Whether the source searches itself: it holds too many to list, so the
     /// search box asks it rather than filtering what was listed.
     pub fn searched(self) -> bool {
-        self == Source::PolyPizza
+        matches!(self, Source::PolyPizza | Source::Objaverse)
     }
 }
 
@@ -150,13 +155,15 @@ impl Entry {
     /// The line a CC-BY licence asks for, `None` when nothing is owed.
     pub fn credit(&self) -> Option<String> {
         let licence = self.licence.as_deref()?;
-        licence.to_ascii_uppercase().contains("BY").then(|| {
+        let upper = licence.to_ascii_uppercase();
+        (upper.contains("BY") || upper.contains("ATTRIBUTION")).then(|| {
             format!(
                 "\"{}\" by {} ({}) {licence}",
                 self.name,
                 self.authors,
                 match self.source {
                     Source::PolyPizza => format!("https://poly.pizza/m/{}", self.id),
+                    Source::Objaverse => format!("https://sketchfab.com/3d-models/{}", self.id),
                     _ => self.source.tag().to_string(),
                 }
             )
@@ -270,7 +277,7 @@ const MAX_BYTES: &str = "1073741824";
 
 /// Fetches `url` into `dest`, through a temporary file renamed into place —
 /// so an interrupted download is never mistaken for a finished one.
-fn download(url: &str, dest: &Path) -> Result<(), String> {
+pub(crate) fn download(url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -300,7 +307,7 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
 
 /// `url` as text, cached at `dest` for a day: an asset list changes when
 /// somebody publishes, not by the minute.
-fn cached_text(url: &str, dest: &Path) -> Result<String, String> {
+pub(crate) fn cached_text(url: &str, dest: &Path) -> Result<String, String> {
     let fresh = std::fs::metadata(dest)
         .and_then(|m| m.modified())
         .ok()
@@ -913,12 +920,12 @@ pub fn thumbnail_now(
         Source::Generated => path.and_then(|p| {
             thumbnail_of(&std::fs::read(p.with_extension("png")).ok()?)
         }),
-        Source::PolyPizza => cache_root().and_then(|root| {
+        Source::PolyPizza | Source::Objaverse => cache_root().and_then(|root| {
             let url = url?;
             if !safe_id(&id) {
                 return None;
             }
-            let dest = root.join("polypizza").join("thumbs").join(&id);
+            let dest = root.join(source.tag()).join("thumbs").join(&id);
             if !dest.exists() {
                 download(&url, &dest).ok()?;
             }
@@ -1121,6 +1128,7 @@ pub fn list_now(
         } else {
             Vec::new()
         }),
+        Source::Objaverse => crate::objaverse::list(kind, query),
     }
 }
 
@@ -1178,6 +1186,7 @@ impl Source {
             Source::AmbientCg => "ambientcg",
             Source::PolyPizza => "polypizza",
             Source::Generated => "generated",
+            Source::Objaverse => "objaverse",
         }
     }
 
@@ -1250,6 +1259,7 @@ fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
             .clone()
             .map(Ready::Model)
             .ok_or_else(|| "the model has no file".to_string()),
+        Source::Objaverse => crate::objaverse::fetch(entry).map(Ready::Model),
     }
 }
 
@@ -1259,7 +1269,7 @@ const PIZZA_API: &str = "https://api.poly.pizza/v1";
 
 /// Whether `id` is safe to name a file by: an id from a list, still
 /// checked, because it becomes a path.
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -1398,6 +1408,9 @@ pub fn find_now(
     folders: &[PathBuf],
     id: &str,
 ) -> Result<Entry, String> {
+    if source == Source::Objaverse {
+        return crate::objaverse::find(id);
+    }
     if source == Source::PolyPizza {
         if !safe_id(id) {
             return Err(format!("`{id}` is not an asset name"));

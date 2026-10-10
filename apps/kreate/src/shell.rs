@@ -6028,6 +6028,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             t("asset-source-local"),
             t("asset-source-polyhaven"),
             t("asset-source-ambientcg"),
+            t("asset-source-objaverse"),
             t("asset-source-polypizza"),
             t("asset-source-generated"),
         ],
@@ -6064,6 +6065,10 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 t("asset-credit-polypizza"),
                 "https://poly.pizza".to_string(),
             )),
+            crate::assets::Source::Objaverse => Some((
+                t("asset-credit-objaverse"),
+                "https://huggingface.co/datasets/allenai/objaverse".to_string(),
+            )),
             crate::assets::Source::Generated => Some((
                 t("asset-credit-generated"),
                 "https://huggingface.co/microsoft/TRELLIS-image-large".to_string(),
@@ -6074,7 +6079,11 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         link: t("asset-link"),
         link_hint: t("asset-link-hint"),
         animated_only: t("asset-animated-only"),
-        search_hint: t("asset-search-hint"),
+        search_hint: t(if source == crate::assets::Source::Objaverse {
+            "asset-search-hint-objaverse"
+        } else {
+            "asset-search-hint"
+        }),
         key_prompt: t("asset-key-prompt"),
         key_where: (
             t("asset-key-where"),

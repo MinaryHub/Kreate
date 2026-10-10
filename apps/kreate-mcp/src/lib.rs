@@ -359,13 +359,13 @@ pub fn tools() -> Value {
         },
         {
             "name": "search_assets",
-            "description": "Searches free asset libraries for models, materials (texture sets) or HDRIs (environment lights): Poly Haven and ambientCG, both CC0; Poly Pizza, low-poly models, many animated, CC0 or CC-BY (needs the user's own key, entered in the Assets panel); or the user's own asset folders. Returns up to `limit` matches, each with the id add_asset takes, its licence and whether it is animated. ambientCG has no models; Poly Pizza has only models.",
+            "description": "Searches free asset libraries for models, materials (texture sets) or HDRIs (environment lights): Poly Haven and ambientCG, both CC0; Objaverse, Sketchfab's Creative Commons models (people, characters, props of every kind; searched by Sketchfab, no account needed, only licences allowing changes and commercial use; CC Attribution asks a credit); Poly Pizza, low-poly models, many animated, CC0 or CC-BY (needs the user's own key, entered in the Assets panel); or the user's own asset folders. Returns up to `limit` matches, each with the id add_asset takes, its licence and whether it is animated. ambientCG has no models; Poly Pizza has only models.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Words to match against names, categories and tags, e.g. \"wooden floor\"." },
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
-                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "objaverse", "polypizza", "local"], "description": "Default polyhaven." },
                     "animated": { "type": "boolean", "description": "Only models that move. Default false." },
                     "thumbnails": { "type": "boolean", "description": "Also the pictures of the first six, to choose by looking. Default false." },
                     "limit": { "type": "integer", "description": "Default 20." }
@@ -381,7 +381,7 @@ pub fn tools() -> Value {
                 "properties": {
                     "id": { "type": "string" },
                     "kind": { "type": "string", "enum": ["model", "material", "hdri"] },
-                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "polypizza", "local"], "description": "Default polyhaven." },
+                    "source": { "type": "string", "enum": ["polyhaven", "ambientcg", "objaverse", "polypizza", "local"], "description": "Default polyhaven." },
                     "resolution": { "type": "string", "enum": ["1k", "2k", "4k"], "description": "Texture size. Default 1k." },
                     "location": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "A model: where the middle of its base goes, in metres. Default beside what is there." },
                     "height": { "type": "number", "description": "A model: how tall to make it, in metres. Default the file's size." },

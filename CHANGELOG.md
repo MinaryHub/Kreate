@@ -109,6 +109,12 @@ use; `scripts/release.sh` turns that section into the next release.
 - Your own model files have pictures in the Assets editor: each is read and
   drawn once, from the front right and a little above, and the picture kept
   for next time.
+- Objaverse in the Assets editor: Sketchfab's Creative Commons models —
+  people, characters, creatures, props — found with Sketchfab's search and
+  fetched from the Objaverse dataset on Hugging Face, with no account.
+  Only licences that allow changing and selling are listed; a CC
+  Attribution model says the credit it asks for. Poly Pizza, which needs a
+  key, moves after it.
 - Poly Pizza in the Assets editor: thousands of low-poly models, many of
   them animated characters, CC0 or CC-BY. Enter searches it; "Animated
   only" lists what moves. It wants a free API key of your own, pasted into

@@ -26,6 +26,7 @@ pub mod materials;
 pub mod meshcheck;
 pub mod modal;
 pub mod mode;
+pub mod objaverse;
 pub mod pick;
 pub mod prefs;
 pub mod proportions;

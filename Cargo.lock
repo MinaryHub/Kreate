@@ -1588,6 +1588,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "flate2",
  "getrandom 0.3.4",
  "glam",
  "half",

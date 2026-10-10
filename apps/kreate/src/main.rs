@@ -10183,7 +10183,7 @@ fn assets_search(
         .and_then(|k| Kind::from_tag(&k))
         .ok_or("`kind` is model, material or hdri")?;
     let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-        .ok_or("`source` is polyhaven, ambientcg, polypizza or local")?;
+        .ok_or("`source` is polyhaven, ambientcg, objaverse, polypizza or local")?;
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let query = text("query").unwrap_or_default();
     let animated = params
