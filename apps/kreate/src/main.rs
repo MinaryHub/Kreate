@@ -6737,8 +6737,18 @@ impl App {
     }
 
     /// Adds what the import threads have read.
+    ///
+    /// And asks for a frame. A thread finishing wakes the loop, not the
+    /// window: without the request the model was in the document and not on
+    /// the screen until the mouse next moved.
     fn serve_imports(&mut self) {
         let ready: Vec<ImportReady> = self.imports.1.try_iter().collect();
+        if ready.is_empty() {
+            return;
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
         for result in ready {
             match result {
                 Ok(path) => {
