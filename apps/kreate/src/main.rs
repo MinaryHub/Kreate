@@ -4825,6 +4825,10 @@ impl App {
         self.motion = kreate_render::CameraMotion::new(Camera::default());
         self.camera_view = None;
         self.camera_view_object = None;
+        // The grid too, which a fresh start always shows.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.viewport.show_grid = true;
+        }
         self.adopt(load_document(None));
         self.file = DocumentFile::new();
         self.status("new document");
@@ -5646,6 +5650,12 @@ impl App {
         self.hover = None;
         self.drag_select = None;
         self.ui.adjust_params = None;
+        // Stopped, at the frame the document was saved at — a new one's
+        // first. The last document's playback ran on into the next, and the
+        // clock the modifiers read stayed at its frame.
+        self.playing = None;
+        let frame = self.doc.playback.frame;
+        self.set_frame(frame);
         // The whole scene in view, lamp and camera included, the way Blender's
         // default file opens. Snapped rather than animated: there is no
         // previous view to keep the user's bearings from, and a quarter-second
@@ -12008,6 +12018,20 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new document starts stopped at its first frame: the last one's
+    /// playback does not run on into it, nor its clock.
+    #[test]
+    fn a_new_document_starts_stopped_at_its_first_frame() {
+        let mut app = app();
+        app.set_frame(120.0);
+        app.playing = Some(std::time::Instant::now());
+        app.new_document();
+        assert!(app.playing.is_none(), "still playing");
+        let start = app.doc.playback.start as f64;
+        assert_eq!(app.doc.playback.frame, start);
+        assert_eq!(app.time.frame(), start);
     }
 
     /// File ▸ Open shows a document from where it was looked at when it was
