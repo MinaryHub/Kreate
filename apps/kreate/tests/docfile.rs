@@ -656,3 +656,66 @@ fn tidying_keeps_a_session_holding_something_it_does_not_recognise() {
         "an unrelated file was deleted"
     );
 }
+
+#[test]
+fn pruning_clears_what_nobody_wants_and_keeps_what_someone_might() {
+    let root = scratch("prune");
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    // A crash an hour ago: kept, to be offered.
+    let Some((recent, _)) = plant_session(&root, 4_294_967_290, "recent.kreate") else {
+        return;
+    };
+    // A crash a month ago: cleared.
+    let Some((stale, stale_dir)) = plant_session(&root, 4_294_967_289, "stale.kreate") else {
+        return;
+    };
+    let month_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+    let _ = std::fs::File::open(&stale)
+        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(month_ago)));
+    // A session that ended with nothing in it: cleared.
+    let empty = root.join("session-4294967288");
+    std::fs::create_dir_all(&empty).expect("create");
+    std::fs::write(empty.join("session.lock"), b"").expect("write");
+    // A dead process's crash socket, and the running one's: one goes.
+    let dead_socket = root.join("crash-4294967288.sock");
+    std::fs::write(&dead_socket, b"").expect("write");
+    let own_socket = root.join(format!("crash-{}.sock", std::process::id()));
+    std::fs::write(&own_socket, b"").expect("write");
+    // Something that is not the autosave's: left alone.
+    let stranger = root.join("notes.txt");
+    std::fs::write(&stranger, b"mine").expect("write");
+
+    docfile::prune_in(&root, week);
+    let kept = recent.exists();
+    let results = (
+        kept,
+        stale.exists() || stale_dir.exists(),
+        empty.exists(),
+        dead_socket.exists(),
+        own_socket.exists(),
+        stranger.exists(),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        results,
+        (true, false, false, false, true, true),
+        "(recent kept, stale gone, empty gone, dead socket gone, own socket kept, stranger kept)"
+    );
+}
+
+#[test]
+fn a_running_session_is_never_pruned_however_old_its_autosave() {
+    // Another Kreate open for a month with unsaved work: its autosave is the
+    // only copy, and its lock is held.
+    let root = scratch("prune-live");
+    let live = docfile::hold_session_in(&root).expect("a session");
+    let save = live.join("work.kreate");
+    std::fs::write(&save, b"unsaved").expect("write");
+    let month_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+    let _ = std::fs::File::open(&save)
+        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(month_ago)));
+    docfile::prune_in(&root, std::time::Duration::from_secs(7 * 24 * 3600));
+    let survived = save.exists();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(survived, "a running session's autosave was pruned");
+}

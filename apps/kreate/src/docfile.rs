@@ -344,6 +344,15 @@ impl DocumentFile {
         }
     }
 
+    /// The process is closing cleanly: this session's autosaves are dropped,
+    /// since the user has just said what to keep. A crash never gets here,
+    /// which is what leaves its autosave to be offered back.
+    pub fn end_cleanly(&mut self) {
+        if let Some(session) = &self.session {
+            session.clear();
+        }
+    }
+
     /// Removes this session's autosave, after a real save has superseded it.
     fn discard_autosave(&mut self) {
         if let Some(session) = &self.session {
@@ -517,6 +526,7 @@ impl Session {
                 .open(&lock)
             {
                 Ok(file) => {
+                    hold_for_the_process(&lock);
                     LIVE_SESSIONS.fetch_add(1, Ordering::AcqRel);
                     return Some(Self { dir, _lock: file });
                 }
@@ -530,6 +540,20 @@ impl Session {
         None
     }
 
+    /// Removes every autosave this session made: the process is closing
+    /// cleanly, with the user's say on what to keep, so none of it is a
+    /// crash's to recover.
+    fn clear(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            if e.file_name() != std::ffi::OsStr::new("session.lock") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
     /// Where this session's autosave of `original` goes.
     fn autosave_path(&self, original: Option<&Path>) -> PathBuf {
         let stem = original
@@ -537,6 +561,123 @@ impl Session {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "untitled".to_string());
         self.dir.join(format!("{stem}.kreate"))
+    }
+}
+
+/// Locks a session's lock file for as long as the process lives — the
+/// operating system's own record that the session is running, which goes
+/// when the process does, however it ends.
+///
+/// Held by the process, not by the `Session`: one process makes a new
+/// `DocumentFile`, and so a new `Session` on the same directory, for every
+/// document it opens, and the lock must not lapse in between.
+fn hold_for_the_process(lock: &Path) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static HELD: OnceLock<Mutex<HashMap<PathBuf, std::fs::File>>> = OnceLock::new();
+    let Ok(mut held) = HELD.get_or_init(Default::default).lock() else {
+        return;
+    };
+    if held.contains_key(lock) {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock)
+    else {
+        return;
+    };
+    if file.try_lock().is_ok() {
+        held.insert(lock.to_path_buf(), file);
+    }
+}
+
+/// Whether a session's process is still running: whether something holds
+/// its lock. A directory with no lock file has nothing holding it.
+fn is_live(lock: &Path) -> bool {
+    if !lock.exists() {
+        return false;
+    }
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock)
+    {
+        Ok(file) => matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        // Windows refuses the open itself while a live session has it.
+        Err(_) => cfg!(windows),
+    }
+}
+
+/// Claims a session in `root` for the rest of the process, as a running
+/// Kreate's is, and says where. For tests of what the pruning spares.
+#[doc(hidden)]
+pub fn hold_session_in(root: &Path) -> Option<PathBuf> {
+    let session = Session::acquire_in(root)?;
+    let dir = session.dir.clone();
+    std::mem::forget(session);
+    Some(dir)
+}
+
+/// How long a crashed session's autosave is offered before it is cleared
+/// away unasked.
+pub const RECOVERY_KEPT: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Clears what dead sessions left in `root` that nobody will want: a
+/// session directory with no autosave in it, one whose newest autosave is
+/// older than `kept`, and a crash reporter's socket whose process is gone.
+/// A live session's directory — another Kreate running — is never touched.
+pub fn prune_in(root: &Path, kept: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mine = format!("session-{}", std::process::id());
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(pid) = name
+            .strip_prefix("crash-")
+            .and_then(|r| r.strip_suffix(".sock"))
+        {
+            let session = root.join(format!("session-{pid}"));
+            if pid != std::process::id().to_string() && !is_live(&session.join("session.lock")) {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
+        if !name.starts_with("session-") || name == mine || !path.is_dir() {
+            continue;
+        }
+        if is_live(&path.join("session.lock")) {
+            continue;
+        }
+        let saves: Vec<std::time::SystemTime> = std::fs::read_dir(&path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|f| f.path().extension().is_some_and(|e| e == "kreate"))
+            .map(|f| {
+                f.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH)
+            })
+            .collect();
+        let newest = saves.iter().max().copied();
+        let old = newest.is_none_or(|t| now.duration_since(t).unwrap_or_default() > kept);
+        if old {
+            // Only the session's own files: an autosave and its lock.
+            for f in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+                let p = f.path();
+                let ours = f.file_name() == std::ffi::OsStr::new("session.lock")
+                    || p.extension().is_some_and(|e| e == "kreate");
+                if ours {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            let _ = std::fs::remove_dir(&path);
+        }
     }
 }
 
@@ -605,7 +746,10 @@ pub struct Recoverable {
 /// lock cannot be locked belongs to a live session.
 pub fn find_recoverable() -> Vec<Recoverable> {
     match autosave_root() {
-        Some(root) => find_recoverable_in(&root),
+        Some(root) => {
+            prune_in(&root, RECOVERY_KEPT);
+            find_recoverable_in(&root)
+        }
         None => Vec::new(),
     }
 }
@@ -665,34 +809,9 @@ pub fn forget_recoverable(path: &Path) {
     }
 }
 
-#[cfg(windows)]
+/// Whether nothing holds a session's lock: its process has ended.
 fn is_stale(lock: &Path) -> bool {
-    if !lock.exists() {
-        // No lock at all: either a directory from a build before locks existed,
-        // or one whose lock was removed. Either way nothing is holding it.
-        return true;
-    }
-    // A live session holds the handle open without sharing write access, so
-    // Windows refuses this. That refusal is the signal.
-    std::fs::OpenOptions::new().write(true).open(lock).is_ok()
-}
-
-#[cfg(not(windows))]
-fn is_stale(lock: &Path) -> bool {
-    if !lock.exists() {
-        return true;
-    }
-    // Unix lets two processes open the same file for writing, so the open tells
-    // us nothing on its own. Deleting the directory when we cannot be sure would
-    // be destroying a running session's only copy of unsaved work, so the safe
-    // answer without a flock is to leave it alone and let the user decide from
-    // the list.
-    //
-    // The consequence is stated rather than hidden: on Unix a running instance's
-    // autosave may appear in the recovery list. Offering to open a file is
-    // harmless; deleting one is not, and this errs in the direction where being
-    // wrong costs nothing.
-    true
+    !is_live(lock)
 }
 
 /// Writes `bytes` to `path` via a temporary file and a rename.

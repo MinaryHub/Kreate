@@ -733,6 +733,7 @@ unsaved-untitled = This document
 unsaved-body = { $name } has changes that have not been saved. Save them before you { $what }?
 unsaved-what-new = start a new document
 unsaved-what-open = open another document
+unsaved-what-quit = quit Kreate
 unsaved-save = Save
 unsaved-discard = Don't Save
 unsaved-cancel = Cancel

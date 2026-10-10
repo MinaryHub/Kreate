@@ -4820,6 +4820,18 @@ impl App {
         }
     }
 
+    /// Closes Kreate, asking first about unsaved work as a new document
+    /// does. A clean close clears this session's autosaves: they are for a
+    /// crash, and after one the user has had their say they would only pile
+    /// up as recoveries of work that was deliberately left.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.confirm_discarding_changes("unsaved-what-quit") {
+            return;
+        }
+        self.file.end_cleanly();
+        event_loop.exit();
+    }
+
     /// Replaces the document with an empty one.
     fn new_document(&mut self) {
         if !self.confirm_discarding_changes("unsaved-what-new") {
@@ -9505,7 +9517,7 @@ impl App {
             KeyCode::KeyQ
                 if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down =>
             {
-                event_loop.exit();
+                self.quit(event_loop);
                 return;
             }
             KeyCode::F1 => {
@@ -10528,7 +10540,7 @@ impl ApplicationHandler for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.quit(event_loop),
             WindowEvent::DroppedFile(path) => {
                 self.open_dropped(&path);
                 self.redraw.set(RedrawReason::SCENE_CHANGED);

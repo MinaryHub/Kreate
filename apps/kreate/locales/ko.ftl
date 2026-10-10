@@ -748,6 +748,7 @@ unsaved-untitled = 이 문서
 unsaved-body = { $name }에 저장하지 않은 변경 사항이 있습니다. { $what } 전에 저장할까요?
 unsaved-what-new = 새 문서를 만들기
 unsaved-what-open = 다른 문서를 열기
+unsaved-what-quit = Kreate를 종료하기
 unsaved-save = 저장
 unsaved-discard = 저장 안 함
 unsaved-cancel = 취소
