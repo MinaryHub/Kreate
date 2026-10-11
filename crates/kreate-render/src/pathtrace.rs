@@ -315,10 +315,10 @@ pub struct PathTracer {
     volume: PtVolumeGpu,
 }
 
-/// The volume's parameters, as `PtVolume` in the shader reads them.
+/// One gas's parameters, as `PtVolume` in the shader reads them.
 #[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-struct PtVolumeParams {
+struct PtVolumeItem {
     lo: [f32; 4],
     hi: [f32; 4],
     color: [f32; 4],
@@ -326,16 +326,50 @@ struct PtVolumeParams {
     cells: [u32; 4],
 }
 
+/// The most gases the path tracer travels through at once.
+pub const MAX_VOLUMES: usize = 4;
+
+/// `PtVolumes` in the shader.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct PtVolumeParams {
+    info: [u32; 4],
+    atlas: [f32; 4],
+    items: [PtVolumeItem; MAX_VOLUMES],
+}
+
 /// The cells a flame can glow in and each one's running share of the glow,
 /// for aiming at it: `[index as bits, share]`. A cell counts when any cell
 /// beside it burns — the grid is read smoothly, so the glow reaches a cell
 /// past the last that burns, and a cell never chosen where there is glow
 /// would be light never found.
+#[cfg(test)]
 fn flame_cells(flame: &[u8], cells: [u32; 3]) -> Vec<[f32; 2]> {
+    running_shares(flame_weights(flame, cells, 0))
+}
+
+/// Weighted cells as `[index as bits, running share]`, the last share one.
+fn running_shares(weights: Vec<(u32, f64)>) -> Vec<[f32; 2]> {
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let mut running = 0.0;
+    weights
+        .into_iter()
+        .map(|(i, w)| {
+            running += w;
+            [f32::from_bits(i), (running / total) as f32]
+        })
+        .collect()
+}
+
+/// Each cell a flame can glow in, tagged with which gas in its top three
+/// bits, and how brightly: see `flame_cells`.
+fn flame_weights(flame: &[u8], cells: [u32; 3], gas: u32) -> Vec<(u32, f64)> {
     let [nx, ny, nz] = cells.map(|c| c as usize);
     let at = |i: usize, j: usize, k: usize| flame[(k * ny + j) * nx + i];
     let mut out = Vec::new();
-    let mut total = 0.0f64;
     for k in 0..nz {
         for j in 0..ny {
             for i in 0..nx {
@@ -350,24 +384,26 @@ fn flame_cells(flame: &[u8], cells: [u32; 3]) -> Vec<[f32; 2]> {
                 if most > 0 {
                     let f = most as f64 / 255.0;
                     // As bright as it glows: the ramp brightens with the flame.
-                    total += f * f;
-                    out.push((((k * ny + j) * nx + i) as u32, total));
+                    out.push((((k * ny + j) * nx + i) as u32 | (gas << 29), f * f));
                 }
             }
         }
     }
-    out.into_iter()
-        .map(|(i, running)| [f32::from_bits(i), (running / total) as f32])
-        .collect()
+    out
 }
 
 struct PtVolumeGpu {
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
     sampler: wgpu::Sampler,
+    /// Every gas's grid, stacked along Z.
     grid: wgpu::Texture,
-    cells: [u32; 3],
-    key: usize,
+    /// The stack's size, and each gas's cells in it.
+    atlas: [u32; 3],
+    cells: Vec<[u32; 3]>,
+    /// What each gas's bytes were: one that is the same is not uploaded
+    /// again.
+    keys: Vec<usize>,
     bind: wgpu::BindGroup,
     last: PtVolumeParams,
     /// `flame_cells`, and how many.
@@ -436,8 +472,8 @@ impl PtVolumeGpu {
         });
         // An empty grid of one cell until there is a gas: the group is
         // always bound, and `lo.w` of zero says there is nothing in it.
-        let cells = [1, 1, 1];
-        let grid = Self::grid(device, cells);
+        let atlas = [1, 1, 1];
+        let grid = Self::grid(device, atlas);
         let flame = Self::flame_buffer(device, &[]);
         let bind = Self::bind(device, &layout, &params, &grid, &sampler, &flame);
         Self {
@@ -445,8 +481,9 @@ impl PtVolumeGpu {
             params,
             sampler,
             grid,
-            cells,
-            key: usize::MAX,
+            atlas,
+            cells: Vec::new(),
+            keys: Vec::new(),
             bind,
             last: PtVolumeParams::default(),
             flame,
@@ -695,95 +732,126 @@ impl PathTracer {
         }
     }
 
-    /// The gas the paths travel through, or none. Its grid is uploaded when
-    /// it is a new one; whether anything changed is the answer, for the
-    /// caller to start the sum again.
-    pub fn set_volume(
+    /// The gases the paths travel through — the first `MAX_VOLUMES` — or
+    /// none. A grid is uploaded when it is a new one; whether anything
+    /// changed is the answer, for the caller to start the sum again.
+    pub fn set_volumes(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        volume: Option<&crate::volume::VolumeData<'_>>,
+        volumes: &[crate::volume::VolumeData<'_>],
     ) -> bool {
         let v = &mut self.volume;
-        let Some(data) = volume.filter(|d| {
-            let count = d.cells.iter().map(|c| *c as usize).product::<usize>();
-            !d.cells.contains(&0) && d.smoke.len() == count && d.flame.len() == count
-        }) else {
-            let off = PtVolumeParams::default();
-            let changed = v.last != off;
-            if changed {
-                queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&off));
-                v.last = off;
-            }
-            return changed;
-        };
+        let volumes: Vec<&crate::volume::VolumeData<'_>> = volumes
+            .iter()
+            .filter(|d| {
+                let count = d.cells.iter().map(|c| *c as usize).product::<usize>();
+                !d.cells.contains(&0) && d.smoke.len() == count && d.flame.len() == count
+            })
+            .take(MAX_VOLUMES)
+            .collect();
+        let cells: Vec<[u32; 3]> = volumes.iter().map(|d| d.cells).collect();
         let mut changed = false;
-        if data.cells != v.cells {
-            v.cells = data.cells;
-            v.grid = PtVolumeGpu::grid(device, data.cells);
-            v.key = usize::MAX;
+        // A new stack when the gases' sizes change: as wide and deep as the
+        // widest, as tall as all of them.
+        if cells != v.cells {
+            v.atlas = [
+                cells.iter().map(|c| c[0]).max().unwrap_or(1).max(1),
+                cells.iter().map(|c| c[1]).max().unwrap_or(1).max(1),
+                cells.iter().map(|c| c[2]).sum::<u32>().max(1),
+            ];
+            v.grid = PtVolumeGpu::grid(device, v.atlas);
+            v.cells = cells;
+            v.keys = vec![usize::MAX; volumes.len()];
+            changed = true;
         }
-        if data.key != v.key {
-            let mut bytes = Vec::with_capacity(data.smoke.len() * 2);
-            for (s, f) in data.smoke.iter().zip(data.flame) {
-                bytes.push(*s);
-                bytes.push(*f);
+        let mut layer = 0;
+        let mut regrid = changed;
+        let mut first_layer = Vec::with_capacity(volumes.len());
+        for (i, data) in volumes.iter().enumerate() {
+            first_layer.push(layer);
+            if v.keys[i] != data.key {
+                let mut bytes = Vec::with_capacity(data.smoke.len() * 2);
+                for (s, f) in data.smoke.iter().zip(data.flame) {
+                    bytes.push(*s);
+                    bytes.push(*f);
+                }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &v.grid,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(data.cells[0] * 2),
+                        rows_per_image: Some(data.cells[1]),
+                    },
+                    wgpu::Extent3d {
+                        width: data.cells[0],
+                        height: data.cells[1],
+                        depth_or_array_layers: data.cells[2],
+                    },
+                );
+                v.keys[i] = data.key;
+                regrid = true;
             }
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &v.grid,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &bytes,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(data.cells[0] * 2),
-                    rows_per_image: Some(data.cells[1]),
-                },
-                wgpu::Extent3d {
-                    width: data.cells[0],
-                    height: data.cells[1],
-                    depth_or_array_layers: data.cells[2],
-                },
-            );
-            v.key = data.key;
-            let cells = flame_cells(data.flame, data.cells);
-            v.flame_count = cells.len() as u32;
-            v.flame = PtVolumeGpu::flame_buffer(device, &cells);
+            layer += data.cells[2];
+        }
+        if regrid {
+            let weights = volumes
+                .iter()
+                .enumerate()
+                .flat_map(|(i, d)| flame_weights(d.flame, d.cells, i as u32))
+                .collect();
+            let shares = running_shares(weights);
+            v.flame_count = shares.len() as u32;
+            v.flame = PtVolumeGpu::flame_buffer(device, &shares);
             v.bind = PtVolumeGpu::bind(device, &v.layout, &v.params, &v.grid, &v.sampler, &v.flame);
             changed = true;
         }
-        let size = data.max - data.min;
-        let cell = (size.x / data.cells[0] as f64)
-            .min(size.y / data.cells[1] as f64)
-            .min(size.z / data.cells[2] as f64);
-        let detail = data.detail.clamp(0.0, 1.0);
         // As thick as the raster view draws it, so the two agree.
         let thick = crate::volume::THICKNESS;
-        let params = PtVolumeParams {
-            lo: [data.min.x as f32, data.min.y as f32, data.min.z as f32, 1.0],
-            hi: [
-                data.max.x as f32,
-                data.max.y as f32,
-                data.max.z as f32,
-                thick,
-            ],
-            color: [
-                data.smoke_color[0],
-                data.smoke_color[1],
-                data.smoke_color[2],
-                crate::volume::GLOW,
-            ],
-            detail: [
-                detail,
-                (1.0 / (cell * 2.0)) as f32,
-                data.time,
-                thick * (1.0 + detail),
-            ],
-            cells: [data.cells[0], data.cells[1], data.cells[2], v.flame_count],
+        let mut params = PtVolumeParams {
+            info: [volumes.len() as u32, v.flame_count, 0, 0],
+            atlas: [v.atlas[0] as f32, v.atlas[1] as f32, v.atlas[2] as f32, 0.0],
+            ..Default::default()
         };
+        for (i, data) in volumes.iter().enumerate() {
+            let size = data.max - data.min;
+            let cell = (size.x / data.cells[0] as f64)
+                .min(size.y / data.cells[1] as f64)
+                .min(size.z / data.cells[2] as f64);
+            let detail = data.detail.clamp(0.0, 1.0);
+            params.items[i] = PtVolumeItem {
+                lo: [data.min.x as f32, data.min.y as f32, data.min.z as f32, 1.0],
+                hi: [
+                    data.max.x as f32,
+                    data.max.y as f32,
+                    data.max.z as f32,
+                    thick,
+                ],
+                color: [
+                    data.smoke_color[0],
+                    data.smoke_color[1],
+                    data.smoke_color[2],
+                    crate::volume::GLOW,
+                ],
+                detail: [
+                    detail,
+                    (1.0 / (cell * 2.0)) as f32,
+                    data.time,
+                    thick * (1.0 + detail),
+                ],
+                cells: [data.cells[0], data.cells[1], data.cells[2], first_layer[i]],
+            };
+        }
         if params != v.last {
             queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&params));
             v.last = params;

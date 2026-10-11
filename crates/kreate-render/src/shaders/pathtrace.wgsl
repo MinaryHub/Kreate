@@ -84,10 +84,12 @@ const PT_SURFACE: u32 = 4u;
 
 // What a compiled material decided at a point: the generated `pt_material`
 // fills it, from whichever material the surface names.
-// A baked gas: smoke that absorbs and scatters, flame that glows. One per
-// scene; `lo.w` says whether there is one.
+// Baked gases: smoke that absorbs and scatters, flame that glows. Up to
+// four, their grids stacked along Z in one texture.
+const PT_MAX_VOLUMES: u32 = 4u;
+
 struct PtVolume {
-    // The box in the world; w: 1 when there is a volume.
+    // The box in the world.
     lo: vec4<f32>,
     // w: how thick the smoke is per metre at full density.
     hi: vec4<f32>,
@@ -98,16 +100,26 @@ struct PtVolume {
     // per metre; z: seconds, which they drift with; w: the most the
     // thickness can reach anywhere, which the tracking steps by.
     detail: vec4<f32>,
-    // The cells: x, y, z counted, w: how many glowing cells the flame can be
-    // aimed at by (`pt_flame_cells`); none when there is no flame.
+    // The cells along X, Y and Z, and w: the first layer of the stack
+    // that is this gas's.
     cells: vec4<u32>,
 };
 
-@group(1) @binding(0) var<uniform> pt_volume: PtVolume;
+struct PtVolumes {
+    // x: how many gases; y: how many glowing cells the flames can be aimed
+    // at by (`pt_flame_cells`).
+    info: vec4<u32>,
+    // The stack's size in texels.
+    atlas: vec4<f32>,
+    items: array<PtVolume, 4>,
+};
+
+@group(1) @binding(0) var<uniform> pt_volumes: PtVolumes;
 @group(1) @binding(1) var pt_volume_grid: texture_3d<f32>;
 @group(1) @binding(2) var pt_volume_sampler: sampler;
-// The cells a flame can glow in, each with the running share of the glow up
-// to and including it: x the cell's index as bits, y the share.
+// The cells the flames can glow in, each with the running share of the glow
+// up to and including it: x the gas (top three bits) and the cell's index as
+// bits, y the share.
 @group(1) @binding(3) var<storage, read> pt_flame_cells: array<vec2<f32>>;
 
 struct PtMaterialOut {
@@ -471,17 +483,38 @@ fn pt_power(a: f32, b: f32) -> f32 {
 }
 
 fn pt_volume_on() -> bool {
-    return pt_volume.lo.w > 0.5;
+    return pt_volumes.info.x > 0u;
 }
 
-// Where a ray is inside the volume's box: from x to y, empty when y <= x.
+// Where a ray is inside any gas's box: from x to y, empty when y <= x.
 fn pt_volume_span(origin: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
     let inv = 1.0 / dir;
-    let t0 = (pt_volume.lo.xyz - origin) * inv;
-    let t1 = (pt_volume.hi.xyz - origin) * inv;
-    let lo = min(t0, t1);
-    let hi = max(t0, t1);
-    return vec2<f32>(max(max(max(lo.x, lo.y), lo.z), 0.0), min(min(hi.x, hi.y), hi.z));
+    var start = 1e30;
+    var end = 0.0;
+    for (var i = 0u; i < min(pt_volumes.info.x, PT_MAX_VOLUMES); i = i + 1u) {
+        let v = pt_volumes.items[i];
+        let t0 = (v.lo.xyz - origin) * inv;
+        let t1 = (v.hi.xyz - origin) * inv;
+        let lo = min(t0, t1);
+        let hi = max(t0, t1);
+        let enter = max(max(max(lo.x, lo.y), lo.z), 0.0);
+        let leave = min(min(hi.x, hi.y), hi.z);
+        if (leave > enter) {
+            start = min(start, enter);
+            end = max(end, leave);
+        }
+    }
+    return vec2<f32>(start, end);
+}
+
+// The thickest all the gases together can be anywhere: what the tracking
+// steps by.
+fn pt_majorant() -> f32 {
+    var most = 0.0;
+    for (var i = 0u; i < min(pt_volumes.info.x, PT_MAX_VOLUMES); i = i + 1u) {
+        most += pt_volumes.items[i].detail.w;
+    }
+    return max(most, 1e-6);
 }
 
 fn pt_lattice(p: vec3<f32>) -> f32 {
@@ -502,32 +535,62 @@ fn pt_value_noise(p: vec3<f32>) -> f32 {
         u.z);
 }
 
-// The smoke's thickness per metre and the flame at a point: the grid, with
-// its thin edges eaten by wisps as the viewport draws them.
-fn pt_volume_at(p: vec3<f32>) -> vec2<f32> {
-    let uvw = (p - pt_volume.lo.xyz) / (pt_volume.hi.xyz - pt_volume.lo.xyz);
+// One gas at a point: its smoke's thickness per metre and its flame — its
+// grid read from its layers of the stack, with the thin edges eaten by wisps
+// as the viewport draws them.
+fn pt_one_volume(i: u32, p: vec3<f32>) -> vec2<f32> {
+    let v = pt_volumes.items[i];
+    let uvw = (p - v.lo.xyz) / (v.hi.xyz - v.lo.xyz);
     if (any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0))) {
         return vec2<f32>(0.0);
     }
-    let g = textureSampleLevel(pt_volume_grid, pt_volume_sampler, uvw, 0.0).rg;
+    // Kept half a texel inside its own cells, so a read never blends in the
+    // next gas's layers or the padding beside a smaller grid.
+    let n = vec3<f32>(v.cells.xyz);
+    let texel = clamp(uvw * n, vec3<f32>(0.5), n - vec3<f32>(0.5));
+    let at = (texel + vec3<f32>(0.0, 0.0, f32(v.cells.w))) / pt_volumes.atlas.xyz;
+    let g = textureSampleLevel(pt_volume_grid, pt_volume_sampler, at, 0.0).rg;
     var smoke = g.r;
-    let d = pt_volume.detail;
+    let d = v.detail;
     if (d.x > 0.0 && smoke > 0.002) {
-        let q = (p - pt_volume.lo.xyz) * d.y - vec3<f32>(0.0, 0.0, d.z * 0.6 * d.y);
+        let q = (p - v.lo.xyz) * d.y - vec3<f32>(0.0, 0.0, d.z * 0.6 * d.y);
         let wisps = (pt_value_noise(q) * 0.5 + pt_value_noise(q * 2.03) * 0.25 + pt_value_noise(q * 4.07) * 0.125) / 0.875;
         let eaten = d.x * 0.85 * (1.0 - wisps);
         smoke = clamp((smoke - eaten) / max(1.0 - eaten, 0.05), 0.0, 1.0) * (1.0 + d.x);
     }
-    return vec2<f32>(smoke * pt_volume.hi.w, g.g);
+    return vec2<f32>(smoke * v.hi.w, g.g);
 }
 
-// The light a flame gives per metre: dark red to orange to yellowish white.
-fn pt_flame(f: f32) -> vec3<f32> {
+// The flame's colour: dark red to orange to yellowish white.
+fn pt_flame_ramp(f: f32) -> vec3<f32> {
     let ember = vec3<f32>(0.5, 0.04, 0.0);
     let orange = vec3<f32>(1.0, 0.42, 0.05);
     let white = vec3<f32>(1.0, 0.86, 0.55);
-    let c = mix(mix(ember, orange, smoothstep(0.0, 0.45, f)), white, smoothstep(0.55, 1.0, f));
-    return c * f * 8.0 * pt_volume.color.w;
+    return mix(mix(ember, orange, smoothstep(0.0, 0.45, f)), white, smoothstep(0.55, 1.0, f));
+}
+
+// All the gases at a point: how thick the smoke is, the light the flames
+// give per metre, and the smoke's colour, weighted by how thick each is.
+struct PtMedium {
+    sigma: f32,
+    glow: vec3<f32>,
+    albedo: vec3<f32>,
+};
+
+fn pt_medium(p: vec3<f32>) -> PtMedium {
+    var m: PtMedium;
+    m.sigma = 0.0;
+    m.glow = vec3<f32>(0.0);
+    var tint = vec3<f32>(0.0);
+    for (var i = 0u; i < min(pt_volumes.info.x, PT_MAX_VOLUMES); i = i + 1u) {
+        let here = pt_one_volume(i, p);
+        let v = pt_volumes.items[i];
+        m.sigma += here.x;
+        m.glow += pt_flame_ramp(here.y) * here.y * 8.0 * v.color.w;
+        tint += v.color.rgb * here.x;
+    }
+    m.albedo = select(vec3<f32>(0.0), tint / m.sigma, m.sigma > 0.0);
+    return m;
 }
 
 // The light a surface at `p` gets straight from the flame: one point picked
@@ -545,7 +608,7 @@ fn pt_flame_light(p: vec3<f32>) -> PtFlameLight {
     out.e = vec3<f32>(0.0);
     out.l = vec3<f32>(0.0, 0.0, 1.0);
     out.reach = 0.0;
-    let count = pt_volume.cells.w;
+    let count = pt_volumes.info.y;
     if (!pt_volume_on() || count == 0u) {
         return out;
     }
@@ -572,11 +635,13 @@ fn pt_flame_light(p: vec3<f32>) -> PtFlameLight {
     if (share <= 0.0) {
         return out;
     }
-    let index = bitcast<u32>(pt_flame_cells[lo].x);
-    let n = pt_volume.cells.xyz;
+    let tagged = bitcast<u32>(pt_flame_cells[lo].x);
+    let v = pt_volumes.items[min(tagged >> 29u, PT_MAX_VOLUMES - 1u)];
+    let index = tagged & 0x1fffffffu;
+    let n = v.cells.xyz;
     let cell = vec3<u32>(index % n.x, (index / n.x) % n.y, index / (n.x * n.y));
-    let size = (pt_volume.hi.xyz - pt_volume.lo.xyz) / vec3<f32>(n);
-    let x = pt_volume.lo.xyz + (vec3<f32>(cell) + vec3<f32>(pt_random(), pt_random(), pt_random())) * size;
+    let size = (v.hi.xyz - v.lo.xyz) / vec3<f32>(n);
+    let x = v.lo.xyz + (vec3<f32>(cell) + vec3<f32>(pt_random(), pt_random(), pt_random())) * size;
     let to = x - p;
     let dist2 = max(dot(to, to), 1e-8);
     let reach = sqrt(dist2);
@@ -584,8 +649,7 @@ fn pt_flame_light(p: vec3<f32>) -> PtFlameLight {
     out.reach = reach;
     // Chosen with this probability per cubic metre.
     let pdf = share / (size.x * size.y * size.z);
-    let glow = pt_flame(pt_volume_at(x).y);
-    out.e = glow / (dist2 * pdf);
+    out.e = pt_medium(x).glow / (dist2 * pdf);
     return out;
 }
 
@@ -602,7 +666,7 @@ fn pt_transmittance(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> f32 {
     if (end <= span.x) {
         return 1.0;
     }
-    let most = pt_volume.detail.w;
+    let most = pt_majorant();
     var t = span.x;
     var through = 1.0;
     for (var i = 0; i < 256; i = i + 1) {
@@ -610,7 +674,7 @@ fn pt_transmittance(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> f32 {
         if (t >= end) {
             break;
         }
-        through *= 1.0 - pt_volume_at(origin + dir * t).x / most;
+        through *= 1.0 - pt_medium(origin + dir * t).sigma / most;
         if (through < 1e-3) {
             return 0.0;
         }
@@ -685,8 +749,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let end = select(span.y, min(span.y, hit.t), hit.t >= 0.0);
             var scattered = false;
             var at = origin;
+            var tint = vec3<f32>(1.0);
             if (end > span.x) {
-                let most = pt_volume.detail.w;
+                let most = pt_majorant();
                 var t = span.x;
                 for (var i = 0; i < 512; i = i + 1) {
                     t += -log(1.0 - pt_random()) / most;
@@ -694,14 +759,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                         break;
                     }
                     let x = origin + dir * t;
-                    let here = pt_volume_at(x);
+                    let here = pt_medium(x);
                     // After a surface, the flame was aimed at directly (see
                     // `pt_flame_light`); found again here it would count
                     // twice.
-                    if (last_pdf < 0.0 || pt_volume.cells.w == 0u) {
-                        radiance += throughput * pt_flame(here.y) / most;
+                    if (last_pdf < 0.0 || pt_volumes.info.y == 0u) {
+                        radiance += throughput * here.glow / most;
                     }
-                    if (pt_random() * most < here.x) {
+                    if (pt_random() * most < here.sigma) {
+                        tint = here.albedo;
                         scattered = true;
                         at = x;
                         break;
@@ -714,7 +780,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                     break;
                 }
                 // What the smoke scatters rather than absorbs.
-                throughput *= pt_volume.color.rgb;
+                throughput *= tint;
                 // A lamp, through whatever is between: the smoke scatters
                 // evenly every way, a quarter-π steradians' worth to each.
                 if (pt.light_count > 0u) {
@@ -1009,7 +1075,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // The flame, aimed at as a light of its own: without it a floor by a
         // fire found the glow only when a bounce happened to go into it.
-        if (pt_volume.cells.w > 0u) {
+        if (pt_volumes.info.y > 0u) {
             let flame = pt_flame_light(p);
             if (pt_luminance(flame.e) > 0.0 && dot(flame.l, geometric) > 0.0) {
                 if (pt_trace(start, flame.l, flame.reach * 0.999, true, PT_NONE).t < 0.0) {

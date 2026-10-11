@@ -2678,9 +2678,9 @@ impl Viewport {
             self.volume_signature = signature;
             self.restart_accumulation();
         }
-        // The path tracer travels through the first; the raster march draws
-        // them all where it is not tracing.
-        if self.pathtracer.set_volume(device, queue, volumes.first()) {
+        // The path tracer travels through them too; the raster march draws
+        // them where it is not tracing.
+        if self.pathtracer.set_volumes(device, queue, volumes) {
             self.restart_accumulation();
         }
         if volumes.is_empty() && self.volumes.is_empty() {
