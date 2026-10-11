@@ -150,6 +150,9 @@ pub struct ShellState {
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
     pub chat_provider: usize,
+    /// The models the assistant can answer with (Ollama's), and which.
+    pub chat_models: Vec<String>,
+    pub chat_model: usize,
     /// Who Claude Code is signed in as, and the code box for signing in.
     pub chat_account: kreate_ui::chat::ChatAccount,
     pub chat_code: String,
@@ -654,6 +657,8 @@ impl Default for ShellState {
             chat_focused: false,
             chat_busy: false,
             chat_provider: 0,
+            chat_models: Vec::new(),
+            chat_model: 0,
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
@@ -6322,6 +6327,8 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     let providers = kreate_ui::chat::ChatProviders {
         names: &names,
         current: state.chat_provider,
+        models: &state.chat_models,
+        model: state.chat_model,
     };
     state.chat_focused = kreate_ui::chat::chat(
         ui,

@@ -4419,9 +4419,16 @@ impl App {
                         chat.set_provider(provider);
                     }
                     self.ui.chat_provider = index;
+                    self.ui.chat_models.clear();
                     self.ui.chat_log.clear();
                     self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
                     self.ui.chat_busy = false;
+                }
+                Command::ChatModel { index } => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.set_model(index);
+                        self.ui.chat_model = chat.model().unwrap_or(0);
+                    }
                 }
                 Command::ChatSignIn => {
                     if let Some(chat) = &mut self.chat {

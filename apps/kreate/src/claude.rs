@@ -61,10 +61,18 @@ pub enum Provider {
     Gemini,
     /// ChatGPT, through OpenAI's Codex CLI.
     ChatGpt,
+    /// A model on this computer, through Ollama: no account, nothing sent
+    /// away. Kreate runs the conversation itself; see [`crate::ollama`].
+    Ollama,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Claude, Provider::Gemini, Provider::ChatGpt];
+    pub const ALL: [Provider; 4] = [
+        Provider::Claude,
+        Provider::Gemini,
+        Provider::ChatGpt,
+        Provider::Ollama,
+    ];
 
     /// The name a person knows it by.
     pub fn name(self) -> &'static str {
@@ -72,6 +80,7 @@ impl Provider {
             Provider::Claude => "Claude",
             Provider::Gemini => "Gemini",
             Provider::ChatGpt => "ChatGPT",
+            Provider::Ollama => "Ollama",
         }
     }
 
@@ -81,6 +90,7 @@ impl Provider {
             Provider::Claude => ("claude", "KREATE_CLAUDE"),
             Provider::Gemini => ("gemini", "KREATE_GEMINI"),
             Provider::ChatGpt => ("codex", "KREATE_CODEX"),
+            Provider::Ollama => ("ollama", "KREATE_OLLAMA"),
         }
     }
 
@@ -91,6 +101,7 @@ impl Provider {
             Provider::Claude => "install Claude Code from https://claude.com/claude-code",
             Provider::Gemini => "install the Gemini CLI: npm install -g @google/gemini-cli",
             Provider::ChatGpt => "install the Codex CLI: npm install -g @openai/codex",
+            Provider::Ollama => "install Ollama from https://ollama.com",
         };
         format!(
             "`{name}` was not found. To use {}, {how}, or set {var} to its path.",
@@ -104,6 +115,7 @@ impl Provider {
             Provider::Claude => return crate::prefs::config_dir().filter(|d| d.is_dir()),
             Provider::Gemini => "gemini",
             Provider::ChatGpt => "codex",
+            Provider::Ollama => return None,
         };
         let dir = crate::prefs::config_dir()?.join("agents").join(id);
         std::fs::create_dir_all(&dir).ok()?;
@@ -143,6 +155,8 @@ pub enum Event {
     SignInUrl(String),
     /// Sign-in finished; `Some` if it failed. The account is asked again.
     SignedIn(Option<String>),
+    /// The models Ollama has; [`Chat::model`] is the one picked.
+    Models(Vec<crate::ollama::Model>),
 }
 
 /// Who an assistant's tool is signed in as.
@@ -172,6 +186,11 @@ pub struct Chat {
     /// Account questions and sign-ins, which outlive any one turn.
     side: (Sender<Event>, Receiver<Event>),
     sign_in: Option<SignIn>,
+    /// Ollama's models, the one talked to, and the conversation, which here
+    /// is Kreate's to keep.
+    models: Vec<crate::ollama::Model>,
+    model: Option<usize>,
+    local: Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
 /// A `claude auth login` in progress.
@@ -181,7 +200,10 @@ struct SignIn {
 }
 
 struct Turn {
-    child: Child,
+    /// The assistant's program, or for Ollama the way to stop Kreate's own
+    /// loop.
+    child: Option<Child>,
+    stop: Option<Arc<crate::ollama::Stop>>,
     events: Receiver<Event>,
 }
 
@@ -195,6 +217,29 @@ impl Chat {
             wake: Arc::new(wake),
             side: mpsc::channel(),
             sign_in: None,
+            models: Vec::new(),
+            model: None,
+            local: Arc::default(),
+        }
+    }
+
+    /// Ollama's models, as last asked.
+    pub fn models(&self) -> &[crate::ollama::Model] {
+        &self.models
+    }
+
+    /// Which of [`Chat::models`] Ollama answers with.
+    pub fn model(&self) -> Option<usize> {
+        self.model
+    }
+
+    /// Answers with another of Ollama's models from the next message on,
+    /// remembered for next time. The conversation carries over: it is
+    /// Kreate's, not the model's.
+    pub fn set_model(&mut self, index: usize) {
+        if let Some(m) = self.models.get(index) {
+            crate::ollama::save_model(&m.name);
+            self.model = Some(index);
         }
     }
 
@@ -219,6 +264,30 @@ impl Chat {
     /// [`Event::Account`].
     pub fn check_account(&self) {
         let (tx, wake, provider) = (self.side.0.clone(), Arc::clone(&self.wake), self.provider);
+        if provider == Provider::Ollama {
+            // No account: whether Ollama answers, and what it has.
+            std::thread::spawn(move || {
+                let account = match crate::ollama::models() {
+                    Ok(models) if models.is_empty() => Account::Unavailable(
+                        "Ollama has no models yet. Fetch one that can use tools: `ollama pull qwen3`."
+                            .into(),
+                    ),
+                    Ok(models) => {
+                        let host = crate::ollama::host();
+                        let _ = tx.send(Event::Models(models));
+                        Account::SignedIn {
+                            email: host,
+                            organisation: None,
+                            plan: Some("local".into()),
+                        }
+                    }
+                    Err(why) => Account::Unavailable(why),
+                };
+                let _ = tx.send(Event::Account(account));
+                wake();
+            });
+            return;
+        }
         std::thread::spawn(move || {
             let _ = tx.send(Event::Account(ask_account(provider)));
             wake();
@@ -239,10 +308,15 @@ impl Chat {
             return Ok(());
         }
         let provider = self.provider;
+        if provider == Provider::Ollama {
+            return Err("Ollama runs on this computer and needs no sign-in.".into());
+        }
         let tool = find_cli(provider).ok_or_else(|| provider.not_installed())?;
         let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
         let mut command = quiet_command(tool);
         match provider {
+            // Turned away above: there is nothing to sign in to.
+            Provider::Ollama => {}
             Provider::Claude => {
                 command.args(["auth", "login"]);
             }
@@ -334,6 +408,9 @@ impl Chat {
             _ => {}
         }
         let words = prompt_with_text(text, attachments);
+        if provider == Provider::Ollama {
+            return self.send_local(words, attachments);
+        }
         // Claude Code's turn, as JSON on its input, when it carries more than
         // words.
         let mut stdin_turn: Option<String> = None;
@@ -345,6 +422,8 @@ impl Chat {
         let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
         let mut command = quiet_command(tool);
         let parse: fn(&str) -> Vec<Event> = match provider {
+            // Sent by Kreate itself, above.
+            Provider::Ollama => return Err("Ollama is not a program to start".into()),
             Provider::Claude => {
                 let config = serde_json::json!({
                     "mcpServers": { "kreate": { "command": connector, "args": [] } }
@@ -463,14 +542,76 @@ impl Chat {
         let (tx, rx) = mpsc::channel();
         let wake = Arc::clone(&self.wake);
         std::thread::spawn(move || read_turn(stdout, stderr, &tx, &*wake, parse));
-        self.turn = Some(Turn { child, events: rx });
+        self.turn = Some(Turn {
+            child: Some(child),
+            stop: None,
+            events: rx,
+        });
+        Ok(())
+    }
+
+    /// A message to Ollama: Kreate's own loop, on a thread, with the
+    /// connector's tools.
+    fn send_local(&mut self, words: String, attachments: &[Attachment]) -> Result<(), String> {
+        let model = self
+            .model
+            .and_then(|i| self.models.get(i))
+            .cloned()
+            .ok_or("Ollama has no model to answer with: fetch one with `ollama pull qwen3`.")?;
+        if attachments.iter().any(|a| a.kind == AttachKind::Pdf) {
+            return Err("Ollama here cannot take PDFs. Claude can.".into());
+        }
+        let pictures: Vec<String> = attachments
+            .iter()
+            .filter(|a| a.is_image())
+            .map(|a| base64::encode(&a.data))
+            .collect();
+        if !pictures.is_empty() && !model.vision {
+            return Err(format!(
+                "{} cannot see pictures. Pick a model that can (llava, qwen2.5vl, gemma3), or Claude.",
+                model.name
+            ));
+        }
+        let connector = find_connector().ok_or(
+            "kreate-mcp was not found next to Kreate. Build it with `cargo build -p kreate-mcp`.",
+        )?;
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(crate::ollama::Stop::default());
+        let (history, wake, halt) = (
+            Arc::clone(&self.local),
+            Arc::clone(&self.wake),
+            Arc::clone(&stop),
+        );
+        std::thread::spawn(move || {
+            crate::ollama::turn(
+                model,
+                history,
+                words,
+                pictures,
+                connector,
+                SYSTEM_PROMPT,
+                halt,
+                tx,
+                wake,
+            )
+        });
+        self.turn = Some(Turn {
+            child: None,
+            stop: Some(stop),
+            events: rx,
+        });
         Ok(())
     }
 
     /// Stops the answer in progress. What was already done stays done.
     pub fn stop(&mut self) {
         if let Some(turn) = &mut self.turn {
-            let _ = turn.child.kill();
+            if let Some(child) = &mut turn.child {
+                let _ = child.kill();
+            }
+            if let Some(stop) = &turn.stop {
+                stop.stop();
+            }
         }
     }
 
@@ -478,6 +619,9 @@ impl Chat {
     pub fn reset(&mut self) {
         self.stop();
         self.session = None;
+        if let Ok(mut local) = self.local.lock() {
+            local.clear();
+        }
     }
 
     /// Everything that has happened since the last call.
@@ -503,6 +647,15 @@ impl Chat {
                 }));
                 self.check_account();
                 continue;
+            }
+            if let Event::Models(models) = &event {
+                let current = self
+                    .model
+                    .and_then(|i| self.models.get(i))
+                    .map(|m| m.name.clone());
+                let saved = current.or_else(crate::ollama::saved_model);
+                self.model = crate::ollama::pick(models, saved.as_deref());
+                self.models = models.clone();
             }
             out.push(event);
         }
@@ -533,7 +686,9 @@ impl Chat {
             }
         }
         if finished {
-            let _ = turn.child.wait();
+            if let Some(child) = &mut turn.child {
+                let _ = child.wait();
+            }
             self.turn = None;
         }
         out
@@ -572,6 +727,8 @@ fn ask_account(provider: Provider) -> Account {
             }
         }
         Provider::Gemini => gemini_account(),
+        // Asked through its endpoint, by `check_account`.
+        Provider::Ollama => Account::Checking,
         Provider::ChatGpt => match quiet_command(tool)
             .args(["login", "status"])
             .stdin(Stdio::null())
@@ -1032,7 +1189,7 @@ fn content(message: &Value) -> &[Value] {
 
 /// A line about a tool's input: the script for `run_script`, otherwise the
 /// arguments as they were given.
-fn tool_detail(name: &str, input: &Value) -> String {
+pub(crate) fn tool_detail(name: &str, input: &Value) -> String {
     if name == "run_script" {
         if let Some(script) = input.get("script").and_then(Value::as_str) {
             return script.trim().to_string();

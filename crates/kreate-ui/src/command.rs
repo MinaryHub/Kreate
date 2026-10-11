@@ -194,6 +194,11 @@ pub enum Command {
     ChatProvider {
         index: usize,
     },
+    /// From the chat panel: answer with another of the assistant's models —
+    /// an index into the list the panel was given.
+    ChatModel {
+        index: usize,
+    },
     /// From the Claude panel: sign Claude Code in, in the browser.
     ChatSignIn,
     /// From the Claude panel: the code the sign-in page showed.

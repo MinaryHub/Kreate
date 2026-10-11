@@ -105,6 +105,10 @@ pub struct ChatText {
 pub struct ChatProviders<'a> {
     pub names: &'a [&'a str],
     pub current: usize,
+    /// The models the assistant can answer with, when it is one that has a
+    /// choice (Ollama); empty otherwise.
+    pub models: &'a [String],
+    pub model: usize,
 }
 
 /// The panel itself. `attachments` go with the next message. Returns whether the input box has
@@ -145,6 +149,26 @@ pub fn chat(
                         }
                     }
                 });
+            if !providers.models.is_empty() {
+                let current = providers
+                    .models
+                    .get(providers.model)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                egui::ComboBox::from_id_salt("chat-model")
+                    // i18n-exempt: a model's name
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (index, name) in providers.models.iter().enumerate() {
+                            // i18n-exempt: a model's name
+                            if ui.selectable_label(index == providers.model, name).clicked()
+                                && index != providers.model
+                            {
+                                queue.push(Command::ChatModel { index });
+                            }
+                        }
+                    });
+            }
         });
     });
     draw_account(ui, &theme, text, account, code, queue);

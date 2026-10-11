@@ -372,6 +372,11 @@ impl App {
                     };
                     continue;
                 }
+                Event::Models(models) => {
+                    self.ui.chat_models = models.into_iter().map(|m| m.name).collect();
+                    self.ui.chat_model = chat.model().unwrap_or(0);
+                    continue;
+                }
                 Event::SignInUrl(url) => {
                     self.ui.chat_account =
                         kreate_ui::chat::ChatAccount::SigningIn { url: Some(url) };
