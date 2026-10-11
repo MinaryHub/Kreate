@@ -582,7 +582,9 @@ impl App {
                     .and_then(|k| Kind::from_tag(&k))
                     .ok_or("`kind` is model, material or hdri")?;
                 let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-                    .ok_or("`source` is polyhaven, ambientcg, objaverse, polypizza or local")?;
+                    .ok_or(
+                    "`source` is polyhaven, ambientcg, objaverse, sketchfab, polypizza or local",
+                )?;
                 let id = text("id").ok_or("`id` is required")?;
                 let resolution = match text("resolution").as_deref() {
                     Some("2k") => "2k",

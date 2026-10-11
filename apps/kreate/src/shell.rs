@@ -6113,6 +6113,7 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
             t("asset-source-objaverse"),
             t("asset-source-polypizza"),
             t("asset-source-generated"),
+            t("asset-source-sketchfab"),
         ],
         kinds: vec![
             t("asset-kind-models"),
@@ -6151,6 +6152,10 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
                 t("asset-credit-objaverse"),
                 "https://huggingface.co/datasets/allenai/objaverse".to_string(),
             )),
+            crate::assets::Source::Sketchfab => Some((
+                t("asset-credit-sketchfab"),
+                "https://sketchfab.com".to_string(),
+            )),
             crate::assets::Source::Generated => Some((
                 t("asset-credit-generated"),
                 "https://huggingface.co/microsoft/TRELLIS-image-large".to_string(),
@@ -6161,17 +6166,39 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         link: t("asset-link"),
         link_hint: t("asset-link-hint"),
         animated_only: t("asset-animated-only"),
-        search_hint: t(if source == crate::assets::Source::Objaverse {
-            "asset-search-hint-objaverse"
+        search_hint: match source {
+            crate::assets::Source::Objaverse => t("asset-search-hint-objaverse"),
+            crate::assets::Source::Sketchfab => match crate::sketchfab::signed_in_as() {
+                Some(who) => state.catalog.format(
+                    "asset-search-hint-sketchfab",
+                    kreate_i18n::TextKind::Ui,
+                    &[("name", who.as_str())],
+                ),
+                None => t("asset-search-hint-sketchfab-out"),
+            },
+            _ => t("asset-search-hint"),
+        },
+        key_prompt: t(if source == crate::assets::Source::Sketchfab {
+            "asset-sketchfab-prompt"
         } else {
-            "asset-search-hint"
+            "asset-key-prompt"
         }),
-        key_prompt: t("asset-key-prompt"),
-        key_where: (
-            t("asset-key-where"),
-            "https://poly.pizza/settings/api".to_string(),
-        ),
-        key_hint: t("asset-key-hint"),
+        key_where: if source == crate::assets::Source::Sketchfab {
+            (
+                t("asset-sketchfab-where"),
+                "https://sketchfab.com/settings/password".to_string(),
+            )
+        } else {
+            (
+                t("asset-key-where"),
+                "https://poly.pizza/settings/api".to_string(),
+            )
+        },
+        key_hint: t(if source == crate::assets::Source::Sketchfab {
+            "asset-sketchfab-hint"
+        } else {
+            "asset-key-hint"
+        }),
         key_save: t("asset-key-save"),
         key_change: t("asset-key-change"),
         gen_hint: t("asset-gen-hint"),
@@ -6262,12 +6289,17 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         error: state
             .asset_error
             .clone()
-            .filter(|e| e != crate::assets::KEY_MISSING),
+            .filter(|e| e != crate::assets::KEY_MISSING && e != crate::sketchfab::TOKEN_MISSING),
         searched: source.searched(),
         animated_only: source.searched().then_some(state.asset_query.animated),
-        key_needed: source == crate::assets::Source::PolyPizza
-            && (!state.asset_key_held
-                || state.asset_error.as_deref() == Some(crate::assets::KEY_REFUSED)),
+        key_needed: matches!(
+            source,
+            crate::assets::Source::PolyPizza | crate::assets::Source::Sketchfab
+        ) && (!state.asset_key_held
+            || matches!(
+                state.asset_error.as_deref(),
+                Some(crate::assets::KEY_REFUSED | crate::sketchfab::TOKEN_REFUSED)
+            )),
         key_held: state.asset_key_held,
         generator: (source == crate::assets::Source::Generated).then(|| {
             kreate_ui::assets::GeneratorView {

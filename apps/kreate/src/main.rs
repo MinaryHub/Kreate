@@ -4730,7 +4730,14 @@ impl App {
                         self.ui.asset_error = Some(why);
                     }
                 }
-                Command::AssetKey { key } => match kreate::assets::save_polypizza_key(&key) {
+                Command::AssetKey { key } => match if kreate::assets::Source::ALL
+                    .get(self.ui.asset_source)
+                    == Some(&kreate::assets::Source::Sketchfab)
+                {
+                    kreate::sketchfab::save_token(&key)
+                } else {
+                    kreate::assets::save_polypizza_key(&key)
+                } {
                     Ok(()) => {
                         self.ui.asset_key_held = !key.trim().is_empty();
                         self.reset_asset_list();
@@ -10274,7 +10281,7 @@ fn assets_search(
         .and_then(|k| Kind::from_tag(&k))
         .ok_or("`kind` is model, material or hdri")?;
     let source = Source::from_tag(&text("source").unwrap_or("polyhaven".into()))
-        .ok_or("`source` is polyhaven, ambientcg, objaverse, polypizza or local")?;
+        .ok_or("`source` is polyhaven, ambientcg, objaverse, sketchfab, polypizza or local")?;
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let query = text("query").unwrap_or_default();
     let animated = params

@@ -68,16 +68,21 @@ pub enum Source {
     /// Face — found with Sketchfab's own search, fetched from the dataset,
     /// neither asking for an account.
     Objaverse,
+    /// Sketchfab itself, signed in with the user's API token: their own
+    /// models, their likes, and everything downloadable. See
+    /// [`crate::sketchfab`].
+    Sketchfab,
 }
 
 impl Source {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Local,
         Self::PolyHaven,
         Self::AmbientCg,
         Self::Objaverse,
         Self::PolyPizza,
         Self::Generated,
+        Self::Sketchfab,
     ];
 
     /// Whether assets come over the network.
@@ -94,7 +99,10 @@ impl Source {
     /// Whether the source searches itself: it holds too many to list, so the
     /// search box asks it rather than filtering what was listed.
     pub fn searched(self) -> bool {
-        matches!(self, Source::PolyPizza | Source::Objaverse)
+        matches!(
+            self,
+            Source::PolyPizza | Source::Objaverse | Source::Sketchfab
+        )
     }
 }
 
@@ -163,7 +171,9 @@ impl Entry {
                 self.authors,
                 match self.source {
                     Source::PolyPizza => format!("https://poly.pizza/m/{}", self.id),
-                    Source::Objaverse => format!("https://sketchfab.com/3d-models/{}", self.id),
+                    Source::Objaverse | Source::Sketchfab => {
+                        format!("https://sketchfab.com/3d-models/{}", self.id)
+                    }
                     _ => self.source.tag().to_string(),
                 }
             )
@@ -920,7 +930,7 @@ pub fn thumbnail_now(
         Source::Generated => path.and_then(|p| {
             thumbnail_of(&std::fs::read(p.with_extension("png")).ok()?)
         }),
-        Source::PolyPizza | Source::Objaverse => cache_root().and_then(|root| {
+        Source::PolyPizza | Source::Objaverse | Source::Sketchfab => cache_root().and_then(|root| {
             let url = url?;
             if !safe_id(&id) {
                 return None;
@@ -1129,6 +1139,7 @@ pub fn list_now(
             Vec::new()
         }),
         Source::Objaverse => crate::objaverse::list(kind, query),
+        Source::Sketchfab => crate::sketchfab::list(kind, query),
     }
 }
 
@@ -1187,6 +1198,7 @@ impl Source {
             Source::PolyPizza => "polypizza",
             Source::Generated => "generated",
             Source::Objaverse => "objaverse",
+            Source::Sketchfab => "sketchfab",
         }
     }
 
@@ -1260,6 +1272,7 @@ fn fetch(entry: &Entry, resolution: &str) -> Result<Ready, String> {
             .map(Ready::Model)
             .ok_or_else(|| "the model has no file".to_string()),
         Source::Objaverse => crate::objaverse::fetch(entry).map(Ready::Model),
+        Source::Sketchfab => crate::sketchfab::fetch(entry).map(Ready::Model),
     }
 }
 
@@ -1410,6 +1423,9 @@ pub fn find_now(
 ) -> Result<Entry, String> {
     if source == Source::Objaverse {
         return crate::objaverse::find(id);
+    }
+    if source == Source::Sketchfab {
+        return crate::sketchfab::find(id);
     }
     if source == Source::PolyPizza {
         if !safe_id(id) {

@@ -25,7 +25,10 @@ impl App {
                 kreate_i18n::TextKind::Ui,
                 &[],
             ));
-            self.ui.asset_key_held = kreate::assets::polypizza_key().is_some();
+            self.ui.asset_key_held = match source {
+                Source::Sketchfab => kreate::sketchfab::token().is_some(),
+                _ => kreate::assets::polypizza_key().is_some(),
+            };
             library.list(
                 source,
                 kind,
