@@ -64,6 +64,8 @@ pub struct LiquidSim {
     drops: Vec<Drop>,
     /// 0 is PIC, 1 is FLIP.
     flip: f32,
+    /// How thick the liquid is, 0 (water) to 1 (honey, mud).
+    viscosity: f32,
     inflows: Vec<Region>,
     outflows: Vec<Vec<bool>>,
     rng: Rng,
@@ -112,6 +114,7 @@ impl LiquidSim {
             pressure: vec![0.0; cells],
             drops: Vec::new(),
             flip: flip.clamp(0.0, 1.0) as f32,
+            viscosity: 0.0,
             inflows: Vec::new(),
             outflows: Vec::new(),
             rng: Rng::new(seed),
@@ -120,6 +123,11 @@ impl LiquidSim {
 
     pub fn cells(&self) -> [usize; 3] {
         self.n
+    }
+
+    /// How thick the liquid is: 0 runs like water, 1 slumps like honey.
+    pub fn set_viscosity(&mut self, viscosity: f64) {
+        self.viscosity = viscosity.clamp(0.0, 1.0) as f32;
     }
 
     pub fn cell_size(&self) -> f32 {
@@ -262,6 +270,10 @@ impl LiquidSim {
             *x += gravity.z * dt;
         }
         self.walls(&kinds, &mut u, &mut v, &mut w);
+        if self.viscosity > 0.0 {
+            self.thicken(&kinds, dt, &mut u, &mut v, &mut w);
+            self.walls(&kinds, &mut u, &mut v, &mut w);
+        }
         self.project(&kinds, &mut u, &mut v, &mut w);
         self.extrapolate(&kinds, &mut u, &mut v, &mut w);
         self.walls(&kinds, &mut u, &mut v, &mut w);
@@ -501,6 +513,105 @@ impl LiquidSim {
                         field[(k * dims[1] + j) * dims[0] + i] -= pressure(b) - pressure(a);
                     }
                 }
+            }
+        }
+    }
+
+    /// Viscosity: the liquid's velocity spread to its neighbours, by
+    /// solving `u − ν·dt·∇²u = u*` over the faces in the liquid — implicit,
+    /// so however thick the liquid and however long the step it settles
+    /// rather than ringing. Jacobi iterations, every face on its own each
+    /// round, so every core takes a share. The domain's walls and the
+    /// obstacles hold the liquid still where it touches them — no slip —
+    /// which is what a thick liquid drags on: a block that slides as a
+    /// whole has nothing inside it to even out.
+    fn thicken(&self, kinds: &[Cell], dt: f32, u: &mut [f32], v: &mut [f32], w: &mut [f32]) {
+        let n = self.n;
+        // Square metres a second: half of one at the top of the scale, a
+        // thousandth of that at a tenth of it — the dial is squared, so its
+        // lower half is for liquids only a little thicker than water.
+        let nu = 0.5 * self.viscosity * self.viscosity;
+        let a = nu * dt / (self.h * self.h);
+        for (axis, field) in [&mut *u, &mut *v, &mut *w].into_iter().enumerate() {
+            let dims = face_dims(n, axis);
+            let liquid_face = |i: usize, j: usize, k: usize| {
+                let hi = [i, j, k];
+                let mut lo = hi;
+                let up = hi[axis] < n[axis] && kinds[self.cell(i, j, k)] == Cell::Liquid;
+                let down = hi[axis] > 0 && {
+                    lo[axis] -= 1;
+                    kinds[self.cell(lo[0], lo[1], lo[2])] == Cell::Liquid
+                };
+                up || down
+            };
+            let inside: Vec<bool> = (0..field.len())
+                .into_par_iter()
+                .map(|at| {
+                    let (i, j, k) = (
+                        at % dims[0],
+                        (at / dims[0]) % dims[1],
+                        at / (dims[0] * dims[1]),
+                    );
+                    liquid_face(i, j, k)
+                })
+                .collect();
+            // Faces against an obstacle.
+            let blocked: Vec<bool> = (0..field.len())
+                .into_par_iter()
+                .map(|at| {
+                    let (i, j, k) = (
+                        at % dims[0],
+                        (at / dims[0]) % dims[1],
+                        at / (dims[0] * dims[1]),
+                    );
+                    let hi = [i, j, k];
+                    let up = hi[axis] < n[axis] && kinds[self.cell(i, j, k)] == Cell::Solid;
+                    let down = hi[axis] > 0 && {
+                        let mut lo = hi;
+                        lo[axis] -= 1;
+                        kinds[self.cell(lo[0], lo[1], lo[2])] == Cell::Solid
+                    };
+                    up || down
+                })
+                .collect();
+            let start = field.to_vec();
+            for _ in 0..20 {
+                let now = field.to_vec();
+                field.par_iter_mut().enumerate().for_each(|(at, out)| {
+                    if !inside[at] {
+                        return;
+                    }
+                    let (i, j, k) = (
+                        at % dims[0],
+                        (at / dims[0]) % dims[1],
+                        at / (dims[0] * dims[1]),
+                    );
+                    let p = [i as isize, j as isize, k as isize];
+                    let (mut sum, mut count) = (0.0, 0.0);
+                    for (da, sign) in [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)] {
+                        let mut q = p;
+                        q[da] += sign;
+                        // Past the domain's wall, across it, or into an
+                        // obstacle: still, pulling the liquid to stillness.
+                        if q[da] < 0 || q[da] >= dims[da] as isize {
+                            if da != axis {
+                                count += 1.0;
+                            }
+                            continue;
+                        }
+                        let nb =
+                            (q[2] as usize * dims[1] + q[1] as usize) * dims[0] + q[0] as usize;
+                        if blocked[nb] {
+                            count += 1.0;
+                        } else if inside[nb] {
+                            // A neighbour in the air pulls on nothing: the
+                            // free surface is not a wall.
+                            sum += now[nb];
+                            count += 1.0;
+                        }
+                    }
+                    *out = (start[at] + a * sum) / (1.0 + a * count);
+                });
             }
         }
     }
@@ -1193,5 +1304,24 @@ mod tests {
             })
         };
         assert_eq!(run(1), run(4));
+    }
+
+    #[test]
+    fn a_thick_liquid_slumps_where_water_runs() {
+        let spread = |viscosity: f64| {
+            let mut sim = LiquidSim::new(bounds(Vec3::ZERO, Vec3::new(2.0, 1.0, 1.0)), 16, 0.95, 1);
+            sim.set_viscosity(viscosity);
+            sim.fill(&cube_at(Vec3::new(0.3, 0.5, 0.45), 0.5), Vec3::ZERO);
+            for _ in 0..24 {
+                sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+            }
+            let reach = sim.particles().map(|p| p.x).fold(0.0f32, f32::max);
+            (reach, sim.particle_count())
+        };
+        let (water, n) = spread(0.0);
+        let (honey, m) = spread(1.0);
+        assert_eq!(n, m, "none lost");
+        assert!(honey < water - 0.2, "honey reached {honey}, water {water}");
+        assert!(honey > 0.55, "it still slumps: {honey}");
     }
 }

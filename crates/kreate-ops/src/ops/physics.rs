@@ -440,6 +440,10 @@ pub struct FluidParams {
     /// A domain: how lively the liquid is — high splashes, low is calm.
     #[param(min = 0.0, max = 1.0)]
     pub flip: f64,
+    /// A liquid domain: how thick the liquid is — water at 0, honey or mud
+    /// at 1.
+    #[param(min = 0.0, max = 1.0)]
+    pub viscosity: f64,
     /// A gas domain: how strongly heat lifts the smoke.
     #[param(soft_min = -10.0, soft_max = 10.0)]
     pub buoyancy: f64,
@@ -490,6 +494,7 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
         domain: 0,
         resolution: d.resolution,
         flip: d.flip,
+        viscosity: d.viscosity,
         buoyancy: d.buoyancy,
         vorticity: d.vorticity,
         dissipation: d.dissipation,
@@ -512,6 +517,7 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
             };
             p.resolution = d.resolution;
             p.flip = d.flip;
+            p.viscosity = d.viscosity;
             p.buoyancy = d.buoyancy;
             p.vorticity = d.vorticity;
             p.dissipation = d.dissipation;
@@ -548,7 +554,7 @@ pub fn fluid_param_applies(p: &FluidParams, name: &str) -> bool {
     match name {
         "role" => true,
         "domain" | "resolution" => domain,
-        "flip" => domain && !gas,
+        "flip" | "viscosity" => domain && !gas,
         "buoyancy" | "vorticity" | "dissipation" | "smoke_color" | "turbulence" | "detail" => {
             domain && gas
         }
@@ -605,6 +611,7 @@ impl Operator for FluidSet {
                     .resolution
                     .clamp(4, kreate_scene::physics::fluid::MAX_RESOLUTION),
                 flip: params.flip.clamp(0.0, 1.0),
+                viscosity: finite_or(params.viscosity, 0.0).clamp(0.0, 1.0),
                 buoyancy: finite_or(params.buoyancy, 2.0).clamp(-50.0, 50.0),
                 vorticity: finite_or(params.vorticity, 0.3).clamp(0.0, 10.0),
                 dissipation: finite_or(params.dissipation, 0.05).clamp(0.0, 10.0),

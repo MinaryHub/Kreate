@@ -81,19 +81,31 @@ struct Liquid {
     uid: Uid,
     sim: LiquidSim,
     frames: Vec<Arc<kreate_mesh::MeshData>>,
+    /// From the world into the domain's own turned frame, which the
+    /// simulation's grid lies along: a domain turned on the floor fills
+    /// its own box, not the box round it.
+    into: DAffine3,
+    /// Gravity in that frame.
+    gravity: kreate_math::Vec3,
 }
 
 /// The liquid's surface in the domain object's own space: empty when there
 /// is no liquid, so an emptied domain shows nothing rather than its box.
-fn surface_of(sim: &LiquidSim, world: DAffine3) -> Arc<kreate_mesh::MeshData> {
+fn surface_of(sim: &LiquidSim, to_local: DAffine3) -> Arc<kreate_mesh::MeshData> {
     let mut mesh = sim
         .surface()
         .unwrap_or_else(|| kreate_mesh::MeshData::from_faces(Vec::new(), &[]));
-    let back = world.inverse();
     for p in mesh.positions_mut() {
-        *p = back.transform_point3(p.as_dvec3()).as_vec3();
+        *p = to_local.transform_point3(p.as_dvec3()).as_vec3();
     }
     Arc::new(mesh)
+}
+
+/// Triangles moved by `by`.
+fn moved(tris: &[[kreate_math::Vec3; 3]], by: DAffine3) -> Vec<[kreate_math::Vec3; 3]> {
+    tris.iter()
+        .map(|t| t.map(|p| by.transform_point3(p.as_dvec3()).as_vec3()))
+        .collect()
 }
 
 /// The object's transform that puts it at `world`, given its parent.
@@ -349,25 +361,40 @@ pub fn bake_with(
             });
             continue;
         }
+        // The domain's own frame: its turn and place, not its size.
+        let (_, turn, place) = w.to_scale_rotation_translation();
+        let frame = DAffine3::from_rotation_translation(turn, place);
+        let into = frame.inverse();
+        let bounds = kreate_math::Aabb::from_points(
+            mesh.positions()
+                .iter()
+                .map(|p| (into * w).transform_point3(p.as_dvec3()).as_vec3()),
+        );
         let mut sim = LiquidSim::new(bounds, domain.resolution, domain.flip, o.uid.raw());
+        sim.set_viscosity(domain.viscosity);
+        let walls: Vec<Vec<[kreate_math::Vec3; 3]>> =
+            walls.iter().map(|t| moved(t, into)).collect();
         sim.set_obstacles(&walls);
         for (flow, tris) in flows
             .iter()
             .filter(|(f, _)| f.substance == Substance::Liquid)
         {
-            let speed = flow.velocity.as_vec3();
+            let tris = moved(tris, into);
+            let speed = (turn.inverse() * flow.velocity).as_vec3();
             match flow.kind {
-                super::FlowKind::Geometry => sim.fill(tris, speed),
-                super::FlowKind::Inflow => sim.add_inflow(tris, speed),
-                super::FlowKind::Outflow => sim.add_outflow(tris),
+                super::FlowKind::Geometry => sim.fill(&tris, speed),
+                super::FlowKind::Inflow => sim.add_inflow(&tris, speed),
+                super::FlowKind::Outflow => sim.add_outflow(&tris),
             }
         }
-        let first = surface_of(&sim, w);
+        let first = surface_of(&sim, w.inverse() * frame);
         liquids.push(Liquid {
             object: id,
             uid: o.uid,
             sim,
             frames: vec![first],
+            into,
+            gravity: (turn.inverse() * settings.gravity).as_vec3(),
         });
     }
 
@@ -460,15 +487,17 @@ pub fn bake_with(
                         .iter()
                         .find(|t| t.object == *o)
                         .map_or_else(|| scene.world_transform(*o), |t| t.now);
-                    world_triangles(m, w)
+                    world_triangles(m, liquid.into * w)
                 })
                 .collect();
             if !walls.is_empty() {
                 liquid.sim.set_obstacles(&walls);
             }
-            liquid.sim.advance(dt as f32, settings.gravity.as_vec3());
+            liquid.sim.advance(dt as f32, liquid.gravity);
             let w = scene.world_transform(liquid.object);
-            liquid.frames.push(surface_of(&liquid.sim, w));
+            liquid
+                .frames
+                .push(surface_of(&liquid.sim, w.inverse() * liquid.into.inverse()));
         }
         for gas in gases.iter_mut() {
             let walls: Vec<Vec<[kreate_math::Vec3; 3]>> = obstacles
@@ -1000,5 +1029,54 @@ mod tests {
             .evaluated(&doc, domain, &EvalCtx::still())
             .unwrap();
         assert_eq!(shown.num_faces(), 0, "the box is not drawn");
+    }
+
+    #[test]
+    fn a_turned_domain_keeps_its_liquid_in_its_own_box() {
+        use crate::physics::{Fluid, FluidDomain, FluidFlow};
+        let mut doc = Document::new();
+        short(&mut doc, 24);
+        let domain = add(
+            &mut doc,
+            "Domain",
+            kreate_mesh::primitives::cube(2.0),
+            DVec3::new(0.0, 0.0, 1.0),
+        );
+        // Turned an eighth about the up axis: its corners reach past where
+        // a box along the world's axes round it would put its walls.
+        doc.object_mut(domain).unwrap().transform.rotation =
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_4);
+        let water = add(
+            &mut doc,
+            "Water",
+            kreate_mesh::primitives::cube(0.8),
+            DVec3::new(0.0, 0.0, 1.3),
+        );
+        doc.object_mut(domain).unwrap().physics.fluid = Some(Fluid::Domain(FluidDomain {
+            resolution: 16,
+            ..Default::default()
+        }));
+        doc.object_mut(water).unwrap().physics.fluid = Some(Fluid::Flow(FluidFlow::default()));
+        let (cache, _) = bake(&doc);
+        let last = &cache.fluid[0].frames[23];
+        assert!(last.num_faces() > 0);
+        // In the domain's own space, its box is -1..1: the water spread to
+        // its walls and no further.
+        let reach = last
+            .positions()
+            .iter()
+            .map(|p| p.x.abs().max(p.y.abs()))
+            .fold(0.0f32, f32::max);
+        assert!(
+            reach < 1.05,
+            "the water went {reach} out, past the walls at 1"
+        );
+        assert!(reach > 0.8, "it spread to the walls: {reach}");
+        let low = last
+            .positions()
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::MAX, f32::min);
+        assert!((low + 1.0).abs() < 0.1, "it lies on the floor: {low}");
     }
 }

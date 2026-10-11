@@ -98,6 +98,8 @@ pub struct FluidRecord {
     pub resolution: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viscosity: Option<f64>,
     /// A flow's: `geometry`, `inflow` or `outflow`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
@@ -231,6 +233,7 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 role: "domain".into(),
                 resolution: Some(d.resolution),
                 flip: Some(d.flip),
+                viscosity: Some(d.viscosity),
                 flow: None,
                 velocity: None,
                 domain: Some(
@@ -253,6 +256,7 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 role: "flow".into(),
                 resolution: None,
                 flip: None,
+                viscosity: None,
                 flow: Some(
                     match f.kind {
                         FlowKind::Geometry => "geometry",
@@ -374,6 +378,7 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
                         .unwrap_or(d.resolution)
                         .clamp(4, kreate_scene::physics::fluid::MAX_RESOLUTION),
                     flip: finite(f.flip, d.flip).clamp(0.0, 1.0),
+                    viscosity: finite(f.viscosity, d.viscosity).clamp(0.0, 1.0),
                     buoyancy: finite(f.buoyancy, d.buoyancy).clamp(-50.0, 50.0),
                     vorticity: finite(f.vorticity, d.vorticity).clamp(0.0, 10.0),
                     dissipation: finite(f.dissipation, d.dissipation).clamp(0.0, 10.0),
@@ -489,6 +494,7 @@ mod tests {
                 kind: DomainKind::Gas,
                 resolution: 48,
                 flip: 0.8,
+                viscosity: 0.625,
                 buoyancy: 3.5,
                 vorticity: 0.75,
                 dissipation: 0.25,

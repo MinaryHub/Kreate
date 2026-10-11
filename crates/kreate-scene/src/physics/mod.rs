@@ -318,6 +318,8 @@ pub struct FluidDomain {
     /// Liquid, 0 to 1: how much of its own motion the liquid keeps from
     /// step to step. High is lively and splashy, low is calm and smooth.
     pub flip: f64,
+    /// Liquid, 0 to 1: how thick it is — water at 0, honey or mud at 1.
+    pub viscosity: f64,
     /// Gas: how strongly heat lifts it, metres a second squared.
     pub buoyancy: f64,
     /// Gas: how much it curls. 0 is smooth.
@@ -341,6 +343,7 @@ impl Default for FluidDomain {
             kind: DomainKind::Liquid,
             resolution: 32,
             flip: 0.95,
+            viscosity: 0.0,
             buoyancy: gas.buoyancy as f64,
             vorticity: gas.vorticity as f64,
             dissipation: gas.dissipation as f64,
