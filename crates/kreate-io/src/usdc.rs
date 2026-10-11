@@ -286,6 +286,8 @@ enum V {
     Paths(Vec<String>),
     Arcs(Vec<Arc>),
     Pairs(Vec<(String, String)>),
+    /// Values over time: each time code and its value.
+    Samples(Vec<(f64, V)>),
     Specifier(u8),
     None,
 }
@@ -466,21 +468,27 @@ impl<'a> Crate<'a> {
         let mut c = self.at(p)?;
         Ok(match kind {
             TIME_SAMPLES => {
-                // A jump, the times; a jump, the values: the first is taken.
+                // A jump over the times' own data to their encoding; then a
+                // jump to the values' count and their encodings.
                 let start = c.at;
                 let jump = c.i64()?;
                 c.at = usize::try_from(start as i64 + jump)
                     .map_err(|_| UsdcError("a bad jump".into()))?;
+                let times = match self.value(Rep(c.u64()?), depth + 1)? {
+                    V::Nums(t) => t,
+                    _ => Vec::new(),
+                };
                 let start = c.at;
                 let jump = c.i64()?;
-                let _ = jump;
+                c.at = usize::try_from(start as i64 + jump)
+                    .map_err(|_| UsdcError("a bad jump".into()))?;
                 let count = c.count(8)?;
-                let _ = start;
-                if count == 0 {
-                    return Ok(V::None);
+                let mut out = Vec::with_capacity(count.min(times.len()));
+                for t in times.into_iter().take(count) {
+                    let rep = Rep(c.u64()?);
+                    out.push((t, self.value(rep, depth + 1)?));
                 }
-                let first = Rep(c.u64()?);
-                self.value(first, depth + 1)?
+                V::Samples(out)
             }
             TOKEN_VECTOR | PATH_VECTOR | STRING_VECTOR => {
                 let n = c.count(4)?;
@@ -923,6 +931,11 @@ pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
                 if let Some(V::Texts(t)) = val("upAxis") {
                     layer.up_axis = t.into_iter().next();
                 }
+                if let Some(V::Nums(n)) =
+                    val("timeCodesPerSecond").or_else(|| val("framesPerSecond"))
+                {
+                    layer.time_codes_per_second = n.first().copied();
+                }
                 if let Some(V::Nums(n)) = val("metersPerUnit") {
                     layer.meters_per_unit = n.first().copied();
                 }
@@ -1000,14 +1013,20 @@ pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
                     if let Some(V::Texts(t)) = val("typeName") {
                         property.type_name = t.into_iter().next().unwrap_or_default();
                     }
-                    let value = val("default")
-                        .filter(|v| !matches!(v, V::None))
-                        .or_else(|| val("timeSamples"));
-                    property.value = match value {
-                        Some(V::Nums(n)) => Some(Val::Nums(n)),
-                        Some(V::Texts(t)) => Some(Val::Texts(t)),
+                    let plain_val = |v: V| match v {
+                        V::Nums(n) => Some(Val::Nums(n)),
+                        V::Texts(t) => Some(Val::Texts(t)),
                         _ => None,
                     };
+                    if let Some(V::Samples(list)) = val("timeSamples") {
+                        property.samples = list
+                            .into_iter()
+                            .filter_map(|(t, v)| Some((t, plain_val(v)?)))
+                            .collect();
+                    }
+                    property.value = val("default")
+                        .and_then(plain_val)
+                        .or_else(|| property.samples.first().map(|(_, v)| v.clone()));
                     if let Some(V::Texts(t)) = val("interpolation") {
                         property.interpolation = t.into_iter().next();
                     }

@@ -22,9 +22,17 @@
 //! `UsdPreviewSurface`: colours, metal, roughness, emission, opacity, and
 //! the pictures `UsdUVTexture`s give them.
 //!
+//! What moves, moves: time-sampled `xformOp`s become an animation, at the
+//! stage's `timeCodesPerSecond`. A skeleton becomes an armature — its joints'
+//! rest and bind transforms, its meshes' joint indices and weights (four a
+//! point, the strongest), and its `SkelAnimation` as the joints' channels. A
+//! point instancer places its prototypes at each instance, the prototypes'
+//! meshes shared. Curves come in as thin tubes; rectangle and disc lights as
+//! area lights; a dome light's picture as the world's light.
+//!
 //! The stage's `upAxis` and `metersPerUnit` are the source's axes and units —
-//! Y and centimetres when it does not say, as USD's own fallbacks are.
-//! Animation, skeletons and point instancers are not read, and said so.
+//! Y and centimetres when it does not say, as USD's own fallbacks are. Point
+//! clouds, blend shapes and moving points are not read, and said so.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,8 +40,9 @@ use std::path::{Path, PathBuf};
 use kreate_math::{AxisConvention, Quat, Vec2, Vec3};
 
 use crate::ir::{
-    ImportCamera, ImportImage, ImportLight, ImportLightKind, ImportMaterial, ImportMesh,
-    ImportNode, ImportNodeData, ImportScene, ImportTransform, LossyNote, SourceMetadata,
+    ChannelInterpolation, ChannelValues, ImportAnimation, ImportCamera, ImportChannel, ImportImage,
+    ImportLight, ImportLightKind, ImportMaterial, ImportMesh, ImportNode, ImportNodeData,
+    ImportScene, ImportTransform, LossyNote, SourceMetadata,
 };
 
 /// How many layers deep references may go: a loop of references is a
@@ -75,6 +84,10 @@ pub struct Property {
     pub element_size: Option<i64>,
     /// A relationship's targets, or an attribute's connections.
     pub targets: Vec<String>,
+    /// Its values over time, by time code, in order — empty when it does not
+    /// move. [`Property::value`] is its value at rest: the default, or else
+    /// the first of these.
+    pub samples: Vec<(f64, Val)>,
 }
 
 impl Property {
@@ -141,6 +154,8 @@ pub struct Layer {
     pub up_axis: Option<String>,
     pub meters_per_unit: Option<f64>,
     pub default_prim: Option<String>,
+    /// Time codes a second; 24 when the layer does not say.
+    pub time_codes_per_second: Option<f64>,
     pub sublayers: Vec<String>,
     pub prims: Vec<Prim>,
 }
@@ -280,6 +295,9 @@ fn merge(strong: &mut Prim, weak: Prim) {
                 }
                 if s.targets.is_empty() {
                     s.targets = w.targets;
+                }
+                if s.samples.is_empty() {
+                    s.samples = w.samples;
                 }
                 if s.type_name.is_empty() {
                     s.type_name = w.type_name;
@@ -574,6 +592,13 @@ fn read_stage(assets: &Assets, base: &str, name: &str) -> Result<ImportScene, Us
         materials: HashMap::new(),
         images: HashMap::new(),
         colours: HashMap::new(),
+        rate: root
+            .time_codes_per_second
+            .filter(|r| *r > 0.0)
+            .unwrap_or(24.0),
+        skeletons: HashMap::new(),
+        pending: Vec::new(),
+        shared: HashMap::new(),
         all: HashMap::new(),
         said: Vec::new(),
     };
@@ -590,8 +615,12 @@ fn read_stage(assets: &Assets, base: &str, name: &str) -> Result<ImportScene, Us
     for p in &prims {
         reader.prim(p, None, &format!("/{}", p.name));
     }
+    reader.bind_skins();
     Ok(reader.scene)
 }
+
+/// A skeleton as read: its skin, its node, its joints' names and nodes.
+type SkeletonRead = (usize, usize, Vec<String>, Vec<usize>);
 
 struct Reader<'a> {
     scene: ImportScene,
@@ -602,6 +631,17 @@ struct Reader<'a> {
     materials: HashMap<String, Option<usize>>,
     images: HashMap<String, Option<usize>>,
     colours: HashMap<[u32; 3], usize>,
+    /// Time codes a second.
+    rate: f64,
+    /// The mesh each geometry prim became, by path: an instanced prototype
+    /// is read once.
+    shared: HashMap<String, Option<usize>>,
+    /// Skeletons read, by path: their skin, their node, and their joints'
+    /// names and nodes.
+    skeletons: HashMap<String, SkeletonRead>,
+    /// Skinned meshes to bind once every skeleton is read: the mesh, its
+    /// node, its prim's path.
+    pending: Vec<(usize, usize, String)>,
     /// What has been said already, so a thousand prims of one unsupported
     /// kind make one note.
     said: Vec<String>,
@@ -630,22 +670,17 @@ impl<'a> Reader<'a> {
         let t = prim.type_name.as_str();
         match t {
             "Material" | "Shader" | "NodeGraph" | "GeomSubset" => return,
-            "Skeleton" | "SkelAnimation" | "BlendShape" => {
-                self.say(
-                    "skeletons and their animation are not read: meshes come in at rest".into(),
-                );
+            "SkelAnimation" => return,
+            "BlendShape" => {
+                self.say("blend shapes are not read".into());
                 return;
             }
-            "PointInstancer" => {
-                self.say(format!("`{}`: point instancers are not read", prim.name));
-                return;
-            }
-            "BasisCurves" | "NurbsCurves" | "Points" | "HermiteCurves" => {
-                self.say(format!("`{}`: curves and points are not read", prim.name));
+            "Points" => {
+                self.say(format!("`{}`: point clouds are not read", prim.name));
                 return;
             }
             "DomeLight" => {
-                self.say("a dome light is not read: set the world's sky instead".into());
+                self.dome(prim);
                 return;
             }
             _ => {}
@@ -654,13 +689,25 @@ impl<'a> Reader<'a> {
         node.parent = parent;
         node.transform = self.transform(prim);
         node.data = match t {
-            "Mesh" => self
-                .mesh(prim, path)
-                .map_or(ImportNodeData::Empty, ImportNodeData::Mesh),
-            "Cube" | "Sphere" | "Cylinder" | "Cone" | "Capsule" | "Plane" | "Cylinder_1"
-            | "Capsule_1" => self
-                .shape(prim, path)
-                .map_or(ImportNodeData::Empty, ImportNodeData::Mesh),
+            // A prim instanced many times is one mesh, shared.
+            "Mesh" | "Cube" | "Sphere" | "Cylinder" | "Cone" | "Capsule" | "Plane"
+            | "Cylinder_1" | "Capsule_1" | "BasisCurves" | "NurbsCurves" | "HermiteCurves" => {
+                let made = match self.shared.get(path) {
+                    Some(m) => *m,
+                    None => {
+                        let m = match t {
+                            "Mesh" => self.mesh(prim, path),
+                            "BasisCurves" | "NurbsCurves" | "HermiteCurves" => {
+                                self.curves(prim, path)
+                            }
+                            _ => self.shape(prim, path),
+                        };
+                        self.shared.insert(path.to_string(), m);
+                        m
+                    }
+                };
+                made.map_or(ImportNodeData::Empty, ImportNodeData::Mesh)
+            }
             "Camera" => ImportNodeData::Camera(self.camera(prim)),
             "DistantLight" | "SphereLight" | "RectLight" | "DiskLight" | "CylinderLight" => {
                 ImportNodeData::Light(self.light(prim))
@@ -669,77 +716,374 @@ impl<'a> Reader<'a> {
         };
         let at = self.scene.nodes.len();
         self.scene.nodes.push(node);
+        self.animate(prim, at);
+        if t == "Skeleton" {
+            self.skeleton(prim, path, at);
+        }
+        if let (ImportNodeData::Mesh(m), true) = (
+            self.scene.nodes[at].data,
+            prim.property("primvars:skel:jointIndices").is_some(),
+        ) {
+            self.pending.push((m, at, path.to_string()));
+        }
+        if prim.property("points").is_some_and(|p| p.samples.len() > 1) {
+            self.say(format!(
+                "`{}`: moving points are read at their first time",
+                prim.name
+            ));
+        }
+        if t == "PointInstancer" {
+            // Its children are the prototypes, drawn where it says, not
+            // where they stand.
+            self.instances(prim, at, path);
+            return;
+        }
         for c in &prim.children {
             self.prim(c, Some(at), &format!("{path}/{}", c.name));
         }
     }
 
-    /// `xformOpOrder`'s operations, in order, as one placement.
+    /// `xformOpOrder`'s operations, in order, as one placement — at rest.
     fn transform(&mut self, prim: &Prim) -> ImportTransform {
-        use kreate_math::glam::{DMat4, DQuat, DVec3};
+        trs(xform_at(prim, None).unwrap_or(kreate_math::glam::DMat4::IDENTITY))
+    }
+
+    /// A prim whose placement moves: a channel for each part of it, keyed
+    /// at every time any of its operations is.
+    fn animate(&mut self, prim: &Prim, node: usize) {
         let Some(order) = prim.property("xformOpOrder").and_then(Property::texts) else {
-            return ImportTransform::default();
+            return;
         };
-        let mut m = DMat4::IDENTITY;
-        for op in order {
-            if op == "!resetXformStack!" {
-                m = DMat4::IDENTITY;
+        let mut times: Vec<f64> = order
+            .iter()
+            .filter_map(|op| prim.property(op.trim_start_matches("!invert!")))
+            .flat_map(|p| p.samples.iter().map(|(t, _)| *t))
+            .collect();
+        times.sort_by(f64::total_cmp);
+        times.dedup();
+        if times.len() < 2 {
+            return;
+        }
+        let mut translations = Vec::with_capacity(times.len());
+        let mut rotations: Vec<Quat> = Vec::with_capacity(times.len());
+        let mut scales = Vec::with_capacity(times.len());
+        for t in &times {
+            let at = trs(xform_at(prim, Some(*t)).unwrap_or(kreate_math::glam::DMat4::IDENTITY));
+            // The same way round as the key before, so the turn between
+            // them is the short one.
+            let q = match rotations.last() {
+                Some(prev) if prev.dot(at.rotation) < 0.0 => -at.rotation,
+                _ => at.rotation,
+            };
+            translations.push(at.translation);
+            rotations.push(q);
+            scales.push(at.scale);
+        }
+        let seconds: Vec<f32> = times.iter().map(|t| (*t / self.rate) as f32).collect();
+        let animation = self.take();
+        for values in [
+            ChannelValues::Translation(translations),
+            ChannelValues::Rotation(rotations),
+            ChannelValues::Scale(scales),
+        ] {
+            animation.channels.push(ImportChannel {
+                node,
+                interpolation: ChannelInterpolation::Linear,
+                times: seconds.clone(),
+                values,
+            });
+        }
+    }
+
+    /// The stage's one animation, made when first needed.
+    fn take(&mut self) -> &mut ImportAnimation {
+        if self.scene.animations.is_empty() {
+            self.scene.animations.push(ImportAnimation {
+                name: "Stage".into(),
+                channels: Vec::new(),
+            });
+        }
+        self.scene.animations.last_mut().expect("made")
+    }
+
+    /// A skeleton: a node for each joint under its own, a skin whose
+    /// binds are its `bindTransforms`, and its animation if it has one.
+    fn skeleton(&mut self, prim: &'a Prim, path: &str, node: usize) {
+        use kreate_math::glam::DMat4;
+        let Some(joints) = prim.property("joints").and_then(Property::texts) else {
+            return;
+        };
+        let matrices = |name: &str| -> Option<Vec<DMat4>> {
+            let n = prim.nums(name)?;
+            (n.len() == joints.len() * 16).then(|| {
+                n.as_chunks::<16>()
+                    .0
+                    .iter()
+                    .map(DMat4::from_cols_array)
+                    .collect()
+            })
+        };
+        let bind = matrices("bindTransforms");
+        let rest = matrices("restTransforms");
+        let parent_of = |i: usize| -> Option<usize> {
+            let (up, _) = joints[i].rsplit_once('/')?;
+            joints.iter().position(|j| j == up)
+        };
+        let mut nodes: Vec<usize> = Vec::with_capacity(joints.len());
+        for i in 0..joints.len() {
+            let name = joints[i]
+                .rsplit('/')
+                .next()
+                .unwrap_or(&joints[i])
+                .to_string();
+            let parent = parent_of(i);
+            // At rest: as the skeleton says, or from the binds.
+            let local = match (&rest, &bind) {
+                (Some(r), _) => r[i],
+                (None, Some(b)) => match parent {
+                    Some(p) => b[p].inverse() * b[i],
+                    None => b[i],
+                },
+                _ => DMat4::IDENTITY,
+            };
+            let mut joint = ImportNode::new(name);
+            joint.parent = Some(parent.and_then(|p| nodes.get(p).copied()).unwrap_or(node));
+            joint.transform = trs(local);
+            nodes.push(self.scene.nodes.len());
+            self.scene.nodes.push(joint);
+        }
+        self.scene.skins.push(crate::ir::ImportSkin {
+            name: prim.name.clone(),
+            joints: nodes.clone(),
+            // From the skeleton's space to each joint's at the bind.
+            inverse_bind: bind.map(|b| b.iter().map(|m| m.inverse().as_mat4()).collect()),
+        });
+        let skin = self.scene.skins.len() - 1;
+        self.skeletons.insert(
+            path.to_string(),
+            (skin, node, joints.to_vec(), nodes.clone()),
+        );
+        // Its animation: named on it, or on the skeleton root above it.
+        let mut at = path.to_string();
+        let mut source = prim
+            .property("skel:animationSource")
+            .and_then(|r| r.targets.first().cloned());
+        while source.is_none() {
+            let Some((up, _)) = at.rsplit_once('/') else {
+                break;
+            };
+            at = up.to_string();
+            if at.is_empty() {
+                break;
+            }
+            source = self
+                .all
+                .get(&at)
+                .and_then(|p| p.property("skel:animationSource"))
+                .and_then(|r| r.targets.first().cloned());
+        }
+        if let Some(anim) = source.and_then(|s| self.all.get(&absolute(&s, path)).copied()) {
+            self.skel_animation(anim, joints, &nodes);
+        }
+    }
+
+    /// A SkelAnimation's turns, moves and sizes, a channel each per joint.
+    fn skel_animation(&mut self, anim: &Prim, skeleton: &[String], nodes: &[usize]) {
+        let Some(names) = anim.property("joints").and_then(Property::texts) else {
+            return;
+        };
+        let target: Vec<Option<usize>> = names
+            .iter()
+            .map(|n| {
+                skeleton
+                    .iter()
+                    .position(|s| s == n)
+                    .and_then(|i| nodes.get(i).copied())
+            })
+            .collect();
+        for (attr, width) in [("translations", 3), ("rotations", 4), ("scales", 3)] {
+            let Some(p) = anim.property(attr) else {
+                continue;
+            };
+            let times: Vec<f64> = if p.samples.is_empty() {
+                vec![0.0]
+            } else {
+                p.samples.iter().map(|(t, _)| *t).collect()
+            };
+            let per_time: Vec<Vec<f64>> = times
+                .iter()
+                .filter_map(|t| value_at(p, (!p.samples.is_empty()).then_some(*t)))
+                .collect();
+            if per_time.len() != times.len() {
                 continue;
             }
-            let (invert, name) = match op.strip_prefix("!invert!") {
-                Some(n) => (true, n),
-                None => (false, op.as_str()),
-            };
-            let Some(v) = prim.nums(name) else { continue };
-            let kind = name
-                .strip_prefix("xformOp:")
-                .unwrap_or(name)
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let v3 = || DVec3::new(v[0], *v.get(1).unwrap_or(&0.0), *v.get(2).unwrap_or(&0.0));
-            let r = |a: f64| a.to_radians();
-            let op_m = match kind {
-                "translate" if v.len() >= 3 => DMat4::from_translation(v3()),
-                "scale" if v.len() >= 3 => DMat4::from_scale(v3()),
-                "scale" if v.len() == 1 => DMat4::from_scale(DVec3::splat(v[0])),
-                "rotateX" => DMat4::from_rotation_x(r(v[0])),
-                "rotateY" => DMat4::from_rotation_y(r(v[0])),
-                "rotateZ" => DMat4::from_rotation_z(r(v[0])),
-                // `rotateXYZ` turns about X first: the matrix is Z·Y·X.
-                k if k.starts_with("rotate") && k.len() == 9 && v.len() >= 3 => {
-                    // The value is (x, y, z) whatever the order; the name
-                    // says which is turned first.
-                    let mut q = DQuat::IDENTITY;
-                    for a in k[6..].chars() {
-                        let turn = match a {
-                            'X' => DQuat::from_rotation_x(r(v[0])),
-                            'Y' => DQuat::from_rotation_y(r(v[1])),
-                            _ => DQuat::from_rotation_z(r(v[2])),
+            let seconds: Vec<f32> = times.iter().map(|t| (*t / self.rate) as f32).collect();
+            for (k, node) in target.iter().enumerate() {
+                let Some(node) = *node else { continue };
+                let values: Option<Vec<&[f64]>> = per_time
+                    .iter()
+                    .map(|v| v.get(k * width..(k + 1) * width))
+                    .collect();
+                let Some(values) = values else { continue };
+                let values = if attr == "rotations" {
+                    let mut out: Vec<Quat> = Vec::with_capacity(values.len());
+                    for v in &values {
+                        // Real part first, as USD writes them.
+                        let q = Quat::from_xyzw(v[1] as f32, v[2] as f32, v[3] as f32, v[0] as f32)
+                            .normalize();
+                        let q = match out.last() {
+                            Some(prev) if prev.dot(q) < 0.0 => -q,
+                            _ => q,
                         };
-                        q = turn * q;
+                        out.push(q);
                     }
-                    DMat4::from_quat(q)
-                }
-                // A quaternion is written real part first.
-                "orient" if v.len() >= 4 => {
-                    DMat4::from_quat(DQuat::from_xyzw(v[1], v[2], v[3], v[0]).normalize())
-                }
-                "transform" if v.len() >= 16 => {
-                    // Rows of a row-vector matrix: glam's columns.
-                    DMat4::from_cols_array(&v[..16].try_into().expect("sixteen"))
-                }
-                _ => continue,
-            };
-            let op_m = if invert { op_m.inverse() } else { op_m };
-            // Earlier operations in the order are outermost.
-            m *= op_m;
+                    ChannelValues::Rotation(out)
+                } else {
+                    let v3: Vec<Vec3> = values
+                        .iter()
+                        .map(|v| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32))
+                        .collect();
+                    if attr == "scales" {
+                        ChannelValues::Scale(v3)
+                    } else {
+                        ChannelValues::Translation(v3)
+                    }
+                };
+                self.take().channels.push(ImportChannel {
+                    node,
+                    interpolation: ChannelInterpolation::Linear,
+                    times: seconds.clone(),
+                    values,
+                });
+            }
         }
-        let (scale, rotation, translation) = m.to_scale_rotation_translation();
-        ImportTransform {
-            translation: translation.as_vec3(),
-            rotation: rotation.as_quat().normalize(),
-            scale: scale.as_vec3(),
+    }
+
+    /// Every skinned mesh bound to its skeleton: hung from it, its points
+    /// in the skeleton's space, its joints and weights four to a point.
+    fn bind_skins(&mut self) {
+        use kreate_math::glam::DMat4;
+        for (mesh, node, path) in std::mem::take(&mut self.pending) {
+            let Some(prim) = self.all.get(&path).copied() else {
+                continue;
+            };
+            // Its skeleton: named on it or above it, or the first under the
+            // skeleton root it is in.
+            let mut at = path.clone();
+            let mut skel = prim
+                .property("skel:skeleton")
+                .and_then(|r| r.targets.first().cloned());
+            let mut root = None;
+            while skel.is_none() {
+                let Some((up, _)) = at.rsplit_once('/') else {
+                    break;
+                };
+                at = up.to_string();
+                if at.is_empty() {
+                    break;
+                }
+                let p = self.all.get(&at).copied();
+                if root.is_none() && p.is_some_and(|p| p.type_name == "SkelRoot") {
+                    root = Some(at.clone());
+                }
+                skel = p
+                    .and_then(|p| p.property("skel:skeleton"))
+                    .and_then(|r| r.targets.first().cloned());
+            }
+            let skel = skel.map(|s| absolute(&s, &path)).or_else(|| {
+                let root = root?;
+                self.skeletons
+                    .keys()
+                    .filter(|k| k.starts_with(&format!("{root}/")))
+                    .min()
+                    .cloned()
+            });
+            let Some((skin, skel_node, names, _)) =
+                skel.and_then(|s| self.skeletons.get(&s).cloned())
+            else {
+                self.say(format!(
+                    "`{}`: its skeleton was not found; it comes in at rest",
+                    prim.name
+                ));
+                continue;
+            };
+            let (Some(indices), Some(weights)) = (
+                prim.nums("primvars:skel:jointIndices"),
+                prim.nums("primvars:skel:jointWeights"),
+            ) else {
+                continue;
+            };
+            let property = prim.property("primvars:skel:jointIndices");
+            let element = property.and_then(|p| p.element_size).unwrap_or(1).max(1) as usize;
+            let constant = property.and_then(|p| p.interpolation.as_deref()) == Some("constant");
+            // A mesh may name its own subset of the joints.
+            let remap: Option<Vec<usize>> = prim
+                .property("skel:joints")
+                .and_then(Property::texts)
+                .map(|own| {
+                    own.iter()
+                        .map(|n| names.iter().position(|s| s == n).unwrap_or(0))
+                        .collect()
+                });
+            let points = self.scene.meshes[mesh].positions.len();
+            let mut skin_data = crate::ir::VertexSkin::default();
+            for p in 0..points {
+                let base = if constant { 0 } else { p * element };
+                let mut pairs: Vec<(usize, f32)> = (0..element)
+                    .filter_map(|k| {
+                        let j = *indices.get(base + k)? as usize;
+                        let w = *weights.get(base + k)? as f32;
+                        let j = remap.as_ref().map_or(j, |r| r.get(j).copied().unwrap_or(0));
+                        Some((j, w))
+                    })
+                    .filter(|(_, w)| *w > 0.0)
+                    .collect();
+                pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
+                pairs.truncate(4);
+                let total: f32 = pairs.iter().map(|(_, w)| w).sum();
+                let mut js = [0u16; 4];
+                let mut ws = [0f32; 4];
+                for (k, (j, w)) in pairs.iter().enumerate() {
+                    js[k] = *j as u16;
+                    ws[k] = if total > 0.0 { w / total } else { 0.0 };
+                }
+                skin_data.joints.push(js);
+                skin_data.weights.push(ws);
+            }
+            if element > 4 {
+                self.say(
+                    "skin weights past four a point were let go, and the rest made to add up"
+                        .into(),
+                );
+            }
+            // Its points where the skeleton sees them at the bind.
+            if let Some(m) = prim
+                .nums("primvars:skel:geomBindTransform")
+                .or_else(|| prim.nums("skel:geomBindTransform"))
+                .filter(|m| m.len() >= 16)
+            {
+                let bind = DMat4::from_cols_array(&m[..16].try_into().expect("sixteen")).as_mat4();
+                let normal = kreate_math::Mat3::from_mat4(bind).inverse().transpose();
+                let mesh = &mut self.scene.meshes[mesh];
+                for q in &mut mesh.positions {
+                    *q = bind.transform_point3(*q);
+                }
+                if let Some(ns) = &mut mesh.corner_normals {
+                    for n in ns {
+                        *n = (normal * *n).normalize_or_zero();
+                    }
+                }
+            }
+            if self.scene.vertex_skins.len() < self.scene.meshes.len() {
+                self.scene
+                    .vertex_skins
+                    .resize(self.scene.meshes.len(), None);
+            }
+            self.scene.vertex_skins[mesh] = Some(skin_data);
+            let n = &mut self.scene.nodes[node];
+            n.parent = Some(skel_node);
+            n.transform = ImportTransform::default();
+            n.skin = Some(skin);
         }
     }
 
@@ -1268,6 +1612,211 @@ impl<'a> Reader<'a> {
         self.scene.cameras.len() - 1
     }
 
+    /// A dome light's picture as the world's light.
+    fn dome(&mut self, prim: &Prim) {
+        let file = prim
+            .text("inputs:texture:file")
+            .or_else(|| prim.text("texture:file"))
+            .map(str::to_string);
+        let Some(file) = file.filter(|f| !f.is_empty()) else {
+            self.say("a dome light with no picture: the world keeps its colour".into());
+            return;
+        };
+        if prim
+            .text("inputs:texture:format")
+            .is_some_and(|f| f != "latlong" && f != "automatic")
+        {
+            self.say("a dome light's picture is read as a latitude-longitude one".into());
+        }
+        let get = |n: &str| prim.num(&format!("inputs:{n}")).or_else(|| prim.num(n));
+        let strength =
+            (get("intensity").unwrap_or(1.0) * 2f64.powf(get("exposure").unwrap_or(0.0))) as f32;
+        match self.assets.read(&prim.base, &file) {
+            Some((bytes, _)) => {
+                self.scene.environment = Some(crate::ir::ImportEnvironment {
+                    name: Path::new(&file)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "environment".into()),
+                    bytes,
+                    strength,
+                })
+            }
+            None => self.say(format!("the dome light's picture `{file}` was not found")),
+        }
+    }
+
+    /// A point instancer's instances: a node each, placed as it says, with
+    /// its prototype under it — the prototype's meshes shared, not copied.
+    fn instances(&mut self, prim: &'a Prim, node: usize, path: &str) {
+        const MAX_INSTANCES: usize = 20_000;
+        let prototypes: Vec<(String, &'a Prim)> = prim
+            .property("prototypes")
+            .map(|r| r.targets.clone())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| {
+                let at = absolute(t, path);
+                let p = *self.all.get(&at)?;
+                Some((at, p))
+            })
+            .collect();
+        let Some(indices) = prim.nums("protoIndices") else {
+            return;
+        };
+        let positions = prim.nums("positions").unwrap_or(&[]);
+        let orientations = prim.nums("orientations").unwrap_or(&[]);
+        let scales = prim.nums("scales").unwrap_or(&[]);
+        let hidden: Vec<i64> = prim
+            .nums("invisibleIds")
+            .map(|i| i.iter().map(|v| *v as i64).collect())
+            .unwrap_or_default();
+        let ids: Option<Vec<i64>> = prim
+            .nums("ids")
+            .map(|i| i.iter().map(|v| *v as i64).collect());
+        if indices.len() > MAX_INSTANCES {
+            self.say(format!(
+                "`{}`: the first {MAX_INSTANCES} of its {} instances were read",
+                prim.name,
+                indices.len()
+            ));
+        }
+        for (i, proto) in indices.iter().enumerate().take(MAX_INSTANCES) {
+            let id = ids
+                .as_ref()
+                .and_then(|v| v.get(i).copied())
+                .unwrap_or(i as i64);
+            if hidden.contains(&id) {
+                continue;
+            }
+            let Some((proto_path, proto)) = prototypes.get(*proto as usize).cloned() else {
+                continue;
+            };
+            let v3 = |a: &[f64], d: f32| {
+                a.get(i * 3..i * 3 + 3)
+                    .map(|v| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32))
+                    .unwrap_or(Vec3::splat(d))
+            };
+            let rotation = orientations
+                .get(i * 4..i * 4 + 4)
+                .map(|q| {
+                    Quat::from_xyzw(q[1] as f32, q[2] as f32, q[3] as f32, q[0] as f32).normalize()
+                })
+                .unwrap_or(Quat::IDENTITY);
+            let mut instance = ImportNode::new(format!("{}_{i}", prim.name));
+            instance.parent = Some(node);
+            instance.transform = ImportTransform {
+                translation: v3(positions, 0.0),
+                rotation,
+                scale: if scales.is_empty() {
+                    Vec3::ONE
+                } else {
+                    v3(scales, 1.0)
+                },
+            };
+            let at = self.scene.nodes.len();
+            self.scene.nodes.push(instance);
+            self.prim(proto, Some(at), &proto_path);
+        }
+    }
+
+    /// Curves as thin tubes along their points: hair, wires, strokes. A
+    /// cubic curve's points are its control points, followed straight.
+    fn curves(&mut self, prim: &Prim, path: &str) -> Option<usize> {
+        const MAX_SEGMENTS: usize = 400_000;
+        const SIDES: usize = 6;
+        let points: Vec<Vec3> = prim
+            .nums("points")?
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+            .collect();
+        let counts: Vec<usize> = prim
+            .nums("curveVertexCounts")
+            .map(|c| c.iter().map(|n| *n as usize).collect())
+            .unwrap_or_else(|| vec![points.len()]);
+        if prim.text("type").is_some_and(|t| t != "linear") || prim.type_name != "BasisCurves" {
+            self.say("curves are followed through their control points, straight".into());
+        }
+        let widths = prim.nums("widths").unwrap_or(&[]);
+        // A width per point, or one for all; or, not given, a hundredth of
+        // the curves' size.
+        let fallback = {
+            let (lo, hi) = points
+                .iter()
+                .fold((Vec3::MAX, Vec3::MIN), |(l, h), p| (l.min(*p), h.max(*p)));
+            ((hi - lo).length() * 0.005).max(1e-4)
+        };
+        let width = |k: usize| -> f32 {
+            match widths.len() {
+                0 => fallback * 2.0,
+                1 => widths[0] as f32,
+                _ => widths.get(k).copied().unwrap_or(widths[0]) as f32,
+            }
+        };
+        let mut positions = Vec::new();
+        let mut faces: Vec<Vec<u32>> = Vec::new();
+        let mut start = 0;
+        let mut segments = 0;
+        for &n in &counts {
+            let run = start..(start + n).min(points.len());
+            start += n;
+            if run.len() < 2 || segments > MAX_SEGMENTS {
+                continue;
+            }
+            segments += run.len() - 1;
+            // A frame carried along the curve, so the tube does not twist.
+            let mut normal = Vec3::ZERO;
+            let first = positions.len() as u32;
+            for k in run.clone() {
+                let prev = points[k.max(run.start + 1) - 1];
+                let next = points[(k + 1).min(run.end - 1)];
+                let along = (next - prev).normalize_or_zero();
+                if normal == Vec3::ZERO {
+                    normal = along.any_orthonormal_vector();
+                }
+                normal = (normal - along * normal.dot(along))
+                    .normalize_or(along.any_orthonormal_vector());
+                let side = along.cross(normal);
+                let r = width(k) * 0.5;
+                for s in 0..SIDES {
+                    let a = std::f32::consts::TAU * s as f32 / SIDES as f32;
+                    positions.push(points[k] + (normal * a.cos() + side * a.sin()) * r);
+                }
+            }
+            for k in 0..run.len() as u32 - 1 {
+                for s in 0..SIDES as u32 {
+                    let a = first + k * SIDES as u32 + s;
+                    let b = first + k * SIDES as u32 + (s + 1) % SIDES as u32;
+                    faces.push(vec![a, b, b + SIDES as u32, a + SIDES as u32]);
+                }
+            }
+        }
+        if segments > MAX_SEGMENTS {
+            self.say(format!(
+                "`{}`: its curves were read up to {MAX_SEGMENTS} segments",
+                prim.name
+            ));
+        }
+        if faces.is_empty() {
+            return None;
+        }
+        let material = self.binding(prim, path).or_else(|| {
+            prim.nums("primvars:displayColor")
+                .filter(|c| c.len() >= 3)
+                .map(|c| self.colour(c[0] as f32, c[1] as f32, c[2] as f32))
+        });
+        self.scene.meshes.push(ImportMesh {
+            name: prim.name.clone(),
+            positions,
+            face_materials: material.map(|m| vec![m as i32; faces.len()]),
+            faces,
+            ..ImportMesh::default()
+        });
+        Some(self.scene.meshes.len() - 1)
+    }
+
     fn light(&mut self, prim: &Prim) -> usize {
         // `inputs:` since USD 21; plain names before.
         let get = |n: &str| prim.num(&format!("inputs:{n}")).or_else(|| prim.num(n));
@@ -1282,6 +1831,26 @@ impl<'a> Reader<'a> {
         let pi = std::f32::consts::PI;
         let (kind, intensity) = match prim.type_name.as_str() {
             "DistantLight" => (ImportLightKind::Directional, strength),
+            // A glowing shape, in nits, as it is.
+            "RectLight" => (
+                ImportLightKind::Area {
+                    width: get("width").unwrap_or(1.0) as f32,
+                    height: get("height").unwrap_or(1.0) as f32,
+                    round: false,
+                },
+                strength,
+            ),
+            "DiskLight" => {
+                let d = 2.0 * get("radius").unwrap_or(0.5) as f32;
+                (
+                    ImportLightKind::Area {
+                        width: d,
+                        height: d,
+                        round: true,
+                    },
+                    strength,
+                )
+            }
             t => {
                 // A glowing surface's brightness times its area: candela.
                 let area = match t {
@@ -1301,8 +1870,8 @@ impl<'a> Reader<'a> {
                         2.0 * r * get("length").unwrap_or(1.0) as f32
                     }
                 };
-                if t != "SphereLight" {
-                    self.say("area lights come in as point lights of the same strength".into());
+                if t == "CylinderLight" {
+                    self.say("cylinder lights come in as point lights of the same strength".into());
                 }
                 let cone = prim
                     .num("inputs:shaping:cone:angle")
@@ -1330,6 +1899,104 @@ impl<'a> Reader<'a> {
             range: None,
         });
         self.scene.lights.len() - 1
+    }
+}
+
+/// A property's value at `time` — between its samples, a straight line;
+/// before or after them, the nearest — or its value at rest.
+fn value_at(p: &Property, time: Option<f64>) -> Option<Vec<f64>> {
+    let rest = || p.nums().map(<[f64]>::to_vec);
+    let Some(t) = time else { return rest() };
+    let nums = |v: &Val| match v {
+        Val::Nums(n) => Some(n.clone()),
+        _ => None,
+    };
+    if p.samples.is_empty() {
+        return rest();
+    }
+    let after = p.samples.iter().position(|(s, _)| *s >= t);
+    match after {
+        None => nums(&p.samples.last()?.1),
+        Some(0) => nums(&p.samples[0].1),
+        Some(k) => {
+            let (t0, v0) = (&p.samples[k - 1].0, nums(&p.samples[k - 1].1)?);
+            let (t1, v1) = (&p.samples[k].0, nums(&p.samples[k].1)?);
+            let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+            Some(v0.iter().zip(&v1).map(|(a, b)| a + (b - a) * f).collect())
+        }
+    }
+}
+
+/// A prim's `xformOpOrder` as one matrix, at `time` or at rest; `None` when
+/// it has none.
+fn xform_at(prim: &Prim, time: Option<f64>) -> Option<kreate_math::glam::DMat4> {
+    use kreate_math::glam::{DMat4, DQuat, DVec3};
+    let order = prim.property("xformOpOrder").and_then(Property::texts)?;
+    let mut m = DMat4::IDENTITY;
+    for op in order {
+        if op == "!resetXformStack!" {
+            m = DMat4::IDENTITY;
+            continue;
+        }
+        let (invert, name) = match op.strip_prefix("!invert!") {
+            Some(n) => (true, n),
+            None => (false, op.as_str()),
+        };
+        let Some(v) = prim.property(name).and_then(|p| value_at(p, time)) else {
+            continue;
+        };
+        let kind = name
+            .strip_prefix("xformOp:")
+            .unwrap_or(name)
+            .split(':')
+            .next()
+            .unwrap_or("");
+        let v3 = || DVec3::new(v[0], *v.get(1).unwrap_or(&0.0), *v.get(2).unwrap_or(&0.0));
+        let r = |a: f64| a.to_radians();
+        let op_m = match kind {
+            "translate" if v.len() >= 3 => DMat4::from_translation(v3()),
+            "scale" if v.len() >= 3 => DMat4::from_scale(v3()),
+            "scale" if v.len() == 1 => DMat4::from_scale(DVec3::splat(v[0])),
+            "rotateX" if !v.is_empty() => DMat4::from_rotation_x(r(v[0])),
+            "rotateY" if !v.is_empty() => DMat4::from_rotation_y(r(v[0])),
+            "rotateZ" if !v.is_empty() => DMat4::from_rotation_z(r(v[0])),
+            // `rotateXYZ` turns about X first: the matrix is Z·Y·X. The value
+            // is (x, y, z) whatever the order; the name says which is first.
+            k if k.starts_with("rotate") && k.len() == 9 && v.len() >= 3 => {
+                let mut q = DQuat::IDENTITY;
+                for a in k[6..].chars() {
+                    let turn = match a {
+                        'X' => DQuat::from_rotation_x(r(v[0])),
+                        'Y' => DQuat::from_rotation_y(r(v[1])),
+                        _ => DQuat::from_rotation_z(r(v[2])),
+                    };
+                    q = turn * q;
+                }
+                DMat4::from_quat(q)
+            }
+            // A quaternion is written real part first.
+            "orient" if v.len() >= 4 => {
+                DMat4::from_quat(DQuat::from_xyzw(v[1], v[2], v[3], v[0]).normalize())
+            }
+            // Rows of a row-vector matrix: glam's columns.
+            "transform" if v.len() >= 16 => {
+                DMat4::from_cols_array(&v[..16].try_into().expect("sixteen"))
+            }
+            _ => continue,
+        };
+        let op_m = if invert { op_m.inverse() } else { op_m };
+        // Earlier operations in the order are outermost.
+        m *= op_m;
+    }
+    Some(m)
+}
+
+fn trs(m: kreate_math::glam::DMat4) -> ImportTransform {
+    let (scale, rotation, translation) = m.to_scale_rotation_translation();
+    ImportTransform {
+        translation: translation.as_vec3(),
+        rotation: rotation.as_quat().normalize(),
+        scale: scale.as_vec3(),
     }
 }
 
@@ -1545,6 +2212,292 @@ def Xform "Car" (
             (scene.source.unit_scale - 0.01).abs() < 1e-9,
             "centimetres when unsaid"
         );
+    }
+
+    const ARM: &str = r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    timeCodesPerSecond = 10
+)
+def SkelRoot "Rig"
+{
+    def Skeleton "Skel" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        uniform token[] joints = ["Upper", "Upper/Lower"]
+        uniform matrix4d[] bindTransforms = [((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)), ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,1,1))]
+        uniform matrix4d[] restTransforms = [((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)), ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,1,1))]
+        rel skel:animationSource = </Rig/Skel/Bend>
+
+        def SkelAnimation "Bend"
+        {
+            uniform token[] joints = ["Upper/Lower"]
+            quatf[] rotations.timeSamples = {
+                0: [(1, 0, 0, 0)],
+                10: [(0.7071068, 0.7071068, 0, 0)],
+            }
+            float3[] translations = [(0, 0, 1)]
+        }
+    }
+    def Mesh "Skin" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        point3f[] points = [(0,0,0), (0.2,0,0), (0,0,2), (0.2,0,2)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 3, 2]
+        int[] primvars:skel:jointIndices = [0, 0, 0, 0, 1, 0, 1, 0] (
+            elementSize = 2
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 0, 1, 0, 0.75, 0.25, 0.75, 0.25] (
+            elementSize = 2
+            interpolation = "vertex"
+        )
+        rel skel:skeleton = </Rig/Skel>
+    }
+}
+"#;
+
+    #[test]
+    fn a_skeleton_binds_its_mesh_and_plays_its_animation() {
+        let scene = parse_usda_text(ARM).unwrap();
+        assert_eq!(scene.skins.len(), 1);
+        let skin = &scene.skins[0];
+        let names: Vec<&str> = skin
+            .joints
+            .iter()
+            .map(|j| scene.nodes[*j].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Upper", "Lower"]);
+        // The lower joint hangs from the upper, a metre up.
+        let lower = skin.joints[1];
+        assert_eq!(scene.nodes[lower].parent, Some(skin.joints[0]));
+        assert!((scene.world_transform(lower).unwrap().translation.z - 1.0).abs() < 1e-6);
+        let mesh_node = scene.nodes.iter().position(|n| n.name == "Skin").unwrap();
+        assert_eq!(scene.nodes[mesh_node].skin, Some(0));
+        let weights = scene.vertex_skins[0].as_ref().unwrap();
+        assert_eq!(weights.joints[2], [1, 0, 0, 0]);
+        assert_eq!(weights.weights[2], [0.75, 0.25, 0.0, 0.0]);
+        // A quarter turn about X over a second.
+        let turn = scene.animations[0]
+            .channels
+            .iter()
+            .find(|c| c.node == lower && matches!(c.values, ChannelValues::Rotation(_)))
+            .unwrap();
+        assert_eq!(turn.times, vec![0.0, 1.0]);
+        let ChannelValues::Rotation(q) = &turn.values else {
+            unreachable!()
+        };
+        assert!((q[1].to_axis_angle().1 - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        // And it builds: an armature, the mesh following it.
+        let mut doc = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut doc);
+        assert!(doc
+            .objects()
+            .any(|(_, o)| matches!(o.data, kreate_scene::ObjectData::Armature(_))));
+        assert!(doc
+            .objects()
+            .any(|(_, o)| o.name == "Skin" && o.skin.is_some()));
+    }
+
+    #[test]
+    fn a_moving_prim_becomes_an_animation_in_seconds() {
+        let scene = parse_usda_text(
+            r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+def Xform "Mover"
+{
+    double3 xformOp:translate.timeSamples = {
+        0: (0, 0, 0),
+        48: (2, 0, 0),
+    }
+    float xformOp:rotateZ = 90
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+}
+"#,
+        )
+        .unwrap();
+        let channels = &scene.animations[0].channels;
+        let moves = channels
+            .iter()
+            .find(|c| matches!(c.values, ChannelValues::Translation(_)))
+            .unwrap();
+        assert_eq!(moves.times, vec![0.0, 2.0], "24 a second when unsaid");
+        let ChannelValues::Translation(t) = &moves.values else {
+            unreachable!()
+        };
+        assert_eq!(t[1], Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn instancers_domes_area_lights_and_curves_come_in() {
+        let dir = std::env::temp_dir().join(format!("kreate-usd-more-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([200, 220, 255, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(dir.join("sky.png"), &png).unwrap();
+        std::fs::write(
+            dir.join("more.usda"),
+            r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+def Xform "World"
+{
+    def PointInstancer "Forest"
+    {
+        rel prototypes = [</World/Forest/Protos/Tree>, </World/Forest/Protos/Rock>]
+        int[] protoIndices = [0, 1, 0]
+        point3f[] positions = [(0, 0, 0), (5, 0, 0), (10, 0, 0)]
+        quath[] orientations = [(1, 0, 0, 0), (0.7071, 0, 0, 0.7071), (1, 0, 0, 0)]
+        int64[] invisibleIds = [2]
+        def Scope "Protos"
+        {
+            def Cube "Tree" { double size = 1 }
+            def Sphere "Rock" { double radius = 0.5 }
+        }
+    }
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky.png@
+        float inputs:intensity = 2
+    }
+    def RectLight "Panel"
+    {
+        float inputs:width = 2
+        float inputs:height = 0.5
+        float inputs:intensity = 300
+    }
+    def BasisCurves "Wire"
+    {
+        uniform token type = "linear"
+        int[] curveVertexCounts = [3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0)]
+        float[] widths = [0.1] (
+            interpolation = "constant"
+        )
+    }
+}
+"#,
+        )
+        .unwrap();
+        let scene = parse_usd_file(&dir.join("more.usda")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Two instances shown (the third hidden), sharing their prototypes'
+        // meshes.
+        let instances: Vec<usize> = scene
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.name.starts_with("Forest_"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(instances.len(), 2);
+        let rock = scene.nodes.iter().position(|n| n.name == "Rock").unwrap();
+        let w = scene.world_transform(rock).unwrap();
+        assert!((w.translation.x - 5.0).abs() < 1e-6);
+        let shown_meshes: std::collections::HashSet<usize> = scene
+            .nodes
+            .iter()
+            .filter_map(|n| match n.data {
+                ImportNodeData::Mesh(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scene.meshes.iter().filter(|m| m.name == "Tree").count(),
+            1,
+            "read once"
+        );
+        assert!(shown_meshes.len() >= 2);
+        // The sky.
+        let env = scene.environment.as_ref().expect("a sky");
+        assert_eq!(env.strength, 2.0);
+        assert_eq!(&env.bytes[..4], &png[..4]);
+        // The panel, as itself.
+        let panel = scene.lights.iter().find(|l| l.name == "Panel").unwrap();
+        assert_eq!(
+            panel.kind,
+            ImportLightKind::Area {
+                width: 2.0,
+                height: 0.5,
+                round: false
+            }
+        );
+        assert_eq!(panel.intensity, 300.0);
+        // The wire, as a tube round its two segments.
+        let wire = scene.meshes.iter().find(|m| m.name == "Wire").unwrap();
+        assert_eq!(wire.faces.len(), 2 * 6);
+        let r = wire.positions[..6]
+            .iter()
+            .map(|p| p.length())
+            .fold(0.0f32, f32::max);
+        assert!((r - 0.05).abs() < 1e-5, "{r}");
+        // And they build: the world wears the sky, the panel is an area light.
+        let mut doc = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut doc);
+        let world = doc.active_world().and_then(|w| doc.world(w)).unwrap();
+        assert!(matches!(
+            world.background,
+            kreate_scene::Background::Image(_)
+        ));
+        assert!(doc
+            .lights()
+            .any(|(_, l)| matches!(l.kind, kreate_scene::LightKind::Area { .. })));
+    }
+
+    /// The binary form says what the text does: each stage above, made a
+    /// `.usdc` by Pixar's own `usdcat`, reads the same. Skipped where
+    /// `usdcat` is not installed.
+    #[test]
+    fn binary_layers_read_as_their_text_does() {
+        let dir = std::env::temp_dir().join(format!("kreate-usdc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (k, text) in [STAGE, ARM].into_iter().enumerate() {
+            let a = dir.join(format!("{k}.usda"));
+            let c = dir.join(format!("{k}.usdc"));
+            std::fs::write(&a, text).unwrap();
+            let made = std::process::Command::new("usdcat")
+                .arg(&a)
+                .arg("-o")
+                .arg(&c)
+                .output();
+            if !made.is_ok_and(|o| o.status.success()) {
+                eprintln!("usdcat is not here: skipped");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let from_text = parse_usd_file(&a).unwrap();
+            let from_binary = parse_usd_file(&c).unwrap();
+            let names =
+                |s: &ImportScene| s.nodes.iter().map(|n| n.name.clone()).collect::<Vec<_>>();
+            assert_eq!(names(&from_text), names(&from_binary));
+            for (x, y) in from_text.meshes.iter().zip(&from_binary.meshes) {
+                assert_eq!(x.positions, y.positions);
+                assert_eq!(x.faces, y.faces);
+                assert_eq!(x.corner_uvs, y.corner_uvs);
+            }
+            assert_eq!(from_text.vertex_skins, from_binary.vertex_skins);
+            assert_eq!(from_text.skins, from_binary.skins);
+            let channels = |s: &ImportScene| {
+                s.animations
+                    .iter()
+                    .flat_map(|a| a.channels.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(channels(&from_text), channels(&from_binary));
+            assert_eq!(from_text.lights.len(), from_binary.lights.len());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

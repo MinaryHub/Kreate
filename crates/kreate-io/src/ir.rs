@@ -668,6 +668,14 @@ pub enum ImportLightKind {
     Directional,
     /// Candela, with a cone in radians: the inner and outer half-angles.
     Spot { inner: f32, outer: f32 },
+    /// Nits: a glowing rectangle (or, `round`, a disc as wide as `width`),
+    /// facing down its -Z. Read from USD; written as a point of the same
+    /// axial candela by the formats that have no such light.
+    Area {
+        width: f32,
+        height: f32,
+        round: bool,
+    },
 }
 
 /// A light as described by an interchange format.
@@ -1048,6 +1056,16 @@ impl<'a> ExportScene<'a> {
     }
 }
 
+/// The light from everywhere: an environment picture, as its file's bytes
+/// (any format the image loader reads, HDR and EXR among them).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportEnvironment {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// A multiplier on the picture.
+    pub strength: f32,
+}
+
 /// A scene as read from a file, before it becomes a document.
 #[derive(Clone, Debug)]
 pub struct ImportScene {
@@ -1079,6 +1097,8 @@ pub struct ImportScene {
     pub node_weights: Vec<Vec<f32>>,
     /// Morph target weights moving: per channel, the node and its keys.
     pub morph_channels: Vec<ImportMorphChannel>,
+    /// The world's light, when the file names a picture for it.
+    pub environment: Option<ImportEnvironment>,
     pub source: SourceMetadata,
 }
 
@@ -1132,6 +1152,7 @@ impl ImportScene {
             vertex_morphs: Vec::new(),
             node_weights: Vec::new(),
             morph_channels: Vec::new(),
+            environment: None,
             source,
         }
     }

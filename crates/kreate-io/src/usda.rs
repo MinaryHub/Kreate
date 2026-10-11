@@ -509,18 +509,21 @@ impl Parser {
         };
         let mut value = None;
         let mut targets = Vec::new();
+        let mut samples = Vec::new();
         if self.eat('=') {
             let raw = self.value()?;
             match suffix.as_deref() {
                 Some("connect") => targets = paths_of(&raw),
                 Some("timeSamples") => {
-                    if let Raw::Dict(samples) = raw {
-                        // The first sample in time.
-                        let first = samples
+                    if let Raw::Dict(raw) = raw {
+                        let mut list: Vec<(f64, Val)> = raw
                             .into_iter()
-                            .filter_map(|(t, v)| Some((t.parse::<f64>().ok()?, v)))
-                            .min_by(|a, b| a.0.total_cmp(&b.0));
-                        value = first.and_then(|(_, v)| val_of(&v));
+                            .filter_map(|(t, v)| Some((t.parse::<f64>().ok()?, val_of(&v)?)))
+                            .collect();
+                        list.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        // At rest: the first sample in time.
+                        value = list.first().map(|(_, v)| v.clone());
+                        samples = list;
                     }
                 }
                 _ => value = val_of(&raw),
@@ -544,6 +547,9 @@ impl Parser {
             property.value = value;
         }
         property.targets.extend(targets);
+        if !samples.is_empty() {
+            property.samples = samples;
+        }
         for (key, _, v) in meta {
             match (key.as_str(), v) {
                 ("interpolation", Raw::Text(t)) => property.interpolation = Some(t),
@@ -649,6 +655,10 @@ pub fn parse_usda(text: &str) -> Result<Layer, UsdaError> {
             ("upAxis", Raw::Text(a)) => layer.up_axis = Some(a),
             ("metersPerUnit", Raw::Num(m)) => layer.meters_per_unit = Some(m),
             ("defaultPrim", Raw::Text(d)) => layer.default_prim = Some(d),
+            ("timeCodesPerSecond", Raw::Num(n)) => layer.time_codes_per_second = Some(n),
+            ("framesPerSecond", Raw::Num(n)) if layer.time_codes_per_second.is_none() => {
+                layer.time_codes_per_second = Some(n)
+            }
             ("subLayers", v) => {
                 let mut assets = Vec::new();
                 collect_assets(&v, &mut assets);

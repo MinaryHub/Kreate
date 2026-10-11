@@ -279,7 +279,7 @@ fn write_lights(lights: &[crate::ir::ImportLight], root: &mut json::Root) {
         .iter()
         .map(|light| {
             let (kind, spot) = match light.kind {
-                ImportLightKind::Point => (khr::Type::Point, None),
+                ImportLightKind::Point | ImportLightKind::Area { .. } => (khr::Type::Point, None),
                 ImportLightKind::Directional => (khr::Type::Directional, None),
                 ImportLightKind::Spot { inner, outer } => (
                     khr::Type::Spot,

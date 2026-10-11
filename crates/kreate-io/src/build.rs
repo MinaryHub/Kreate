@@ -55,6 +55,32 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
     // document refers to one by id.
     let materials = build_materials(scene, doc, &mut notes);
 
+    // The world's light: its picture, on the active world (made if there is
+    // none).
+    if let Some(env) = &scene.environment {
+        match crate::image_import::load_image(&env.bytes, &env.name, kreate_scene::ColorSpace::Srgb)
+        {
+            Ok(image) => {
+                let image = doc.add_image(image);
+                let world = match doc.active_world() {
+                    Some(w) => w,
+                    None => {
+                        let w = doc.add_world(kreate_scene::World::new("World"));
+                        doc.set_active_world(Some(w));
+                        w
+                    }
+                };
+                if let Some(world) = doc.world_mut(world) {
+                    world.background = kreate_scene::Background::Image(image);
+                    world.strength = env.strength as f64;
+                }
+            }
+            Err(_) => notes.push(BuildNote::MissingData {
+                node: format!("the environment picture {}", env.name),
+            }),
+        }
+    }
+
     // A face in the file names a material in the *file's* table; a face in the
     // document names a slot in its *mesh's* list (§7.5). So each mesh gets the
     // materials it actually uses as its slots, in the order of their file
@@ -132,6 +158,23 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
                     },
                 },
                 ImportLightKind::Directional => kreate_scene::LightKind::SUN,
+                ImportLightKind::Area {
+                    width,
+                    height,
+                    round,
+                } => kreate_scene::LightKind::Area {
+                    shape: if round {
+                        kreate_scene::AreaShape::Disc {
+                            radius: width as f64 * 0.5,
+                        }
+                    } else {
+                        kreate_scene::AreaShape::Rect {
+                            width: width as f64,
+                            height: height as f64,
+                        }
+                    },
+                    spread: std::f64::consts::PI,
+                },
                 ImportLightKind::Spot { inner, outer } => {
                     notes.push(BuildNote::ConeBlend {
                         light: light.name.clone(),

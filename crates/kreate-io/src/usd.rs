@@ -378,6 +378,27 @@ fn write_node(
                         format!("{inner}float inputs:radius = {r}\n"),
                     )
                 }
+                ImportLightKind::Area {
+                    width,
+                    height,
+                    round,
+                } => {
+                    if round {
+                        (
+                            "DiskLight",
+                            light.intensity,
+                            format!("{inner}float inputs:radius = {}\n", width * 0.5),
+                        )
+                    } else {
+                        (
+                            "RectLight",
+                            light.intensity,
+                            format!(
+                                "{inner}float inputs:width = {width}\n{inner}float inputs:height = {height}\n"
+                            ),
+                        )
+                    }
+                }
                 ImportLightKind::Directional => (
                     "DistantLight",
                     light.intensity,
