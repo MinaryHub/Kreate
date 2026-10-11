@@ -244,6 +244,15 @@ pub enum Command {
     /// Ask for a scene file and add what it holds to the document, as one
     /// undo step — beside what is there, where Open would replace it.
     ImportScene,
+    /// The same, for one format: an index into the application's import
+    /// formats, the file dialog showing only those files.
+    ImportFormat {
+        index: usize,
+    },
+    /// Export to one format: an index into the application's export formats.
+    ExportFormat {
+        index: usize,
+    },
     /// From the asset browser: list this source (by its place in the menu).
     AssetSource {
         index: usize,

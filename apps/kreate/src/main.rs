@@ -4806,6 +4806,35 @@ impl App {
                         self.import_into(&path);
                     }
                 }
+                Command::ImportFormat { index } => {
+                    if let Some(format) = kreate::formats::IMPORT.get(index) {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(format.name, format.extensions)
+                            .set_title(format!("Import {}", format.name))
+                            .pick_file()
+                        {
+                            self.import_into(&path);
+                        }
+                    }
+                }
+                Command::ExportFormat { index } => {
+                    if let Some(format) = kreate::formats::EXPORT.get(index) {
+                        let stem = self
+                            .file
+                            .path()
+                            .and_then(|p| p.file_stem())
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "untitled".into());
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(format.name, format.extensions)
+                            .set_title(format!("Export {}", format.name))
+                            .set_file_name(format!("{stem}.{}", format.extensions[0]))
+                            .save_file()
+                        {
+                            let _ = self.export_to(&path);
+                        }
+                    }
+                }
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
@@ -5034,17 +5063,11 @@ impl App {
     /// can be reached from the interface, and a round trip that only the
     /// converter can perform is a round trip the user does not have.
     fn export_scene(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("glTF binary", &["glb"])
-            .add_filter("glTF", &["gltf"])
-            .add_filter("Wavefront OBJ", &["obj"])
-            .add_filter("STL", &["stl"])
-            .add_filter("3MF (3D printing)", &["3mf"])
-            .add_filter("STEP (CAD, faceted)", &["step", "stp"])
-            .add_filter("Parts list (CSV)", &["csv"])
-            .add_filter("USD (text)", &["usda"])
-            .add_filter("USDZ (one file, for AR)", &["usdz"])
-            .add_filter("URDF (robot)", &["urdf"])
+        let mut dialog = rfd::FileDialog::new();
+        for format in kreate::formats::EXPORT {
+            dialog = dialog.add_filter(format.name, format.extensions);
+        }
+        let Some(path) = dialog
             .set_title("Export")
             .set_file_name("untitled.glb")
             .save_file()

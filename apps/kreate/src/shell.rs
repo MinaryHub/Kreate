@@ -1357,8 +1357,9 @@ struct Labels {
     reveal_hidden: String,
     file_save: String,
     file_save_as: String,
-    file_export: String,
-    file_import: String,
+    file_import_menu: String,
+    file_export_menu: String,
+    file_any_format: String,
     file_run_script: String,
     menu_search: String,
     menu_copy_script: String,
@@ -1696,8 +1697,9 @@ impl Labels {
             reveal_hidden: t("reveal-hidden"),
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
-            file_export: t("menu-file-export"),
-            file_import: t("menu-file-import"),
+            file_import_menu: t("menu-file-import-menu"),
+            file_export_menu: t("menu-file-export-menu"),
+            file_any_format: t("menu-file-any-format"),
             file_run_script: t("menu-file-run-script"),
             menu_search: t("menu-search"),
             menu_copy_script: t("menu-copy-script"),
@@ -3671,19 +3673,50 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 ),
                 Separator,
                 // Beside what is there, as one undo step: where Open replaces.
-                entry(
-                    "file.import",
-                    &l.file_import,
-                    Run::Command(Command::ImportScene),
-                ),
-                // After a separator, because an export is not a save: the
-                // document keeps no path from it and treating a `.glb` as a
-                // working file loses everything the format cannot hold.
-                entry(
-                    "file.export",
-                    &l.file_export,
-                    Run::Command(Command::ExportScene),
-                ),
+                // Any format the readers know, or one at a time.
+                MenuNode::Sub(l.file_import_menu.clone(), {
+                    let mut nodes = vec![entry(
+                        "file.import",
+                        &l.file_any_format,
+                        Run::Command(Command::ImportScene),
+                    )];
+                    nodes.push(Separator);
+                    for (index, format) in crate::formats::IMPORT.iter().enumerate() {
+                        nodes.push(MenuNode::Entry(
+                            MenuEntry::new(
+                                "file.import",
+                                // i18n-exempt: a file format's own name
+                                &format.label(),
+                                Run::Command(Command::ImportFormat { index }),
+                            )
+                            .variant("format", kreate_reflect::PropertyValue::Enum(index as u32)),
+                        ));
+                    }
+                    nodes
+                }),
+                // An export is not a save: the document keeps no path from it
+                // and treating a `.glb` as a working file loses everything the
+                // format cannot hold.
+                MenuNode::Sub(l.file_export_menu.clone(), {
+                    let mut nodes = vec![entry(
+                        "file.export",
+                        &l.file_any_format,
+                        Run::Command(Command::ExportScene),
+                    )];
+                    nodes.push(Separator);
+                    for (index, format) in crate::formats::EXPORT.iter().enumerate() {
+                        nodes.push(MenuNode::Entry(
+                            MenuEntry::new(
+                                "file.export",
+                                // i18n-exempt: a file format's own name
+                                &format.label(),
+                                Run::Command(Command::ExportFormat { index }),
+                            )
+                            .variant("format", kreate_reflect::PropertyValue::Enum(index as u32)),
+                        ));
+                    }
+                    nodes
+                }),
                 MenuNode::Sub(
                     l.file_export_drawing.clone(),
                     [
