@@ -10,9 +10,10 @@
 //!
 //! Vertices (`x y z`, and `nx ny nz` and `s t` / `u v` / `texture_u
 //! texture_v` when present) and faces (`vertex_indices` or `vertex_index`,
-//! n-gons as written). Every other element and property is stepped over by its
-//! declared type, so a file with extra data still reads; colours per vertex are
-//! named in the notes rather than dropped silently.
+//! n-gons as written), and colours per vertex (`red green blue`, and `alpha`
+//! when present: bytes or fractions, as a scanner writes them, taken as
+//! display colour). Every other element and property is stepped over by its
+//! declared type, so a file with extra data still reads.
 //!
 //! # What has to be assumed
 //!
@@ -244,7 +245,7 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
     let mut normals: Vec<Vec3> = Vec::new();
     let mut uvs: Vec<Vec2> = Vec::new();
     let mut faces: Vec<Vec<u32>> = Vec::new();
-    let mut coloured = false;
+    let mut colors: Vec<glam::Vec4> = Vec::new();
     for element in &elements {
         let is_vertex = element.name == "vertex";
         let is_face = element.name == "face";
@@ -260,7 +261,20 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
         let tv = find(&["t", "v", "texture_v", "texture_t"]);
         let has_normals = is_vertex && nx.is_some() && ny.is_some() && nz.is_some();
         let has_uvs = is_vertex && tu.is_some() && tv.is_some();
-        coloured |= is_vertex && find(&["red", "r", "diffuse_red"]).is_some();
+        let (cr, cg, cb) = (
+            find(&["red", "r", "diffuse_red"]),
+            find(&["green", "g", "diffuse_green"]),
+            find(&["blue", "b", "diffuse_blue"]),
+        );
+        let ca = find(&["alpha", "a", "diffuse_alpha"]);
+        let has_colors = is_vertex && cr.is_some() && cg.is_some() && cb.is_some();
+        // A byte's colour is a share of 255; a fraction's is itself.
+        let full = |i: Option<usize>| match i.map(|i| element.properties[i].ty) {
+            Some(Scalar::F32 | Scalar::F64) => 1.0,
+            Some(Scalar::U16 | Scalar::I16) => 65535.0,
+            _ => 255.0,
+        };
+        let (rf, gf, bf, af) = (full(cr), full(cg), full(cb), full(ca));
         let indices = find(&["vertex_indices", "vertex_index"]);
         if is_vertex {
             positions.reserve(element.count.min(1 << 24));
@@ -310,15 +324,22 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
                 if has_uvs {
                     uvs.push(Vec2::new(get(tu), get(tv)));
                 }
+                if has_colors {
+                    // As a display shows it: made linear, as Kreate keeps
+                    // colours.
+                    let linear =
+                        |v: f32, full: f32| kreate_math::srgb_to_linear((v / full).clamp(0.0, 1.0));
+                    colors.push(glam::Vec4::new(
+                        linear(get(cr), rf),
+                        linear(get(cg), gf),
+                        linear(get(cb), bf),
+                        ca.map_or(1.0, |_| (get(ca) / af).clamp(0.0, 1.0)),
+                    ));
+                }
             } else if is_face {
                 faces.push(face);
             }
         }
-    }
-    if coloured {
-        source.notes.push(LossyNote::Unsupported {
-            what: "vertex colours".into(),
-        });
     }
 
     // Faces naming a vertex that is not there, or fewer than three distinct
@@ -358,6 +379,11 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
             .flat_map(|f| f.iter().map(|v| uvs[*v as usize]))
             .collect()
     });
+    let corner_colors = (colors.len() == positions.len() && !colors.is_empty()).then(|| {
+        kept.iter()
+            .flat_map(|f| f.iter().map(|v| colors[*v as usize]))
+            .collect()
+    });
     let mut scene = ImportScene::new(source);
     scene.meshes.push(ImportMesh {
         name: name.to_string(),
@@ -365,6 +391,7 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
         faces: kept,
         corner_uvs,
         corner_normals,
+        corner_colors,
         face_materials: None,
         smoothing_groups: None,
     });
@@ -403,7 +430,7 @@ end_header
 ";
 
     #[test]
-    fn an_ascii_file_keeps_its_quad_normals_and_uvs() {
+    fn an_ascii_file_keeps_its_quad_normals_uvs_and_colours() {
         let scene = parse_ply(QUAD.as_bytes(), "square").expect("parses");
         let mesh = &scene.meshes[0];
         assert_eq!(mesh.positions.len(), 5);
@@ -413,11 +440,26 @@ end_header
             mesh.corner_uvs.as_ref().map(|u| u[2]),
             Some(Vec2::new(1.0, 1.0))
         );
-        assert!(scene
+        // The square's corners red, the apex black: bytes, as display
+        // colour, kept linear — and full red is full red either way.
+        let colours = mesh.corner_colors.as_ref().expect("colours");
+        assert_eq!(colours.len(), 7);
+        assert_eq!(colours[0], glam::Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(colours[6], glam::Vec4::new(0.0, 0.0, 0.0, 1.0));
+        assert!(!scene
             .source
             .notes
             .iter()
             .any(|n| matches!(n, LossyNote::Unsupported { what } if what.contains("colour"))));
+    }
+
+    #[test]
+    fn a_half_bright_byte_is_the_display_s_half_not_the_light_s() {
+        let half = QUAD.replace("255 0 0\n1 0 0", "128 0 0\n1 0 0");
+        let scene = parse_ply(half.as_bytes(), "square").expect("parses");
+        let red = scene.meshes[0].corner_colors.as_ref().unwrap()[0].x;
+        // sRGB 128 is about a fifth of the light, not a half.
+        assert!((red - 0.216).abs() < 0.01, "{red}");
     }
 
     /// The same square, written in binary of either order.

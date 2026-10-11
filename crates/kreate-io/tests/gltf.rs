@@ -308,8 +308,9 @@ fn what_the_importer_does_not_read_is_recorded() {
     // out when the export they sent someone turns out to be a static pose.
     let mut root: serde_json::Value =
         serde_json::from_slice(&gltf_with(&asymmetric(), None, &[0, 1, 2])).unwrap();
-    // An occlusion map: a standard surface here has no slot for one. The
-    // picture is a file beside the document, read through its path.
+    // An occlusion map on the second set of texture coordinates: the map is
+    // read, but only the first set is. The picture is a file beside the
+    // document, read through its path.
     let dir = std::env::temp_dir().join(format!("kreate-occlusion-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("made");
     let mut png = Vec::new();
@@ -319,7 +320,7 @@ fn what_the_importer_does_not_read_is_recorded() {
     std::fs::write(dir.join("occlusion.png"), png).expect("written");
     root["images"] = json!([{ "uri": "occlusion.png" }]);
     root["textures"] = json!([{ "source": 0 }]);
-    root["materials"] = json!([{ "occlusionTexture": { "index": 0 } }]);
+    root["materials"] = json!([{ "occlusionTexture": { "index": 0, "texCoord": 1 } }]);
     root["meshes"][0]["primitives"][0]["material"] = json!(0);
     let path = dir.join("occluded.gltf");
     std::fs::write(&path, serde_json::to_vec(&root).unwrap()).expect("written");

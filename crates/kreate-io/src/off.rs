@@ -136,6 +136,7 @@ pub fn parse_off(text: &str, name: &str) -> Result<ImportScene, OffError> {
         faces,
         corner_uvs: None,
         corner_normals: None,
+        corner_colors: None,
         face_materials: None,
         smoothing_groups: None,
     });

@@ -275,6 +275,10 @@ pub struct RenderMeshCpu {
     /// slight crawl, and worse once §2.3's texture painting is writing through
     /// these coordinates rather than only reading.
     pub uvs: Vec<[f32; 2]>,
+    /// Each vertex's colour, linear RGBA in a byte each, red lowest: what
+    /// multiplies the base colour. White where the mesh has none, so a mesh
+    /// without colours draws as it always has.
+    pub colors: Vec<u32>,
     /// Triangle indices, three per triangle.
     pub indices: Vec<u32>,
     /// Source face per triangle. What lets id-buffer picking report a face
@@ -481,6 +485,38 @@ impl RenderMeshCpu {
         // position, which is what a seam *is*.
         let corner_uvs = mesh.attributes().get_f32x2(names::UV);
         let corner_verts = mesh.corner_verts();
+        // A colour per corner, from a corner layer or a point one.
+        let color_of = {
+            let layer = mesh.attributes().get(names::COLOR);
+            move |corner: usize, vertex: usize| -> u32 {
+                let pack = |c: glam::Vec4| {
+                    let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+                    b(c.x) | b(c.y) << 8 | b(c.z) << 16 | b(c.w) << 24
+                };
+                match layer {
+                    Some(l) => match (&l.domain, &l.data) {
+                        (
+                            kreate_mesh::attribute::Domain::Corner,
+                            kreate_mesh::attribute::AttrData::F32x4(v),
+                        ) => v.get(corner).map_or(u32::MAX, |c| pack(*c)),
+                        (
+                            kreate_mesh::attribute::Domain::Point,
+                            kreate_mesh::attribute::AttrData::F32x4(v),
+                        ) => v.get(vertex).map_or(u32::MAX, |c| pack(*c)),
+                        (
+                            kreate_mesh::attribute::Domain::Corner,
+                            kreate_mesh::attribute::AttrData::F32x3(v),
+                        ) => v.get(corner).map_or(u32::MAX, |c| pack(c.extend(1.0))),
+                        (
+                            kreate_mesh::attribute::Domain::Point,
+                            kreate_mesh::attribute::AttrData::F32x3(v),
+                        ) => v.get(vertex).map_or(u32::MAX, |c| pack(c.extend(1.0))),
+                        _ => u32::MAX,
+                    },
+                    None => u32::MAX,
+                }
+            }
+        };
         let mesh_positions = mesh.positions();
         let nverts = mesh.num_verts() as usize;
 
@@ -523,6 +559,7 @@ impl RenderMeshCpu {
         let mut positions = Vec::with_capacity(nverts);
         let mut normals = Vec::with_capacity(nverts);
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(nverts);
+        let mut colors: Vec<u32> = Vec::with_capacity(nverts);
         let mut render_to_vert: Vec<u32> = Vec::with_capacity(nverts);
         let mut corner_to_render = vec![u32::MAX; corner_verts.len()];
         // One representative render vertex per mesh vertex, so the overlay
@@ -531,7 +568,7 @@ impl RenderMeshCpu {
         // The distinct normals of the vertex being worked on. Reused rather than
         // reallocated per vertex, which at a million vertices is a million
         // allocations for a list that never exceeds a vertex's face count.
-        let mut distinct: Vec<(u32, [u32; 2], u32)> = Vec::new();
+        let mut distinct: Vec<(u32, [u32; 3], u32)> = Vec::new();
 
         for v in 0..nverts {
             distinct.clear();
@@ -540,13 +577,17 @@ impl RenderMeshCpu {
                 let uv = corner_uvs
                     .map(|u| u[corner as usize])
                     .unwrap_or(glam::Vec2::ZERO);
-                let key = [uv.x.to_bits(), uv.y.to_bits()];
+                // The colour splits too: two colours meeting at a vertex — a
+                // painted border, a scan's seam — are two vertices.
+                let color = color_of(corner as usize, v);
+                let key = [uv.x.to_bits(), uv.y.to_bits(), color];
                 let index = match distinct.iter().find(|(n, k, _)| *n == normal && *k == key) {
                     Some((_, _, index)) => *index,
                     None => {
                         positions.push(GpuPosition(mesh_positions[v].to_array()));
                         normals.push(normal);
                         uvs.push([uv.x, uv.y]);
+                        colors.push(color);
                         render_to_vert.push(v as u32);
                         let index = (positions.len() - 1) as u32;
                         distinct.push((normal, key, index));
@@ -661,6 +702,7 @@ impl RenderMeshCpu {
             positions,
             normals,
             uvs,
+            colors,
             indices,
             tri_to_face,
             submeshes,

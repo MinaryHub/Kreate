@@ -106,6 +106,8 @@ pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> 
     let mut positions: Vec<Vec3> = Vec::new();
     let mut uvs: Vec<Vec2> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
+    // A colour per vertex, where the line gave one.
+    let mut colors: Vec<Option<glam::Vec4>> = Vec::new();
 
     let mut groups: Vec<GroupBuilder> = Vec::new();
     let mut materials: Vec<String> = Vec::new();
@@ -148,8 +150,23 @@ pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> 
                     parse_f32(c[1], line, "v")?,
                     parse_f32(c[2], line, "v")?,
                 ));
-                // A 4th component (w) and trailing r/g/b vertex colours both
-                // exist in the wild; neither is represented here.
+                // Six numbers are a position and a colour — MeshLab's and
+                // ZBrush's extension, fractions as a display shows them; four
+                // are a position and a weight, which is not represented.
+                colors.push(if c.len() >= 6 {
+                    let linear = |s: &str| -> Result<f32, ObjError> {
+                        let v = parse_f32(s, line, "v")?.clamp(0.0, 1.0);
+                        Ok(kreate_math::srgb_to_linear(v))
+                    };
+                    Some(glam::Vec4::new(
+                        linear(c[3])?,
+                        linear(c[4])?,
+                        linear(c[5])?,
+                        1.0,
+                    ))
+                } else {
+                    None
+                });
             }
             "vt" => {
                 let c: Vec<&str> = it.collect();
@@ -272,7 +289,9 @@ pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> 
         if g.faces.is_empty() {
             continue;
         }
-        scene.meshes.push(build_mesh(g, &positions, &uvs, &normals));
+        scene
+            .meshes
+            .push(build_mesh(g, &positions, &uvs, &normals, &colors));
     }
     Ok(scene)
 }
@@ -324,7 +343,13 @@ fn parse_corner(
 /// **not** need to be split into two vertices — which is what every triangulating
 /// importer does, and what leaves users with a mesh that falls apart the moment
 /// they move a vertex.
-fn build_mesh(g: GroupBuilder, positions: &[Vec3], uvs: &[Vec2], normals: &[Vec3]) -> ImportMesh {
+fn build_mesh(
+    g: GroupBuilder,
+    positions: &[Vec3],
+    uvs: &[Vec2],
+    normals: &[Vec3],
+    colors: &[Option<glam::Vec4>],
+) -> ImportMesh {
     // Compact in *ascending source order*, not first-encounter order. Both are
     // deterministic, but ascending order also means a file Kreate wrote reads
     // back with identical vertex numbering — first-encounter order would permute
@@ -356,6 +381,23 @@ fn build_mesh(g: GroupBuilder, positions: &[Vec3], uvs: &[Vec2], normals: &[Vec3
             .map(|c| c.vt.map(|i| uvs[i as usize]).unwrap_or(Vec2::ZERO))
             .collect()
     });
+    let has_colors = g
+        .faces
+        .iter()
+        .flatten()
+        .any(|c| colors.get(c.v as usize).is_some_and(|c| c.is_some()));
+    let corner_colors = has_colors.then(|| {
+        all_corners
+            .clone()
+            .map(|c| {
+                colors
+                    .get(c.v as usize)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(glam::Vec4::ONE)
+            })
+            .collect()
+    });
     let corner_normals = has_normals.then(|| {
         all_corners
             .map(|c| c.vn.map(|i| normals[i as usize]).unwrap_or(Vec3::ZERO))
@@ -368,6 +410,7 @@ fn build_mesh(g: GroupBuilder, positions: &[Vec3], uvs: &[Vec2], normals: &[Vec3
         faces,
         corner_uvs,
         corner_normals,
+        corner_colors,
         face_materials: g.materials.iter().any(|&m| m >= 0).then_some(g.materials),
         smoothing_groups: Some(g.smoothing),
     }
@@ -764,5 +807,18 @@ f 1 2 3
         for (a, b) in out[0].1.positions().iter().zip(m.positions()) {
             assert!((*a - *b).length() < 1e-5, "{a} != {b}");
         }
+    }
+
+    #[test]
+    fn vertex_colours_on_v_lines_are_read_as_display_colour() {
+        let scene = parse("v 0 0 0 1 0 0\nv 1 0 0 0 1 0\nv 1 1 0 0.5 0.5 0.5\nf 1 2 3\n");
+        let colours = scene.meshes[0].corner_colors.as_ref().expect("colours");
+        assert_eq!(colours[0], glam::Vec4::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(colours[1], glam::Vec4::new(0.0, 1.0, 0.0, 1.0));
+        assert!((colours[2].x - 0.214).abs() < 0.01, "{}", colours[2]);
+        // And none where the file gives none.
+        assert!(parse("v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n").meshes[0]
+            .corner_colors
+            .is_none());
     }
 }

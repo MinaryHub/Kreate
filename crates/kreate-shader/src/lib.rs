@@ -241,7 +241,7 @@ pub fn compile_with(
     }
     let _ = writeln!(
         wgsl,
-        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32 }}"
+        "struct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32, occlusion: f32 }}"
     );
     let _ = writeln!(wgsl);
     wgsl.push_str(&out.functions);
@@ -314,6 +314,10 @@ pub fn compile_with(
         "    out.alpha = clamp({alpha}, 0.0, 1.0);\n    out.clip = material.values[{}].w;",
         surface_slot + 2
     );
+    // How much of the surroundings' light reaches in: one, all of it, when
+    // nothing says otherwise.
+    let occlusion = out.input_expr(output, 6, "1.0")?;
+    let _ = writeln!(wgsl, "    out.occlusion = clamp({occlusion}, 0.0, 1.0);");
     let _ = writeln!(wgsl, "    return out;\n}}");
 
     Ok(Compiled {
@@ -864,7 +868,7 @@ impl Emitter<'_> {
 /// [`for_tracer`] strips them from each material.
 pub fn tracer_declarations() -> String {
     format!(
-        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32 }}\n{TEXEL}{PROCEDURAL}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32, occlusion: f32 }}\n{TEXEL}{PROCEDURAL}"
     )
 }
 

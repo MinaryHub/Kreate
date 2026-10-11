@@ -127,6 +127,7 @@ material-base-colour = 베이스 컬러
 material-metallic-roughness = 메탈릭 / 러프니스
 material-normal-map = 노멀 맵
 material-emission-map = 발광 맵
+material-occlusion-map = 오클루전 맵
 material-empty-slot = 비어 있음
 material-no-slots = 슬롯 없음
 material-add-slot = 재질 슬롯 추가

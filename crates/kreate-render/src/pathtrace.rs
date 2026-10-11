@@ -113,6 +113,9 @@ pub struct PtMesh<'a> {
     pub uvs: &'a [[f32; 2]],
     /// Unit normals, one per position.
     pub normals: &'a [Vec3],
+    /// Vertex colours, one per position — a byte a channel, red lowest —
+    /// which multiply the surface's base colour. Empty for white.
+    pub colors: &'a [u32],
     pub indices: &'a [u32],
     pub transform: DAffine3,
     pub surface: u32,
@@ -225,6 +228,7 @@ struct GpuNode {
 
 struct Scene {
     uvs: wgpu::Buffer,
+    colors: wgpu::Buffer,
     colour_images: wgpu::TextureView,
     data_images: wgpu::TextureView,
     positions: wgpu::Buffer,
@@ -625,6 +629,7 @@ impl PathTracer {
                 storage(13, true, c),
                 storage(14, true, c),
                 storage(15, true, c),
+                storage(16, true, c),
             ],
         });
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -910,6 +915,7 @@ impl PathTracer {
         }
         let mut local: Vec<[f32; 4]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
+        let mut colors: Vec<u32> = Vec::new();
         let mut positions: Vec<Vec3> = Vec::new();
         let mut normals: Vec<[f32; 4]> = Vec::new();
         let mut triangles: Vec<[u32; 4]> = Vec::new();
@@ -919,6 +925,9 @@ impl PathTracer {
             let normal_matrix = to_world.matrix3.inverse().transpose();
             uvs.extend(
                 (0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])),
+            );
+            colors.extend(
+                (0..mesh.positions.len()).map(|i| mesh.colors.get(i).copied().unwrap_or(u32::MAX)),
             );
             for (p, n) in mesh.positions.iter().zip(mesh.normals) {
                 local.push([p[0], p[1], p[2], 1.0]);
@@ -1095,6 +1104,14 @@ impl PathTracer {
         };
         self.scene = Some(Scene {
             uvs: upload("path trace uvs", bytemuck::cast_slice(&uvs)),
+            colors: upload(
+                "path trace colours",
+                bytemuck::cast_slice(if colors.is_empty() {
+                    &[u32::MAX][..]
+                } else {
+                    &colors
+                }),
+            ),
             colour_images,
             data_images,
             positions: upload("path trace positions", bytemuck::cast_slice(&positions)),
@@ -1218,6 +1235,10 @@ impl PathTracer {
             entries.push(wgpu::BindGroupEntry {
                 binding: 15,
                 resource: scene.local.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 16,
+                resource: scene.colors.as_entire_binding(),
             });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),

@@ -257,6 +257,13 @@ fn from_imported(
         let emissive_texture = material
             .emissive_texture()
             .and_then(|t| texture("emission", t.tex_coord(), t.texture().source().index()));
+        let (occlusion_texture, occlusion_strength) = match material.occlusion_texture() {
+            Some(t) => (
+                texture("occlusion", t.tex_coord(), t.texture().source().index()),
+                t.strength(),
+            ),
+            None => (None, 1.0),
+        };
         let (normal_texture, normal_scale) = match material.normal_texture() {
             Some(t) => (
                 texture("normal", t.tex_coord(), t.texture().source().index()),
@@ -284,6 +291,8 @@ fn from_imported(
             metallic_roughness_texture,
             normal_texture,
             emissive_texture,
+            occlusion_texture,
+            occlusion_strength,
             normal_scale,
             emissive_strength: material.emissive_strength().unwrap_or(1.0),
             // `BLEND` is see-through in a way a rasteriser blends; here it is
@@ -319,6 +328,8 @@ fn from_imported(
         let mut faces: Vec<Vec<u32>> = Vec::new();
         let mut uvs: Vec<Vec2> = Vec::new();
         let mut normals: Vec<Vec3> = Vec::new();
+        let mut colors: Vec<glam::Vec4> = Vec::new();
+        let mut any_colors = false;
         let mut face_materials: Vec<i32> = Vec::new();
         let mut any_uvs = false;
         let mut any_normals = false;
@@ -406,8 +417,14 @@ fn from_imported(
             let primitive_normals: Option<Vec<Vec3>> = reader
                 .read_normals()
                 .map(|n| n.map(Vec3::from_array).collect());
+            // Linear, as glTF stores them; a primitive without them is
+            // white, which multiplies its base colour by nothing.
+            let primitive_colors: Option<Vec<glam::Vec4>> = reader
+                .read_colors(0)
+                .map(|c| c.into_rgba_f32().map(glam::Vec4::from_array).collect());
             any_uvs |= primitive_uvs.is_some();
             any_normals |= primitive_normals.is_some();
+            any_colors |= primitive_colors.is_some();
 
             // Indices are optional: without them the vertices are consumed in
             // order, three at a time.
@@ -476,6 +493,12 @@ fn from_imported(
                             .and_then(|n| n.get(local).copied())
                             .unwrap_or(Vec3::Z),
                     );
+                    colors.push(
+                        primitive_colors
+                            .as_ref()
+                            .and_then(|c| c.get(local).copied())
+                            .unwrap_or(glam::Vec4::ONE),
+                    );
                 }
             }
         }
@@ -486,6 +509,7 @@ fn from_imported(
             faces,
             corner_uvs: any_uvs.then_some(uvs),
             corner_normals: any_normals.then_some(normals),
+            corner_colors: any_colors.then_some(colors),
             face_materials: (!face_materials.is_empty()).then_some(face_materials),
             smoothing_groups: None,
         };
@@ -886,14 +910,6 @@ fn note_unread_features(document: &gltf::Document, scene: &mut ImportScene) {
     let n = missing(document.cameras().len(), scene.cameras.len());
     if n > 0 {
         mention(format!("{n} cameras were not read"));
-    }
-    // The maps a standard surface here has no slot for.
-    let occlusion = document
-        .materials()
-        .filter(|m| m.occlusion_texture().is_some())
-        .count();
-    if occlusion > 0 {
-        mention(format!("{occlusion} occlusion maps were not read"));
     }
     scene.source.notes.extend(notes);
 }

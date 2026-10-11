@@ -968,6 +968,7 @@ pub fn parse_fbx(
             faces,
             corner_uvs: (!uvs.is_empty()).then_some(uvs),
             corner_normals: (!normals.is_empty()).then_some(normals),
+            corner_colors: None,
             // Indices into the model's own material list for now; made the
             // scene's once the model is known.
             face_materials: (!materials.is_empty()).then_some(materials),

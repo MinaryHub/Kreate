@@ -408,3 +408,43 @@ fn an_emission_map_round_trips_as_a_colour() {
     let graph = m.shading_graph();
     assert!(graph.incoming(0, 4).is_some(), "the emission socket is fed");
 }
+
+/// An occlusion map packed with metal and roughness — glTF's ORM — goes out
+/// as the same picture for both, and comes back as one image in both slots,
+/// its strength kept. And a material that has one shades the surroundings'
+/// light by its red.
+#[test]
+fn a_packed_occlusion_map_round_trips_as_one_image() {
+    let mut doc = mapped();
+    let (id, _) = doc
+        .materials()
+        .next()
+        .map(|(id, m)| (id, m.clone()))
+        .unwrap();
+    let packed = doc.material(id).unwrap().metallic_roughness_image;
+    let m = doc.material_mut(id).unwrap();
+    m.occlusion_image = packed;
+    m.occlusion_strength = 0.5;
+    let bytes = write(&doc, true);
+    let json = glb_json(&bytes);
+    let occlusion = &json["materials"][0]["occlusionTexture"];
+    assert_eq!(occlusion["strength"], 0.5);
+    assert_eq!(
+        occlusion["index"],
+        json["materials"][0]["pbrMetallicRoughness"]["metallicRoughnessTexture"]["index"],
+        "one texture for both"
+    );
+    let (back, notes) = read(&bytes);
+    let (_, m) = back.materials().next().unwrap();
+    assert!(m.occlusion_image.is_some());
+    assert_eq!(m.occlusion_image, m.metallic_roughness_image);
+    assert_eq!(m.occlusion_strength, 0.5);
+    assert!(
+        !notes.iter().any(|n| format!("{n:?}").contains("occlusion")),
+        "{notes:?}"
+    );
+    // The graph it shades with reads the red into the surface's occlusion.
+    let graph = m.shading_graph();
+    let surface = graph.output().unwrap();
+    assert!(graph.incoming(surface, 6).is_some(), "occlusion wired");
+}

@@ -127,6 +127,7 @@ material-base-colour = Base Colour
 material-metallic-roughness = Metallic / Roughness
 material-normal-map = Normal Map
 material-emission-map = Emission Map
+material-occlusion-map = Occlusion Map
 material-empty-slot = Empty
 material-no-slots = No slots
 material-add-slot = Add a material slot

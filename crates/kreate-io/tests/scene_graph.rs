@@ -214,6 +214,7 @@ fn a_format_with_no_hierarchy_still_places_its_meshes() {
         faces: vec![vec![0, 1, 2]],
         corner_uvs: None,
         corner_normals: None,
+        corner_colors: None,
         face_materials: None,
         smoothing_groups: None,
     });

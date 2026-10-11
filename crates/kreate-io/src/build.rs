@@ -1475,6 +1475,15 @@ fn build_materials(
             );
             let normal_image = image_for(m.normal_texture, MaterialMap::Normal.color_space());
             let emission_image = image_for(m.emissive_texture, MaterialMap::Emission.color_space());
+            // The same picture as the metal-roughness one when the file packed
+            // them — glTF's ORM maps — so one image, not two copies of it.
+            let occlusion_image = if m.occlusion_texture.is_some()
+                && m.occlusion_texture == m.metallic_roughness_texture
+            {
+                metallic_roughness_image
+            } else {
+                image_for(m.occlusion_texture, MaterialMap::Occlusion.color_space())
+            };
             doc.add_material(kreate_scene::Material {
                 name: m.name.clone(),
                 // Linear on both sides — glTF's factor is linear, and so is the
@@ -1491,6 +1500,8 @@ fn build_materials(
                 metallic_roughness_image,
                 normal_image,
                 emission_image,
+                occlusion_image,
+                occlusion_strength: m.occlusion_strength.clamp(0.0, 1.0),
                 normal_strength: m.normal_scale,
                 // The glow's colour and how bright, kept apart as the
                 // datablock keeps them; a file with a colour and no strength
@@ -1612,6 +1623,12 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             ),
             normal_texture: texture(MaterialMap::Normal, material.normal_image, &mut notes),
             emissive_texture: texture(MaterialMap::Emission, material.emission_image, &mut notes),
+            occlusion_texture: texture(
+                MaterialMap::Occlusion,
+                material.occlusion_image,
+                &mut notes,
+            ),
+            occlusion_strength: material.occlusion_strength,
             normal_scale: material.normal_strength,
             emissive_strength: if material.emission_strength > 0.0 {
                 material.emission_strength

@@ -5379,6 +5379,7 @@ impl App {
                 kreate_scene::MaterialMap::MetallicRoughness => "Metallic / Roughness",
                 kreate_scene::MaterialMap::Normal => "Normal Map",
                 kreate_scene::MaterialMap::Emission => "Emission Map",
+                kreate_scene::MaterialMap::Occlusion => "Occlusion Map",
             })
             .pick_file()
         else {
@@ -8898,6 +8899,7 @@ impl App {
                                     self.doc.world_transform(*id),
                                     materials.index_of(&self.doc, *id),
                                     runs,
+                                    cpu.colors,
                                 )
                             })
                             .collect();
@@ -8910,16 +8912,27 @@ impl App {
                                 p.transform,
                                 first_panel + i as u32,
                                 Vec::new(),
+                                Vec::new(),
                             )
                         }));
                         let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
                             .iter()
                             .map(
-                                |(positions, uvs, normals, indices, transform, surface, runs)| {
+                                |(
+                                    positions,
+                                    uvs,
+                                    normals,
+                                    indices,
+                                    transform,
+                                    surface,
+                                    runs,
+                                    colors,
+                                )| {
                                     kreate_render::pathtrace::PtMesh {
                                         positions,
                                         uvs,
                                         normals,
+                                        colors,
                                         indices,
                                         transform: *transform,
                                         surface: *surface,

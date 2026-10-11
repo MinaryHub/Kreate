@@ -379,13 +379,15 @@ impl NodeKind {
                 Socket::Vector,
             ],
             // Base colour, metallic, roughness, normal, a tint on the glow,
-            // and opacity — last, so the sockets files name keep their numbers.
+            // opacity, and occlusion — each new one last, so the sockets
+            // files name keep their numbers.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Vector,
                 Socket::Color,
+                Socket::Scalar,
                 Socket::Scalar,
             ],
         }
@@ -695,6 +697,7 @@ impl NodeKind {
                 "Normal",
                 "Emission",
                 "Alpha",
+                "Occlusion",
             ],
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
         }
@@ -889,9 +892,48 @@ impl ShaderGraph {
                 wire(&mut graph, texture, 1, 0, 5);
             }
         }
+        // An occlusion map's red, eased towards none by its strength: the
+        // light from the surroundings that reaches into a crease. From the
+        // metal-roughness picture's own red when the file packed them
+        // together, as glTF's ORM maps do.
+        // r · strength + (1 − strength): all of it at full strength, none
+        // at zero.
+        let strength = material.occlusion_strength.clamp(0.0, 1.0);
+        let occlusion_from = |graph: &mut Self, channels: usize| {
+            let scaled = add(
+                graph,
+                "Occlusion Strength",
+                NodeKind::Math {
+                    op: MathOp::Multiply,
+                    a: 1.0,
+                    b: strength,
+                },
+            );
+            let eased = add(
+                graph,
+                "Occlusion",
+                NodeKind::Math {
+                    op: MathOp::Add,
+                    a: 0.0,
+                    b: 1.0 - strength,
+                },
+            );
+            wire(graph, channels, 0, scaled, 0);
+            wire(graph, scaled, 0, eased, 0);
+            wire(graph, eased, 0, 0, 6);
+        };
+        if let Some(image) = material
+            .occlusion_image
+            .filter(|o| Some(*o) != material.metallic_roughness_image)
+        {
+            let texture = add(&mut graph, "Occlusion Map", NodeKind::image(Some(image)));
+            let channels = add(&mut graph, "Occlusion Channels", NodeKind::SeparateRgb);
+            wire(&mut graph, texture, 0, channels, 0);
+            occlusion_from(&mut graph, channels);
+        }
         if let Some(image) = material.metallic_roughness_image {
             // glTF's packing: green is roughness, blue is metallic, and each
-            // multiplies its factor. Red is occlusion and is not read here.
+            // multiplies its factor; red is occlusion, when the file says so.
             let texture = add(
                 &mut graph,
                 "Metallic Roughness",
@@ -899,6 +941,9 @@ impl ShaderGraph {
             );
             let channels = add(&mut graph, "Channels", NodeKind::SeparateRgb);
             wire(&mut graph, texture, 0, channels, 0);
+            if material.occlusion_image == Some(image) {
+                occlusion_from(&mut graph, channels);
+            }
             for (channel, name, factor, socket) in [
                 (1, "Roughness", material.roughness, 2),
                 (2, "Metallic", material.metallic, 1),
@@ -949,7 +994,7 @@ impl ShaderGraph {
                 | Some(NodeKind::MultiplyValue) => true,
                 // Metallic, roughness and the normal are numbers; the base
                 // colour, the glow's tint and an alpha are not about which.
-                Some(NodeKind::Surface { .. }) => matches!(l.to_socket, 1..=3),
+                Some(NodeKind::Surface { .. }) => matches!(l.to_socket, 1..=3 | 6),
                 _ => false,
             }
         });

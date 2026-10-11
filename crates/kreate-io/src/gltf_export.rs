@@ -109,6 +109,7 @@ struct VertexKey {
     vertex: u32,
     uv: [u32; 2],
     normal: [u32; 3],
+    color: [u32; 4],
 }
 
 /// Writes a glTF 2.0 file.
@@ -868,6 +869,24 @@ fn write_mesh(
 ) -> Vec<json::mesh::Primitive> {
     let positions = mesh.positions();
     let uvs = mesh.attributes().get_f32x2(names::UV);
+    // The vertex colours, as COLOR_0: per corner, from a corner layer or a
+    // point one.
+    let colors: Option<Vec<glam::Vec4>> = mesh.attributes().get(names::COLOR).and_then(|l| {
+        use kreate_mesh::attribute::{AttrData, Domain};
+        let corners = mesh.corner_verts();
+        match (&l.domain, &l.data) {
+            (Domain::Corner, AttrData::F32x4(v)) => Some(v.to_vec()),
+            (Domain::Point, AttrData::F32x4(v)) => {
+                Some(corners.iter().map(|p| v[*p as usize]).collect())
+            }
+            (Domain::Corner, AttrData::F32x3(v)) => Some(v.iter().map(|c| c.extend(1.0)).collect()),
+            (Domain::Point, AttrData::F32x3(v)) => {
+                Some(corners.iter().map(|p| v[*p as usize].extend(1.0)).collect())
+            }
+            _ => None,
+        }
+    });
+    let colors = colors.filter(|c| c.len() == mesh.num_corners() as usize);
     // Authored split normals win over computed ones, which is the whole point of
     // storing them: a mesh that carries them has had its shading decided by hand
     // and recomputing would overrule the author.
@@ -928,6 +947,7 @@ fn write_mesh(
         let mut out_positions: Vec<Vec3> = Vec::new();
         let mut out_uvs: Vec<Vec2> = Vec::new();
         let mut out_normals: Vec<Vec3> = Vec::new();
+        let mut out_colors: Vec<glam::Vec4> = Vec::new();
         let mut out_vertex: Vec<u32> = Vec::new();
         let mut out_joints: Vec<[u16; 4]> = Vec::new();
         let mut out_weights: Vec<[f32; 4]> = Vec::new();
@@ -945,15 +965,18 @@ fn write_mesh(
                     .map(|u| UvOrigin::TopLeft.from_kreate(u[c]))
                     .unwrap_or(Vec2::ZERO);
                 let normal = normals.map(|n| to_gltf * n[c]).unwrap_or(Vec3::Y);
+                let color = colors.as_ref().map_or(glam::Vec4::ONE, |k| k[c]);
                 let key = VertexKey {
                     vertex,
                     uv: [uv.x.to_bits(), uv.y.to_bits()],
                     normal: [normal.x.to_bits(), normal.y.to_bits(), normal.z.to_bits()],
+                    color: color.to_array().map(f32::to_bits),
                 };
                 let index = *seen.entry(key).or_insert_with(|| {
                     out_positions.push(to_gltf * positions[vertex as usize]);
                     out_uvs.push(uv);
                     out_normals.push(normal);
+                    out_colors.push(color);
                     out_vertex.push(vertex);
                     if let Some((skin, _)) = &skinning {
                         out_joints.push(skin.joints[vertex as usize]);
@@ -1044,6 +1067,22 @@ fn write_mesh(
                     out_uvs.len(),
                     json::accessor::ComponentType::F32,
                     json::accessor::Type::Vec2,
+                    None,
+                    None,
+                ),
+            );
+        }
+
+        if colors.is_some() {
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_colors), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::Colors(0)),
+                push_accessor(
+                    root,
+                    view,
+                    out_colors.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec4,
                     None,
                     None,
                 ),
@@ -1355,6 +1394,16 @@ fn emit_material(
                 extensions: None,
                 extras: Default::default(),
             })
+        }),
+        occlusion_texture: described.and_then(|m| {
+            m.occlusion_texture
+                .map(|i| json::material::OcclusionTexture {
+                    index: json::Index::new(i as u32),
+                    strength: json::material::StrengthFactor(m.occlusion_strength),
+                    tex_coord: 0,
+                    extensions: None,
+                    extras: Default::default(),
+                })
         }),
         emissive_texture: described
             .and_then(|m| m.emissive_texture)

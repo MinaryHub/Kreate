@@ -61,6 +61,9 @@ struct VertexOut {
     /// texture: one that moves with the object rather than the camera.
     @location(3) local: vec3<f32>,
     @location(4) local_normal: vec3<f32>,
+    /// The vertex colour, which multiplies the base colour as glTF's
+    /// `COLOR_0` does: white where the mesh has none.
+    @location(5) tint: vec4<f32>,
 }
 
 @vertex
@@ -68,6 +71,7 @@ fn vs_rendered(
     @location(0) position: vec3<f32>,
     @location(1) packed_normal: u32,
     @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
 ) -> VertexOut {
     let world = object.model * vec4<f32>(position, 1.0);
     var out: VertexOut;
@@ -76,6 +80,7 @@ fn vs_rendered(
 
     out.uv = uv;
     out.local = position;
+    out.tint = color;
 
     let n = oct_decode(packed_normal);
     out.local_normal = n;
@@ -154,7 +159,8 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     geometry.position_dx = dpdx(in.local);
     geometry.position_dy = dpdy(in.local);
     let sample = material_sample(in.uv, uv_dx, uv_dy, geometry);
-    let surface = sample.surface;
+    var surface = sample.surface;
+    surface.base_color *= in.tint.rgb;
     var normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
     // A bump's tilt, as a surface gradient in the object's space: carried
     // into this one the way a normal is, by the inverse transpose, and
@@ -180,6 +186,12 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // What the surface emits, added to what it reflects: a glow is light the
     // surface makes, so no light, shadow or occlusion has a say in it.
     var lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + sample.emission;
+    // An occlusion map shades only the light from the surroundings — what
+    // the environment pours in from every side and a crease cannot see —
+    // not a lamp's, which shadows already decide.
+    if (sample.occlusion < 1.0) {
+        lit -= (1.0 - sample.occlusion) * environment_ambient(surface, normal, view);
+    }
     if (sample.transmission > 0.0) {
         lit = mix(lit, through_glass(surface, sample, in.world, normal, view, in.clip.xy), sample.transmission);
     }
@@ -190,7 +202,7 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     out.surface = vec4<f32>(normal, roughness);
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     out.share = vec4<f32>(specular_share(surface_f0(surface), nov, roughness), 1.0);
-    out.environment = vec4<f32>(environment_specular(surface, normal, view), 1.0);
+    out.environment = vec4<f32>(environment_specular(surface, normal, view) * sample.occlusion, 1.0);
     // A cut-out: nothing here. Last, after every derivative this stage
     // takes — a derivative after a discard reads a neighbour that is gone.
     if (sample.clip > 0.0 && sample.alpha < sample.clip) {

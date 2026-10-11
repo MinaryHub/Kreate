@@ -322,6 +322,11 @@ pub struct Material {
     /// A colour image the glow is multiplied by: where a surface glows, and in
     /// what colour — a screen, a lit window. glTF's `emissiveTexture`.
     pub emission_image: Option<ImageId>,
+    /// glTF's occlusion map: how much of the surroundings' light reaches in,
+    /// in red. See [`MaterialMap::Occlusion`].
+    pub occlusion_image: Option<ImageId>,
+    /// How much of the occlusion map is used, 0 to 1: glTF's `strength`.
+    pub occlusion_strength: f32,
     /// The colour the surface glows with, beside how brightly.
     ///
     /// Two fields rather than one radiance, the way a light keeps its tint
@@ -376,6 +381,8 @@ impl Default for Material {
             normal_image: None,
             normal_strength: 1.0,
             emission_image: None,
+            occlusion_image: None,
+            occlusion_strength: 1.0,
             emission: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
             emission_strength: 0.0,
             transmission: 0.0,
@@ -401,16 +408,21 @@ pub enum MaterialMap {
     MetallicRoughness,
     Normal,
     Emission,
+    /// How much of the light from the surroundings reaches into each
+    /// crease, in red: glTF's occlusion map. Often the same picture as the
+    /// metal-roughness one, its red channel otherwise unused.
+    Occlusion,
 }
 
 impl MaterialMap {
     /// Every map, in the order the panel lists them and the operator numbers
     /// them.
-    pub const ALL: [MaterialMap; 4] = [
+    pub const ALL: [MaterialMap; 5] = [
         MaterialMap::BaseColor,
         MaterialMap::MetallicRoughness,
         MaterialMap::Normal,
         MaterialMap::Emission,
+        MaterialMap::Occlusion,
     ];
 
     /// A stable name for scripts and files. Not the discriminant, for the
@@ -421,6 +433,7 @@ impl MaterialMap {
             MaterialMap::MetallicRoughness => "metallic_roughness",
             MaterialMap::Normal => "normal",
             MaterialMap::Emission => "emission",
+            MaterialMap::Occlusion => "occlusion",
         }
     }
 
@@ -433,7 +446,9 @@ impl MaterialMap {
     pub fn color_space(self) -> crate::image::ColorSpace {
         match self {
             MaterialMap::BaseColor | MaterialMap::Emission => crate::image::ColorSpace::Srgb,
-            MaterialMap::MetallicRoughness | MaterialMap::Normal => crate::image::ColorSpace::Raw,
+            MaterialMap::MetallicRoughness | MaterialMap::Normal | MaterialMap::Occlusion => {
+                crate::image::ColorSpace::Raw
+            }
         }
     }
 }
@@ -481,6 +496,7 @@ impl Material {
             MaterialMap::MetallicRoughness => self.metallic_roughness_image,
             MaterialMap::Normal => self.normal_image,
             MaterialMap::Emission => self.emission_image,
+            MaterialMap::Occlusion => self.occlusion_image,
         }
     }
 
@@ -491,6 +507,7 @@ impl Material {
             MaterialMap::MetallicRoughness => &mut self.metallic_roughness_image,
             MaterialMap::Normal => &mut self.normal_image,
             MaterialMap::Emission => &mut self.emission_image,
+            MaterialMap::Occlusion => &mut self.occlusion_image,
         }
     }
 }

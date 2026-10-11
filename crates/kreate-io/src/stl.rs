@@ -317,6 +317,7 @@ fn assemble(triangles: Vec<Triangle>, name: &str, options: &StlOptions) -> Impor
         faces,
         corner_uvs: None,
         corner_normals: None,
+        corner_colors: None,
         face_materials: None,
         smoothing_groups: None,
     };

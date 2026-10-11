@@ -251,6 +251,9 @@ pub struct GpuMesh {
     /// per material — a scene would compile twice the shaders to save eight
     /// bytes a vertex on the meshes that are not textured.
     uvs: wgpu::Buffer,
+    /// Each vertex's colour, which multiplies the base colour: a vertex
+    /// attribute for the direct passes, storage for the cluster one.
+    colors: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Positions as storage, plus the edge list and its flags.
     ///
@@ -343,6 +346,21 @@ impl GpuMesh {
             label: Some("mesh uvs"),
             contents: bytemuck::cast_slice(&cpu.uvs),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        // White for every vertex when the mesh has no colours, so the passes
+        // that read them need not ask; one word when there are no vertices,
+        // since a binding of no bytes cannot be made.
+        let white = vec![u32::MAX; cpu.positions.len().max(1)];
+        let colors = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh colours"),
+            contents: bytemuck::cast_slice(
+                if cpu.colors.len() == cpu.positions.len() && !cpu.colors.is_empty() {
+                    &cpu.colors
+                } else {
+                    &white
+                },
+            ),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
         });
         // STORAGE as well as INDEX: the id pass draws faces *non-indexed* and
         // reads this as an array, because `vertex_index` in an indexed draw is
@@ -501,6 +519,10 @@ impl GpuMesh {
                     binding: 3,
                     resource: cluster_indices.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: colors.as_entire_binding(),
+                },
             ],
         });
 
@@ -508,6 +530,7 @@ impl GpuMesh {
             positions,
             normals,
             uvs,
+            colors,
             indices,
             edge_bind,
             id_bind,
@@ -530,6 +553,10 @@ impl GpuMesh {
     /// Lent rather than copied, and deliberately the *live* ones: a deform
     /// session reads its own rest copy and writes here, so the rasteriser needs
     /// no knowledge that a drag is happening at all.
+    pub fn colors(&self) -> &wgpu::Buffer {
+        &self.colors
+    }
+
     pub fn positions(&self) -> &wgpu::Buffer {
         &self.positions
     }
@@ -871,6 +898,18 @@ fn cluster_instance_bind(
 /// The cluster draw reads four arrays that are all the same kind of thing, so
 /// spelling out four near-identical entries would be four chances to
 /// mistranscribe a binding index.
+/// A mesh's vertex colour as the direct passes read it: four bytes, read
+/// as fractions, at location 3.
+const COLOR_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: 4,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &[wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Unorm8x4,
+        offset: 0,
+        shader_location: 3,
+    }],
+};
+
 fn storage_bind_group_layout(
     device: &wgpu::Device,
     label: &str,
@@ -1639,7 +1678,7 @@ impl Viewport {
             cluster_draw: storage_bind_group_layout(
                 device,
                 "cluster draw",
-                4,
+                5,
                 wgpu::ShaderStages::VERTEX,
             ),
         };
@@ -2270,6 +2309,8 @@ impl Viewport {
                                     shader_location: 2,
                                 }],
                             },
+                            // The vertex colour, a byte a channel.
+                            COLOR_LAYOUT,
                         ],
                     },
                     fragment: Some(wgpu::FragmentState {
@@ -4227,6 +4268,7 @@ impl Viewport {
                 pass.set_vertex_buffer(0, mesh.positions.slice(..));
                 pass.set_vertex_buffer(1, mesh.normals.slice(..));
                 pass.set_vertex_buffer(2, mesh.uvs.slice(..));
+                pass.set_vertex_buffer(3, mesh.colors.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 // One call per run of faces on a material slot, the slot
                 // carried as the instance index so the shader colours the run
@@ -4988,6 +5030,7 @@ impl Viewport {
             pass.set_vertex_buffer(0, mesh.positions.slice(..));
             pass.set_vertex_buffer(1, mesh.normals.slice(..));
             pass.set_vertex_buffer(2, mesh.uvs.slice(..));
+            pass.set_vertex_buffer(3, mesh.colors.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
 
             // One call per run of triangles sharing a material slot. Nearly
@@ -5228,6 +5271,7 @@ fn rendered_pipeline(
                         shader_location: 2,
                     }],
                 },
+                COLOR_LAYOUT,
             ],
         },
         fragment: Some(wgpu::FragmentState {

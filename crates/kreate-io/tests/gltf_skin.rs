@@ -298,6 +298,7 @@ fn a_mesh_hung_from_a_joint_follows_its_bone() {
         faces: vec![vec![0, 1, 2]],
         corner_uvs: None,
         corner_normals: None,
+        corner_colors: None,
         face_materials: None,
         smoothing_groups: None,
     });

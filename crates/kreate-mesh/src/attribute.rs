@@ -364,6 +364,10 @@ pub mod names {
     /// Corner / `F32x3`. Present only when custom split normals are authored;
     /// its presence overrides computed normals.
     pub const CUSTOM_NORMAL: &str = "custom_normal";
+    /// Corner or Point / `F32x4`, linear RGBA. The colour painted or scanned
+    /// onto the surface, which multiplies the material's base colour — glTF's
+    /// `COLOR_0`, PLY's `red green blue`, Blender's colour attribute.
+    pub const COLOR: &str = "color";
 
     /// Selection lives in attribute layers rather than a side table, so it
     /// survives `MeshData` <-> `BMesh` round trips and shares structurally under

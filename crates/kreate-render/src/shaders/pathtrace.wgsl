@@ -81,6 +81,9 @@ const PT_SURFACE: u32 = 4u;
 // the normal. What a procedural texture is read at, so that it sits on the
 // object here as it does in the viewport.
 @group(0) @binding(15) var<storage, read> pt_local: array<vec4<f32>>;
+// Each vertex's colour, a byte a channel, red lowest: what multiplies the
+// surface's base colour, white where the mesh has none.
+@group(0) @binding(16) var<storage, read> pt_colors: array<u32>;
 
 // What a compiled material decided at a point: the generated `pt_material`
 // fills it, from whichever material the surface names.
@@ -964,6 +967,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 s.metallic *= mr.b;
             }
         }
+        // The vertex colour, as glTF's `COLOR_0` multiplies the base colour.
+        let tint = unpack4x8unorm(pt_colors[tri.x]) * w
+            + unpack4x8unorm(pt_colors[tri.y]) * hit.u
+            + unpack4x8unorm(pt_colors[tri.z]) * hit.v;
+        s.base_color *= tint.rgb;
         s.roughness = max(s.roughness, 0.02);
         let v = -dir;
         let start = p + geometric * 1e-3 * max(1.0, length(p - pt.eye.xyz) * 0.01);

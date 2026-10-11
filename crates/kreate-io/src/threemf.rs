@@ -373,6 +373,7 @@ fn read_part(
                         faces: Vec::new(),
                         corner_uvs: None,
                         corner_normals: None,
+                        corner_colors: None,
                         face_materials: None,
                         smoothing_groups: None,
                     });

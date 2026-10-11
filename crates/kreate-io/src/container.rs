@@ -829,6 +829,11 @@ pub struct MaterialRecord {
     /// The glow's image, by identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emission_uid: Option<u64>,
+    /// The occlusion map, by identity, and its strength when it is not one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion_uid: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion_strength: Option<f32>,
     /// The normal map's strength, written only when it is not one.
     ///
     /// Absent reads as one, which is the value every file written before this
@@ -1568,6 +1573,12 @@ pub fn write(
                         .emission_image
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
+                    occlusion_uid: m
+                        .occlusion_image
+                        .and_then(|id| document.image_uid(id))
+                        .map(|uid| uid.raw()),
+                    occlusion_strength: (m.occlusion_strength != 1.0)
+                        .then_some(m.occlusion_strength),
                     normal_strength: (m.normal_strength != 1.0).then_some(m.normal_strength),
                     emission: (m.emission_strength != 0.0).then_some([
                         m.emission.r,
@@ -2111,6 +2122,13 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             emission_image: record
                 .emission_uid
                 .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            occlusion_image: record
+                .occlusion_uid
+                .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw))),
+            occlusion_strength: record
+                .occlusion_strength
+                .filter(|s| s.is_finite())
+                .map_or(1.0, |s| s.clamp(0.0, 1.0)),
             normal_strength: record.normal_strength.unwrap_or(1.0),
             emission: record
                 .emission

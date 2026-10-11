@@ -126,6 +126,9 @@ pub struct ImportMaterial {
     pub normal_texture: Option<usize>,
     /// glTF's `emissiveTexture`: what the glow is multiplied by.
     pub emissive_texture: Option<usize>,
+    /// The occlusion map, by image index, and how much of it is used.
+    pub occlusion_texture: Option<usize>,
+    pub occlusion_strength: f32,
     /// glTF's `normalTexture.scale`.
     pub normal_scale: f32,
     /// What `emissive` is multiplied by: `KHR_materials_emissive_strength`.
@@ -166,6 +169,8 @@ impl Default for ImportMaterial {
             metallic_roughness_texture: None,
             normal_texture: None,
             emissive_texture: None,
+            occlusion_texture: None,
+            occlusion_strength: 1.0,
             normal_scale: 1.0,
             emissive_strength: 1.0,
             transmission: 0.0,
@@ -190,6 +195,9 @@ pub struct ImportMesh {
     pub corner_uvs: Option<Vec<Vec2>>,
     /// Corner domain. Authored split normals; absent means "compute them".
     pub corner_normals: Option<Vec<Vec3>>,
+    /// A colour per corner, linear RGBA: glTF's `COLOR_0`, a PLY's or an
+    /// OBJ's vertex colours, spread to the corners they meet.
+    pub corner_colors: Option<Vec<glam::Vec4>>,
     /// Face domain. Index into [`ImportScene::materials`].
     pub face_materials: Option<Vec<i32>>,
     /// Face domain. `0` means flat shading; equal non-zero values smooth together.
@@ -343,6 +351,7 @@ impl ImportMesh {
         self.faces = faces;
         retain_corners(&mut self.corner_uvs, &kept_corner);
         retain_corners(&mut self.corner_normals, &kept_corner);
+        retain_corners(&mut self.corner_colors, &kept_corner);
 
         // Faces that collapsed below three corners are dropped by `sanitize`,
         // which also keeps the corner arrays in step — one place that decides
@@ -397,6 +406,15 @@ impl ImportMesh {
         };
         if let Some(uvs) = &self.corner_uvs {
             self.corner_uvs = Some(filter_corners(uvs));
+        }
+        if let Some(cs) = &self.corner_colors {
+            let filtered: Vec<glam::Vec4> = corner_ranges
+                .iter()
+                .zip(&keep)
+                .filter(|(_, &k)| k)
+                .flat_map(|(r, _)| cs[r.clone()].iter().copied())
+                .collect();
+            self.corner_colors = Some(filtered);
         }
         if let Some(ns) = &self.corner_normals {
             let filtered: Vec<Vec3> = corner_ranges
@@ -1212,6 +1230,16 @@ fn convert_mesh(m: &ImportMesh, src: &SourceMetadata) -> MeshData {
             );
         }
     }
+    if let Some(cs) = &m.corner_colors {
+        if cs.len() == num_corners {
+            let vals: Vec<glam::Vec4> = per_face_reorder(cs, &m.faces, flip);
+            mesh.attributes_mut().insert(
+                names::COLOR,
+                Domain::Corner,
+                AttrData::F32x4(Arc::new(vals)),
+            );
+        }
+    }
     if let Some(mats) = &m.face_materials {
         if mats.len() == mesh.num_faces() as usize {
             mesh.attributes_mut().insert(
@@ -1323,6 +1351,7 @@ mod weld_tests {
                 Vec2::new(0.0, 1.0),
             ]),
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         }
@@ -1393,6 +1422,7 @@ mod weld_tests {
             faces: vec![vec![0, 1, 2]],
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1425,6 +1455,7 @@ mod weld_tests {
                 Vec2::new(0.0, 1.0),
             ]),
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1458,6 +1489,7 @@ mod weld_tests {
             faces: vec![vec![0, 1, 2], vec![0, 3, 4]],
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1487,6 +1519,7 @@ mod weld_tests {
             faces: vec![vec![0, 1, 2]],
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1518,6 +1551,7 @@ mod weld_tests {
             faces: (0..20).map(|i| vec![i, i + 1, i + 2]).collect(),
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1566,6 +1600,7 @@ mod weld_tests {
             faces: vec![vec![0, 2, 3], vec![1, 3, 2]],
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1606,6 +1641,7 @@ mod weld_tests {
             faces: vec![vec![2, 3, 0]],
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };
@@ -1647,6 +1683,7 @@ mod weld_tests {
             faces: Vec::new(),
             corner_uvs: None,
             corner_normals: None,
+            corner_colors: None,
             face_materials: None,
             smoothing_groups: None,
         };

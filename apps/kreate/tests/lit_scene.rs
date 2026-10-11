@@ -271,6 +271,7 @@ fn shoot_with(gpu: &Gpu, doc: &Document, camera: Camera, traced: bool) -> Vec<[f
                         positions,
                         uvs,
                         normals,
+                        colors: &[],
                         indices,
                         transform: *transform,
                         surface: *surface,

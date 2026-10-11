@@ -1403,6 +1403,7 @@ struct Labels {
     material_metallic_roughness: String,
     material_normal_map: String,
     material_emission_map: String,
+    material_occlusion_map: String,
     material_uses_nodes: String,
     node_use_nodes: String,
     node_use_nodes_hint: String,
@@ -1742,6 +1743,7 @@ impl Labels {
             material_metallic_roughness: t("material-metallic-roughness"),
             material_normal_map: t("material-normal-map"),
             material_emission_map: t("material-emission-map"),
+            material_occlusion_map: t("material-occlusion-map"),
             material_uses_nodes: t("material-uses-nodes"),
             node_use_nodes: t("node-use-nodes"),
             node_use_nodes_hint: t("node-use-nodes-hint"),
@@ -9591,6 +9593,7 @@ fn draw_material_tab(
                 kreate_scene::MaterialMap::MetallicRoughness => &l.material_metallic_roughness,
                 kreate_scene::MaterialMap::Normal => &l.material_normal_map,
                 kreate_scene::MaterialMap::Emission => &l.material_emission_map,
+                kreate_scene::MaterialMap::Occlusion => &l.material_occlusion_map,
             };
             let map_id = index as u32;
             ui.label(label);

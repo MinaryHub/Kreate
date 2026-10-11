@@ -91,6 +91,8 @@ struct Instance {
 @group(2) @binding(1) var<storage, read> cluster_normals: array<u32>;
 @group(2) @binding(2) var<storage, read> cluster_records: array<Cluster>;
 @group(2) @binding(3) var<storage, read> cluster_indices: array<u32>;
+// Each vertex's colour, a byte a channel, red lowest.
+@group(2) @binding(4) var<storage, read> cluster_colors: array<u32>;
 
 fn cluster_position(i: u32) -> vec3<f32> {
     let b = 3u * i;
@@ -141,6 +143,7 @@ fn vs_cluster(
         out.weight = vec2<f32>(0.0);
         out.ramp = 0.0;
         out.layer = -1.0;
+        out.tint = vec4<f32>(1.0);
         return out;
     }
 
@@ -158,6 +161,7 @@ fn vs_cluster(
     out.weight = vec2<f32>(0.0);
     out.ramp = 0.0;
     out.layer = -1.0;
+    out.tint = unpack4x8unorm(cluster_colors[index]);
     return out;
 }
 
@@ -198,6 +202,9 @@ struct VsOut {
     @location(4) @interpolate(flat) ramp: f32,
     // The image layer the face shows, below zero for none.
     @location(5) @interpolate(flat) layer: f32,
+    // The vertex colour, which multiplies the base colour: white where the
+    // mesh has none.
+    @location(6) tint: vec4<f32>,
 };
 
 // A face set's colour: a hue from its number, soft, so the form still reads.
@@ -237,6 +244,7 @@ fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) normal_packed: u32,
     @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
     @builtin(instance_index) slot: u32,
 ) -> VsOut {
     var out: VsOut;
@@ -255,6 +263,7 @@ fn vs_main(
     out.ramp = object.paint.x;
     let s = min(slot, 7u);
     out.layer = object.slot_layers[s / 4u][s % 4u];
+    out.tint = color;
     return out;
 }
 
@@ -323,7 +332,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     let texel = textureSample(solid_tex, solid_sampler, vec2<f32>(in.weight.x, 1.0 - in.weight.y), max(i32(in.layer), 0));
     let image = texel.rgb;
     let cut = select(0.0, fract(in.layer) * 2.0, in.layer > -0.5);
-    var base = in.base_color.rgb;
+    var base = in.base_color.rgb * in.tint.rgb;
     // The picture shows in Flat only. Studio is lit to read shape, and a
     // texture over it hides the very shading it is there for; its colour
     // is the material's. A cut-out is still cut in both: that is shape.
