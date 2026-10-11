@@ -299,6 +299,7 @@ pub fn bake_with(
                     buoyancy: domain.buoyancy as f32,
                     vorticity: domain.vorticity as f32,
                     dissipation: domain.dissipation as f32,
+                    turbulence: domain.turbulence as f32,
                     ..GasSettings::default()
                 },
             );

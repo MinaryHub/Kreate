@@ -2671,6 +2671,7 @@ impl Viewport {
         for v in volumes {
             (v.key, v.cells).hash(&mut h);
             v.smoke_color.map(f32::to_bits).hash(&mut h);
+            (v.detail.to_bits(), v.time.to_bits()).hash(&mut h);
         }
         let signature = h.finish();
         if signature != self.volume_signature {

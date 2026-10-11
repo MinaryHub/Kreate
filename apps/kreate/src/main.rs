@@ -9048,6 +9048,8 @@ impl App {
                     max: track.bounds.max.as_dvec3(),
                     smoke_color: d.smoke_color.as_vec3().to_array(),
                     key: std::sync::Arc::as_ptr(&at.smoke) as *const u8 as usize,
+                    detail: d.detail as f32,
+                    time: (now / self.doc.playback.fps.max(1.0)) as f32,
                 })
             })
             .collect();

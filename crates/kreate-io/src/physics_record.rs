@@ -115,6 +115,10 @@ pub struct FluidRecord {
     pub dissipation: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke_color: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbulence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<f64>,
     /// A flow's: `liquid`, `smoke`, `fire` or `smoke_and_fire`. Absent is
     /// liquid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +244,8 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 vorticity: Some(d.vorticity),
                 dissipation: Some(d.dissipation),
                 smoke_color: Some(d.smoke_color.to_array()),
+                turbulence: Some(d.turbulence),
+                detail: Some(d.detail),
                 substance: None,
                 temperature: None,
             },
@@ -261,6 +267,8 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 vorticity: None,
                 dissipation: None,
                 smoke_color: None,
+                turbulence: None,
+                detail: None,
                 substance: Some(
                     match f.substance {
                         Substance::Liquid => "liquid",
@@ -375,6 +383,8 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
                         .filter(|c| c.is_finite())
                         .unwrap_or(d.smoke_color)
                         .clamp(kreate_math::DVec3::ZERO, kreate_math::DVec3::ONE),
+                    turbulence: finite(f.turbulence, d.turbulence).clamp(0.0, 10.0),
+                    detail: finite(f.detail, d.detail).clamp(0.0, 1.0),
                 })
             } else {
                 Fluid::Flow(FluidFlow {
@@ -483,6 +493,8 @@ mod tests {
                 vorticity: 0.75,
                 dissipation: 0.25,
                 smoke_color: kreate_math::DVec3::new(0.25, 0.5, 0.75),
+                turbulence: 1.25,
+                detail: 0.375,
             })),
             ..Default::default()
         };

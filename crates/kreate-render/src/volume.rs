@@ -33,6 +33,10 @@ pub struct VolumeData<'a> {
     pub smoke_color: [f32; 3],
     /// What the grid's bytes are: the same key is not uploaded again.
     pub key: usize,
+    /// How much finer-than-cell wisps carve the smoke, 0 to 1.
+    pub detail: f32,
+    /// Seconds into the animation, which the wisps drift with.
+    pub time: f32,
 }
 
 #[repr(C)]
@@ -45,6 +49,7 @@ struct Params {
     light: [f32; 4],
     march: [f32; 4],
     region: [f32; 4],
+    detail: [f32; 4],
 }
 
 struct Item {
@@ -257,6 +262,14 @@ impl Volumes {
                     if hdr { 1.0 } else { 0.0 },
                 ],
                 region: [region.0 as f32, region.1 as f32, 0.0, 0.0],
+                // A wisp about two cells across at its coarsest, and finer
+                // in the octaves above it.
+                detail: [
+                    v.detail.clamp(0.0, 1.0),
+                    (1.0 / (cell * 2.0)) as f32,
+                    v.time,
+                    0.0,
+                ],
             };
             queue.write_buffer(&item.params, 0, bytemuck::bytes_of(&params));
             self.items.push(item);

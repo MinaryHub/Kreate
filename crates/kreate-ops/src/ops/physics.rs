@@ -452,6 +452,14 @@ pub struct FluidParams {
     /// A gas domain: the smoke's colour.
     #[param(color)]
     pub smoke_color: [f64; 3],
+    /// A gas domain: small eddies stirring the smoke, breaking a plume's
+    /// sides into curls. Baked in.
+    #[param(min = 0.0, soft_max = 3.0)]
+    pub turbulence: f64,
+    /// A gas domain: finer wisps than the cells, drawn into the smoke. Seen
+    /// at once, with no new bake.
+    #[param(min = 0.0, max = 1.0)]
+    pub detail: f64,
     /// A flow: what it gives — liquid, smoke, fire, or fire that smokes.
     #[param(variants("liquid", "smoke", "fire", "smoke_and_fire"))]
     pub substance: u32,
@@ -486,6 +494,8 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
         vorticity: d.vorticity,
         dissipation: d.dissipation,
         smoke_color: d.smoke_color.to_array(),
+        turbulence: d.turbulence,
+        detail: d.detail,
         substance: 0,
         flow: 0,
         temperature: FluidFlow::default().temperature,
@@ -506,6 +516,8 @@ pub fn fluid_params(f: Option<&Fluid>) -> FluidParams {
             p.vorticity = d.vorticity;
             p.dissipation = d.dissipation;
             p.smoke_color = d.smoke_color.to_array();
+            p.turbulence = d.turbulence;
+            p.detail = d.detail;
         }
         Some(Fluid::Flow(f)) => {
             p.role = 2;
@@ -537,7 +549,9 @@ pub fn fluid_param_applies(p: &FluidParams, name: &str) -> bool {
         "role" => true,
         "domain" | "resolution" => domain,
         "flip" => domain && !gas,
-        "buoyancy" | "vorticity" | "dissipation" | "smoke_color" => domain && gas,
+        "buoyancy" | "vorticity" | "dissipation" | "smoke_color" | "turbulence" | "detail" => {
+            domain && gas
+        }
         "substance" | "flow" => flow,
         "temperature" => flow && p.substance != 0 && !drain,
         "velocity" => flow && !drain,
@@ -595,6 +609,8 @@ impl Operator for FluidSet {
                 vorticity: finite_or(params.vorticity, 0.3).clamp(0.0, 10.0),
                 dissipation: finite_or(params.dissipation, 0.05).clamp(0.0, 10.0),
                 smoke_color: DVec3::from_array(params.smoke_color).clamp(DVec3::ZERO, DVec3::ONE),
+                turbulence: finite_or(params.turbulence, 0.5).clamp(0.0, 10.0),
+                detail: finite_or(params.detail, 0.6).clamp(0.0, 1.0),
             })),
             2 => Some(Fluid::Flow(FluidFlow {
                 kind: match params.flow {

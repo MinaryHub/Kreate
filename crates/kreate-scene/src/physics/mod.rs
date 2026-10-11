@@ -326,6 +326,12 @@ pub struct FluidDomain {
     pub dissipation: f64,
     /// Gas: the smoke's colour, linear.
     pub smoke_color: DVec3,
+    /// Gas: small eddies stirring it as it moves, breaking a plume's sides
+    /// into curls. Baked in.
+    pub turbulence: f64,
+    /// Gas: finer wisps than the cells, drawn into the smoke. Changes how it
+    /// looks, not the bake.
+    pub detail: f64,
 }
 
 impl Default for FluidDomain {
@@ -339,6 +345,8 @@ impl Default for FluidDomain {
             vorticity: gas.vorticity as f64,
             dissipation: gas.dissipation as f64,
             smoke_color: DVec3::splat(0.6),
+            turbulence: gas.turbulence as f64,
+            detail: 0.6,
         }
     }
 }

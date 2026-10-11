@@ -22,6 +22,9 @@ struct Params {
     march: vec4<f32>,
     // The drawn region, in pixels.
     region: vec4<f32>,
+    // x: how much finer-than-cell wisps carve the smoke, 0 to 1; y: their
+    // frequency, per metre; z: seconds, which they drift up with.
+    detail: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -58,6 +61,30 @@ fn flame_color(t: f32) -> vec3<f32> {
     let orange = vec3<f32>(1.0, 0.42, 0.05);
     let white = vec3<f32>(1.0, 0.86, 0.55);
     return mix(mix(ember, orange, smoothstep(0.0, 0.45, t)), white, smoothstep(0.55, 1.0, t));
+}
+
+// A lattice value from 0 to 1.
+fn lattice(p: vec3<f32>) -> f32 {
+    var q = fract(p * 0.3183099 + vec3<f32>(0.71, 0.113, 0.419));
+    q = q * 17.0;
+    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+fn value_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(lattice(i), lattice(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+            mix(lattice(i + vec3<f32>(0.0, 1.0, 0.0)), lattice(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
+        mix(mix(lattice(i + vec3<f32>(0.0, 0.0, 1.0)), lattice(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+            mix(lattice(i + vec3<f32>(0.0, 1.0, 1.0)), lattice(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y),
+        u.z);
+}
+
+// Three octaves, 0 to 1 about a half.
+fn wisps(p: vec3<f32>) -> f32 {
+    return (value_noise(p) * 0.5 + value_noise(p * 2.03) * 0.25 + value_noise(p * 4.07) * 0.125) / 0.875;
 }
 
 // A small hash, so each pixel starts its march a little apart and the
@@ -109,7 +136,17 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         }
         let at = a + dir * t;
         let g = sample_grid(at);
-        let smoke = g.r;
+        var smoke = g.r;
+        // Finer than the cells: the smoke's thin edges eaten away by wisps,
+        // its thick heart left — erosion, as clouds are drawn. A wisp only
+        // scaling the smoke averages away along the ray; one cutting it to
+        // nothing does not. In the domain's own metres, so they hold still
+        // as the view moves, and rising with the smoke.
+        if (p.detail.x > 0.0 && smoke > 0.002) {
+            let q = (at - p.box_min.xyz) * p.detail.y - vec3<f32>(0.0, 0.0, p.detail.z * 0.6 * p.detail.y);
+            let eaten = p.detail.x * 0.85 * (1.0 - wisps(q));
+            smoke = clamp((smoke - eaten) / max(1.0 - eaten, 0.05), 0.0, 1.0) * (1.0 + p.detail.x);
+        }
         let flame = g.g;
         if (smoke > 0.002 || flame > 0.002) {
             let sigma = smoke * thick;

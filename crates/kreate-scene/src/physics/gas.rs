@@ -37,6 +37,9 @@ pub struct GasSettings {
     pub cooling: f32,
     /// The fraction of fuel that burns each second once lit.
     pub burn_rate: f32,
+    /// How hard the gas is stirred by small eddies of its own: breaks a
+    /// plume's smooth sides into curls. 0 is none.
+    pub turbulence: f32,
 }
 
 impl Default for GasSettings {
@@ -48,6 +51,7 @@ impl Default for GasSettings {
             dissipation: 0.05,
             cooling: 0.6,
             burn_rate: 2.5,
+            turbulence: 0.5,
         }
     }
 }
@@ -88,6 +92,8 @@ pub struct GasSim {
     settings: GasSettings,
     /// What stirs the sources, the same every bake.
     rng: super::Rng,
+    /// Seconds simulated, which the eddies drift with.
+    time: f32,
 }
 
 impl GasSim {
@@ -113,6 +119,7 @@ impl GasSim {
             sinks: Vec::new(),
             settings,
             rng: super::Rng::new(0x5EED),
+            time: 0.0,
         }
     }
 
@@ -211,6 +218,7 @@ impl GasSim {
         self.forces(dt, gravity);
         self.project();
         self.advect(dt);
+        self.time += dt;
         let s = self.settings;
         let thin = (1.0 - s.dissipation * dt).clamp(0.0, 1.0);
         let cool = (1.0 - s.cooling * dt).clamp(0.0, 1.0);
@@ -311,8 +319,14 @@ impl GasSim {
                 }
             })
             .collect();
+        // The flow at each cell's middle, once, for both the swirls and the
+        // eddies.
+        let centre = if s.vorticity > 0.0 || s.turbulence > 0.0 {
+            self.centred()
+        } else {
+            Vec::new()
+        };
         if s.vorticity > 0.0 {
-            let centre = self.centred();
             let at = |i: isize, j: isize, k: isize| -> Vec3 {
                 let i = i.clamp(0, n[0] as isize - 1) as usize;
                 let j = j.clamp(0, n[1] as isize - 1) as usize;
@@ -352,6 +366,31 @@ impl GasSim {
                         let c = self.cell(i as usize, j as usize, k as usize);
                         // Fedkiw's ε·h·(N × ω).
                         force[c] += 2.0 * s.vorticity * self.h * towards.cross(curl[c]);
+                    }
+                }
+            }
+        }
+        // Eddies: the curl of a smooth noise a few cells across, drifting
+        // with time — swirls that turn without squeezing, so they add no
+        // pressure for the projection to fight. Only where there is gas;
+        // still air stirred is work for nothing.
+        if s.turbulence > 0.0 {
+            let across = 4.0 * self.h;
+            let drift = up * (-0.4 * self.time / across);
+            // As strong as the flow is fast: an eddy turns over in the time
+            // the flow takes to cross it, so still smoke is left still and a
+            // fast plume is torn at its edges.
+            let flow = &centre;
+            for k in 0..n[2] {
+                for j in 0..n[1] {
+                    for i in 0..n[0] {
+                        let c = self.cell(i, j, k);
+                        if self.solid[c] || self.density[c] + self.heat[c] + self.fuel[c] < 0.01 {
+                            continue;
+                        }
+                        let p = Vec3::new(i as f32, j as f32, k as f32) * (self.h / across) + drift;
+                        let speed = flow[c].length();
+                        force[c] += curl_noise(p) * (0.5 * s.turbulence * speed * speed / across);
                     }
                 }
             }
@@ -624,6 +663,48 @@ impl GasSim {
     }
 }
 
+/// A lattice point's value, from -1 to 1: a hash, the same everywhere.
+fn lattice(x: i32, y: i32, z: i32, channel: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x8DA6_B343)
+        ^ (y as u32).wrapping_mul(0xD816_3841)
+        ^ (z as u32).wrapping_mul(0xCB1A_B31F)
+        ^ channel.wrapping_mul(0x1656_67B1);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5BD1_E995);
+    h ^= h >> 15;
+    (h & 0xFFFF) as f32 / 32767.5 - 1.0
+}
+
+/// Smooth value noise: the lattice blended with a quintic, so its slope is
+/// smooth too — its curl, which the eddies are, has no seams.
+fn value_noise(p: Vec3, channel: u32) -> f32 {
+    let base = p.floor();
+    let f = p - base;
+    let s = f * f * f * (f * (f * 6.0 - Vec3::splat(15.0)) + Vec3::splat(10.0));
+    let (x, y, z) = (base.x as i32, base.y as i32, base.z as i32);
+    let mut out = 0.0;
+    for c in 0..8 {
+        let (a, b, d) = (c & 1, (c >> 1) & 1, c >> 2);
+        let w = (if a == 1 { s.x } else { 1.0 - s.x })
+            * (if b == 1 { s.y } else { 1.0 - s.y })
+            * (if d == 1 { s.z } else { 1.0 - s.z });
+        out += w * lattice(x + a, y + b, z + d, channel);
+    }
+    out
+}
+
+/// The curl of three value noises: a flow that swirls and neither gathers
+/// nor spreads.
+fn curl_noise(p: Vec3) -> Vec3 {
+    let e = 0.05;
+    let d = |axis: usize, channel: u32| {
+        let mut step = Vec3::ZERO;
+        step[axis] = e;
+        (value_noise(p + step, channel) - value_noise(p - step, channel)) / (2.0 * e)
+    };
+    Vec3::new(d(1, 2) - d(2, 1), d(2, 0) - d(0, 2), d(0, 1) - d(1, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +869,68 @@ mod tests {
         let (smoke, flame) = sim.snapshot();
         assert_eq!(smoke.len(), sim.density.len());
         assert_eq!((smoke[0], smoke[1], flame[2]), (255, 128, 255));
+    }
+
+    #[test]
+    fn turbulence_breaks_a_plume_up_and_it_still_rises() {
+        let source = cube_at(Vec3::new(0.5, 0.5, 0.2), 0.3);
+        let plume = |turbulence: f32| {
+            let mut sim = GasSim::new(
+                domain(),
+                16,
+                GasSettings {
+                    turbulence,
+                    vorticity: 0.0,
+                    ..GasSettings::default()
+                },
+            );
+            sim.add_source(
+                &source,
+                Emission {
+                    smoke: 1.0,
+                    heat: 1.0,
+                    fuel: 0.0,
+                    velocity: Vec3::ZERO,
+                },
+            );
+            for _ in 0..36 {
+                sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+            }
+            sim
+        };
+        let (calm, stirred) = (plume(0.0), plume(1.0));
+        // How far the smoke is from mirror-symmetric across x = 0.5.
+        let lopsided = |sim: &GasSim| {
+            let n = sim.n;
+            let mut apart = 0.0;
+            for k in 0..n[2] {
+                for j in 0..n[1] {
+                    for i in 0..n[0] {
+                        let a = sim.density[sim.cell(i, j, k)];
+                        let b = sim.density[sim.cell(n[0] - 1 - i, j, k)];
+                        apart += (a - b).abs();
+                    }
+                }
+            }
+            apart
+        };
+        assert!(
+            lopsided(&stirred) > lopsided(&calm) * 2.0 + 0.5,
+            "stirred {} calm {}",
+            lopsided(&stirred),
+            lopsided(&calm)
+        );
+        let (low, _) = centre_of(&calm);
+        let (high, _) = centre_of(&stirred);
+        // Mixing slows a plume, but it still climbs well clear of its
+        // source, which sits at 0.2.
+        assert!(
+            high.z > 0.5 && high.z > low.z * 0.6,
+            "it stopped rising: {} vs {}",
+            high.z,
+            low.z
+        );
+        // And the same every time.
+        assert_eq!(plume(1.0).density, stirred.density);
     }
 }
