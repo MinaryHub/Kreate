@@ -244,6 +244,27 @@ fn voxel_remesh_rebuilds_and_is_one_undo_step() {
 }
 
 #[test]
+fn quad_remesh_rebuilds_in_squares_and_is_one_undo_step() {
+    let (registry, mut history, mut doc, mesh) =
+        wired(kreate_mesh::primitives::uv_sphere(1.0, 32, 16));
+    let before = doc.mesh(mesh).unwrap().num_faces();
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "sculpt.quad_remesh",
+        &[("faces", PropertyValue::Int(400))],
+    )
+    .unwrap();
+    let m = doc.mesh(mesh).unwrap();
+    assert!((0..m.num_faces()).all(|f| m.face_verts(f).len() == 4));
+    let n = m.num_faces() as f32;
+    assert!((n - 400.0).abs() < 160.0, "about as many as asked: {n}");
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc.mesh(mesh).unwrap().num_faces(), before);
+}
+
+#[test]
 fn an_alpha_by_name_shapes_the_stroke_and_an_unknown_one_is_said() {
     let stroke = |alpha: &str| {
         let (registry, mut history, mut doc, mesh) =

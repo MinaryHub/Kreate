@@ -39,6 +39,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<FaceSetFromMask>();
     registry.register::<FaceSetVisibility>();
     registry.register::<VoxelRemesh>();
+    registry.register::<QuadRemesh>();
     registry.register::<DeformRegion>();
     registry.register::<CreasePath>();
     registry.register::<DisplaceImage>();
@@ -588,6 +589,54 @@ impl Operator for VoxelRemesh {
             return Ok(OpResult::Cancelled);
         };
         let out = kreate_mesh::remesh::voxel_remesh(m, params.voxel_size as f32)
+            .map_err(|e| OpError::Failed(e.to_string()))?;
+        if let Some(target) = doc.document_mut().mesh_mut(mesh) {
+            *target = out;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct QuadRemeshParams {
+    /// About how many faces the rebuilt surface has.
+    #[param(min = 10, max = 200000, unit = "count")]
+    pub faces: u32,
+}
+
+impl Default for QuadRemeshParams {
+    fn default() -> Self {
+        Self { faces: 2000 }
+    }
+}
+
+/// Blender's QuadriFlow: the active mesh rebuilt as squares that run along
+/// its shape — rings round a limb, lines along a crease.
+pub struct QuadRemesh;
+
+impl Operator for QuadRemesh {
+    type Params = QuadRemeshParams;
+    fn id() -> &'static str {
+        "sculpt.quad_remesh"
+    }
+    fn label() -> &'static str {
+        "Quad Remesh"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        has_mesh(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(mesh) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(m) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let edge = kreate_mesh::quadremesh::edge_for_faces(m, params.faces as usize);
+        let out = kreate_mesh::quadremesh::quad_remesh(m, edge)
             .map_err(|e| OpError::Failed(e.to_string()))?;
         if let Some(target) = doc.document_mut().mesh_mut(mesh) {
             *target = out;

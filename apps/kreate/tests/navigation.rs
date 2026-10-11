@@ -292,10 +292,11 @@ const APP_ACTIONS: &[&str] = &[
     // interface, not the document.
     "brush.radius_adjust",
     // The face set under the pointer, which only the application can find,
-    // and a remesh at the size the header holds.
+    // and a remesh at the size — or face count — the header holds.
     "sculpt.face_set_hide",
     "sculpt.face_set_isolate",
     "sculpt.remesh",
+    "sculpt.quad",
     "brush.strength_adjust",
     // The 3D cursor: placed from the pointer and the selection, which the
     // application knows and the operator (`scene.cursor_set`) is handed.

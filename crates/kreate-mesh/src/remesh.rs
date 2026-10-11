@@ -51,7 +51,7 @@ impl std::fmt::Display for RemeshError {
 }
 
 /// The point of triangle `abc` nearest `p`. Ericson's, §5.1.5.
-fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+pub(crate) fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;

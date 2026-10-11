@@ -18,6 +18,7 @@ pub mod mesh_data;
 pub mod modifiers;
 pub mod primitives;
 pub mod profile;
+pub mod quadremesh;
 pub mod remesh;
 pub mod sculpt;
 pub mod section;

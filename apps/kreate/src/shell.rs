@@ -1280,6 +1280,8 @@ pub struct SculptSettings {
     pub detail: f32,
     /// The voxel remesh's voxel size, in the mesh's units.
     pub voxel_size: f32,
+    /// About how many faces the quad remesh makes.
+    pub quad_faces: u32,
     /// The mask and face sets shown on the surface.
     pub show_overlay: bool,
 }
@@ -1305,6 +1307,7 @@ impl Default for SculptSettings {
             dyntopo: false,
             detail: 0.2,
             voxel_size: 0.05,
+            quad_faces: 2000,
             show_overlay: true,
         }
     }
@@ -1456,6 +1459,7 @@ struct Labels {
     sculpt_face_set_from_mask: String,
     sculpt_show_all: String,
     sculpt_remesh: String,
+    sculpt_quad_remesh: String,
     pose_ik_add: String,
     menu_weights: String,
     group_add: String,
@@ -1798,6 +1802,7 @@ impl Labels {
             sculpt_face_set_from_mask: t("sculpt-face-set-from-mask"),
             sculpt_show_all: t("sculpt-show-all"),
             sculpt_remesh: t("sculpt-remesh"),
+            sculpt_quad_remesh: t("sculpt-quad-remesh"),
             pose_ik_add: t("op-pose-ik-add"),
             menu_weights: t("menu-weights"),
             group_add: t("op-object-vertex-group-add"),
@@ -3896,6 +3901,11 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         &l.sculpt_remesh,
                         dispatch("sculpt.remesh"),
                     ));
+                    nodes.push(entry(
+                        "sculpt.quad",
+                        &l.sculpt_quad_remesh,
+                        dispatch("sculpt.quad"),
+                    ));
                     nodes
                 },
             }),
@@ -4968,6 +4978,8 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
         "sculpt-detail",
         "sculpt-voxel-size",
         "sculpt-remesh",
+        "sculpt-quad-faces",
+        "sculpt-quad-remesh",
     ]
     .iter()
     .map(|k| c(k))
@@ -5092,6 +5104,21 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
             let mut p = PropertyMap::new();
             p.set("voxel_size", V::Float(s.voxel_size as f64));
             run.push(("sculpt.voxel_remesh", p));
+            ui.close();
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(&labels[22]);
+            ui.add(
+                egui::DragValue::new(&mut s.quad_faces)
+                    .range(10..=200_000)
+                    .speed(10.0),
+            );
+        });
+        if ui.button(&labels[23]).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("faces", V::Int(s.quad_faces as i64));
+            run.push(("sculpt.quad_remesh", p));
             ui.close();
         }
     });

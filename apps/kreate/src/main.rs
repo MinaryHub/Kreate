@@ -9676,6 +9676,14 @@ impl App {
                 );
                 self.run_op("sculpt.voxel_remesh", p);
             }
+            "sculpt.quad" => {
+                let mut p = PropertyMap::new();
+                p.set(
+                    "faces",
+                    PropertyValue::Int(self.ui.sculpt.quad_faces as i64),
+                );
+                self.run_op("sculpt.quad_remesh", p);
+            }
             "brush.radius_adjust" => self.begin_brush_adjust(false),
             "brush.strength_adjust" => self.begin_brush_adjust(true),
             "sculpt.brush" => {
