@@ -564,7 +564,7 @@ fn write_skins(
 /// The joints and weights each vertex of `mesh` carries, for the skin the
 /// scene binds it with: its four heaviest bones, normalised, as glTF allows
 /// no more. `None` when no node skins this mesh.
-fn vertex_skin(
+pub(crate) fn vertex_skin(
     mesh: &MeshData,
     scene: &ExportScene<'_>,
     index: usize,

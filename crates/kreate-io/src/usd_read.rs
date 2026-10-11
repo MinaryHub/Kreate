@@ -816,9 +816,12 @@ impl<'a> Reader<'a> {
     /// binds are its `bindTransforms`, and its animation if it has one.
     fn skeleton(&mut self, prim: &'a Prim, path: &str, node: usize) {
         use kreate_math::glam::DMat4;
-        let Some(joints) = prim.property("joints").and_then(Property::texts) else {
-            return;
-        };
+        // No joints is a skeleton too: one that plays only blend shapes. An
+        // empty list reads as no numbers, so it is taken as no names.
+        let joints: &[String] = prim
+            .property("joints")
+            .and_then(Property::texts)
+            .unwrap_or(&[]);
         let matrices = |name: &str| -> Option<Vec<DMat4>> {
             let n = prim.nums(name)?;
             (n.len() == joints.len() * 16).then(|| {

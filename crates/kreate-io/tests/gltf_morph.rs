@@ -163,3 +163,32 @@ fn a_still_key_comes_back_as_far_on_as_it_was() {
     let keys = &back.object(blob).unwrap().shape_keys;
     assert_eq!((keys[0].value, keys[1].value), (0.25, 0.0));
 }
+
+/// Shape keys through USD: blend shapes on the mesh, their weights keyed on
+/// a skeleton's animation, the surface back where it was as they move.
+#[test]
+fn shape_keys_come_back_through_usd_as_blend_shapes() {
+    let (mut doc, id) = shaped();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let text = kreate_io::usd::write_usda(&scene).0;
+    assert!(text.contains("def BlendShape \"Tall\""));
+    assert!(text.contains("blendShapeWeights.timeSamples"));
+    assert!(
+        !text.contains("points.timeSamples"),
+        "blend shapes, not a point cache"
+    );
+    let read = kreate_io::usd_read::parse_usda_text(&text).expect("what we wrote reads");
+    let mut back = Document::new();
+    kreate_io::build::build_into(&read, &mut back);
+    let back_id = back
+        .objects()
+        .find(|(_, o)| !o.shape_keys.is_empty())
+        .map(|(id, _)| id)
+        .expect("a mesh with shape keys");
+    for frame in [1.0, 5.5, 10.0] {
+        let want = surface(&mut doc, id, frame);
+        let got = surface(&mut back, back_id, frame);
+        let d = apart(&want, &got);
+        assert!(d < 1e-3, "frame {frame}: the surface moved by {d}");
+    }
+}

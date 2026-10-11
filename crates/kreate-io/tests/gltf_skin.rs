@@ -470,3 +470,41 @@ fn a_mesh_bound_stretched_moves_as_the_file_says() {
         assert!(d < 1e-3, "frame {frame}: {d}");
     }
 }
+
+/// The same rig through USD: a Skeleton, its SkelAnimation and the mesh's
+/// joints and weights — not frames of moving points — and the surface back
+/// where it was, at rest and bent.
+#[test]
+fn a_skinned_mesh_comes_back_through_usd_as_a_rig() {
+    let (mut doc, body) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let text = kreate_io::usd::write_usda(&scene).0;
+    assert!(text.contains("def SkelRoot \"World\""), "a skeleton root");
+    assert!(text.contains("def Skeleton \"Skel\""));
+    assert!(text.contains("primvars:skel:jointWeights"));
+    assert!(
+        !text.contains("points.timeSamples"),
+        "a rig, not a point cache"
+    );
+    let read = kreate_io::usd_read::parse_usda_text(&text).expect("what we wrote reads");
+    let mut back = Document::new();
+    let (made, _) = build_into(&read, &mut back);
+    let body_back = *made
+        .iter()
+        .find(|id| {
+            back.object(**id)
+                .is_some_and(|o| o.name == "Body_mesh" || o.name == "Body")
+        })
+        .expect("the mesh came back");
+    let mesh_back = back
+        .objects()
+        .find(|(_, o)| o.skin.is_some())
+        .map(|(id, _)| id)
+        .unwrap_or(body_back);
+    for frame in [1.0, 5.5, 10.0] {
+        let want = surface(&mut doc, body, frame);
+        let got = surface(&mut back, mesh_back, frame);
+        let d = apart(&want, &got);
+        assert!(d < 1e-3, "frame {frame}: the surface moved by {d}");
+    }
+}
