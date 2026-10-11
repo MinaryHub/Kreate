@@ -323,6 +323,42 @@ struct PtVolumeParams {
     hi: [f32; 4],
     color: [f32; 4],
     detail: [f32; 4],
+    cells: [u32; 4],
+}
+
+/// The cells a flame can glow in and each one's running share of the glow,
+/// for aiming at it: `[index as bits, share]`. A cell counts when any cell
+/// beside it burns — the grid is read smoothly, so the glow reaches a cell
+/// past the last that burns, and a cell never chosen where there is glow
+/// would be light never found.
+fn flame_cells(flame: &[u8], cells: [u32; 3]) -> Vec<[f32; 2]> {
+    let [nx, ny, nz] = cells.map(|c| c as usize);
+    let at = |i: usize, j: usize, k: usize| flame[(k * ny + j) * nx + i];
+    let mut out = Vec::new();
+    let mut total = 0.0f64;
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let mut most = 0u8;
+                for c in 0..27 {
+                    let (a, b, d) = (c % 3, (c / 3) % 3, c / 9);
+                    let (x, y, z) = (i + a, j + b, k + d);
+                    if x >= 1 && y >= 1 && z >= 1 && x <= nx && y <= ny && z <= nz {
+                        most = most.max(at(x - 1, y - 1, z - 1));
+                    }
+                }
+                if most > 0 {
+                    let f = most as f64 / 255.0;
+                    // As bright as it glows: the ramp brightens with the flame.
+                    total += f * f;
+                    out.push((((k * ny + j) * nx + i) as u32, total));
+                }
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(i, running)| [f32::from_bits(i), (running / total) as f32])
+        .collect()
 }
 
 struct PtVolumeGpu {
@@ -334,6 +370,9 @@ struct PtVolumeGpu {
     key: usize,
     bind: wgpu::BindGroup,
     last: PtVolumeParams,
+    /// `flame_cells`, and how many.
+    flame: wgpu::Buffer,
+    flame_count: u32,
 }
 
 impl PtVolumeGpu {
@@ -368,6 +407,16 @@ impl PtVolumeGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: c,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -389,7 +438,8 @@ impl PtVolumeGpu {
         // always bound, and `lo.w` of zero says there is nothing in it.
         let cells = [1, 1, 1];
         let grid = Self::grid(device, cells);
-        let bind = Self::bind(device, &layout, &params, &grid, &sampler);
+        let flame = Self::flame_buffer(device, &[]);
+        let bind = Self::bind(device, &layout, &params, &grid, &sampler, &flame);
         Self {
             layout,
             params,
@@ -399,7 +449,22 @@ impl PtVolumeGpu {
             key: usize::MAX,
             bind,
             last: PtVolumeParams::default(),
+            flame,
+            flame_count: 0,
         }
+    }
+
+    fn flame_buffer(device: &wgpu::Device, cells: &[[f32; 2]]) -> wgpu::Buffer {
+        let one = [[0.0f32; 2]];
+        let cells = if cells.is_empty() { &one[..] } else { cells };
+        wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("path trace flame cells"),
+                contents: bytemuck::cast_slice(cells),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        )
     }
 
     fn grid(device: &wgpu::Device, cells: [u32; 3]) -> wgpu::Texture {
@@ -425,6 +490,7 @@ impl PtVolumeGpu {
         params: &wgpu::Buffer,
         grid: &wgpu::Texture,
         sampler: &wgpu::Sampler,
+        flame: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         let view = grid.create_view(&wgpu::TextureViewDescriptor::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -442,6 +508,10 @@ impl PtVolumeGpu {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: flame.as_entire_binding(),
                 },
             ],
         })
@@ -651,7 +721,6 @@ impl PathTracer {
         if data.cells != v.cells {
             v.cells = data.cells;
             v.grid = PtVolumeGpu::grid(device, data.cells);
-            v.bind = PtVolumeGpu::bind(device, &v.layout, &v.params, &v.grid, &v.sampler);
             v.key = usize::MAX;
         }
         if data.key != v.key {
@@ -680,6 +749,10 @@ impl PathTracer {
                 },
             );
             v.key = data.key;
+            let cells = flame_cells(data.flame, data.cells);
+            v.flame_count = cells.len() as u32;
+            v.flame = PtVolumeGpu::flame_buffer(device, &cells);
+            v.bind = PtVolumeGpu::bind(device, &v.layout, &v.params, &v.grid, &v.sampler, &v.flame);
             changed = true;
         }
         let size = data.max - data.min;
@@ -709,6 +782,7 @@ impl PathTracer {
                 data.time,
                 thick * (1.0 + detail),
             ],
+            cells: [data.cells[0], data.cells[1], data.cells[2], v.flame_count],
         };
         if params != v.last {
             queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&params));
@@ -1171,5 +1245,46 @@ impl PathTracer {
         pass.set_pipeline(&self.resolve);
         pass.set_bind_group(0, resolve_bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod flame_tests {
+    use super::flame_cells;
+
+    #[test]
+    fn a_flame_is_aimed_at_by_its_cells_and_their_neighbours_by_how_bright() {
+        // One cell burning in the middle of a 4×4×4 grid, one dimly in a
+        // corner.
+        let mut flame = vec![0u8; 64];
+        let index = |i: usize, j: usize, k: usize| (k * 4 + j) * 4 + i;
+        flame[index(1, 1, 1)] = 255;
+        flame[index(3, 3, 3)] = 51;
+        let cells = flame_cells(&flame, [4, 4, 4]);
+        let chosen: Vec<u32> = cells.iter().map(|c| c[0].to_bits()).collect();
+        // The bright cell's 27 and the dim one's 8, with no cell twice.
+        assert!(chosen.contains(&(index(1, 1, 1) as u32)));
+        assert!(
+            chosen.contains(&(index(2, 2, 2) as u32)),
+            "a neighbour it glows into"
+        );
+        assert!(chosen.contains(&(index(3, 3, 3) as u32)));
+        assert!(
+            !chosen.contains(&(index(0, 0, 3) as u32)),
+            "too far from either"
+        );
+        // Running shares, ending at all of it.
+        assert!(cells.windows(2).all(|w| w[1][1] >= w[0][1]));
+        assert!((cells.last().unwrap()[1] - 1.0).abs() < 1e-6);
+        // The bright neighbourhood takes nearly all of it.
+        let share = |i: usize| {
+            let at = cells
+                .iter()
+                .position(|c| c[0].to_bits() == i as u32)
+                .unwrap();
+            cells[at][1] - if at > 0 { cells[at - 1][1] } else { 0.0 }
+        };
+        assert!(share(index(1, 1, 1)) > share(index(3, 3, 3)) * 20.0);
+        assert!(flame_cells(&[0u8; 8], [2, 2, 2]).is_empty());
     }
 }

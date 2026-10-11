@@ -98,11 +98,17 @@ struct PtVolume {
     // per metre; z: seconds, which they drift with; w: the most the
     // thickness can reach anywhere, which the tracking steps by.
     detail: vec4<f32>,
+    // The cells: x, y, z counted, w: how many glowing cells the flame can be
+    // aimed at by (`pt_flame_cells`); none when there is no flame.
+    cells: vec4<u32>,
 };
 
 @group(1) @binding(0) var<uniform> pt_volume: PtVolume;
 @group(1) @binding(1) var pt_volume_grid: texture_3d<f32>;
 @group(1) @binding(2) var pt_volume_sampler: sampler;
+// The cells a flame can glow in, each with the running share of the glow up
+// to and including it: x the cell's index as bits, y the share.
+@group(1) @binding(3) var<storage, read> pt_flame_cells: array<vec2<f32>>;
 
 struct PtMaterialOut {
     surface: Surface,
@@ -524,6 +530,65 @@ fn pt_flame(f: f32) -> vec3<f32> {
     return c * f * 8.0 * pt_volume.color.w;
 }
 
+// The light a surface at `p` gets straight from the flame: one point picked
+// in the flame, as often as its cell glows, and its glow over the distance
+// squared — as the lux a lamp would deliver along `l`, which `brdf_shade`
+// takes. The smoke between is the caller's to count.
+struct PtFlameLight {
+    l: vec3<f32>,
+    e: vec3<f32>,
+    reach: f32,
+};
+
+fn pt_flame_light(p: vec3<f32>) -> PtFlameLight {
+    var out: PtFlameLight;
+    out.e = vec3<f32>(0.0);
+    out.l = vec3<f32>(0.0, 0.0, 1.0);
+    out.reach = 0.0;
+    let count = pt_volume.cells.w;
+    if (!pt_volume_on() || count == 0u) {
+        return out;
+    }
+    // The cell, by its share.
+    let u = pt_random();
+    var lo = 0u;
+    var hi = count - 1u;
+    loop {
+        if (lo >= hi) {
+            break;
+        }
+        let mid = (lo + hi) / 2u;
+        if (pt_flame_cells[mid].y < u) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    var before = 0.0;
+    if (lo > 0u) {
+        before = pt_flame_cells[lo - 1u].y;
+    }
+    let share = pt_flame_cells[lo].y - before;
+    if (share <= 0.0) {
+        return out;
+    }
+    let index = bitcast<u32>(pt_flame_cells[lo].x);
+    let n = pt_volume.cells.xyz;
+    let cell = vec3<u32>(index % n.x, (index / n.x) % n.y, index / (n.x * n.y));
+    let size = (pt_volume.hi.xyz - pt_volume.lo.xyz) / vec3<f32>(n);
+    let x = pt_volume.lo.xyz + (vec3<f32>(cell) + vec3<f32>(pt_random(), pt_random(), pt_random())) * size;
+    let to = x - p;
+    let dist2 = max(dot(to, to), 1e-8);
+    let reach = sqrt(dist2);
+    out.l = to / reach;
+    out.reach = reach;
+    // Chosen with this probability per cubic metre.
+    let pdf = share / (size.x * size.y * size.z);
+    let glow = pt_flame(pt_volume_at(x).y);
+    out.e = glow / (dist2 * pdf);
+    return out;
+}
+
 // How much of the light gets through the smoke along a ray, up to `reach`:
 // ratio tracking — stepping by the thickest the smoke can be and keeping
 // the fraction each step's real smoke lets by. Unbiased, and never zero
@@ -630,7 +695,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                     }
                     let x = origin + dir * t;
                     let here = pt_volume_at(x);
-                    radiance += throughput * pt_flame(here.y) / most;
+                    // After a surface, the flame was aimed at directly (see
+                    // `pt_flame_light`); found again here it would count
+                    // twice.
+                    if (last_pdf < 0.0 || pt_volume.cells.w == 0u) {
+                        radiance += throughput * pt_flame(here.y) / most;
+                    }
                     if (pt_random() * most < here.x) {
                         scattered = true;
                         at = x;
@@ -933,6 +1003,18 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                     let e = le / pdf * pt_transmittance(start, l, sqrt(dist2));
                     let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
                     radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
+                }
+            }
+        }
+
+        // The flame, aimed at as a light of its own: without it a floor by a
+        // fire found the glow only when a bounce happened to go into it.
+        if (pt_volume.cells.w > 0u) {
+            let flame = pt_flame_light(p);
+            if (pt_luminance(flame.e) > 0.0 && dot(flame.l, geometric) > 0.0) {
+                if (pt_trace(start, flame.l, flame.reach * 0.999, true, PT_NONE).t < 0.0) {
+                    let through = pt_transmittance(start, flame.l, flame.reach);
+                    radiance += throughput * through * brdf_shade(s, n, v, flame.l, flame.e, true, true);
                 }
             }
         }
