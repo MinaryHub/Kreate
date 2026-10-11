@@ -18,6 +18,12 @@ pub fn source() -> &'static str {
 
 const GRID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 
+/// How thick smoke at full density is, per metre: the raster march's and
+/// the path tracer's, so the two pictures agree.
+pub const THICKNESS: f32 = 15.0;
+/// How brightly a flame glows in the linear picture.
+pub const GLOW: f32 = 4.0;
+
 /// One gas to draw this frame.
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeData<'a> {
@@ -253,12 +259,12 @@ impl Volumes {
                 inv_view_proj: inv.to_cols_array_2d(),
                 box_min: [lo.x, lo.y, lo.z, 0.0],
                 box_max: [hi.x, hi.y, hi.z, 0.0],
-                smoke_color: [v.smoke_color[0], v.smoke_color[1], v.smoke_color[2], 4.0],
+                smoke_color: [v.smoke_color[0], v.smoke_color[1], v.smoke_color[2], GLOW],
                 light: [light.x, light.y, light.z, 0.0],
                 march: [
                     (cell * 0.5) as f32,
                     400.0,
-                    15.0,
+                    THICKNESS,
                     if hdr { 1.0 } else { 0.0 },
                 ],
                 region: [region.0 as f32, region.1 as f32, 0.0, 0.0],

@@ -2678,6 +2678,11 @@ impl Viewport {
             self.volume_signature = signature;
             self.restart_accumulation();
         }
+        // The path tracer travels through the first; the raster march draws
+        // them all where it is not tracing.
+        if self.pathtracer.set_volume(device, queue, volumes.first()) {
+            self.restart_accumulation();
+        }
         if volumes.is_empty() && self.volumes.is_empty() {
             return;
         }
@@ -5030,11 +5035,10 @@ impl Viewport {
             // against. A full mean is left on the picture and shown again.
             if self.frame_sample.is_some() || !self.accum_applies {
                 self.encode_lit_scene(encoder, draws);
+                // The tracer travels through the smoke itself — its shadows,
+                // the light it scatters and the flame's glow on what is near.
                 self.pathtracer
                     .render(encoder, &self.shading_bind, self.hdr.view());
-                // Over the traced picture, by the raster depth: the tracer
-                // itself does not see the smoke.
-                self.volumes.draw(encoder, self.hdr.view(), true);
                 if self.path_trace_denoise {
                     self.denoise.apply(
                         encoder,

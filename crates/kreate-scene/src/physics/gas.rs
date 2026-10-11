@@ -377,9 +377,12 @@ impl GasSim {
         if s.turbulence > 0.0 {
             let across = 4.0 * self.h;
             let drift = up * (-0.4 * self.time / across);
-            // As strong as the flow is fast: an eddy turns over in the time
-            // the flow takes to cross it, so still smoke is left still and a
-            // fast plume is torn at its edges.
+            // They turn the flow, not speed it: each cell's velocity is
+            // swung about the noise's direction, as fast as the flow crosses
+            // an eddy — so still smoke is left still and a fast plume is torn
+            // at its edges — and at right angles to itself, so no energy is
+            // added. A push along the noise instead fed on the speed it made,
+            // and a hot fire's plume ran away with it.
             let flow = &centre;
             for k in 0..n[2] {
                 for j in 0..n[1] {
@@ -390,7 +393,12 @@ impl GasSim {
                         }
                         let p = Vec3::new(i as f32, j as f32, k as f32) * (self.h / across) + drift;
                         let speed = flow[c].length();
-                        force[c] += curl_noise(p) * (0.5 * s.turbulence * speed * speed / across);
+                        let Some(axis) = curl_noise(p).try_normalize() else {
+                            continue;
+                        };
+                        // Radians a second, held below a quarter turn a step.
+                        let turn = (0.3 * s.turbulence * speed / across).min(0.25 / dt.max(1e-4));
+                        force[c] += axis.cross(flow[c]) * turn;
                     }
                 }
             }
@@ -932,5 +940,45 @@ mod tests {
         );
         // And the same every time.
         assert_eq!(plume(1.0).density, stirred.density);
+    }
+
+    #[test]
+    fn a_hot_fire_stirred_hard_does_not_run_away() {
+        let mut sim = GasSim::new(
+            domain(),
+            16,
+            GasSettings {
+                turbulence: 3.0,
+                ..GasSettings::default()
+            },
+        );
+        sim.add_source(
+            &cube_at(Vec3::new(0.5, 0.5, 0.2), 0.3),
+            Emission {
+                smoke: 0.25,
+                heat: 2.0,
+                fuel: 1.0,
+                velocity: Vec3::ZERO,
+            },
+        );
+        let started = std::time::Instant::now();
+        for _ in 0..48 {
+            sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+        }
+        let fastest = sim
+            .u
+            .iter()
+            .chain(&sim.v)
+            .chain(&sim.w)
+            .fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(
+            fastest.is_finite() && fastest < 20.0,
+            "the flow ran away to {fastest} m/s"
+        );
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }

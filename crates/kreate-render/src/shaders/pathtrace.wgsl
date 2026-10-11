@@ -84,6 +84,26 @@ const PT_SURFACE: u32 = 4u;
 
 // What a compiled material decided at a point: the generated `pt_material`
 // fills it, from whichever material the surface names.
+// A baked gas: smoke that absorbs and scatters, flame that glows. One per
+// scene; `lo.w` says whether there is one.
+struct PtVolume {
+    // The box in the world; w: 1 when there is a volume.
+    lo: vec4<f32>,
+    // w: how thick the smoke is per metre at full density.
+    hi: vec4<f32>,
+    // The smoke's colour — what of the light it scatters, not absorbs — and
+    // w: how brightly the flame glows.
+    color: vec4<f32>,
+    // x: how much finer-than-cell wisps carve the smoke; y: their frequency
+    // per metre; z: seconds, which they drift with; w: the most the
+    // thickness can reach anywhere, which the tracking steps by.
+    detail: vec4<f32>,
+};
+
+@group(1) @binding(0) var<uniform> pt_volume: PtVolume;
+@group(1) @binding(1) var pt_volume_grid: texture_3d<f32>;
+@group(1) @binding(2) var pt_volume_sampler: sampler;
+
 struct PtMaterialOut {
     surface: Surface,
     // Tangent-space, +Z out of the surface.
@@ -444,6 +464,95 @@ fn pt_power(a: f32, b: f32) -> f32 {
     return select(1.0, a2 / (a2 + b2), a2 + b2 > 0.0);
 }
 
+fn pt_volume_on() -> bool {
+    return pt_volume.lo.w > 0.5;
+}
+
+// Where a ray is inside the volume's box: from x to y, empty when y <= x.
+fn pt_volume_span(origin: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
+    let inv = 1.0 / dir;
+    let t0 = (pt_volume.lo.xyz - origin) * inv;
+    let t1 = (pt_volume.hi.xyz - origin) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    return vec2<f32>(max(max(max(lo.x, lo.y), lo.z), 0.0), min(min(hi.x, hi.y), hi.z));
+}
+
+fn pt_lattice(p: vec3<f32>) -> f32 {
+    var q = fract(p * 0.3183099 + vec3<f32>(0.71, 0.113, 0.419));
+    q = q * 17.0;
+    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+fn pt_value_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(pt_lattice(i), pt_lattice(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+            mix(pt_lattice(i + vec3<f32>(0.0, 1.0, 0.0)), pt_lattice(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
+        mix(mix(pt_lattice(i + vec3<f32>(0.0, 0.0, 1.0)), pt_lattice(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+            mix(pt_lattice(i + vec3<f32>(0.0, 1.0, 1.0)), pt_lattice(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y),
+        u.z);
+}
+
+// The smoke's thickness per metre and the flame at a point: the grid, with
+// its thin edges eaten by wisps as the viewport draws them.
+fn pt_volume_at(p: vec3<f32>) -> vec2<f32> {
+    let uvw = (p - pt_volume.lo.xyz) / (pt_volume.hi.xyz - pt_volume.lo.xyz);
+    if (any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0))) {
+        return vec2<f32>(0.0);
+    }
+    let g = textureSampleLevel(pt_volume_grid, pt_volume_sampler, uvw, 0.0).rg;
+    var smoke = g.r;
+    let d = pt_volume.detail;
+    if (d.x > 0.0 && smoke > 0.002) {
+        let q = (p - pt_volume.lo.xyz) * d.y - vec3<f32>(0.0, 0.0, d.z * 0.6 * d.y);
+        let wisps = (pt_value_noise(q) * 0.5 + pt_value_noise(q * 2.03) * 0.25 + pt_value_noise(q * 4.07) * 0.125) / 0.875;
+        let eaten = d.x * 0.85 * (1.0 - wisps);
+        smoke = clamp((smoke - eaten) / max(1.0 - eaten, 0.05), 0.0, 1.0) * (1.0 + d.x);
+    }
+    return vec2<f32>(smoke * pt_volume.hi.w, g.g);
+}
+
+// The light a flame gives per metre: dark red to orange to yellowish white.
+fn pt_flame(f: f32) -> vec3<f32> {
+    let ember = vec3<f32>(0.5, 0.04, 0.0);
+    let orange = vec3<f32>(1.0, 0.42, 0.05);
+    let white = vec3<f32>(1.0, 0.86, 0.55);
+    let c = mix(mix(ember, orange, smoothstep(0.0, 0.45, f)), white, smoothstep(0.55, 1.0, f));
+    return c * f * 8.0 * pt_volume.color.w;
+}
+
+// How much of the light gets through the smoke along a ray, up to `reach`:
+// ratio tracking — stepping by the thickest the smoke can be and keeping
+// the fraction each step's real smoke lets by. Unbiased, and never zero
+// for a thin wisp, as a single yes-or-no would be.
+fn pt_transmittance(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> f32 {
+    if (!pt_volume_on()) {
+        return 1.0;
+    }
+    let span = pt_volume_span(origin, dir);
+    let end = min(span.y, reach);
+    if (end <= span.x) {
+        return 1.0;
+    }
+    let most = pt_volume.detail.w;
+    var t = span.x;
+    var through = 1.0;
+    for (var i = 0; i < 256; i = i + 1) {
+        t += -log(1.0 - pt_random()) / most;
+        if (t >= end) {
+            break;
+        }
+        through *= 1.0 - pt_volume_at(origin + dir * t).x / most;
+        if (through < 1e-3) {
+            return 0.0;
+        }
+    }
+    return through;
+}
+
 @compute @workgroup_size(8, 8)
 fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= pt.size.x || id.y >= pt.size.y) {
@@ -501,6 +610,84 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let hit = pt_trace(origin, dir, 1e30, false, skip);
         skip = PT_NONE;
+        // Through the smoke first, as far as the surface it would meet:
+        // delta tracking. Tentative collisions every so far by the thickest
+        // the smoke can be; at each the flame there adds its glow, and the
+        // real smoke there, as a share of that thickest, is the chance the
+        // path scatters off it rather than passing on.
+        if (pt_volume_on()) {
+            let span = pt_volume_span(origin, dir);
+            let end = select(span.y, min(span.y, hit.t), hit.t >= 0.0);
+            var scattered = false;
+            var at = origin;
+            if (end > span.x) {
+                let most = pt_volume.detail.w;
+                var t = span.x;
+                for (var i = 0; i < 512; i = i + 1) {
+                    t += -log(1.0 - pt_random()) / most;
+                    if (t >= end) {
+                        break;
+                    }
+                    let x = origin + dir * t;
+                    let here = pt_volume_at(x);
+                    radiance += throughput * pt_flame(here.y) / most;
+                    if (pt_random() * most < here.x) {
+                        scattered = true;
+                        at = x;
+                        break;
+                    }
+                }
+            }
+            if (scattered) {
+                bounce += 1u;
+                if (bounce > pt.max_bounces) {
+                    break;
+                }
+                // What the smoke scatters rather than absorbs.
+                throughput *= pt_volume.color.rgb;
+                // A lamp, through whatever is between: the smoke scatters
+                // evenly every way, a quarter-π steradians' worth to each.
+                if (pt.light_count > 0u) {
+                    let k = min(u32(pt_random() * f32(pt.light_count)), pt.light_count - 1u);
+                    let light = lights[k];
+                    if ((light.flags & FLAG_GEOMETRY) == 0u) {
+                        let rel = at - pt.eye.xyz;
+                        let to_light = direction_to(light, rel);
+                        let e = illuminance_at(light, rel) * f32(pt.light_count);
+                        var reach = 1e30;
+                        if (light.falloff != FALLOFF_PARALLEL) {
+                            reach = length(light.position.xyz - rel) * 0.999;
+                        }
+                        if (pt_luminance(e) > 0.0) {
+                            var lit = 1.0;
+                            if (casts_shadow(light)) {
+                                if (pt_trace(at, to_light, reach, true, PT_NONE).t >= 0.0) {
+                                    lit = 0.0;
+                                } else {
+                                    lit = pt_transmittance(at, to_light, reach);
+                                }
+                            }
+                            radiance += throughput * e * (lit / 12.566371);
+                        }
+                    }
+                }
+                // On, in a direction even over the sphere.
+                let z = 1.0 - 2.0 * pt_random();
+                let r = sqrt(max(1.0 - z * z, 0.0));
+                let a = 6.2831853 * pt_random();
+                origin = at;
+                dir = vec3<f32>(r * cos(a), r * sin(a), z);
+                last_pdf = -1.0;
+                if (bounce >= 3u) {
+                    let keep = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 0.95);
+                    if (pt_random() > keep) {
+                        break;
+                    }
+                    throughput /= keep;
+                }
+                continue;
+            }
+        }
         if (hit.t < 0.0) {
             var weight = 1.0;
             if (last_pdf >= 0.0 && pt.env.z != 0u) {
@@ -708,7 +895,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             if (dot(l, geometric) > 0.0) {
                 let pdf = env_share * pt_env_pdf(l);
                 if (pdf > 0.0 && pt_trace(start, l, 1e30, true, PT_NONE).t < 0.0) {
-                    let e = pt_environment(l) / pdf;
+                    let e = pt_environment(l) / pdf * pt_transmittance(start, l, 1e30);
                     let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
                     radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
                 }
@@ -741,8 +928,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 if (visible) {
                     let pdf = pt_emitter_pdf(le, dist2, cos_l);
                     // The light arriving, as the lux a lamp would deliver
-                    // perpendicular to the ray: what `brdf_shade` takes.
-                    let e = le / pdf;
+                    // perpendicular to the ray: what `brdf_shade` takes —
+                    // less what smoke between keeps back.
+                    let e = le / pdf * pt_transmittance(start, l, sqrt(dist2));
                     let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
                     radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
                 }
@@ -784,7 +972,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
                 let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true, PT_NONE).t < 0.0;
                 if (lit) {
-                    radiance += throughput
+                    var through = 1.0;
+                    if (casts_shadow(light)) {
+                        through = pt_transmittance(start, aim, reach);
+                    }
+                    radiance += throughput * through
                         * brdf_shade(s, n, v, to_light, e, lights_diffuse(light), lights_specular(light));
                 }
             }

@@ -311,6 +311,141 @@ pub struct PathTracer {
     resolve_bind: Option<wgpu::BindGroup>,
     size: (u32, u32),
     sample: u32,
+    /// A baked gas the paths travel through: group 1.
+    volume: PtVolumeGpu,
+}
+
+/// The volume's parameters, as `PtVolume` in the shader reads them.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct PtVolumeParams {
+    lo: [f32; 4],
+    hi: [f32; 4],
+    color: [f32; 4],
+    detail: [f32; 4],
+}
+
+struct PtVolumeGpu {
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    grid: wgpu::Texture,
+    cells: [u32; 3],
+    key: usize,
+    bind: wgpu::BindGroup,
+    last: PtVolumeParams,
+}
+
+impl PtVolumeGpu {
+    fn new(device: &wgpu::Device) -> Self {
+        let c = wgpu::ShaderStages::COMPUTE;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("path trace volume"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: c,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: c,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: c,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("path trace volume params"),
+            size: std::mem::size_of::<PtVolumeParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("path trace volume"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        // An empty grid of one cell until there is a gas: the group is
+        // always bound, and `lo.w` of zero says there is nothing in it.
+        let cells = [1, 1, 1];
+        let grid = Self::grid(device, cells);
+        let bind = Self::bind(device, &layout, &params, &grid, &sampler);
+        Self {
+            layout,
+            params,
+            sampler,
+            grid,
+            cells,
+            key: usize::MAX,
+            bind,
+            last: PtVolumeParams::default(),
+        }
+    }
+
+    fn grid(device: &wgpu::Device, cells: [u32; 3]) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("path trace volume grid"),
+            size: wgpu::Extent3d {
+                width: cells[0],
+                height: cells[1],
+                depth_or_array_layers: cells[2],
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        params: &wgpu::Buffer,
+        grid: &wgpu::Texture,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        let view = grid.create_view(&wgpu::TextureViewDescriptor::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path trace volume"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    }
 }
 
 impl PathTracer {
@@ -340,6 +475,7 @@ impl PathTracer {
             count: None,
         };
         let c = wgpu::ShaderStages::COMPUTE;
+        let volume = PtVolumeGpu::new(device);
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path trace scene"),
             entries: &[
@@ -386,7 +522,7 @@ impl PathTracer {
         });
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path trace"),
-            bind_group_layouts: &[Some(&scene_layout), None, Some(shading)],
+            bind_group_layouts: &[Some(&scene_layout), Some(&volume.layout), Some(shading)],
             immediate_size: 0,
         });
         let trace = Self::trace_pipeline(device, &trace_layout, &source("", 0));
@@ -485,7 +621,101 @@ impl PathTracer {
             resolve_bind: None,
             size: (0, 0),
             sample: 0,
+            volume,
         }
+    }
+
+    /// The gas the paths travel through, or none. Its grid is uploaded when
+    /// it is a new one; whether anything changed is the answer, for the
+    /// caller to start the sum again.
+    pub fn set_volume(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        volume: Option<&crate::volume::VolumeData<'_>>,
+    ) -> bool {
+        let v = &mut self.volume;
+        let Some(data) = volume.filter(|d| {
+            let count = d.cells.iter().map(|c| *c as usize).product::<usize>();
+            !d.cells.contains(&0) && d.smoke.len() == count && d.flame.len() == count
+        }) else {
+            let off = PtVolumeParams::default();
+            let changed = v.last != off;
+            if changed {
+                queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&off));
+                v.last = off;
+            }
+            return changed;
+        };
+        let mut changed = false;
+        if data.cells != v.cells {
+            v.cells = data.cells;
+            v.grid = PtVolumeGpu::grid(device, data.cells);
+            v.bind = PtVolumeGpu::bind(device, &v.layout, &v.params, &v.grid, &v.sampler);
+            v.key = usize::MAX;
+        }
+        if data.key != v.key {
+            let mut bytes = Vec::with_capacity(data.smoke.len() * 2);
+            for (s, f) in data.smoke.iter().zip(data.flame) {
+                bytes.push(*s);
+                bytes.push(*f);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &v.grid,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(data.cells[0] * 2),
+                    rows_per_image: Some(data.cells[1]),
+                },
+                wgpu::Extent3d {
+                    width: data.cells[0],
+                    height: data.cells[1],
+                    depth_or_array_layers: data.cells[2],
+                },
+            );
+            v.key = data.key;
+            changed = true;
+        }
+        let size = data.max - data.min;
+        let cell = (size.x / data.cells[0] as f64)
+            .min(size.y / data.cells[1] as f64)
+            .min(size.z / data.cells[2] as f64);
+        let detail = data.detail.clamp(0.0, 1.0);
+        // As thick as the raster view draws it, so the two agree.
+        let thick = crate::volume::THICKNESS;
+        let params = PtVolumeParams {
+            lo: [data.min.x as f32, data.min.y as f32, data.min.z as f32, 1.0],
+            hi: [
+                data.max.x as f32,
+                data.max.y as f32,
+                data.max.z as f32,
+                thick,
+            ],
+            color: [
+                data.smoke_color[0],
+                data.smoke_color[1],
+                data.smoke_color[2],
+                crate::volume::GLOW,
+            ],
+            detail: [
+                detail,
+                (1.0 / (cell * 2.0)) as f32,
+                data.time,
+                thick * (1.0 + detail),
+            ],
+        };
+        if params != v.last {
+            queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&params));
+            v.last = params;
+            changed = true;
+        }
+        changed
     }
 
     fn trace_pipeline(
@@ -917,6 +1147,7 @@ impl PathTracer {
             });
             pass.set_pipeline(&self.trace);
             pass.set_bind_group(0, scene_bind, &[]);
+            pass.set_bind_group(1, &self.volume.bind, &[]);
             pass.set_bind_group(2, shading, &[]);
             pass.dispatch_workgroups(self.size.0.div_ceil(8), self.size.1.div_ceil(8), 1);
         }
