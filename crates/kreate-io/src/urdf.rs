@@ -22,12 +22,16 @@
 //! COLLADA) and taken as metres and Z up where it does not (STL, OBJ), as ROS
 //! takes them.
 //!
-//! # What is not kept, and said
+//! # What else is kept
 //!
-//! Collision shapes (a robot is looked at here, not simulated), inertia,
-//! joint limits, mimic joints and the `<gazebo>` / `<transmission>` blocks.
-//! A mesh that cannot be found is a note, not a failure: the rest of the
-//! robot still comes in.
+//! Each joint's kind, limits, effort, velocity and the joint it mimics, and
+//! each link's inertia, ride on their objects (`kreate_scene::robot`), so a
+//! robot is posed within its limits and written back out whole. Collision
+//! shapes come in as hidden meshes under their link, for the same reason.
+//!
+//! The `<gazebo>` and `<transmission>` blocks are not read, and said. A mesh
+//! that cannot be found is a note, not a failure: the rest of the robot
+//! still comes in.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +42,7 @@ use crate::ir::{
     ImportMaterial, ImportMesh, ImportNode, ImportScene, ImportTransform, LossyNote, SourceMetadata,
 };
 use crate::xml::{self, Element};
+use kreate_scene::robot::{Inertial, Joint, JointKind, Mimic, RobotPart};
 
 /// Why a robot description could not be read at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,25 +163,85 @@ pub fn parse_urdf(text: &str, base: &Path, load: &LoadPart<'_>) -> Result<Import
                     ),
                 });
             }
+            let limit = j.child("limit");
+            let attr = |name: &str| {
+                limit
+                    .and_then(|l| l.attr(name))
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            };
+            joint.robot = Some(RobotPart::Joint(Joint {
+                kind: JointKind::from_tag(kind).unwrap_or_default(),
+                lower: attr("lower"),
+                upper: attr("upper"),
+                effort: attr("effort"),
+                velocity: attr("velocity"),
+                mimic: j.child("mimic").and_then(|m| {
+                    Some(Mimic {
+                        joint: m.attr("joint")?.to_string(),
+                        multiplier: m
+                            .attr("multiplier")
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(1.0),
+                        offset: m
+                            .attr("offset")
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0.0),
+                    })
+                }),
+                ..Joint::default()
+            }));
             parent = Some(scene.nodes.len());
             scene.nodes.push(joint);
         }
         let mut node = ImportNode::new(name);
         node.parent = parent;
         node.transform = link_transform;
+        node.robot = Some(RobotPart::Link {
+            inertial: link.child("inertial").map(|i| {
+                let o = origin_of(i);
+                let inertia = i.child("inertia");
+                let get = |n: &str| {
+                    inertia
+                        .and_then(|x| x.attr(n))
+                        .and_then(|v| v.trim().parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                Inertial {
+                    origin: kreate_math::DTransform {
+                        translation: o.translation.as_dvec3(),
+                        rotation: o.rotation.as_dquat(),
+                        scale: kreate_math::DVec3::ONE,
+                    },
+                    mass: i
+                        .child("mass")
+                        .and_then(|m| m.attr("value"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0.0),
+                    inertia: [
+                        get("ixx"),
+                        get("ixy"),
+                        get("ixz"),
+                        get("iyy"),
+                        get("iyz"),
+                        get("izz"),
+                    ],
+                }
+            }),
+        });
         let at = scene.nodes.len();
         scene.nodes.push(node);
         link_node.insert(name.to_string(), at);
 
         for (k, visual) in link.all("visual").enumerate() {
             add_visual(
-                &mut scene, visual, name, k, at, &named, base, load, &mut parts,
+                &mut scene, visual, name, k, at, &named, base, load, &mut parts, false,
             );
         }
-        if link.child("collision").is_some() && link.child("visual").is_none() {
-            scene.source.notes.push(LossyNote::Unsupported {
-                what: format!("link `{name}` has only a collision shape, which is not shown"),
-            });
+        for (k, collision) in link.all("collision").enumerate() {
+            add_visual(
+                &mut scene, collision, name, k, at, &named, base, load, &mut parts, true,
+            );
         }
         // Its children next.
         for j in &joints {
@@ -190,11 +255,6 @@ pub fn parse_urdf(text: &str, base: &Path, load: &LoadPart<'_>) -> Result<Import
     if root.child("transmission").is_some() || root.child("gazebo").is_some() {
         scene.source.notes.push(LossyNote::Unsupported {
             what: "transmissions and simulator settings are not read".into(),
-        });
-    }
-    if joints.iter().any(|j| j.child("limit").is_some()) {
-        scene.source.notes.push(LossyNote::Unsupported {
-            what: "joint limits are not kept: each joint turns freely about its empty's Z".into(),
         });
     }
     Ok(scene)
@@ -218,19 +278,25 @@ fn add_visual(
     base: &Path,
     load: &LoadPart<'_>,
     parts: &mut HashMap<PathBuf, ImportScene>,
+    collision: bool,
 ) {
     let Some(geometry) = visual.child("geometry") else {
         return;
     };
+    let what = if collision { "collision" } else { "visual" };
     let mut node = ImportNode::new(visual.attr("name").map(str::to_string).unwrap_or_else(|| {
         if index == 0 {
-            format!("{link}_visual")
+            format!("{link}_{what}")
         } else {
-            format!("{link}_visual_{index}")
+            format!("{link}_{what}_{index}")
         }
     }));
     node.parent = Some(under);
     node.transform = origin_of(visual);
+    if collision {
+        node.robot = Some(RobotPart::Collision);
+        node.hidden = true;
+    }
     // Its material: one by name, or one given in place.
     let material = visual.child("material").and_then(|m| {
         if let Some(own) =
@@ -308,6 +374,11 @@ fn add_visual(
     let at = scene.nodes.len();
     scene.nodes.push(node);
     let Some(mut part) = part else { return };
+    if collision {
+        for n in &mut part.nodes {
+            n.hidden = true;
+        }
+    }
     // The visual's colour, on what has none of its own.
     if let Some(material) = material {
         let local = part.materials.len();
@@ -322,7 +393,13 @@ fn add_visual(
             }
         }
     }
-    scene.graft(part, Some(at));
+    let tops = scene.graft(part, Some(at));
+    if collision {
+        // A part with no hierarchy got a node a mesh; hidden too.
+        for t in tops {
+            scene.nodes[t].hidden = true;
+        }
+    }
 }
 
 /// Where a mesh file is: beside the description, under a ROS package found
@@ -419,6 +496,349 @@ fn number(text: Option<&str>, default: f32) -> f32 {
     text.and_then(|t| t.trim().parse().ok()).unwrap_or(default)
 }
 
+// --- writing ---------------------------------------------------------------------
+
+/// A robot written out: the description, and its mesh files by the path
+/// the description names them by (`meshes/…stl`, beside it).
+pub struct WrittenRobot {
+    pub urdf: String,
+    pub files: Vec<(String, Vec<u8>)>,
+    pub notes: Vec<LossyNote>,
+}
+
+/// The document as a robot description.
+///
+/// A robot that came in from one goes back out as it was — its links, its
+/// joints with their limits and the joints they mimic, its links' inertia,
+/// visual and collision meshes with their colours — at rest, whatever pose
+/// it is in now. A document that is not a robot is written as one: every
+/// object a link, fixed to its parent, under one `base_link`.
+pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobot {
+    use kreate_scene::document::{ObjectData, ObjectId};
+    use kreate_scene::robot::RobotPart;
+    use std::fmt::Write as _;
+
+    let mut notes = Vec::new();
+    let objects: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+    let part = |id: ObjectId| doc.object(id).and_then(|o| o.robot.clone());
+    // Where an object would be with every joint at rest.
+    let rest_world = |id: ObjectId| -> kreate_math::DAffine3 {
+        let mut chain = Vec::new();
+        let mut at = Some(id);
+        while let Some(i) = at {
+            if chain.len() > objects.len() {
+                break;
+            }
+            chain.push(i);
+            at = doc.object(i).and_then(|o| o.parent);
+        }
+        let mut world = kreate_math::DAffine3::IDENTITY;
+        for i in chain.into_iter().rev() {
+            let Some(o) = doc.object(i) else { continue };
+            let local = match &o.robot {
+                Some(RobotPart::Joint(j)) => j.rest,
+                _ => o.transform,
+            };
+            world = world * o.parent_inverse * local.to_affine();
+        }
+        world
+    };
+    let robot_doc = objects
+        .iter()
+        .any(|id| matches!(part(*id), Some(RobotPart::Link { .. })));
+    // The links, and each object's link: the nearest link at or above it.
+    let is_link = |id: ObjectId| {
+        if robot_doc {
+            matches!(part(id), Some(RobotPart::Link { .. }))
+        } else {
+            !matches!(
+                doc.object(id).map(|o| &o.data),
+                Some(ObjectData::Light(_) | ObjectData::Camera(_))
+            )
+        }
+    };
+    let link_of = |id: ObjectId| -> Option<ObjectId> {
+        let mut at = Some(id);
+        for _ in 0..=objects.len() {
+            let i = at?;
+            if is_link(i) {
+                return Some(i);
+            }
+            at = doc.object(i).and_then(|o| o.parent);
+        }
+        None
+    };
+    let links: Vec<ObjectId> = objects.iter().copied().filter(|id| is_link(*id)).collect();
+    // Names, unique: a URDF names links and joints, and two the same is an
+    // error to every reader.
+    let mut taken = std::collections::HashSet::new();
+    let mut unique = |name: &str| -> String {
+        let base: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let base = if base.is_empty() {
+            "part".to_string()
+        } else {
+            base
+        };
+        let mut n = base.clone();
+        let mut k = 1;
+        while !taken.insert(n.clone()) {
+            k += 1;
+            n = format!("{base}_{k}");
+        }
+        n
+    };
+    let link_name: std::collections::HashMap<ObjectId, String> = links
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                unique(&doc.object(*id).map(|o| o.name.clone()).unwrap_or_default()),
+            )
+        })
+        .collect();
+    let parent_link = |id: ObjectId| doc.object(id).and_then(|o| o.parent).and_then(link_of);
+    let roots: Vec<ObjectId> = links
+        .iter()
+        .copied()
+        .filter(|l| parent_link(*l).is_none())
+        .collect();
+    let base = if roots.len() == 1 {
+        None
+    } else {
+        Some(unique("base_link"))
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(out, "<?xml version=\"1.0\"?>");
+    let _ = writeln!(out, "<!-- Written by Kreate -->");
+    let _ = writeln!(out, "<robot name=\"{}\">", escape(robot_name));
+    let fmt3 = |v: kreate_math::DVec3| format!("{} {} {}", tidy(v.x), tidy(v.y), tidy(v.z));
+    let origin = |t: &kreate_math::DAffine3| -> String {
+        let (_, rotation, translation) = t.to_scale_rotation_translation();
+        let (yaw, pitch, roll) = rotation.to_euler(kreate_math::glam::EulerRot::ZYX);
+        // Angles under a micro-radian are rounding, not a turn.
+        let rpy =
+            kreate_math::DVec3::new(roll, pitch, yaw).map(|a| if a.abs() < 1e-6 { 0.0 } else { a });
+        format!(
+            "<origin xyz=\"{}\" rpy=\"{}\"/>",
+            fmt3(translation),
+            fmt3(rpy)
+        )
+    };
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut mesh_file: std::collections::HashMap<kreate_scene::MeshId, String> =
+        std::collections::HashMap::new();
+    let mut materials_written = std::collections::HashSet::new();
+    if let Some(b) = &base {
+        let _ = writeln!(out, "  <link name=\"{}\"/>", escape(b));
+    }
+    for &link in &links {
+        let name = &link_name[&link];
+        let frame = rest_world(link);
+        let inverse = frame.inverse();
+        let _ = writeln!(out, "  <link name=\"{}\">", escape(name));
+        if let Some(RobotPart::Link { inertial: Some(i) }) = part(link) {
+            let t = i.origin.to_affine();
+            let [ixx, ixy, ixz, iyy, iyz, izz] = i.inertia.map(tidy);
+            let _ = writeln!(out, "    <inertial>");
+            let _ = writeln!(out, "      {}", origin(&t));
+            let _ = writeln!(out, "      <mass value=\"{}\"/>", tidy(i.mass));
+            let _ = writeln!(
+                out,
+                "      <inertia ixx=\"{ixx}\" ixy=\"{ixy}\" ixz=\"{ixz}\" iyy=\"{iyy}\" iyz=\"{iyz}\" izz=\"{izz}\"/>"
+            );
+            let _ = writeln!(out, "    </inertial>");
+        }
+        // Its meshes: visual, or under a collision shape.
+        for &id in &objects {
+            let Some(o) = doc.object(id) else { continue };
+            let ObjectData::Mesh(mesh) = o.data else {
+                continue;
+            };
+            if link_of(id) != Some(link) || (robot_doc && is_link(id) && id != link) {
+                continue;
+            }
+            // Under a collision shape?
+            let mut collision = false;
+            let mut at = Some(id);
+            while let Some(i) = at.filter(|i| *i != link) {
+                if matches!(part(i), Some(RobotPart::Collision)) {
+                    collision = true;
+                    break;
+                }
+                at = doc.object(i).and_then(|o| o.parent);
+            }
+            if !collision && !o.visible && robot_doc {
+                continue;
+            }
+            let Some(data) = doc.mesh(mesh) else { continue };
+            let file = mesh_file
+                .entry(mesh)
+                .or_insert_with(|| {
+                    let tag = if collision { "collision" } else { "visual" };
+                    let path = format!("meshes/{}.stl", unique(&format!("{name}_{tag}")));
+                    let (bytes, more) = crate::stl::write_stl(
+                        data,
+                        &crate::stl::StlOptions {
+                            unit_scale: 1.0,
+                            ..Default::default()
+                        },
+                    );
+                    notes.extend(more);
+                    files.push((path.clone(), bytes));
+                    path
+                })
+                .clone();
+            let relative = inverse * rest_world(id);
+            let (scale, _, _) = relative.to_scale_rotation_translation();
+            let tag = if collision { "collision" } else { "visual" };
+            let _ = writeln!(out, "    <{tag}>");
+            let _ = writeln!(out, "      {}", origin(&relative));
+            let _ = writeln!(out, "      <geometry>");
+            let scale_attr = if (scale - kreate_math::DVec3::ONE).abs().max_element() > 1e-9 {
+                format!(" scale=\"{}\"", fmt3(scale))
+            } else {
+                String::new()
+            };
+            let _ = writeln!(out, "        <mesh filename=\"{file}\"{scale_attr}/>");
+            let _ = writeln!(out, "      </geometry>");
+            if !collision {
+                if let Some(m) = doc.material_at(id, 0) {
+                    let c = m.base_color;
+                    let mat_name = escape(&m.name);
+                    if materials_written.insert(mat_name.clone()) {
+                        let _ = writeln!(
+                            out,
+                            "      <material name=\"{mat_name}\"><color rgba=\"{} {} {} {}\"/></material>",
+                            tidy(c.r as f64),
+                            tidy(c.g as f64),
+                            tidy(c.b as f64),
+                            tidy(m.alpha as f64)
+                        );
+                    } else {
+                        let _ = writeln!(out, "      <material name=\"{mat_name}\"/>");
+                    }
+                }
+            }
+            let _ = writeln!(out, "    </{tag}>");
+        }
+        let _ = writeln!(out, "  </link>");
+    }
+    // The joints: between each link and the one above it.
+    for &link in &links {
+        let parent = parent_link(link).or(None);
+        let parent_name = match (parent, &base) {
+            (Some(p), _) => link_name[&p].clone(),
+            (None, Some(b)) => b.clone(),
+            (None, None) => continue,
+        };
+        // The joint object between them, if the robot has one.
+        let mut joint_obj = None;
+        let mut at = doc.object(link).and_then(|o| o.parent);
+        while let Some(i) = at {
+            if Some(i) == parent {
+                break;
+            }
+            if let Some(RobotPart::Joint(j)) = part(i) {
+                joint_obj = Some((i, j));
+                break;
+            }
+            at = doc.object(i).and_then(|o| o.parent);
+        }
+        let parent_frame = parent
+            .map(rest_world)
+            .unwrap_or(kreate_math::DAffine3::IDENTITY);
+        let child_frame = rest_world(link);
+        let relative = parent_frame.inverse() * child_frame;
+        let (name, kind, joint) = match &joint_obj {
+            Some((i, j)) => (
+                unique(&doc.object(*i).map(|o| o.name.clone()).unwrap_or_default()),
+                j.kind.tag(),
+                Some(j.clone()),
+            ),
+            None => (
+                unique(&format!("{parent_name}_to_{}", link_name[&link])),
+                "fixed",
+                None,
+            ),
+        };
+        let _ = writeln!(out, "  <joint name=\"{}\" type=\"{kind}\">", escape(&name));
+        let _ = writeln!(out, "    <parent link=\"{}\"/>", escape(&parent_name));
+        let _ = writeln!(out, "    <child link=\"{}\"/>", escape(&link_name[&link]));
+        let _ = writeln!(out, "    {}", origin(&relative));
+        if let (Some((i, _)), Some(j)) = (&joint_obj, &joint) {
+            if j.kind != kreate_scene::robot::JointKind::Fixed {
+                // The joint's Z, in the child link's frame.
+                let along = rest_world(*i).matrix3 * kreate_math::DVec3::Z;
+                let axis = (child_frame.matrix3.inverse() * along).normalize_or_zero();
+                // A unit axis with single precision's dust swept off it.
+                let axis = axis
+                    .map(|c| if c.abs() < 1e-6 { 0.0 } else { c })
+                    .normalize_or_zero();
+                let _ = writeln!(out, "    <axis xyz=\"{}\"/>", fmt3(axis));
+            }
+            if j.kind.limited() || j.effort != 0.0 || j.velocity != 0.0 {
+                let _ = writeln!(
+                    out,
+                    "    <limit lower=\"{}\" upper=\"{}\" effort=\"{}\" velocity=\"{}\"/>",
+                    tidy(j.lower),
+                    tidy(j.upper),
+                    tidy(j.effort),
+                    tidy(j.velocity)
+                );
+            }
+            if let Some(m) = &j.mimic {
+                let _ = writeln!(
+                    out,
+                    "    <mimic joint=\"{}\" multiplier=\"{}\" offset=\"{}\"/>",
+                    escape(&m.joint),
+                    tidy(m.multiplier),
+                    tidy(m.offset)
+                );
+            }
+        }
+        let _ = writeln!(out, "  </joint>");
+    }
+    let _ = writeln!(out, "</robot>");
+    if !robot_doc {
+        notes.push(LossyNote::Unsupported {
+            what: "the document is not a robot: every object was written as a link fixed to its parent".into(),
+        });
+    }
+    WrittenRobot {
+        urdf: out,
+        files,
+        notes,
+    }
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// A number as short as single precision reads it back — what the robot's
+/// numbers went through on the way in — with a rounding error near zero let
+/// go.
+fn tidy(v: f64) -> String {
+    if v.abs() < 1e-9 {
+        "0".into()
+    } else {
+        format!("{}", v as f32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,7 +922,7 @@ mod tests {
         assert!((visual.transform_vector3(kreate_math::DVec3::X).length() - 0.001).abs() < 1e-7);
 
         // Shapes and colours.
-        assert_eq!(scene.meshes.len(), 3);
+        assert_eq!(scene.meshes.len(), 4, "three visuals and a collision shape");
         let blue = scene
             .materials
             .iter()
@@ -525,11 +945,30 @@ mod tests {
             .materials
             .iter()
             .any(|m| m.name == "red" && m.base_color == [1.0, 0.0, 0.0, 1.0]));
-        assert!(scene
-            .source
-            .notes
+        let shoulder = scene.nodes.iter().find(|n| n.name == "shoulder").unwrap();
+        match &shoulder.robot {
+            Some(RobotPart::Joint(j)) => {
+                assert_eq!(j.kind, JointKind::Revolute);
+                assert_eq!(
+                    (j.lower, j.upper, j.effort, j.velocity),
+                    (-1.0, 1.0, 10.0, 1.0)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // The collision cylinder, hidden, and the mesh under it.
+        let at = scene
+            .nodes
             .iter()
-            .any(|n| matches!(n, LossyNote::Unsupported { what } if what.contains("limits"))));
+            .position(|n| n.name == "upper_collision")
+            .unwrap();
+        assert!(scene.nodes[at].hidden);
+        assert_eq!(scene.nodes[at].robot, Some(RobotPart::Collision));
+        assert!(scene
+            .nodes
+            .iter()
+            .filter(|n| n.parent == Some(at))
+            .all(|n| n.hidden));
     }
 
     #[test]
@@ -550,5 +989,105 @@ mod tests {
             .notes
             .iter()
             .any(|n| matches!(n, LossyNote::Unsupported { what } if what.contains("not found"))));
+    }
+
+    #[test]
+    fn a_robot_written_out_reads_back_at_rest_whatever_its_pose() {
+        let dir = std::env::temp_dir().join(format!("kreate-urdf-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = |p: &Path| -> Result<ImportScene, String> {
+            crate::stl::parse_stl(
+                &std::fs::read(p).map_err(|e| e.to_string())?,
+                &crate::stl::StlOptions {
+                    unit_scale: 1.0,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())
+        };
+        let none = |_: &Path| -> Result<ImportScene, String> { Err("none".into()) };
+        let arm = ARM.replace(r#"<link name="hand"><visual><geometry><mesh filename="package://arm_pkg/meshes/hand.stl" scale="0.001 0.001 0.001"/></geometry></visual></link>"#, r#"<link name="hand"><inertial><origin xyz="0 0 0.1"/><mass value="2"/><inertia ixx="1" ixy="0" ixz="0" iyy="2" iyz="0" izz="3"/></inertial></link>"#);
+        let scene = parse_urdf(&arm, &dir, &none).unwrap();
+        let mut doc = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut doc);
+        // Pose it: the shoulder turned. What goes out is still the rest.
+        let shoulder = doc
+            .objects()
+            .find(|(_, o)| o.name == "shoulder")
+            .map(|(id, _)| id)
+            .unwrap();
+        if let Some(o) = doc.object_mut(shoulder) {
+            if let Some(RobotPart::Joint(j)) = &o.robot {
+                o.transform = j.place(0.8);
+            }
+        }
+        let written = write_urdf(&doc, "arm");
+        for (path, bytes) in &written.files {
+            let p = dir.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        }
+        let again = parse_urdf(&written.urdf, &dir, &stl).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut back = kreate_scene::Document::new();
+        crate::build::build_into(&again, &mut back);
+        // Every mesh's corners where they were at rest.
+        let corners = |d: &kreate_scene::Document| -> Vec<[i64; 3]> {
+            let mut out: Vec<[i64; 3]> = d
+                .objects()
+                .filter(|(_, o)| o.visible)
+                .filter_map(|(id, o)| match o.data {
+                    kreate_scene::ObjectData::Mesh(m) => Some((id, d.mesh(m)?)),
+                    _ => None,
+                })
+                .flat_map(|(id, m)| {
+                    let w = d.world_transform(id);
+                    m.positions()
+                        .iter()
+                        .map(move |p| {
+                            let q = w.transform_point3(p.as_dvec3());
+                            [
+                                (q.x * 1e4).round() as i64,
+                                (q.y * 1e4).round() as i64,
+                                (q.z * 1e4).round() as i64,
+                            ]
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let mut rest = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut rest);
+        assert_eq!(corners(&rest), corners(&back));
+        // Limits, the hidden collision cylinder and the hand's inertia.
+        let joint = back
+            .objects()
+            .find_map(|(_, o)| match (&o.robot, o.name.as_str()) {
+                (Some(RobotPart::Joint(j)), "shoulder") => Some(j.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            (joint.kind, joint.lower, joint.upper),
+            (JointKind::Revolute, -1.0, 1.0)
+        );
+        assert!(back
+            .objects()
+            .any(|(_, o)| o.robot == Some(RobotPart::Collision) && !o.visible));
+        let hand = back
+            .objects()
+            .find(|(_, o)| o.name == "hand")
+            .map(|(_, o)| o.robot.clone())
+            .unwrap();
+        match hand {
+            Some(RobotPart::Link { inertial: Some(i) }) => {
+                assert_eq!(i.mass, 2.0);
+                assert_eq!(i.inertia, [1.0, 0.0, 0.0, 2.0, 0.0, 3.0]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

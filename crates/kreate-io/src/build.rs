@@ -255,7 +255,10 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
             // Parenting everything while it is still at the origin makes that
             // memory an identity, and then the transforms mean what the file
             // meant.
-            Some(doc.add_object(Object::new(node.name.clone(), data)))
+            let mut object = Object::new(node.name.clone(), data);
+            object.robot = node.robot.clone();
+            object.visible = !node.hidden;
+            Some(doc.add_object(object))
         })
         .collect();
 
@@ -311,6 +314,10 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
         }
         if let Some(object) = doc.object_mut(*id) {
             object.transform = to_transform(scene.place(index, &node.transform));
+            // A joint rests where the file put it.
+            if let Some(kreate_scene::robot::RobotPart::Joint(j)) = &mut object.robot {
+                j.rest = object.transform;
+            }
         }
     }
 

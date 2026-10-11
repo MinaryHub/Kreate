@@ -27,9 +27,96 @@ const TIME_CODES: f32 = 24.0;
 use kreate_math::Vec3;
 use kreate_mesh::attribute::names;
 
-/// The stage, and what it could not say.
+/// The stage, and what it could not say. Pictures its materials use are
+/// named `textures/…png` beside it; [`write_usd`] gives them too.
 pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
+    let package = write_usd(scene);
+    (package.text, package.notes)
+}
+
+/// A stage and the pictures it names, by the path it names them by.
+pub struct UsdPackage {
+    pub text: String,
+    pub files: Vec<(String, Vec<u8>)>,
+    pub notes: Vec<LossyNote>,
+}
+
+/// The stage as one `.usdz`: the stage first, then its pictures, each
+/// stored as it is and on a 64-byte boundary, as the format asks.
+pub fn write_usdz(scene: &ExportScene<'_>) -> (Vec<u8>, Vec<LossyNote>) {
+    use std::io::Write;
+    let package = write_usd(scene);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_alignment(64);
+    let mut notes = package.notes;
+    let mut failed = None;
+    let mut entries = vec![("scene.usda".to_string(), package.text.into_bytes())];
+    entries.extend(package.files);
+    for (name, bytes) in &entries {
+        let result = zip
+            .start_file(name.as_str(), options)
+            .map_err(|e| e.to_string())
+            .and_then(|_| zip.write_all(bytes).map_err(|e| e.to_string()));
+        if let Err(why) = result {
+            failed = Some(why);
+            break;
+        }
+    }
+    if let Some(why) = failed {
+        notes.push(LossyNote::Unsupported {
+            what: format!("the package could not be written whole: {why}"),
+        });
+    }
+    let bytes = zip
+        .finish()
+        .map(std::io::Cursor::into_inner)
+        .unwrap_or_default();
+    (bytes, notes)
+}
+
+/// The stage, and the pictures its materials name.
+pub fn write_usd(scene: &ExportScene<'_>) -> UsdPackage {
     let mut notes = Vec::new();
+    // Each picture a material uses, as a PNG beside the stage.
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut texture_paths: Vec<Option<String>> = vec![None; scene.images.len()];
+    let used: Vec<usize> = scene
+        .materials
+        .iter()
+        .flat_map(|m| {
+            [
+                m.base_color_texture,
+                m.metallic_roughness_texture,
+                m.normal_texture,
+                m.emissive_texture,
+                m.occlusion_texture,
+            ]
+        })
+        .flatten()
+        .collect();
+    let image_names = unique(scene.images.iter().map(|i| i.name.as_str()));
+    for i in used {
+        if texture_paths.get(i).is_none_or(Option::is_some) {
+            continue;
+        }
+        let image = &scene.images[i];
+        let Some(rgba) =
+            image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
+        else {
+            continue;
+        };
+        let mut png = Vec::new();
+        if rgba
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_ok()
+        {
+            let path = format!("textures/{}.png", image_names[i]);
+            files.push((path.clone(), png));
+            texture_paths[i] = Some(path);
+        }
+    }
     let mut out = String::new();
     let _ = writeln!(out, "#usda 1.0");
     let _ = writeln!(out, "(");
@@ -61,7 +148,7 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
         let _ = writeln!(out, "    def Scope \"Looks\"");
         let _ = writeln!(out, "    {{");
         for (m, name) in scene.materials.iter().zip(&material_names) {
-            write_material(&mut out, m, name, 2);
+            write_material(&mut out, m, name, 2, &texture_paths);
         }
         let _ = writeln!(out, "    }}");
     }
@@ -137,7 +224,11 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
             what: "shape keys went out as moving points, not as blend shapes".into(),
         });
     }
-    (out, notes)
+    UsdPackage {
+        text: out,
+        files,
+        notes,
+    }
 }
 
 /// A name USD accepts for a prim: letters, digits and underscores, not
@@ -391,7 +482,23 @@ fn write_mesh(
     };
     let pad = "    ".repeat(depth);
     let inner = "    ".repeat(depth + 1);
-    let _ = writeln!(out, "{pad}def Mesh \"{name}\"");
+    let slots = mesh.attributes().get_i32(names::MATERIAL_INDEX);
+    let mut used: Vec<i32> = slots.map(|s| s.to_vec()).unwrap_or_default();
+    used.sort_unstable();
+    used.dedup();
+    let bound = |slot: i32| {
+        scene
+            .material_of(index, slot)
+            .and_then(|m| materials.get(m))
+    };
+    if bound(0).is_some() || used.iter().any(|s| bound(*s).is_some()) {
+        let _ = writeln!(
+            out,
+            "{pad}def Mesh \"{name}\" (\n{pad}    prepend apiSchemas = [\"MaterialBindingAPI\"]\n{pad})"
+        );
+    } else {
+        let _ = writeln!(out, "{pad}def Mesh \"{name}\"");
+    }
     let _ = writeln!(out, "{pad}{{");
     let list = |v: &mut dyn Iterator<Item = String>| v.collect::<Vec<_>>().join(", ");
     let positions = mesh.positions();
@@ -449,53 +556,199 @@ fn write_mesh(
         );
     }
     let _ = writeln!(out, "{inner}uniform token subdivisionScheme = \"none\"");
-    // The first slot's material for the whole mesh; per-face slots would be
-    // GeomSubsets, which this does not write yet.
-    let slots = mesh.attributes().get_i32(names::MATERIAL_INDEX);
-    let distinct = slots.map_or(1, |s| {
-        let mut v: Vec<i32> = s.to_vec();
-        v.sort_unstable();
-        v.dedup();
-        v.len()
-    });
-    if distinct > 1 {
-        notes.push(LossyNote::Unsupported {
-            what: format!("{label}: its faces use several materials; USD got the first"),
-        });
-    }
-    if let Some(m) = scene.material_of(index, 0).and_then(|m| materials.get(m)) {
+    // The first slot's material for the whole mesh, and where faces use
+    // others, a subset of them each.
+    let _ = (label, &notes);
+    if let Some(m) = bound(0) {
         let _ = writeln!(out, "{inner}rel material:binding = </World/Looks/{m}>");
+    }
+    if let (Some(slots), true) = (slots, used.len() > 1) {
+        let _ = writeln!(
+            out,
+            "{inner}uniform token subsetFamily:materialBind:familyType = \"nonOverlapping\""
+        );
+        let deep = "    ".repeat(depth + 2);
+        for slot in &used {
+            let Some(m) = bound(*slot) else { continue };
+            let faces: Vec<String> = slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| *s == slot)
+                .map(|(f, _)| f.to_string())
+                .collect();
+            let _ = writeln!(
+                out,
+                "{inner}def GeomSubset \"Slot{slot}\" (\n{inner}    prepend apiSchemas = [\"MaterialBindingAPI\"]\n{inner})"
+            );
+            let _ = writeln!(out, "{inner}{{");
+            let _ = writeln!(out, "{deep}uniform token elementType = \"face\"");
+            let _ = writeln!(out, "{deep}uniform token familyName = \"materialBind\"");
+            let _ = writeln!(out, "{deep}int[] indices = [{}]", faces.join(", "));
+            let _ = writeln!(out, "{deep}rel material:binding = </World/Looks/{m}>");
+            let _ = writeln!(out, "{inner}}}");
+        }
     }
     let _ = writeln!(out, "{pad}}}");
 }
 
-fn write_material(out: &mut String, m: &crate::ir::ImportMaterial, name: &str, depth: usize) {
+fn write_material(
+    out: &mut String,
+    m: &crate::ir::ImportMaterial,
+    name: &str,
+    depth: usize,
+    textures: &[Option<String>],
+) {
     let pad = "    ".repeat(depth);
     let inner = "    ".repeat(depth + 1);
     let deep = "    ".repeat(depth + 2);
+    let picture = |i: Option<usize>| i.and_then(|i| textures.get(i).cloned().flatten());
+    let base = picture(m.base_color_texture);
+    let metal_rough = picture(m.metallic_roughness_texture);
+    let normal = picture(m.normal_texture);
+    let emission = picture(m.emissive_texture);
+    let occlusion = picture(m.occlusion_texture);
+    let at =
+        |shader: &str, output: &str| format!("</World/Looks/{name}/{shader}.outputs:{output}>");
     let _ = writeln!(out, "{pad}def Material \"{name}\"");
     let _ = writeln!(out, "{pad}{{");
     let _ = writeln!(
         out,
-        "{inner}token outputs:surface.connect = </World/Looks/{name}/Surface.outputs:surface>"
+        "{inner}token outputs:surface.connect = {}",
+        at("Surface", "surface")
     );
     let _ = writeln!(out, "{inner}def Shader \"Surface\"");
     let _ = writeln!(out, "{inner}{{");
     let _ = writeln!(out, "{deep}uniform token info:id = \"UsdPreviewSurface\"");
     let [r, g, b, a] = m.base_color;
-    let _ = writeln!(out, "{deep}color3f inputs:diffuseColor = ({r}, {g}, {b})");
+    match &base {
+        Some(_) => {
+            let _ = writeln!(
+                out,
+                "{deep}color3f inputs:diffuseColor.connect = {}",
+                at("BaseColor", "rgb")
+            );
+        }
+        None => {
+            let _ = writeln!(out, "{deep}color3f inputs:diffuseColor = ({r}, {g}, {b})");
+        }
+    }
     let _ = writeln!(out, "{deep}float inputs:opacity = {a}");
-    let _ = writeln!(out, "{deep}float inputs:metallic = {}", m.metallic);
-    let _ = writeln!(out, "{deep}float inputs:roughness = {}", m.roughness);
+    if let Some(clip) = m.alpha_clip {
+        let _ = writeln!(out, "{deep}float inputs:opacityThreshold = {clip}");
+    }
+    // glTF's packing, which the importer keeps: roughness green, metal blue.
+    match &metal_rough {
+        Some(_) => {
+            let _ = writeln!(
+                out,
+                "{deep}float inputs:metallic.connect = {}",
+                at("MetalRough", "b")
+            );
+            let _ = writeln!(
+                out,
+                "{deep}float inputs:roughness.connect = {}",
+                at("MetalRough", "g")
+            );
+        }
+        None => {
+            let _ = writeln!(out, "{deep}float inputs:metallic = {}", m.metallic);
+            let _ = writeln!(out, "{deep}float inputs:roughness = {}", m.roughness);
+        }
+    }
     let e = m.emissive * m.emissive_strength;
-    let _ = writeln!(
-        out,
-        "{deep}color3f inputs:emissiveColor = ({}, {}, {})",
-        e.x, e.y, e.z
-    );
+    match &emission {
+        Some(_) => {
+            let _ = writeln!(
+                out,
+                "{deep}color3f inputs:emissiveColor.connect = {}",
+                at("Emission", "rgb")
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "{deep}color3f inputs:emissiveColor = ({}, {}, {})",
+                e.x, e.y, e.z
+            );
+        }
+    }
+    if normal.is_some() {
+        let _ = writeln!(
+            out,
+            "{deep}normal3f inputs:normal.connect = {}",
+            at("Normal", "rgb")
+        );
+    }
+    if occlusion.is_some() {
+        let _ = writeln!(
+            out,
+            "{deep}float inputs:occlusion.connect = {}",
+            at("Occlusion", "r")
+        );
+    }
     let _ = writeln!(out, "{deep}float inputs:ior = {}", m.ior);
     let _ = writeln!(out, "{deep}token outputs:surface");
     let _ = writeln!(out, "{inner}}}");
+    let any = [&base, &metal_rough, &normal, &emission, &occlusion]
+        .iter()
+        .any(|t| t.is_some());
+    if any {
+        // Where on the picture: the mesh's `st`.
+        let _ = writeln!(out, "{inner}def Shader \"Reader\"");
+        let _ = writeln!(out, "{inner}{{");
+        let _ = writeln!(
+            out,
+            "{deep}uniform token info:id = \"UsdPrimvarReader_float2\""
+        );
+        let _ = writeln!(out, "{deep}string inputs:varname = \"st\"");
+        let _ = writeln!(out, "{deep}float2 outputs:result");
+        let _ = writeln!(out, "{inner}}}");
+    }
+    for (shader, file, space, scale, bias) in [
+        ("BaseColor", &base, "sRGB", None, None),
+        ("MetalRough", &metal_rough, "raw", None, None),
+        // A normal map's colour is a direction: twice, less one.
+        (
+            "Normal",
+            &normal,
+            "raw",
+            Some((2.0, 2.0, 2.0, 1.0)),
+            Some((-1.0, -1.0, -1.0, 0.0)),
+        ),
+        (
+            "Emission",
+            &emission,
+            "sRGB",
+            Some((e.x, e.y, e.z, 1.0)),
+            None,
+        ),
+        ("Occlusion", &occlusion, "raw", None, None),
+    ] {
+        let Some(file) = file else { continue };
+        let _ = writeln!(out, "{inner}def Shader \"{shader}\"");
+        let _ = writeln!(out, "{inner}{{");
+        let _ = writeln!(out, "{deep}uniform token info:id = \"UsdUVTexture\"");
+        let _ = writeln!(out, "{deep}asset inputs:file = @{file}@");
+        let _ = writeln!(out, "{deep}token inputs:sourceColorSpace = \"{space}\"");
+        let _ = writeln!(
+            out,
+            "{deep}float2 inputs:st.connect = {}",
+            at("Reader", "result")
+        );
+        let _ = writeln!(out, "{deep}token inputs:wrapS = \"repeat\"");
+        let _ = writeln!(out, "{deep}token inputs:wrapT = \"repeat\"");
+        if let Some((x, y, z, w)) = scale {
+            let _ = writeln!(out, "{deep}float4 inputs:scale = ({x}, {y}, {z}, {w})");
+        }
+        if let Some((x, y, z, w)) = bias {
+            let _ = writeln!(out, "{deep}float4 inputs:bias = ({x}, {y}, {z}, {w})");
+        }
+        for o in ["rgb", "r", "g", "b", "a"] {
+            let t = if o == "rgb" { "float3" } else { "float" };
+            let _ = writeln!(out, "{deep}{t} outputs:{o}");
+        }
+        let _ = writeln!(out, "{inner}}}");
+    }
     let _ = writeln!(out, "{pad}}}");
 }
 

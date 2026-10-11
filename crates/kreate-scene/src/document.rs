@@ -209,6 +209,9 @@ pub struct Object {
     /// What it is to the simulation: a rigid body, a collider, cloth,
     /// particle systems. See [`crate::physics`].
     pub physics: crate::physics::ObjectPhysics,
+    /// What it is to a robot: a link, a joint, a collision shape. See
+    /// [`crate::robot`].
+    pub robot: Option<crate::robot::RobotPart>,
 }
 
 impl Object {
@@ -239,6 +242,7 @@ impl Object {
             active_shape: None,
             editing_shape: None,
             physics: crate::physics::ObjectPhysics::default(),
+            robot: None,
         }
     }
 

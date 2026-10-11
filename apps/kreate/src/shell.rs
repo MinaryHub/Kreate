@@ -9152,6 +9152,7 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    draw_robot_panel(ui, state, doc, object);
     draw_physical_panel(ui, state, doc, registry);
     draw_mesh_check_panel(ui, state, doc, object);
     draw_nla_panel(ui, state, doc, registry, object);
@@ -9207,6 +9208,104 @@ fn draw_object_tab(
             });
         });
     }
+}
+
+/// The robot the active object belongs to, joint by joint: a slider each,
+/// held to the joint's limits — what a robot description's joint state
+/// publisher is, in a panel. A joint that mimics another follows it and is
+/// shown, not set.
+fn draw_robot_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, active: ObjectId) {
+    use kreate_scene::robot::RobotPart;
+    // The robot: everything under the top of the active object's tree, if
+    // anything there is a joint.
+    let mut root = active;
+    let mut guard = 0;
+    while let Some(p) = doc.object(root).and_then(|o| o.parent) {
+        root = p;
+        guard += 1;
+        if guard > 10_000 {
+            break;
+        }
+    }
+    let under = |mut id: ObjectId| -> bool {
+        for _ in 0..10_000 {
+            if id == root {
+                return true;
+            }
+            match doc.object(id).and_then(|o| o.parent) {
+                Some(p) => id = p,
+                None => return false,
+            }
+        }
+        false
+    };
+    let joints: Vec<(
+        ObjectId,
+        String,
+        kreate_scene::robot::Joint,
+        kreate_math::DTransform,
+    )> = doc
+        .objects()
+        .filter_map(|(id, o)| match &o.robot {
+            Some(RobotPart::Joint(j)) if j.kind.moves() && under(id) => {
+                Some((id, o.name.clone(), j.clone(), o.transform))
+            }
+            _ => None,
+        })
+        .collect();
+    if joints.is_empty() {
+        return;
+    }
+    let title = state.catalog.get("panel-robot");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        if ui.button(state.catalog.get("robot-reset")).clicked() {
+            state.queue.run("robot.reset_pose", PropertyMap::new());
+        }
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        egui::Grid::new("robot-joints")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for (id, name, joint, transform) in &joints {
+                    let position = joint.position_of(transform);
+                    let label = ui.label(name);
+                    if *id == active {
+                        label.highlight();
+                    }
+                    let slides = joint.kind.slides();
+                    let (lo, hi) = if joint.kind.limited() && joint.lower < joint.upper {
+                        (joint.lower, joint.upper)
+                    } else if slides {
+                        (-1.0, 1.0)
+                    } else {
+                        (-std::f64::consts::PI, std::f64::consts::PI)
+                    };
+                    // Degrees to look at, radians underneath.
+                    let to_shown = |v: f64| if slides { v } else { v.to_degrees() };
+                    let mut shown = to_shown(position);
+                    let slider = egui::Slider::new(&mut shown, to_shown(lo)..=to_shown(hi))
+                        .suffix(if slides { " m" } else { "°" })
+                        .max_decimals(if slides { 3 } else { 1 });
+                    let follows = joint.mimic.as_ref().map(|m| m.joint.clone());
+                    let response = ui.add_enabled(follows.is_none(), slider);
+                    let response = match &follows {
+                        Some(f) => response.on_disabled_hover_text(state.catalog.format(
+                            "robot-follows",
+                            kreate_i18n::TextKind::Tooltip,
+                            &[("joint", f.as_str())],
+                        )),
+                        None => response,
+                    };
+                    if response.changed() {
+                        let value = if slides { shown } else { shown.to_radians() };
+                        let mut p = PropertyMap::new();
+                        p.set("joint", kreate_reflect::PropertyValue::Text(name.clone()));
+                        p.set("position", kreate_reflect::PropertyValue::Float(value));
+                        send_edit(state, "robot.set_joint", p, dragging);
+                    }
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 /// The object's NLA: Push Down for its action, and each strip's place,

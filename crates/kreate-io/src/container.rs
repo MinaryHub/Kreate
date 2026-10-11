@@ -152,6 +152,118 @@ impl Default for Manifest {
 }
 
 /// One object, as the file describes it.
+/// A link's inertia, as a file keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InertialRecord {
+    pub translation: [f64; 3],
+    /// `xyzw`.
+    pub rotation: [f64; 4],
+    pub mass: f64,
+    pub inertia: [f64; 6],
+}
+
+/// What an object is to a robot, as a file keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "part", rename_all = "snake_case")]
+pub enum RobotRecord {
+    Link {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inertial: Option<InertialRecord>,
+    },
+    Joint {
+        kind: String,
+        rest_translation: [f64; 3],
+        /// `xyzw`.
+        rest_rotation: [f64; 4],
+        lower: f64,
+        upper: f64,
+        #[serde(default)]
+        effort: f64,
+        #[serde(default)]
+        velocity: f64,
+        /// The joint followed, its multiplier and its offset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mimic: Option<(String, f64, f64)>,
+    },
+    Collision,
+}
+
+impl RobotRecord {
+    pub fn write(part: &kreate_scene::robot::RobotPart) -> Self {
+        use kreate_scene::robot::RobotPart;
+        let quat = |q: kreate_math::DQuat| [q.x, q.y, q.z, q.w];
+        match part {
+            RobotPart::Link { inertial } => RobotRecord::Link {
+                inertial: inertial.as_ref().map(|i| InertialRecord {
+                    translation: i.origin.translation.to_array(),
+                    rotation: quat(i.origin.rotation),
+                    mass: i.mass,
+                    inertia: i.inertia,
+                }),
+            },
+            RobotPart::Joint(j) => RobotRecord::Joint {
+                kind: j.kind.tag().to_string(),
+                rest_translation: j.rest.translation.to_array(),
+                rest_rotation: quat(j.rest.rotation),
+                lower: j.lower,
+                upper: j.upper,
+                effort: j.effort,
+                velocity: j.velocity,
+                mimic: j
+                    .mimic
+                    .as_ref()
+                    .map(|m| (m.joint.clone(), m.multiplier, m.offset)),
+            },
+            RobotPart::Collision => RobotRecord::Collision,
+        }
+    }
+
+    pub fn read(&self) -> kreate_scene::robot::RobotPart {
+        use kreate_scene::robot::{Inertial, Joint, JointKind, Mimic, RobotPart};
+        let quat = |q: &[f64; 4]| kreate_math::DQuat::from_xyzw(q[0], q[1], q[2], q[3]).normalize();
+        match self {
+            RobotRecord::Link { inertial } => RobotPart::Link {
+                inertial: inertial.as_ref().map(|i| Inertial {
+                    origin: kreate_math::DTransform {
+                        translation: kreate_math::DVec3::from_array(i.translation),
+                        rotation: quat(&i.rotation),
+                        scale: kreate_math::DVec3::ONE,
+                    },
+                    mass: i.mass,
+                    inertia: i.inertia,
+                }),
+            },
+            RobotRecord::Joint {
+                kind,
+                rest_translation,
+                rest_rotation,
+                lower,
+                upper,
+                effort,
+                velocity,
+                mimic,
+            } => RobotPart::Joint(Joint {
+                kind: JointKind::from_tag(kind).unwrap_or_default(),
+                rest: kreate_math::DTransform {
+                    translation: kreate_math::DVec3::from_array(*rest_translation),
+                    rotation: quat(rest_rotation),
+                    scale: kreate_math::DVec3::ONE,
+                },
+                lower: *lower,
+                upper: *upper,
+                effort: *effort,
+                velocity: *velocity,
+                mimic: mimic.as_ref().map(|(joint, multiplier, offset)| Mimic {
+                    joint: joint.clone(),
+                    multiplier: *multiplier,
+                    offset: *offset,
+                }),
+            }),
+            RobotRecord::Collision => RobotPart::Collision,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectRecord {
     pub name: String,
@@ -222,6 +334,10 @@ pub struct ObjectRecord {
     /// Its physics settings, when it has any. See `physics_record`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physics: Option<crate::physics_record::PhysicsRecord>,
+    /// What it is to a robot, when it is a link, a joint or a collision
+    /// shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robot: Option<RobotRecord>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1762,6 +1878,7 @@ pub fn write(
                 active_shape: object.active_shape.clone(),
                 editing_shape: object.editing_shape.clone(),
                 physics: crate::physics_record::write(&object.physics),
+                robot: object.robot.as_ref().map(RobotRecord::write),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -2461,6 +2578,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         if let Some(p) = &record.physics {
             object.physics = crate::physics_record::read(p);
         }
+        object.robot = record.robot.as_ref().map(RobotRecord::read);
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {

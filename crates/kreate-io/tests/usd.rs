@@ -244,3 +244,81 @@ fn what_is_written_reads_back_in_place_and_in_colour() {
         .objects()
         .any(|(_, o)| matches!(o.data, ObjectData::Camera(_))));
 }
+
+#[test]
+fn a_usdz_carries_its_pictures_and_reads_back_with_them() {
+    let mut doc = Document::new();
+    let mut pixels = Vec::new();
+    for y in 0..3u8 {
+        for x in 0..5u8 {
+            pixels.extend_from_slice(&[x * 40, y * 60, 200, 255]);
+        }
+    }
+    let picture = kreate_io::image_import::image_from_rgba8(
+        "Bricks",
+        5,
+        3,
+        &pixels,
+        kreate_scene::ColorSpace::Srgb,
+    )
+    .expect("an image");
+    let picture = doc.add_image(picture);
+    let packed = kreate_io::image_import::image_from_rgba8(
+        "MetalRough",
+        5,
+        3,
+        &pixels,
+        kreate_scene::ColorSpace::Raw,
+    )
+    .expect("an image");
+    let packed = doc.add_image(packed);
+    let brick = doc.add_material(Material {
+        name: "Brick".into(),
+        base_color_image: Some(picture),
+        metallic_roughness_image: Some(packed),
+        ..Default::default()
+    });
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    doc.set_mesh_slots(mesh, vec![Some(brick)]);
+    doc.add_object(Object::new("Wall", ObjectData::Mesh(mesh)));
+
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, notes) = kreate_io::usd::write_usdz(&scene);
+    assert!(
+        notes.iter().all(|n| !format!("{n:?}").contains("whole")),
+        "{notes:?}"
+    );
+    // Every file's data on a 64-byte boundary, stored as it is.
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("a zip");
+    assert_eq!(
+        archive.by_index(0).unwrap().name(),
+        "scene.usda",
+        "the stage first"
+    );
+    for i in 0..archive.len() {
+        let f = archive.by_index(i).unwrap();
+        assert_eq!(f.compression(), zip::CompressionMethod::Stored);
+        assert_eq!(f.data_start() % 64, 0, "{}", f.name());
+    }
+
+    let path = std::env::temp_dir().join(format!("kreate-usdz-{}.usdz", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    if let Ok(keep) = std::env::var("KREATE_KEEP_USDZ") {
+        std::fs::write(keep, &bytes).unwrap();
+    }
+    let back = kreate_io::usd_read::parse_usd_file(&path);
+    let _ = std::fs::remove_file(&path);
+    let back = back.expect("reads");
+    let m = back
+        .materials
+        .iter()
+        .find(|m| m.name == "Brick")
+        .expect("the brick came back");
+    let t = m.base_color_texture.expect("with its picture");
+    assert_eq!((back.images[t].width, back.images[t].height), (5, 3));
+    assert_eq!(&back.images[t].pixels[..4], &pixels[..4]);
+    assert!(
+        m.metallic_roughness_texture.is_some(),
+        "metal and roughness, packed as they went"
+    );
+}

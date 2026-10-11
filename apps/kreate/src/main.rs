@@ -5043,6 +5043,8 @@ impl App {
             .add_filter("STEP (CAD, faceted)", &["step", "stp"])
             .add_filter("Parts list (CSV)", &["csv"])
             .add_filter("USD (text)", &["usda"])
+            .add_filter("USDZ (one file, for AR)", &["usdz"])
+            .add_filter("URDF (robot)", &["urdf"])
             .set_title("Export")
             .set_file_name("untitled.glb")
             .save_file()
@@ -5102,9 +5104,30 @@ impl App {
                 }
             }
             "usda" => {
-                let (text, more) = kreate_io::usd::write_usda(&scene);
+                // The pictures beside it, where it names them.
+                let package = kreate_io::usd::write_usd(&scene);
+                notes.extend(package.notes);
+                match write_beside(path, &package.files) {
+                    Ok(()) => Ok(package.text.into_bytes()),
+                    Err(e) => Err(e),
+                }
+            }
+            "usdz" => {
+                let (bytes, more) = kreate_io::usd::write_usdz(&scene);
                 notes.extend(more);
-                Ok(text.into_bytes())
+                Ok(bytes)
+            }
+            "urdf" => {
+                let name = path
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "robot".into());
+                let robot = kreate_io::urdf::write_urdf(&self.doc, &name);
+                notes.extend(robot.notes);
+                match write_beside(path, &robot.files) {
+                    Ok(()) => Ok(robot.urdf.into_bytes()),
+                    Err(e) => Err(e),
+                }
             }
             "obj" | "stl" => {
                 // Neither format has a node, a light or a camera, so what
@@ -11337,6 +11360,20 @@ fn load_document(path: Option<&str>) -> Document {
         None => kreate::startup::starting_scene(&mut doc),
     }
     doc
+}
+
+/// Files an export names, written in the folder beside it: a stage's
+/// pictures, a robot's meshes.
+fn write_beside(path: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    for (name, bytes) in files {
+        let target = dir.join(name);
+        if let Some(folder) = target.parent() {
+            std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        }
+        std::fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
+    }
+    Ok(())
 }
 
 fn main() {

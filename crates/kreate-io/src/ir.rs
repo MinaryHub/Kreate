@@ -612,6 +612,11 @@ pub struct ImportNode {
     pub data: ImportNodeData,
     /// Index into [`ImportScene::skins`], for a mesh the joints deform.
     pub skin: Option<usize>,
+    /// What it is to a robot. A joint's rest is filled in when it is
+    /// built: it is where the node ends up.
+    pub robot: Option<kreate_scene::robot::RobotPart>,
+    /// Kept but not shown: a robot's collision shape.
+    pub hidden: bool,
 }
 
 impl ImportNode {
@@ -622,6 +627,8 @@ impl ImportNode {
             transform: ImportTransform::default(),
             data: ImportNodeData::Empty,
             skin: None,
+            robot: None,
+            hidden: false,
         }
     }
 }

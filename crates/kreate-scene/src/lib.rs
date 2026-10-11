@@ -19,6 +19,7 @@ pub mod modifier;
 pub mod nla;
 pub mod physics;
 pub mod render;
+pub mod robot;
 pub mod shader;
 pub mod shape;
 pub mod sketch;

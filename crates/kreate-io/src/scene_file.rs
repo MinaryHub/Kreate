@@ -148,8 +148,10 @@ pub fn read_part(path: &Path) -> Result<crate::ir::ImportScene, String> {
         other => return Err(format!("`.{other}` meshes are not read")),
     };
     let mut scene = scene.baked_to_kreate();
+    // A part's one mesh by the file's name: an STL's own name is "stl".
+    let single = scene.meshes.len() == 1;
     for m in &mut scene.meshes {
-        if m.name.is_empty() || m.name == "Import" {
+        if single || m.name.is_empty() || m.name == "Import" {
             m.name = name.clone();
         }
     }
