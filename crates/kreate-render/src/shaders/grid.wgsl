@@ -54,9 +54,16 @@ struct FsOut {
 
 // Coverage of a line lattice of the given spacing, anti-aliased by the screen
 // space derivative of the coordinate.
-fn lattice(coord: vec2<f32>, spacing: f32) -> f32 {
+//
+// The derivative is the coordinate's, taken once by the caller and divided by
+// the spacing here — not `fwidth(coord / spacing)`. Where the spacing steps a
+// decade, the pixels of one 2x2 quad use different spacings, and the
+// derivative of the quotient took in that step: enormous in one pixel row,
+// which then read as lying on a line everywhere along it — a row of bright
+// dashes across the floor at every distance the grid changed scale.
+fn lattice(coord: vec2<f32>, spacing: f32, coord_width: vec2<f32>) -> f32 {
     let scaled = coord / spacing;
-    let deriv = fwidth(scaled);
+    let deriv = coord_width / spacing;
     // Distance to the nearest lattice line, in pixels.
     let dist = abs(fract(scaled - 0.5) - 0.5) / max(deriv, vec2<f32>(1e-8));
     let line = min(dist.x, dist.y);
@@ -106,8 +113,9 @@ fn fs_main(in: VsOut) -> FsOut {
     let minor_spacing = pow(10.0, level);
     let major_spacing = minor_spacing * 10.0;
 
-    let fine = lattice(world_xy, minor_spacing) * (1.0 - blend);
-    let coarse = lattice(world_xy, major_spacing);
+    let width = fwidth(world_xy);
+    let fine = lattice(world_xy, minor_spacing, width) * (1.0 - blend);
+    let coarse = lattice(world_xy, major_spacing, width);
     var coverage = max(fine * 0.55, coarse * 0.85);
 
     // Fade out toward the horizon, where the lattice degenerates into noise.
