@@ -633,7 +633,39 @@ impl Operator for FluidSet {
             })),
             _ => None,
         };
-        Ok(on_selected(doc, params.active_only, |p| p.fluid = fluid))
+        let result = on_selected(doc, params.active_only, |p| p.fluid = fluid);
+        // A liquid's domain is the water you see once it is baked, so one
+        // with no material of its own is given water — Blender's Quick
+        // Liquid does the same. A material the user chose is left alone.
+        let liquid = matches!(fluid, Some(Fluid::Domain(d)) if d.kind == DomainKind::Liquid);
+        if result == OpResult::Finished && liquid {
+            let d = doc.document_mut();
+            let bare: Vec<kreate_scene::document::MeshId> = d
+                .selection
+                .objects
+                .iter()
+                .filter(|id| !params.active_only || d.selection.active == Some(**id))
+                .filter_map(|id| d.object(*id))
+                .filter(|o| matches!(o.physics.fluid, Some(Fluid::Domain(_))))
+                .filter_map(|o| o.mesh())
+                .filter(|m| d.mesh_slots(*m).iter().all(|s| s.is_none()))
+                .collect();
+            if !bare.is_empty() {
+                let water = d.add_material(kreate_scene::document::Material {
+                    name: "Water".into(),
+                    base_color: kreate_math::SceneRgb::new(0.8, 0.92, 1.0),
+                    roughness: 0.03,
+                    metallic: 0.0,
+                    transmission: 1.0,
+                    ior: 1.333,
+                    ..Default::default()
+                });
+                for m in bare {
+                    d.set_mesh_slots(m, vec![Some(water)]);
+                }
+            }
+        }
+        Ok(result)
     }
 }
 

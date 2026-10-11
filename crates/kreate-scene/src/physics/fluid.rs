@@ -685,30 +685,80 @@ impl LiquidSim {
             }
             sum
         };
-        // One pass of smoothing, so single particles do not stand as beads.
-        let mut smooth = density.clone();
-        for k in 1..dims[2] - 1 {
-            for j in 1..dims[1] - 1 {
-                for i in 1..dims[0] - 1 {
-                    let c = density[index(i, j, k)];
-                    let around = density[index(i - 1, j, k)]
-                        + density[index(i + 1, j, k)]
-                        + density[index(i, j - 1, k)]
-                        + density[index(i, j + 1, k)]
-                        + density[index(i, j, k - 1)]
-                        + density[index(i, j, k + 1)];
-                    smooth[index(i, j, k)] = 0.5 * c + around / 12.0;
+        // Two passes of smoothing, so single particles do not stand as
+        // beads and a flat pool is flat.
+        let mut smooth = density;
+        for _ in 0..2 {
+            let from = smooth.clone();
+            for k in 1..dims[2] - 1 {
+                for j in 1..dims[1] - 1 {
+                    for i in 1..dims[0] - 1 {
+                        let c = from[index(i, j, k)];
+                        let around = from[index(i - 1, j, k)]
+                            + from[index(i + 1, j, k)]
+                            + from[index(i, j - 1, k)]
+                            + from[index(i, j + 1, k)]
+                            + from[index(i, j, k - 1)]
+                            + from[index(i, j, k + 1)];
+                        smooth[index(i, j, k)] = 0.5 * c + around / 12.0;
+                    }
                 }
             }
         }
-        let iso = 0.5 * full;
+        // A third of full, not half: a sheet one or two particles thick —
+        // what a splash thins to — reads as a sheet rather than as lace. A
+        // full pool's edge moves out by a fraction of a cell for it.
+        let iso = 0.33 * full;
         let field = Field {
             origin,
             h: s,
             dims,
             values: smooth.into_iter().map(|d| iso - d).collect(),
         };
-        surface_nets(&field)
+        let mut mesh = surface_nets(&field)?;
+        taubin(&mut mesh, 4);
+        // Shaded smooth: water has no facets.
+        let faces = mesh.num_faces() as usize;
+        mesh.attributes_mut().insert(
+            kreate_mesh::attribute::names::SHADE_SMOOTH,
+            kreate_mesh::attribute::Domain::Face,
+            kreate_mesh::attribute::AttrData::Bool(std::sync::Arc::new(vec![true; faces])),
+        );
+        Some(mesh)
+    }
+}
+
+/// Taubin's smoothing: each vertex towards its neighbours' middle, then a
+/// little further back out, `rounds` times. The steps a grid leaves on a
+/// surface go; the volume, which plain averaging shrinks, stays.
+fn taubin(mesh: &mut MeshData, rounds: usize) {
+    let n = mesh.num_verts() as usize;
+    let mut around: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for f in 0..mesh.num_faces() {
+        let ring = mesh.face_verts(f);
+        for k in 0..ring.len() {
+            let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+            if !around[a as usize].contains(&b) {
+                around[a as usize].push(b);
+            }
+            if !around[b as usize].contains(&a) {
+                around[b as usize].push(a);
+            }
+        }
+    }
+    for _ in 0..rounds {
+        for factor in [0.5f32, -0.53] {
+            let from = mesh.positions().to_vec();
+            for (v, p) in mesh.positions_mut().iter_mut().enumerate() {
+                let near = &around[v];
+                if near.is_empty() {
+                    continue;
+                }
+                let middle =
+                    near.iter().map(|u| from[*u as usize]).sum::<Vec3>() / near.len() as f32;
+                *p = from[v] + (middle - from[v]) * factor;
+            }
+        }
     }
 }
 
@@ -956,5 +1006,87 @@ mod tests {
         assert!(LiquidSim::new(bounds(Vec3::ZERO, Vec3::ONE), 8, 0.9, 0)
             .surface()
             .is_none());
+    }
+
+    #[test]
+    fn a_still_pool_has_a_flat_smooth_top() {
+        let mut sim = LiquidSim::new(bounds(Vec3::ZERO, Vec3::ONE), 16, 0.95, 6);
+        sim.fill(
+            &world_triangles(
+                &kreate_mesh::primitives::cube(1.0),
+                DAffine3::from_scale_rotation_translation(
+                    DVec3::new(1.0, 1.0, 0.4),
+                    Default::default(),
+                    DVec3::new(0.5, 0.5, 0.2),
+                ),
+            ),
+            Vec3::ZERO,
+        );
+        for _ in 0..12 {
+            sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+        }
+        let skin = sim.surface().expect("a surface");
+        // The top: vertices well inside the walls and above the middle.
+        let top: Vec<f32> = skin
+            .positions()
+            .iter()
+            .filter(|p| p.z > 0.25 && p.x > 0.2 && p.x < 0.8 && p.y > 0.2 && p.y < 0.8)
+            .map(|p| p.z)
+            .collect();
+        assert!(top.len() > 20, "{} top vertices", top.len());
+        let mean = top.iter().sum::<f32>() / top.len() as f32;
+        let rough = top.iter().map(|z| (z - mean).abs()).fold(0.0f32, f32::max);
+        assert!(
+            rough < sim.cell_size() * 0.35,
+            "the top is {rough} rough, cells {}",
+            sim.cell_size()
+        );
+        let smooth = skin
+            .attributes()
+            .get(kreate_mesh::attribute::names::SHADE_SMOOTH)
+            .is_some();
+        assert!(smooth, "not shaded smooth");
+    }
+
+    #[test]
+    fn a_sheet_one_particle_thick_is_one_piece() {
+        // What a splash thins to: particles spread one deep across a plane.
+        let mut sim = LiquidSim::new(bounds(Vec3::ZERO, Vec3::ONE), 16, 0.95, 7);
+        let step = sim.cell_size() / SEED as f32;
+        let mut y = 0.2;
+        while y < 0.8 {
+            let mut x = 0.2;
+            while x < 0.8 {
+                sim.drops.push(Drop {
+                    pos: Vec3::new(x, y, 0.5),
+                    vel: Vec3::ZERO,
+                });
+                x += step;
+            }
+            y += step;
+        }
+        let skin = sim.surface().expect("a surface");
+        // Pieces, by faces sharing vertices.
+        let n = skin.num_verts() as usize;
+        let mut root: Vec<usize> = (0..n).collect();
+        fn find(root: &mut [usize], mut v: usize) -> usize {
+            while root[v] != v {
+                root[v] = root[root[v]];
+                v = root[v];
+            }
+            v
+        }
+        for f in 0..skin.num_faces() {
+            let ring = skin.face_verts(f);
+            for w in ring.windows(2) {
+                let (a, b) = (
+                    find(&mut root, w[0] as usize),
+                    find(&mut root, w[1] as usize),
+                );
+                root[a] = b;
+            }
+        }
+        let pieces = (0..n).filter(|v| find(&mut root, *v) == *v).count();
+        assert_eq!(pieces, 1, "the sheet came apart into {pieces} pieces");
     }
 }

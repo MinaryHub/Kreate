@@ -373,6 +373,16 @@ fn a_liquid_is_set_up_baked_and_undone_by_operators() {
         doc.object(tank).unwrap().physics.fluid,
         Some(kreate_scene::physics::Fluid::Domain(d)) if d.resolution == 12
     ));
+    // Given water, having no material of its own; the water block keeps
+    // none, being a flow.
+    let slots = doc.mesh_slots(doc.object(tank).unwrap().mesh().unwrap());
+    let given = doc.material(slots[0].expect("a material")).unwrap();
+    assert_eq!(given.name, "Water");
+    assert!(given.transmission > 0.9 && (given.ior - 1.333).abs() < 1e-3);
+    assert!(doc
+        .mesh_slots(doc.object(water).unwrap().mesh().unwrap())
+        .iter()
+        .all(|s| s.is_none()));
     assert!(run(&registry, &mut history, &mut doc, "physics.bake", &[]));
     assert_eq!(doc.physics_cache.fluid.len(), 1);
     assert_eq!(doc.physics_cache.fluid[0].frames.len(), 12);
