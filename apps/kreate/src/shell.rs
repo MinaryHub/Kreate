@@ -5808,14 +5808,13 @@ fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
     }
 }
 
-/// The Render tab: the scene's render settings, and the buttons that use them.
-/// One physics panel: an operator's parameters as they stand, edited in
-/// place, each change sent through the operator.
-fn physics_panel(
+/// One physics panel's fields: an operator's parameters as they stand,
+/// edited in place, each change sent through the operator — for the active
+/// object only.
+fn physics_fields(
     ui: &mut Ui,
     state: &mut ShellState,
     registry: &OperatorRegistry,
-    title: &str,
     op: &str,
     mut params: PropertyMap,
     keep: impl Fn(&str) -> bool,
@@ -5824,161 +5823,173 @@ fn physics_panel(
     // Its own id scope: several panels have a "Kind", and egui names a
     // drop-down by its label.
     ui.push_id(op, |ui| {
-        kreate_ui::panel::section(ui, title, true, |ui| {
-            if kreate_ui::property_editor::property_editor_where(
-                ui,
-                &state.catalog,
-                info.id,
-                info.schema,
-                &mut params,
-                keep,
-            ) {
-                // The tab shows the active object, so it sets the active
-                // object: the same values sent to the whole selection would
-                // overwrite every other object's own — and switch off the
-                // physics of those the active one had none of.
-                if info.schema.iter().any(|d| d.name == "active_only") {
-                    params.set("active_only", kreate_reflect::PropertyValue::Bool(true));
-                }
-                let dragging = ui.ctx().input(|i| i.pointer.any_down());
-                send_edit(state, op, params, dragging);
+        if kreate_ui::property_editor::property_editor_where(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            keep,
+        ) {
+            // The tab shows the active object, so it sets the active
+            // object: the same values sent to the whole selection would
+            // overwrite every other object's own — and switch off the
+            // physics of those the active one had none of.
+            if info.schema.iter().any(|d| d.name == "active_only") {
+                params.set("active_only", kreate_reflect::PropertyValue::Bool(true));
             }
-        });
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, op, params, dragging);
+        }
     });
 }
 
-/// Blender's Physics tab: what the active object is to the simulation —
-/// rigid body, collider, cloth or soft body, particle systems — and the
-/// scene's gravity, range and bake.
-fn draw_physics_tab(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    doc: &Document,
-    registry: &OperatorRegistry,
-) {
+/// A simulation a mesh can be part of, as the Physics tab's buttons offer
+/// them — Blender's row of physics types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sim {
+    Collision,
+    Cloth,
+    SoftBody,
+    RigidBody,
+    FluidDomain,
+    FluidFlow,
+    Particles,
+    Hair,
+}
+
+impl Sim {
+    /// In the order the buttons stand and the sections open.
+    const ALL: [Sim; 8] = [
+        Sim::Collision,
+        Sim::Cloth,
+        Sim::SoftBody,
+        Sim::RigidBody,
+        Sim::FluidDomain,
+        Sim::FluidFlow,
+        Sim::Particles,
+        Sim::Hair,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Sim::Collision => "physics-collision",
+            Sim::Cloth => "physics-cloth",
+            Sim::SoftBody => "physics-soft-body",
+            Sim::RigidBody => "physics-rigid",
+            Sim::FluidDomain => "physics-fluid-domain",
+            Sim::FluidFlow => "physics-fluid-flow",
+            Sim::Particles => "physics-particles",
+            Sim::Hair => "physics-hair",
+        }
+    }
+
+    fn on(self, p: &kreate_scene::physics::ObjectPhysics) -> bool {
+        use kreate_scene::physics::{Fluid, ParticleKind, SoftKind};
+        match self {
+            Sim::Collision => p.collision.is_some(),
+            Sim::Cloth => p.soft.as_ref().is_some_and(|s| s.kind == SoftKind::Cloth),
+            Sim::SoftBody => p.soft.as_ref().is_some_and(|s| s.kind == SoftKind::Soft),
+            Sim::RigidBody => p.rigid.is_some(),
+            Sim::FluidDomain => matches!(p.fluid, Some(Fluid::Domain(_))),
+            Sim::FluidFlow => matches!(p.fluid, Some(Fluid::Flow(_))),
+            Sim::Particles => p.particles.iter().any(|s| s.kind == ParticleKind::Emitter),
+            Sim::Hair => p.particles.iter().any(|s| s.kind == ParticleKind::Hair),
+        }
+    }
+
+    /// What this cannot be used with: both would move the mesh, or one is
+    /// a container the other would sit inside of.
+    fn clashes_with(self, other: Sim) -> bool {
+        use Sim::*;
+        let pair = |a: Sim, b: Sim| (self == a && other == b) || (self == b && other == a);
+        pair(RigidBody, Cloth)
+            || pair(RigidBody, SoftBody)
+            || pair(Cloth, SoftBody)
+            || pair(FluidDomain, RigidBody)
+            || pair(FluidDomain, Cloth)
+            || pair(FluidDomain, SoftBody)
+            || pair(FluidDomain, Collision)
+            || pair(FluidDomain, FluidFlow)
+            || pair(FluidDomain, Particles)
+            || pair(FluidDomain, Hair)
+    }
+
+    /// Whether it is simulated over time, and so has a bake.
+    fn bakes(self) -> bool {
+        self != Sim::Collision
+    }
+}
+
+/// Switches a simulation on the active mesh on or off, through the
+/// operators the panels have always used.
+fn set_sim(state: &mut ShellState, p: &kreate_scene::physics::ObjectPhysics, sim: Sim, on: bool) {
     use kreate_ops::ops::physics as ph;
     use kreate_reflect::OpParams as _;
     use kreate_reflect::PropertyValue as V;
-    ui.heading(state.catalog.get("tab-physics"));
-    let active = doc
-        .selection
-        .active
-        .and_then(|id| doc.object(id))
-        .filter(|o| o.mesh().is_some());
-    match active {
-        None => {
-            ui.weak(state.catalog.get("physics-no-mesh"));
+    let only = |mut m: PropertyMap| {
+        m.set("active_only", V::Bool(true));
+        m
+    };
+    match sim {
+        Sim::Collision => {
+            let mut m = ph::collision_params(p.collision.as_ref()).to_map();
+            m.set("enabled", V::Bool(on));
+            state.queue.run("physics.collision_set", only(m));
         }
-        Some(o) => {
-            let p = &o.physics;
-            let on = p.rigid.is_some();
-            let title = state.catalog.get("physics-rigid");
-            physics_panel(
-                ui,
-                state,
-                registry,
-                &title,
-                "physics.rigid_body_set",
-                ph::rigid_params(p.rigid.as_ref()).to_map(),
-                |n| on || n == "enabled",
-            );
-            let on = p.collision.is_some();
-            let title = state.catalog.get("physics-collision");
-            physics_panel(
-                ui,
-                state,
-                registry,
-                &title,
-                "physics.collision_set",
-                ph::collision_params(p.collision.as_ref()).to_map(),
-                |n| on || n == "enabled",
-            );
-            let soft = ph::soft_params(p.soft.as_ref());
-            let kind = soft.kind;
-            let title = state.catalog.get("physics-soft");
-            physics_panel(
-                ui,
-                state,
-                registry,
-                &title,
-                "physics.soft_set",
-                soft.to_map(),
-                |n| ph::soft_param_applies(kind, n),
-            );
-            let fluid = ph::fluid_params(p.fluid.as_ref());
-            let title = state.catalog.get("physics-liquid");
-            physics_panel(
-                ui,
-                state,
-                registry,
-                &title,
-                "physics.fluid_set",
-                fluid.to_map(),
-                |n| ph::fluid_param_applies(&fluid, n),
-            );
-            let title = state.catalog.get("physics-particles");
-            kreate_ui::panel::section(ui, &title, true, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(state.catalog.get("physics-add-emitter"))
-                        .clicked()
-                    {
-                        state.queue.run("physics.particles_add", PropertyMap::new());
-                    }
-                    if ui.button(state.catalog.get("physics-add-hair")).clicked() {
+        Sim::RigidBody => {
+            let mut m = ph::rigid_params(p.rigid.as_ref()).to_map();
+            m.set("enabled", V::Bool(on));
+            state.queue.run("physics.rigid_body_set", only(m));
+        }
+        Sim::Cloth | Sim::SoftBody => {
+            let mut m = ph::soft_params(p.soft.as_ref()).to_map();
+            let kind = match (on, sim) {
+                (false, _) => 0,
+                (true, Sim::Cloth) => 1,
+                _ => 2,
+            };
+            m.set("kind", V::Enum(kind));
+            state.queue.run("physics.soft_set", only(m));
+        }
+        Sim::FluidDomain | Sim::FluidFlow => {
+            let mut m = ph::fluid_params(p.fluid.as_ref()).to_map();
+            let role = match (on, sim) {
+                (false, _) => 0,
+                (true, Sim::FluidDomain) => 1,
+                _ => 2,
+            };
+            m.set("role", V::Enum(role));
+            state.queue.run("physics.fluid_set", only(m));
+        }
+        Sim::Particles | Sim::Hair => {
+            let kind = if sim == Sim::Hair {
+                kreate_scene::physics::ParticleKind::Hair
+            } else {
+                kreate_scene::physics::ParticleKind::Emitter
+            };
+            if on {
+                let mut m = PropertyMap::new();
+                m.set("kind", V::Enum(u32::from(sim == Sim::Hair)));
+                state.queue.run("physics.particles_add", m);
+            } else {
+                // Every system of this kind, last first so the numbers hold.
+                for (i, s) in p.particles.iter().enumerate().rev() {
+                    if s.kind == kind {
                         let mut m = PropertyMap::new();
-                        m.set("kind", V::Enum(1));
-                        state.queue.run("physics.particles_add", m);
+                        m.set("index", V::Int(i as i64));
+                        state.queue.run("physics.particles_remove", m);
                     }
-                });
-                for (i, s) in p.particles.iter().enumerate() {
-                    ui.push_id(("particles", i), |ui| {
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            // i18n-exempt: the system's name is the user's own text
-                            ui.strong(&s.name);
-                            if ui
-                                .small_button(REMOVE_GLYPH)
-                                .on_hover_text(state.catalog.get("physics-remove-system"))
-                                .clicked()
-                            {
-                                let mut m = PropertyMap::new();
-                                m.set("index", V::Int(i as i64));
-                                state.queue.run("physics.particles_remove", m);
-                            }
-                        });
-                        let params = ph::particle_params(doc, i as u32, s);
-                        let kind = params.kind;
-                        if let Some(info) = registry.get("physics.particles_set") {
-                            let mut map = params.to_map();
-                            if kreate_ui::property_editor::property_editor_where(
-                                ui,
-                                &state.catalog,
-                                info.id,
-                                info.schema,
-                                &mut map,
-                                |n| ph::particle_param_applies(kind, n),
-                            ) {
-                                let dragging = ui.ctx().input(|i| i.pointer.any_down());
-                                send_edit(state, "physics.particles_set", map, dragging);
-                            }
-                        }
-                    });
                 }
-            });
+            }
         }
     }
-    ui.separator();
-    let title = state.catalog.get("physics-world");
-    physics_panel(
-        ui,
-        state,
-        registry,
-        &title,
-        "physics.world_set",
-        ph::world_params(&doc.physics).to_map(),
-        |_| true,
-    );
+}
+
+/// The bake buttons, inside a simulation's own section: the bake runs every
+/// simulation in the scene, as it always has, and says so. Bake to
+/// Keyframes is the rigid body's alone.
+fn bake_row(ui: &mut Ui, state: &mut ShellState, doc: &Document, with_keys: bool) {
     let cache = &doc.physics_cache;
     ui.horizontal(|ui| {
         if let Some((done, total)) = state.bake_progress {
@@ -5998,7 +6009,11 @@ fn draw_physics_tab(
             }
             return;
         }
-        if ui.button(state.catalog.get("physics-bake")).clicked() {
+        if ui
+            .button(state.catalog.get("physics-bake"))
+            .on_hover_text(state.catalog.get("physics-bake-all-hint"))
+            .clicked()
+        {
             state
                 .queue
                 .dispatch("physics.bake_start", PropertyMap::new());
@@ -6014,13 +6029,14 @@ fn draw_physics_tab(
         }
         // Said before the click: the rigid bodies stop being rigid bodies,
         // which otherwise looks like the settings going missing.
-        if ui
-            .add_enabled(
-                !cache.rigid.is_empty(),
-                egui::Button::new(state.catalog.get("physics-bake-to-keys")),
-            )
-            .on_hover_text(state.catalog.get("op-physics-bake-to-keys-desc"))
-            .clicked()
+        if with_keys
+            && ui
+                .add_enabled(
+                    !cache.rigid.is_empty(),
+                    egui::Button::new(state.catalog.get("physics-bake-to-keys")),
+                )
+                .on_hover_text(state.catalog.get("op-physics-bake-to-keys-desc"))
+                .clicked()
         {
             state.queue.run("physics.bake_to_keys", PropertyMap::new());
         }
@@ -6046,6 +6062,208 @@ fn draw_physics_tab(
     }
 }
 
+/// Blender's Physics tab: a row of buttons, one a simulation, lit for those
+/// the active mesh is part of — pressing one switches it on or off — and
+/// below, a section for each that is on, with its settings and its bake.
+/// What cannot go together is not offered together. The scene's gravity
+/// and range close the tab.
+fn draw_physics_tab(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+) {
+    use kreate_ops::ops::physics as ph;
+    use kreate_reflect::OpParams as _;
+    use kreate_reflect::PropertyValue as V;
+    ui.heading(state.catalog.get("tab-physics"));
+    let active = doc.selection.active.and_then(|id| doc.object(id));
+    match active {
+        None => {
+            ui.weak(state.catalog.get("physics-nothing-selected"));
+        }
+        // Simulations act on meshes: an empty, a camera, a light or an
+        // armature has none to take part in.
+        Some(o) if o.mesh().is_none() => {
+            ui.weak(state.catalog.get("physics-not-applicable"));
+        }
+        Some(o) => {
+            let p = &o.physics;
+            let on: Vec<Sim> = Sim::ALL.into_iter().filter(|s| s.on(p)).collect();
+            // The buttons: lit when on; pressed again, off. One that clashes
+            // with what is on is not offered, and says why.
+            ui.horizontal_wrapped(|ui| {
+                for sim in Sim::ALL {
+                    let lit = on.contains(&sim);
+                    let blocker = on.iter().find(|o| sim.clashes_with(**o)).copied();
+                    let button = egui::Button::selectable(lit, state.catalog.get(sim.key()));
+                    let response = ui.add_enabled(lit || blocker.is_none(), button);
+                    let response = match blocker {
+                        Some(b) if !lit => {
+                            let other = state.catalog.get(b.key());
+                            response.on_disabled_hover_text(state.catalog.format(
+                                "physics-clash",
+                                kreate_i18n::TextKind::Tooltip,
+                                &[("other", other.as_str())],
+                            ))
+                        }
+                        _ => response.on_hover_text(state.catalog.get(if lit {
+                            "physics-switch-off"
+                        } else {
+                            "physics-switch-on"
+                        })),
+                    };
+                    if response.clicked() {
+                        set_sim(state, p, sim, !lit);
+                    }
+                }
+            });
+            if on.is_empty() {
+                ui.weak(state.catalog.get("physics-none-on"));
+            }
+            ui.add_space(4.0);
+            // A section for each that is on.
+            let off_hint = state.catalog.get("physics-switch-off");
+            for sim in on.iter().copied() {
+                let title = state.catalog.get(sim.key());
+                let (_, closed) = ui
+                    .push_id(("sim", sim.key()), |ui| {
+                        kreate_ui::panel::section_closable(ui, &title, true, &off_hint, |ui| {
+                            match sim {
+                                Sim::Collision => physics_fields(
+                                    ui,
+                                    state,
+                                    registry,
+                                    "physics.collision_set",
+                                    ph::collision_params(p.collision.as_ref()).to_map(),
+                                    |n| n != "enabled",
+                                ),
+                                Sim::RigidBody => physics_fields(
+                                    ui,
+                                    state,
+                                    registry,
+                                    "physics.rigid_body_set",
+                                    ph::rigid_params(p.rigid.as_ref()).to_map(),
+                                    |n| n != "enabled",
+                                ),
+                                Sim::Cloth | Sim::SoftBody => {
+                                    let soft = ph::soft_params(p.soft.as_ref());
+                                    let kind = soft.kind;
+                                    physics_fields(
+                                        ui,
+                                        state,
+                                        registry,
+                                        "physics.soft_set",
+                                        soft.to_map(),
+                                        |n| n != "kind" && ph::soft_param_applies(kind, n),
+                                    );
+                                }
+                                Sim::FluidDomain | Sim::FluidFlow => {
+                                    let fluid = ph::fluid_params(p.fluid.as_ref());
+                                    physics_fields(
+                                        ui,
+                                        state,
+                                        registry,
+                                        "physics.fluid_set",
+                                        fluid.to_map(),
+                                        |n| n != "role" && ph::fluid_param_applies(&fluid, n),
+                                    );
+                                }
+                                Sim::Particles | Sim::Hair => {
+                                    let kind = if sim == Sim::Hair {
+                                        kreate_scene::physics::ParticleKind::Hair
+                                    } else {
+                                        kreate_scene::physics::ParticleKind::Emitter
+                                    };
+                                    for (i, s) in p.particles.iter().enumerate() {
+                                        if s.kind != kind {
+                                            continue;
+                                        }
+                                        ui.push_id(("particles", i), |ui| {
+                                            ui.horizontal(|ui| {
+                                                // i18n-exempt: the system's name is the user's own text
+                                                ui.strong(&s.name);
+                                                if ui
+                                                    .small_button(REMOVE_GLYPH)
+                                                    .on_hover_text(
+                                                        state.catalog.get("physics-remove-system"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    let mut m = PropertyMap::new();
+                                                    m.set("index", V::Int(i as i64));
+                                                    state.queue.run("physics.particles_remove", m);
+                                                }
+                                            });
+                                            let params = ph::particle_params(doc, i as u32, s);
+                                            let kind = params.kind;
+                                            if let Some(info) = registry.get("physics.particles_set")
+                                            {
+                                                let mut map = params.to_map();
+                                                if kreate_ui::property_editor::property_editor_where(
+                                                    ui,
+                                                    &state.catalog,
+                                                    info.id,
+                                                    info.schema,
+                                                    &mut map,
+                                                    |n| {
+                                                        n != "kind"
+                                                            && ph::particle_param_applies(kind, n)
+                                                    },
+                                                ) {
+                                                    let dragging =
+                                                        ui.ctx().input(|i| i.pointer.any_down());
+                                                    send_edit(
+                                                        state,
+                                                        "physics.particles_set",
+                                                        map,
+                                                        dragging,
+                                                    );
+                                                }
+                                            }
+                                            ui.separator();
+                                        });
+                                    }
+                                    // Another system of the same kind.
+                                    if ui.button(state.catalog.get("physics-add-another")).clicked()
+                                    {
+                                        let mut m = PropertyMap::new();
+                                        m.set("kind", V::Enum(u32::from(sim == Sim::Hair)));
+                                        state.queue.run("physics.particles_add", m);
+                                    }
+                                }
+                            }
+                            if sim.bakes() {
+                                ui.separator();
+                                bake_row(ui, state, doc, sim == Sim::RigidBody);
+                            }
+                        })
+                    })
+                    .inner;
+                if closed {
+                    set_sim(state, p, sim, false);
+                }
+            }
+        }
+    }
+    ui.separator();
+    // The scene's: gravity, how finely time is cut, the frames a bake covers.
+    let title = state.catalog.get("physics-world");
+    ui.push_id("physics.world_set", |ui| {
+        kreate_ui::panel::section(ui, &title, false, |ui| {
+            physics_fields(
+                ui,
+                state,
+                registry,
+                "physics.world_set",
+                ph::world_params(&doc.physics).to_map(),
+                |_| true,
+            );
+        });
+    });
+}
+
+/// The Render tab: the scene's render settings, and the buttons that use them.
 fn draw_render_tab(
     ui: &mut Ui,
     state: &mut ShellState,
@@ -10800,6 +11018,35 @@ pub fn load_catalog(locale: &str) -> Catalog {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn simulations_that_cannot_go_together_say_so_both_ways() {
+        for a in Sim::ALL {
+            assert!(!a.clashes_with(a), "{a:?} with itself");
+            for b in Sim::ALL {
+                assert_eq!(a.clashes_with(b), b.clashes_with(a), "{a:?} {b:?}");
+            }
+        }
+        assert!(Sim::Cloth.clashes_with(Sim::RigidBody));
+        assert!(Sim::FluidDomain.clashes_with(Sim::Collision));
+        assert!(
+            !Sim::Collision.clashes_with(Sim::Cloth),
+            "cloth falls on colliders"
+        );
+        assert!(!Sim::Collision.bakes() && Sim::RigidBody.bakes());
+    }
+
+    #[test]
+    fn a_button_is_lit_by_what_the_object_holds() {
+        let mut p = kreate_scene::physics::ObjectPhysics::default();
+        assert!(Sim::ALL.iter().all(|s| !s.on(&p)));
+        p.soft = Some(kreate_scene::physics::SoftBody {
+            kind: kreate_scene::physics::SoftKind::Soft,
+            ..Default::default()
+        });
+        assert!(Sim::SoftBody.on(&p) && !Sim::Cloth.on(&p));
+    }
+
     use super::*;
     use kreate_scene::document::Object;
 
