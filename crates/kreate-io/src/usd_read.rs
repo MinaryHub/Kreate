@@ -30,9 +30,13 @@
 //! meshes shared. Curves come in as thin tubes; rectangle and disc lights as
 //! area lights; a dome light's picture as the world's light.
 //!
+//! A mesh's blend shapes become its morph targets (shape keys), keyed by the
+//! skeleton's animation; a mesh whose points move becomes a run of them,
+//! one a time, keyed so it moves between them as USD draws it. A point
+//! cloud comes in as small diamonds of its widths.
+//!
 //! The stage's `upAxis` and `metersPerUnit` are the source's axes and units —
-//! Y and centimetres when it does not say, as USD's own fallbacks are. Point
-//! clouds, blend shapes and moving points are not read, and said so.
+//! Y and centimetres when it does not say, as USD's own fallbacks are.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -620,7 +624,9 @@ fn read_stage(assets: &Assets, base: &str, name: &str) -> Result<ImportScene, Us
 }
 
 /// A skeleton as read: its skin, its node, its joints' names and nodes.
-type SkeletonRead = (usize, usize, Vec<String>, Vec<usize>);
+/// A skeleton as read: its skin, its node, its joints' names and nodes, and
+/// the path of the animation it plays.
+type SkeletonRead = (usize, usize, Vec<String>, Vec<usize>, Option<String>);
 
 struct Reader<'a> {
     scene: ImportScene,
@@ -675,10 +681,6 @@ impl<'a> Reader<'a> {
                 self.say("blend shapes are not read".into());
                 return;
             }
-            "Points" => {
-                self.say(format!("`{}`: point clouds are not read", prim.name));
-                return;
-            }
             "DomeLight" => {
                 self.dome(prim);
                 return;
@@ -691,7 +693,8 @@ impl<'a> Reader<'a> {
         node.data = match t {
             // A prim instanced many times is one mesh, shared.
             "Mesh" | "Cube" | "Sphere" | "Cylinder" | "Cone" | "Capsule" | "Plane"
-            | "Cylinder_1" | "Capsule_1" | "BasisCurves" | "NurbsCurves" | "HermiteCurves" => {
+            | "Cylinder_1" | "Capsule_1" | "BasisCurves" | "NurbsCurves" | "HermiteCurves"
+            | "Points" => {
                 let made = match self.shared.get(path) {
                     Some(m) => *m,
                     None => {
@@ -700,6 +703,7 @@ impl<'a> Reader<'a> {
                             "BasisCurves" | "NurbsCurves" | "HermiteCurves" => {
                                 self.curves(prim, path)
                             }
+                            "Points" => self.point_cloud(prim, path),
                             _ => self.shape(prim, path),
                         };
                         self.shared.insert(path.to_string(), m);
@@ -722,15 +726,17 @@ impl<'a> Reader<'a> {
         }
         if let (ImportNodeData::Mesh(m), true) = (
             self.scene.nodes[at].data,
-            prim.property("primvars:skel:jointIndices").is_some(),
+            prim.property("primvars:skel:jointIndices").is_some()
+                || prim.property("skel:blendShapes").is_some(),
         ) {
             self.pending.push((m, at, path.to_string()));
         }
-        if prim.property("points").is_some_and(|p| p.samples.len() > 1) {
-            self.say(format!(
-                "`{}`: moving points are read at their first time",
-                prim.name
-            ));
+        if let (ImportNodeData::Mesh(m), "Mesh") = (self.scene.nodes[at].data, t) {
+            if prim.property("points").is_some_and(|p| p.samples.len() > 1)
+                && self.scene.vertex_morphs.get(m).is_none_or(Vec::is_empty)
+            {
+                self.point_cache(prim, m, at);
+            }
         }
         if t == "PointInstancer" {
             // Its children are the prototypes, drawn where it says, not
@@ -859,10 +865,6 @@ impl<'a> Reader<'a> {
             inverse_bind: bind.map(|b| b.iter().map(|m| m.inverse().as_mat4()).collect()),
         });
         let skin = self.scene.skins.len() - 1;
-        self.skeletons.insert(
-            path.to_string(),
-            (skin, node, joints.to_vec(), nodes.clone()),
-        );
         // Its animation: named on it, or on the skeleton root above it.
         let mut at = path.to_string();
         let mut source = prim
@@ -882,9 +884,14 @@ impl<'a> Reader<'a> {
                 .and_then(|p| p.property("skel:animationSource"))
                 .and_then(|r| r.targets.first().cloned());
         }
-        if let Some(anim) = source.and_then(|s| self.all.get(&absolute(&s, path)).copied()) {
+        let anim_path = source.map(|s| absolute(&s, path));
+        if let Some(anim) = anim_path.as_ref().and_then(|s| self.all.get(s).copied()) {
             self.skel_animation(anim, joints, &nodes);
         }
+        self.skeletons.insert(
+            path.to_string(),
+            (skin, node, joints.to_vec(), nodes.clone(), anim_path),
+        );
     }
 
     /// A SkelAnimation's turns, moves and sizes, a channel each per joint.
@@ -960,13 +967,16 @@ impl<'a> Reader<'a> {
     }
 
     /// Every skinned mesh bound to its skeleton: hung from it, its points
-    /// in the skeleton's space, its joints and weights four to a point.
+    /// in the skeleton's space, its joints and weights four to a point —
+    /// and its blend shapes as morph targets, keyed by the skeleton's
+    /// animation.
     fn bind_skins(&mut self) {
         use kreate_math::glam::DMat4;
         for (mesh, node, path) in std::mem::take(&mut self.pending) {
             let Some(prim) = self.all.get(&path).copied() else {
                 continue;
             };
+            let shapes = self.blend_shapes(prim, mesh);
             // Its skeleton: named on it or above it, or the first under the
             // skeleton root it is in.
             let mut at = path.clone();
@@ -998,15 +1008,22 @@ impl<'a> Reader<'a> {
                     .min()
                     .cloned()
             });
-            let Some((skin, skel_node, names, _)) =
+            let Some((skin, skel_node, names, _, anim)) =
                 skel.and_then(|s| self.skeletons.get(&s).cloned())
             else {
-                self.say(format!(
-                    "`{}`: its skeleton was not found; it comes in at rest",
-                    prim.name
-                ));
+                if prim.property("primvars:skel:jointIndices").is_some() {
+                    self.say(format!(
+                        "`{}`: its skeleton was not found; it comes in at rest",
+                        prim.name
+                    ));
+                }
                 continue;
             };
+            // Its blend shapes' weights, keyed as the animation says.
+            let anim = anim.as_ref().and_then(|a| self.all.get(a).copied());
+            if let (Some(shapes), Some(anim)) = (&shapes, anim) {
+                self.shape_weights(anim, shapes, node);
+            }
             let (Some(indices), Some(weights)) = (
                 prim.nums("primvars:skel:jointIndices"),
                 prim.nums("primvars:skel:jointWeights"),
@@ -1056,21 +1073,30 @@ impl<'a> Reader<'a> {
                         .into(),
                 );
             }
-            // Its points where the skeleton sees them at the bind.
+            // Its points where the skeleton sees them at the bind — and its
+            // shapes' offsets turned the same way.
             if let Some(m) = prim
                 .nums("primvars:skel:geomBindTransform")
                 .or_else(|| prim.nums("skel:geomBindTransform"))
                 .filter(|m| m.len() >= 16)
             {
                 let bind = DMat4::from_cols_array(&m[..16].try_into().expect("sixteen")).as_mat4();
-                let normal = kreate_math::Mat3::from_mat4(bind).inverse().transpose();
-                let mesh = &mut self.scene.meshes[mesh];
-                for q in &mut mesh.positions {
+                let linear = kreate_math::Mat3::from_mat4(bind);
+                let normal = linear.inverse().transpose();
+                let data = &mut self.scene.meshes[mesh];
+                for q in &mut data.positions {
                     *q = bind.transform_point3(*q);
                 }
-                if let Some(ns) = &mut mesh.corner_normals {
+                if let Some(ns) = &mut data.corner_normals {
                     for n in ns {
                         *n = (normal * *n).normalize_or_zero();
+                    }
+                }
+                if let Some(targets) = self.scene.vertex_morphs.get_mut(mesh) {
+                    for (_, offsets) in targets {
+                        for d in offsets {
+                            *d = linear * *d;
+                        }
                     }
                 }
             }
@@ -1085,6 +1111,246 @@ impl<'a> Reader<'a> {
             n.transform = ImportTransform::default();
             n.skin = Some(skin);
         }
+    }
+
+    /// A mesh's blend shapes as its morph targets: each target's offsets,
+    /// for the points it names or for all of them. Their names, in the
+    /// mesh's order, when it has any.
+    fn blend_shapes(&mut self, prim: &Prim, mesh: usize) -> Option<Vec<String>> {
+        let names = prim
+            .property("skel:blendShapes")
+            .and_then(Property::texts)?
+            .to_vec();
+        let targets = prim.property("skel:blendShapeTargets")?.targets.clone();
+        let count = self.scene.meshes[mesh].positions.len();
+        let mut morphs = Vec::new();
+        for (name, target) in names.iter().zip(&targets) {
+            let Some(shape) = self.all.get(&absolute(target, "/")).copied() else {
+                continue;
+            };
+            let Some(offsets) = shape.nums("offsets") else {
+                continue;
+            };
+            let offsets: Vec<Vec3> = offsets
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|o| Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32))
+                .collect();
+            let mut full = vec![Vec3::ZERO; count];
+            match shape.nums("pointIndices") {
+                Some(at) => {
+                    for (i, d) in at.iter().zip(&offsets) {
+                        if let Some(slot) = full.get_mut(*i as usize) {
+                            *slot = *d;
+                        }
+                    }
+                }
+                None => {
+                    for (slot, d) in full.iter_mut().zip(&offsets) {
+                        *slot = *d;
+                    }
+                }
+            }
+            if shape
+                .properties
+                .iter()
+                .any(|p| p.name.starts_with("inbetweens:"))
+            {
+                self.say("blend shapes' in-between shapes are not read".into());
+            }
+            morphs.push((name.clone(), full));
+        }
+        if morphs.is_empty() {
+            return None;
+        }
+        if self.scene.vertex_morphs.len() < self.scene.meshes.len() {
+            self.scene
+                .vertex_morphs
+                .resize(self.scene.meshes.len(), Vec::new());
+        }
+        self.scene.vertex_morphs[mesh] = morphs;
+        Some(names)
+    }
+
+    /// The animation's blend-shape weights for one mesh's shapes, in their
+    /// order: a morph channel on its node.
+    fn shape_weights(&mut self, anim: &Prim, shapes: &[String], node: usize) {
+        let Some(keyed) = anim.property("blendShapes").and_then(Property::texts) else {
+            return;
+        };
+        let Some(weights) = anim.property("blendShapeWeights") else {
+            return;
+        };
+        let column: Vec<Option<usize>> = shapes
+            .iter()
+            .map(|s| keyed.iter().position(|k| k == s))
+            .collect();
+        let times: Vec<f64> = if weights.samples.is_empty() {
+            vec![0.0]
+        } else {
+            weights.samples.iter().map(|(t, _)| *t).collect()
+        };
+        let mut values = Vec::with_capacity(times.len() * shapes.len());
+        for t in &times {
+            let Some(row) = value_at(weights, (!weights.samples.is_empty()).then_some(*t)) else {
+                return;
+            };
+            for c in &column {
+                values.push(c.and_then(|c| row.get(c)).copied().unwrap_or(0.0) as f32);
+            }
+        }
+        if self.scene.node_weights.len() <= node {
+            self.scene.node_weights.resize(node + 1, Vec::new());
+        }
+        self.scene.node_weights[node] = values[..shapes.len()].to_vec();
+        let name = self.take().name.clone();
+        let rate = self.rate;
+        self.scene
+            .morph_channels
+            .push(crate::ir::ImportMorphChannel {
+                animation: name,
+                node,
+                interpolation: ChannelInterpolation::Linear,
+                times: times.iter().map(|t| (*t / rate) as f32).collect(),
+                values,
+            });
+    }
+
+    /// A mesh whose points move: a morph target for each time after the
+    /// first, keyed one at a time — so between two times the points move in
+    /// the straight line between them, as USD draws them.
+    fn point_cache(&mut self, prim: &Prim, mesh: usize, node: usize) {
+        const MAX_VALUES: usize = 6_000_000;
+        let Some(p) = prim.property("points") else {
+            return;
+        };
+        let count = self.scene.meshes[mesh].positions.len();
+        if p.samples.len() < 2 {
+            return;
+        }
+        if p.samples.len() * count > MAX_VALUES {
+            self.say(format!(
+                "`{}`: too many moving points to keep; read at their first time",
+                prim.name
+            ));
+            return;
+        }
+        let rest = self.scene.meshes[mesh].positions.clone();
+        let mut targets = Vec::new();
+        for (k, (_, v)) in p.samples.iter().enumerate().skip(1) {
+            let Val::Nums(n) = v else {
+                return;
+            };
+            if n.len() != count * 3 {
+                self.say(format!(
+                    "`{}`: its point count changes over time; read at the first",
+                    prim.name
+                ));
+                return;
+            }
+            let offsets: Vec<Vec3> = n
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(&rest)
+                .map(|(q, r)| Vec3::new(q[0] as f32, q[1] as f32, q[2] as f32) - *r)
+                .collect();
+            targets.push((format!("frame_{k}"), offsets));
+        }
+        let n = targets.len();
+        if self.scene.vertex_morphs.len() < self.scene.meshes.len() {
+            self.scene
+                .vertex_morphs
+                .resize(self.scene.meshes.len(), Vec::new());
+        }
+        self.scene.vertex_morphs[mesh] = targets;
+        // At each time, its own target full and the rest off.
+        let mut values = Vec::with_capacity(p.samples.len() * n);
+        for k in 0..p.samples.len() {
+            for j in 0..n {
+                values.push(if k == j + 1 { 1.0 } else { 0.0 });
+            }
+        }
+        if self.scene.node_weights.len() <= node {
+            self.scene.node_weights.resize(node + 1, Vec::new());
+        }
+        self.scene.node_weights[node] = vec![0.0; n];
+        let name = self.take().name.clone();
+        let times = p
+            .samples
+            .iter()
+            .map(|(t, _)| (*t / self.rate) as f32)
+            .collect();
+        self.scene
+            .morph_channels
+            .push(crate::ir::ImportMorphChannel {
+                animation: name,
+                node,
+                interpolation: ChannelInterpolation::Linear,
+                times,
+                values,
+            });
+    }
+
+    /// A point cloud as small diamonds, each as wide as its point says.
+    fn point_cloud(&mut self, prim: &Prim, path: &str) -> Option<usize> {
+        const MAX_POINTS: usize = 200_000;
+        let points = prim.nums("points")?;
+        let widths = prim.nums("widths").unwrap_or(&[]);
+        let count = (points.len() / 3).min(MAX_POINTS);
+        if points.len() / 3 > MAX_POINTS {
+            self.say(format!(
+                "`{}`: the first {MAX_POINTS} of its points were read",
+                prim.name
+            ));
+        }
+        let mut positions = Vec::with_capacity(count * 6);
+        let mut faces = Vec::with_capacity(count * 8);
+        for i in 0..count {
+            let c = Vec3::new(
+                points[i * 3] as f32,
+                points[i * 3 + 1] as f32,
+                points[i * 3 + 2] as f32,
+            );
+            let r = match widths.len() {
+                0 => 0.01,
+                1 => widths[0] as f32 * 0.5,
+                _ => widths.get(i).copied().unwrap_or(widths[0]) as f32 * 0.5,
+            };
+            let base = positions.len() as u32;
+            for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+                positions.push(c + d * r);
+            }
+            for [a, b, e] in [
+                [0, 2, 4],
+                [2, 1, 4],
+                [1, 3, 4],
+                [3, 0, 4],
+                [2, 0, 5],
+                [1, 2, 5],
+                [3, 1, 5],
+                [0, 3, 5],
+            ] {
+                faces.push(vec![base + a, base + b, base + e]);
+            }
+        }
+        if faces.is_empty() {
+            return None;
+        }
+        let material = self.binding(prim, path).or_else(|| {
+            prim.nums("primvars:displayColor")
+                .filter(|c| c.len() >= 3)
+                .map(|c| self.colour(c[0] as f32, c[1] as f32, c[2] as f32))
+        });
+        self.scene.meshes.push(ImportMesh {
+            name: prim.name.clone(),
+            positions,
+            face_materials: material.map(|m| vec![m as i32; faces.len()]),
+            faces,
+            ..ImportMesh::default()
+        });
+        Some(self.scene.meshes.len() - 1)
     }
 
     /// A primvar's values spread to every corner, by its interpolation.
@@ -2234,6 +2500,11 @@ def SkelRoot "Rig"
         def SkelAnimation "Bend"
         {
             uniform token[] joints = ["Upper/Lower"]
+            uniform token[] blendShapes = ["Bulge"]
+            float[] blendShapeWeights.timeSamples = {
+                0: [0],
+                10: [1],
+            }
             quatf[] rotations.timeSamples = {
                 0: [(1, 0, 0, 0)],
                 10: [(0.7071068, 0.7071068, 0, 0)],
@@ -2257,6 +2528,14 @@ def SkelRoot "Rig"
             interpolation = "vertex"
         )
         rel skel:skeleton = </Rig/Skel>
+        uniform token[] skel:blendShapes = ["Bulge"]
+        rel skel:blendShapeTargets = </Rig/Skin/Bulge>
+
+        def BlendShape "Bulge"
+        {
+            uniform vector3f[] offsets = [(0.5, 0, 0)]
+            uniform int[] pointIndices = [3]
+        }
     }
 }
 "#;
@@ -2301,6 +2580,71 @@ def SkelRoot "Rig"
         assert!(doc
             .objects()
             .any(|(_, o)| o.name == "Skin" && o.skin.is_some()));
+        // Its blend shape: one point out, keyed from nothing to all of it.
+        let (name, offsets) = &scene.vertex_morphs[0][0];
+        assert_eq!(name, "Bulge");
+        assert_eq!(offsets[3], Vec3::new(0.5, 0.0, 0.0));
+        assert_eq!(offsets[0], Vec3::ZERO);
+        let keyed = &scene.morph_channels[0];
+        assert_eq!(
+            (keyed.times.clone(), keyed.values.clone()),
+            (vec![0.0, 1.0], vec![0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn moving_points_play_and_a_point_cloud_shows() {
+        let scene = parse_usda_text(
+            r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    timeCodesPerSecond = 1
+)
+def Mesh "Flag"
+{
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    point3f[] points.timeSamples = {
+        0: [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        1: [(0, 0, 0), (1, 0, 1), (0, 1, 0)],
+        2: [(0, 0, 0), (1, 0, 0), (0, 1, 2)],
+    }
+}
+def Points "Dust"
+{
+    point3f[] points = [(0, 0, 0), (3, 0, 0)]
+    float[] widths = [0.2, 0.4] (
+        interpolation = "vertex"
+    )
+}
+"#,
+        )
+        .unwrap();
+        let flag = scene.meshes.iter().position(|m| m.name == "Flag").unwrap();
+        let targets = &scene.vertex_morphs[flag];
+        assert_eq!(targets.len(), 2, "a target for each time after the first");
+        assert_eq!(targets[0].1[1], Vec3::new(0.0, 0.0, 1.0));
+        assert_eq!(targets[1].1[2], Vec3::new(0.0, 0.0, 2.0));
+        let keyed = &scene.morph_channels[0];
+        assert_eq!(keyed.times, vec![0.0, 1.0, 2.0]);
+        assert_eq!(keyed.values, vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        // They build into shape keys.
+        let mut doc = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut doc);
+        let keys = doc
+            .objects()
+            .find(|(_, o)| o.name == "Flag")
+            .map(|(_, o)| o.shape_keys.len())
+            .unwrap();
+        assert_eq!(keys, 2);
+        let dust = scene.meshes.iter().find(|m| m.name == "Dust").unwrap();
+        assert_eq!(dust.faces.len(), 16);
+        assert!(
+            (dust.positions[6].x - 3.2).abs() < 1e-6,
+            "{}",
+            dust.positions[6]
+        );
     }
 
     #[test]
@@ -2487,6 +2831,8 @@ def Xform "World"
                 assert_eq!(x.corner_uvs, y.corner_uvs);
             }
             assert_eq!(from_text.vertex_skins, from_binary.vertex_skins);
+            assert_eq!(from_text.vertex_morphs, from_binary.vertex_morphs);
+            assert_eq!(from_text.morph_channels, from_binary.morph_channels);
             assert_eq!(from_text.skins, from_binary.skins);
             let channels = |s: &ImportScene| {
                 s.animations
