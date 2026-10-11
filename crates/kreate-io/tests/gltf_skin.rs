@@ -428,3 +428,44 @@ fn bones_run_to_the_next_joint_whatever_the_joints_axes_say() {
         );
     }
 }
+
+/// A mesh bound while stretched — every joint's matrix carrying the same
+/// uneven scale, as some Sketchfab characters come — moves as the file says,
+/// rather than shearing as its bones turn.
+#[test]
+fn a_mesh_bound_stretched_moves_as_the_file_says() {
+    use glam::{Mat4, Vec3};
+    let (mut doc, body) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let mut read = parse_gltf(&bytes, &GltfOptions::default()).expect("parses");
+    // The same surface, stored stretched and bound to undo it.
+    let stretch = Mat4::from_scale(Vec3::new(1.0, 1.3, 0.8));
+    let skinned = read
+        .nodes
+        .iter()
+        .find_map(|n| match n.data {
+            kreate_io::ir::ImportNodeData::Mesh(m) if n.skin.is_some() => Some(m),
+            _ => None,
+        })
+        .expect("a skinned mesh");
+    for p in read.meshes[skinned].positions.iter_mut() {
+        *p = stretch.transform_point3(*p);
+    }
+    for m in read.skins[0].inverse_bind.as_mut().expect("matrices") {
+        *m *= stretch.inverse();
+    }
+    let mut back = Document::new();
+    let (made, _) = build_into(&read, &mut back);
+    let body_back = *made
+        .iter()
+        .find(|id| back.object(**id).is_some_and(|o| o.name == "Body"))
+        .expect("the body");
+    for frame in [1.0, 5.0, 10.0] {
+        let d = apart(
+            &surface(&mut doc, body, frame),
+            &surface(&mut back, body_back, frame),
+        );
+        assert!(d < 1e-3, "frame {frame}: {d}");
+    }
+}

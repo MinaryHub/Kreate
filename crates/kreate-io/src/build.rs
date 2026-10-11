@@ -316,6 +316,8 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
 
     // Bound: the weights as the bones' vertex groups, and the mesh following
     // its armature.
+    let mut warped: std::collections::HashSet<kreate_scene::document::MeshId> =
+        std::collections::HashSet::new();
     for (index, node) in scene.nodes.iter().enumerate() {
         let (Some(Some(id)), ImportNodeData::Mesh(m)) = (made.get(index), node.data) else {
             continue;
@@ -327,6 +329,29 @@ pub fn build_into(scene: &ImportScene, doc: &mut Document) -> (Vec<ObjectId>, Ve
             continue;
         };
         let rig_uid = doc.object(rig.object).map(|o| o.uid);
+        if let Some(warp) = rig.mesh_warp.filter(|_| warped.insert(*mesh)) {
+            if let Some(data) = doc.mesh_mut(*mesh) {
+                for p in data.positions_mut() {
+                    *p = warp.transform_point3(p.as_dvec3()).as_vec3();
+                }
+                // Authored normals, by the inverse transpose, as normals go.
+                let turn = warp.matrix3.inverse().transpose();
+                let name = kreate_mesh::attribute::names::CUSTOM_NORMAL;
+                if let Some(layer) = data.attributes_mut().remove(name) {
+                    let turned = match &layer.data {
+                        kreate_mesh::attribute::AttrData::F32x3(v) => {
+                            kreate_mesh::attribute::AttrData::F32x3(std::sync::Arc::new(
+                                v.iter()
+                                    .map(|n| (turn * n.as_dvec3()).normalize_or_zero().as_vec3())
+                                    .collect(),
+                            ))
+                        }
+                        other => other.clone(),
+                    };
+                    data.attributes_mut().insert(name, layer.domain, turned);
+                }
+            }
+        }
         if let Some(data) = doc.mesh_mut(*mesh) {
             let n = data.num_verts() as usize;
             for (k, bone) in rig.bone_names.iter().enumerate() {
@@ -552,6 +577,9 @@ struct Rig {
     /// pose is the joint's placement with it taken out, so a joint scaled
     /// as it was bound poses at one and its children inherit nothing extra.
     bind_scale: Vec<kreate_math::DVec3>,
+    /// What the skinned meshes' vertices are moved by first, in their own
+    /// space: the uneven stretch the binds shared, taken out of them.
+    mesh_warp: Option<kreate_math::DAffine3>,
     /// The turn from each joint's frame to its bone's: none where the
     /// joint's own axis runs to its child, and otherwise what stands the
     /// bone towards it. A pose is the joint's placement turned the same way,
@@ -662,14 +690,39 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
                 })
                 .fold(0.0, f64::max)
         };
-        let at_origin = binds_at(DAffine3::IDENTITY);
-        let at_node = binds_at(mesh_world);
-        let mesh_at_node = untidy(&at_node) + 1e-6 < untidy(&at_origin);
-        let (chosen, bind) = if mesh_at_node {
-            (mesh_world, at_node)
-        } else {
-            (DAffine3::IDENTITY, at_origin)
+        // A mesh bound while stretched — every joint's bind the same uneven
+        // scale on the outside — has that stretch taken out of the binds
+        // and put into the mesh, where it is one linear map. Left in the
+        // binds, each bone's own uneven scale met its parent's turn and made
+        // a shear no pose can hold, and the body warped as it moved.
+        let unwarp = |binds: Vec<DAffine3>| -> (Option<kreate_math::DMat3>, Vec<DAffine3>) {
+            match common_stretch(&binds, &blank) {
+                Some(n) => {
+                    // Not a blank joint's: its identity was never stretched,
+                    // and stretching it now would give it the uneven scale
+                    // this is taking out.
+                    let undo = DAffine3::from_mat3(n.inverse());
+                    let binds = binds
+                        .iter()
+                        .zip(&blank)
+                        .map(|(b, blank)| if *blank { *b } else { undo * *b })
+                        .collect();
+                    (Some(n), binds)
+                }
+                None => (None, binds),
+            }
         };
+        let (stretch_origin, at_origin) = unwarp(binds_at(DAffine3::IDENTITY));
+        let (stretch_node, at_node) = unwarp(binds_at(mesh_world));
+        let mesh_at_node = untidy(&at_node) + 1e-6 < untidy(&at_origin);
+        let (chosen, bind, stretch) = if mesh_at_node {
+            (mesh_world, at_node, stretch_node)
+        } else {
+            (DAffine3::IDENTITY, at_origin, stretch_origin)
+        };
+        // In the mesh's own space: the stretch, undone where the mesh stands.
+        let mesh_warp =
+            stretch.map(|n| chosen.inverse() * DAffine3::from_mat3(n.inverse()) * chosen);
         // And at the size of the joints themselves: a file whose matrices
         // are in centimetres under joints scaled to metres — Sketchfab's,
         // from Mixamo — otherwise stood its bones at rest forty times the
@@ -912,6 +965,7 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
                 .map(|m| m.to_scale_rotation_translation().0)
                 .collect(),
             turn: turns,
+            mesh_warp,
         };
         // Standing as the file's nodes stand, which need not be the bind.
         let pose = rig_pose(scene, &rig, doc, None);
@@ -925,6 +979,45 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
         rigs.push(rig);
     }
     rigs
+}
+
+/// The uneven stretch every bind shares on its outside, when they do: each
+/// bind's linear part `L = N · J`, `J` a turn and an even scale, so `L Lᵀ`
+/// is `N Nᵀ` but for each joint's own scale. `N` is that's square root,
+/// even in size. `None` when there is none, or when the binds disagree.
+fn common_stretch(binds: &[kreate_math::DAffine3], skip: &[bool]) -> Option<kreate_math::DMat3> {
+    use kreate_math::DMat3;
+    let shapes: Vec<DMat3> = binds
+        .iter()
+        .zip(skip.iter().chain(std::iter::repeat(&false)))
+        .filter(|(_, s)| !**s)
+        .map(|(b, _)| {
+            let l = b.matrix3;
+            let g = l * l.transpose();
+            let trace = g.x_axis.x + g.y_axis.y + g.z_axis.z;
+            g * (3.0 / trace)
+        })
+        .filter(|g| g.is_finite())
+        .collect();
+    let first = *shapes.first()?;
+    let apart = |a: &DMat3, b: &DMat3| {
+        (*a - *b)
+            .to_cols_array()
+            .iter()
+            .fold(0.0f64, |m, x| m.max(x.abs()))
+    };
+    if shapes.iter().any(|g| apart(g, &first) > 1e-4) || apart(&first, &DMat3::IDENTITY) < 1e-4 {
+        return None;
+    }
+    // The square root of a symmetric positive matrix, by Denman and Beavers.
+    let (mut y, mut z) = (first, DMat3::IDENTITY);
+    for _ in 0..30 {
+        let (yi, zi) = (y.inverse(), z.inverse());
+        y = (y + zi) * 0.5;
+        z = (z + yi) * 0.5;
+    }
+    let n = y * y.determinant().cbrt().recip();
+    n.is_finite().then_some(n)
 }
 
 /// Each bone's pose that puts it where its joint is at time `t` (seconds)
