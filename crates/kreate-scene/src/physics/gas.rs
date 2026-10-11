@@ -17,7 +17,9 @@
 use kreate_math::{Aabb, Vec3};
 use kreate_mesh::remesh::winding;
 
-use super::fluid::{conjugate_gradient, face_dims, for_trilinear};
+use rayon::prelude::*;
+
+use super::fluid::{conjugate_gradient, face_dims, for_trilinear, poisson_apply};
 
 /// The most cells along a domain's longest side.
 pub const MAX_RESOLUTION: u32 = 128;
@@ -86,6 +88,8 @@ pub struct GasSim {
     /// How brightly each cell burned in the last step, 0 to 1.
     pub flame: Vec<f32>,
     solid: Vec<bool>,
+    /// The last step's pressure in each cell, where the next solve starts.
+    pressure: Vec<f32>,
     sources: Vec<Source>,
     /// Cells that take away whatever gas enters them.
     sinks: Vec<Vec<bool>>,
@@ -115,6 +119,7 @@ impl GasSim {
             fuel: vec![0.0; cells],
             flame: vec![0.0; cells],
             solid: vec![false; cells],
+            pressure: vec![0.0; cells],
             sources: Vec::new(),
             sinks: Vec::new(),
             settings,
@@ -311,6 +316,7 @@ impl GasSim {
         let up = -gravity.normalize_or(Vec3::NEG_Z);
         // Cell-centred force, then averaged onto each face.
         let mut force: Vec<Vec3> = (0..self.density.len())
+            .into_par_iter()
             .map(|c| {
                 if self.solid[c] {
                     Vec3::ZERO
@@ -334,41 +340,42 @@ impl GasSim {
                 centre[(k * n[1] + j) * n[0] + i]
             };
             let h2 = 2.0 * self.h;
-            let mut curl = vec![Vec3::ZERO; centre.len()];
-            for k in 0..n[2] as isize {
-                for j in 0..n[1] as isize {
-                    for i in 0..n[0] as isize {
-                        let dx = (at(i + 1, j, k) - at(i - 1, j, k)) / h2;
-                        let dy = (at(i, j + 1, k) - at(i, j - 1, k)) / h2;
-                        let dz = (at(i, j, k + 1) - at(i, j, k - 1)) / h2;
-                        curl[self.cell(i as usize, j as usize, k as usize)] =
-                            Vec3::new(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x);
-                    }
-                }
-            }
+            let place = |c: usize| {
+                (
+                    (c % n[0]) as isize,
+                    ((c / n[0]) % n[1]) as isize,
+                    (c / (n[0] * n[1])) as isize,
+                )
+            };
+            let curl: Vec<Vec3> = (0..centre.len())
+                .into_par_iter()
+                .map(|c| {
+                    let (i, j, k) = place(c);
+                    let dx = (at(i + 1, j, k) - at(i - 1, j, k)) / h2;
+                    let dy = (at(i, j + 1, k) - at(i, j - 1, k)) / h2;
+                    let dz = (at(i, j, k + 1) - at(i, j, k - 1)) / h2;
+                    Vec3::new(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x)
+                })
+                .collect();
             let len = |i: isize, j: isize, k: isize| -> f32 {
                 let i = i.clamp(0, n[0] as isize - 1) as usize;
                 let j = j.clamp(0, n[1] as isize - 1) as usize;
                 let k = k.clamp(0, n[2] as isize - 1) as usize;
                 curl[(k * n[1] + j) * n[0] + i].length()
             };
-            for k in 0..n[2] as isize {
-                for j in 0..n[1] as isize {
-                    for i in 0..n[0] as isize {
-                        let grad = Vec3::new(
-                            len(i + 1, j, k) - len(i - 1, j, k),
-                            len(i, j + 1, k) - len(i, j - 1, k),
-                            len(i, j, k + 1) - len(i, j, k - 1),
-                        ) / h2;
-                        let Some(towards) = grad.try_normalize() else {
-                            continue;
-                        };
-                        let c = self.cell(i as usize, j as usize, k as usize);
-                        // Fedkiw's ε·h·(N × ω).
-                        force[c] += 2.0 * s.vorticity * self.h * towards.cross(curl[c]);
-                    }
+            let h = self.h;
+            force.par_iter_mut().enumerate().for_each(|(c, force)| {
+                let (i, j, k) = place(c);
+                let grad = Vec3::new(
+                    len(i + 1, j, k) - len(i - 1, j, k),
+                    len(i, j + 1, k) - len(i, j - 1, k),
+                    len(i, j, k + 1) - len(i, j, k - 1),
+                ) / h2;
+                if let Some(towards) = grad.try_normalize() {
+                    // Fedkiw's ε·h·(N × ω).
+                    *force += 2.0 * s.vorticity * h * towards.cross(curl[c]);
                 }
-            }
+            });
         }
         // Eddies: the curl of a smooth noise a few cells across, drifting
         // with time — swirls that turn without squeezing, so they add no
@@ -384,24 +391,22 @@ impl GasSim {
             // added. A push along the noise instead fed on the speed it made,
             // and a hot fire's plume ran away with it.
             let flow = &centre;
-            for k in 0..n[2] {
-                for j in 0..n[1] {
-                    for i in 0..n[0] {
-                        let c = self.cell(i, j, k);
-                        if self.solid[c] || self.density[c] + self.heat[c] + self.fuel[c] < 0.01 {
-                            continue;
-                        }
-                        let p = Vec3::new(i as f32, j as f32, k as f32) * (self.h / across) + drift;
-                        let speed = flow[c].length();
-                        let Some(axis) = curl_noise(p).try_normalize() else {
-                            continue;
-                        };
-                        // Radians a second, held below a quarter turn a step.
-                        let turn = (0.3 * s.turbulence * speed / across).min(0.25 / dt.max(1e-4));
-                        force[c] += axis.cross(flow[c]) * turn;
-                    }
+            let (solid, density, heat, fuel, h) =
+                (&self.solid, &self.density, &self.heat, &self.fuel, self.h);
+            force.par_iter_mut().enumerate().for_each(|(c, force)| {
+                if solid[c] || density[c] + heat[c] + fuel[c] < 0.01 {
+                    return;
                 }
-            }
+                let (i, j, k) = (c % n[0], (c / n[0]) % n[1], c / (n[0] * n[1]));
+                let p = Vec3::new(i as f32, j as f32, k as f32) * (h / across) + drift;
+                let speed = flow[c].length();
+                let Some(axis) = curl_noise(p).try_normalize() else {
+                    return;
+                };
+                // Radians a second, held below a quarter turn a step.
+                let turn = (0.3 * s.turbulence * speed / across).min(0.25 / dt.max(1e-4));
+                *force += axis.cross(flow[c]) * turn;
+            });
         }
         for (axis, field) in [&mut self.u, &mut self.v, &mut self.w]
             .into_iter()
@@ -507,18 +512,12 @@ impl GasSim {
                 }
             }
         }
-        let apply = |x: &[f32], out: &mut [f32]| {
-            for r in 0..x.len() {
-                let mut s = diag[r] * x[r];
-                for nb in nbrs[r] {
-                    if nb != usize::MAX {
-                        s -= x[nb];
-                    }
-                }
-                out[r] = s;
-            }
-        };
-        let q = conjugate_gradient(&apply, &diag, &rhs, 200, 1e-4);
+        let apply = |x: &[f32], out: &mut [f32]| poisson_apply(&diag, &nbrs, x, out);
+        let guess = open.iter().map(|c| self.pressure[*c]).collect();
+        let q = conjugate_gradient(&apply, &diag, &rhs, guess, 200, 1e-4);
+        for (r, c) in open.iter().enumerate() {
+            self.pressure[*c] = q[r];
+        }
         let solid = &self.solid;
         let pressure = |c: Option<usize>| -> f32 {
             match c {
@@ -610,45 +609,47 @@ impl GasSim {
             let mid = g - v * (0.5 * dt);
             g - sim.velocity_at(mid) / sim.h * dt
         };
-        let mut scalars = [
-            vec![0.0f32; self.density.len()],
-            vec![0.0f32; self.density.len()],
-            vec![0.0f32; self.density.len()],
-        ];
-        for k in 0..n[2] {
-            for j in 0..n[1] {
-                for i in 0..n[0] {
-                    let c = self.cell(i, j, k);
-                    if self.solid[c] {
-                        continue;
-                    }
-                    let g = Vec3::new(i as f32, j as f32, k as f32) + Vec3::splat(0.5);
-                    let from = back(self, g);
-                    // From outside the domain comes clear air.
-                    let size = Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
-                    if from.min_element() < 0.0 || from.cmpgt(size).any() {
-                        continue;
-                    }
-                    scalars[0][c] = self.scalar_at(&self.density, from);
-                    scalars[1][c] = self.scalar_at(&self.heat, from);
-                    scalars[2][c] = self.scalar_at(&self.fuel, from);
+        // Every cell and every face looks back on its own, from the flow as
+        // it stood: every core takes a share.
+        let size = Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
+        let carried: Vec<[f32; 3]> = (0..self.density.len())
+            .into_par_iter()
+            .map(|c| {
+                if self.solid[c] {
+                    return [0.0; 3];
                 }
-            }
-        }
-        let mut faces = [self.u.clone(), self.v.clone(), self.w.clone()];
-        for (axis, out) in faces.iter_mut().enumerate() {
+                let (i, j, k) = (c % n[0], (c / n[0]) % n[1], c / (n[0] * n[1]));
+                let g = Vec3::new(i as f32, j as f32, k as f32) + Vec3::splat(0.5);
+                let from = back(self, g);
+                // From outside the domain comes clear air.
+                if from.min_element() < 0.0 || from.cmpgt(size).any() {
+                    return [0.0; 3];
+                }
+                [
+                    self.scalar_at(&self.density, from),
+                    self.scalar_at(&self.heat, from),
+                    self.scalar_at(&self.fuel, from),
+                ]
+            })
+            .collect();
+        let scalars = [0, 1, 2].map(|s| carried.iter().map(|c| c[s]).collect::<Vec<f32>>());
+        let faces = [0, 1, 2].map(|axis| {
             let dims = face_dims(n, axis);
-            for k in 0..dims[2] {
-                for j in 0..dims[1] {
-                    for i in 0..dims[0] {
-                        let mut g = Vec3::new(i as f32, j as f32, k as f32) + Vec3::splat(0.5);
-                        g[axis] -= 0.5;
-                        let from = back(self, g);
-                        out[(k * dims[1] + j) * dims[0] + i] = self.velocity_at(from)[axis];
-                    }
-                }
-            }
-        }
+            (0..dims.iter().product::<usize>())
+                .into_par_iter()
+                .map(|at| {
+                    let (i, j, k) = (
+                        at % dims[0],
+                        (at / dims[0]) % dims[1],
+                        at / (dims[0] * dims[1]),
+                    );
+                    let mut g = Vec3::new(i as f32, j as f32, k as f32) + Vec3::splat(0.5);
+                    g[axis] -= 0.5;
+                    let from = back(self, g);
+                    self.velocity_at(from)[axis]
+                })
+                .collect::<Vec<f32>>()
+        });
         let [density, heat, fuel] = scalars;
         self.density = density;
         self.heat = heat;
@@ -980,5 +981,32 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn a_bake_is_the_same_on_one_core_as_on_many() {
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut sim = GasSim::new(domain(), 12, GasSettings::default());
+                sim.add_source(
+                    &cube_at(Vec3::new(0.5, 0.5, 0.2), 0.3),
+                    Emission {
+                        smoke: 0.5,
+                        heat: 1.0,
+                        fuel: 1.0,
+                        velocity: Vec3::ZERO,
+                    },
+                );
+                for _ in 0..12 {
+                    sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+                }
+                (sim.density, sim.flame)
+            })
+        };
+        assert_eq!(run(1), run(4));
     }
 }

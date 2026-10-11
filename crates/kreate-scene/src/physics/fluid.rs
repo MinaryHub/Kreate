@@ -22,6 +22,8 @@ use kreate_math::{Aabb, DAffine3, Vec3};
 use kreate_mesh::remesh::{surface_nets, winding, Field};
 use kreate_mesh::MeshData;
 
+use rayon::prelude::*;
+
 use super::Rng;
 
 /// The most cells along a domain's longest side.
@@ -57,6 +59,8 @@ pub struct LiquidSim {
     v: Vec<f32>,
     w: Vec<f32>,
     solid: Vec<bool>,
+    /// The last step's pressure in each cell, where the next solve starts.
+    pressure: Vec<f32>,
     drops: Vec<Drop>,
     /// 0 is PIC, 1 is FLIP.
     flip: f32,
@@ -105,6 +109,7 @@ impl LiquidSim {
             v: vec![0.0; n[0] * (n[1] + 1) * n[2]],
             w: vec![0.0; n[0] * n[1] * (n[2] + 1)],
             solid: vec![false; cells],
+            pressure: vec![0.0; cells],
             drops: Vec::new(),
             flip: flip.clamp(0.0, 1.0) as f32,
             inflows: Vec::new(),
@@ -265,21 +270,22 @@ impl LiquidSim {
         let dv: Vec<f32> = v.iter().zip(&v0).map(|(a, b)| a - b).collect();
         let dw: Vec<f32> = w.iter().zip(&w0).map(|(a, b)| a - b).collect();
         let flip = self.flip;
+        // Each particle on its own: every core takes a share.
         let mut drops = std::mem::take(&mut self.drops);
-        for d in drops.iter_mut() {
+        drops.par_iter_mut().for_each(|d| {
             let pic = self.sample(&u, &v, &w, d.pos);
             let change = self.sample(&du, &dv, &dw, d.pos);
             d.vel = pic * (1.0 - flip) + (d.vel + change) * flip;
-        }
+        });
         self.u = u;
         self.v = v;
         self.w = w;
         // Through the new flow, midpoint first.
-        for d in drops.iter_mut() {
+        drops.par_iter_mut().for_each(|d| {
             let mid = d.pos + self.velocity(d.pos) * (0.5 * dt);
             let to = d.pos + self.velocity(mid) * dt;
             d.pos = self.keep_out(d.pos, to, &mut d.vel);
-        }
+        });
         drops.retain(|d| {
             self.cell_of(d.pos).is_none_or(|(i, j, k)| {
                 let c = self.cell(i, j, k);
@@ -409,7 +415,7 @@ impl LiquidSim {
 
     /// Takes off the pressure that would squeeze or stretch the liquid:
     /// afterwards as much leaves each liquid cell as enters it.
-    fn project(&self, kinds: &[Cell], u: &mut [f32], v: &mut [f32], w: &mut [f32]) {
+    fn project(&mut self, kinds: &[Cell], u: &mut [f32], v: &mut [f32], w: &mut [f32]) {
         let n = self.n;
         let cells = kinds.len();
         // The unknowns: one pressure per liquid cell.
@@ -460,18 +466,13 @@ impl LiquidSim {
                 }
             }
         }
-        let apply = |x: &[f32], out: &mut [f32]| {
-            for r in 0..x.len() {
-                let mut s = diag[r] * x[r];
-                for nb in nbrs[r] {
-                    if nb != usize::MAX {
-                        s -= x[nb];
-                    }
-                }
-                out[r] = s;
-            }
-        };
-        let q = conjugate_gradient(&apply, &diag, &rhs, 400, 1e-5);
+        let apply = |x: &[f32], out: &mut [f32]| poisson_apply(&diag, &nbrs, x, out);
+        let guess = liquid.iter().map(|c| self.pressure[*c]).collect();
+        let q = conjugate_gradient(&apply, &diag, &rhs, guess, 400, 1e-5);
+        self.pressure.iter_mut().for_each(|p| *p = 0.0);
+        for (r, c) in liquid.iter().enumerate() {
+            self.pressure[*c] = q[r];
+        }
         let pressure = |c: usize| -> f32 {
             match kinds[c] {
                 Cell::Liquid => q[index[c]],
@@ -528,36 +529,44 @@ impl LiquidSim {
                     }
                 }
             }
+            // Three rounds, each reading only the last: every face is its
+            // own answer, so every core takes a share of them.
             for _ in 0..3 {
-                let before = known.clone();
+                let before = std::mem::take(&mut known);
                 let values = field.to_vec();
-                for k in 0..dims[2] {
-                    for j in 0..dims[1] {
-                        for i in 0..dims[0] {
-                            let at = fix(i, j, k);
-                            if before[at] {
+                let next: Vec<(f32, bool)> = (0..values.len())
+                    .into_par_iter()
+                    .map(|at| {
+                        if before[at] {
+                            return (values[at], true);
+                        }
+                        let i = at % dims[0];
+                        let j = (at / dims[0]) % dims[1];
+                        let k = at / (dims[0] * dims[1]);
+                        let p = [i as isize, j as isize, k as isize];
+                        let (mut sum, mut count) = (0.0, 0.0);
+                        for (da, sign) in [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)] {
+                            let mut q = p;
+                            q[da] += sign;
+                            if q[da] < 0 || q[da] >= dims[da] as isize {
                                 continue;
                             }
-                            let (mut sum, mut count) = (0.0, 0.0);
-                            let p = [i as isize, j as isize, k as isize];
-                            for (da, sign) in [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)] {
-                                let mut q = p;
-                                q[da] += sign;
-                                if q[da] < 0 || q[da] >= dims[da] as isize {
-                                    continue;
-                                }
-                                let nb = fix(q[0] as usize, q[1] as usize, q[2] as usize);
-                                if before[nb] {
-                                    sum += values[nb];
-                                    count += 1.0;
-                                }
-                            }
-                            if count > 0.0 {
-                                field[at] = sum / count;
-                                known[at] = true;
+                            let nb = fix(q[0] as usize, q[1] as usize, q[2] as usize);
+                            if before[nb] {
+                                sum += values[nb];
+                                count += 1.0;
                             }
                         }
-                    }
+                        if count > 0.0 {
+                            (sum / count, true)
+                        } else {
+                            (values[at], false)
+                        }
+                    })
+                    .collect();
+                known = next.iter().map(|(_, k)| *k).collect();
+                for (f, (v, _)) in field.iter_mut().zip(&next) {
+                    *f = *v;
                 }
             }
         }
@@ -643,7 +652,6 @@ impl LiquidSim {
         // A point of room past each wall, so the surface closes there.
         let dims = self.n.map(|c| c * 2 + 3);
         let origin = self.origin - Vec3::splat(s);
-        let mut density = vec![0.0f32; dims.iter().product()];
         let index = |i: usize, j: usize, k: usize| (k * dims[1] + j) * dims[0] + i;
         let reach = 2.0 * s;
         let kernel = |d2: f32| {
@@ -654,23 +662,50 @@ impl LiquidSim {
                 0.0
             }
         };
+        // The particles by the layer of points they sit in; then each layer
+        // gathers from those near it, a layer to a core. Summed in the same
+        // order whatever the cores, so a bake is the same every time.
+        let plane = dims[0] * dims[1];
+        let mut layers: Vec<Vec<Vec3>> = vec![Vec::new(); dims[2]];
         for d in &self.drops {
-            let g = (d.pos - origin) / s;
-            let lo = (g - Vec3::splat(2.0)).ceil().max(Vec3::splat(1.0));
-            let hi = (g + Vec3::splat(2.0)).floor().min(Vec3::new(
-                dims[0] as f32 - 2.0,
-                dims[1] as f32 - 2.0,
-                dims[2] as f32 - 2.0,
-            ));
-            for k in lo.z as usize..=hi.z.max(0.0) as usize {
-                for j in lo.y as usize..=hi.y.max(0.0) as usize {
-                    for i in lo.x as usize..=hi.x.max(0.0) as usize {
-                        let q = origin + Vec3::new(i as f32, j as f32, k as f32) * s;
-                        density[index(i, j, k)] += kernel(q.distance_squared(d.pos));
+            let k = ((d.pos.z - origin.z) / s)
+                .floor()
+                .clamp(0.0, dims[2] as f32 - 1.0) as usize;
+            layers[k].push(d.pos);
+        }
+        let density: Vec<f32> = (0..dims[2])
+            .into_par_iter()
+            .flat_map_iter(|k| {
+                let mut out = vec![0.0f32; plane];
+                if k >= 1 && k + 2 <= dims[2] {
+                    let z = origin.z + k as f32 * s;
+                    for near in &layers[k.saturating_sub(2)..(k + 3).min(dims[2])] {
+                        for p in near {
+                            let dz = z - p.z;
+                            if dz * dz >= reach * reach {
+                                continue;
+                            }
+                            let g = (*p - origin) / s;
+                            let (ilo, ihi) = (
+                                (g.x - 2.0).ceil().max(1.0) as usize,
+                                (g.x + 2.0).floor().min(dims[0] as f32 - 2.0).max(0.0) as usize,
+                            );
+                            let (jlo, jhi) = (
+                                (g.y - 2.0).ceil().max(1.0) as usize,
+                                (g.y + 2.0).floor().min(dims[1] as f32 - 2.0).max(0.0) as usize,
+                            );
+                            for j in jlo..=jhi {
+                                for i in ilo..=ihi {
+                                    let q = origin + Vec3::new(i as f32, j as f32, k as f32) * s;
+                                    out[j * dims[0] + i] += kernel(q.distance_squared(*p));
+                                }
+                            }
+                        }
                     }
                 }
-            }
-        }
+                out
+            })
+            .collect();
         // What a point deep in the liquid reads: particles `h / SEED` apart
         // all round it, which is `s` here. Half of it is the surface.
         let full = {
@@ -690,20 +725,25 @@ impl LiquidSim {
         let mut smooth = density;
         for _ in 0..2 {
             let from = smooth.clone();
-            for k in 1..dims[2] - 1 {
-                for j in 1..dims[1] - 1 {
-                    for i in 1..dims[0] - 1 {
-                        let c = from[index(i, j, k)];
-                        let around = from[index(i - 1, j, k)]
-                            + from[index(i + 1, j, k)]
-                            + from[index(i, j - 1, k)]
-                            + from[index(i, j + 1, k)]
-                            + from[index(i, j, k - 1)]
-                            + from[index(i, j, k + 1)];
-                        smooth[index(i, j, k)] = 0.5 * c + around / 12.0;
-                    }
+            smooth.par_iter_mut().enumerate().for_each(|(at, out)| {
+                let (i, j, k) = (at % dims[0], (at / dims[0]) % dims[1], at / plane);
+                if i == 0
+                    || j == 0
+                    || k == 0
+                    || i + 1 == dims[0]
+                    || j + 1 == dims[1]
+                    || k + 1 == dims[2]
+                {
+                    return;
                 }
-            }
+                let around = from[index(i - 1, j, k)]
+                    + from[index(i + 1, j, k)]
+                    + from[index(i, j - 1, k)]
+                    + from[index(i, j + 1, k)]
+                    + from[index(i, j, k - 1)]
+                    + from[index(i, j, k + 1)];
+                *out = 0.5 * from[at] + around / 12.0;
+            });
         }
         // A third of full, not half: a sheet one or two particles thick —
         // what a splash thins to — reads as a sheet rather than as lace. A
@@ -749,15 +789,18 @@ fn taubin(mesh: &mut MeshData, rounds: usize) {
     for _ in 0..rounds {
         for factor in [0.5f32, -0.53] {
             let from = mesh.positions().to_vec();
-            for (v, p) in mesh.positions_mut().iter_mut().enumerate() {
-                let near = &around[v];
-                if near.is_empty() {
-                    continue;
-                }
-                let middle =
-                    near.iter().map(|u| from[*u as usize]).sum::<Vec3>() / near.len() as f32;
-                *p = from[v] + (middle - from[v]) * factor;
-            }
+            mesh.positions_mut()
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(v, p)| {
+                    let near = &around[v];
+                    if near.is_empty() {
+                        return;
+                    }
+                    let middle =
+                        near.iter().map(|u| from[*u as usize]).sum::<Vec3>() / near.len() as f32;
+                    *p = from[v] + (middle - from[v]) * factor;
+                });
         }
     }
 }
@@ -799,63 +842,101 @@ pub(super) fn for_trilinear(q: Vec3, dims: [usize; 3], mut f: impl FnMut(usize, 
 
 /// Solves `A x = b` for a symmetric positive (semi)definite `A`, given as
 /// `apply`, by conjugate gradients preconditioned by its diagonal.
+/// The pressure's matrix times `x`: each unknown's open neighbours, less the
+/// unknowns among them. A row each, on every core. The dot products the
+/// solve takes stay in order on one, so a bake comes out the same every time
+/// and on every machine.
+pub(super) fn poisson_apply(diag: &[f32], nbrs: &[[usize; 6]], x: &[f32], out: &mut [f32]) {
+    out.par_iter_mut().enumerate().for_each(|(r, out)| {
+        let mut s = diag[r] * x[r];
+        for nb in nbrs[r] {
+            if nb != usize::MAX {
+                s -= x[nb];
+            }
+        }
+        *out = s;
+    });
+}
+
+/// `a · b` in f64, a fixed run of elements to each core and the runs' sums
+/// added in order — so the same however many cores there are and however
+/// the work is shared, and a bake comes out the same every time.
+fn dot(a: &[f32], b: &[f32]) -> f64 {
+    const RUN: usize = 4096;
+    let parts: Vec<f64> = a
+        .par_chunks(RUN)
+        .zip(b.par_chunks(RUN))
+        .map(|(a, b)| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (*x as f64) * (*y as f64))
+                .sum()
+        })
+        .collect();
+    parts.iter().sum()
+}
+
+/// Starting from `guess` — the last step's answer, which a flow that
+/// changes little from step to step leaves close — so the solve has less of
+/// the way to go.
 pub(super) fn conjugate_gradient(
     apply: &impl Fn(&[f32], &mut [f32]),
     diag: &[f32],
     b: &[f32],
+    guess: Vec<f32>,
     iterations: usize,
     tolerance: f32,
 ) -> Vec<f32> {
     let n = b.len();
-    let mut x = vec![0.0f32; n];
-    let mut r = b.to_vec();
     let norm_b = b.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
     if norm_b < 1e-12 {
-        return x;
+        return vec![0.0f32; n];
     }
+    let mut x = if guess.len() == n && guess.iter().all(|g| g.is_finite()) {
+        guess
+    } else {
+        vec![0.0f32; n]
+    };
+    let mut r = vec![0.0f32; n];
+    apply(&x, &mut r);
+    r.par_iter_mut()
+        .zip(b.par_iter())
+        .for_each(|(r, b)| *r = b - *r);
     let precondition = |r: &[f32], z: &mut [f32]| {
-        for i in 0..n {
-            z[i] = if diag[i] > 0.0 { r[i] / diag[i] } else { 0.0 };
-        }
+        z.par_iter_mut()
+            .zip(r.par_iter().zip(diag.par_iter()))
+            .for_each(|(z, (r, d))| *z = if *d > 0.0 { r / d } else { 0.0 });
     };
     let mut z = vec![0.0f32; n];
     precondition(&r, &mut z);
     let mut p = z.clone();
-    let mut rz: f64 = r
-        .iter()
-        .zip(&z)
-        .map(|(a, b)| (*a as f64) * (*b as f64))
-        .sum();
+    let mut rz = dot(&r, &z);
     let mut ap = vec![0.0f32; n];
     for _ in 0..iterations {
         apply(&p, &mut ap);
-        let pap: f64 = p
-            .iter()
-            .zip(&ap)
-            .map(|(a, b)| (*a as f64) * (*b as f64))
-            .sum();
+        let pap = dot(&p, &ap);
         if pap.abs() < 1e-30 {
             break;
         }
         let alpha = (rz / pap) as f32;
-        for i in 0..n {
-            x[i] += alpha * p[i];
-            r[i] -= alpha * ap[i];
-        }
-        if r.iter().map(|v| v.abs()).fold(0.0f32, f32::max) <= tolerance * norm_b {
+        x.par_iter_mut()
+            .zip(r.par_iter_mut())
+            .zip(p.par_iter().zip(ap.par_iter()))
+            .for_each(|((x, r), (p, ap))| {
+                *x += alpha * p;
+                *r -= alpha * ap;
+            });
+        let largest = r.par_iter().map(|v| v.abs()).reduce(|| 0.0f32, f32::max);
+        if largest <= tolerance * norm_b {
             break;
         }
         precondition(&r, &mut z);
-        let rz_new: f64 = r
-            .iter()
-            .zip(&z)
-            .map(|(a, b)| (*a as f64) * (*b as f64))
-            .sum();
+        let rz_new = dot(&r, &z);
         let beta = (rz_new / rz) as f32;
         rz = rz_new;
-        for i in 0..n {
-            p[i] = z[i] + beta * p[i];
-        }
+        p.par_iter_mut()
+            .zip(z.par_iter())
+            .for_each(|(p, z)| *p = z + beta * *p);
     }
     x
 }
@@ -1088,5 +1169,29 @@ mod tests {
         }
         let pieces = (0..n).filter(|v| find(&mut root, *v) == *v).count();
         assert_eq!(pieces, 1, "the sheet came apart into {pieces} pieces");
+    }
+
+    #[test]
+    fn a_bake_is_the_same_on_one_core_as_on_many() {
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut sim =
+                    LiquidSim::new(bounds(Vec3::ZERO, Vec3::new(2.0, 1.0, 1.0)), 16, 0.95, 9);
+                sim.fill(&cube_at(Vec3::new(0.3, 0.5, 0.45), 0.5), Vec3::ZERO);
+                for _ in 0..12 {
+                    sim.advance(1.0 / 24.0, Vec3::new(0.0, 0.0, -9.81));
+                }
+                let skin = sim.surface().expect("a surface");
+                (
+                    sim.particles().collect::<Vec<_>>(),
+                    skin.positions().to_vec(),
+                )
+            })
+        };
+        assert_eq!(run(1), run(4));
     }
 }
