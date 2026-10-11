@@ -22,7 +22,10 @@ use kreate_scene::Document;
 use crate::build::BuildNote;
 
 /// The extensions read as scenes, beside Kreate's own `.kreate`.
-pub const SCENE_FORMATS: &[&str] = &["gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off"];
+pub const SCENE_FORMATS: &[&str] = &[
+    "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "usd", "usda", "usdc", "usdz", "dae",
+    "urdf",
+];
 
 /// Whether `path` names a file this module reads.
 pub fn is_scene_file(path: &Path) -> bool {
@@ -82,6 +85,18 @@ pub fn read_scene_file(path: &Path) -> Result<(Document, Vec<BuildNote>), String
             .map_err(|e| e.to_string())?,
         "stl" => crate::stl::parse_stl(&bytes, &Default::default()).map_err(|e| e.to_string())?,
         "obj" => crate::parse_obj(&text(bytes)?, Default::default()).map_err(|e| e.to_string())?,
+        "dae" => crate::dae::parse_dae_file(path).map_err(|e| e.to_string())?,
+        // USD finds what a stage references from the stage's own folder, so
+        // it reads by path.
+        "usd" | "usda" | "usdc" | "usdz" => {
+            crate::usd_read::parse_usd_file(path).map_err(|e| e.to_string())?
+        }
+        "urdf" => crate::urdf::parse_urdf(
+            &text(bytes)?,
+            path.parent().unwrap_or(Path::new(".")),
+            &read_part,
+        )
+        .map_err(|e| e.to_string())?,
         other => return Err(format!("`.{other}` is not a scene file Kreate reads")),
     };
     let mut doc = Document::new();
@@ -90,6 +105,55 @@ pub fn read_scene_file(path: &Path) -> Result<(Document, Vec<BuildNote>), String
         doc.selection.add(*first);
     }
     Ok((doc, notes))
+}
+
+/// A mesh file a robot description names, in Kreate's axes and metres. ROS
+/// takes an STL or an OBJ as metres and Z up, whatever a printer or another
+/// program would, so they are read that way here; a format that says its own
+/// axes and units (glTF, COLLADA) is read by what it says.
+pub fn read_part(path: &Path) -> Result<crate::ir::ImportScene, String> {
+    let lower = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let bytes = || std::fs::read(path).map_err(|e| format!("cannot read: {e}"));
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".to_string());
+    let scene = match lower.as_str() {
+        "stl" => crate::stl::parse_stl(
+            &bytes()?,
+            &crate::stl::StlOptions {
+                unit_scale: 1.0,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?,
+        "obj" => crate::parse_obj(
+            &String::from_utf8_lossy(&bytes()?),
+            crate::obj::ObjOptions {
+                axis: kreate_math::AxisConvention::KREATE,
+                unit_scale: 1.0,
+            },
+        )
+        .map_err(|e| e.to_string())?,
+        "ply" => crate::parse_ply(&bytes()?, &name).map_err(|e| e.to_string())?,
+        "dae" => crate::dae::parse_dae_file(path).map_err(|e| e.to_string())?,
+        "gltf" | "glb" => crate::gltf_import::parse_gltf_file(path, &Default::default())
+            .map_err(|e| e.to_string())?,
+        "usd" | "usda" | "usdc" | "usdz" => {
+            crate::usd_read::parse_usd_file(path).map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("`.{other}` meshes are not read")),
+    };
+    let mut scene = scene.baked_to_kreate();
+    for m in &mut scene.meshes {
+        if m.name.is_empty() || m.name == "Import" {
+            m.name = name.clone();
+        }
+    }
+    Ok(scene)
 }
 
 /// Documents read ahead, by path and the file's modification time.
@@ -164,5 +228,63 @@ mod tests {
         // Taken once: the second time reads the file.
         assert_eq!(take(&path).expect("read").objects().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod robots_and_stages {
+    use super::*;
+
+    #[test]
+    fn a_robot_and_a_stage_open_through_the_one_reader() {
+        let dir = std::env::temp_dir().join(format!("kreate-robot-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("meshes")).unwrap();
+        // A link's mesh as ROS has it: metres, and a capital extension.
+        std::fs::write(
+            dir.join("meshes").join("arm.STL"),
+            "solid arm\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 0.5 0 0\nvertex 0 0.5 0\nendloop\nendfacet\nendsolid arm\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bot.urdf"),
+            r#"<robot name="bot">
+                <link name="base"/>
+                <link name="arm"><visual><geometry><mesh filename="meshes/arm.stl"/></geometry></visual></link>
+                <joint name="hinge" type="continuous">
+                  <parent link="base"/><child link="arm"/>
+                  <origin xyz="0 0 1"/><axis xyz="0 0 1"/>
+                </joint>
+            </robot>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("stage.usda"),
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n    metersPerUnit = 1\n)\ndef Cube \"Box\" { double size = 1 }\n",
+        )
+        .unwrap();
+        let (robot, _) = read_scene_file(&dir.join("bot.urdf")).unwrap();
+        let (stage, _) = read_scene_file(&dir.join("stage.usda")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<&str> = robot.objects().map(|(_, o)| o.name.as_str()).collect();
+        for want in ["base", "hinge", "arm"] {
+            assert!(names.contains(&want), "{want} in {names:?}");
+        }
+        // The STL in metres, a metre up: its far corner half a metre out.
+        let (id, mesh) = robot
+            .objects()
+            .find_map(|(id, o)| match o.data {
+                kreate_scene::document::ObjectData::Mesh(m) => Some((id, robot.mesh(m)?)),
+                _ => None,
+            })
+            .unwrap();
+        let w = robot.world_transform(id);
+        let far = mesh
+            .positions()
+            .iter()
+            .map(|p| w.transform_point3(p.as_dvec3()))
+            .fold(0.0f64, |a, p| a.max(p.x));
+        assert!((far - 0.5).abs() < 1e-6, "{far}");
+        assert!(stage.objects().any(|(_, o)| o.name == "Box"));
+        assert!(is_scene_file(Path::new("x.usdz")) && is_scene_file(Path::new("x.URDF")));
     }
 }

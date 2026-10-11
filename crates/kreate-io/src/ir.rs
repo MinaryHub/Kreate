@@ -1178,6 +1178,144 @@ impl ImportScene {
     }
 }
 
+impl ImportScene {
+    /// The same scene with its points and placements already in Kreate's
+    /// axes and metres, and its UVs from the bottom left — so it can be put
+    /// inside another scene whose file said nothing about either, as a robot
+    /// description puts the mesh files it names. What moves and what bends
+    /// is not carried: a part is a part.
+    pub fn baked_to_kreate(mut self) -> Self {
+        let source = self.source.clone();
+        let xform = source.to_kreate_matrix();
+        let normal_xform = xform.inverse().transpose();
+        let flip = source.axis.flips_winding();
+        for m in &mut self.meshes {
+            for p in &mut m.positions {
+                *p = xform * *p;
+            }
+            if let Some(uvs) = &mut m.corner_uvs {
+                let turned = per_face_reorder(uvs, &m.faces, flip);
+                *uvs = turned
+                    .into_iter()
+                    .map(|uv| source.uv_origin.to_kreate(uv))
+                    .collect();
+            }
+            if let Some(ns) = &mut m.corner_normals {
+                *ns = per_face_reorder(ns, &m.faces, flip)
+                    .into_iter()
+                    .map(|n| (normal_xform * n).normalize_or_zero())
+                    .collect();
+            }
+            if let Some(cs) = &mut m.corner_colors {
+                *cs = per_face_reorder(cs, &m.faces, flip);
+            }
+            if flip {
+                for f in &mut m.faces {
+                    f.reverse();
+                }
+            }
+        }
+        for at in 0..self.nodes.len() {
+            let t = self.nodes[at].transform;
+            let placed = self.place(at, &t);
+            let (scale, rotation, translation) = glam::Affine3A::from_mat3_translation(
+                placed.matrix3.as_mat3(),
+                placed.translation.as_vec3(),
+            )
+            .to_scale_rotation_translation();
+            self.nodes[at].transform = ImportTransform {
+                translation,
+                rotation,
+                scale,
+            };
+        }
+        if !self.animations.is_empty() || !self.skins.is_empty() {
+            self.source.notes.push(LossyNote::Unsupported {
+                what: "a part's animation and skin were not kept".into(),
+            });
+        }
+        self.animations.clear();
+        self.skins.clear();
+        self.morph_channels.clear();
+        for n in &mut self.nodes {
+            n.skin = None;
+        }
+        self.vertex_skins.clear();
+        self.source.axis = kreate_math::AxisConvention::KREATE;
+        self.source.unit_scale = 1.0;
+        self.source.uv_origin = UvOrigin::BottomLeft;
+        self
+    }
+
+    /// `part` put inside this scene, under `parent` — its materials, pictures
+    /// and meshes added to this one's lists and every index into them moved
+    /// along. Both are taken to be in the same axes and units already (see
+    /// [`ImportScene::baked_to_kreate`]). A part with no hierarchy gets a
+    /// node for each of its meshes. Returns the part's top nodes.
+    pub fn graft(&mut self, part: ImportScene, parent: Option<usize>) -> Vec<usize> {
+        let (materials, images, meshes) =
+            (self.materials.len(), self.images.len(), self.meshes.len());
+        let (lights, cameras, nodes) = (self.lights.len(), self.cameras.len(), self.nodes.len());
+        self.images.extend(part.images);
+        for mut m in part.materials {
+            for t in [
+                &mut m.base_color_texture,
+                &mut m.metallic_roughness_texture,
+                &mut m.normal_texture,
+                &mut m.emissive_texture,
+                &mut m.occlusion_texture,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *t += images;
+            }
+            self.materials.push(m);
+        }
+        let mesh_count = part.meshes.len();
+        for mut m in part.meshes {
+            if let Some(fm) = &mut m.face_materials {
+                for f in fm.iter_mut().filter(|f| **f >= 0) {
+                    *f += materials as i32;
+                }
+            }
+            self.meshes.push(m);
+        }
+        self.lights.extend(part.lights);
+        self.cameras.extend(part.cameras);
+        self.source.notes.extend(part.source.notes);
+        let mut tops = Vec::new();
+        if part.nodes.is_empty() {
+            for i in 0..mesh_count {
+                let mut n = ImportNode::new(self.meshes[meshes + i].name.clone());
+                n.parent = parent;
+                n.data = ImportNodeData::Mesh(meshes + i);
+                tops.push(self.nodes.len());
+                self.nodes.push(n);
+            }
+            return tops;
+        }
+        for (i, mut n) in part.nodes.into_iter().enumerate() {
+            n.parent = match n.parent {
+                Some(p) => Some(p + nodes),
+                None => {
+                    tops.push(nodes + i);
+                    parent
+                }
+            };
+            n.data = match n.data {
+                ImportNodeData::Empty => ImportNodeData::Empty,
+                ImportNodeData::Mesh(m) => ImportNodeData::Mesh(m + meshes),
+                ImportNodeData::Light(l) => ImportNodeData::Light(l + lights),
+                ImportNodeData::Camera(c) => ImportNodeData::Camera(c + cameras),
+            };
+            n.skin = None;
+            self.nodes.push(n);
+        }
+        tops
+    }
+}
+
 /// Applies the axis and unit conversion, reverses winding if handedness flips,
 /// and installs the corner-domain layers.
 fn convert_mesh(m: &ImportMesh, src: &SourceMetadata) -> MeshData {

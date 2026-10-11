@@ -1,9 +1,9 @@
 //! The scene as a USD stage, in text.
 //!
-//! No USD library is at hand to read the result, so the claims are about the
-//! text: it is balanced, it says what the scene has, a mesh's arrays add up,
-//! a binding names a material that is there, and a child sits inside its
-//! parent.
+//! The claims are about the text — it is balanced, it says what the scene
+//! has, a mesh's arrays add up, a binding names a material that is there, and
+//! a child sits inside its parent — and about the round trip: what Kreate
+//! writes, Kreate's own reader brings back.
 
 use kreate_math::{DQuat, DTransform, DVec3};
 use kreate_scene::document::{Object, ObjectData};
@@ -179,4 +179,68 @@ fn baked_cloth_goes_out_as_moving_points() {
             .count(),
         10
     );
+}
+
+#[test]
+fn what_is_written_reads_back_in_place_and_in_colour() {
+    let doc = scene();
+    let text = usda(&doc);
+    let back = kreate_io::usd_read::parse_usda_text(&text).expect("reads");
+    let mut read = Document::new();
+    kreate_io::build::build_into(&back, &mut read);
+    let find = |d: &Document, name: &str| {
+        d.objects()
+            .find(|(_, o)| o.name.replace('.', "_") == name.replace('.', "_"))
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("{name} came back"))
+    };
+    let (a, b) = (find(&doc, "Cube.001"), find(&read, "Cube_001"));
+    let (wa, wb) = (doc.world_transform(a), read.world_transform(b));
+    assert!(
+        (wa.translation - wb.translation).length() < 1e-5,
+        "{} {}",
+        wa.translation,
+        wb.translation
+    );
+    // The cube's mesh sits under its transform; its corners land where they
+    // did.
+    let corners = |d: &Document| -> Vec<DVec3> {
+        let mut out: Vec<DVec3> = d
+            .objects()
+            .filter_map(|(id, o)| match o.data {
+                ObjectData::Mesh(m) => Some((d.world_transform(id), d.mesh(m)?)),
+                _ => None,
+            })
+            .flat_map(|(w, m)| {
+                m.positions()
+                    .iter()
+                    .map(move |p| w.transform_point3(p.as_dvec3()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort_by(|p, q| {
+            p.x.total_cmp(&q.x)
+                .then(p.y.total_cmp(&q.y))
+                .then(p.z.total_cmp(&q.z))
+        });
+        out
+    };
+    let (ca, cb) = (corners(&doc), corners(&read));
+    assert_eq!(ca.len(), cb.len());
+    for (p, q) in ca.iter().zip(&cb) {
+        assert!((*p - *q).length() < 1e-4, "{p} {q}");
+    }
+    let red = read
+        .materials()
+        .find(|(_, m)| m.name.contains("Red"))
+        .map(|(_, m)| m.clone())
+        .expect("the paint came back");
+    assert!((red.roughness - 0.3).abs() < 1e-5);
+    assert!((red.base_color.r - 0.8).abs() < 1e-5);
+    assert!(read
+        .objects()
+        .any(|(_, o)| matches!(o.data, ObjectData::Light(_))));
+    assert!(read
+        .objects()
+        .any(|(_, o)| matches!(o.data, ObjectData::Camera(_))));
 }

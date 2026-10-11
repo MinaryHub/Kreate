@@ -488,7 +488,8 @@ fn under(dir: &Path, ready: Ready) -> Ready {
 
 /// Extensions read as models, and as environments.
 const SCENES: &[&str] = &[
-    "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "kreate",
+    "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "usd", "usda", "usdc", "usdz", "dae",
+    "urdf", "kreate",
 ];
 const ENVIRONMENTS: &[&str] = &["hdr", "exr"];
 const IMAGES: &[&str] = &["png", "jpg", "jpeg"];

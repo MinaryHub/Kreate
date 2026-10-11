@@ -9,6 +9,7 @@
 pub mod build;
 pub mod clipboard;
 pub mod container;
+pub mod dae;
 pub mod drawing;
 pub mod exr;
 pub mod fbx;
@@ -29,7 +30,12 @@ pub mod scene_file;
 pub mod step;
 pub mod stl;
 pub mod threemf;
+pub mod urdf;
 pub mod usd;
+pub mod usd_read;
+pub mod usda;
+pub mod usdc;
+pub mod xml;
 
 pub use build::{build_into, scene_from_document, BuildNote};
 pub use container::{ContainerError, Manifest, UnknownEntry};

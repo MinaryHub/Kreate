@@ -340,7 +340,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "open_file",
-            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a scene to import — glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF or OFF. Unsaved changes in the current document are lost. To add a scene to the open document instead, use import_file.",
+            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a scene to import — glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae), or a robot's URDF (its links as empties, each joint an empty whose local Z is the joint's axis). Unsaved changes in the current document are lost. To add a scene to the open document instead, use import_file.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },
@@ -350,7 +350,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "import_file",
-            "description": "Adds a scene file's contents to the open document, beside what is there, as one undo step: glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF or OFF. What it adds is selected.",
+            "description": "Adds a scene file's contents to the open document, beside what is there, as one undo step: glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae) or URDF. What it adds is selected.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },
