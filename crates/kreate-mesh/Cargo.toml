@@ -14,3 +14,4 @@ bytemuck.workspace = true
 smallvec.workspace = true
 ahash.workspace = true
 thiserror.workspace = true
+rayon.workspace = true

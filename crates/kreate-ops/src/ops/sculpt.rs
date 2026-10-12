@@ -635,8 +635,7 @@ impl Operator for QuadRemesh {
         let Some(m) = doc.document().mesh(mesh) else {
             return Ok(OpResult::Cancelled);
         };
-        let edge = kreate_mesh::quadremesh::edge_for_faces(m, params.faces as usize);
-        let out = kreate_mesh::quadremesh::quad_remesh(m, edge)
+        let out = kreate_mesh::quadremesh::quad_remesh_faces(m, params.faces as usize)
             .map_err(|e| OpError::Failed(e.to_string()))?;
         if let Some(target) = doc.document_mut().mesh_mut(mesh) {
             *target = out;

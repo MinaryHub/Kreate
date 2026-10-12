@@ -259,7 +259,7 @@ fn quad_remesh_rebuilds_in_squares_and_is_one_undo_step() {
     let m = doc.mesh(mesh).unwrap();
     assert!((0..m.num_faces()).all(|f| m.face_verts(f).len() == 4));
     let n = m.num_faces() as f32;
-    assert!((n - 400.0).abs() < 160.0, "about as many as asked: {n}");
+    assert!((n - 400.0).abs() < 50.0, "about as many as asked: {n}");
     assert!(history.undo(&mut doc));
     assert_eq!(doc.mesh(mesh).unwrap().num_faces(), before);
 }

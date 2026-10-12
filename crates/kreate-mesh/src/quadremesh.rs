@@ -32,6 +32,7 @@ use kreate_math::{Aabb, Bvh, Vec3};
 
 use crate::remesh::closest_on_triangle;
 use crate::MeshData;
+use rayon::prelude::*;
 
 /// The most triangles the surface is split into before the field is solved.
 /// Squares finer than this would take that many — refused rather than tried.
@@ -88,6 +89,30 @@ pub fn edge_for_faces(mesh: &MeshData, faces: usize) -> f32 {
         }
     }
     (area / faces.max(1) as f32).sqrt()
+}
+
+/// The surface of `mesh` rebuilt as about `faces` squares. The size that
+/// count suggests is a guess — a curved or bumpy surface takes more squares
+/// than its area says — so when the first try is more than a twelfth off,
+/// the size is corrected by what it gave and the closer of the two kept.
+pub fn quad_remesh_faces(mesh: &MeshData, faces: usize) -> Result<MeshData, QuadRemeshError> {
+    let faces = faces.max(1);
+    let edge = edge_for_faces(mesh, faces);
+    let first = quad_remesh(mesh, edge)?;
+    let got = first.num_faces() as f32;
+    let ratio = got / faces as f32;
+    if (ratio - 1.0).abs() <= 1.0 / 12.0 {
+        return Ok(first);
+    }
+    let Ok(second) = quad_remesh(mesh, edge * ratio.sqrt()) else {
+        return Ok(first);
+    };
+    let off = |m: &MeshData| (m.num_faces() as f32 - faces as f32).abs();
+    Ok(if off(&second) < off(&first) {
+        second
+    } else {
+        first
+    })
 }
 
 /// The surface of `mesh` rebuilt as squares about `edge` across, running
@@ -601,6 +626,35 @@ fn round_to(o: Vec3, q: Vec3, n: Vec3, v: Vec3, scale: f32) -> Vec3 {
     o + q * ((q.dot(d) * inv).round() * scale) + t * ((t.dot(d) * inv).round() * scale)
 }
 
+/// The vertices in groups no two neighbours share, each smallest group
+/// number its neighbours have not taken: a group's vertices can be smoothed
+/// all at once — on every core — and the result is the same however many
+/// there are.
+fn colours(level: &Level) -> Vec<Vec<u32>> {
+    let mut colour = vec![u32::MAX; level.len()];
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    let mut taken: Vec<bool> = Vec::new();
+    for i in 0..level.len() {
+        taken.clear();
+        for &j in level.neighbours(i) {
+            let c = colour[j as usize];
+            if c != u32::MAX {
+                if taken.len() <= c as usize {
+                    taken.resize(c as usize + 1, false);
+                }
+                taken[c as usize] = true;
+            }
+        }
+        let c = taken.iter().position(|t| !t).unwrap_or(taken.len());
+        colour[i] = c as u32;
+        if groups.len() <= c {
+            groups.resize(c + 1, Vec::new());
+        }
+        groups[c].push(i as u32);
+    }
+    groups
+}
+
 /// The cross field and the grid positions at the finest level.
 fn solve(levels: &[Level], scale: f32) -> (Vec<Vec3>, Vec<Vec3>) {
     const SWEEPS: usize = 20;
@@ -624,23 +678,33 @@ fn solve(levels: &[Level], scale: f32) -> (Vec<Vec3>, Vec<Vec3>) {
                 })
                 .collect();
         }
+        let groups = colours(level);
         for _ in 0..SWEEPS {
-            for i in 0..level.len() {
-                if level.held[i].is_some() {
-                    continue;
+            for group in &groups {
+                let turned: Vec<Vec3> = group
+                    .par_iter()
+                    .map(|&i| {
+                        let i = i as usize;
+                        if level.held[i].is_some() {
+                            return q[i];
+                        }
+                        let n = level.n[i];
+                        let mut sum = q[i];
+                        let mut weight = 0.0f32;
+                        for &j in level.neighbours(i) {
+                            let j = j as usize;
+                            let (a, b) = compat_orientation(sum, n, q[j], level.n[j]);
+                            sum = a * weight + b;
+                            sum -= n * n.dot(sum);
+                            weight += 1.0;
+                            sum = sum.try_normalize().unwrap_or(q[i]);
+                        }
+                        sum
+                    })
+                    .collect();
+                for (&i, v) in group.iter().zip(turned) {
+                    q[i as usize] = v;
                 }
-                let n = level.n[i];
-                let mut sum = q[i];
-                let mut weight = 0.0f32;
-                for &j in level.neighbours(i) {
-                    let j = j as usize;
-                    let (a, b) = compat_orientation(sum, n, q[j], level.n[j]);
-                    sum = a * weight + b;
-                    sum -= n * n.dot(sum);
-                    weight += 1.0;
-                    sum = sum.try_normalize().unwrap_or(q[i]);
-                }
-                q[i] = sum;
             }
         }
     }
@@ -696,28 +760,38 @@ fn solve(levels: &[Level], scale: f32) -> (Vec<Vec3>, Vec<Vec3>) {
                 })
                 .collect();
         }
+        let groups = colours(level);
         for _ in 0..SWEEPS {
-            for i in 0..level.len() {
-                let (v, n) = (level.v[i], level.n[i]);
-                let mut sum = o[i];
-                let mut weight = 0.0f32;
-                for &j in level.neighbours(i) {
-                    let j = j as usize;
-                    let (a, b) = compat_position_index(
-                        v, n, q[i], sum, level.v[j], level.n[j], q[j], o[j], scale,
-                    );
-                    let pa = corner(sum, q[i], n, a, scale);
-                    let pb = corner(o[j], q[j], level.n[j], b, scale);
-                    sum = (pa * weight + pb) / (weight + 1.0);
-                    weight += 1.0;
-                    sum -= n * n.dot(sum - v);
+            for group in &groups {
+                let placed: Vec<Vec3> = group
+                    .par_iter()
+                    .map(|&i| {
+                        let i = i as usize;
+                        let (v, n) = (level.v[i], level.n[i]);
+                        let mut sum = o[i];
+                        let mut weight = 0.0f32;
+                        for &j in level.neighbours(i) {
+                            let j = j as usize;
+                            let (a, b) = compat_position_index(
+                                v, n, q[i], sum, level.v[j], level.n[j], q[j], o[j], scale,
+                            );
+                            let pa = corner(sum, q[i], n, a, scale);
+                            let pb = corner(o[j], q[j], level.n[j], b, scale);
+                            sum = (pa * weight + pb) / (weight + 1.0);
+                            weight += 1.0;
+                            sum -= n * n.dot(sum - v);
+                        }
+                        if level.held[i].is_some() {
+                            // A grid line along the edge it is held to.
+                            let t = n.cross(q[i]);
+                            sum += t * t.dot(v - sum);
+                        }
+                        round_to(sum, q[i], n, v, scale)
+                    })
+                    .collect();
+                for (&i, p) in group.iter().zip(placed) {
+                    o[i as usize] = p;
                 }
-                if level.held[i].is_some() {
-                    // A grid line along the edge it is held to.
-                    let t = n.cross(q[i]);
-                    sum += t * t.dot(v - sum);
-                }
-                o[i] = round_to(sum, q[i], n, v, scale);
             }
         }
     }
@@ -1019,7 +1093,6 @@ fn relax(
         list.sort_unstable();
         list.dedup();
     }
-    let mut hits = Vec::new();
     let nearest = |p: Vec3, hits: &mut Vec<u32>| -> Option<Vec3> {
         let mut reach = scale;
         for _ in 0..4 {
@@ -1039,27 +1112,32 @@ fn relax(
         }
         None
     };
-    for p in points.iter_mut() {
-        if let Some(on) = nearest(*p, &mut hits) {
+    // Each point on its own, on every core: they read the last pass's
+    // points and write only their own.
+    points.par_iter_mut().for_each_init(Vec::new, |hits, p| {
+        if let Some(on) = nearest(*p, hits) {
             *p = on;
         }
-    }
+    });
     for _ in 0..4 {
         let before = points.clone();
-        for (i, p) in points.iter_mut().enumerate() {
-            if pinned[i] || neighbours[i].is_empty() {
-                continue;
-            }
-            let middle = neighbours[i]
-                .iter()
-                .map(|&j| before[j as usize])
-                .sum::<Vec3>()
-                / neighbours[i].len() as f32;
-            let moved = before[i].lerp(middle, 0.5);
-            if let Some(on) = nearest(moved, &mut hits) {
-                *p = on;
-            }
-        }
+        points
+            .par_iter_mut()
+            .enumerate()
+            .for_each_init(Vec::new, |hits, (i, p)| {
+                if pinned[i] || neighbours[i].is_empty() {
+                    return;
+                }
+                let middle = neighbours[i]
+                    .iter()
+                    .map(|&j| before[j as usize])
+                    .sum::<Vec3>()
+                    / neighbours[i].len() as f32;
+                let moved = before[i].lerp(middle, 0.5);
+                if let Some(on) = nearest(moved, hits) {
+                    *p = on;
+                }
+            });
     }
     points
 }

@@ -1699,6 +1699,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "kreate-math",
+ "rayon",
  "smallvec",
  "thiserror 2.0.20",
 ]
