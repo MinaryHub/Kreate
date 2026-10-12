@@ -173,6 +173,15 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- A new look, "Graphite Workshop": the chrome is three graphite steps, darker
+  than the viewport, so the model is the brightest thing on screen; orange
+  marks only what is selected or active. Numbers are set in IBM Plex Mono
+  (bundled, SIL Open Font License) so columns of values line up; rows and
+  fields are 24 px. The workspaces are one segmented group, the mode is named
+  in its own quiet tint in the viewport header and the status bar, the status
+  bar's shortcuts sit on key caps, and the outliner marks the active object
+  with an accent edge.
+
 - A new document is empty: no cube, no lamp, no camera. The world is still
   there, so what is added is lit in the rendered view.
 - An import frames what arrived, so a part a few centimetres across is not a

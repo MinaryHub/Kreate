@@ -6,10 +6,12 @@
 //! light mode is a hunt rather than an edit, and it means two places that are
 //! meant to show the same state drift apart without anyone noticing.
 //!
-//! The direction is *warm chrome, neutral viewport*. The surfaces here are
-//! warm neutrals, low in saturation, so that a full working day in them is
-//! comfortable. The viewport is deliberately **not** one of them — see
-//! [`kreate_render::palette::VIEWPORT`] for why the warmth stops at its edge.
+//! The direction is *Graphite Workshop*: the model is the brightest thing on
+//! screen. The chrome is three graphite steps — the window, the panels, the
+//! fields and headers on them — a shade cooler and darker than the viewport,
+//! so nothing beside the geometry competes with it, and the steps are far
+//! enough apart that a panel, a field and a header read as layers at a
+//! glance. One warm accent means selected or active, and nothing else.
 //!
 //! Anything shared with the viewport — the accent, the axis colours — is read
 //! from [`kreate_render::palette`] rather than repeated here. A selected row
@@ -27,10 +29,11 @@ use kreate_render::palette;
 /// other metric follows from it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Density {
-    /// 24 px controls. More rows on screen.
-    Compact,
-    /// 28 px controls. The default.
+    /// 24 px controls. More rows on screen. The default: a modeller's panels
+    /// are lists of values, and the design keeps a row and a field one height.
     #[default]
+    Compact,
+    /// 28 px controls.
     Comfortable,
 }
 
@@ -60,11 +63,12 @@ impl Density {
 /// path through the panels.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
-    /// Input fields and pressed states. The bottom of the ramp.
+    /// The window behind the areas, and what a pressed control sinks to.
+    /// The bottom of the ramp.
     pub sunken: Color32,
     /// Panel backgrounds.
     pub base: Color32,
-    /// Headers, the status bar, menus and cards.
+    /// Fields, headers, menus and cards: what sits on a panel.
     pub raised: Color32,
     /// Dividers and control outlines.
     pub border: Color32,
@@ -112,18 +116,18 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Warm chrome, neutral viewport.
+    /// Graphite chrome around the viewport.
     pub fn studio(density: Density) -> Self {
         Self {
-            sunken: hex(0x17_16_14),
-            base: hex(0x20_1E_1B),
-            raised: hex(0x2A_27_24),
-            border: hex(0x36_32_30),
-            border_strong: hex(0x47_42_3E),
+            sunken: hex(0x0012_1316),
+            base: hex(0x001A_1B1F),
+            raised: hex(0x0023_252A),
+            border: hex(0x002E_3137),
+            border_strong: hex(0x003A_3D44),
 
-            text: hex(0xED_E8_E2),
-            text_dim: hex(0xA3_9D_95),
-            text_faint: hex(0x6E_68_62),
+            text: hex(0x00E6_E7EA),
+            text_dim: hex(0x00A3_A7AF),
+            text_faint: hex(0x008A_8F98),
 
             accent: hex(palette::ACCENT),
             // Alpha rather than a blended constant: the wash sits over more
@@ -135,11 +139,28 @@ impl Theme {
             axis_y: hex(palette::AXIS_Y),
             axis_z: hex(palette::AXIS_Z),
 
-            radius: 3,
+            radius: 4,
             row_height: 24.0,
             panel_padding: 12.0,
             density,
         }
+    }
+
+    /// The quiet tint naming a mode, by its tag: the chip's fill and its
+    /// text. `None` for object mode, the resting state, which needs no name
+    /// tag. Only the mode's own name wears it — in the viewport header and
+    /// the status bar — never a control: orange stays the one colour for
+    /// what is selected.
+    pub fn mode_tint(&self, tag: &str) -> Option<(Color32, Color32)> {
+        let (fill, text) = match tag {
+            "edit_mesh" | "edit_armature" => (0x4F_B3_A9, 0x9F_DC_D5),
+            "sculpt" => (0xB4_8C_F0, 0xD3_BD_F7),
+            "pose" => (0x78_AA_E6, 0xB9_D3_F2),
+            "weight_paint" => (0xE6_78_AA, 0xF2_BC_D4),
+            "texture_paint" => (0xD6_C8_78, 0xE8_DC_A2),
+            _ => return None,
+        };
+        Some((hex(fill).gamma_multiply(0.16), hex(text)))
     }
 
     /// The colour of one axis, indexed `0..3`.
@@ -172,6 +193,9 @@ impl Theme {
     pub fn style(&self, base: &egui::Style) -> egui::Style {
         let mut style = base.clone();
         style.visuals = self.visuals();
+        // Numbers in the monospaced face: a column of values lines up, and a
+        // value scrubbed under the pointer does not jitter as its digits change.
+        style.drag_value_text_style = egui::TextStyle::Monospace;
 
         let s = &mut style.spacing;
         s.item_spacing = egui::vec2(8.0, 4.0);
@@ -179,7 +203,7 @@ impl Theme {
         s.interact_size = egui::vec2(40.0, self.density.control_height());
         s.window_margin = egui::Margin::same(self.panel_padding as i8);
         s.menu_margin = egui::Margin::same(6);
-        s.indent = 16.0;
+        s.indent = 14.0;
         s.icon_width = 14.0;
         s.icon_width_inner = 8.0;
         style
@@ -209,15 +233,20 @@ impl Theme {
         visuals.panel_fill = self.base;
         visuals.window_fill = self.raised;
         visuals.faint_bg_color = self.raised;
-        visuals.extreme_bg_color = self.sunken;
+        // A text field sits on the panel as the other fields do, a step up,
+        // rather than as a hole in it.
+        visuals.extreme_bg_color = self.raised;
         visuals.code_bg_color = self.sunken;
         visuals.window_stroke = Stroke::new(1.0, self.border);
-        visuals.window_corner_radius = CornerRadius::same(4);
-        visuals.menu_corner_radius = CornerRadius::same(4);
+        visuals.window_corner_radius = CornerRadius::same(10);
+        visuals.menu_corner_radius = CornerRadius::same(8);
 
         visuals.widgets.noninteractive = widget(self.base, self.base, self.border, self.text_dim);
         visuals.widgets.inactive = widget(self.raised, self.raised, self.border, self.text);
         visuals.widgets.hovered = widget(self.border, self.border, self.border_strong, self.text);
+        // Fields and buttons sit on the panel as raised shapes with no
+        // outline: the step in shade is the edge, as the design draws it.
+        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
         // An engaged control wears the accent, because that is the same thing
         // the accent means in the viewport: this is what you are acting on.
         visuals.widgets.active = widget(
@@ -292,25 +321,25 @@ mod tests {
     }
 
     #[test]
-    fn the_chrome_is_warm_and_the_ramp_ascends() {
+    fn the_chrome_is_graphite_and_the_ramp_ascends() {
         let t = Theme::studio(Density::Comfortable);
-        // Warm: red above blue on every surface. This is the direction's whole
-        // premise, and a paste of a cool hex would silently undo it.
+        // Graphite: never warmer than neutral, so the one warm colour on
+        // screen is the accent and what it marks.
         for s in [t.sunken, t.base, t.raised, t.border, t.border_strong] {
             assert!(
-                s.r() > s.b(),
-                "surface {:?} is not warm",
+                s.b() >= s.r(),
+                "surface {:?} is warm",
                 (s.r(), s.g(), s.b())
             );
         }
         // And the ramp has to actually ascend, or panels stop reading as
-        // layers. Compared on the red channel, which is monotone here.
+        // layers.
         let ramp = [t.sunken, t.base, t.raised, t.border, t.border_strong];
         for pair in ramp.windows(2) {
             assert!(
-                pair[1].r() > pair[0].r(),
+                pair[1].b() > pair[0].b() && pair[1].r() > pair[0].r(),
                 "the surface ramp does not ascend: {:?}",
-                ramp.map(|c| c.r())
+                ramp.map(|c| (c.r(), c.b()))
             );
         }
     }
@@ -331,6 +360,10 @@ mod tests {
         };
         let ratio = (lum(t.text_faint) + 0.05) / (lum(t.sunken) + 0.05);
         assert!(ratio > 3.0, "faint text on sunken is only {ratio:.2}:1");
+        // Faint text is drawn on the panels and the fields too, at the body
+        // size: the 4.5:1 floor for small text, on the lighter of the two.
+        let ratio = (lum(t.text_faint) + 0.05) / (lum(t.raised) + 0.05);
+        assert!(ratio > 4.5, "faint text on a field is only {ratio:.2}:1");
 
         let ratio = (lum(t.text) + 0.05) / (lum(t.base) + 0.05);
         assert!(ratio > 7.0, "primary text on base is only {ratio:.2}:1");
@@ -348,7 +381,7 @@ mod tests {
         };
         let accent = lum(t.accent.r(), t.accent.g(), t.accent.b());
 
-        for (name, hex) in [("base", 0x20_1E_1B), ("viewport", palette::VIEWPORT)] {
+        for (name, hex) in [("base", 0x001A_1B1F), ("viewport", palette::VIEWPORT)] {
             let [r, g, b] = palette::rgb8(hex);
             let ratio = (accent + 0.05) / (lum(r, g, b) + 0.05);
             assert!(ratio > 4.5, "accent on {name} is only {ratio:.2}:1");
@@ -410,6 +443,29 @@ mod tests {
         compact.install(&ctx);
         assert_eq!(of(&ctx).density, Density::Compact);
         assert_eq!(of(&ctx).accent, compact.accent);
+    }
+
+    #[test]
+    fn a_mode_is_named_by_its_own_tint_and_object_mode_by_none() {
+        let t = Theme::default();
+        assert!(t.mode_tint("object").is_none());
+        let tints: Vec<_> = [
+            "edit_mesh",
+            "sculpt",
+            "pose",
+            "weight_paint",
+            "texture_paint",
+        ]
+        .iter()
+        .map(|m| t.mode_tint(m).expect("a tint"))
+        .collect();
+        // Each mode its own, and none of them the accent.
+        for (i, a) in tints.iter().enumerate() {
+            assert_ne!(a.1, t.accent);
+            for b in &tints[i + 1..] {
+                assert_ne!(a.1, b.1);
+            }
+        }
     }
 
     #[test]

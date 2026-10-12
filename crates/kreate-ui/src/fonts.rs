@@ -44,11 +44,18 @@ use std::sync::Arc;
 /// The embedded Korean + Latin UI font.
 pub const PRETENDARD: &[u8] = include_bytes!("../../../assets/fonts/Pretendard-Regular.subset.ttf");
 
+/// The embedded monospaced face, for numbers and script text: IBM Plex
+/// Mono, under the SIL Open Font License (see its licence beside it).
+pub const PLEX_MONO: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
+
 /// Family names, in resolution order.
 pub mod family {
     /// Latin and Hangul. Listed first for both, because Pretendard's Latin is
     /// designed to sit with its Hangul rather than being an afterthought.
     pub const UI: &str = "Pretendard";
+    /// Digits and code. First in the monospaced family, with Pretendard after
+    /// it for the Hangul Plex does not have.
+    pub const MONO: &str = "IBM Plex Mono";
 }
 
 /// Installs the font stack on an egui context.
@@ -58,6 +65,10 @@ pub fn install(ctx: &egui::Context) {
     fonts.font_data.insert(
         family::UI.to_owned(),
         Arc::new(egui::FontData::from_static(PRETENDARD)),
+    );
+    fonts.font_data.insert(
+        family::MONO.to_owned(),
+        Arc::new(egui::FontData::from_static(PLEX_MONO)),
     );
 
     // Prepended rather than appended: egui's own default is Latin-only, so
@@ -70,6 +81,13 @@ pub fn install(ctx: &egui::Context) {
             .or_default()
             .insert(0, family::UI.to_owned());
     }
+    // Numbers in Plex Mono, ahead of Pretendard, which then answers only
+    // for what Plex has no glyph for.
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, family::MONO.to_owned());
 
     ctx.set_fonts(fonts);
 }
@@ -215,6 +233,28 @@ mod tests {
                 family::UI
             );
         }
+    }
+
+    #[test]
+    fn numbers_are_monospaced_and_hangul_still_shows_in_the_mono_face() {
+        let ctx = ready_context();
+        let width = |text: &str| {
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(
+                        text.to_owned(),
+                        egui::FontId::monospace(12.0),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .x
+            })
+        };
+        assert!(
+            (width("1111") - width("0000")).abs() < 0.01,
+            "digits differ in width"
+        );
+        assert!(width("관절") > 10.0, "Hangul fell out of the mono face");
     }
 
     #[test]

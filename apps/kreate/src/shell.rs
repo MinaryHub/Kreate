@@ -2129,13 +2129,16 @@ pub fn draw(
             // mode is the resting state and says it quietly.
             let theme = kreate_ui::theme::from_ui(ui);
             let name = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
-            if mode == Default::default() {
-                ui.label(name);
-            } else {
-                // Anything but the resting state wears the accent, which is
-                // what the accent says everywhere else: this is what you are
-                // acting on.
-                ui.colored_label(theme.accent, name);
+            // The mode in its own tint, as the viewport header names it;
+            // object mode, the resting state, plainly. Not the accent: that
+            // means "selected", and a mode is not a selection.
+            match theme.mode_tint(mode.tag()) {
+                Some((_, text)) => {
+                    ui.colored_label(text, name);
+                }
+                None => {
+                    ui.label(name);
+                }
             }
             // The mode's everyday keys, as Blender's status bar keeps them in
             // view: what the hand does next, without opening a menu to learn
@@ -2177,7 +2180,21 @@ pub fn draw(
                     .filter(|i| !i.shortcut.is_empty())
                 {
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(&info.shortcut).strong().small());
+                    // A key cap: the shortcut on a raised chip, in the
+                    // monospaced face, and what it does beside it.
+                    egui::Frame::new()
+                        .fill(theme.raised)
+                        .stroke(egui::Stroke::new(1.0, theme.border))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(5, 0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&info.shortcut)
+                                    .monospace()
+                                    .small()
+                                    .color(theme.text),
+                            );
+                        });
                     ui.weak(egui::RichText::new(&info.name).small());
                 }
             }
@@ -8380,19 +8397,46 @@ fn draw_workspace_tabs(ui: &mut Ui, state: &mut ShellState) {
         .iter()
         .map(|space| space.name.clone())
         .collect();
-    for (index, name) in names.iter().enumerate() {
-        // The built-in layouts' names are the program's words and are
-        // translated; a name the user gave one is theirs and is not.
-        let key = format!("workspace-{}", name.to_lowercase().replace(' ', "-"));
-        let shown = if state.catalog.has(&key) {
-            state.catalog.get(&key)
-        } else {
-            name.clone()
-        };
-        if ui.selectable_label(index == active, shown).clicked() {
-            state.switch_workspace(index);
-        }
-    }
+    // One segmented group, the open one raised in it: the workspaces are
+    // one choice among several, and read as that rather than as menu titles.
+    let theme = kreate_ui::theme::from_ui(ui);
+    egui::Frame::new()
+        .fill(theme.sunken)
+        .stroke(egui::Stroke::new(1.0, theme.border))
+        .corner_radius(7)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (index, name) in names.iter().enumerate() {
+                    // The built-in layouts' names are the program's words and
+                    // are translated; a name the user gave one is theirs.
+                    let key = format!("workspace-{}", name.to_lowercase().replace(' ', "-"));
+                    let shown = if state.catalog.has(&key) {
+                        state.catalog.get(&key)
+                    } else {
+                        name.clone()
+                    };
+                    let open = index == active;
+                    let text = egui::RichText::new(shown).color(if open {
+                        theme.text
+                    } else {
+                        theme.text_dim
+                    });
+                    let button = egui::Button::new(text)
+                        .fill(if open {
+                            theme.border_strong
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(5);
+                    if ui.add(button).clicked() {
+                        state.switch_workspace(index);
+                    }
+                }
+            });
+        });
 }
 
 /// The mode dropdown in the top bar.
@@ -8424,18 +8468,37 @@ fn draw_mode_menu(
     // and reading the document inside would hold a borrow across the queue.
     let has = kreate_ops::mode::Has::of(doc);
 
-    egui::ComboBox::from_id_salt("mode")
-        .selected_text(current)
-        .show_ui(ui, |ui| {
-            // This object's modes; see `Mode::offered`.
-            for (kind, name) in names.iter().filter(|(k, _)| *k == mode || k.offered(has)) {
-                ui.add_enabled_ui(kind.can_enter(has), |ui| {
-                    if ui.selectable_label(*kind == mode, name).clicked() {
-                        state.queue.push(Command::SetMode(kind.tag().to_string()));
-                    }
-                });
+    // The mode named in its own tint, so Sculpt never looks like Edit at a
+    // glance; object mode, the resting state, stays plain.
+    let theme = kreate_ui::theme::from_ui(ui);
+    let tint = theme.mode_tint(mode.tag());
+    let shown = match tint {
+        Some((_, text)) => egui::RichText::new(current).color(text),
+        None => egui::RichText::new(current),
+    };
+    // In a scope: the tint is the mode button's alone, and set on the Ui it
+    // would carry on to every menu after it in the header.
+    ui.scope(|ui| {
+        if let Some((fill, _)) = tint {
+            let w = &mut ui.visuals_mut().widgets;
+            for v in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                v.weak_bg_fill = fill;
+                v.bg_fill = fill;
             }
-        });
+        }
+        egui::ComboBox::from_id_salt("mode")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                // This object's modes; see `Mode::offered`.
+                for (kind, name) in names.iter().filter(|(k, _)| *k == mode || k.offered(has)) {
+                    ui.add_enabled_ui(kind.can_enter(has), |ui| {
+                        if ui.selectable_label(*kind == mode, name).clicked() {
+                            state.queue.push(Command::SetMode(kind.tag().to_string()));
+                        }
+                    });
+                }
+            });
+    });
 }
 
 /// The edit-mode menus: Mesh, Edge and Face.

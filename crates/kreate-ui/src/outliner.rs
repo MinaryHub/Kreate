@@ -651,7 +651,11 @@ fn draw_object_row(
     renaming: &mut Option<Renaming>,
 ) -> bool {
     let mut toggled = false;
-    ui.horizontal(|ui| {
+    // The active object's row: the selection wash across the whole row and
+    // the accent along its edge — the one in the viewport, found at a glance.
+    // Painted behind, in a slot taken before the row is drawn.
+    let behind = ui.painter().add(egui::Shape::Noop);
+    let drawn = ui.horizontal(|ui| {
         ui.add_space(indent(ui) * (row.depth as f32 + 1.0));
 
         // The expander: a chevron when there is something to open, a gap the
@@ -787,6 +791,19 @@ fn draw_object_row(
             }
         });
     });
+    if row.active {
+        let theme = crate::theme::from_ui(ui);
+        let rect =
+            egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), drawn.response.rect.y_range());
+        let edge = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        ui.painter().set(
+            behind,
+            egui::Shape::Vec(vec![
+                egui::Shape::rect_filled(rect, 3.0, theme.accent_wash),
+                egui::Shape::rect_filled(edge, 0.0, theme.accent),
+            ]),
+        );
+    }
     toggled
 }
 

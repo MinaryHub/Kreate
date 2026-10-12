@@ -1136,14 +1136,15 @@ fn the_viewport_follows_the_layout_it_is_given() {
 }
 
 #[test]
-fn the_chrome_is_warm_and_the_viewport_is_not() {
+fn the_chrome_is_graphite_and_darker_than_the_viewport() {
     // The whole premise of the theme, checked where it actually matters: on
-    // the composited frame, not on the token table. Warm chrome makes a
-    // neutral grey read cool, so the viewport must stay neutral or the tool is
-    // misreporting the one colour the user is judging.
+    // the composited frame, not on the token table. The model is the light:
+    // the chrome is graphite, never warm, and darker than the viewport around
+    // the model, which stays neutral — a tinted clear would misreport the one
+    // colour the user is judging.
     //
     // Two failures this catches that a unit test cannot: the theme never being
-    // installed on the context at all, and the viewport clear drifting warm to
+    // installed on the context at all, and the viewport clear drifting to
     // "match" the panels.
     let c = gpu_or_skip!(composite(&doc_with_cube(), "ko-KR"));
 
@@ -1161,13 +1162,15 @@ fn the_chrome_is_warm_and_the_viewport_is_not() {
         (inside_column, (vr.min.y + vr.height() * 0.75) as u32),
         (W / 2, H - 4),
     ];
+    let mut panel_light = 0;
     for (x, y) in panel_samples {
         let p = c.at(x, y);
         let (r, b) = (i32::from(p[0]), i32::from(p[2]));
         assert!(
-            r > b,
-            "panel pixel at ({x},{y}) is not warm: {p:?} — is the theme installed?"
+            b >= r && (b - r) <= 12,
+            "panel pixel at ({x},{y}) is not graphite: {p:?} — is the theme installed?"
         );
+        panel_light = panel_light.max(i32::from(p[1]));
     }
 
     // And an empty corner of the viewport, away from the cube and the axis
@@ -1185,6 +1188,11 @@ fn the_chrome_is_warm_and_the_viewport_is_not() {
     assert!(
         (20..=48).contains(&r),
         "the viewport background is not the expected dark neutral: {p:?}"
+    );
+    // And no panel is brighter than the space the model sits in.
+    assert!(
+        panel_light <= g,
+        "a panel ({panel_light}) is brighter than the viewport ({g})"
     );
 }
 
